@@ -1,0 +1,34 @@
+# Research sources and verification boundary
+
+Research date: 2026-11-05. The initial three subagents investigated runtime architecture/integration, product concepts, and product/dispatch workflows. A later user-requested single subagent investigated reusable Herdr identifiers in [the focused ID report](herdr-identifiers.md), and another requested single subagent compared [CLI/RPC/MCP interfaces](agent-interface-options.md). The coordinating passes examined NSH, Shear, related products, documentation consistency, and MVP scope/readiness.
+
+## Source snapshots
+
+| Source | Inspected revision | Location / scope |
+| --- | --- | --- |
+| herdr-core | `c6b316f87c33e6f2ab1a1ceea3e3461e2b6bb61a`, package 0.1.18 | Fresh shallow research clone, `/private/tmp/canban-research-herdr-core`; current source and published schema |
+| herdr-app | `e77f112ac2ea136b84fe510efa42d41163bfd776`, package 0.1.13 | Fresh shallow research clone, `/private/tmp/canban-research-herdr-app`; current app concepts and client implementation |
+| Shear (`jjyr/shear-tool`) | `e782772145cbeb2fde02657100c0e2373bf0e3ab` | Existing `/Users/jjy/Workspace/shear`; analysis/core separation, native review UI, vendored Diff |
+| NSH (`longbridge/nsh`) | `b7a69186d3c20a59690f2ac834dc527bee7f8438` | Existing Cargo source checkout; embedding, WebView, Editor, RichEditor, DiffView |
+
+Core, app, and Shear tracked working trees were clean during inspection. The NSH Cargo checkout had only the untracked Cargo marker `.cargo-ok`; tracked source was clean. NSH and Shear are inspected local snapshots, not assertions of latest upstream. Temporary clone paths are investigation locations, not required Canban dependencies; durable references below point to pinned source.
+
+Older local Herdr repositories were used only to identify version differences. The findings in the current-core documents are based on the fresh core/app snapshots. In particular, legacy screen-based agent detection and Workspace/Pane ownership must not be projected onto current core.
+
+## Key primary references
+
+- herdr-core [runtime scope](https://github.com/herdrdev/herdr-core/blob/c6b316f87c33e6f2ab1a1ceea3e3461e2b6bb61a/AGENTS.md), [API/transport](https://github.com/herdrdev/herdr-core/blob/c6b316f87c33e6f2ab1a1ceea3e3461e2b6bb61a/schema/README.md), [method schema](https://github.com/herdrdev/herdr-core/blob/c6b316f87c33e6f2ab1a1ceea3e3461e2b6bb61a/schema/hc.openrpc.json), [templates](https://github.com/herdrdev/herdr-core/blob/c6b316f87c33e6f2ab1a1ceea3e3461e2b6bb61a/docs/templates.md), [security](https://github.com/herdrdev/herdr-core/blob/c6b316f87c33e6f2ab1a1ceea3e3461e2b6bb61a/docs/security.md).
+- herdr-app [product model](https://github.com/herdrdev/herdr-app/blob/e77f112ac2ea136b84fe510efa42d41163bfd776/src/model.rs), [shared layout document](https://github.com/herdrdev/herdr-app/blob/e77f112ac2ea136b84fe510efa42d41163bfd776/src/mirror.rs), [core client](https://github.com/herdrdev/herdr-app/blob/e77f112ac2ea136b84fe510efa42d41163bfd776/src/hc.rs), [core binary discovery](https://github.com/herdrdev/herdr-app/blob/e77f112ac2ea136b84fe510efa42d41163bfd776/src/core_bin.rs), [commands](https://github.com/herdrdev/herdr-app/blob/e77f112ac2ea136b84fe510efa42d41163bfd776/docs/commands.md).
+- Shear [architecture](https://github.com/jjyr/shear-tool/blob/e782772145cbeb2fde02657100c0e2373bf0e3ab/docs/architecture.md), [review workflow](https://github.com/jjyr/shear-tool/blob/e782772145cbeb2fde02657100c0e2373bf0e3ab/docs/review-workflow.md), [core manifest](https://github.com/jjyr/shear-tool/blob/e782772145cbeb2fde02657100c0e2373bf0e3ab/crates/shear-core/Cargo.toml), [custom Diff extension](https://github.com/jjyr/shear-tool/blob/e782772145cbeb2fde02657100c0e2373bf0e3ab/vendor/README.md). Repository access may be required for these links; the actual inspection used the local checkout.
+- NSH [Rust gallery](https://github.com/longbridge/nsh/blob/b7a69186d3c20a59690f2ac834dc527bee7f8438/examples/gallery-rs/README.md), [native Rust entry](https://github.com/longbridge/nsh/blob/b7a69186d3c20a59690f2ac834dc527bee7f8438/examples/gallery-rs/native/src/main.rs), [overview](https://github.com/longbridge/nsh/blob/b7a69186d3c20a59690f2ac834dc527bee7f8438/README.md), [embedding](https://github.com/longbridge/nsh/blob/b7a69186d3c20a59690f2ac834dc527bee7f8438/docs/dev/embedding.md), [elements/WebView](https://github.com/longbridge/nsh/blob/b7a69186d3c20a59690f2ac834dc527bee7f8438/docs/dev/elements.md), [macOS backend](https://github.com/longbridge/nsh/blob/b7a69186d3c20a59690f2ac834dc527bee7f8438/docs/dev/macos.md).
+- Related product documentation: [Vibe Kanban issues](https://www.vibekanban.com/docs/issue-management), [Git operations](https://www.vibekanban.com/docs/workspaces/git-operations), [agent configurations](https://www.vibekanban.com/docs/settings/agent-configurations), [Linear delegation](https://linear.app/docs/assigning-issues), [Linear documents](https://linear.app/docs/documents), [GitHub agent workflow](https://docs.github.com/en/copilot/how-tos/copilot-on-github/use-copilot-agents/overview). These were read live on the research date and are not commit-pinned.
+
+## What was and was not verified
+
+Verified through source/documentation inspection: object ownership, protocol methods and framing, runtime persistence/recovery design, current app-to-core integration, NSH embedding primitives, and Shear's dependency/presentation boundary. Individual guides contain more precise code locations.
+
+The initial research pass checked balanced code fences, final newlines, 36 local document links, and 74 pinned source-file references across its 13 Markdown files. Referenced source paths and numeric line bounds were checked against the inspected checkouts. Cross-document review also aligned request-time context capture and logical Canban service ownership. Later user discussion selected native Rust/NSH work surfaces and same-process service co-hosting, superseding the original default separate-service/WebView-heavy proposal. Subsequent product discussions add and update documents separately. These checks establish documentation consistency, not implementation correctness.
+
+Not verified through execution: compatibility with the user's installed core, real provider status hooks, launch idempotency under injected failures, native terminal fidelity, NSH/WebView interactions, performance, background scheduling, packaging, or merge operations. No application was built, no agent was launched, and no live core session or user data was mutated. Upstream checkouts were read-only; changes in Canban are documentation only.
+
+User directions, source facts, recommendations, and open product choices are kept separate. The docs describe a proposed product, not a shipped implementation. A source-backed architecture recommendation does not establish runtime acceptance or market demand.
