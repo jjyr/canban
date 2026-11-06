@@ -7,5 +7,7 @@
 - Canban uses Apache-2.0. Future Cargo workspace packages inherit that license. Preserve applicable third-party licenses/notices when importing code or assets.
 - Original Canban copyright attribution is JJy <jjyruby@gmail.com>, starting in 2026. Preserve third-party attribution separately.
 - Keep the main components in separate crates: AppServer, Kanban, Workflow Engine, Scheduler, UI, and the supporting boundaries documented in docs.
-- This is currently a documentation/design repository. Do not describe planned interfaces or crates as implemented.
+- Follow the selected [UI architecture](docs/ui-architecture.md): separate canban-ui-kit from product UI, reuse suitable NSH behavior, maintain component contracts and a native gallery using production components, and fix shared defects in their owning layer with appropriate regression scenarios.
+- The repository now contains a macOS MVP. Read [implementation and acceptance](docs/implementation.md) for implemented behavior versus remaining proposals; historical research/specification entries are not runtime acceptance evidence.
+- Use mise run build/test/acceptance for implementation checks. Validate affected native UI behavior with the running .local/Canban.app; compilation alone does not establish interaction acceptance. Herdr tests must use an isolated home/core rather than mutating the user's live core.
 - Canonical machine inventory is ~/Workspace/Machines. Keep machine-specific connection, environment, and deployment knowledge there.

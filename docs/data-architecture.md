@@ -1,6 +1,6 @@
 # Data architecture
 
-Status: updated 2026-11-06. The user selected ~/.canban/, SQLite with WAL, file-backed execution content, and compressed Card archives covering related Agent execution data/results using zstd or lz4. Durable card history, Canban-owned organization, one Session model, and archive-time worktree handling follow current product decisions. Detailed schema, directory layout, archive container/codec choice, and mechanisms below remain recommendations; no storage implementation exists.
+Status: updated 2026-11-06. The selected ~/.canban/, SQLite WAL, file-backed execution content and compressed Card archive direction now has a first implementation using checksummed tar+zstd packages. See [implementation and acceptance](implementation.md) for actual behavior and verification limits. Broader mechanisms below remain design references where not implemented.
 
 ## Recommended storage boundary
 
@@ -231,3 +231,5 @@ Use versioned database migrations and versioned structured payloads. Permanent d
 ## Selected direction and remaining proposals
 
 The selected baseline is ~/.canban/, SQLite with WAL, file-backed execution input/report bodies, and zstd/lz4-compressed Card archives including related execution data/results. One shared database, detailed schema/layout, archive container/default codec, publication/cleanup and restore mechanisms, and portable Project export remain proposals or implementation refinements. No database or ~/.canban/ directories have been initialized by this design work.
+
+Implementation refinement: the MVP uses one shared WAL database and versioned, checksummed tar+zstd archives. Structured SQL history/reference/deduplication rows remain online; matching expanded file bytes are compacted after archive publication. SQL cold-storage pruning and lz4 encoding remain later options. Actual runtime homes are initialized on startup independently of the earlier design-only work.

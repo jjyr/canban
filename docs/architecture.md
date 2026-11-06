@@ -2,6 +2,8 @@
 
 Status: current direction discussed with the user, 2026-11-05. Rust/NSH main UI and optional WebView embedding are user-selected. The AppServer is logically independent; MVP co-hosts it with the desktop rather than requiring a separately deployed Canban daemon. Naming and crate boundaries were refined on 2026-11-06: AppServer, Workflow Engine, and Scheduler. Detailed runtime/thread wiring and agent adapter selection remain implementation proposals.
 
+Implementation update, 2026-11-06: a native MVP now exists with same-process AppServer, a CLI/headless host, installed-hc JSON-RPC integration and SQLite/file persistence. See [current implementation and acceptance](implementation.md); broader proposals below retain their original design scope.
+
 ## Overall assessment
 
 The product responsibility boundaries are clear enough for focused MVP implementation planning: Canban owns Project/Board/card/context/history/workflow; herdr-core owns terminal execution. The architecture should now converge on one application state owner, one shared operation surface, and explicit UI/service/runtime boundaries.
@@ -93,6 +95,8 @@ Recommended application rule: filesystem, database, Git, core transport, and oth
 Native platform/NSH thread constraints are supplied by the framework. The exact AppHandle/subscription wiring must be validated in the native spike; no working Rust/NSH prototype was built in this research.
 
 Optional WebViews receive a narrow resource/component bridge to the same service. Do not grant preview content direct core/socket/database authority. Native drag/drop, IME, selection, Markdown/rich editing, list virtualization, and terminal presentation need real interaction acceptance; Rust/native does not itself prove those product behaviors.
+
+The user-approved [UI architecture](ui-architecture.md) separates canban-ui-kit for tokens/styled reusable controls over NSH from reusable product components and presenters in canban-ui, with a native gallery and component-level regression workflow. The first MVP implements these boundaries; [implementation and acceptance](implementation.md) records the verified subset and remaining limits.
 
 ## Storage and identity
 

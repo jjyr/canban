@@ -2,6 +2,8 @@
 
 Canban is the product; Human Context names the proposed approach. Current user directions center on native Rust/NSH UI, directory-backed Projects, local Boards/cards, stage-triggered workflows, tag/default automatic scheduling, and a unified card timeline. AppServer is a logical component co-hosted in the desktop process for MVP; WebView is embedded only as needed. Documentation is English; proposals and unresolved decisions are identified.
 
+The repository now has a runnable macOS MVP. Start with [implementation, development and acceptance](implementation.md) for actual behavior, commands and validation limits. Dated pre-implementation statements in the design/research documents describe their original scope; they are not the current implementation status.
+
 ## Current product documents
 
 | Document | Purpose |
@@ -27,6 +29,7 @@ Start with [MVP interface contracts](interfaces/mvp-contract.md) for the propose
 1. [Proposed Canban architecture](architecture.md): native UI, logical/co-hosted AppServer, storage, callbacks, runtime binding, and future daemon extraction.
    [Internal architecture comparison](architecture-internal-options.md) compares module/call organizations; [crates and timers](architecture-crates-and-timers.md) records the user-requested crate split, AppServer/Workflow Engine/Scheduler names, and card timer placement.
    [Data architecture](data-architecture.md) records ~/.canban/, SQLite with WAL, file-backed execution context/reports, and zstd/lz4-compressed Card archives; detailed schema and archive mechanisms remain proposals.
+   [UI architecture and design system](ui-architecture.md) records the approved NSH reuse, separate UI Kit, component contracts, native gallery, and regression workflow.
 2. [herdr-core integration](research/herdr-core-integration.md): installed service versus app-managed service, embedding, and Herdr app linkage.
 3. [Herdr product concepts](research/herdr-core-concepts.md): existing Space/Tab/Pane versus core Terminal/Session, separate from Canban's Project model.
 4. [herdr-core architecture](research/herdr-core-architecture.md): source modules, holders/processes, protocol, status, persistence, and recovery.

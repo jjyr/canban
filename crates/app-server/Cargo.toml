@@ -1,0 +1,25 @@
+[package]
+name = "canban-app-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+canban-types.workspace = true
+canban-storage.workspace = true
+canban-kanban.workspace = true
+canban-context.workspace = true
+canban-timeline.workspace = true
+canban-notifications.workspace = true
+canban-workflow-engine.workspace = true
+canban-scheduler.workspace = true
+canban-herdr.workspace = true
+canban-workspaces.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

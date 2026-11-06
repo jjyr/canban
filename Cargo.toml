@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["JJy <jjyruby@gmail.com>"]
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+clap = { version = "4", features = ["derive", "env"] }
+tempfile = "3"
+sha2 = "0.10"
+tar = "0.4"
+zstd = "0.13"
+nsh-core = { git = "https://github.com/longbridge/nsh", rev = "b7a69186d3c20a59690f2ac834dc527bee7f8438" }
+nsh-base = { git = "https://github.com/longbridge/nsh", rev = "b7a69186d3c20a59690f2ac834dc527bee7f8438", default-features = false }
+nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "b7a69186d3c20a59690f2ac834dc527bee7f8438", default-features = false }
+canban-types = { path = "crates/types" }
+canban-storage = { path = "crates/storage" }
+canban-kanban = { path = "crates/kanban" }
+canban-context = { path = "crates/context" }
+canban-timeline = { path = "crates/timeline" }
+canban-notifications = { path = "crates/notifications" }
+canban-workflow-engine = { path = "crates/workflow-engine" }
+canban-scheduler = { path = "crates/scheduler" }
+canban-herdr = { path = "crates/herdr" }
+canban-workspaces = { path = "crates/workspaces" }
+canban-app-server = { path = "crates/app-server" }
+canban-ui-kit = { path = "crates/ui-kit" }
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0

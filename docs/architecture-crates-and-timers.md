@@ -17,14 +17,17 @@ Status: current naming/crate direction and timer placement proposal, 2026-11-06.
 | Workspaces | canban-workspaces | crates/workspaces | Directory/Git/worktree preparation/reuse and Archive handling |
 | Storage | canban-storage | crates/storage | Shared local persistence/attachment IO implementations |
 | Shared boundary types | canban-types | crates/types | Only shared IDs, command/event/report/action payloads needed across crates |
-| UI/desktop host | canban-ui | crates/ui | Rust/NSH components, UI state, and co-hosted desktop entry |
+| UI Kit | canban-ui-kit | crates/ui-kit | Generic tokens, styled reusable NSH controls, and shared interaction conventions; no product/service dependencies |
+| UI/desktop host | canban-ui | crates/ui | Product components, presenters/screens, native gallery, UI state, and co-hosted desktop entry |
 | Agent CLI | canban-cli | crates/cli | Thin agent-facing adapter to AppServer operations |
 
-This is a proposed workspace layout, not created crates or a new process topology. Core components get real compile-time boundaries, as requested. They still run in one Canban process for MVP; a separate daemon host can depend on AppServer without linking NSH UI.
+This layout is now represented by workspace crates in the initial MVP. Core components have compile-time boundaries and run in one Canban process; the CLI also provides a headless host without linking NSH UI. Timer internals and future capabilities below remain proposals. See [implementation and acceptance](implementation.md).
 
 The user selected prefixed Cargo package names but unprefixed filesystem names. For example, crates/scheduler/Cargo.toml declares canban-scheduler, while its source module is src/timers.rs. Follow the [development conventions](development-conventions.md); Canban's project license is Apache-2.0.
 
 The shared-types crate is a narrow dependency boundary, not a place for all business code. Exact supporting-crate granularity can be adjusted during implementation while preserving the major AppServer/Kanban/Workflow Engine/Scheduler/UI boundaries.
+
+The user subsequently approved the separate UI Kit/product UI boundary and component/gallery/regression conventions in [UI architecture](ui-architecture.md). canban-ui depends on canban-ui-kit; UI Kit builds on NSH and must not depend on AppServer or business-domain crates. Individual components use ordinary modules, not individual crates.
 
 The request/attempt data model is unchanged by renaming the scheduling component. Earlier dispatch_request_id notation can remain a logical request key; renaming does not require another execution/session identity or wire-schema migration before an implementation exists.
 

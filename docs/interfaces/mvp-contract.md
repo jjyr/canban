@@ -1,6 +1,6 @@
 # MVP interface contracts and reporting mechanism
 
-Status: concrete interface proposal for review, 2026-11-05. These commands, environment variables, RPC methods, and Rust boundaries are not implemented. Product decisions already confirmed by the user remain authoritative: one Session model, agent-declared completion, ordinary review reports, JSON templates, and a minimal internal event direction. This proposal does not design the post-MVP event infrastructure.
+Status: original interface design, 2026-11-05; a first implementation now exists as of 2026-11-06. See [implementation and acceptance](../implementation.md) and current source for supported operations/actual payloads. Illustrative receipts and other proposals below remain design references rather than claims of exact wire compatibility. Product decisions already confirmed by the user remain authoritative. The post-MVP event infrastructure is still deferred.
 
 ## Scope and recommendation
 

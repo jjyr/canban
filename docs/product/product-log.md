@@ -252,7 +252,36 @@ The user pointed out that the execution context directory structure did not clea
 
 Card-owned resources live with the Card; resources shared across Cards can remain in shared managed storage. Database relationships remain explicit, and artifact IDs hide physical storage locations. The projects/ subtree contains Canban data, while the user's actual source directory remains separate. Archive combines the Card subtree, a consistent export of its database history/content, and required shared resources. The [data architecture](../data-architecture.md#files-and-configuration) records the revised proposal; no runtime directories were created.
 
+## 2026-11-06: UI architecture and design-system discussion
+
+Status: **User-requested quality/reuse direction**, with architecture and process recommendations for discussion.
+
+The user wants each needed UI component developed independently or reused from NSH, supported by an overall design system so components are reused and UI defects do not recur across screens. They asked to discuss how to achieve this before implementation.
+
+The [UI architecture proposal](../ui-architecture.md) separates app-owned tokens/styled controls in a proposed canban-ui-kit from reusable product components, presenters and screen composition in canban-ui. NSH's inspected component documentation assigns interaction behavior to nsh-base and styling to the application. The proposal therefore reuses base behavior, centralizes Canban presentation/interaction contracts, and avoids independent screen implementations of shared controls.
+
+Proposed development practice: inventory components and NSH reuse routes; build a native gallery using actual production components and deterministic fixtures; validate meaningful component and composition states; fix defects in their owning layer and retain reproductions. Start with a real Board/Card/Timeline/composer slice rather than an exhaustive speculative library. These proposals are not yet approved crate/convention changes and do not claim native acceptance or a guarantee of zero defects.
+
+## 2026-11-06: UI direction approved and development readiness
+
+Status: **User-approved UI architecture and conventions**; readiness assessment is an engineering recommendation.
+
+The user approved the preceding UI direction: separate canban-ui-kit from product UI, reuse suitable NSH behavior, define shared visual/interaction contracts, maintain a native gallery using production components, and fix defects at their owning layer with meaningful regression cases. The architecture/crate plan, development conventions and AGENTS guide now record this as selected direction. Palette, exact component inventory/metrics and test harness details remain refinements.
+
+The user then asked whether development could begin. Assessment: product scope and ownership boundaries are sufficiently defined to start MVP implementation. The remaining high-risk areas are native NSH input/editing, Board drag/scroll/focus composition, application state updates, and real Herdr startup/report/reconnect integration. Start with workspace boundaries, a small native component/gallery slice, and the local Card -> queued request -> execution report -> Timeline/Review path. Resolve detailed schemas and UI APIs through those slices rather than delaying all work for a complete upfront specification. This assessment does not claim that runtime feasibility or native acceptance has already been demonstrated and does not itself start implementation.
+
+## 2026-11-06: first MVP implementation and live acceptance
+
+Status: **User-authorized implementation**, with scoped verification evidence.
+
+The user requested implementation through MVP, then confirmation of native interactions and Herdr connectivity. The repository now contains the Rust workspace, shared UI Kit/Gallery, local Board/Card/Notes/context selection, SQLite WAL and file-backed captures/reports, Workflow Engine/Scheduler, installed-hc JSON-RPC adapter, explicit report CLI/IPC, attention notices, worktree lifecycle, and checksummed tar+zstd Card archives.
+
+An isolated real Herdr core/PTY harness verifies development-to-review, fresh mentions, blocked notices, report storage/archiving/restoration and restart without duplicate dispatch. A real existing Codex Agent also read captured context and successfully reported completed through the bundled CLI. Live integration found and fixed obsolete Codex --full-auto startup arguments and large JSON frame truncation from macOS accepted-socket nonblocking inheritance. Native checks include creation/editing, Unicode/Markdown, stage drag, comments, Notes, keyboard/disabled behavior, themes and image clipboard persistence.
+
+The current [implementation guide](../implementation.md) distinguishes actual behavior and limits from earlier design proposals. Structured SQL history stays online in this MVP; complete record exports plus long execution/resource files are compressed, and matching expanded bytes compacted. Deferred features remain deferred. This does not claim exhaustive acceptance of every provider, IME composition path or large-data interaction.
+
 ## Remaining implementation refinements
+
 The earlier completion, old-execution handover, worktree-lifetime, Review-depth, template-UI, provider-scope, and notification questions are resolved by the user's decisions above. Do not keep them open as product blockers.
 
 Small refinements remain: the common completion/blockage report encoding, deterministic routing configuration, JSON file/schema/reload details, Note ownership/selection, attachment limits, archive treatment of modified managed worktrees, internal notification display, and actual coordinator lifetime. Detailed event architecture is intentionally postponed until after MVP.

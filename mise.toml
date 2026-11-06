@@ -1,0 +1,23 @@
+[tools]
+rust = "beta-2026-10-14"
+
+[tasks.check]
+run = "cargo check --workspace"
+
+[tasks.test]
+run = "cargo test --workspace"
+
+[tasks.run]
+depends = ["build"]
+run = ".local/Canban.app/Contents/MacOS/canban-ui"
+
+[tasks.build]
+run = ["cargo build -p canban-ui -p canban-cli", "/usr/bin/python3 scripts/package.py"]
+
+[tasks.gallery]
+depends = ["build"]
+run = ".local/Canban.app/Contents/MacOS/canban-ui --gallery"
+
+[tasks.acceptance]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance.py"

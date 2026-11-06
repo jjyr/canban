@@ -1,6 +1,6 @@
 # MVP scope and implementation sequence
 
-Status: updated to the user's 2026-11-05 simplification decisions. The core product scope is now sufficiently settled for implementation planning. Runtime feasibility and application acceptance have not yet been demonstrated.
+Status: scope derived from the user's 2026-11-05/06 decisions; the first native MVP is now implemented. [Implementation and acceptance](implementation.md) records supported behavior, real-Herdr/Codex verification, native interaction checks and remaining limits. The acceptance goals below are the product plan rather than proof that every possible scenario has been validated.
 
 ## The first-release loop
 
@@ -41,6 +41,7 @@ The stage workflow and its completion callback decide progression. Agent self-re
 - A needs-attention card condition and an internal notification event for blocked/input-needed work.
 - A minimal event-driven Rust application: enum events, in-memory channel, and interested components subscribing by topic. Detailed event architecture follows MVP.
 - Native Rust/NSH main UI with optional embedded WebView, and an NSH-independent AppServer co-hosted in the desktop process. A separately deployed Canban daemon is not a first-release requirement.
+- A separate canban-ui-kit, suitable NSH behavior reuse, component contracts, and a native gallery using production components. Develop shared controls and product composition through a useful vertical slice; follow the approved [UI architecture](ui-architecture.md) and regression conventions.
 
 ## Explicit simplifications
 
