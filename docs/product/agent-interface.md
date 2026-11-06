@@ -1,8 +1,6 @@
 # Agent-callable Canban interface
 
-Status: exposing a direct interface for agents is a confirmed product direction. The method names, transport, and examples below are proposed contracts; no Canban CLI, RPC server, or endpoint has been implemented.
-
-The concrete [MVP interface contract](../interfaces/mvp-contract.md) now specifies the proposed reporting path: bundled CLI -> local Unix socket/JSON-RPC -> shared handler, launch-context environment variables, execution.report payload/receipt, failures, and request-bound workflow action. It is an implementation-ready proposal for review, not a claim that the transport has already been approved or built.
+Status: the CLI -> local Unix socket JSON-RPC -> shared AppServer boundary is implemented. See [implementation](../implementation.md) for the exact operation inventory and acceptance evidence. Broader operations below remain design proposals unless listed there. The concrete [MVP interface contract](../interfaces/mvp-contract.md) documents the shared request-bound reporting mechanism and implemented interactive extensions.
 
 ## One application authority
 
@@ -78,7 +76,7 @@ Illustrative accepted result:
 }
 ```
 
-Queued means the service accepted the workflow intent. It does not claim the agent already started. A Backlog move produces a stage event without a stage-entry launch. Routing unavailable or capacity exhaustion must be represented in the request/read model instead of pretending a terminal exists.
+Queued means the service accepted the workflow intent. It does not claim the agent already started. A Backlog move produces a stage event without a stage-entry launch. Unavailable routing or pending startup must be represented in the request/read model instead of pretending a terminal exists.
 
 ## Identity and allowed actions
 

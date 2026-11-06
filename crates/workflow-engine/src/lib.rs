@@ -9,6 +9,18 @@ pub fn validate(flow: &Workflow) -> Result<()> {
             "Stage IDs must be nonempty and unique"
         );
     }
+    for stage in &flow.stages {
+        if let Some(profile) = &stage.profile {
+            ensure!(
+                !profile.trim().is_empty(),
+                "Stage profile ID cannot be empty"
+            );
+            ensure!(
+                stage.execute,
+                "A non-executing stage cannot select an Agent profile"
+            );
+        }
+    }
     let backlog = stage(flow, "backlog")?;
     ensure!(!backlog.execute, "Backlog cannot execute agents");
     for stage in &flow.stages {

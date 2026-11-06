@@ -32,7 +32,7 @@ The stage workflow and its completion callback decide progression. Agent self-re
 
 - Directory-backed Projects, one Board each, local cards, project-local numbers, descriptions/tags/resources/image paste, basic Notes edit/preview and selected context.
 - Backlog/Develop/Review default, required no-op Backlog, automatic stage Scheduler and fresh @mention conversations through one Session model.
-- Tag/default routing and ordinary admission limits for logical active work.
+- Tag/default routing and independent concurrent Sessions without application concurrency caps.
 - Agent completion/progress/blocking reports, unified card timeline, comments/results, and a minimal agent-callable application interface.
 - Herdr's existing runnable agent setup through core; no new provider-integration program or Canban-only agent family restriction.
 - Development checkout/worktree preparation where applicable, reuse through review/rework, and worktree handling at Archive.
@@ -82,7 +82,7 @@ The in-memory channel transports events; persisted card history remains the time
 1. **Runtime/UI seam:** connect to a scratch core, launch a harmless fixture through an existing launch path, read output/status, and verify native Rust/NSH command/state updates against the co-hosted AppServer, with WebView only for a specific optional surface. Do not touch the user's live core.
 2. **Project and card:** directory/Board/card numbers, description/resources, basic Notes, comments, archive, and recoverable timeline data.
 3. **Minimum events and interface:** route application actions through the small shared event direction and expose core card/comment/report operations to agents. Do not implement the deferred event framework.
-4. **Automatic Scheduler:** JSON workflow bindings, default/tag selection, ordinary capacity queue, generic Session launch, and self-reported completion callbacks.
+4. **Automatic Scheduler:** JSON workflow bindings, default/tag selection, persisted launch queue without concurrency caps, generic Session launch, and self-reported completion callbacks.
 5. **Complete the loop:** ordinary Review report, needs-attention/internal notification, fresh mentions, worktree reuse and archive handling, human disposition, and restart/reconnect behavior.
 
 The [architecture](architecture.md) defines the co-hosted logical service and future daemon seam. [Agent interface research](research/agent-interface-options.md) recommends thin CLI plus local RPC and shared typed handlers; MCP can be a later adapter. These transport recommendations are not a second application authority.

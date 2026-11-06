@@ -2,7 +2,9 @@ use anyhow::Result;
 use std::sync::Arc;
 mod components;
 mod presenter;
+mod profiles;
 mod screens;
+mod sessions;
 use canban_ui_kit::tokens::*;
 use nsh_core::prelude::*;
 use presenter::*;
@@ -70,6 +72,7 @@ fn run() -> Result<()> {
     let _runtime = app.start()?;
     APP.set(app).ok();
     GALLERY.set(std::env::args().any(|s| s == "--gallery")).ok();
+    nsh_platform_macos::set_components(canban_terminal::native::register);
     nsh_platform_macos::set_ui_sets(vec![nsh_base::registry(), registry()]);
     let result = nsh_platform_macos::run_app(
         nsh_platform_macos::AppSource::Rust(

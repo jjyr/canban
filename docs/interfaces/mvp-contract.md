@@ -219,3 +219,17 @@ Proposed now: common report entry point, launch context injection, local CLI/ser
 Deferred: full application event enum, topic hierarchy, channel library, subscriber lifecycle, global delivery/replay guarantees, distributed reporting, provider-specific integrations, template UI, and old-process coordination. The [event direction](../product/events-and-notifications.md) remains deliberately small.
 
 Before claiming the mechanism works, implement and validate a harmless fixture calling the CLI, one existing runnable agent following the instruction, blocked notification, default completion-to-Review, and an acknowledgment retry. No such implementation or runtime validation has been performed.
+
+## Implemented interactive extensions (2026-11-07)
+
+All operations use the existing local JSON-RPC/AppServer authority. Mutation callers can supply request_key for replay/conflict protection. CLI supplies a new key when absent; use the same key when retrying an uncertain call.
+
+| Operation | Parameters | Effect |
+| --- | --- | --- |
+| agent.open | card_id, profile_id, optional fresh | Focus queued/live invocation; otherwise start/resume exact Card/profile history. fresh explicitly resets the provider reference after exit. |
+| agent.bind | request_id, attempt, session_id | Bind current invocation to exact provider ID; reject changed IDs or reuse by another Card/profile. |
+| agent.turn_ended | request_id, attempt, session_id, optional body | Bind/record root turn boundary and optional file-backed final assistant response; does not complete task. |
+| agent.reply | request_id, attempt, question_id, body | Persist Markdown reply and comment.replied event; does not advance workflow or exit. |
+| agent.interrupt / agent.end | attempt_id, request_key | Commit a durable control intent, verify owning core, send interrupt/kill once; retain unknown delivery rather than auto-replay. |
+
+canban bind-session reads CODEX_THREAD_ID in Codex tool context. canban reply --to QUESTION_ID --file PATH sends the answer with current request/attempt. canban agent-notify codex JSON receives notify payload; the Claude form reads root Stop JSON on stdin. CANBAN_PROVIDER gates automatic Codex report binding so an inherited parent Agent ID cannot misidentify a child command. Long payloads are stored under the owning Card's run directory. Live @profile Questions have delivery state and keep the original task/callback. A pending question racing close is retained for a later invocation of the same conversation.

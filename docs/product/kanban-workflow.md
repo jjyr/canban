@@ -40,7 +40,7 @@ These are proposed field categories, not finalized enums. A Develop card can be 
 2. Create a local card in Backlog, receiving its project-local number.
 3. Write the description, reference notes/files/URLs/other cards, and paste images where useful. Add optional routing tags.
 4. Move the card into Develop. This commits a stage-entry event and makes the development workflow automatically eligible for Scheduler; no second routine Start/Scheduler click is required.
-5. Scheduler selects a matching agent, or the default for an untagged card, and waits for capacity. The card remains in Develop with a Queued reason until execution begins.
+5. Scheduler selects a matching agent, or the default for an untagged card, and queues it for launch without a concurrency limit. The card remains in Develop with a Queued reason until execution begins.
 6. The workflow runs preparation callbacks, such as creating a worktree where applicable, then starts the agent. Its attempt and runtime observations appear in the same card timeline.
 7. Users and agents comment; users can mention agents. Questions, comments, results, checks, and relevant code changes remain linked to the card and attempt.
 8. In the default template, the agent declaring development completed automatically moves the card into Review. No independent quality/check/process-exit gate is added. Review produces an ordinary report; the Shear interface follows later. Other JSON templates can configure different outcome transitions.
@@ -52,11 +52,11 @@ Backlog entry never automatically starts a stage workflow. Stage preparation and
 
 Tags select which agent may execute a stage's workflow. They do not by themselves define development versus review. No-tag routing uses the configured default; a tagged request must not silently run on a different agent.
 
-A submitted @agent comment creates a new dispatch request and a fresh conversation for the current question. It does not append to, interrupt, or reuse the active agent conversation, even when the same profile is named. It also does not permanently retag the card. Existing Run references can provide context without becoming delivery targets.
+A submitted @profile comment resolves the Card/profile conversation. If live, it is immediately appended to the current invocation; otherwise Scheduler starts/resumes it. It does not automatically interrupt, change routing tags or replace the original task/callback.
 
-Entering Develop or Review independently selects an agent through its workflow/tag/default rules and starts a fresh conversation too. All executions use the same Session/Run model and lifecycle. Only their dispatch trigger, prepared task/context/resources, and completion binding differ. Canban controls these runs through herdr-core; see [Sessions and scheduling](sessions.md).
+Develop/Review independently select their configured profile and queue a task with the stage callback. Distinct profiles retain separate histories; repeated work for the same Card/profile resumes the same provider ID. All invocations use one request/attempt model. See [Sessions](sessions.md).
 
-A response to a comment is linked to that comment in the timeline. The request-bound completion action prevents it from accidentally advancing the card as the current development result. All executions use ordinary logical-work capacity controls. The user accepts exceptional old processes continuing in MVP; do not add writer handover or process-quiescence coordination to this interaction.
+A CLI reply is linked to its Question/comment in Timeline without completing the current assignment. Only an explicit completed report invokes its original callback. Different Cards/profiles run concurrently without capacity caps; duplicate live starts of one conversation are avoided.
 
 Saving the description, typing a mention, and submitting a comment are different actions. Trigger a mention from a submitted, structured mention rather than every keystroke or autosave. Mentions in quoted text and code blocks remain content. These are interaction recommendations to validate.
 
@@ -106,9 +106,9 @@ Keep the earlier direction of declarative layouts: title, tags, stage/status, re
 2. Create cards in two Projects; each has independent numbering and unambiguous scoped references.
 3. Move an untagged card to Develop: automatic default routing, preparation, and one execution are visible without another launch click.
 4. Move a claude-tagged card to Develop: only the configured matching profile may run it.
-5. Exhaust capacity: the card stays in Develop and displays Queued with a concrete reason.
+5. Run multiple Boards with the same profile: each request launches independently without a concurrency cap.
 6. Replay a move or reconnect after an uncertain launch: no blind duplicate, and ambiguity remains visible.
-7. Submit user and agent comments, a structured mention, and a pasted image: all persist in the unified timeline. The mention schedules a fresh Session; its response cannot be mistaken for the active development workflow's result.
+7. Submit user and agent comments, a structured mention, and a pasted image: all persist in the unified timeline. The mention appends or starts/resumes its Card/profile conversation; its reply cannot be mistaken for completion of the active development task.
 8. The development agent reports completed: the default template enters Review and schedules an ordinary report without independent checks or waiting for process exit. Normal repeated report handling does not create another transition.
 9. Archive completed work: retain card number, comments, events, and artifacts; reopening cannot silently dispatch.
 10. Load a JSON template; show a useful mismatch if a change cannot apply. A visual template editor and complex active-template migration are deferred.

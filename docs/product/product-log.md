@@ -285,3 +285,60 @@ The current [implementation guide](../implementation.md) distinguishes actual be
 The earlier completion, old-execution handover, worktree-lifetime, Review-depth, template-UI, provider-scope, and notification questions are resolved by the user's decisions above. Do not keep them open as product blockers.
 
 Small refinements remain: the common completion/blockage report encoding, deterministic routing configuration, JSON file/schema/reload details, Note ownership/selection, attachment limits, archive treatment of modified managed worktrees, internal notification display, and actual coordinator lifetime. Detailed event architecture is intentionally postponed until after MVP.
+
+
+## 2026-11-06 — Simplify concurrency and inspect direct Agent interaction
+
+User direction: remove default concurrency limits and avoid speculative scheduling machinery. Scheduler now launches eligible requests without global, Project or profile caps. Obsolete capacity configuration fields are ignored, including saved request profiles. This supersedes earlier capacity/admission decisions in this log and the original research.
+
+The user also asked to inspect direct Agent interaction: add information while an Agent works, ask follow-up questions, and continue through Herdr operations. The current UI only reads output and retries with a fresh Session. Herdr exposes terminal.send/interrupt/keys/attach, but the built-in batch-mode commands do not provide an interactive conversation merely because a PTY exists. The current gap and recommended minimal next step are documented in [Agent interaction](agent-interaction.md); interactive support is not yet implemented or accepted.
+
+
+## 2026-11-06 — Interactive terminal, automatic exit and explicit resume
+
+The user rejected codex exec / claude -p as the intended execution experience. Start an interactive Agent terminal for work; users can view it, type and interrupt during execution. After completion, exit the Agent, and allow a later explicit resume for follow-up.
+
+The technical/product proposal preserves a single Session model: request/attempt is an invocation, provider conversation is resumable history, and core/terminal is the current runtime binding. New stage entry/@profile remains fresh; explicit resume creates a new request reusing the provider conversation, with no stage callback by default. Exact ID binding, graceful post-report exit and the renderer are not yet accepted in the runtime. The earlier minimal text-composer-only recommendation is superseded by the requirement for a real terminal.
+
+See [Agent interaction](agent-interaction.md) and [technical research](../research/interactive-agent-lifecycle.md). WebView plus a mature terminal emulator, normal-close failure handling and Restore-before-archived-resume are recommendations, not additional user decisions.
+
+
+## 2026-11-06 — Native libghostty and Card/configuration context reuse (discussion)
+
+The user selected libghostty instead of the proposed WebView/xterm.js terminal. Use libghostty-vt as the initial concrete reuse target; the NSH native renderer/input host remains work to implement. Herdr's inspected API has no provider-conversation resume operation; Canban resolves provider references and invokes the provider's resume command through terminal.run.
+
+The user then proposed reusing Agent context within each Card, followed by the clarification that genuinely different contexts such as Review should remain separate. The working recommendation is one provider conversation per (Card, Agent configuration identity). Developer and Reviewer can be distinct named configurations using the same Codex provider. Repeat mentions/clicks reuse the corresponding role's conversation; execution/request/attempt/report/callback records remain per invocation. This is a proposal under discussion, not a finalized new runtime contract or an implemented migration. It supersedes the preceding execution-specific mention-picker recommendation and avoids equating provider brand with conversation identity.
+
+See [Agent interaction](agent-interaction.md), [interactive lifecycle](../research/interactive-agent-lifecycle.md) and [native terminal](../research/native-terminal.md). No Agent was launched, provider setup changed or native library imported during this discussion.
+
+
+## 2026-11-06 — Profile identity accepted; definition ownership proposed
+
+The user agreed that selecting a profile through @ uses that configuration and its Card-scoped conversation. Distinct configurations such as Developer and Reviewer retain distinct context even if their provider is the same.
+
+Recommendation in response to who defines profiles: the application-wide Agent registry defines reusable named profiles (starter profiles supplied by Canban, user customization through JSON); Kanban templates reference those IDs for automatic stage tasks and define stage instructions/transitions. Templates do not define live sessions. Direct mentions can use any configured profile without changing the workflow. Reuse the existing config/agents.json and workflow configuration boundaries. New profile role fields, stage references and tag/default precedence are not implemented or finalized by this documentation update.
+
+
+## 2026-11-06 — Implement independent profiles and stage references
+
+The user approved the profile/template ownership boundary. Implemented optional profile.role_instruction and stage.profile, starter developer/reviewer roles on fresh homes, role/task snapshots and validation of global references at startup/Project creation/reload. Explicit mentions select their profile; named automatic stage profiles take precedence over Card routing tags, while old stages preserve tag/default selection. Existing files/Projects are retained.
+
+Settings and Card mention controls share registry data; Board headers expose stage selection. Workspace tests and isolated real-Herdr fixture acceptance passed, including actual distinct Developer/Reviewer launches and native @reviewer submission. This implements the configuration/routing slice; provider conversation binding/reuse, native libghostty terminal and interactive graceful exit/resume are still unimplemented and must not be described as delivered. See [implemented profile configuration](agent-profiles.md).
+
+
+## 2026-11-07 — Reply channel comparison and simpler profile loading
+
+The user requested comparing Agent-initiated Canban CLI replies against reading Herdr terminal output before selecting how active @questions are handled. Generic Herdr APIs provide terminal capture/streams/status, not semantic assistant-message records linked to a Canban question. [Reply path comparison](../research/agent-reply-options.md) records both options and a combined recommendation, still pending a decision; no reply API or scraping logic was implemented.
+
+The user selected simpler profile behavior: changed configuration applies on next load; no strict new profile IDs/versioning/reset policy. Running invocations retain their loaded setup and saved execution captures remain immutable. The user also accepted Restore before resuming archived Cards and explicit fresh-conversation recovery when provider history is missing.
+
+
+## 2026-11-07 — Immediate append selected for active @mentions
+
+The user considered scheduling @questions after an Agent finished its current task, then explicitly selected immediate append for simplicity. Persist the question and deliver it now to the existing Card/profile invocation. Do not add a task-completion-gated follow-up queue for active mentions. The original task/callback remains active; answering the question does not by itself complete it or request Agent exit.
+
+Absent/exited conversations still use the agreed first-start/exact-resume path, with an ordinary follow-up invocation. Closing and blocked/uncertain-delivery cases preserve the message and show its state. The delivery decision does not imply Herdr has semantic reply extraction; [reply-channel comparison](../research/agent-reply-options.md) remains the reference for that separate boundary. No runtime behavior was changed in this documentation update.
+
+## 2026-11-07 — Interactive Card/profile conversations implemented
+
+Implemented the accepted single conversation per Card/profile model with immediate live mentions, CLI question replies independent of completion, explicit provider binding, exact-ID resume, turn-boundary normal exit and a native libghostty-vt terminal. Real Codex workflow/resume acceptance and deterministic Herdr/native UI acceptance are recorded in implementation.md. Claude's lifecycle adapter remains pending live-provider acceptance; no new product session classes or concurrency caps were introduced.

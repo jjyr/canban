@@ -58,6 +58,7 @@ impl AppServer {
                 let c: Config =
                     serde_json::from_slice(&std::fs::read(self.home.join("config/agents.json"))?)?;
                 Self::validate_config(&c)?;
+                self.validate_references(&c)?;
                 *self.config.write().unwrap() = c;
                 self.emit("configuration", None);
                 Ok(json!({"reloaded":true}))
@@ -72,7 +73,7 @@ impl AppServer {
                         self.home.join("config/workflows/default.json"),
                     )?)?
                 };
-                canban_workflow_engine::validate(&workflow)?;
+                Self::validate_workflow(&config, &workflow)?;
                 let project =
                     canban_kanban::project(strp(&p, "name")?, strp(&p, "directory")?, workflow)?;
                 self.mutate(method, &p, |db| {
@@ -235,18 +236,48 @@ impl AppServer {
                 mentions.sort();
                 mentions.dedup();
                 for agent in mentions {
-                    enqueue(
-                        db,
-                        &config,
-                        &mut c,
-                        &project,
-                        stage,
-                        &format!("comment:{}", event.id),
-                        Some(&agent),
-                        Some(format!(
-                            "Answer this comment/question in the context of the Card.\n\n{body}"
-                        )),
-                    )?;
+                    let profile = canban_scheduler::select(&config, &[], Some(&agent))?;
+                    let _context = crate::sessions::conversation(db, &c, &profile)?;
+                    let active = db.list::<Request>()?.into_iter().rev().find(|r| {
+                        r.card_id == c.id
+                            && r.profile.id == agent
+                            && matches!(
+                                r.state.as_str(),
+                                "queued" | "starting" | "running" | "working" | "blocked"
+                            )
+                    });
+                    let req = if let Some(req) = active {
+                        req
+                    } else {
+                        enqueue(
+                            db,
+                            &config,
+                            &mut c,
+                            &project,
+                            stage,
+                            &format!("comment:{}", event.id),
+                            Some(&agent),
+                            Some(format!(
+                                "Answer this comment/question in the context of the Card.\n\n{body}"
+                            )),
+                        )?
+                        .context("Question not queued")?
+                    };
+                    let question = Question {
+                        id: format!("{}:{}", event.id, agent),
+                        project_id: c.project_id.clone(),
+                        card_id: c.id.clone(),
+                        profile_id: agent,
+                        comment_id: event.id.clone(),
+                        body: body.into(),
+                        request_id: req.id.clone(),
+                        attempt: req.attempt,
+                        state: "pending".into(),
+                        error: None,
+                        reply_path: None,
+                        created_at: now(),
+                    };
+                    db.save(&question)?;
                 }
                 c.revision += 1;
                 db.save(&c)?;
@@ -302,7 +333,18 @@ impl AppServer {
                 db.save(&note)?;
                 Ok(serde_json::to_value(note)?)
             }),
-            "execution.report" => self.report(p),
+            "agent.open" => self.open_agent(p),
+            "agent.bind" => self.bind_session(p),
+            "agent.turn_ended" => self.turn_ended(p),
+            "agent.reply" => self.reply(p),
+            "agent.interrupt" => self.control_agent(p, false),
+            "agent.end" => self.control_agent(p, true),
+            "execution.report" => {
+                if p["session_id"].is_string() {
+                    self.bind_session(json!({"request_id":p["execution"]["request_id"],"attempt":p["execution"]["attempt_number"],"session_id":p["session_id"]}))?;
+                }
+                self.report(p)
+            }
             "execution.retry" => self.mutate(method, &p, |db| {
                 let mut req: Request = db.get(strp(&p, "request_id")?)?;
                 let c: Card = db.get(&req.card_id)?;

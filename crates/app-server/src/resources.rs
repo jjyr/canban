@@ -128,6 +128,18 @@ impl AppServer {
             .unwrap()
             .clone();
         let filtered = Snapshot {
+            conversations: snapshot
+                .conversations
+                .iter()
+                .filter(|v| v.card_id == card_id)
+                .cloned()
+                .collect(),
+            questions: snapshot
+                .questions
+                .iter()
+                .filter(|v| v.card_id == card_id)
+                .cloned()
+                .collect(),
             projects: vec![project.clone()],
             cards: vec![card.clone()],
             events: snapshot

@@ -50,7 +50,7 @@ AppServer is the Rust application entry/composition component hosting the featur
 | Projects/Boards/cards/numbers/stage/attention/timing attributes | Kanban |
 | Notes/resources/attachments/captured input | Context |
 | JSON template interpretation and workflow progression | Workflow Engine |
-| Routing, queue/capacity/time readiness, generic execution lifecycle | Scheduler |
+| Routing, queue/time readiness, generic execution lifecycle | Scheduler |
 | Durable card history/comments/reports | Timeline |
 | Internal notifications and later native delivery | Notifications |
 | Focus/navigation/selection/transient edit presentation | NSH UI |
@@ -131,7 +131,7 @@ Persist card timing attributes through the Kanban crate. Put due-time waiting/tr
 ## Product execution policy
 
 1. A stage entry or submitted @mention reaches the shared application operation and produces the relevant product event/request.
-2. Scheduler selects the workflow/profile/context and applies ordinary logical-work capacity limits.
+2. Scheduler selects the workflow/profile/context and launches eligible work without concurrency caps.
 3. Preparation creates/reuses the directory/worktree when applicable, retained across Develop/Review/rework until Archive.
 4. The runtime adapter launches the existing runnable agent setup through core, with report association/instructions.
 5. The agent explicitly declares completed, blocked, or other supported outcome through the shared report entry.

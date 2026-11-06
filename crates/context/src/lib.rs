@@ -74,14 +74,21 @@ pub fn capture(
         .iter()
         .filter(|a| a.card_id == card.id)
         .collect();
-    let manifest = serde_json::json!({"schema_version":1,"project":project,"card":card,"request":req,"attempt":attempt,"timeline":timeline,"notes":notes,"reports":reports,"artifacts":artifacts});
+    let questions: Vec<_> = snapshot
+        .questions
+        .iter()
+        .filter(|q| q.request_id == req.id && q.state != "replied")
+        .collect();
+    let manifest = serde_json::json!({"schema_version":1,"project":project,"card":card,"request":req,"attempt":attempt,"timeline":timeline,"notes":notes,"reports":reports,"artifacts":artifacts,"questions":questions});
     let manifest_path = dir.join("context.json");
     atomic(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
     let prompt = format!(
-        "# Canban Card #{}: {}\n\n{}\n\n## Assignment\n{}\n\n## Captured Human Context\nRead the exact context manifest at {}. It contains notes, comments, earlier report references, and attachment paths (relative to {}). Read relevant earlier reports.\n\n## Outcome reporting\nYou must explicitly report your own outcome by running the provided CLI. Do not move or archive the card.\nCANBAN_ENDPOINT={} CANBAN_REQUEST_ID={} CANBAN_ATTEMPT={} {} report --state completed --message 'Summary' --file /absolute/path/to/your-report.md\nUse --state blocked when you need human input; working for progress, failed on failure. --file is optional. CANBAN_CLI, CANBAN_ENDPOINT, CANBAN_REQUEST_ID and CANBAN_ATTEMPT are also in your environment. CLI success means the outcome was recorded; Canban applies the workflow.\n",
+        "# Canban Card #{}: {}\n\n{}\n\n## Agent role: @{}\n{}\n\n## Assignment\n{}\n\n## Captured Human Context\nRead the exact context manifest at {}. It contains notes, comments, earlier report references, and attachment paths (relative to {}). Read relevant earlier reports.\n\n## Outcome reporting\nYou must explicitly report your own outcome by running the provided CLI. Do not move or archive the card.\nCANBAN_ENDPOINT={} CANBAN_REQUEST_ID={} CANBAN_ATTEMPT={} {} report --state completed --message 'Summary' --file /absolute/path/to/your-report.md\nUse --state blocked when you need human input; working for progress, failed on failure. --file is optional. CANBAN_CLI, CANBAN_ENDPOINT, CANBAN_REQUEST_ID and CANBAN_ATTEMPT are also in your environment. CLI success means the outcome was recorded; Canban applies the workflow.\n",
         card.number,
         card.title,
         card.body,
+        req.profile.id,
+        req.profile.role_instruction,
         req.instruction,
         manifest_path.display(),
         home.display(),
@@ -90,6 +97,11 @@ pub fn capture(
         attempt,
         shell_quote(&cli.to_string_lossy())
     );
+    let mut prompt = prompt;
+    prompt.push_str("\n## Conversation binding and follow-up questions\nFor Codex, your first shell action must run \"$CANBAN_CLI\" bind-session (it reads CODEX_THREAD_ID). When resuming, this prompt's execution binding supersedes any older reporting command in conversation history.\n");
+    for q in questions {
+        prompt.push_str(&format!("\nQuestion ID: {}\n{}\nPublish the answer with \"$CANBAN_CLI\" reply --to {} --file /absolute/path/to/answer.md. A reply does not complete the task.\n",q.id,q.body,shell_quote(&q.id)));
+    }
     atomic(&dir.join("prompt.md"), prompt.as_bytes())?;
     relative(home, &dir.join("prompt.md"))
 }

@@ -82,7 +82,7 @@ The user has now resolved the main scope questions with explicit MVP simplificat
 
 The first useful loop is **Project -> local card in Backlog -> Develop -> automatic dispatch -> visible result and discussion -> human disposition -> archive**.
 
-Include directory-backed Projects and Boards, basic Notes editing/preview and captured context, the default workflow template, local cards and project-local numbers, rich descriptions/resource references/image paste, unified timeline/comments, agent mentions, tag/default routing, run history, concurrency/recovery controls, and an agent-callable application interface. Rich conversational UI remains a separate scope choice.
+Include directory-backed Projects and Boards, basic Notes editing/preview and captured context, the default workflow template, local cards and project-local numbers, rich descriptions/resource references/image paste, unified timeline/comments, agent mentions, tag/default routing, run history, independent concurrent Sessions and recovery, and an agent-callable application interface. Rich conversational UI remains a separate scope choice.
 
 Review produces an ordinary report through the existing generic Scheduler path; integrate the Shear interface later. The default next-stage callback trusts the agent's completion declaration. JSON templates provide customization without a template-editing GUI.
 

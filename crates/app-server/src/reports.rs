@@ -43,8 +43,18 @@ impl AppServer {
             let mut req:Request=db.get(&req.id)?;let mut run:Attempt=db.get(&attempt.id)?;let mut card:Card=db.get(&card.id)?;
             let report=Report{id:report_id,request_id:req.id.clone(),project_id:req.project_id.clone(),card_id:req.card_id.clone(),attempt:number,state:state.into(),message:p["message"].as_str().unwrap_or("").into(),path,request_key:key.into(),fingerprint,created_at:now()};db.save(&report)?;
             log(db,&card,"execution.reported",&format!("agent:{}",req.profile.id),&format!("{state}: {}",report.message),Some(req.id.clone()),json!({"report_id":report.id,"path":report.path,"attempt":number,"state":state}))?;
+            if state=="completed" && req.trigger.starts_with("comment:") {
+                for mut q in db.list::<Question>()?.into_iter().filter(|q|q.request_id==req.id && q.state!="replied") {
+                    q.state="replied".into();q.reply_path=report.path.clone();db.save(&q)?;
+                    log(db,&card,"comment.replied",&format!("agent:{}",req.profile.id),&report.message,Some(req.id.clone()),json!({"reply_to":q.comment_id,"question_id":q.id,"path":report.path}))?;
+                }
+            }
             let current=req.attempt==number;
-            if run.state!="completed" {run.state=state.into();db.save(&run)?;}
+            if run.state!="completed" {
+                run.state=state.into();
+                if state=="completed" && req.profile.provider_kind()!="command" {run.close_state="pending".into();run.turn_ended_at=None;}
+                db.save(&run)?;
+            }
             if current && req.state!="completed" {
                 req.state=state.into();db.save(&req)?;
                 if state=="blocked"||state=="failed"{attention(db,&mut card,if report.message.is_empty(){state}else{&report.message})?;}

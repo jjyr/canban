@@ -45,6 +45,11 @@ fn admit(app: &AppServer, request: &Request) -> Attempt {
                 observed: None,
                 error: None,
                 created_at: now(),
+                conversation_id: None,
+                provider_session_id: None,
+                close_state: String::new(),
+                turn_ended_at: None,
+                response_path: None,
             };
             db.save(&run)?;
             Ok(run)
@@ -108,7 +113,7 @@ fn failed_revision_leaves_no_event_or_request() {
     assert_eq!(s.cards[0].stage, "backlog");
 }
 #[test]
-fn mention_is_a_fresh_session_without_stage_callback() {
+fn mentions_coalesce_in_the_card_profile_queue_without_stage_callback() {
     let (_d, app, _p, c) = setup();
     app.call(
         "comment.add",
@@ -121,8 +126,9 @@ fn mention_is_a_fresh_session_without_stage_callback() {
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
-    assert_eq!(snap.requests.len(), 2);
-    assert_ne!(snap.requests[0].id, snap.requests[1].id);
+    assert_eq!(snap.requests.len(), 1);
+    assert_eq!(snap.questions.len(), 2);
+    assert_eq!(snap.questions[0].request_id, snap.questions[1].request_id);
     assert!(snap.requests.iter().all(|r| r.on_completed.is_none()));
     let run = admit(&app, &snap.requests[0]);
     app.call("execution.report",json!({"execution":{"request_id":run.request_id,"attempt_number":1},"state":"completed","message":"answer","request_key":"answer1"})).unwrap();
@@ -145,7 +151,14 @@ fn blocked_produces_attention_and_durable_notice() {
 }
 #[test]
 fn unmatched_tags_never_fall_back_to_unrelated_agent() {
-    let (_d, app, _p, c) = setup();
+    let (_d, app, mut project, c) = setup();
+    // Legacy stages without a profile reference retain tag/default routing.
+    project.workflow.stages[1].profile = None;
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&project))
+        .unwrap();
     app.call(
         "card.update",
         json!({"card_id":c.id,"revision":1,"tags":["unknown-agent"]}),
@@ -316,4 +329,302 @@ fn selected_note_context_is_captured_without_following_later_edits() {
     assert_eq!(value["notes"][0]["body"], "Original decision");
     app.call("note.save",json!({"project_id":project.id,"note_id":first.id,"revision":1,"title":"Selected","body":"Later revision"})).unwrap();
     assert_eq!(std::fs::read(manifest).unwrap(), original);
+}
+
+#[test]
+fn legacy_capacity_fields_do_not_survive_config_or_request_loading() {
+    let (_dir, app, _project, card) = setup();
+    let mut legacy = serde_json::to_value(app.config()).unwrap();
+    legacy["capacity"] = json!(1);
+    for profile in legacy["profiles"].as_array_mut().unwrap() {
+        profile["capacity"] = json!(1);
+    }
+    std::fs::write(
+        app.home.join("config/agents.json"),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    app.call("config.reload", json!({})).unwrap();
+    let current = serde_json::to_value(app.config()).unwrap();
+    assert!(current.get("capacity").is_none());
+    assert!(
+        current["profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p.get("capacity").is_none())
+    );
+    app.call(
+        "comment.add",
+        json!({"card_id":card.id,"body":"@codex task"}),
+    )
+    .unwrap();
+    let mut request = serde_json::to_value(&app.snapshot().unwrap().requests[0]).unwrap();
+    request["profile"]["capacity"] = json!(1);
+    let loaded: Request = serde_json::from_value(request).unwrap();
+    assert!(
+        serde_json::to_value(loaded).unwrap()["profile"]
+            .get("capacity")
+            .is_none()
+    );
+}
+
+#[test]
+fn template_profiles_and_mentions_select_independent_roles_and_callbacks() {
+    let (_dir, app, _project, card) = setup();
+    app.call(
+        "card.update",
+        json!({"card_id":card.id,"revision":1,"tags":["claude"]}),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":2,"stage":"develop"}),
+    )
+    .unwrap();
+    let developer = app.snapshot().unwrap().requests[0].clone();
+    assert_eq!(developer.profile.id, "developer");
+    app.call(
+        "comment.add",
+        json!({"card_id":card.id,"body":"@reviewer assess the approach"}),
+    )
+    .unwrap();
+    let mention = app
+        .snapshot()
+        .unwrap()
+        .requests
+        .into_iter()
+        .find(|r| r.trigger.starts_with("comment:"))
+        .unwrap();
+    assert_eq!(mention.profile.id, "reviewer");
+    assert!(mention.on_completed.is_none());
+    let run = admit(&app, &developer);
+    app.call("execution.report",json!({"execution":{"request_id":run.request_id,"attempt_number":1},"state":"completed","request_key":"roles-completed"})).unwrap();
+    let snapshot = app.snapshot().unwrap();
+    let review = snapshot
+        .requests
+        .iter()
+        .find(|r| r.trigger == "stage_entry" && r.stage == "review")
+        .unwrap();
+    assert_eq!(review.profile.id, "reviewer");
+    assert_ne!(
+        review.profile.role_instruction,
+        developer.profile.role_instruction
+    );
+    assert_eq!(snapshot.cards[0].tags, ["claude"]);
+}
+
+#[test]
+fn unknown_stage_profiles_fail_before_project_creation() {
+    let (dir, app, _project, _card) = setup();
+    let mut workflow = Workflow::default();
+    workflow.stages[2].profile = Some("missing-reviewer".into());
+    assert!(
+        app.call(
+            "project.create",
+            json!({"name":"Invalid","directory":dir.path().join("invalid"),"workflow":workflow})
+        )
+        .is_err()
+    );
+    assert_eq!(app.snapshot().unwrap().projects.len(), 1);
+    assert!(!dir.path().join("invalid").exists());
+}
+
+#[test]
+fn referenced_profile_removal_is_rejected_without_replacing_active_config() {
+    let (_dir, app, _project, _card) = setup();
+    let mut changed = app.config();
+    changed.profiles.retain(|p| p.id != "reviewer");
+    std::fs::write(
+        app.home.join("config/agents.json"),
+        serde_json::to_vec(&changed).unwrap(),
+    )
+    .unwrap();
+    assert!(app.call("config.reload", json!({})).is_err());
+    assert!(app.config().profiles.iter().any(|p| p.id == "reviewer"));
+}
+
+#[test]
+fn queued_role_and_stage_task_are_immutable_after_config_reload() {
+    let (_dir, app, project, card) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let before = app.snapshot().unwrap().requests[0].clone();
+    let mut config = app.config();
+    config
+        .profiles
+        .iter_mut()
+        .find(|p| p.id == "developer")
+        .unwrap()
+        .role_instruction = "New role".into();
+    std::fs::write(
+        app.home.join("config/agents.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    app.call("config.reload", json!({})).unwrap();
+    assert_eq!(app.snapshot().unwrap().requests[0], before);
+    let snapshot = app.snapshot().unwrap();
+    let path = canban_context::capture(
+        &app.home,
+        &project,
+        &snapshot.cards[0],
+        &before,
+        1,
+        &snapshot,
+        "/tmp/test.sock",
+        Path::new("/bin/echo"),
+    )
+    .unwrap();
+    let prompt = std::fs::read_to_string(app.home.join(path)).unwrap();
+    assert!(prompt.contains(&before.profile.role_instruction));
+    assert!(prompt.contains(&before.instruction));
+    assert!(!prompt.contains("New role"));
+    app.call(
+        "comment.add",
+        json!({"card_id":card.id,"body":"@developer explain"}),
+    )
+    .unwrap();
+    // Input appended to the existing invocation retains its loaded profile.
+    assert_eq!(app.snapshot().unwrap().requests.len(), 1);
+    let run = admit(&app, &before);
+    app.call("execution.report",json!({"execution":{"request_id":run.request_id,"attempt_number":1},"state":"completed","request_key":"finish-old-role"})).unwrap();
+    app.call(
+        "comment.add",
+        json!({"card_id":card.id,"body":"@developer next assignment"}),
+    )
+    .unwrap();
+    assert!(
+        app.snapshot()
+            .unwrap()
+            .requests
+            .iter()
+            .any(|r| r.profile.role_instruction == "New role")
+    );
+}
+
+#[test]
+fn legacy_registry_and_workflow_are_preserved_without_starter_role_injection() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join("config")).unwrap();
+    let mut legacy = serde_json::to_value(Config::default()).unwrap();
+    legacy["default_agent"] = json!("codex");
+    legacy["profiles"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|p| p["id"] == "codex");
+    legacy["profiles"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("role_instruction");
+    let original = serde_json::to_vec(&legacy).unwrap();
+    std::fs::write(home.join("config/agents.json"), &original).unwrap();
+    let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    assert_eq!(
+        std::fs::read(home.join("config/agents.json")).unwrap(),
+        original
+    );
+    let flow: Workflow =
+        serde_json::from_slice(&std::fs::read(home.join("config/workflows/default.json")).unwrap())
+            .unwrap();
+    assert!(flow.stages.iter().all(|s| s.profile.is_none()));
+    assert_eq!(app.config().profiles.len(), 1);
+}
+
+#[test]
+fn live_replies_preserve_task_callback_and_require_current_invocation() {
+    let (_dir, app, _project, card) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let run = admit(&app, &app.snapshot().unwrap().requests[0]);
+    let binding =
+        json!({"request_id":run.request_id,"attempt":run.number,"session_id":"exact-thread"});
+    app.call("agent.bind", binding.clone()).unwrap();
+    app.call("agent.turn_ended", json!({"request_id":run.request_id,"attempt":run.number,"session_id":"exact-thread","body":"Ready"})).unwrap();
+    app.call(
+        "comment.add",
+        json!({"card_id":card.id,"body":"@developer explain progress"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.requests.len(), 1);
+    let q = &snap.questions[0];
+    let mut reply = json!({"request_key":"answer-once","request_id":run.request_id,"attempt":run.number,"question_id":q.id,"body":"Still working"});
+    reply["attempt"] = json!(2);
+    assert!(app.call("agent.reply", reply.clone()).is_err());
+    reply["attempt"] = json!(run.number);
+    app.call("agent.reply", reply.clone()).unwrap();
+    app.call("agent.reply", reply).unwrap();
+    let snap = app.snapshot().unwrap();
+    assert!(snap.reports.is_empty());
+    assert_eq!(snap.cards[0].stage, "develop");
+    assert_eq!(
+        snap.events
+            .iter()
+            .filter(|e| e.kind == "comment.replied")
+            .count(),
+        1
+    );
+    app.call("execution.report",json!({"execution":{"request_id":run.request_id,"attempt_number":run.number},"state":"completed","body":"Done","request_key":"finish-live"})).unwrap();
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.cards[0].stage, "review");
+    assert_eq!(snap.attempts[0].close_state, "pending");
+    assert!(
+        snap.attempts[0].turn_ended_at.is_none(),
+        "Earlier ready turn must not close a later task"
+    );
+    let repeated = app
+        .call(
+            "agent.open",
+            json!({"card_id":card.id,"profile_id":"developer"}),
+        )
+        .unwrap();
+    assert_eq!(repeated["request_id"], run.request_id);
+    assert_eq!(app.snapshot().unwrap().requests.len(), 2);
+    let reviewer = admit(&app, &snap.requests[1]);
+    assert!(app.call("agent.bind",json!({"request_id":reviewer.request_id,"attempt":reviewer.number,"session_id":"exact-thread"})).is_err());
+    assert!(
+        app.call(
+            "agent.bind",
+            json!({"request_id":run.request_id,"attempt":run.number,"session_id":"another-thread"})
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn restarting_does_not_blindly_redeliver_uncertain_question() {
+    let (_dir, app, _project, card) = setup();
+    app.call(
+        "agent.open",
+        json!({"card_id":card.id,"profile_id":"developer"}),
+    )
+    .unwrap();
+    app.call(
+        "comment.add",
+        json!({"card_id":card.id,"body":"@developer question"}),
+    )
+    .unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut q = db.list::<Question>()?.remove(0);
+            q.state = "delivering".into();
+            db.save(&q)
+        })
+        .unwrap();
+    // This restart regression must never contact the user's Herdr core.
+    app.config.write().unwrap().hc = "/usr/bin/false".into();
+    let _running = app.start().unwrap();
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.questions[0].state, "delivery_unknown");
+    assert!(snap.cards[0].attention.is_some());
 }

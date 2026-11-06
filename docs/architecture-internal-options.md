@@ -14,7 +14,7 @@ All alternatives can use the same product modules and storage. The question is h
 | Kanban | Projects, Boards/stages, cards/numbers/tags, and authoritative card transitions/attention |
 | Context | Notes, resource references, attachments, and captured input |
 | Workflow Engine | Interpret JSON templates and turn stage/report events into configured actions |
-| Scheduler | Routing/default selection, ordinary capacity, request/attempt lifecycle, and generic Session execution |
+| Scheduler | Routing/default selection, request/attempt lifecycle, and generic Session execution |
 | Workspaces | Prepare/reuse execution directory/worktree; handle managed worktree at Archive |
 | Timeline | Card history/comments/report presentation and persistence access |
 | Notifications | Internal notification records/events; future native-delivery adapter |
@@ -155,7 +155,7 @@ Event/operation names below are illustrative, not a finalized enum/schema.
 1. NSH UI -> AppServer -> Kanban.move_card(Develop)
 2. Kanban updates card -> CardMoved event
 3. Workflow Engine reads Develop binding -> Scheduler.enqueue(task specification)
-4. Scheduler selects profile/capacity -> Workspaces.prepare_or_reuse
+4. Scheduler selects profile -> Workspaces.prepare_or_reuse
 5. Scheduler -> CoreAdapter.launch -> herdr-core terminal
 6. Agent -> CLI/report entry -> Scheduler records completed declaration
 7. Scheduler -> ExecutionReported event

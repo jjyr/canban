@@ -4,6 +4,8 @@ Canban is the product; Human Context names the proposed approach. Current user d
 
 The repository now has a runnable macOS MVP. Start with [implementation, development and acceptance](implementation.md) for actual behavior, commands and validation limits. Dated pre-implementation statements in the design/research documents describe their original scope; they are not the current implementation status.
 
+[Real Agent workflow and cross-Board acceptance](real-agent-acceptance.md) records the two-Board, four-Codex-Session Develop/Review/Archive run and the exact concurrency/isolation limits.
+
 ## Current product documents
 
 | Document | Purpose |
@@ -13,11 +15,14 @@ The repository now has a runnable macOS MVP. Start with [implementation, develop
 | [Projects and workflow templates](product/projects-and-workflows.md) | Directory/Board ownership, required Backlog, callbacks, customization, and template migration |
 | [Kanban card workflow](product/kanban-workflow.md) | Numbers, resources, stages/run/outcome separation, comments, mentions, and archive |
 | [Scheduler](product/scheduler.md) | Stage determines work; tags select agents; admission determines timing |
-| [One Session model](product/sessions.md) | Fresh conversations from different triggers; Canban schedules through core with one execution model |
+| [Agent profile configuration](product/agent-profiles.md) | Implemented registry, role instructions, stage references, routing and JSON examples |
+| [Agent interaction](product/agent-interaction.md) | Interactive terminal execution, completion/exit, resume and acceptance limits |
+| [One Session model](product/sessions.md) | Card/profile conversations, request/attempt lifetimes and live replies through one execution model |
 | [Unified timeline](product/timeline.md) | Proposed event envelope, event catalog, comment revisions, attachments, ordering, and recovery |
 | [Agent-callable interface](product/agent-interface.md) | Proposed application operations shared with the desktop |
 | [MVP sequence](mvp-plan.md) | Scope, implementation proposals, decision gates, and acceptance matrix |
 | [MVP scope review](product/mvp-scope-review.md) | User resolutions and the simplified first-release boundary |
+| [MVP progress and next steps](product/mvp-next-steps.md) | Current acceptance boundaries and recommended daily-use, review and code-delivery priorities |
 | [Events and notifications](product/events-and-notifications.md) | Rust enum/channel/topic direction, needs-attention state, internal notifications; detailed architecture deferred |
 
 Current default template: Backlog / Develop / Review. Only Backlog is mandatory. Archive retains completed work outside the active Board. Plan/Process are earlier generic planning/execution terms, not additional required columns. Earlier Space-based organization and Ready/In Progress/Done column recommendations have been superseded.
@@ -35,6 +40,9 @@ Start with [MVP interface contracts](interfaces/mvp-contract.md) for the propose
 4. [herdr-core architecture](research/herdr-core-architecture.md): source modules, holders/processes, protocol, status, persistence, and recovery.
 5. [Herdr identifiers](research/herdr-identifiers.md): reusable runtime identity, its lifetime limits, and a minimal logical execution key.
 6. [CLI, RPC, and MCP](research/agent-interface-options.md): Herdr's actual pattern, agent-facing adapter comparison, and the single shared operation boundary.
+7. [Interactive Agent lifecycle](research/interactive-agent-lifecycle.md): provider conversation IDs, real terminal attachment, graceful exit/resume, renderer options and acceptance gates.
+8. [Native libghostty terminal](research/native-terminal.md): VT library versus native renderer, NSH host, Herdr stream ownership and source reuse.
+9. [Active @question replies](research/agent-reply-options.md): explicit CLI replies versus Herdr terminal observation, association limits and the proposed combined boundary.
 
 Core executes terminals; it has no Canban Project, Board, Card, workflow, or scheduler. Space belongs to herdr-app. Canban's Project is its own directory-backed product object and need not synchronize with a Herdr Space.
 

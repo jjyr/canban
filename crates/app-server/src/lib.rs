@@ -101,7 +101,12 @@ fn enqueue(
     if !stage.execute && explicit.is_none() {
         return Ok(None);
     }
-    let profile = match canban_scheduler::select(config, &card.tags, explicit) {
+    let profile = match canban_scheduler::select_for_stage(
+        config,
+        &card.tags,
+        stage.profile.as_deref(),
+        explicit,
+    ) {
         Ok(p) => p,
         Err(e) => {
             attention(db, card, &e.to_string())?;
@@ -131,6 +136,12 @@ fn enqueue(
         },
     );
     db.save(&req)?;
+    let mut context = crate::sessions::conversation(db, card, &req.profile)?;
+    // Queued work does not replace the pointer to an invocation that is still live.
+    if context.last_request_id.is_none() {
+        context.last_request_id = Some(req.id.clone());
+        db.save(&context)?;
+    }
     log(
         db,
         card,
@@ -174,12 +185,29 @@ impl AppServer {
             }
             canban_context::atomic(&path, &serde_json::to_vec_pretty(&initial)?)?;
         }
-        let flow = home.join("config/workflows/default.json");
-        if !flow.exists() {
-            canban_context::atomic(&flow, &serde_json::to_vec_pretty(&Workflow::default())?)?;
-        }
         let config: Config = serde_json::from_slice(&std::fs::read(path)?)?;
         Self::validate_config(&config)?;
+        let flow = home.join("config/workflows/default.json");
+        if !flow.exists() {
+            let mut initial = Workflow::default();
+            // An older/custom registry may not define the new starter roles.
+            // Preserve its tag/default routing instead of modifying user profiles.
+            for stage in &mut initial.stages {
+                if stage
+                    .profile
+                    .as_ref()
+                    .is_some_and(|id| !config.profiles.iter().any(|p| &p.id == id))
+                {
+                    stage.profile = None;
+                }
+            }
+            canban_context::atomic(&flow, &serde_json::to_vec_pretty(&initial)?)?;
+        }
+        let default_workflow: Workflow = serde_json::from_slice(&std::fs::read(&flow)?)?;
+        Self::validate_workflow(&config, &default_workflow)?;
+        for project in store.db().list::<Project>()? {
+            Self::validate_workflow(&config, &project.workflow)?;
+        }
         Ok(Arc::new(Self {
             home,
             store: Mutex::new(store),
@@ -190,7 +218,6 @@ impl AppServer {
         }))
     }
     fn validate_config(c: &Config) -> Result<()> {
-        ensure!(c.capacity > 0, "Global capacity must be positive");
         let mut ids = std::collections::HashSet::new();
         for p in &c.profiles {
             ensure!(
@@ -198,14 +225,38 @@ impl AppServer {
                 "Profile IDs must be nonempty and unique"
             );
             ensure!(
-                p.capacity > 0 && (!p.argv.is_empty() || p.template.is_some()),
-                "Profile needs a command/template and positive capacity"
+                !p.argv.is_empty() || p.template.is_some(),
+                "Profile needs a command/template"
             );
         }
         ensure!(
             ids.contains(&c.default_agent),
             "Default agent is not configured"
         );
+        Ok(())
+    }
+    fn validate_workflow(config: &Config, workflow: &Workflow) -> Result<()> {
+        canban_workflow_engine::validate(workflow)?;
+        for stage in &workflow.stages {
+            if let Some(profile) = &stage.profile {
+                ensure!(
+                    config.profiles.iter().any(|p| &p.id == profile),
+                    "Stage {} references unknown Agent profile @{profile}",
+                    stage.id
+                );
+            }
+        }
+        Ok(())
+    }
+    fn validate_references(&self, config: &Config) -> Result<()> {
+        let workflow: Workflow = serde_json::from_slice(&std::fs::read(
+            self.home.join("config/workflows/default.json"),
+        )?)?;
+        Self::validate_workflow(config, &workflow)?;
+        for project in self.snapshot()?.projects {
+            Self::validate_workflow(config, &project.workflow)
+                .with_context(|| format!("Project {} workflow", project.name))?;
+        }
         Ok(())
     }
     pub fn endpoint(&self) -> PathBuf {
@@ -272,9 +323,11 @@ impl AppServer {
 }
 
 mod commands;
+mod providers;
 mod reports;
 mod resources;
 mod runtime;
+mod sessions;
 
 pub fn default_home() -> Result<PathBuf> {
     if let Some(v) = std::env::var_os("CANBAN_HOME") {

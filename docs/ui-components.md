@@ -11,9 +11,16 @@ Status: initial implementation inventory, 2026-11-06. These modules are used by 
 | Panels/text/badge | crates/ui-kit/src/surface.rs | Shared NSH layout/text composition | Native themes and real Card composition inspected |
 | Card tile | crates/ui/src/components.rs | Product projection, press-to-open, dedicated pan handle and cancellation | Native Backlog -> Develop drag invoked real scheduling |
 | Timeline item | crates/ui/src/components.rs | Comment Markdown, event provenance, report/output intents | Production and Gallery fixtures; explicit reports through real Herdr/CLI |
+| Agent profile picker / registry | crates/ui/src/profiles.rs | Shared configured profile projection; inserts @profile into a retained composer draft; Settings shows role instructions | Native @reviewer selection/submission and fixture completion verified; Board labels reflect template references |
 | Agent run/output panel | crates/ui/src/components.rs | Request/attempt view, retry and read-only output | Fixture stages and real Codex completion; full terminal takeover deferred |
 | Context picker | crates/ui/src/components.rs | Per-Card Project Note selection via shared Checkbox | Immutable selected-context regression; native checkbox toggle and saved revision verified |
 | Presenters | crates/ui/src/presenter.rs | Async AppServer operations, event-driven refresh, draft preservation and resource generation checks | Live state updates, native saves and image-paste refresh |
 | Screens / Gallery | crates/ui/src/screens.rs | Compose production components; fixture-only Gallery requires no model | Board, Card, Notes and Gallery native checks |
 
 Components use their current typed Rust inputs/events; longer-form component API docs can grow with the public surface. Menus/dialogs/rich-editor/virtual-list wrappers should be added when a concrete feature needs them, using NSH facilities first. Do not create parallel screen copies or claim unimplemented Gallery scenarios as tested. The [design-system conventions](ui-architecture.md) govern subsequent changes.
+
+## Interactive Agent components (2026-11-07)
+
+crates/ui/src/sessions.rs owns the shared Card profile entries and Agent terminal screen. Input is the selected request/attempt and profile registry; actions open/resume, interrupt, end or explicitly start fresh context. Navigation detaches only the viewer. crates/terminal owns the native canban/terminal component with immutable binding (config, core ID, terminal address), read_only input gating and an independent stream worker. It has no Card/workflow/storage dependency. The Gallery uses this production native component with a deterministic VT fixture. Read-only is enabled during completed/closing/closed states; uncertain-close errors remain inspectable.
+
+Native terminal regression scenarios also cover hidden cursor/null cursor metadata, wide-glyph background ordering, clipping to native bounds and scrolling a static Gallery fixture into view. The component redraws on native visibility/window-position changes as well as VT revision changes.

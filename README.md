@@ -2,11 +2,11 @@
 
 Canban is a native Rust/NSH desktop workbench for **Human Context**: preserving intent, decisions, working context, and review history across Agent execution. Kanban is the management center; Scheduler turns stage changes and mentions into Agent runs through herdr-core.
 
-The first macOS MVP implements local Projects/Boards/Cards, JSON workflows and routing, fresh Agent Sessions, explicit CLI outcome reporting, Notes/context selection, resources/image paste, Timeline, attention notices, and compressed archives. See [implementation and acceptance](docs/implementation.md) for the exact supported behavior and remaining limits.
+The first macOS MVP implements local Projects/Boards/Cards, JSON workflows and routing, Card/profile Agent conversations with exact-ID resume, native libghostty terminals, explicit CLI outcome reporting, Notes/context selection, resources/image paste, Timeline, attention notices, and compressed archives. See [implementation and acceptance](docs/implementation.md) for the exact supported behavior and remaining limits.
 
 ## Run
 
-Prerequisites: macOS, Xcode command-line tools, mise, and an installed compatible hc. Agent executables/templates use your existing installation and authentication.
+Prerequisites: macOS, Xcode command-line tools, mise (pinned Rust and Zig 0.16.0), and an installed compatible hc. Agent executables/templates use your existing installation and authentication.
 
 ```sh
 mise run build
@@ -19,9 +19,12 @@ The local development bundle is .local/Canban.app. Configuration and managed dat
 mise run gallery
 mise run test
 mise run acceptance
+mise run acceptance-interactive
 ```
 
 The opt-in acceptance task uses a disposable directory and isolated Herdr core with a deterministic fixture Agent; it does not use a paid model or modify the user's existing core. Real Codex reporting was also validated separately. The [development guide](docs/implementation.md) covers configuration, CLI operations, runtime lifetime, and reproducible verification.
+
+For an explicit real-model check, mise run acceptance-real runs actual Codex development and review on two disposable Git Boards, verifies overlapping execution and isolation, then archives both Cards. See [real acceptance evidence](docs/real-agent-acceptance.md). This uses your installed provider configuration; it is not part of routine unit/fixture checks.
 
 Start with the [documentation guide](docs/README.md), particularly the [herdr-core integration recommendation](docs/research/herdr-core-integration.md) and the separate [product concepts explanation](docs/research/herdr-core-concepts.md).
 
@@ -32,3 +35,5 @@ Cargo package names use canban-xxx; crate directories and source filenames omit 
 Copyright 2026 JJy <jjyruby@gmail.com>.
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
+
+For interactive real-Codex acceptance, run mise run acceptance-real-interactive. It verifies active @ replies, separate Developer/Reviewer histories, normal exit, exact-ID resume and archived replies. Folder trust/permission prompts still require normal interactive handling. Ghostty source is checksum-pinned by the terminal-deps task; bundled third-party notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

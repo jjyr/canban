@@ -23,6 +23,17 @@ pub fn select(config: &Config, tags: &[String], explicit: Option<&str>) -> Resul
     ensure!(tags.is_empty(), "No agent matches the card tags");
     select(config, &[], Some(&config.default_agent))
 }
+/// Explicit mentions select a profile directly. Automatic stages with a profile
+/// reference keep that role even when the Card has routing tags. Legacy stages
+/// without a reference retain tag/default routing.
+pub fn select_for_stage(
+    config: &Config,
+    tags: &[String],
+    stage_profile: Option<&str>,
+    explicit: Option<&str>,
+) -> Result<Profile> {
+    select(config, tags, explicit.or(stage_profile))
+}
 pub fn request(
     project: &str,
     card: &str,
@@ -45,16 +56,4 @@ pub fn request(
         attempt: 0,
         created_at: now(),
     }
-}
-pub fn ready(config: &Config, pending: &Request, requests: &[Request]) -> bool {
-    let running: Vec<_> = requests
-        .iter()
-        .filter(|r| matches!(r.state.as_str(), "starting" | "running" | "working"))
-        .collect();
-    running.len() < config.capacity
-        && running
-            .iter()
-            .filter(|r| r.profile.id == pending.profile.id)
-            .count()
-            < pending.profile.capacity
 }

@@ -60,6 +60,8 @@ record!(Note, "notes", project);
 record!(Notice, "notifications", card);
 record!(Artifact, "artifacts", card);
 record!(Report, "reports", card);
+record!(Conversation, "conversations", card);
+record!(Question, "questions", card);
 impl Record for Card {
     const TABLE: &'static str = "cards";
     fn id(&self) -> &str {
@@ -146,7 +148,7 @@ impl Store {
         anyhow::ensure!(mode == "wal", "SQLite WAL could not be enabled");
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 1,
+            version <= 2,
             "Database schema is newer than this application"
         );
         if version == 0 {
@@ -175,6 +177,9 @@ impl Store {
                 conn.execute_batch(&format!("CREATE TABLE {table} (id TEXT PRIMARY KEY, project_id TEXT, card_id TEXT, state TEXT NOT NULL, number INTEGER NOT NULL, data TEXT NOT NULL{refs}{card_ref}); CREATE INDEX {table}_scope ON {table}(project_id,card_id,state);"))?;
             }
             conn.execute_batch("CREATE UNIQUE INDEX card_numbers ON cards(project_id,number); CREATE UNIQUE INDEX event_order ON events(card_id,number); CREATE UNIQUE INDEX report_keys ON reports(json_extract(data,'$.request_key')); PRAGMA user_version=1; COMMIT;")?;
+        }
+        if version < 2 {
+            conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE conversations (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id),card_id TEXT REFERENCES cards(id),state TEXT NOT NULL,number INTEGER NOT NULL,data TEXT NOT NULL); CREATE UNIQUE INDEX conversation_profiles ON conversations(card_id,json_extract(data,'$.profile_id')); CREATE TABLE questions (id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),card_id TEXT REFERENCES cards(id),state TEXT NOT NULL,number INTEGER NOT NULL,data TEXT NOT NULL); PRAGMA user_version=2; COMMIT;")?;
         }
         Ok(Self {
             conn,
@@ -243,6 +248,8 @@ impl Db<'_> {
             notes: self.list()?,
             notices: self.list()?,
             artifacts: self.list()?,
+            conversations: self.list()?,
+            questions: self.list()?,
         })
     }
 }

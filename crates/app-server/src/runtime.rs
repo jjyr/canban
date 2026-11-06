@@ -1,4 +1,15 @@
 use super::*;
+fn uuid_session_id() -> String {
+    let s = id();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &s[..8],
+        &s[8..12],
+        &s[12..16],
+        &s[16..20],
+        &s[20..]
+    )
+}
 
 impl AppServer {
     pub fn start(self: &Arc<Self>) -> Result<Running> {
@@ -17,7 +28,19 @@ impl AppServer {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
         // Persisted starting intents must not be replayed as fresh launches.
         // A known binding can reconnect. A lost launch reply remains unknown.
-        self.store.lock().unwrap().write(|db|{for mut req in db.list::<Request>()?.into_iter().filter(|r|r.state=="starting"){let run=db.get::<Attempt>(&Attempt::key(&req.id,req.attempt)).ok();req.state=if run.as_ref().and_then(|a|a.terminal.as_ref()).is_some(){"running"}else{"unknown"}.into();db.save(&req)?;if req.state=="unknown"{let mut card:Card=db.get(&req.card_id)?;attention(db,&mut card,"Launch interrupted before its receipt was saved. Inspect Herdr before explicitly retrying.")?;card.revision+=1;db.save(&card)?;}}Ok(())})?;
+        self.store.lock().unwrap().write(|db|{for mut req in db.list::<Request>()?.into_iter().filter(|r|r.state=="starting"){let run=db.get::<Attempt>(&Attempt::key(&req.id,req.attempt)).ok();req.state=if run.as_ref().and_then(|a|a.terminal.as_ref()).is_some(){"running"}else{"unknown"}.into();db.save(&req)?;if req.state=="unknown"{if let Some(mut run)=run {run.state="unknown".into();db.save(&run)?;}let mut card:Card=db.get(&req.card_id)?;attention(db,&mut card,"Launch interrupted before its receipt was saved. Inspect Herdr before explicitly retrying.")?;card.revision+=1;db.save(&card)?;}}Ok(())})?;
+        self.store.lock().unwrap().write(|db| {
+            for mut q in db.list::<Question>()?.into_iter().filter(|q| q.state == "delivering") {
+                q.state = "delivery_unknown".into();
+                q.error = Some("AppServer restarted during delivery; inspect the Agent terminal before resending".into());
+                let mut card: Card = db.get(&q.card_id)?;
+                attention(db, &mut card, q.error.as_deref().unwrap())?;
+                card.revision += 1;
+                db.save(&card)?;
+                db.save(&q)?;
+            }
+            Ok(())
+        })?;
         let weak = Arc::downgrade(self);
         std::thread::spawn(move || {
             while let Some(server) = weak.upgrade() {
@@ -77,83 +100,231 @@ impl AppServer {
         Ok(())
     }
     pub(super) fn tick(&self) -> Result<()> {
-        let config = self.config();
+        let client = canban_herdr::Client {
+            config: self.config(),
+        };
         let snapshot = self.snapshot()?;
-        if let Some(request) = snapshot.requests.iter().find(|r| {
-            r.state == "queued" && canban_scheduler::ready(&config, r, &snapshot.requests)
-        }) {
-            let id = request.id.clone();
-            let req = self.store.lock().unwrap().write(|db| {
-                let mut r: Request = db.get(&id)?;
-                let c: Card = db.get(&r.card_id)?;
-                if c.archived_at.is_some() {
-                    r.state = "cancelled".into();
-                    db.save(&r)?;
-                    return Ok(None);
+        let bound: Vec<_> = snapshot
+            .attempts
+            .iter()
+            .filter(|a| {
+                a.terminal.is_some()
+                    && (a.observed.as_ref().is_none_or(|v| v["state"] != "finished")
+                        || a.output_path.is_none())
+            })
+            .cloned()
+            .collect();
+        if !bound.is_empty() {
+            let core = client.status()?;
+            for run in bound {
+                if run.core_id.as_deref() != core["core"]["id"].as_str() {
+                    continue;
                 }
-                r.state = "starting".into();
-                r.attempt += 1;
-                db.save(&r)?;
-                Ok(Some(r))
-            })?;
-            if let Some(req) = req {
-                let result = self.launch(&req, &snapshot);
-                if let Err(e) = result {
-                    self.launch_failed(&req, &format!("{e:#}"))?;
+                let Ok(value) = client.get(run.terminal.as_ref().unwrap()) else {
+                    continue;
+                };
+                let finished = value["state"] == "finished";
+                if finished && run.output_path.is_none() {
+                    let _ = self.capture_output(&run);
+                }
+                let observed = canban_herdr::observation(&value);
+                if run.observed.as_ref() != Some(&observed)
+                    || (finished && run.close_state != "closed")
+                {
+                    self.store.lock().unwrap().write(|db|{
+                        let mut current:Attempt=db.get(&run.id)?;
+                        current.observed=Some(observed.clone());
+                        if finished {
+                            current.close_state="closed".into();
+                            if matches!(current.state.as_str(),"running"|"working"|"starting") {
+                                current.state="needs_report".into();
+                                let mut req:Request=db.get(&run.request_id)?;
+                                if req.attempt==run.number && req.state!="completed" {req.state="needs_report".into();db.save(&req)?;}
+                                let mut card:Card=db.get(&run.card_id)?;
+                                attention(db,&mut card,"Agent exited without an explicit outcome. Inspect the retained output before resuming.")?;
+                                card.revision+=1;db.save(&card)?;
+                            }
+                        }
+                        db.save(&current)
+                    })?;
+                    self.emit("runtime", Some(run.card_id.clone()));
                 }
             }
         }
-        // Runtime observation is presentation/reconciliation, never completion inference.
-        for run in snapshot.attempts.iter().filter(|a| {
-            matches!(a.state.as_str(), "starting" | "running" | "working")
-                || (a.state == "completed" && a.output_path.is_none() && a.error.is_none())
-        }) {
-            if let Some(terminal) = &run.terminal {
-                let client = canban_herdr::Client {
-                    config: config.clone(),
-                };
-                let status = client.status()?;
-                if run.core_id.as_deref() != status["core"]["id"].as_str() {
-                    if run.state == "completed" {
-                        self.store.lock().unwrap().write(|db| {
-                            let mut a: Attempt = db.get(&run.id)?;
-                            a.error =
-                                Some("Output unavailable: original core identity changed".into());
-                            db.save(&a)
-                        })?;
-                    } else {
-                        self.launch_failed(
-                            snapshot
-                                .requests
-                                .iter()
-                                .find(|r| r.id == run.request_id)
-                                .context("Request missing")?,
-                            "Herdr core identity changed. Original execution cannot be resolved.",
-                        )?;
-                    }
-                    continue;
-                }
-                if let Ok(value) = client.get(terminal) {
-                    if (value["state"] == "finished" || run.state == "completed")
-                        && run.output_path.is_none()
-                        && let Err(e) = self.capture_output(run)
-                        && run.state == "completed"
-                    {
-                        self.store.lock().unwrap().write(|db| {
-                            let mut a: Attempt = db.get(&run.id)?;
-                            a.error = Some(format!("Output capture unavailable: {e:#}"));
-                            db.save(&a)
-                        })?;
-                    }
-                    let value = canban_herdr::observation(&value);
-                    if value != run.observed.clone().unwrap_or(Value::Null) {
-                        self.store.lock().unwrap().write(|db|{let mut a:Attempt=db.get(&run.id)?;a.observed=Some(value.clone());db.save(&a)?;
-                        if value["state"]=="finished"&&matches!(a.state.as_str(),"running"|"working"|"starting"){let mut c:Card=db.get(&a.card_id)?;attention(db,&mut c,"Agent exited without an explicit Canban outcome. Inspect output, report an outcome, or retry.")?;c.revision+=1;db.save(&c)?;a.state="needs_report".into();db.save(&a)?;let mut r:Request=db.get(&a.request_id)?;if r.attempt==a.number&&r.state!="completed"{r.state="needs_report".into();db.save(&r)?;}}
-                        Ok(())})?;
-                        self.emit("runtime", Some(run.card_id.clone()));
-                    }
-                }
+        self.store.lock().unwrap().write(|db| {
+            for mut run in db.list::<Attempt>()?.into_iter().filter(|a| a.close_state == "closing" && a.turn_ended_at.is_some_and(|t| now().saturating_sub(t) > 30_000)) {
+                run.close_state = "error".into();
+                run.error = Some("Agent did not exit after the normal exit request. Inspect its terminal or use End session.".into());
+                let mut card: Card = db.get(&run.card_id)?;
+                attention(db, &mut card, run.error.as_deref().unwrap())?;
+                card.revision += 1;
+                db.save(&card)?;
+                db.save(&run)?;
             }
+            Ok(())
+        })?;
+        self.deliver_questions(&client)?;
+        self.close_completed(&client)?;
+        let snapshot = self.snapshot()?;
+        let request = snapshot
+            .requests
+            .iter()
+            .find(|req| {
+                if req.state != "queued" {
+                    return false;
+                }
+                !snapshot.attempts.iter().any(|a| {
+                    a.card_id == req.card_id
+                        && snapshot
+                            .requests
+                            .iter()
+                            .any(|r| r.id == a.request_id && r.profile.id == req.profile.id)
+                        && (a.terminal.is_some()
+                            && a.observed.as_ref().is_none_or(|v| v["state"] != "finished")
+                            || a.state == "unknown")
+                })
+            })
+            .cloned();
+        if let Some(request) = request {
+            let req = self.store.lock().unwrap().write(|db| {
+                let mut req: Request = db.get(&request.id)?;
+                let card: Card = db.get(&req.card_id)?;
+                if card.archived_at.is_some() {
+                    req.state = "cancelled".into();
+                    db.save(&req)?;
+                    return Ok(None);
+                }
+                req.state = "starting".into();
+                req.attempt += 1;
+                db.save(&req)?;
+                Ok(Some(req))
+            })?;
+            if let Some(req) = req
+                && let Err(e) = self.launch(&req, &snapshot)
+            {
+                self.launch_failed(&req, &format!("{e:#}"))?;
+            }
+        }
+        Ok(())
+    }
+    fn deliver_questions(&self, client: &canban_herdr::Client) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        for question in snapshot
+            .questions
+            .iter()
+            .filter(|q| matches!(q.state.as_str(), "pending" | "delivered"))
+        {
+            let Some(req) = snapshot
+                .requests
+                .iter()
+                .find(|r| r.id == question.request_id)
+            else {
+                continue;
+            };
+            if req.state == "completed" && question.state == "pending" {
+                // A question that raced task completion follows the same conversation
+                // after close. It is never silently redirected to the Reviewer.
+                let config = self.config();
+                self.store.lock().unwrap().write(|db|{
+                    let mut q:Question=db.get(&question.id)?;
+                    if q.state=="replied"{return Ok(());}
+                    let mut card:Card=db.get(&q.card_id)?;
+                    if card.archived_at.is_some(){return Ok(());}
+                    let project:Project=db.get(&card.project_id)?;
+                    let stage=canban_workflow_engine::stage(&project.workflow,&card.stage)?;
+                    let request=enqueue(db,&config,&mut card,&project,stage,&format!("comment:{}",q.comment_id),Some(&q.profile_id),Some(format!("Answer this retained question, publish its reply, then report completion.\n{}",q.body)))?.context("Could not retain question")?;
+                    q.request_id=request.id;q.attempt=0;q.state="pending".into();db.save(&q)
+                })?;
+                continue;
+            }
+            if question.state != "pending"
+                || !matches!(req.state.as_str(), "running" | "working" | "blocked")
+            {
+                continue;
+            }
+            let Some(run) = snapshot
+                .attempts
+                .iter()
+                .find(|a| a.request_id == req.id && a.number == req.attempt)
+            else {
+                continue;
+            };
+            let Some(terminal) = &run.terminal else {
+                continue;
+            };
+            if run
+                .observed
+                .as_ref()
+                .is_some_and(|v| v["state"] == "finished")
+            {
+                continue;
+            }
+            self.store.lock().unwrap().write(|db| {
+                let mut q: Question = db.get(&question.id)?;
+                q.state = "delivering".into();
+                q.attempt = run.number;
+                db.save(&q)
+            })?;
+            let text = format!(
+                "Canban question {} (additional input; keep your original task and completion callback):\n{}\nPublish the answer using \"$CANBAN_CLI\" reply --to {} --file /absolute/path/to/answer.md. A reply does not complete your original task.",
+                question.id,
+                question.body,
+                canban_context::shell_quote(&question.id)
+            );
+            let result = if client.status()?["core"]["id"].as_str() == run.core_id.as_deref() {
+                client.call("terminal.send", json!({"terminal":terminal,"text":text}))
+            } else {
+                Err(anyhow::anyhow!("Original core identity changed"))
+            };
+            self.store.lock().unwrap().write(|db|{
+                let mut q:Question=db.get(&question.id)?;
+                if q.state=="replied"{return Ok(());}
+                match &result {Ok(_)=>q.state="delivered".into(),Err(e)=>{q.state="delivery_unknown".into();q.error=Some(format!("{e:#}"));let mut c:Card=db.get(&q.card_id)?;attention(db,&mut c,"Question delivery needs inspection; open the Agent terminal. It was not automatically resent.")?;c.revision+=1;db.save(&c)?;}}
+                db.save(&q)
+            })?;
+            self.emit("question", Some(question.card_id.clone()));
+        }
+        Ok(())
+    }
+    fn close_completed(&self, client: &canban_herdr::Client) -> Result<()> {
+        for run in self.snapshot()?.attempts.into_iter().filter(|a| {
+            a.close_state == "pending"
+                && a.turn_ended_at
+                    .is_some_and(|t| now().saturating_sub(t) > 300)
+        }) {
+            if run
+                .observed
+                .as_ref()
+                .is_some_and(|v| v["state"] == "finished")
+            {
+                continue;
+            }
+            let Some(terminal) = &run.terminal else {
+                continue;
+            };
+            self.store.lock().unwrap().write(|db| {
+                let mut a: Attempt = db.get(&run.id)?;
+                a.close_state = "closing".into();
+                db.save(&a)
+            })?;
+            let result = (|| {
+                ensure!(
+                    client.status()?["core"]["id"].as_str() == run.core_id.as_deref(),
+                    "Original Herdr core is unavailable"
+                );
+                client.call("terminal.send", json!({"terminal":terminal,"text":"/exit"}))
+            })();
+            if let Err(e) = result {
+                self.store.lock().unwrap().write(|db| {
+                    let mut a: Attempt = db.get(&run.id)?;
+                    a.close_state = "error".into();
+                    a.error = Some(format!(
+                        "Normal exit delivery uncertain: {e:#}. Inspect before retrying."
+                    ));
+                    db.save(&a)
+                })?;
+            }
+            self.emit("runtime", Some(run.card_id));
         }
         Ok(())
     }
@@ -179,6 +350,16 @@ impl AppServer {
             &self.endpoint().to_string_lossy(),
             &self.cli,
         )?;
+        let (mut context, fresh) = self.store.lock().unwrap().write(|db| {
+            let mut c = crate::sessions::conversation(db, card, &req.profile)?;
+            let fresh = c.provider_session_id.is_none();
+            if fresh && req.profile.provider_kind() == "claude" {
+                c.provider_session_id = Some(uuid_session_id());
+            }
+            c.last_request_id = Some(req.id.clone());
+            db.save(&c)?;
+            Ok((c, fresh))
+        })?;
         let mut run = Attempt {
             id: Attempt::key(&req.id, req.attempt),
             request_id: req.id.clone(),
@@ -194,9 +375,22 @@ impl AppServer {
             observed: None,
             error: None,
             created_at: now(),
+            conversation_id: Some(context.id.clone()),
+            provider_session_id: context.provider_session_id.clone(),
+            close_state: String::new(),
+            turn_ended_at: None,
+            response_path: None,
         };
         self.store.lock().unwrap().write(|db| {
             db.save(&run)?;
+            for mut q in db
+                .list::<Question>()?
+                .into_iter()
+                .filter(|q| q.request_id == req.id && q.attempt == 0)
+            {
+                q.attempt = req.attempt;
+                db.save(&q)?;
+            }
             let mut c: Card = db.get(&card.id)?;
             c.worktree = Some(run.cwd.clone());
             db.save(&c)
@@ -211,6 +405,9 @@ impl AppServer {
                 self.endpoint().to_string_lossy().into_owned(),
             ),
             ("CANBAN_REQUEST_ID".into(), req.id.clone()),
+            ("CANBAN_PROVIDER".into(), req.profile.provider_kind().into()),
+            // Do not misidentify a child invocation using its launching Agent's ID.
+            ("CODEX_THREAD_ID".into(), String::new()),
             ("CANBAN_ATTEMPT".into(), req.attempt.to_string()),
             ("CANBAN_CLI".into(), self.cli.to_string_lossy().into_owned()),
             (
@@ -225,8 +422,16 @@ impl AppServer {
             ("canban.attempt".into(), req.attempt.to_string()),
         ]);
         let prompt = std::fs::read_to_string(self.home.join(input))?;
-        let terminal = client.launch(
+        let profile = crate::providers::prepare(
             &req.profile,
+            context.provider_session_id.as_deref(),
+            fresh,
+            &self.cli,
+            &self.home,
+            &canban_context::run_dir(&self.home, req, req.attempt),
+        )?;
+        let terminal = client.launch(
+            &profile,
             &prompt,
             &run.cwd,
             env,
@@ -239,6 +444,23 @@ impl AppServer {
         run.observed = Some(canban_herdr::observation(&terminal));
         run.state = "running".into();
         self.store.lock().unwrap().write(|db|{let current:Attempt=db.get(&run.id)?;if current.state!="starting"{run.state=current.state;}db.save(&run)?;let mut r:Request=db.get(&req.id)?;if r.state=="starting"{r.state="running".into();db.save(&r)?;}let c:Card=db.get(&req.card_id)?;log(db,&c,"execution.started","system",&format!("@{} started",req.profile.id),Some(req.id.clone()),json!({"attempt":req.attempt,"terminal":run.terminal,"core_id":run.core_id,"cwd":run.cwd}))})?;
+        self.store.lock().unwrap().write(|db| {
+            for q in snapshot
+                .questions
+                .iter()
+                .filter(|q| q.request_id == req.id && q.state == "pending")
+            {
+                let mut current: Question = db.get(&q.id)?;
+                if current.state == "pending" {
+                    current.state = "delivered".into();
+                    current.attempt = req.attempt;
+                    db.save(&current)?;
+                }
+            }
+            // A callback can have bound the provider ID before launch returned.
+            context = db.get(&context.id)?;
+            Ok(())
+        })?;
         self.emit("execution", Some(req.card_id.clone()));
         if let Some(error) = delivery_error {
             bail!("{error}");
@@ -255,7 +477,16 @@ impl AppServer {
             if let Ok(mut a) = db.get::<Attempt>(&Attempt::key(&req.id, req.attempt))
                 && a.state != "completed"
             {
-                a.state = "failed".into();
+                a.state = if a.terminal.is_none() && error.contains("timed out") {
+                    "unknown"
+                } else {
+                    "failed"
+                }
+                .into();
+                if a.state == "unknown" {
+                    r.state = "unknown".into();
+                    db.save(&r)?;
+                }
                 a.error = Some(error.into());
                 db.save(&a)?;
             }

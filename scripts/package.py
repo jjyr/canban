@@ -18,3 +18,9 @@ for binary in ("canban-ui", "canban"):
 with (app / "Contents/Info.plist").open("wb") as file:
     plistlib.dump({"CFBundleIdentifier": "com.canban.desktop", "CFBundleName": "Canban", "CFBundleDisplayName": "Canban", "CFBundleExecutable": "canban-ui", "CFBundlePackageType": "APPL", "CFBundleVersion": "1", "CFBundleShortVersionString": "0.1.0", "NSHighResolutionCapable": True, "LSMinimumSystemVersion": "13.0"}, file)
 print(app)
+
+resources=app/"Contents/Resources/licenses"
+resources.mkdir(parents=True,exist_ok=True)
+for source in (root/"third_party").glob("*-LICENSE.txt"):
+    shutil.copy2(source,resources/source.name)
+shutil.copy2(root/"THIRD_PARTY_NOTICES.md",resources/"THIRD_PARTY_NOTICES.md")

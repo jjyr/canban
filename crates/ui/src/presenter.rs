@@ -4,8 +4,10 @@ use serde_json::{Value, json};
 #[derive(Clone, Copy)]
 pub struct Ui {
     pub snapshot: Signal<Snapshot>,
+    pub profiles: Signal<Vec<Profile>>,
     pub project: Signal<String>,
     pub card: Signal<String>,
+    pub request: Signal<String>,
     pub page: Signal<String>,
     pub status: Signal<String>,
     pub pending: Signal<bool>,
@@ -17,8 +19,15 @@ impl Ui {
     pub fn new() -> Self {
         Self {
             snapshot: signal(Snapshot::default()),
+            profiles: signal(
+                crate::APP
+                    .get()
+                    .map(|app| app.config().profiles)
+                    .unwrap_or_default(),
+            ),
             project: signal(String::new()),
             card: signal(String::new()),
+            request: signal(String::new()),
             page: signal("board".into()),
             status: signal("Opening local workspace…".into()),
             pending: signal(false),
@@ -58,9 +67,14 @@ pub fn refresh(ui: Ui) {
     ui.refreshing.set(true);
     let app = crate::APP.get().unwrap().clone();
     spawn(async move {
-        let result = blocking(move || app.snapshot()).await;
+        let result = blocking(move || {
+            app.snapshot()
+                .map(|snapshot| (snapshot, app.config().profiles))
+        })
+        .await;
         match result {
-            Ok(Ok(snapshot)) => {
+            Ok(Ok((snapshot, profiles))) => {
+                ui.profiles.set(profiles);
                 if ui.project.get_untracked().is_empty()
                     && let Some(p) = snapshot.projects.first()
                 {
@@ -105,11 +119,12 @@ pub fn dispatch_then(
     spawn(async move {
         let result = blocking(move || {
             let value = app.call(method, params)?;
-            Ok::<_, anyhow::Error>((value, app.snapshot()?))
+            Ok::<_, anyhow::Error>((value, app.snapshot()?, app.config().profiles))
         })
         .await;
         match result {
-            Ok(Ok((value, snapshot))) => {
+            Ok(Ok((value, snapshot, profiles))) => {
+                ui.profiles.set(profiles);
                 ui.snapshot.set(snapshot);
                 ui.status.set(format!("{method} saved"));
                 match method {

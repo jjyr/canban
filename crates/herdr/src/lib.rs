@@ -138,3 +138,5 @@ impl Client {
         self.call("terminal.read", json!({"terminal":terminal,"lines":160}))
     }
 }
+
+pub mod stream;

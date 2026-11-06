@@ -84,6 +84,7 @@ pub fn screen(ui: Ui, page: &str) -> AnyElement {
         "card" => card_detail(ui).into_element(),
         "notes" => notes(ui).into_element(),
         "agents" => agents(ui).into_element(),
+        "terminal" => crate::sessions::screen(ui).into_element(),
         "archive" => archived(ui).into_element(),
         "settings" => settings(ui).into_element(),
         "gallery" => gallery(ui).into_element(),
@@ -208,6 +209,19 @@ fn board(ui: Ui) -> impl IntoElement {
                                     )
                                     .child(badge(cards.len().to_string())),
                             )
+                            .child(muted(
+                                stage
+                                    .profile
+                                    .as_ref()
+                                    .map(|id| format!("Agent: @{id}"))
+                                    .unwrap_or_else(|| {
+                                        if stage.execute {
+                                            "Agent: Card tags / default".into()
+                                        } else {
+                                            "No automatic Agent".into()
+                                        }
+                                    }),
+                            ))
                             .child(
                                 scroll().flex_1().child(
                                     view().gap_3().children(
@@ -263,12 +277,14 @@ fn card_detail(ui: Ui) -> impl IntoElement {
             .child(panel().child(label("Task and context")).child(field(title,"Title")).child(field(body,"Description").multiline(true).h(px(150.0)).on_paste(move|e:&nsh_core::PasteEvent|paste_resources(ui,paste_body.clone(),e,body))).child(field(tags,"Routing tags"))
                 .child(action("Save Card",Variant::Primary,move|_|{if let Some(c)=ui.current_card(){dispatch(ui,"card.update",json!({"card_id":c.id,"revision":c.revision,"title":title.get_untracked(),"body":body.get_untracked(),"tags":parse_tags(&tags.get_untracked())}));}}))
                 .child(nsh_base::text_view().markdown(move||Some(body.get().into()))))
+            .child(crate::sessions::card_agents(ui))
             .child(context_picker(ui))
             .child(panel().child(label("Resources")).child(field(attachment,"Absolute file path to attach"))
                 .child(action("Attach file",Variant::Secondary,move|_|{let path=attachment.get_untracked();let name=std::path::Path::new(&path).file_name().map(|s|s.to_string_lossy().into_owned()).unwrap_or_default();dispatch(ui,"attachment.add",json!({"card_id":card_id3,"source":path,"name":name}));}))
                 .child(dynamic(move||view().gap_2().children(ui.snapshot.with(|s|s.artifacts.iter().filter(|a|a.card_id==card_id4).map(|a|{let card=a.card_id.clone();let path=a.path.clone();action(format!("Open {} · {} bytes",a.name,a.bytes),Variant::Quiet,move|_|open_resource(ui,card.clone(),path.clone())).into_element()}).collect::<Vec<_>>())))))
             .child(panel().child(label("Timeline")).child(dynamic(move||view().children(ui.snapshot.with(|s|s.events.iter().filter(|e|e.card_id==card_id5).cloned().map(|e|timeline_item(ui,e).into_element()).collect::<Vec<_>>())))))
-            .child(panel().child(label("Comment / ask an Agent")).child(muted("Use @codex, @claude, or another configured profile. Each submitted mention creates a fresh Session."))
+            .child(panel().child(label("Comment / ask an Agent")).child(muted("Choose a configured profile below, or type @profile. Mentions do not change the Card stage or its automatic Agent."))
+                .child(crate::profiles::mention_picker(ui.profiles, comment))
                 .child(field(comment,"Write a comment…").multiline(true).h(px(100.0)).on_paste(move|e:&nsh_core::PasteEvent|paste_resources(ui,paste_comment.clone(),e,comment)))
                 .child(action("Post comment",Variant::Primary,move|_|{let body=comment.get_untracked();dispatch_then(ui,"comment.add",json!({"card_id":card_id,"body":body}),move|_|comment.set(String::new()));})))
             .child(dynamic(move||{let id=ui.card.get();view().gap_3().children(ui.snapshot.with(|s|s.requests.iter().filter(|r|r.card_id==id).cloned().map(|r|run_panel(ui,r).into_element()).collect::<Vec<_>>()))}))
@@ -309,7 +325,7 @@ fn agents(ui: Ui) -> impl IntoElement {
                             .map(|r| {
                                 let id = r.card_id.clone();
                                 panel()
-                                    .child(run_panel(ui, r))
+                                    .child(crate::sessions::execution(ui, r))
                                     .child(action("Open Card", Variant::Quiet, move |_| {
                                         ui.open_card(id.clone())
                                     }))
@@ -360,15 +376,24 @@ fn settings(ui: Ui) -> impl IntoElement {
         .home
         .to_string_lossy()
         .into_owned();
-    layout("Settings","JSON configuration; changes apply to newly queued work after reload.")
-        .child(panel().child(label("Application home")).child(muted(home.clone())).child(label("Agent profiles / routing / Herdr endpoint")).child(muted(format!("{home}/config/agents.json")))
-            .child(label("Default workflow for new Projects")).child(muted(format!("{home}/config/workflows/default.json")))
-            .child(action("Reload agent configuration",Variant::Primary,move|_|dispatch(ui,"config.reload",json!({}))))
-            .child(action("Check Herdr connection",Variant::Secondary,move|_|dispatch(ui,"herdr.status",json!({}))))
-            .child(muted("Closing the application stops scheduling. Herdr-owned programs can continue; reopen Canban to receive reports and reconcile state.")))
+    layout("Settings", "JSON configuration; changes apply to newly queued work after reload.")
+        .child(scroll().flex_1().child(view().gap_4()
+            .child(panel()
+                .child(label("Application home"))
+                .child(muted(home.clone()))
+                .child(label("Agent profiles / routing / Herdr endpoint"))
+                .child(muted(format!("{home}/config/agents.json")))
+                .child(label("Default workflow for new Projects"))
+                .child(muted(format!("{home}/config/workflows/default.json")))
+                .child(action("Reload agent configuration", Variant::Primary, move |_| dispatch(ui, "config.reload", json!({}))))
+                .child(action("Check Herdr connection", Variant::Secondary, move |_| dispatch(ui, "herdr.status", json!({})))))
+            .child(crate::profiles::registry(ui.profiles))
+            .child(muted("Closing the application stops scheduling. Herdr-owned programs can continue; reopen Canban to receive reports and reconcile state."))))
 }
 fn gallery(ui: Ui) -> impl IntoElement {
     let input = signal("中文与 English · long text fixture".into());
+    let profile_draft = signal(String::new());
+    let profile_fixture = signal(canban_types::Config::default().profiles);
     let count = signal(0_u32);
     layout(
         "Component Gallery",
@@ -430,6 +455,27 @@ fn gallery(ui: Ui) -> impl IntoElement {
                     panel()
                         .child(label("Shared product Timeline item"))
                         .child(timeline_item(ui, canban_timeline_fixture())),
+                )
+                .child(
+                    panel()
+                        .child(label("Agent profile mention picker"))
+                        .child(crate::profiles::mention_picker(
+                            profile_fixture,
+                            profile_draft,
+                        ))
+                        .child(
+                            field(profile_draft, "Question with @profile")
+                                .multiline(true)
+                                .h(px(80.0)),
+                        ),
+                )
+                .child(crate::profiles::registry(profile_fixture))
+                .child(
+                    panel().child(label("Native libghostty terminal")).child(
+                        native("canban/terminal")
+                            .prop("fixture", json!(true))
+                            .h(px(320.0)),
+                    ),
                 ),
         ),
     )

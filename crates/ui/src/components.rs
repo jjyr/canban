@@ -142,6 +142,11 @@ pub fn run_panel(ui: Ui, req: Request) -> impl IntoElement {
     let mut panel = panel()
         .child(label(format!("@{} · {}", req.profile.id, req.state)))
         .child(muted(format!("{} · {}", req.stage, req.trigger)));
+    let open_id = req.id.clone();
+    panel = panel.child(action("Open terminal", Variant::Primary, move |_| {
+        ui.request.set(open_id.clone());
+        ui.page.set("terminal".into());
+    }));
     if let Some(run) = run {
         let id = run.id.clone();
         panel = panel

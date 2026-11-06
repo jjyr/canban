@@ -17,10 +17,34 @@ fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
 pub fn prepare(home: &Path, project: &Project, card: &Card) -> Result<PathBuf> {
     if let Some(path) = &card.worktree {
         let p = PathBuf::from(path);
+        if p.is_dir() {
+            return Ok(p);
+        }
+        let expected = home.join("worktrees").join(&project.id).join(&card.id);
         ensure!(
-            p.is_dir(),
+            p == expected,
             "Saved working directory is missing: {}",
             p.display()
+        );
+        let keep = format!("refs/canban/cards/{}", card.id);
+        ensure!(
+            git(
+                Path::new(&project.directory),
+                &["rev-parse", "--verify", &keep]
+            )?
+            .status
+            .success(),
+            "Archived Card checkout is unavailable: retained ref missing"
+        );
+        std::fs::create_dir_all(p.parent().unwrap())?;
+        let out = git(
+            Path::new(&project.directory),
+            &["worktree", "add", "--detach", p.to_str().unwrap(), &keep],
+        )?;
+        ensure!(
+            out.status.success(),
+            "Could not recreate archived Card worktree: {}",
+            String::from_utf8_lossy(&out.stderr)
         );
         return Ok(p);
     }
@@ -182,6 +206,11 @@ mod tests {
         assert!(archive(&home, &project, &card).unwrap().is_none());
         assert!(!path.exists());
         run(&["rev-parse", "--verify", "refs/canban/cards/card"]);
+        assert_eq!(prepare(&home, &project, &card).unwrap(), path);
+        assert_eq!(
+            std::fs::read_to_string(path.join("change.txt")).unwrap(),
+            "keep me"
+        );
         assert!(source.join("seed.txt").exists());
     }
 }

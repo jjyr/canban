@@ -9,7 +9,7 @@ Status: current naming/crate direction and timer placement proposal, 2026-11-06.
 | AppServer | canban-app-server | crates/app-server | Shared operations, composition, lifecycle, adapter entry, and routing to module owners |
 | Kanban | canban-kanban | crates/kanban | Projects, Boards, cards, stage/attention state, and card timing attributes |
 | Workflow Engine | canban-workflow-engine | crates/workflow-engine | Interpret JSON templates and advance workflow through configured actions |
-| Scheduler | canban-scheduler | crates/scheduler | Routing/default selection, ordinary capacity, queue/readiness, timed triggers, and generic Session execution |
+| Scheduler | canban-scheduler | crates/scheduler | Routing/default selection, queue/readiness, timed triggers, and generic Session execution |
 | Context | canban-context | crates/context | Notes, resources, attachments, and captured execution input |
 | Timeline | canban-timeline | crates/timeline | Durable card history/comments/reports and history queries |
 | Notifications | canban-notifications | crates/notifications | Internal notifications/events; later native delivery |
@@ -52,7 +52,7 @@ canban-app-server <--- IPC adapter <--- canban-cli
                                   herdr-core
 ```
 
-AppServer wires components and routes operations/actions. Template progression belongs to Workflow Engine; queue/time/capacity and execution belong to Scheduler. Keeping these policies out of the entry layer avoids making AppServer the whole workflow implementation.
+AppServer wires components and routes operations/actions. Template progression belongs to Workflow Engine; queue/time and execution belong to Scheduler. Keeping these policies out of the entry layer avoids making AppServer the whole workflow implementation.
 
 ## Rust dependencies must stay acyclic
 
@@ -123,7 +123,7 @@ Workflow Engine applies the configured template action
 
 The two action branches in the diagram are alternatives. If the configured action moves a card into an executable stage, use that stage's existing scheduling trigger; do not separately enqueue the same work a second time.
 
-The timer does not directly choose that every card must enter Develop or run an agent. Workflow Engine defines the relevant workflow action from configuration. Scheduler later starts the resulting execution under the same ordinary capacity rules as other work.
+The timer does not directly choose that every card must enter Develop or run an agent. Workflow Engine defines the relevant workflow action from configuration. Scheduler later starts the resulting execution under the same scheduling path as other work.
 
 A queue may also support not-before eligibility for a task that is already specified. That is a Scheduler readiness concern. Exact context-capture timing and behavior if the card/template changes before firing remain product refinements for implementing timed work; this document does not silently choose them.
 

@@ -34,6 +34,7 @@ canban-herdr = { path = "crates/herdr" }
 canban-workspaces = { path = "crates/workspaces" }
 canban-app-server = { path = "crates/app-server" }
 canban-ui-kit = { path = "crates/ui-kit" }
+canban-terminal = { path = "crates/terminal" }
 
 [profile.dev]
 debug = 0

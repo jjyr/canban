@@ -30,7 +30,7 @@ These decisions preserve the earlier requirements for local cards, project-local
 | Area | MVP | Later |
 | --- | --- | --- |
 | Kanban | Local Project/Board/card, default stages, archive, visible task/execution/attention status | GitHub issue backend |
-| Scheduler | Automatic triggers, tag/default selection, normal capacity limits, generic Session execution via core | Complex orchestration and residual-process management |
+| Scheduler | Automatic triggers, tag/default selection, no concurrency caps, generic Session execution via core | Complex orchestration and residual-process management |
 | Completion | Agent's own completed declaration and workflow callback | Independent verification/quality gates |
 | Context and discussion | Basic Notes/preview, captured references, comments, attachments, fresh @mentions | Full collaborative knowledge-base/chat product |
 | Worktree | Prepare when applicable, reuse across stages, retain until Archive | Sophisticated lifetime/migration/cleanup automation |

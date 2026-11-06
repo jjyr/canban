@@ -1,6 +1,10 @@
 # Scheduler and agent-reported progression
 
-Status: user-directed MVP behavior, updated 2026-11-06 for the Scheduler component name. Configuration/API examples remain design drafts, not implemented features.
+Status: user-directed MVP behavior, updated 2026-11-06. Basic routing, unrestricted concurrent Sessions and explicit completion callbacks are implemented. Current configuration and concurrency evidence are described below; advanced mechanisms remain deferred.
+
+## Next interaction direction versus the current runtime
+
+The user has accepted Card/profile conversation reuse and separate configuration identities for distinct contexts such as Developer and Reviewer. The [Agent interaction design](agent-interaction.md) is authoritative for that target and records the proposed independent profile registry plus template references. Card/profile conversation reuse, stage-profile references, role instructions, interactive launch/resume and immediate active-mention delivery are implemented. The current lifecycle is described in [Sessions](sessions.md); earlier fresh-conversation wording below is historical.
 
 ## One scheduling path
 
@@ -12,9 +16,9 @@ stage entry / submitted @mention / configured action
                    Canban Scheduler
           task + profile + context + callbacks
                          |
-                 ordinary capacity queue
+                 persisted launch queue
                          |
-                 fresh generic Session
+                 new invocation / same profile history
                          |
               herdr-core terminal execution
                          |
@@ -29,33 +33,47 @@ Stage defines what work to do, tags/defaults select who does it, and Scheduler d
 
 - A card entering an executable stage is automatically eligible; no second Start click is needed.
 - Backlog has no automatic entry workflow.
-- Untagged work uses the configured default agent.
-- Tagged work runs only on a matching configuration. Initial tags can be agent names.
-- A submitted @mention addresses that request's agent and starts a fresh conversation; it does not permanently retag the card.
+- An automatic stage with a profile reference selects that global profile.
+- A stage without a reference uses Card tags, then the configured default Agent for untagged work.
+- Tagged fallback work runs only on a matching configuration. Initial tags can be Agent names; tags do not override a named stage profile.
+- A submitted @mention addresses the Card/profile conversation: append immediately while live, otherwise start/resume. It does not permanently retag the Card.
 - Use Herdr's existing runnable agents/commands/templates/configuration. Do not create a separate Canban-only provider support program.
 - Show missing/ambiguous routing or unavailable startup configuration instead of pretending a launch succeeded.
 
-Exact default inheritance and configuration fields can be refined during implementation. A simple Project-visible default and named routing configuration are sufficient starting points. Herdr core has no brand registry; the reusable launch setup supplies the actual command/profile.
+The current default and profile registry are application-wide; stage references, explicit mentions and legacy tags select their entries. See [profile configuration](agent-profiles.md). Per-Project default overrides are not implemented. Herdr core has no brand registry; the configured existing command/template supplies the launch setup.
+
+## Cross-Board concurrency and isolation
+
+One Project currently owns one Board. Boards share one Scheduler, with no global, Project or per-profile concurrency limit. Queued requests are launched in order without waiting for other Sessions to complete; launches are currently issued one at a time by the Scheduler loop, while the resulting Agents run concurrently. The queue records pending work, rather than reserving capacity. Legacy capacity fields in configuration and saved requests are ignored. Limits can be introduced later if there is a demonstrated need. Routing does not automatically switch provider or assign different brands to different Boards.
+
+Each request/attempt, context path, report and runtime binding is scoped to its Card/Project. Git Cards get separate worktrees; stages of the same Card reuse one worktree. Non-Git/unborn Projects use the configured directory directly, so choosing the same directory for multiple Projects does not create filesystem isolation. Shared external resources and same-user process permissions remain shared. Progression has no residual-process drain gate.
+
+A [real two-Board Codex acceptance](../real-agent-acceptance.md) observed simultaneous development and simultaneous review, then archived both Cards and checked report readability and cross-Board associations. Cross-provider live behavior and exclusive security/resource isolation are outside that evidence.
 
 ## JSON configuration
 
 Workflow/template customization is JSON-first. A UI editor and complex live migration are deferred.
 
-Illustrative routing configuration:
+Example application configuration (preserve other profiles when editing):
 
 ```json
 {
-  "project_id": "project_123",
+  "hc": "hc",
+  "hc_session": "default",
+  "hc_env": {},
   "default_agent": "codex",
-  "agents": {
-    "codex": { "core_template": "canban-codex", "tags": ["codex"] },
-    "claude": { "core_template": "canban-claude", "tags": ["claude"] }
-  },
-  "limits": { "per_project_active": 3 }
+  "profiles": [
+    {
+      "id": "codex",
+      "argv": ["codex", "--no-daemon", "--sandbox", "workspace-write", "--add-dir", "{home}", "{prompt}"],
+      "template": null,
+      "tags": ["codex"]
+    }
+  ]
 }
 ```
 
-This is not hc configuration or a selected schema. Reuse the effective launch configuration and pass the task/context through existing core mechanisms. New logical requests start fresh provider conversations; reconnects refer to the previous execution.
+This is Canban's config/agents.json schema, not hc configuration. Reload via Settings or config.reload and queue new work; queued requests retain their saved profile snapshot. New invocations reuse the Card/profile provider ID; reconnects refer to the existing terminal.
 
 ## Completion is the agent's declaration
 
@@ -81,7 +99,7 @@ The completion callback belongs to the initiating request. A response to an @men
 
 The ordinary workflow advances after an agent reports completion. If an old process or mentioned agent exceptionally continues, do not build process-drain, quiescence, exclusive-writer handover, or orphan tracking before progression. This simplification is explicitly chosen by the user.
 
-Capacity limits track active managed logical work; they are not a promise to constrain every surviving process or external core client. Logical completion can release the application's admission slot without requiring observed terminal exit. Keep runtime facts visible where available, but do not introduce a completion barrier around them.
+There are no application concurrency limits. Logical completion does not require observed terminal exit. Keep runtime facts visible where available, but do not introduce a completion barrier around them.
 
 Manual cancellation can use core's existing controls. Advanced coordination for moving active cards, conflicting writers, stale process activity, and descendant enforcement is deferred.
 
@@ -107,16 +125,16 @@ Core observations and reported status are useful input. Core status remains prog
 
 ## Timed readiness
 
-Scheduler owns queue/capacity/time readiness. A card's saved timing attributes belong to Kanban; initially implement clock waiting and due triggers as a timers module inside canban-scheduler. Workflow Engine decides a configured workflow action when a trigger fires; reminders can target Notifications. See [crates and timers](../architecture-crates-and-timers.md). This responsibility does not by itself promote advanced schedules into MVP.
+Scheduler owns queue/time readiness. A card's saved timing attributes belong to Kanban; initially implement clock waiting and due triggers as a timers module inside canban-scheduler. Workflow Engine decides a configured workflow action when a trigger fires; reminders can target Notifications. See [crates and timers](../architecture-crates-and-timers.md). This responsibility does not by itself promote advanced schedules into MVP.
 
 ## Triggers and effects
 
 | Trigger | MVP behavior |
 | --- | --- |
 | Enter Backlog | Record event/history; no stage launch |
-| Enter Develop / Review / custom executable stage | Schedule configured work in a fresh generic Session |
+| Enter Develop / Review / custom executable stage | Schedule configured work in a new invocation / same profile history |
 | Within-stage reorder | Update/history; no new stage entry |
-| Submitted @mention | Schedule fresh conversation and associate response with comment |
+| Submitted @mention | Append/start/resume addressed profile; associate reply with comment |
 | Agent declares completed | Invoke the request's configured completion callback |
 | Agent blocked / needs input | Needs-attention card condition + internal notification event |
 | Archive | Retain card history and handle managed-worktree cleanup |
