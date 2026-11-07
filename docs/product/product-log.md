@@ -342,3 +342,46 @@ Absent/exited conversations still use the agreed first-start/exact-resume path, 
 ## 2026-11-07 — Interactive Card/profile conversations implemented
 
 Implemented the accepted single conversation per Card/profile model with immediate live mentions, CLI question replies independent of completion, explicit provider binding, exact-ID resume, turn-boundary normal exit and a native libghostty-vt terminal. Real Codex workflow/resume acceptance and deterministic Herdr/native UI acceptance are recorded in implementation.md. Claude's lifecycle adapter remains pending live-provider acceptance; no new product session classes or concurrency caps were introduced.
+
+## 2026-11-07 — Next MVP priorities and command-defined Agent expectations
+
+The user accepted daily-use validation, the Review/code-delivery loop and native Terminal/recovery acceptance as the next priorities. Review stays simple: Accept means merge; rework can use a move back to a previous stage or an @Agent instruction. Merge target/commit/conflict details remain implementation decisions to discuss; no new review state machine is required.
+
+The user expects Agent start/resume behavior to be supplied through editable profile commands, with presets for common Herdr-runnable Agents and user-provided CLI/script commands for others. The [CLI and extensibility discussion](agent-extensibility.md) separates this proposed target from the current Codex/Claude-specific adapters and documents the shared session-ID/reply/report/turn-end/exit contract. This turn changes documentation and upgrades NSH; it does not implement the proposed profile refactor or merge action.
+
+## 2026-11-07 — Unified profile invocation interface confirmed
+
+The user explicitly agreed that Codex and Claude should use the same interface as custom profiles, with optional supplied presets. Rust owns configuration resolution and generic invocation/lifecycle handling; provider-specific command and callback recipes belong to profiles/preset integrations. The current seven-field Profile schema is documented separately from that target. Preset resolution, generic exit/lifecycle fields and migration are still being discussed; no runtime refactor was performed by this clarification.
+
+## 2026-11-07 — Reuse Herdr lifecycle observations; avoid duplicate hooks
+
+The user selected adjusting Profile to reuse capabilities already supplied by Herdr. Runtime status/turn/wait/interrupt use the Herdr adapter; a separate Canban turn-end callback is not a requirement of the new profile contract. Canban retains business reports/replies and provider session binding, while Profile supplies start/resume and normal-exit behavior. Automatic close still requires an explicit completed report plus a later relevant root completion observation; idle, blockage and a bare turn increase are insufficient. Agents without usable status remain manually controllable. Current notify/Stop code has not yet been refactored; this entry records the design decision, not runtime acceptance.
+
+## 2026-11-07 implementation and acceptance follow-through
+
+The approved profile simplification is implemented: editable JSON presets/whole-command overrides, generic invocation, Herdr root status/control, no mandatory notify/Stop channel, explicit report/reply/session binding retained. Recognized legacy configuration is backed up and migrated; opaque Herdr templates fail without rewriting their original configuration.
+
+The user authorized implementation followed by real-workflow, Review-delivery and Terminal/recovery verification. Real Codex human-input and rework tasks passed. Basic native Diff and explicit commit/merge now close the code-delivery gap; Archive remains separate. The implementation defaults target the Project's captured local branch, require a clean matching source checkout, integrate divergent target changes in the Card first, retain conflicts there and fast-forward source only after success. See review-delivery.md for the concrete policy. Native and deterministic recovery checks are recorded in ../mvp-acceptance.md. Chinese IME verification was explicitly skipped by the user. Claude live acceptance remains blocked by local authentication; Shear, GitHub backend and template GUI remain deferred.
+
+## Standalone component Gallery
+
+The user requested removing Gallery from the production program and moving it to examples as the UI-component development/check surface. The entry and deterministic fixtures now live in examples/gallery; mise run gallery opens a separate native app using the exact production UI Kit/product components. It does not initialize AppServer, application storage or Agent/Core connections. Production navigation and startup no longer contain a Gallery mode.
+
+## 2026-11-07 — Notes and workspace direction accepted
+
+The user identifies the calm native workspace (A) as closest to the Kanban-centered product, then accepts the proposed Note role and ASCII workspace hierarchy. Notes retain emerging ideas, independent Agent discussion and reusable Project context. Explicitly creating Cards from a Note places scoped work in Backlog while preserving the source document; multiple Cards may reference one Note and a Card may use several Notes. Note discussion does not automatically advance a Board workflow.
+
+The accepted workspace direction uses Board as the default, an optional selected-Card pane, focused Card plus Terminal/Review when needed, and a Notes document list/editor with discussion opened on demand. See [Notes and the Kanban workspace](notes-and-workspace.md). Detailed Note conversation ownership, context/reply behavior, responsive dimensions and component contracts still need design. Default inclusion of all Project Notes has not been changed or approved as a new policy. This acceptance updates documentation only; it does not authorize or claim completion of the UI redesign.
+
+## 2026-11-07 — Note simplified to file, related events and bidirectional links
+
+The user clarified that a Note should initially be an editable file, augmented with a Timeline of related events (including Card relations and Agent modifications/associations) and bidirectional links between Notes. Agents interact with Notes by reading and writing. This supersedes the independent Note discussion/composer direction in the preceding entry; a Note-owned Agent conversation is not required by the simplified scope.
+
+The Notes ASCII layout now shows file editing/preview, related Cards, links/backlinks and Timeline, with no chat pane. File location, identity/link syntax, refresh/conflict handling and reliable attribution of external writes remain details to design. Current SQLite Note bodies have not been migrated, and no UI/runtime implementation is claimed by this documentation update.
+
+
+## 2026-11-07 — Database Notes and focused workspace implemented
+
+The user clarified that file-like Notes are actually stored in the database, so Agent and product operations can record associations. This supersedes the physical-file interpretation above. No Note filesystem watcher or content migration is required. Notes now expose shared create/read/write/rename operations, immutable revisions, optimistic conflicts, Card/Agent provenance and stable bidirectional links. Agents use the Canban CLI; Notes do not own another chat/session model.
+
+The user approved the calm Kanban workspace and confirmed focused work behavior: clicking an Agent or Review hides the Board while retaining global navigation, with Card left and work right. Back/Close returns to the original Board/selection; drafts and scroll survive route changes. Closing the viewer does not end execution. Production components are also imported by the standalone Gallery. See [implemented contracts and validation](../notes-and-workspace-implementation.md); drag polish, full design-state coverage and crash-persistent drafts remain separate refinements.

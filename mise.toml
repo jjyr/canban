@@ -1,6 +1,6 @@
 [tools]
 rust = "beta-2026-10-14"
-zig = "0.16.0"
+zig = "0.17.1"
 
 [tasks.terminal-deps]
 run = "/usr/bin/python3 scripts/terminal-deps.py"
@@ -21,9 +21,13 @@ run = ".local/Canban.app/Contents/MacOS/canban-ui"
 depends = ["terminal-deps"]
 run = ["cargo build -p canban-ui -p canban-cli", "/usr/bin/python3 scripts/package.py"]
 
+[tasks.build-gallery]
+depends = ["terminal-deps"]
+run = ["cargo build -p canban-ui --example gallery", "/usr/bin/python3 scripts/package.py --gallery"]
+
 [tasks.gallery]
-depends = ["build"]
-run = ".local/Canban.app/Contents/MacOS/canban-ui --gallery"
+depends = ["build-gallery"]
+run = ".local/CanbanGallery.app/Contents/MacOS/gallery"
 
 [tasks.acceptance]
 depends = ["build"]
@@ -40,3 +44,11 @@ run = "/usr/bin/python3 scripts/acceptance-interactive.py"
 [tasks.acceptance-real-interactive]
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance-real-interactive.py"
+
+[tasks.acceptance-real-workflows]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-real-workflows.py"
+
+[tasks.acceptance-native]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-native.py"

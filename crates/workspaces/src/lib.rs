@@ -58,6 +58,17 @@ pub fn prepare(home: &Path, project: &Project, card: &Card) -> Result<PathBuf> {
     // Existing repository edits are not silently copied into a separate checkout.
     let target = home.join("worktrees").join(&project.id).join(&card.id);
     std::fs::create_dir_all(target.parent().unwrap())?;
+    // Older restores cleared the missing path. The retained Card ref still
+    // identifies its own checkout, even when the Project branch has advanced.
+    let keep = format!("refs/canban/cards/{}", card.id);
+    let start = if git(source, &["rev-parse", "--verify", &keep])?
+        .status
+        .success()
+    {
+        keep.as_str()
+    } else {
+        "HEAD"
+    };
     let out = git(
         source,
         &[
@@ -65,7 +76,7 @@ pub fn prepare(home: &Path, project: &Project, card: &Card) -> Result<PathBuf> {
             "add",
             "--detach",
             target.to_str().unwrap(),
-            "HEAD",
+            start,
         ],
     )?;
     ensure!(
@@ -153,6 +164,7 @@ mod tests {
             name: "Test".into(),
             directory: source.to_str().unwrap().into(),
             workflow: Default::default(),
+            target_branch: None,
             created_at: 0,
         };
         let mut card = Card {
@@ -170,6 +182,7 @@ mod tests {
             archive: None,
             archive_error: None,
             worktree: None,
+            delivery: None,
             created_at: 0,
         };
         let home = dir.path().join("home");
@@ -214,3 +227,5 @@ mod tests {
         assert!(source.join("seed.txt").exists());
     }
 }
+
+pub mod review;

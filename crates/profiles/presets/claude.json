@@ -1,0 +1,7 @@
+{
+  "id": "claude",
+  "argv": ["claude", "--session-id", "{session_id}", "{prompt}"],
+  "resume_argv": ["claude", "--resume", "{session_id}", "{prompt}"],
+  "session_instruction": "The provider session ID is allocated and bound by Canban through your launch command. Use the current invocation's Canban reporting commands.",
+  "exit": {"type": "input", "text": "/exit"}
+}

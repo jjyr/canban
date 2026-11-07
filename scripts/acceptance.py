@@ -56,7 +56,10 @@ try:
     config["profiles"].append({"id": "fixture", "argv": ["/usr/bin/python3", str(repo / "scripts/fixture-agent.py")], "tags": ["fixture"], "capacity": 1})
     for profile in config["profiles"]:
         if profile["id"] in ("developer", "reviewer"):
-            profile["provider"] = "command"
+            profile["preset"] = None
+            profile["resume_argv"] = []
+            profile["session_instruction"] = ""
+            profile["exit"] = {"type":"manual"}
             profile["argv"] = ["/usr/bin/python3", str(repo / "scripts/fixture-agent.py")]
             profile["role_instruction"] = "ACCEPTANCE_ROLE_" + profile["id"].upper()
     config_path.write_text(json.dumps(config, indent=2))

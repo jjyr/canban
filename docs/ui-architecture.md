@@ -70,11 +70,11 @@ Keep persistent state separate from UI state. AppServer supplies accepted card/r
 
 ## Native component gallery
 
-Create a Rust/NSH gallery using the exact components imported by production screens. NSH's [Rust gallery](https://github.com/longbridge/nsh/blob/b7a69186d3c20a59690f2ac834dc527bee7f8438/examples/gallery-rs/README.md) demonstrates a Rust-only native entry. Canban's gallery can initially be a development binary in canban-ui, using fixture-backed presenters. This allows both UI Kit and product scenarios without making UI Kit depend on product types. It is not a new production service or a parallel implementation of the controls.
+Create a Rust/NSH gallery using the exact components imported by production screens. NSH's [Rust gallery](https://github.com/longbridge/nsh/blob/b7a69186d3c20a59690f2ac834dc527bee7f8438/examples/gallery-rs/README.md) demonstrates a Rust-only native entry. Canban's Gallery is a standalone Cargo example at `examples/gallery`, importing production components from the `canban-ui` library with local fixtures. Run it with `mise run gallery`; it opens `.local/CanbanGallery.app` without an AppServer, database or Agent. The production desktop has no Gallery route or startup mode. This allows both UI Kit and product scenarios without making UI Kit depend on product types. It is not a new production service or a parallel implementation of the controls.
 
 Show variants and meaningful states, including light/dark appearance, keyboard focus, disabled/pending/error, long and Chinese text, narrow/large windows, empty and populated lists, long reports, and archive-loading/failure. Add combined scenes for menu inside Card detail, composer inside a scrollable Timeline, and Board movement. Isolated buttons alone will not reveal focus, clipping and scrolling defects caused by composition.
 
-Gallery fixtures should be deterministic and not require starting a real Agent. A UI fix should be reproducible there when practical, and the actual affected product flow should also be checked. Gallery-only success does not prove AppServer integration or platform behavior.
+Gallery fixtures are deterministic and do not start real Agents. UI component changes are checked through this standalone example; add a scene for a new component or regression. Business-operation changes use the relevant integration acceptance separately. Gallery checks establish the exercised component behavior, not AppServer integration. See [example development instructions](../examples/README.md).
 
 ## Development and regression loop
 

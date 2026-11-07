@@ -43,7 +43,7 @@ The live database may have canban.sqlite-wal and canban.sqlite-shm sidecars. Let
 | Project, directory binding, Board | Kanban | Relational records; stable IDs independent of directory paths |
 | Cards, stage, tags, attention, archive marker, timing attributes | Kanban | Current-state rows, project-local card number, revision |
 | Workflow templates and routing configuration | Workflow Engine / Scheduler | User-editable JSON inputs and saved validated revisions |
-| Agent profile references and overrides | Scheduler | Reference existing Herdr runnable configuration; save Canban routing and resolved launch configuration |
+| Agent profile definitions and overrides | Profiles / AppServer | Editable command/preset configuration; Requests retain resolved snapshots for Scheduler execution |
 | Scheduling requests and execution attempts | Scheduler | Persistent queue/intent and attempt records |
 | Core/terminal association and last observation | Herdr adapter via Scheduler | Optional runtime binding and observed status/time |
 | Notes, descriptions, comments, resource references | Context / Timeline, according to content ownership | Stable content IDs and immutable revisions; current-revision pointers |
@@ -103,7 +103,7 @@ Card trigger --> scheduling request
                  +--> attempt 2, if a fresh retry is requested
 ```
 
-Do not create a permanent conversation record for each agent name. A profile is reusable configuration. Each attempt is the unified Session already discussed, identified by (dispatch_request_id, attempt_number); run_id may serialize that pair. A separate Session UUID/table is unnecessary for MVP. A provider conversation ID can be saved when available, but Herdr does not supply a universal one.
+Current implementation retains one Conversation per (Card ID, profile ID), not one shared conversation for an Agent name across Cards. Profiles are reusable configuration; each Request/Attempt retains its own task, callback and runtime. Attempts are identified by (request_id, attempt_number). The Conversation stores an opaque exact provider-history ID; Herdr does not supply a universal provider ID. This supersedes the earlier attempt-only Session proposal.
 
 Save request and attempt identity before starting external work. A queued request has no terminal yet. Once known, save the owning core.id and owner-local terminal.address; save the connection route separately. The core tuple links to a live runtime, while the Canban execution record survives terminal removal. See [runtime identity research](research/herdr-identifiers.md).
 
@@ -185,7 +185,7 @@ Managed files have stable IDs and database metadata such as media type, byte siz
 
 SQLite and filesystem writes cannot share one transaction. For an input or report, write a temporary file, finish the durable write, and atomically publish it at a new managed path before committing its database reference. Commit the report's structured result, artifact reference, Timeline entry, and configured progression together; acknowledge acceptance after that commit. A failed file save must not produce an accepted report or advance the card. Unreferenced published files are recoverable orphans, not accepted results. Repeated report submissions use the existing request-key deduplication and must not overwrite a previously accepted file.
 
-Timeline entries keep concise structured details and references. Card descriptions, ordinary comments, and Note revisions can remain in SQLite for MVP; file-backed execution bodies do not require moving every editable text field into files. Load full report/context content on demand rather than for every Board or Timeline list query. Full-text search across managed files, attachment limits, and very large report rendering can be refined separately.
+Timeline entries keep concise structured details and references. Card descriptions, ordinary comments and Note bodies remain in SQLite. Schema v3 adds immutable `note_revisions` and ordered `note_events`; current Notes include parsed outgoing IDs and Card associations. Backlinks derive from current outgoing IDs. Content/revision/link/event changes commit atomically. Existing Notes seed their saved revision without synthesizing old events. Only captured execution context becomes immutable managed files; this does not move the live Note into the filesystem. See [Notes and workspace](product/notes-and-workspace.md) and [implemented contracts](notes-and-workspace-implementation.md). Load full report/context content on demand rather than for every Board or Timeline query. Full-text search, attachment limits and very large report rendering remain refinements.
 
 ## Compressed Card archives
 
@@ -236,4 +236,12 @@ Implementation refinement: the MVP uses one shared WAL database and versioned, c
 
 ## Implemented interactive conversation metadata (2026-11-07)
 
-SQLite schema version 2 adds conversations and questions. A Conversation ID is Card ID + profile ID, with provider, exact provider_session_id and last_request_id. A Question references its comment, Card/profile, request/attempt, delivery/reply state and file-backed reply. Attempts additionally retain conversation_id, provider_session_id, close_state, turn_ended_at and response_path. These records are included in Card archive exports; structured rows remain online for references and deduplication. Captured prompts, question replies and final assistant responses live below the Card's existing runs/<request>/<attempt> directory. Provider-owned full histories remain outside the Canban archive.
+SQLite schema version 2 adds conversations and questions. A Conversation ID is Card ID + profile ID, with provider, exact provider_session_id and last_request_id. A Question references its comment, Card/profile, request/attempt, delivery/reply state and file-backed reply. Attempts additionally retain conversation_id, provider_session_id, close_state, turn_ended_at and response_path. These records are included in Card archive exports; structured rows remain online for references and deduplication. Captured prompts, question replies, reports and retained terminal output live below the Card's existing runs/<request>/<attempt> directory. Historical callback-derived final-response files remain readable; the current Herdr lifecycle does not create provider callback snapshots. Provider-owned full histories remain outside the Canban archive.
+
+## Profile/lifecycle and delivery metadata update (2026-11-07)
+
+Editable preset files live under config/presets; embedded JSON supplies default Codex/Claude recipes. Validated legacy migration writes exact original config bytes to config/agents.legacy-<uuid>.json before atomic publication. Request profile snapshots and historical conversations are not rewritten. Attempts additionally record completion time, report-time turn, close-request time and connection state. Runtime observation is distinct from the explicit outcome.
+
+Project.target_branch captures the default local delivery branch. Card.delivery stores the latest accepted target/commit/request key/timestamp, while full delivery events remain in Timeline. review.merge persists an operations receipt with state unknown before Git effects, then replaces it with the observed result. This is deliberately not described as a transaction spanning SQLite and Git. Reusing the same operation key never blindly replays effects after a lost reply.
+
+Archive retains the Card Git ref independently of the Project's current HEAD. Restore preserves that checkout association; reopening recreates the retained Card commit even if the Project branch has since advanced. Legacy restores with a cleared path also consult the retained Card ref. Reports/replies should be written under CANBAN_RUN_DIR so temporary reporting artifacts stay out of delivered code.

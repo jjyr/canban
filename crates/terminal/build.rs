@@ -26,6 +26,7 @@ fn main() {
         .compile("canban-terminal-native");
     println!("cargo:rustc-link-lib=framework=AppKit");
     println!("cargo:rerun-if-changed=src/native.m");
+    println!("cargo:rerun-if-changed=src/ffi.h");
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let src = manifest
         .join("../../.local/deps/ghostty")
@@ -56,11 +57,16 @@ fn main() {
         ))
         .arg("--prefix")
         .arg(out.join("zig-out"))
-        .env("ZIG_GLOBAL_CACHE_DIR", out.join("zig-global"))
+        // Share immutable dependency/compiler objects across Cargo feature sets.
+        // Keep each invocation's local build cache and install prefix separate.
+        .env(
+            "ZIG_GLOBAL_CACHE_DIR",
+            manifest.join("../../.local/cache/zig"),
+        )
         .arg("--cache-dir")
         .arg(out.join("zig-cache"))
         .status()
-        .unwrap_or_else(|e| panic!("cannot run {zig:?} (Zig 0.16 required): {e}"));
+        .unwrap_or_else(|e| panic!("cannot run {zig:?} (Zig 0.17 required): {e}"));
     assert!(
         status.success(),
         "zig build of libghostty-vt failed: {status}"
@@ -96,7 +102,7 @@ fn main() {
 
     let include = src.join("include");
     let mut builder = bindgen::Builder::default()
-        .header(include.join("ghostty/vt.h").to_string_lossy())
+        .header(manifest.join("src/ffi.h").to_string_lossy())
         .clang_arg(format!("-I{}", include.display()));
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         // Apple's libclang has its builtin headers but needs the SDK for the C
@@ -117,6 +123,7 @@ fn main() {
         .allowlist_function("ghostty_.*")
         .allowlist_type("Ghostty.*")
         .allowlist_var("GHOSTTY_.*")
+        .allowlist_var("CANBAN_STYLE_.*")
         .prepend_enum_name(false)
         .derive_default(true)
         .layout_tests(false)

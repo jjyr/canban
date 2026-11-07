@@ -3,7 +3,7 @@
 from pathlib import Path
 import json,os,subprocess,tempfile,time
 repo=Path(__file__).resolve().parents[1];base=Path(tempfile.mkdtemp(prefix='cb-interactive-',dir='/private/tmp'));home=base/'home';cli=repo/'target/debug/canban'
-env={**os.environ,'CANBAN_HOME':str(home)};core_env={'HC_SESSION':'interactive-acceptance','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'hc-state'),'XDG_CONFIG_HOME':str(base/'hc-config')}
+env={**{k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')},'CANBAN_HOME':str(home)};core_env={'HC_SESSION':'interactive-acceptance','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'hc-state'),'XDG_CONFIG_HOME':str(base/'hc-config')}
 log=open(base/'server.log','w');server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
 def call(method,p=None):
  r=subprocess.run([str(cli),'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=90)
@@ -25,13 +25,38 @@ try:
  wait(lambda _:True,'startup')
  config=json.loads((home/'config/agents.json').read_text());config['hc_env']=core_env;config['hc_session']=core_env['HC_SESSION']
  for p in config['profiles']:
-  p.update(provider='custom',argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'{prompt}'],resume_argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'--resume','{session_id}','{prompt}'])
+  p.update(preset=None,exit={'type':'input','text':'/exit'},session_instruction='',argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'{prompt}'],resume_argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'--resume','{session_id}','{prompt}'])
  (home/'config/agents.json').write_text(json.dumps(config,indent=2));call('config.reload')
  project=call('project.create',{'name':'Interactive acceptance','directory':str(base/'source')})
- card=call('card.create',{'project_id':project['id'],'title':'Exercise interactive task'})
+ note=call('note.save',{'project_id':project['id'],'title':'Context.md','body':'Original captured context'})
+ ref=call('note.save',{'project_id':project['id'],'title':'Reference.md','body':'[Context](note:'+note['id']+')'})
+ card=call('card.create',{'project_id':project['id'],'title':'Exercise interactive task','source_note_id':note['id']})
  call('card.move',{'card_id':card['id'],'revision':1,'stage':'develop'})
  s=wait(lambda s:len(s['attempts'])==1 and s['attempts'][0]['provider_session_id'] and s['attempts'][0]['terminal'],'bound interactive Agent')
  first=s['attempts'][0];sid=first['provider_session_id'];terminal=first['terminal']
+ # Agent writes through the real CLI with its injected execution binding.
+ send(terminal,'note-write '+note['id']+' Agent-written database Note')
+ s=wait(lambda s:any(n['id']==note['id'] and n['body']=='Agent-written database Note' for n in s['notes']),'Agent Note CLI write')
+ event=next(e for e in s['note_events'] if e['note_id']==note['id'] and e['kind']=='note.updated')
+ assert event['actor']=='@developer' and event['card_id']==card['id'] and event['request_id']==first['request_id'] and event['attempt']==1
+ raw=subprocess.run([str(cli),'note','read',note['id']],env=env,capture_output=True,text=True,check=True);assert raw.stdout=='Agent-written database Note'
+ stale=subprocess.run([str(cli),'note','write',note['id'],'--revision','1'],input='Stale human overwrite',env=env,capture_output=True,text=True);assert stale.returncode!=0
+ renamed=subprocess.run([str(cli),'note','rename',note['id'],'Renamed.md','--revision','2'],env=env,capture_output=True,text=True,check=True);assert json.loads(renamed.stdout)['id']==note['id']
+ assert call('note.get',{'note_id':ref['id']})['links']==[note['id']]
+ historical=call('note.revision',{'note_id':note['id'],'revision':1});assert historical['body']=='Original captured context'
+ assert 'Original captured context' in (home/first['input_path']).with_name('context.json').read_text()
+ # Restart the host while the provider is live; reconnect exact binding.
+ server.terminate();server.wait(timeout=10);server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
+ s=wait(lambda s:s['attempts'][0].get('connection_state')=='connected','live host restart')
+ assert len(s['attempts'])==1 and s['attempts'][0]['terminal']==terminal
+ # Temporary transport loss is visible, deduplicated, and never relaunches.
+ config['hc']='/usr/bin/false';(home/'config/agents.json').write_text(json.dumps(config));call('config.reload')
+ s=wait(lambda s:s['attempts'][0].get('connection_state')=='unavailable','offline attention')
+ notices=len(s['notices']);time.sleep(1.2);assert len(call('app.snapshot')['notices'])==notices
+ config['hc']='hc';(home/'config/agents.json').write_text(json.dumps(config));call('config.reload')
+ s=wait(lambda s:s['attempts'][0].get('connection_state')=='connected','original core reconnect')
+ assert len(s['attempts'])==1 and s['attempts'][0]['terminal']==terminal and s['attempts'][0]['provider_session_id']==sid
+
  for _ in range(2):
   opened=call('agent.open',{'card_id':card['id'],'profile_id':'developer'});assert opened['request_id']==first['request_id']
  assert len(call('app.snapshot')['requests'])==1
@@ -53,6 +78,16 @@ try:
  assert all(q['state']=='replied' for q in s['questions']);assert s['cards'][0]['stage']=='review'
  server.terminate();server.wait(timeout=10);server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
  s=wait(lambda s:len(s['conversations'])==2,'restart bindings')
+ # A provider must reject a missing saved conversation, never silently create
+ # unrelated history. Recovery is an explicit fresh-context action.
+ (home/'fixture-history'/f'{sid}.json').unlink()
+ call('agent.open',{'card_id':card['id'],'profile_id':'developer'})
+ s=wait(lambda s:len(s['attempts'])==4 and s['attempts'][-1]['state']=='needs_report','missing provider history')
+ assert s['cards'][0]['attention'] and s['attempts'][-1]['provider_session_id']==sid
+ call('agent.open',{'card_id':card['id'],'profile_id':'developer','fresh':True})
+ s=wait(lambda s:len(s['attempts'])==5 and s['attempts'][-1]['provider_session_id'] not in (None,sid),'explicit fresh context')
+ send(s['attempts'][-1]['terminal'],'finish')
+ s=wait(lambda s:s['attempts'][-1]['close_state']=='closed','fresh context completion')
  current=s['cards'][0];call('card.archive',{'card_id':card['id'],'revision':current['revision']})
  for question in s['questions']:
   assert 'Answer for' in call('resource.read',{'card_id':card['id'],'path':question['reply_path']})['body']

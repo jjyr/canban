@@ -19,6 +19,7 @@ typedef void (*InputFn)(void *, const char *);
 @property NSRect lastVisibleRect;
 @property NSRect lastLayerRect;
 @property NSInteger pendingRedraws;
+@property double scrollRemainder;
 @end
 @implementation CanbanTerminal
 - (BOOL)isFlipped {
@@ -186,11 +187,16 @@ typedef void (*InputFn)(void *, const char *);
   [self setNeedsDisplay:YES];
 }
 - (void)scrollWheel:(NSEvent *)event {
-  [self emit:@{
-    @"kind" : @"scroll",
-    @"delta" : @((NSInteger)(event.scrollingDeltaY * 0.4))
-  }];
-  [self tick];
+  // AppKit's upward wheel delta is positive; libghostty's is negative.
+  // Accumulate precise trackpad deltas instead of losing fractional rows.
+  self.scrollRemainder -= event.scrollingDeltaY *
+      (event.hasPreciseScrollingDeltas ? 1.0 / 18.0 : 3.0);
+  NSInteger rows = (NSInteger)self.scrollRemainder;
+  self.scrollRemainder -= rows;
+  if (rows != 0) {
+    [self emit:@{@"kind" : @"scroll", @"delta" : @(rows)}];
+    [self tick];
+  }
 }
 - (NSString *)selectedText {
   NSMutableString *out = [NSMutableString string];

@@ -52,36 +52,48 @@ impl Default for Workflow {
         }
     }
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ExitAction {
+    #[default]
+    Manual,
+    Input {
+        text: String,
+    },
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct Profile {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
     #[serde(default)]
     pub role_instruction: String,
-    #[serde(default)]
-    pub provider: String,
-    #[serde(default)]
-    pub resume_argv: Vec<String>,
-    pub argv: Vec<String>,
-    #[serde(default)]
-    pub template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_argv: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<ExitAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_instruction: Option<String>,
     #[serde(default)]
     pub tags: Vec<String>,
 }
 impl Profile {
-    pub fn provider_kind(&self) -> &str {
-        if !self.provider.is_empty() {
-            return &self.provider;
-        }
-        match self
-            .argv
+    pub fn command(&self) -> &[String] {
+        self.argv.as_deref().unwrap_or_default()
+    }
+    pub fn resume_command(&self) -> &[String] {
+        self.resume_argv.as_deref().unwrap_or_default()
+    }
+    /// A diagnostic/session namespace only; never selects runtime behavior.
+    pub fn command_name(&self) -> String {
+        self.command()
             .first()
-            .and_then(|a| std::path::Path::new(a).file_name())
+            .and_then(|s| std::path::Path::new(s).file_name())
             .and_then(|s| s.to_str())
-        {
-            Some("codex") => "codex",
-            Some("claude") => "claude",
-            _ => "command",
-        }
+            .unwrap_or("command")
+            .to_owned()
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -95,56 +107,33 @@ pub struct Config {
 }
 impl Default for Config {
     fn default() -> Self {
-        let mut config = Self {
+        let profile = |id: &str, preset: &str, role: &str| Profile {
+            id: id.into(),
+            preset: Some(preset.into()),
+            role_instruction: role.into(),
+            tags: vec![id.into()],
+            ..Default::default()
+        };
+        Self {
             hc: "hc".into(),
             hc_session: "default".into(),
             hc_env: BTreeMap::new(),
             default_agent: "developer".into(),
             profiles: vec![
-                Profile {
-                    id: "codex".into(),
-                    role_instruction: String::new(),
-                    provider: "codex".into(),
-                    resume_argv: Vec::new(),
-                    argv: vec![
-                        "codex",
-                        "--no-daemon",
-                        "--sandbox",
-                        "workspace-write",
-                        "--add-dir",
-                        "{home}",
-                        "{prompt}",
-                    ]
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-                    template: None,
-                    tags: vec!["codex".into()],
-                },
-                Profile {
-                    id: "claude".into(),
-                    role_instruction: String::new(),
-                    provider: "claude".into(),
-                    resume_argv: Vec::new(),
-                    argv: vec!["claude", "{prompt}"]
-                        .into_iter()
-                        .map(Into::into)
-                        .collect(),
-                    template: None,
-                    tags: vec!["claude".into()],
-                },
+                profile("codex", "codex", ""),
+                profile("claude", "claude", ""),
+                profile(
+                    "developer",
+                    "codex",
+                    "You are the Card's development Agent. Implement the agreed task, preserve relevant project conventions, and explain your changes and validation.",
+                ),
+                profile(
+                    "reviewer",
+                    "codex",
+                    "You are the Card's independent review Agent. Inspect the actual changes critically, identify correctness issues and missing validation, and report findings. Do not implement changes unless explicitly asked.",
+                ),
             ],
-        };
-        let mut developer = config.profiles[0].clone();
-        developer.id = "developer".into();
-        developer.tags = vec!["developer".into()];
-        developer.role_instruction = "You are the Card's development Agent. Implement the agreed task, preserve relevant project conventions, and explain your changes and validation.".into();
-        let mut reviewer = config.profiles[0].clone();
-        reviewer.id = "reviewer".into();
-        reviewer.tags = vec!["reviewer".into()];
-        reviewer.role_instruction = "You are the Card's independent review Agent. Inspect the actual changes critically, identify correctness issues and missing validation, and report findings. Do not implement changes unless explicitly asked.".into();
-        config.profiles.extend([developer, reviewer]);
-        config
+        }
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -153,6 +142,8 @@ pub struct Project {
     pub name: String,
     pub directory: String,
     pub workflow: Workflow,
+    #[serde(default)]
+    pub target_branch: Option<String>,
     pub created_at: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -172,7 +163,34 @@ pub struct Card {
     pub archive: Option<String>,
     pub archive_error: Option<String>,
     pub worktree: Option<String>,
+    #[serde(default)]
+    pub delivery: Option<Delivery>,
     pub created_at: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Delivery {
+    pub target_branch: String,
+    pub commit: String,
+    pub request_key: String,
+    pub merged_at: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ReviewPreview {
+    pub card_id: String,
+    pub revision: u64,
+    pub target_branch: String,
+    pub target_head: String,
+    pub card_head: String,
+    pub source_branch: String,
+    pub worktree: String,
+    pub files: Vec<String>,
+    pub patch: String,
+    pub truncated: bool,
+    pub dirty: bool,
+    pub conflicts: Vec<String>,
+    pub token: String,
+    pub merge_allowed: bool,
+    pub reason: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Event {
@@ -227,6 +245,14 @@ pub struct Attempt {
     pub turn_ended_at: Option<u64>,
     #[serde(default)]
     pub response_path: Option<String>,
+    #[serde(default)]
+    pub completed_at: Option<u64>,
+    #[serde(default)]
+    pub completion_turn: Option<u64>,
+    #[serde(default)]
+    pub close_requested_at: Option<u64>,
+    #[serde(default)]
+    pub connection_state: String,
 }
 impl Attempt {
     pub fn key(request: &str, number: u32) -> String {
@@ -286,6 +312,38 @@ pub struct Note {
     pub body: String,
     pub revision: u64,
     pub created_at: u64,
+    #[serde(default)]
+    pub updated_at: u64,
+    #[serde(default)]
+    pub links: Vec<String>,
+    #[serde(default)]
+    pub card_ids: Vec<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct NoteRevision {
+    pub id: String,
+    pub project_id: String,
+    pub note_id: String,
+    pub revision: u64,
+    pub title: String,
+    pub body: String,
+    pub created_at: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct NoteEvent {
+    pub id: String,
+    pub project_id: String,
+    pub note_id: String,
+    pub sequence: u64,
+    pub kind: String,
+    pub actor: String,
+    pub message: String,
+    pub card_id: Option<String>,
+    pub request_id: Option<String>,
+    pub attempt: Option<u32>,
+    pub revision: u64,
+    pub data: Value,
+    pub created_at: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Notice {
@@ -322,6 +380,8 @@ pub struct Snapshot {
     pub conversations: Vec<Conversation>,
     #[serde(default)]
     pub questions: Vec<Question>,
+    #[serde(default)]
+    pub note_events: Vec<NoteEvent>,
 }
 #[derive(Clone, Debug)]
 pub enum AppEvent {

@@ -1,0 +1,7 @@
+{
+  "id": "codex",
+  "argv": ["codex", "--no-daemon", "--sandbox", "workspace-write", "--add-dir", "{home}", "{prompt}"],
+  "resume_argv": ["codex", "--no-daemon", "--sandbox", "workspace-write", "--add-dir", "{home}", "resume", "{session_id}", "{prompt}"],
+  "session_instruction": "Before other work, run \"$CANBAN_CLI\" bind-session --session-id \"$CODEX_THREAD_ID\" to bind this invocation to its actual provider history. Do not reuse a thread ID quoted in earlier conversation history.",
+  "exit": {"type": "input", "text": "/exit"}
+}

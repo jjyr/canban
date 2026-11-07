@@ -10,7 +10,7 @@ pub(super) fn conversation(db: Db<'_>, card: &Card, profile: &Profile) -> Result
         project_id: card.project_id.clone(),
         card_id: card.id.clone(),
         profile_id: profile.id.clone(),
-        provider: profile.provider_kind().into(),
+        provider: profile.command_name(),
         provider_session_id: None,
         last_request_id: None,
         created_at: now(),
@@ -56,32 +56,6 @@ impl AppServer {
             Ok(json!({"bound":true,"conversation_id":context.id,"session_id":session}))
         })
     }
-    pub(super) fn turn_ended(&self, p: Value) -> Result<Value> {
-        let session = strp(&p, "session_id")?;
-        self.bind_session(
-            json!({"request_id":p["request_id"],"attempt":p["attempt"],"session_id":session}),
-        )?;
-        let request: Request = self
-            .store
-            .lock()
-            .unwrap()
-            .db()
-            .get(strp(&p, "request_id")?)?;
-        let path =
-            canban_context::run_dir(&self.home, &request, request.attempt).join("last-response.md");
-        if let Some(body) = p["body"].as_str() {
-            canban_context::atomic(&path, body.as_bytes())?;
-        }
-        self.mutate("agent.turn_ended", &p, |db| {
-            let mut run: Attempt = db.get(&Attempt::key(&request.id, request.attempt))?;
-            run.turn_ended_at = Some(now());
-            if p["body"].is_string() {
-                run.response_path = Some(canban_context::relative(&self.home, &path)?);
-            }
-            db.save(&run)?;
-            Ok(json!({"recorded":true}))
-        })
-    }
     pub(super) fn open_agent(&self, p: Value) -> Result<Value> {
         let config = self.config();
         self.mutate("agent.open",&p,|db| {
@@ -97,7 +71,7 @@ impl AppServer {
                     return Ok(json!({"request_id":req.id,"reused":true,"attempt":run}));
                 }
             }
-            if p["fresh"]==true {context.provider_session_id=None;context.provider=profile.provider_kind().into();db.save(&context)?;}
+            if p["fresh"]==true {context.provider_session_id=None;context.provider=profile.command_name();db.save(&context)?;}
             let project:Project=db.get(&card.project_id)?;
             let stage=canban_workflow_engine::stage(&project.workflow,&card.stage)?;
             let req=enqueue(db,&config,&mut card,&project,stage,"interactive",Some(&profile.id),Some("Initialize this Card conversation and briefly say you are ready. Do not report completion for this initialization. Wait for the user's next instruction; when that requested work is complete, explicitly report its outcome.".into()))?.context("Agent was not queued")?;

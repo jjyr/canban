@@ -1,28 +1,41 @@
 # Agent profiles and workflow references
 
-Status: implemented 2026-11-07, including Card/profile conversation binding, interactive launch/resume and native terminals. Codex has real-model acceptance; Claude has adapter regression coverage, pending live authentication/model acceptance.
+Status: implemented 2026-11-07. This is the current schema. Earlier provider/Herdr-template/hook proposals are superseded. See [MVP acceptance](../mvp-acceptance.md) for evidence and limits.
 
 ## Ownership
 
-Profiles are application-wide reusable configurations in ~/.canban/config/agents.json. Canban supplies developer/reviewer starter profiles on a fresh home, along with codex/claude for direct mentions. Users customize them through JSON. A profile has a stable id, fixed role_instruction, launch argv or an existing Herdr template, and optional routing tags. Model/CLI options live in that argv/template. A profile ID identifies a role/configuration, not a provider brand or terminal.
-
-Workflow JSON contains stage tasks/transitions and references profile IDs. Two profiles can execute the same Codex binary with different instructions. They remain distinct roles in requests and history. Project workflows are saved snapshots; editing the default workflow only affects new Projects.
+Profiles are application-wide configurations in `~/.canban/config/agents.json`. Workflow templates reference their IDs and define stage tasks/transitions. A Card retains one provider conversation for each profile ID. Developer and Reviewer may both use Codex but have independent histories. Neither profile definitions nor workflow templates are live Sessions.
 
 ```text
-agents.json                       workflow default.json
-  developer + role instruction <-- Develop.profile
-  reviewer  + role instruction <-- Review.profile
-                                         |
-                                    Project snapshot
-                                         |
-                              request profile/task snapshot
-                                         |
-                               captured prompt + context
+config/agents.json                 workflow JSON
+  developer + commands + role <--- Develop.profile
+  reviewer  + commands + role <--- Review.profile
+                                      |
+                                Project snapshot
+                                      |
+                             Request profile/task snapshot
+                                      |
+                       generic invocation -> Herdr terminal
 ```
 
-## Actual JSON fields
+`canban-profiles` resolves JSON presets and whole-field overrides. Scheduler/Workflow Engine/AppServer invoke a common interface; runtime code does not select Codex/Claude branches. Herdr supplies status, turn tracking, PTY input, attachment and interruption. Canban owns explicit reports/replies and the opaque provider-history binding.
 
-A runnable interactive configuration example:
+## Profile schema
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Required identity for mentions, workflow references and Card conversation reuse |
+| `preset` | Optional preset name; omitted fields inherit its defaults |
+| `role_instruction` | Role text included separately from the current task; empty by default |
+| `argv` | First-launch argument array; must resolve to a nonempty array |
+| `resume_argv` | Exact-history command array; absent inherits, `[]` explicitly disables Resume |
+| `exit` | `{"type":"manual"}` or `{"type":"input","text":"/exit"}`; no preset defaults to manual |
+| `session_instruction` | Optional prompt recipe for binding history; `""` explicitly disables inherited text |
+| `tags` | Routing aliases; empty by default |
+
+`argv` and `resume_argv` replace the corresponding preset array in full. They are individual arguments, with no implicit shell evaluation/appending. Supported placeholders are `{prompt}`, `{home}`, `{cli}` and `{session_id}`. A fresh launch referencing `{session_id}` gets a preallocated UUID; otherwise the Agent binds its actual ID. Saved IDs are opaque; Canban never substitutes a Herdr terminal address or a latest-history search.
+
+Presets are embedded JSON in `crates/profiles/presets`. `config/presets/<name>.json` supplies or replaces a preset of that name. Presets do not inherit other presets. Reload applies changes to subsequently queued work; already queued/running Request snapshots remain unchanged. Editing commands does not reset an existing conversation. An incompatible Resume fails visibly and offers explicit fresh context after the failed invocation exits.
 
 ```json
 {
@@ -32,70 +45,46 @@ A runnable interactive configuration example:
   "default_agent": "developer",
   "profiles": [
     {
-      "id": "developer",
+      "id": "developer", "preset": "codex",
       "role_instruction": "Implement the agreed Card task and explain validation.",
-      "argv": ["codex", "--no-daemon", "--sandbox", "workspace-write", "--add-dir", "{home}", "{prompt}"],
       "tags": ["developer"]
     },
     {
-      "id": "reviewer",
-      "role_instruction": "Review actual changes critically. Report findings without implementing unrelated changes.",
-      "argv": ["codex", "--no-daemon", "--sandbox", "workspace-write", "--add-dir", "{home}", "{prompt}"],
+      "id": "reviewer", "preset": "codex",
+      "role_instruction": "Review actual code and tests; publish an ordinary report.",
       "tags": ["reviewer"]
+    },
+    {
+      "id": "my-agent", "preset": null,
+      "role_instruction": "Publish explicit Canban outcomes.",
+      "argv": ["/absolute/path/to/wrapper", "start", "{prompt}"],
+      "resume_argv": ["/absolute/path/to/wrapper", "resume", "{session_id}", "{prompt}"],
+      "session_instruction": "Bind your actual history using canban bind-session.",
+      "exit": {"type":"manual"},
+      "tags": ["custom"]
     }
   ]
 }
 ```
 
-Preserve other profiles, custom options and hc settings. provider is optional: codex/claude are inferred from the executable basename; explicitly set it for wrappers. codex receives an invocation-local notify command and exact-ID resume arguments. claude receives per-invocation Stop settings, --session-id for creation and --resume for reuse. custom requires resume_argv with {session_id}; command is an explicit one-shot compatibility mode. Opaque Herdr templates are supported in command mode, because their provider lifecycle cannot be inferred safely. Existing JSON is not rewritten; legacy exec/-p arguments are adapted in memory for recognized interactive providers.
+A user overriding Codex's executable/options can set both complete command arrays while retaining `preset: "codex"`. An explicit manual exit or empty resume array also overrides the preset. `profile.presets` exposes available defaults; `config.get` exposes resolved configuration. Preserve the source JSON when editing overrides: serializing the resolved configuration back would turn inherited defaults into explicit overrides.
 
-Matching workflow example for config/workflows/default.json:
+## Shipped recipes
 
-```json
-{
-  "name": "Development",
-  "stages": [
-    {
-      "id": "backlog", "name": "Backlog", "execute": false,
-      "profile": null, "instruction": "", "on_completed": null
-    },
-    {
-      "id": "develop", "name": "Develop", "execute": true,
-      "profile": "developer", "instruction": "Implement this Card.",
-      "on_completed": "review"
-    },
-    {
-      "id": "review", "name": "Review", "execute": true,
-      "profile": "reviewer", "instruction": "Produce an ordinary Markdown review report.",
-      "on_completed": null
-    }
-  ]
-}
-```
+Codex starts interactively with `--no-daemon --sandbox workspace-write --add-dir {home}` and resumes the exact ID. Its prompt recipe asks the Agent to call `"$CANBAN_CLI" bind-session --session-id "$CODEX_THREAD_ID"` before other work. Claude starts with `--session-id {session_id}` and resumes with `--resume {session_id}`. Both configure normal `/exit` input. Neither installs notify/Stop hooks or changes global provider settings. Claude still needs successful local authentication for real acceptance.
 
-role_instruction defaults to empty for old profiles; profile defaults to null for old stages. The fixed role and the stage/comment task are separate sections in the captured prompt. The context manifest also retains the exact queued profile snapshot, so later configuration edits do not rewrite an earlier execution's role.
+Normal exit requires **explicit Canban completion plus a later Herdr root `done`** for the same invocation. Idle after interruption, blocked/error, exit or a bare turn increment are insufficient. If no usable status is available after 60 seconds, automatic exit is disabled and the Card receives an explanation; manual terminal control remains available. A working Agent is not timed out by this fallback. A sent exit that does not finish within 30 seconds is visible as an error and is not repeatedly sent.
 
-## Selection and validation
+## Workflow and routing
 
-Selection order:
+The default JSON workflow has non-executing Backlog, Develop using `developer` with `on_completed: "review"`, and Review using `reviewer` with no automatic next stage. Review means an ordinary report, followed by human disposition.
 
-1. Explicit @profile: select that exact registry entry; its response has no stage-transition callback and does not change Card tags.
-2. Automatic stage.profile: select that exact entry. Card tags do not override this named role.
-3. No stage reference: use Card routing tags; unmatched/ambiguous tags request attention.
-4. No reference or tags: use default_agent.
+Selection order is explicit `@profile`, stage `profile`, Card tags, then `default_agent`. Unmatched/ambiguous tags request attention. Automatic named stage profiles are not overridden by Card tags. Direct mentions do not retag the Card or change its workflow callback. Startup, Project creation and reload validate profile references before activating the new registry.
 
-Startup, Project creation and configuration reload validate profile references. A reference must resolve to a registered profile; blank references or profile references on non-executing stages are invalid. Default workflow and saved Project references are checked before activating a reloaded registry. Removal of an in-use profile fails with an error and preserves the previous active configuration. Already queued requests keep their own snapshots.
+## Migration
 
-## Existing data and UI
+Recognized legacy provider/batch configuration is converted once. Canban first saves the exact original bytes as `config/agents.legacy-<uuid>.json`, then atomically publishes validated JSON. Known provider launch/resume defaults are supplied through presets. Historical Request snapshots and conversations are not rewritten. A legacy opaque Herdr `template` is rejected with instructions to supply explicit commands; the original config stays intact. Herdr launch-template mode is no longer a Profile execution path. Kanban workflow templates are unaffected.
 
-Existing agents.json, default workflow JSON, saved Projects and queued requests are not rewritten. If an older/custom registry lacks starter roles and its default workflow file is absent, the generated workflow omits those references and preserves tag/default routing instead of injecting profiles. An existing workflow file without profile fields continues its previous behavior.
+## UI
 
-Settings shows the global registry and role instructions with JSON paths/reload. Board column headers show the named stage profile or tag/default fallback. Card comments offer Ask @profile buttons backed by the configured registry. These actions resolve the Card/profile conversation, append to a live invocation or resume an exited one. Profile edits are loaded for later invocations; running/queued snapshots remain immutable.
-
-## Validation
-
-- Workspace tests cover stage/mention role and callback selection, profile-removal rejection, missing-reference rejection before directory creation, immutable queued role/task captures, and old registry compatibility.
-- Model-free acceptance through real hc 0.1.18 passed using separate developer/reviewer fixture profiles and verified their actual prompt roles, terminal bindings, Develop -> Review, mentions/attention, Archive/Restore, restart and unrestricted three-Board execution. Evidence home: /private/tmp/cb-684xomr_/home; core: 9563f908e2e5e1932efb79376e8289cf.
-- Native acceptance used a separate test bundle/home at /private/tmp/cb-profiles-ui-vucz0i89. Board profile labels, inserting @reviewer from the production picker, submitting the question through the actual composer, a completed Reviewer fixture report and unchanged Backlog stage were verified. Settings exposed the same global registry/roles. Normal ~/.canban data was not changed.
-
-These checks used deterministic fixture Agents for new routing coverage. Earlier real-Codex acceptance remains separate evidence; it was not repeated for this configuration change.
+Settings shows resolved profiles and reload controls; Board headers show automatic roles; Card comments offer the same configured mentions. Clicking a live Card Agent attaches to its terminal. Clicking an exited Agent resumes its exact conversation in a new terminal. Missing history is visible, with a separate **Start with retained Card context** action. Closing the view only detaches it.

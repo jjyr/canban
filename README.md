@@ -2,7 +2,7 @@
 
 Canban is a native Rust/NSH desktop workbench for **Human Context**: preserving intent, decisions, working context, and review history across Agent execution. Kanban is the management center; Scheduler turns stage changes and mentions into Agent runs through herdr-core.
 
-The first macOS MVP implements local Projects/Boards/Cards, JSON workflows and routing, Card/profile Agent conversations with exact-ID resume, native libghostty terminals, explicit CLI outcome reporting, Notes/context selection, resources/image paste, Timeline, attention notices, and compressed archives. See [implementation and acceptance](docs/implementation.md) for the exact supported behavior and remaining limits.
+The first macOS MVP implements local Projects/Boards/Cards, JSON workflows and routing, Card/profile Agent conversations with exact-ID resume, native libghostty terminals, explicit CLI outcome reporting, database Notes with revisions/links/Timeline, Board/Card and focused work layouts, context selection, resources/image paste, Timeline, attention notices, and compressed archives. See [implementation and acceptance](docs/implementation.md) for the exact supported behavior and remaining limits.
 
 ## Run
 
@@ -37,3 +37,5 @@ Copyright 2026 JJy <jjyruby@gmail.com>.
 Licensed under the [Apache License, Version 2.0](LICENSE).
 
 For interactive real-Codex acceptance, run mise run acceptance-real-interactive. It verifies active @ replies, separate Developer/Reviewer histories, normal exit, exact-ID resume and archived replies. Folder trust/permission prompts still require normal interactive handling. Ghostty source is checksum-pinned by the terminal-deps task; bundled third-party notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+UI component development uses the standalone [Gallery example](examples/README.md) (`mise run gallery`); it is separate from the production app.

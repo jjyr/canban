@@ -50,6 +50,10 @@ fn admit(app: &AppServer, request: &Request) -> Attempt {
                 close_state: String::new(),
                 turn_ended_at: None,
                 response_path: None,
+                completed_at: None,
+                completion_turn: None,
+                close_requested_at: None,
+                connection_state: String::new(),
             };
             db.save(&run)?;
             Ok(run)
@@ -575,7 +579,7 @@ fn live_replies_preserve_task_callback_and_require_current_invocation() {
     app.call("execution.report",json!({"execution":{"request_id":run.request_id,"attempt_number":run.number},"state":"completed","body":"Done","request_key":"finish-live"})).unwrap();
     let snap = app.snapshot().unwrap();
     assert_eq!(snap.cards[0].stage, "review");
-    assert_eq!(snap.attempts[0].close_state, "pending");
+    assert_eq!(snap.attempts[0].close_state, "waiting");
     assert!(
         snap.attempts[0].turn_ended_at.is_none(),
         "Earlier ready turn must not close a later task"
@@ -627,4 +631,407 @@ fn restarting_does_not_blindly_redeliver_uncertain_question() {
     let snap = app.snapshot().unwrap();
     assert_eq!(snap.questions[0].state, "delivery_unknown");
     assert!(snap.cards[0].attention.is_some());
+}
+
+#[test]
+fn herdr_close_requires_later_root_done_not_interrupt_permission_or_callback() {
+    let (_dir, app, _project, card) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let mut run = admit(&app, &app.snapshot().unwrap().requests[0]);
+    run.completed_at = Some(1000);
+    run.completion_turn = Some(4);
+    for state in ["idle", "blocked", "error", "working"] {
+        assert!(!runtime::completion_ready(
+            &run,
+            &json!({"state":"live","status":{"state":state},"turn":5,"status_ms":1100})
+        ));
+    }
+    assert!(!runtime::completion_ready(
+        &run,
+        &json!({"state":"live","status":{"state":"done"},"turn":4,"status_ms":1100})
+    ));
+    assert!(!runtime::completion_ready(
+        &run,
+        &json!({"state":"live","status":{"state":"done"},"turn":5,"status_ms":999})
+    ));
+    assert!(!runtime::completion_ready(
+        &run,
+        &json!({"state":"finished","status":{"state":"done"},"turn":5,"status_ms":1100})
+    ));
+    assert!(runtime::completion_ready(
+        &run,
+        &json!({"state":"live","status":{"state":"done"},"turn":5,"status_ms":1100})
+    ));
+    app.call(
+        "agent.turn_ended",
+        json!({"request_id":run.request_id,"attempt":run.number,"session_id":"obsolete-hook"}),
+    )
+    .unwrap();
+    assert!(app.snapshot().unwrap().attempts[0].turn_ended_at.is_none());
+    assert!(
+        app.snapshot().unwrap().conversations[0]
+            .provider_session_id
+            .is_none()
+    );
+}
+
+#[test]
+fn legacy_config_migration_keeps_original_and_preserves_conversation_records() {
+    let (dir, app, _, _) = setup();
+    let mut old = serde_json::to_value(Config::default()).unwrap();
+    for p in old["profiles"].as_array_mut().unwrap() {
+        p["provider"] = json!("codex");
+        p["argv"] = json!(["codex", "exec", "--sandbox", "workspace-write", "{prompt}"]);
+        p["resume_argv"] = json!([]);
+        p.as_object_mut().unwrap().remove("preset");
+    }
+    let bytes = serde_json::to_vec_pretty(&old).unwrap();
+    let path = app.home.join("config/agents.json");
+    std::fs::write(&path, &bytes).unwrap();
+    drop(app);
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    assert!(
+        !app.config().profiles[0]
+            .command()
+            .iter()
+            .any(|a| a == "exec")
+    );
+    assert!(!app.config().profiles[0].resume_command().is_empty());
+    let backups = std::fs::read_dir(app.home.join("config"))
+        .unwrap()
+        .filter_map(|e| {
+            let p = e.ok()?.path();
+            p.file_name()?
+                .to_str()?
+                .starts_with("agents.legacy-")
+                .then_some(p)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(std::fs::read(&backups[0]).unwrap(), bytes);
+    assert_eq!(app.snapshot().unwrap().cards.len(), 1);
+}
+
+#[test]
+fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
+    let (dir, app, mut project, mut card) = setup();
+    let source = Path::new(&project.directory);
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(source)
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    git(&["init", "-b", "main"]);
+    for (k, v) in [
+        ("user.name", "Acceptance"),
+        ("user.email", "acceptance@example.invalid"),
+        ("core.hooksPath", "/dev/null"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&["config", k, v]);
+    }
+    std::fs::write(source.join("seed"), "seed").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "seed"]);
+    project.target_branch = Some("main".into());
+    card.stage = "review".into();
+    card.worktree = Some(
+        canban_workspaces::prepare(&app.home, &project, &card)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    );
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.save(&project)?;
+            db.save(&card)
+        })
+        .unwrap();
+    std::fs::write(
+        Path::new(card.worktree.as_ref().unwrap()).join("delivered"),
+        "code",
+    )
+    .unwrap();
+    let preview = app
+        .call("review.preview", json!({"card_id":card.id}))
+        .unwrap();
+    let request = json!({"card_id":card.id,"revision":card.revision,"token":preview["token"],"request_key":"accept-once"});
+    let accepted = app.call("review.merge", request.clone()).unwrap();
+    assert_eq!(accepted["state"], "merged");
+    assert_eq!(
+        git(&["rev-parse", "HEAD"]),
+        accepted["commit"].as_str().unwrap()
+    );
+    let snap = app.snapshot().unwrap();
+    assert!(snap.cards[0].archived_at.is_none());
+    assert!(snap.cards[0].delivery.is_some());
+    assert_eq!(app.call("review.merge", request.clone()).unwrap(), accepted);
+    assert_eq!(
+        app.snapshot()
+            .unwrap()
+            .events
+            .iter()
+            .filter(|e| e.kind == "review.merged")
+            .count(),
+        1
+    );
+    // Simulate a crash after recording an intent: the same request must return
+    // unknown without touching Git, even when files/revisions have since changed.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.conn.execute(
+                "UPDATE operations SET result=?1 WHERE id='accept-once'",
+                [r#"{"state":"unknown"}"#],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let head = git(&["rev-parse", "HEAD"]);
+    drop(app);
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    assert_eq!(
+        app.call("review.merge", request).unwrap()["state"],
+        "unknown"
+    );
+    assert_eq!(git(&["rev-parse", "HEAD"]), head);
+    let c = app.snapshot().unwrap().cards[0].clone();
+    app.call(
+        "card.archive",
+        json!({"card_id":c.id,"revision":c.revision}),
+    )
+    .unwrap();
+    assert_eq!(git(&["rev-parse", "HEAD"]), head);
+    let archived = app.snapshot().unwrap().cards[0].clone();
+    assert!(archived.archived_at.is_some());
+    std::fs::write(source.join("later-project-change"), "later").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "Advance source after archive"]);
+    let source_head = git(&["rev-parse", "HEAD"]);
+    app.call(
+        "card.restore",
+        json!({"card_id":archived.id,"revision":archived.revision}),
+    )
+    .unwrap();
+    let restored = app.snapshot().unwrap().cards[0].clone();
+    let cwd = canban_workspaces::prepare(&app.home, &project, &restored).unwrap();
+    assert!(cwd.join("delivered").exists());
+    assert!(!cwd.join("later-project-change").exists());
+    assert_eq!(git(&["rev-parse", "HEAD"]), source_head);
+}
+
+#[test]
+fn core_loss_during_question_delivery_becomes_unknown_without_replay() {
+    let (_dir, app, _project, card) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    admit(&app, &app.snapshot().unwrap().requests[0]);
+    app.call(
+        "comment.add",
+        json!({"card_id":card.id,"body":"@developer explain progress"}),
+    )
+    .unwrap();
+    let client = canban_herdr::Client {
+        config: Config {
+            hc: "/usr/bin/false".into(),
+            ..Default::default()
+        },
+    };
+    app.deliver_questions(&client).unwrap();
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.questions[0].state, "delivery_unknown");
+    assert!(snap.cards[0].attention.is_some());
+    app.deliver_questions(&client).unwrap();
+    assert_eq!(app.snapshot().unwrap().notices.len(), snap.notices.len());
+    assert_eq!(
+        app.snapshot().unwrap().questions[0].state,
+        "delivery_unknown"
+    );
+}
+
+#[test]
+fn notes_keep_revisions_links_and_provenance_atomically() {
+    let (_d, app, project, card) = setup();
+    let create = |title: &str, body: &str| -> Note {
+        serde_json::from_value(
+            app.call(
+                "note.save",
+                json!({"project_id":project.id,"title":title,"body":body}),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let b = create("Architecture.md", "Original");
+    let a = create(
+        "Idea.md",
+        &format!("[Architecture](note:{})\n`[ignored](note:missing)`", b.id),
+    );
+    assert_eq!(a.links, vec![b.id.clone()]);
+    let events: Vec<NoteEvent> =
+        serde_json::from_value(app.call("note.history", json!({"note_id":b.id})).unwrap()).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind == "note.referenced" && e.data["source_note_id"] == a.id)
+    );
+    let renamed: Note = serde_json::from_value(
+        app.call(
+            "note.rename",
+            json!({"note_id":b.id,"title":"Design.md","revision":b.revision}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(renamed.id, b.id);
+    let unchanged: Note =
+        serde_json::from_value(app.call("note.get", json!({"note_id":a.id})).unwrap()).unwrap();
+    assert_eq!(unchanged.links, vec![b.id.clone()]);
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":card.revision,"stage":"develop"}),
+    )
+    .unwrap();
+    let req = app.snapshot().unwrap().requests[0].clone();
+    let run = admit(&app, &req);
+    let payload = json!({"note_id":b.id,"revision":renamed.revision,"body":"Updated by Agent","execution":{"request_id":req.id,"attempt_number":run.number},"request_key":"note-agent-once"});
+    let saved = app.call("note.write", payload.clone()).unwrap();
+    assert_eq!(app.call("note.write", payload).unwrap(), saved);
+    let history: Vec<NoteEvent> =
+        serde_json::from_value(app.call("note.history", json!({"note_id":b.id})).unwrap()).unwrap();
+    let event = history.last().unwrap();
+    assert_eq!(event.actor, "@developer");
+    assert_eq!(event.card_id, Some(card.id.clone()));
+    assert_eq!(event.attempt, Some(run.number));
+    assert_eq!(
+        history.iter().filter(|e| e.kind == "note.updated").count(),
+        1
+    );
+    let original = app
+        .call("note.revision", json!({"note_id":b.id,"revision":1}))
+        .unwrap();
+    assert_eq!(original["body"], "Original");
+    assert!(
+        app.snapshot()
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.card_id == card.id && e.data["note_id"] == b.id)
+    );
+    let before = app.snapshot().unwrap();
+    assert!(
+        app.call(
+            "note.write",
+            json!({"note_id":b.id,"revision":renamed.revision,"body":"Stale overwrite"})
+        )
+        .is_err()
+    );
+    assert!(app.call("note.write",json!({"note_id":b.id,"revision":saved["revision"],"body":"Bad invocation","execution":{"request_id":req.id,"attempt_number":run.number+1}})).is_err());
+    assert_eq!(before, app.snapshot().unwrap());
+}
+
+#[test]
+fn note_links_and_card_creation_roll_back_on_invalid_scope() {
+    let (d, app, project, _card) = setup();
+    let note: Note = serde_json::from_value(
+        app.call(
+            "note.save",
+            json!({"project_id":project.id,"title":"Idea","body":"Plan"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let other: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name":"Other","directory":d.path().join("other")}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let foreign: Note = serde_json::from_value(
+        app.call(
+            "note.save",
+            json!({"project_id":other.id,"title":"Foreign","body":"Keep"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let before = app.snapshot().unwrap();
+    assert!(app.call("note.write",json!({"note_id":note.id,"revision":note.revision,"body":format!("[x](note:{})",foreign.id)})).is_err());
+    assert!(
+        app.call(
+            "card.create",
+            json!({"project_id":other.id,"title":"Invalid","source_note_id":note.id})
+        )
+        .is_err()
+    );
+    assert_eq!(before, app.snapshot().unwrap());
+    let card:Card=serde_json::from_value(app.call("card.create",json!({"project_id":project.id,"title":"Scoped work","body":"Implement scope","source_note_id":note.id})).unwrap()).unwrap();
+    assert_eq!(card.stage, "backlog");
+    assert_eq!(card.context_notes, Some(vec![note.id.clone()]));
+    assert!(app.snapshot().unwrap().requests.is_empty());
+    let saved: Note =
+        serde_json::from_value(app.call("note.get", json!({"note_id":note.id})).unwrap()).unwrap();
+    assert_eq!(saved.card_ids, vec![card.id.clone()]);
+    app.call(
+        "card.context.update",
+        json!({"card_id":card.id,"revision":card.revision,"note_ids":[]}),
+    )
+    .unwrap();
+    let saved: Note =
+        serde_json::from_value(app.call("note.get", json!({"note_id":note.id})).unwrap()).unwrap();
+    assert!(saved.card_ids.is_empty());
+    let events: Vec<NoteEvent> = serde_json::from_value(
+        app.call("note.history", json!({"note_id":note.id}))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(events.last().unwrap().kind, "note.card_unlinked");
+}
+
+#[test]
+fn upgrading_existing_notes_retains_current_revision_without_inventing_history() {
+    let (d, app, project, _) = setup();
+    let n: Note = serde_json::from_value(
+        app.call(
+            "note.save",
+            json!({"project_id":project.id,"title":"Existing","body":"Keep me"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let db = rusqlite::Connection::open(d.path().join("home/canban.sqlite")).unwrap();
+    db.execute_batch("DROP TABLE note_events; DROP TABLE note_revisions; PRAGMA user_version=2;")
+        .unwrap();
+    drop(db);
+    drop(app);
+    let store = Store::open(&d.path().join("home")).unwrap();
+    let saved: Note = store.db().get(&n.id).unwrap();
+    assert_eq!(saved.body, "Keep me");
+    let rev: NoteRevision = store.db().get(&format!("{}:1", n.id)).unwrap();
+    assert_eq!(rev.body, saved.body);
+    assert!(store.db().list::<NoteEvent>().unwrap().is_empty());
 }

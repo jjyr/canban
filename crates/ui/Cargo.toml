@@ -19,3 +19,7 @@ canban-app-server.workspace = true
 [[bin]]
 name = "canban-ui"
 path = "src/main.rs"
+
+[[example]]
+name = "gallery"
+path = "../../examples/gallery/main.rs"

@@ -55,10 +55,9 @@ impl AppServer {
             }
             "config.get" => Ok(serde_json::to_value(config)?),
             "config.reload" => {
-                let c: Config =
-                    serde_json::from_slice(&std::fs::read(self.home.join("config/agents.json"))?)?;
-                Self::validate_config(&c)?;
+                let (c, migration) = Self::read_config(&self.home)?;
                 self.validate_references(&c)?;
+                Self::publish_migration(&self.home, migration)?;
                 *self.config.write().unwrap() = c;
                 self.emit("configuration", None);
                 Ok(json!({"reloaded":true}))
@@ -74,8 +73,12 @@ impl AppServer {
                     )?)?
                 };
                 Self::validate_workflow(&config, &workflow)?;
-                let project =
+                let mut project =
                     canban_kanban::project(strp(&p, "name")?, strp(&p, "directory")?, workflow)?;
+                project.target_branch = p["target_branch"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .or_else(|| canban_workspaces::review::current_branch(&project.directory));
                 self.mutate(method, &p, |db| {
                     db.save(&project)?;
                     Ok(serde_json::to_value(project)?)
@@ -84,14 +87,25 @@ impl AppServer {
             "card.create" => self.mutate(method, &p, |db| {
                 let project: Project = db.get(strp(&p, "project_id")?)?;
                 let number = db.counter(&format!("cards:{}", project.id))?;
-                let c = canban_kanban::card(
+                let mut c = canban_kanban::card(
                     &project,
                     number,
                     strp(&p, "title")?,
                     p["body"].as_str().unwrap_or(""),
                     strings(&p, "tags"),
                 )?;
-                db.save(&c)?;
+                if let Some(note_id) = p["source_note_id"].as_str() {
+                    let note: Note = db.get(note_id)?;
+                    ensure!(
+                        note.project_id == project.id,
+                        "Source Note belongs to a different Project"
+                    );
+                    c.context_notes = Some(vec![note.id.clone()]);
+                    db.save(&c)?;
+                    crate::notes::relate_card(db, &note.id, &c, true)?;
+                } else {
+                    db.save(&c)?;
+                }
                 log(
                     db,
                     &c,
@@ -188,6 +202,15 @@ impl AppServer {
                         note.project_id == card.project_id,
                         "Context Note belongs to a different Project"
                     );
+                }
+                let previously = card.context_notes.clone().unwrap_or_default();
+                for id in &previously {
+                    if !notes.contains(id) {
+                        crate::notes::relate_card(db, id, &card, false)?;
+                    }
+                }
+                for id in &notes {
+                    crate::notes::relate_card(db, id, &card, true)?;
                 }
                 card.context_notes = Some(notes.clone());
                 card.revision += 1;
@@ -307,44 +330,21 @@ impl AppServer {
                 }
                 Ok(json!({"ok":true}))
             }),
-            "note.save" => self.mutate(method, &p, |db| {
-                let project: Project = db.get(strp(&p, "project_id")?)?;
-                let mut note = if let Some(id) = p["note_id"].as_str() {
-                    let n: Note = db.get(id)?;
-                    ensure!(n.project_id == project.id, "Note is in a different Project");
-                    ensure!(
-                        p["revision"].as_u64() == Some(n.revision),
-                        "Note revision conflict"
-                    );
-                    n
-                } else {
-                    Note {
-                        id: id(),
-                        project_id: project.id,
-                        title: String::new(),
-                        body: String::new(),
-                        revision: 0,
-                        created_at: now(),
-                    }
-                };
-                note.title = strp(&p, "title")?.into();
-                note.body = strp(&p, "body")?.into();
-                note.revision += 1;
-                db.save(&note)?;
-                Ok(serde_json::to_value(note)?)
-            }),
+            "note.list" | "note.get" | "note.read" | "note.history" | "note.revision" => {
+                self.note_read(method, &p)
+            }
+            "note.save" | "note.write" | "note.rename" => self.note_write(method, p),
+            "review.preview" => self.review_preview(p),
+            "review.merge" => self.review_merge(p),
             "agent.open" => self.open_agent(p),
             "agent.bind" => self.bind_session(p),
-            "agent.turn_ended" => self.turn_ended(p),
+            // Old in-flight hook commands can finish, but never drive lifecycle.
+            "agent.turn_ended" => Ok(json!({"deprecated":true,"recorded":false,"source":"herdr"})),
+            "profile.presets" => Ok(serde_json::to_value(canban_profiles::presets(&self.home)?)?),
             "agent.reply" => self.reply(p),
             "agent.interrupt" => self.control_agent(p, false),
             "agent.end" => self.control_agent(p, true),
-            "execution.report" => {
-                if p["session_id"].is_string() {
-                    self.bind_session(json!({"request_id":p["execution"]["request_id"],"attempt":p["execution"]["attempt_number"],"session_id":p["session_id"]}))?;
-                }
-                self.report(p)
-            }
+            "execution.report" => self.report(p),
             "execution.retry" => self.mutate(method, &p, |db| {
                 let mut req: Request = db.get(strp(&p, "request_id")?)?;
                 let c: Card = db.get(&req.card_id)?;

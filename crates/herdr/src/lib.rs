@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, ensure};
-use canban_types::{Config, Profile};
+use canban_types::Config;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -111,22 +111,11 @@ impl Client {
     }
     pub fn launch(
         &self,
-        profile: &Profile,
-        prompt: &str,
+        argv: Vec<String>,
         cwd: &str,
         env: BTreeMap<String, String>,
         labels: BTreeMap<String, String>,
-        home: &str,
     ) -> Result<Value> {
-        let argv = if let Some(template) = &profile.template {
-            vec![template.clone(), prompt.into()]
-        } else {
-            profile
-                .argv
-                .iter()
-                .map(|s| s.replace("{home}", home).replace("{prompt}", prompt))
-                .collect()
-        };
         ensure!(!argv.is_empty(), "Agent profile has no launch command");
         let result=self.call("terminal.run",json!({"argv":argv,"cwd":cwd,"env":env,"labels":labels,"no_parent":true,"no_notify":true,"outlive_parent":true,"wait":false}))?;
         Ok(result)

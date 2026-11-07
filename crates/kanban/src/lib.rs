@@ -14,6 +14,7 @@ pub fn project(name: &str, directory: &str, workflow: Workflow) -> Result<Projec
         name: name.trim().into(),
         directory: std::fs::canonicalize(path)?.to_string_lossy().into_owned(),
         workflow,
+        target_branch: None,
         created_at: now(),
     })
 }
@@ -40,6 +41,7 @@ pub fn card(
         archive: None,
         archive_error: None,
         worktree: None,
+        delivery: None,
         created_at: now(),
     })
 }

@@ -12,6 +12,8 @@ crates/
   kanban/            package: canban-kanban
   workflow-engine/   package: canban-workflow-engine
   scheduler/         package: canban-scheduler
+  profiles/          package: canban-profiles
+  terminal/          package: canban-terminal
   context/           package: canban-context
   timeline/          package: canban-timeline
   notifications/    package: canban-notifications
@@ -52,7 +54,7 @@ Follow the user-approved [UI architecture and design system](ui-architecture.md)
 
 - Keep generic tokens/styled controls and shared interaction conventions in canban-ui-kit. Keep product components, presenters and screen composition in canban-ui. UI Kit has no AppServer, persistence, Herdr or product-domain dependency.
 - Reuse suitable NSH controls/behavior before implementing custom interaction. Give independently reusable components their own file/module and a concise typed input/event, state, layout and interaction contract; do not make a crate per widget or copy shared controls into screens.
-- Maintain a native Rust/NSH gallery using the production components and deterministic fixtures, including meaningful states and realistic composition scenarios.
+- Maintain the standalone native Rust/NSH Gallery in `examples/gallery`, importing production components with deterministic fixtures and meaningful composition states. Use `mise run gallery` for UI component checks; keep its entry/fixture data out of the production app.
 - Reuse shared tokens and explicit component variants. Extend the shared design contract when a new semantic need arises rather than applying inconsistent screen-specific overrides.
 - Fix defects in their owning layer, retain useful reproductions/regression cases and verify affected consumers. Compilation or screenshots alone do not establish native focus, IME, drag or scroll acceptance. Use verification appropriate to the change.
 - Build the system through a useful Board -> Card detail -> comment/mention -> Timeline slice, then extend it with subsequent product surfaces. Do not build an exhaustive speculative component library first.

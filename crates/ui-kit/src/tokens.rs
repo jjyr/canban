@@ -18,3 +18,13 @@ pub const DANGER: AdaptiveColor = tone(0xad3c36, 0xffa39c);
 pub const SUCCESS: AdaptiveColor = tone(0x27745c, 0x7dd6b5);
 pub const RADIUS: f32 = 8.0;
 pub const CONTROL_HEIGHT: f32 = 34.0;
+
+pub const SELECTED: AdaptiveColor = tone(0xe8effb, 0x26364e);
+pub const ATTENTION: AdaptiveColor = tone(0x875a13, 0xf0c679);
+pub const ATTENTION_SURFACE: AdaptiveColor = tone(0xfff3da, 0x3a3020);
+pub const SUCCESS_SURFACE: AdaptiveColor = tone(0xe7f3ed, 0x20392f);
+pub const DANGER_SURFACE: AdaptiveColor = tone(0xfbece9, 0x402a2a);
+pub const BODY_SIZE: f32 = 13.0;
+pub const CAPTION_SIZE: f32 = 12.0;
+
+pub const CLEAR: AdaptiveColor = AdaptiveColor::TRANSPARENT;

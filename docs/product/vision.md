@@ -23,7 +23,7 @@ The automation model has two distinct questions: **the stage determines what wor
 - A submitted @agent request starts a fresh conversation; entering an executable stage independently assigns an agent and starts a fresh conversation for its task.
 - Use one Session model for all executions. The difference is the scheduling trigger/input, not a question/stage session type. Canban makes the scheduling decisions and controls the actual runtime through herdr-core.
 - Cards can reference resources and accept pasted images. Local cards are the first backend; GitHub issue cards are a later extension with the same outward card experience.
-- Preserve the original Notes direction: strong editing and preview, ideas/discussion, and selecting context or a preset to turn an idea into actionable work. Card creation can also begin directly on the Board.
+- Notes are file-like documents stored in SQLite with strong editing/preview, a Timeline of related events (including Card and Agent associations/changes), and bidirectional Note links. Agents interact by reading/writing through the Canban CLI; a dedicated Note discussion/composer is outside the current simplified direction. Notes retain ideas and project context and can inform explicit Card creation; Card creation can also begin directly on the Board. See [Notes and workspace](notes-and-workspace.md).
 - Projects choose a Kanban template at creation. JSON-style configuration is the initial customization surface; template UI and deeper migration features follow later. Incompatible stage mappings must be made visible rather than silently applied.
 - Custom workflows can be created by people or with agent assistance.
 - Canban must expose an interface that agents can call directly.
@@ -59,7 +59,7 @@ Canban
   +-- Scheduler / schedules
 ```
 
-Project is now the chosen product term. The exact relationship and storage of Notes remain open; the diagram preserves the earlier note-editing and discussion direction without deciding a full document hierarchy.
+Project is now the chosen product term. Notes are Project-owned SQLite documents with saved revisions, related-event history, stable links and explicit Card associations; they do not own a separate Agent chat lifecycle.
 
 ## Human Context contract
 

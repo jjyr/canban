@@ -22,13 +22,13 @@ Clicking a Card Agent focuses its queued/live request; an exited conversation ge
 
 ```text
 explicit completed report -> save outcome + apply callback once
-                          -> wait for a later provider turn-end
-                          -> request normal /exit -> observe exited
+                          -> wait for a later relevant Herdr root done
+                          -> apply the configured normal-exit action -> observe exited
                           -> retain provider binding for Resume
 ```
 
 Turn-end, idle, a reply and process exit are not completion. Exit without a report needs attention. A close failure/timeout remains inspectable; Canban does not automatically kill it. Interrupt targets the live PTY; End session explicitly kills it. Closing the terminal screen only detaches its viewer. Core identity is checked before sending input/control/exit.
 
-SQLite WAL stores Conversation and Question metadata alongside requests/attempts. Long captured context, replies, final responses and reports are Card-owned files. Archive compresses these files and record exports but does not back up provider-owned histories. Restore is required before invoking an archived Card; a removed clean worktree can be recreated from its retained Card ref. Missing provider history fails visibly; Start with retained Card context is an explicit fresh-context recovery action.
+SQLite WAL stores Conversation and Question metadata alongside requests/attempts. Long captured context, replies, reports and retained terminal output are Card-owned files. Historical final-response snapshots remain readable; the current lifecycle does not capture provider callback payloads. Archive compresses these files and record exports but does not back up provider-owned histories. Restore is required before invoking an archived Card; a removed clean worktree can be recreated from its retained Card ref. Missing provider history fails visibly; Start with retained Card context is an explicit fresh-context recovery action.
 
 AppServer restart never blindly replays a launch without its receipt, an uncertain question delivery or a physical terminal control intent. These remain unknown/attention for inspection. Provider lifecycle/terminal acceptance limits are in [implementation](../implementation.md).

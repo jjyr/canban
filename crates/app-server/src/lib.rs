@@ -22,6 +22,7 @@ pub struct AppServer {
     cli: PathBuf,
     listeners: Mutex<Vec<mpsc::Sender<AppEvent>>>,
     stop: AtomicBool,
+    review_gate: Mutex<()>,
 }
 pub struct Running {
     server: Arc<AppServer>,
@@ -158,35 +159,9 @@ impl AppServer {
         let store = Store::open(&home)?;
         let path = home.join("config/agents.json");
         if !path.exists() {
-            let mut initial = Config::default();
-            let resolve = |program: &str| {
-                let mut paths =
-                    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-                        .collect::<Vec<_>>();
-                if let Some(home) = std::env::var_os("HOME") {
-                    paths.push(PathBuf::from(home).join(".local/bin"));
-                }
-                paths.extend([
-                    PathBuf::from("/opt/homebrew/bin"),
-                    PathBuf::from("/usr/local/bin"),
-                ]);
-                paths
-                    .into_iter()
-                    .map(|p| p.join(program))
-                    .find(|p| p.is_file())
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| program.into())
-            };
-            initial.hc = resolve(&initial.hc);
-            for profile in &mut initial.profiles {
-                if let Some(program) = profile.argv.first_mut() {
-                    *program = resolve(program);
-                }
-            }
-            canban_context::atomic(&path, &serde_json::to_vec_pretty(&initial)?)?;
+            canban_context::atomic(&path, &serde_json::to_vec_pretty(&Config::default())?)?;
         }
-        let config: Config = serde_json::from_slice(&std::fs::read(path)?)?;
-        Self::validate_config(&config)?;
+        let (config, migration) = Self::read_config(&home)?;
         let flow = home.join("config/workflows/default.json");
         if !flow.exists() {
             let mut initial = Workflow::default();
@@ -208,6 +183,7 @@ impl AppServer {
         for project in store.db().list::<Project>()? {
             Self::validate_workflow(&config, &project.workflow)?;
         }
+        Self::publish_migration(&home, migration)?;
         Ok(Arc::new(Self {
             home,
             store: Mutex::new(store),
@@ -215,7 +191,35 @@ impl AppServer {
             cli,
             listeners: Mutex::new(Vec::new()),
             stop: AtomicBool::new(false),
+            review_gate: Mutex::new(()),
         }))
+    }
+    fn read_config(home: &Path) -> Result<(Config, Option<Vec<u8>>)> {
+        let bytes = std::fs::read(home.join("config/agents.json"))?;
+        let mut value: Value = serde_json::from_slice(&bytes)?;
+        let changed = canban_profiles::migrate(&mut value)?;
+        let raw: Config = serde_json::from_value(value.clone())?;
+        let config = canban_profiles::resolve(raw, home)?;
+        Self::validate_config(&config)?;
+        Ok((
+            config,
+            if changed {
+                Some(serde_json::to_vec_pretty(&value)?)
+            } else {
+                None
+            },
+        ))
+    }
+    fn publish_migration(home: &Path, bytes: Option<Vec<u8>>) -> Result<()> {
+        if let Some(bytes) = bytes {
+            let path = home.join("config/agents.json");
+            let backup = home
+                .join("config")
+                .join(format!("agents.legacy-{}.json", id()));
+            canban_context::atomic(&backup, &std::fs::read(&path)?)?;
+            canban_context::atomic(&path, &bytes)?;
+        }
+        Ok(())
     }
     fn validate_config(c: &Config) -> Result<()> {
         let mut ids = std::collections::HashSet::new();
@@ -224,10 +228,7 @@ impl AppServer {
                 !p.id.is_empty() && ids.insert(&p.id),
                 "Profile IDs must be nonempty and unique"
             );
-            ensure!(
-                !p.argv.is_empty() || p.template.is_some(),
-                "Profile needs a command/template"
-            );
+            ensure!(!p.command().is_empty(), "Profile needs a launch command");
         }
         ensure!(
             ids.contains(&c.default_agent),
@@ -323,7 +324,8 @@ impl AppServer {
 }
 
 mod commands;
-mod providers;
+
+mod notes;
 mod reports;
 mod resources;
 mod runtime;
@@ -360,3 +362,5 @@ pub fn rpc(endpoint: &Path, method: &str, params: Value) -> Result<Value> {
 
 #[cfg(test)]
 mod tests;
+
+mod review;

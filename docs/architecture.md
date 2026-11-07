@@ -173,3 +173,28 @@ Do not infer an always-on promise from either the core's holder design or the lo
 The architecture boundaries are now sufficiently clear for a small vertical slice: native card interaction -> shared operation/history -> automatic core launch -> agent report -> normal Review/report -> attention/notification.
 
 Verify native UI/state-update integration, existing-agent startup and reporting, persistence/restart, optional terminal takeover, and the chosen application lifetime. The [MVP interface contract](interfaces/mvp-contract.md) and [CLI/RPC/MCP research](research/agent-interface-options.md) specify proposed boundaries; neither is implemented acceptance evidence. No app implementation or runtime validation was performed in this documentation work.
+
+## Implemented profile, runtime and delivery boundaries (2026-11-07)
+
+```text
+JSON presets + user overrides -> canban-profiles
+                                       | resolved commands/exit
+Workflow Engine -> Scheduler ------> AppServer
+                       routing          |
+                  +---------------------+----------------------+
+                  |                     |                      |
+             canban-herdr        canban-workspaces       storage/context
+          launch/status/control   prepare/review/merge    WAL + Card files
+                  |                     |                      |
+             Herdr Core             Git checkouts        durable Timeline
+                  |
+                PTY <-------------- canban-terminal
+                  |                 libghostty + AppKit
+                Agent                      ^
+                  |                        |
+       canban report/reply/bind          native NSH UI
+                  |                        |
+                  +------ AppServer <------+- Review operations
+```
+
+Runtime invocation is generic: provider-specific command syntax lives in editable JSON presets, without Rust Codex/Claude lifecycle branches. Herdr owns observations/control; explicit Canban outcomes still advance workflow. Review acceptance is a shared operation with a persisted intent before Git effects, conflict retention in the Card worktree, and a durable delivery receipt. Archive remains a separate storage/worktree-lifetime action. See [profiles](product/agent-profiles.md), [Review delivery](product/review-delivery.md) and [executed acceptance](mvp-acceptance.md).

@@ -31,6 +31,9 @@ unsafe extern "C" {
 struct State {
     model: Model,
     status: String,
+    connected: bool,
+    size_ready: bool,
+    focused: bool,
 }
 enum Input {
     Bytes(Vec<u8>),
@@ -45,6 +48,7 @@ struct Host {
     seen: u64,
     seen_status: String,
     binding: String,
+    content: Option<String>,
     read_only: bool,
 }
 impl Host {
@@ -53,6 +57,9 @@ impl Host {
             state: Arc::new(Mutex::new(State {
                 model: Model::new(80, 24),
                 status: String::new(),
+                connected: false,
+                size_ready: false,
+                focused: false,
             })),
             input: None,
             stop: Arc::new(AtomicBool::new(false)),
@@ -60,6 +67,7 @@ impl Host {
             seen: u64::MAX,
             seen_status: String::new(),
             binding: String::new(),
+            content: None,
             read_only: false,
         }
     }
@@ -69,11 +77,15 @@ impl Host {
             return;
         }
         self.binding = key;
+        self.content = None;
         self.stop.store(true, Ordering::SeqCst);
         self.stop = Arc::new(AtomicBool::new(false));
         self.state = Arc::new(Mutex::new(State {
             model: Model::new(80, 24),
             status: "Connecting…".into(),
+            connected: false,
+            size_ready: false,
+            focused: false,
         }));
         self.seen = u64::MAX;
         let Ok(config) = serde_json::from_value::<Config>(value["config"].clone()) else {
@@ -91,6 +103,14 @@ impl Host {
         self.input = Some(tx);
         std::thread::spawn(move || {
             let client = Client { config };
+            // Layout arrives after set_prop. Attach at the real native size so
+            // Herdr's initial history snapshot is not hard-wrapped at 80 cols.
+            while !state.lock().unwrap().size_ready {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
             while !stop.load(Ordering::SeqCst) {
                 let attempt = (|| -> anyhow::Result<Attachment> {
                     anyhow::ensure!(
@@ -105,11 +125,41 @@ impl Host {
                 let attach = match attempt {
                     Ok(v) => v,
                     Err(e) => {
-                        state.lock().unwrap().status = format!("Could not attach: {e:#}");
-                        break;
+                        {
+                            let mut s = state.lock().unwrap();
+                            s.connected = false;
+                            s.status = format!(
+                                "Could not attach: {e:#} · retrying original terminal; input disabled"
+                            );
+                        }
+                        for _ in rx.try_iter() {} // Never replay input across a lost connection.
+                        for _ in 0..10 {
+                            if stop.load(Ordering::SeqCst) {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(50));
+                        }
+                        continue;
                     }
                 };
-                state.lock().unwrap().status = String::new();
+                for _ in rx.try_iter() {}
+                {
+                    let mut s = state.lock().unwrap();
+                    let size = (s.model.cols, s.model.height);
+                    s.model = Model::new(size.0, size.1);
+                    s.status = String::new();
+                    // Size/focus may have changed while the attach handshake
+                    // was in flight. Dropping stale keystrokes must not lose
+                    // the latest geometry or focus state.
+                    if let Err(e) = attach
+                        .resize(size.0, size.1)
+                        .and_then(|_| attach.focus(s.focused))
+                    {
+                        s.status = format!("Attach setup failed: {e} · reconnecting");
+                        continue;
+                    }
+                    s.connected = true;
+                }
                 let mut reconnect = false;
                 while !stop.load(Ordering::SeqCst) {
                     for input in rx.try_iter() {
@@ -149,7 +199,9 @@ impl Host {
                             state.lock().unwrap().model.resize(c, r);
                         }
                         Ok(Some(Event::Closed(reason))) => {
-                            state.lock().unwrap().status = format!(
+                            let mut s = state.lock().unwrap();
+                            s.connected = false;
+                            s.status = format!(
                                 "Terminal exited · {}",
                                 reason["reason"].as_str().unwrap_or("closed")
                             );
@@ -169,6 +221,7 @@ impl Host {
                         _ => {}
                     }
                 }
+                state.lock().unwrap().connected = false;
                 drop(attach);
                 if !reconnect {
                     break;
@@ -186,6 +239,7 @@ impl Host {
 extern "C" fn frame(host: *mut c_void, cols: u16, rows: u16) -> *const i8 {
     let host = unsafe { &mut *(host as *mut Host) };
     let mut state = host.state.lock().unwrap();
+    state.size_ready = true;
     let cols = cols.clamp(2, 500);
     let rows = rows.clamp(1, 200);
     if (state.model.cols, state.model.height) != (cols, rows) {
@@ -233,7 +287,7 @@ fn key(code: u64, text: &str) -> GhosttyKey {
         126 => GHOSTTY_KEY_ARROW_UP,
         _ => {
             if let Some(c) = text.chars().next().filter(|c| c.is_ascii_alphabetic()) {
-                GHOSTTY_KEY_A + (c.to_ascii_lowercase() as i32 - 'a' as i32)
+                GHOSTTY_KEY_A + (c.to_ascii_lowercase() as u32 - 'a' as u32)
             } else {
                 GHOSTTY_KEY_UNIDENTIFIED
             }
@@ -249,6 +303,9 @@ extern "C" fn input(host: *mut c_void, data: *const i8) {
         return;
     }
     let mut state = host.state.lock().unwrap();
+    if !state.connected && matches!(v["kind"].as_str(), Some("text" | "key" | "paste")) {
+        return;
+    }
     let text = v["text"].as_str().unwrap_or("");
     let command = match v["kind"].as_str() {
         Some("text") => Input::Bytes(state.model.key(GHOSTTY_KEY_UNIDENTIFIED, 0, Some(text))),
@@ -277,7 +334,10 @@ extern "C" fn input(host: *mut c_void, data: *const i8) {
                 .scroll(v["delta"].as_i64().unwrap_or(0) as isize);
             return;
         }
-        Some("focus") => Input::Focus(v["value"] == true),
+        Some("focus") => {
+            state.focused = v["value"] == true;
+            Input::Focus(state.focused)
+        }
         _ => return,
     };
     drop(state);
@@ -313,8 +373,17 @@ impl NativeComponent for Terminal {
         {
             self.host.bind(value);
         }
-        if name == "fixture" && value == Some(&json!(true)) {
-            self.host.state.lock().unwrap().model.write("\x1b[1;36mCanban native terminal\x1b[0m\x1b[?25l\r\nUnicode: 世界 · café\r\nSelection, scroll and paste use the production component.\r\n".as_bytes());
+        // Static VT content uses the same renderer without a Core binding.
+        // Replacing content is idempotent; preview data belongs to the caller.
+        if name == "content" && self.host.binding.is_empty() {
+            let content = value.and_then(Value::as_str);
+            if self.host.content.as_deref() != content {
+                self.host.content = content.map(str::to_owned);
+                let mut state = self.host.state.lock().unwrap();
+                state.model = Model::new(state.model.cols, state.model.height);
+                state.model.write(content.unwrap_or("").as_bytes());
+                self.host.seen = u64::MAX;
+            }
         }
     }
 }

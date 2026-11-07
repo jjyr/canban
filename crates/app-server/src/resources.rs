@@ -128,6 +128,12 @@ impl AppServer {
             .unwrap()
             .clone();
         let filtered = Snapshot {
+            note_events: snapshot
+                .note_events
+                .iter()
+                .filter(|v| v.card_id.as_deref() == Some(card_id))
+                .cloned()
+                .collect(),
             conversations: snapshot
                 .conversations
                 .iter()
@@ -230,11 +236,6 @@ impl AppServer {
             c.archived_at = None;
             c.archive = None;
             c.revision += 1;
-            if let Some(path) = &c.worktree
-                && !Path::new(path).exists()
-            {
-                c.worktree = None;
-            }
             db.save(&c)?;
             log(
                 db,

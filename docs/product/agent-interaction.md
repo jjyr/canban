@@ -1,6 +1,6 @@
 # Card-scoped Agent conversations and native terminals
 
-Status: implemented on 2026-11-07. One provider conversation per (Card, profile), interactive start/resume, immediate active mentions with separate CLI replies, native libghostty-vt terminals and turn-boundary normal exit. Real Codex and deterministic Herdr acceptance passed; see [implementation and acceptance](../implementation.md). Claude's launch/hook adapter is implemented but live Claude acceptance is still pending.
+Status: implemented on 2026-11-07. One provider conversation per (Card, profile), interactive start/resume, immediate active mentions with separate CLI replies, native libghostty-vt terminals and turn-boundary normal exit. Real Codex and deterministic Herdr acceptance passed; see [implementation and acceptance](../implementation.md). Claude's preset is implemented; live Claude acceptance still needs valid local authentication.
 
 ## Product model
 
@@ -28,7 +28,7 @@ There is one Session model. The enduring provider conversation differs from a sh
 
 Implemented: define profiles in the application-wide registry, independently of Kanban templates. Canban supplies useful starter configurations; users can add/edit named profiles in JSON. Reuse the existing ~/.canban/config/agents.json location for MVP rather than introducing Project-specific registries or a profile designer.
 
-A profile owns its stable identity, provider launch/resume setup, model/options and durable role instructions. For example, developer and reviewer may both launch Codex while having distinct role instructions and IDs. An Agent profile is also distinct from a Herdr launch template: it may reference one as an execution mechanism, without delegating Card/conversation ownership to Herdr.
+A profile owns its stable identity, provider launch/resume setup, model/options and durable role instructions. For example, developer and reviewer may both launch Codex while having distinct role instructions and IDs. An Agent profile is distinct from a Herdr launch template. Canban invokes resolved commands directly; legacy opaque templates require conversion. See [profile schema](agent-profiles.md).
 
 A Kanban workflow template owns stage definitions, stage-specific task instructions, completion transitions and references to the profiles used for its automatic work. It does not own the reusable profile definition or a live conversation.
 
@@ -104,7 +104,7 @@ Agent explicitly reports completed
        Card/profile conversation remains available for Resume
 ```
 
-The reporting acknowledgment is returned first. Codex notify / Claude root Stop signals the later turn boundary; Canban then sends /exit through Herdr. An earlier ready/answer turn cannot close a later task. Exit delivery is recorded before sending, checked against the owning core, and never blindly repeated. Failure or a 30-second closing timeout is visible and does not kill the process automatically.
+The reporting acknowledgment is returned first. A later Herdr root done with a later turn and fresh status timestamp establishes the boundary; Canban then applies the profile's normal-exit action through Herdr. No notify/Stop hooks are installed. An earlier ready/answer turn cannot close a later task. Exit delivery is recorded before sending, checked against the owning core, and never blindly repeated. Failure or a 30-second closing timeout is visible and does not kill the process automatically.
 
 If shutdown fails, preserve Completed and show Closing failed with the still-live terminal. Do not pretend the history flushed or auto-start a second process into the same conversation. Workflow progression remains independent of cleanup, but a queued invocation reusing this same conversation waits for a usable invocation boundary. This is the minimum consequence of reusing provider history, not a global concurrency cap or generalized process-drain system.
 
@@ -132,7 +132,7 @@ No global, Board or profile concurrency caps are introduced. Different Card/prof
 
 1. Prove provider-ID binding, interactive input/interrupt, explicit report, graceful exit and exact-ID resume with Codex on a disposable Card.
 2. Build native libghostty-vt TerminalView in an NSH native host and validate input/rendering/IME/paste/selection/resize/reconnect.
-3. Apply the same small lifecycle adapter contract to Claude and verify its installed configuration.
+3. Apply the same command/profile contract to Claude and verify its installed configuration after authentication is available.
 4. Verify repeated mentions/click-to-resume of the same Card/configuration keep one provider conversation but distinct execution/report records. Developer and Reviewer configurations, including two Codex configurations, must get separate conversations. A different Card must also get another conversation.
 5. Verify completion-close/new-stage races, blocked dialogs, stale reporting commands, missing history and Archive/Restore paths.
 

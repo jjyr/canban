@@ -52,7 +52,10 @@ impl AppServer {
             let current=req.attempt==number;
             if run.state!="completed" {
                 run.state=state.into();
-                if state=="completed" && req.profile.provider_kind()!="command" {run.close_state="pending".into();run.turn_ended_at=None;}
+                if state=="completed" {
+                    run.close_state=if matches!(req.profile.exit,Some(ExitAction::Input{..})){"waiting"}else{"manual"}.into();
+                    run.completed_at=Some(now());run.completion_turn=Some(run.observed.as_ref().and_then(|v|v["turn"].as_u64()).unwrap_or(0));run.turn_ended_at=None;
+                }
                 db.save(&run)?;
             }
             if current && req.state!="completed" {

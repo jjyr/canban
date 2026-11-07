@@ -1,6 +1,8 @@
+use crate::drafts::Draft;
 use canban_types::*;
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 #[derive(Clone, Copy)]
 pub struct Ui {
     pub snapshot: Signal<Snapshot>,
@@ -14,8 +16,36 @@ pub struct Ui {
     pub refreshing: Signal<bool>,
     pub output: Signal<String>,
     pub output_request: Signal<u64>,
+    pub review: Signal<Option<ReviewPreview>>,
+    pub review_request: Signal<u64>,
+    pub board_filter: Signal<String>,
+    pub note: Signal<String>,
+    pub source_note: Signal<String>,
+    pub drafts: Stored<BTreeMap<String, Draft>>,
+    pub scrolls: Stored<BTreeMap<String, Point<Points>>>,
+    pub narrow: Signal<bool>,
+    pub expanded: Signal<bool>,
+    pub focused_card: Signal<bool>,
+    pub board_width: Signal<f32>,
+    pub focus_width: Signal<f32>,
+}
+impl Default for Ui {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 impl Ui {
+    pub fn clear_output(self) {
+        self.output_request
+            .set(self.output_request.get_untracked() + 1);
+        self.output.set(String::new());
+    }
+    pub fn navigate(self, page: &str) {
+        self.clear_output();
+        self.review_request
+            .set(self.review_request.get_untracked() + 1);
+        self.page.set(page.into());
+    }
     pub fn new() -> Self {
         Self {
             snapshot: signal(Snapshot::default()),
@@ -34,6 +64,18 @@ impl Ui {
             refreshing: signal(false),
             output: signal(String::new()),
             output_request: signal(0),
+            review: signal(None),
+            review_request: signal(0),
+            board_filter: signal("all".into()),
+            note: signal(String::new()),
+            source_note: signal(String::new()),
+            drafts: stored(BTreeMap::new()),
+            scrolls: stored(BTreeMap::new()),
+            narrow: signal(false),
+            expanded: signal(false),
+            focused_card: signal(false),
+            board_width: signal(700.0),
+            focus_width: signal(420.0),
         }
     }
     pub fn current_card(self) -> Option<Card> {
@@ -53,11 +95,52 @@ impl Ui {
         })
     }
     pub fn open_card(self, id: String) {
+        self.review.set(None);
+        self.review_request
+            .set(self.review_request.get_untracked() + 1);
+        if let Some(project) = self.snapshot.with_untracked(|s| {
+            s.cards
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.project_id.clone())
+        }) {
+            self.project.set(project);
+        }
         self.card.set(id);
+        self.expanded.set(false);
+        self.focused_card.set(false);
         self.output.set(String::new());
         self.output_request
             .set(self.output_request.get_untracked() + 1);
         self.page.set("card".into());
+    }
+    pub fn back_board(self) {
+        self.review_request
+            .set(self.review_request.get_untracked() + 1);
+        self.page.set(
+            if self.card.get_untracked().is_empty() || self.narrow.get_untracked() {
+                "board".into()
+            } else {
+                "card".into()
+            },
+        );
+        self.expanded.set(false);
+        self.focused_card.set(false);
+    }
+    pub fn open_note(self, id: String) {
+        if let Some(project) = self.snapshot.with_untracked(|s| {
+            s.notes
+                .iter()
+                .find(|n| n.id == id)
+                .map(|n| n.project_id.clone())
+        }) {
+            self.project.set(project);
+        }
+        self.output_request
+            .set(self.output_request.get_untracked() + 1);
+        self.output.set(String::new());
+        self.note.set(id);
+        self.page.set("notes".into());
     }
 }
 pub fn refresh(ui: Ui) {
@@ -65,7 +148,11 @@ pub fn refresh(ui: Ui) {
         return;
     }
     ui.refreshing.set(true);
-    let app = crate::APP.get().unwrap().clone();
+    let Some(app) = crate::APP.get().cloned() else {
+        ui.status
+            .set("Gallery preview: no AppServer connected".into());
+        return;
+    };
     spawn(async move {
         let result = blocking(move || {
             app.snapshot()
@@ -102,20 +189,36 @@ pub fn dispatch(ui: Ui, method: &'static str, params: Value) {
 pub fn dispatch_then(
     ui: Ui,
     method: &'static str,
-    mut params: Value,
+    params: Value,
     after: impl FnOnce(Value) + 'static,
 ) {
+    dispatch_complete(ui, method, params, move |result| {
+        if let Ok(value) = result {
+            after(value);
+        }
+    });
+}
+pub fn dispatch_complete(
+    ui: Ui,
+    method: &'static str,
+    mut params: Value,
+    after: impl FnOnce(Result<Value, String>) + 'static,
+) {
     if ui.pending.get_untracked() {
-        ui.status
-            .set("Please wait for the current operation".into());
+        after(Err(
+            "Another operation is pending; your draft is retained".into()
+        ));
         return;
     }
+    let Some(app) = crate::APP.get().cloned() else {
+        after(Err("Gallery preview: no AppServer connected".into()));
+        return;
+    };
     ui.pending.set(true);
     ui.status.set(format!("{method}…"));
     if params.get("request_key").is_none() {
         params["request_key"] = json!(id());
     }
-    let app = crate::APP.get().unwrap().clone();
     spawn(async move {
         let result = blocking(move || {
             let value = app.call(method, params)?;
@@ -126,32 +229,49 @@ pub fn dispatch_then(
             Ok(Ok((value, snapshot, profiles))) => {
                 ui.profiles.set(profiles);
                 ui.snapshot.set(snapshot);
-                ui.status.set(format!("{method} saved"));
+                ui.status.set(match value["state"].as_str() {
+                    Some("failed" | "unknown") => format!(
+                        "{}: {}",
+                        method,
+                        value["message"]
+                            .as_str()
+                            .unwrap_or("Inspect before retrying")
+                    ),
+                    _ => "Saved".into(),
+                });
                 match method {
                     "project.create" => {
                         if let Some(id) = value["id"].as_str() {
                             ui.project.set(id.into());
+                            ui.card.set(String::new());
                             ui.page.set("board".into());
                         }
                     }
                     "card.create" => {
                         if let Some(id) = value["id"].as_str() {
                             ui.open_card(id.into());
+                            ui.source_note.set(String::new());
                         }
                     }
                     "card.archive" => ui.page.set("archive".into()),
                     "herdr.status" => ui.status.set(format!(
-                        "Herdr {} connected · core {} · {} live terminals",
-                        value["version"].as_str().unwrap_or(""),
-                        value["core"]["id"].as_str().unwrap_or(""),
-                        value["live"]
+                        "Herdr connected · core {}",
+                        value["core"]["id"].as_str().unwrap_or("")
                     )),
                     _ => {}
                 }
-                after(value);
+                after(Ok(value));
             }
-            Ok(Err(e)) => ui.status.set(format!("Error: {e:#}")),
-            Err(e) => ui.status.set(format!("Worker error: {e}")),
+            Ok(Err(e)) => {
+                let error = format!("{e:#}");
+                ui.status.set(error.clone());
+                after(Err(error));
+            }
+            Err(e) => {
+                let error = e.to_string();
+                ui.status.set(error.clone());
+                after(Err(error));
+            }
         }
         ui.pending.set(false);
     });
@@ -172,7 +292,11 @@ pub fn load_text(ui: Ui, method: &'static str, params: Value) {
     let generation = ui.output_request.get_untracked() + 1;
     ui.output_request.set(generation);
     ui.output.set("Loading…".into());
-    let app = crate::APP.get().unwrap().clone();
+    let Some(app) = crate::APP.get().cloned() else {
+        ui.status
+            .set("Gallery preview: no AppServer connected".into());
+        return;
+    };
     spawn(async move {
         let result = blocking(move || app.call(method, params)).await;
         if ui.output_request.get_untracked() != generation {
@@ -195,20 +319,35 @@ pub fn paste_resources(
     card_id: String,
     event: &nsh_core::PasteEvent,
     draft: Signal<String>,
+    comment: bool,
 ) {
     if event.files.is_empty() {
         return;
     }
     let files = event.files.clone();
-    let app = crate::APP.get().unwrap().clone();
+    let Some(app) = crate::APP.get().cloned() else {
+        return;
+    };
+    let owner = format!("card:{card_id}");
     spawn(async move {
         let result=blocking(move||{let mut refs=Vec::new();for file in files{let value=app.call("attachment.add",json!({"card_id":card_id,"name":file.name,"media_type":file.mime,"bytes":file.data,"request_key":id()}))?;refs.push(format!("[{}](attachment:{})",value["name"].as_str().unwrap_or("Attachment"),value["id"].as_str().unwrap_or("")));}Ok::<_,anyhow::Error>(refs)}).await;
         match result {
             Ok(Ok(refs)) => {
-                draft.update(|body| {
-                    body.push_str("\n\n");
-                    body.push_str(&refs.join("\n"));
-                });
+                let addition = format!("\n\n{}", refs.join("\n"));
+                if let Some(mut body) = draft.try_get() {
+                    body.push_str(&addition);
+                    draft.try_set(body);
+                } else {
+                    ui.drafts.with(|m| {
+                        if let Some(value) = m.get_mut(&owner) {
+                            if comment {
+                                value.comment.push_str(&addition);
+                            } else {
+                                value.body.push_str(&addition);
+                            }
+                        }
+                    });
+                }
                 ui.status.set("Pasted attachments saved".into());
                 refresh(ui);
             }
@@ -219,7 +358,11 @@ pub fn paste_resources(
 }
 
 pub fn open_resource(ui: Ui, card_id: String, path: String) {
-    let app = crate::APP.get().unwrap().clone();
+    let Some(app) = crate::APP.get().cloned() else {
+        ui.status
+            .set("Gallery preview: no AppServer connected".into());
+        return;
+    };
     spawn(async move {
         match blocking(move || {
             let value = app.call(

@@ -57,6 +57,8 @@ macro_rules! record {
 }
 record!(Project, "projects");
 record!(Note, "notes", project);
+record!(NoteRevision, "note_revisions", project);
+record!(NoteEvent, "note_events", project);
 record!(Notice, "notifications", card);
 record!(Artifact, "artifacts", card);
 record!(Report, "reports", card);
@@ -148,7 +150,7 @@ impl Store {
         anyhow::ensure!(mode == "wal", "SQLite WAL could not be enabled");
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 2,
+            version <= 3,
             "Database schema is newer than this application"
         );
         if version == 0 {
@@ -180,6 +182,22 @@ impl Store {
         }
         if version < 2 {
             conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE conversations (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id),card_id TEXT REFERENCES cards(id),state TEXT NOT NULL,number INTEGER NOT NULL,data TEXT NOT NULL); CREATE UNIQUE INDEX conversation_profiles ON conversations(card_id,json_extract(data,'$.profile_id')); CREATE TABLE questions (id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),card_id TEXT REFERENCES cards(id),state TEXT NOT NULL,number INTEGER NOT NULL,data TEXT NOT NULL); PRAGMA user_version=2; COMMIT;")?;
+        }
+        if version < 3 {
+            conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE note_revisions (id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),card_id TEXT,state TEXT NOT NULL,number INTEGER NOT NULL,data TEXT NOT NULL); CREATE TABLE note_events (id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),card_id TEXT,state TEXT NOT NULL,number INTEGER NOT NULL,data TEXT NOT NULL); CREATE UNIQUE INDEX note_revision_order ON note_revisions(json_extract(data,'$.note_id'),json_extract(data,'$.revision')); CREATE UNIQUE INDEX note_event_order ON note_events(json_extract(data,'$.note_id'),json_extract(data,'$.sequence'));")?;
+            let db = Db { conn: &conn };
+            for n in db.list::<Note>()? {
+                db.save(&NoteRevision {
+                    id: format!("{}:{}", n.id, n.revision),
+                    project_id: n.project_id.clone(),
+                    note_id: n.id.clone(),
+                    revision: n.revision,
+                    title: n.title,
+                    body: n.body,
+                    created_at: n.created_at,
+                })?;
+            }
+            conn.execute_batch("PRAGMA user_version=3; COMMIT;")?;
         }
         Ok(Self {
             conn,
@@ -250,6 +268,7 @@ impl Db<'_> {
             artifacts: self.list()?,
             conversations: self.list()?,
             questions: self.list()?,
+            note_events: self.list()?,
         })
     }
 }

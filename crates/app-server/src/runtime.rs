@@ -11,6 +11,19 @@ fn uuid_session_id() -> String {
     )
 }
 
+/// A bare turn change includes interruptions and permission dialogs. Require a
+/// later root `done` for this invocation, never an old idle/completed screen.
+pub(super) fn completion_ready(run: &Attempt, value: &Value) -> bool {
+    value["state"] != "finished"
+        && value["status"]["state"] == "done"
+        && value["turn"]
+            .as_u64()
+            .is_some_and(|t| t > run.completion_turn.unwrap_or(u64::MAX))
+        && run
+            .completed_at
+            .is_some_and(|at| value["status_ms"].as_u64().is_some_and(|t| t >= at))
+}
+
 impl AppServer {
     pub fn start(self: &Arc<Self>) -> Result<Running> {
         let socket = self.endpoint();
@@ -115,13 +128,34 @@ impl AppServer {
             .cloned()
             .collect();
         if !bound.is_empty() {
-            let core = client.status()?;
+            let core = match client.status() {
+                Ok(core) => core,
+                Err(e) => {
+                    for run in &bound {
+                        self.connection_lost(
+                            run,
+                            "unavailable",
+                            &format!("Herdr unavailable: {e:#}"),
+                        )?;
+                    }
+                    return Ok(());
+                }
+            };
             for run in bound {
                 if run.core_id.as_deref() != core["core"]["id"].as_str() {
+                    self.connection_lost(&run,"replaced","Original Herdr core identity changed; inspect the original runtime before starting a replacement")?;
                     continue;
                 }
-                let Ok(value) = client.get(run.terminal.as_ref().unwrap()) else {
-                    continue;
+                let value = match client.get(run.terminal.as_ref().unwrap()) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        self.connection_lost(
+                            &run,
+                            "unavailable",
+                            &format!("Original terminal unavailable: {e:#}"),
+                        )?;
+                        continue;
+                    }
                 };
                 let finished = value["state"] == "finished";
                 if finished && run.output_path.is_none() {
@@ -129,11 +163,19 @@ impl AppServer {
                 }
                 let observed = canban_herdr::observation(&value);
                 if run.observed.as_ref() != Some(&observed)
+                    || run.connection_state != "connected"
                     || (finished && run.close_state != "closed")
                 {
                     self.store.lock().unwrap().write(|db|{
                         let mut current:Attempt=db.get(&run.id)?;
                         current.observed=Some(observed.clone());
+                        if matches!(current.connection_state.as_str(),"unavailable"|"replaced") {
+                            log(db,&db.get::<Card>(&run.card_id)?,"execution.reconnected","system","Reconnected to the original terminal",Some(run.request_id.clone()),json!({"terminal":run.terminal}))?;
+                        }
+                        current.connection_state="connected".into();
+                        if current.close_state=="waiting" && completion_ready(&current,&observed) {
+                            current.close_state="pending".into();current.turn_ended_at=Some(now());
+                        }
                         if finished {
                             current.close_state="closed".into();
                             if matches!(current.state.as_str(),"running"|"working"|"starting") {
@@ -152,7 +194,7 @@ impl AppServer {
             }
         }
         self.store.lock().unwrap().write(|db| {
-            for mut run in db.list::<Attempt>()?.into_iter().filter(|a| a.close_state == "closing" && a.turn_ended_at.is_some_and(|t| now().saturating_sub(t) > 30_000)) {
+            for mut run in db.list::<Attempt>()?.into_iter().filter(|a| a.close_state == "closing" && a.close_requested_at.is_some_and(|t| now().saturating_sub(t) > 30_000)) {
                 run.close_state = "error".into();
                 run.error = Some("Agent did not exit after the normal exit request. Inspect its terminal or use End session.".into());
                 let mut card: Card = db.get(&run.card_id)?;
@@ -160,6 +202,14 @@ impl AppServer {
                 card.revision += 1;
                 db.save(&card)?;
                 db.save(&run)?;
+            }
+            Ok(())
+        })?;
+        self.store.lock().unwrap().write(|db| {
+            for mut run in db.list::<Attempt>()?.into_iter().filter(|a|a.close_state=="waiting" && a.completed_at.is_some_and(|t|now().saturating_sub(t)>60_000) && a.observed.as_ref().is_none_or(|v|v["status"]["state"].as_str().is_none_or(|s|s.is_empty()||s=="unknown"))) {
+                run.close_state="manual".into();
+                run.error=Some("Completion was recorded, but Herdr supplied no usable Agent status. Automatic exit is disabled; use the terminal or End session.".into());
+                let mut card:Card=db.get(&run.card_id)?;attention(db,&mut card,run.error.as_deref().unwrap())?;card.revision+=1;db.save(&card)?;db.save(&run)?;
             }
             Ok(())
         })?;
@@ -207,7 +257,35 @@ impl AppServer {
         }
         Ok(())
     }
-    fn deliver_questions(&self, client: &canban_herdr::Client) -> Result<()> {
+    fn connection_lost(&self, run: &Attempt, state: &str, message: &str) -> Result<()> {
+        if run.connection_state == state {
+            return Ok(());
+        }
+        self.store.lock().unwrap().write(|db| {
+            let mut current: Attempt = db.get(&run.id)?;
+            if current.connection_state == state {
+                return Ok(());
+            }
+            current.connection_state = state.into();
+            db.save(&current)?;
+            let mut card: Card = db.get(&run.card_id)?;
+            attention(db, &mut card, message)?;
+            card.revision += 1;
+            db.save(&card)?;
+            log(
+                db,
+                &card,
+                "execution.disconnected",
+                "system",
+                message,
+                Some(run.request_id.clone()),
+                json!({"terminal":run.terminal,"connection_state":state}),
+            )
+        })?;
+        self.emit("runtime", Some(run.card_id.clone()));
+        Ok(())
+    }
+    pub(super) fn deliver_questions(&self, client: &canban_herdr::Client) -> Result<()> {
         let snapshot = self.snapshot()?;
         for question in snapshot
             .questions
@@ -271,11 +349,13 @@ impl AppServer {
                 question.body,
                 canban_context::shell_quote(&question.id)
             );
-            let result = if client.status()?["core"]["id"].as_str() == run.core_id.as_deref() {
+            let result = (|| -> Result<Value> {
+                ensure!(
+                    client.status()?["core"]["id"].as_str() == run.core_id.as_deref(),
+                    "Original core identity changed"
+                );
                 client.call("terminal.send", json!({"terminal":terminal,"text":text}))
-            } else {
-                Err(anyhow::anyhow!("Original core identity changed"))
-            };
+            })();
             self.store.lock().unwrap().write(|db|{
                 let mut q:Question=db.get(&question.id)?;
                 if q.state=="replied"{return Ok(());}
@@ -302,9 +382,22 @@ impl AppServer {
             let Some(terminal) = &run.terminal else {
                 continue;
             };
+            let request: Request = self.store.lock().unwrap().db().get(&run.request_id)?;
+            let Some(ExitAction::Input { text }) = &request.profile.exit else {
+                continue;
+            };
+            ensure!(
+                client.status()?["core"]["id"].as_str() == run.core_id.as_deref(),
+                "Original Herdr core is unavailable"
+            );
+            let actual = client.get(terminal)?;
+            if !completion_ready(&run, &actual) {
+                continue;
+            }
             self.store.lock().unwrap().write(|db| {
                 let mut a: Attempt = db.get(&run.id)?;
                 a.close_state = "closing".into();
+                a.close_requested_at = Some(now());
                 db.save(&a)
             })?;
             let result = (|| {
@@ -312,7 +405,7 @@ impl AppServer {
                     client.status()?["core"]["id"].as_str() == run.core_id.as_deref(),
                     "Original Herdr core is unavailable"
                 );
-                client.call("terminal.send", json!({"terminal":terminal,"text":"/exit"}))
+                client.call("terminal.send", json!({"terminal":terminal,"text":text}))
             })();
             if let Err(e) = result {
                 self.store.lock().unwrap().write(|db| {
@@ -353,7 +446,13 @@ impl AppServer {
         let (mut context, fresh) = self.store.lock().unwrap().write(|db| {
             let mut c = crate::sessions::conversation(db, card, &req.profile)?;
             let fresh = c.provider_session_id.is_none();
-            if fresh && req.profile.provider_kind() == "claude" {
+            if fresh
+                && req
+                    .profile
+                    .command()
+                    .iter()
+                    .any(|a| a.contains("{session_id}"))
+            {
                 c.provider_session_id = Some(uuid_session_id());
             }
             c.last_request_id = Some(req.id.clone());
@@ -380,6 +479,10 @@ impl AppServer {
             close_state: String::new(),
             turn_ended_at: None,
             response_path: None,
+            completed_at: None,
+            completion_turn: None,
+            close_requested_at: None,
+            connection_state: String::new(),
         };
         self.store.lock().unwrap().write(|db| {
             db.save(&run)?;
@@ -405,9 +508,18 @@ impl AppServer {
                 self.endpoint().to_string_lossy().into_owned(),
             ),
             ("CANBAN_REQUEST_ID".into(), req.id.clone()),
-            ("CANBAN_PROVIDER".into(), req.profile.provider_kind().into()),
+            (
+                "CANBAN_RUN_DIR".into(),
+                canban_context::run_dir(&self.home, req, req.attempt)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            (
+                "CANBAN_SESSION_ID".into(),
+                context.provider_session_id.clone().unwrap_or_default(),
+            ),
             // Do not misidentify a child invocation using its launching Agent's ID.
-            ("CODEX_THREAD_ID".into(), String::new()),
+            ("CANBAN_PROFILE_ID".into(), req.profile.id.clone()),
             ("CANBAN_ATTEMPT".into(), req.attempt.to_string()),
             ("CANBAN_CLI".into(), self.cli.to_string_lossy().into_owned()),
             (
@@ -422,22 +534,17 @@ impl AppServer {
             ("canban.attempt".into(), req.attempt.to_string()),
         ]);
         let prompt = std::fs::read_to_string(self.home.join(input))?;
-        let profile = crate::providers::prepare(
+        let argv = canban_profiles::command(
             &req.profile,
             context.provider_session_id.as_deref(),
             fresh,
-            &self.cli,
-            &self.home,
-            &canban_context::run_dir(&self.home, req, req.attempt),
+            &[
+                ("home", &self.home.to_string_lossy()),
+                ("prompt", &prompt),
+                ("cli", &self.cli.to_string_lossy()),
+            ],
         )?;
-        let terminal = client.launch(
-            &profile,
-            &prompt,
-            &run.cwd,
-            env,
-            labels,
-            &self.home.to_string_lossy(),
-        )?;
+        let terminal = client.launch(argv, &run.cwd, env, labels)?;
         run.core_id = Some(strp(&core["core"], "id")?.into());
         run.terminal = Some(strp(&terminal, "address")?.into());
         let delivery_error=terminal.get("first_message").filter(|v|v["sent"]==false).map(|v|format!("Herdr did not deliver the initial task: {v}. Inspect this terminal before retrying."));

@@ -147,7 +147,7 @@ impl Model {
     pub fn scroll(&mut self, delta: isize) {
         unsafe {
             let mut s = GhosttyTerminalScrollViewport {
-                tag: GHOSTTY_SCROLL_VIEWPORT_DELTA,
+                tag: GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA,
                 ..Default::default()
             };
             s.value.delta = delta;
@@ -181,7 +181,7 @@ impl Model {
     }
     pub fn key(&mut self, key: GhosttyKey, mods: GhosttyMods, text: Option<&str>) -> Vec<u8> {
         unsafe {
-            ghostty_key_encoder_setopt_from_terminal(self.keys, self.term);
+            ok(ghostty_key_encoder_set_from_terminal(self.keys, self.term));
             ghostty_key_event_set_action(self.event, GHOSTTY_KEY_ACTION_PRESS);
             ghostty_key_event_set_key(self.event, key);
             ghostty_key_event_set_mods(self.event, mods);
@@ -194,14 +194,20 @@ impl Model {
                 },
             );
             let text = text.unwrap_or("");
-            ghostty_key_event_set_utf8(self.event, text.as_ptr().cast(), text.len());
+            ok(ghostty_key_event_set_utf8(
+                self.event,
+                GhosttyString {
+                    ptr: text.as_ptr(),
+                    len: text.len(),
+                },
+            ));
             ghostty_key_event_set_unshifted_codepoint(
                 self.event,
                 text.chars().next().map_or(0, |c| c as u32),
             );
             let mut buf = [0u8; 256];
             let mut len = 0;
-            if ghostty_key_encoder_encode(
+            let encoded = if ghostty_key_encoder_encode(
                 self.keys,
                 self.event,
                 buf.as_mut_ptr().cast(),
@@ -212,7 +218,13 @@ impl Model {
                 buf[..len].to_vec()
             } else {
                 vec![]
-            }
+            };
+            // Upstream borrows the UTF-8 bytes; do not retain a caller's text.
+            ok(ghostty_key_event_set_utf8(
+                self.event,
+                GhosttyString::default(),
+            ));
+            encoded
         }
     }
     pub fn frame(&mut self) -> Frame {
@@ -258,10 +270,7 @@ impl Model {
                         GHOSTTY_CELL_DATA_WIDE,
                         &mut wide as *mut _ as *mut c_void,
                     );
-                    let mut style = GhosttyStyle {
-                        size: std::mem::size_of::<GhosttyStyle>(),
-                        ..Default::default()
-                    };
+                    let mut style = GhosttyStyle::default();
                     ghostty_render_state_row_cells_get(
                         self.cells,
                         GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_STYLE,
@@ -279,7 +288,7 @@ impl Model {
                         GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR,
                         &mut bg as *mut _ as *mut c_void,
                     );
-                    if style.inverse {
+                    if style.flags & CANBAN_STYLE_INVERSE != 0 {
                         std::mem::swap(&mut fg, &mut bg);
                     }
                     let mut len = 0u32;
@@ -290,13 +299,18 @@ impl Model {
                     );
                     let mut cps = vec![0u32; len as usize];
                     if len > 0 {
-                        ghostty_render_state_row_cells_get(
+                        let mut graphemes = GhosttyCodepointBuffer {
+                            ptr: cps.as_mut_ptr(),
+                            cap: cps.len(),
+                            len: 0,
+                        };
+                        ok(ghostty_render_state_row_cells_get(
                             self.cells,
                             GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF,
-                            cps.as_mut_ptr().cast(),
-                        );
+                            &mut graphemes as *mut _ as *mut c_void,
+                        ));
                     }
-                    let text = if style.invisible
+                    let text = if style.flags & CANBAN_STYLE_INVISIBLE != 0
                         || wide == GHOSTTY_CELL_WIDE_SPACER_TAIL
                         || wide == GHOSTTY_CELL_WIDE_SPACER_HEAD
                     {
@@ -308,8 +322,8 @@ impl Model {
                         text,
                         fg: rgb(fg),
                         bg: rgb(bg),
-                        bold: style.bold,
-                        underline: style.underline != 0,
+                        bold: style.flags & CANBAN_STYLE_BOLD != 0,
+                        underline: style.flags & CANBAN_STYLE_UNDERLINE != 0,
                         tail: wide == GHOSTTY_CELL_WIDE_SPACER_TAIL,
                     });
                 }
@@ -357,6 +371,58 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n")
     }
+    #[test]
+    fn long_output_scrolls_back_and_returns_to_live_view_after_resize() {
+        let mut model = Model::new(40, 8);
+        for n in 0..12000 {
+            model.write(format!("row {n:05}\r\n").as_bytes());
+        }
+        assert!(text(&mut model).contains("row 11999"));
+        model.scroll(-50);
+        let older = text(&mut model);
+        assert!(!older.contains("row 11999"));
+        assert!(older.contains("row 11949"));
+        model.resize(55, 12);
+        assert_eq!(model.frame().rows.len(), 12);
+        model.scroll(12000);
+        assert!(text(&mut model).contains("row 11999"));
+        model.write("still responsive 世界".as_bytes());
+        assert!(text(&mut model).contains("still responsive 世界"));
+    }
+    #[test]
+    fn keyboard_encoding_tracks_application_cursor_mode() {
+        let mut model = Model::new(40, 8);
+        assert_eq!(
+            model.key(GHOSTTY_KEY_UNIDENTIFIED, 0, Some("世界")),
+            "世界".as_bytes()
+        );
+        assert_eq!(model.key(GHOSTTY_KEY_ENTER, 0, None), b"\r");
+        assert_eq!(
+            model.key(GHOSTTY_KEY_C, GHOSTTY_MODS_CTRL as GhosttyMods, Some("c")),
+            b"\x03"
+        );
+        assert_eq!(model.key(GHOSTTY_KEY_ARROW_UP, 0, None), b"\x1b[A");
+        model.write(b"\x1b[?1h");
+        assert_eq!(model.key(GHOSTTY_KEY_ARROW_UP, 0, None), b"\x1bOA");
+        model.write(b"\x1b[?1l");
+        assert_eq!(model.key(GHOSTTY_KEY_ARROW_UP, 0, None), b"\x1b[A");
+    }
+
+    #[test]
+    fn style_flags_preserve_emphasis_inverse_and_hidden_text() {
+        let mut model = Model::new(40, 8);
+        model.write(b"\x1b[1;4mB\x1b[0m\x1b[7mI\x1b[0m\x1b[8mH\x1b[0m");
+        let frame = model.frame();
+        let row = &frame.rows[0];
+        assert_eq!(row[0].text, "B");
+        assert!(row[0].bold && row[0].underline);
+        assert_eq!(row[1].text, "I");
+        assert!(!row[1].bold && !row[1].underline);
+        assert_eq!(row[1].fg, row[0].bg);
+        assert_eq!(row[1].bg, row[0].fg);
+        assert!(row[2].text.is_empty());
+    }
+
     #[test]
     fn redraw_unicode_alternate_screen_and_bracketed_paste() {
         let mut model = Model::new(40, 8);
