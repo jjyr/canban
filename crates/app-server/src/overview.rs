@@ -1,0 +1,50 @@
+use super::*;
+impl AppServer {
+    pub(super) fn overview_preview(&self, p: Value) -> Result<Value> {
+        let snapshot = self.snapshot()?;
+        let rows = canban_notifications::overview(&snapshot);
+        let row = rows
+            .iter()
+            .find(|r| r.id == p["row_id"].as_str().unwrap_or(""))
+            .context("Overview context no longer exists")?;
+        let run = row
+            .attempt
+            .as_ref()
+            .context("No terminal for this context")?;
+        ensure!(
+            Some(run.id.as_str()) == p["attempt_id"].as_str(),
+            "Overview invocation changed; select the current row again"
+        );
+        let client = canban_herdr::Client {
+            config: self.config(),
+        };
+        ensure!(
+            client.status()?["core"]["id"].as_str() == run.core_id.as_deref(),
+            "Original Herdr core unavailable; retained context only"
+        );
+        let terminal = run.terminal.as_deref().context("No bound terminal")?;
+        let screen = client.read(terminal)?;
+        let mut text = screen["text"]
+            .as_str()
+            .context("No terminal text")?
+            .to_owned();
+        // Screen preview is read-only and bounded independently of terminal history.
+        if text.len() > 32_768 {
+            let mut start = text.len() - 32_768;
+            while !text.is_char_boundary(start) {
+                start += 1;
+            }
+            text = text[start..].to_owned();
+        }
+        let current = canban_notifications::overview(&self.snapshot()?);
+        ensure!(
+            current
+                .iter()
+                .any(|r| r.id == row.id && r.attempt.as_ref().is_some_and(|a| a.id == run.id)),
+            "Overview invocation changed while reading"
+        );
+        Ok(
+            json!({"text":text,"source":"Herdr terminal screen (read-only)","observed_at":now(),"attempt_id":run.id,"terminal":terminal,"core_id":run.core_id}),
+        )
+    }
+}

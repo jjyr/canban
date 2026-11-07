@@ -102,6 +102,10 @@ try:
         git(source, "init")
         git(source, "add", ".")
         git(source, "-c", "user.name=Canban Acceptance", "-c", "user.email=acceptance@example.invalid", "-c", "core.hooksPath=/dev/null", "commit", "-m", "Seed real Agent acceptance task")
+        workflow_path = home / 'config/workflows/default.json'
+        local_workflow = json.loads(workflow_path.read_text())
+        local_workflow['workspace']['sync_base'] = False  # Fixture repositories have no remote.
+        workflow_path.write_text(json.dumps(local_workflow))
         project = call("project.create", {"name": "Real Board " + fixture["name"], "directory": str(source)})
         marker = "CANBAN_" + fixture["name"].upper() + "_" + base.name
         note = call("note.save", {"project_id": project["id"], "title": "Board isolation marker", "body": f"This is the {fixture['name']} Board. Isolation marker: {marker}. Include this marker in every development/review report. Only work in the assigned task worktree."})

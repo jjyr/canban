@@ -37,6 +37,10 @@ impl AppServer {
         Ok(serde_json::to_value(plan)?)
     }
     pub(super) fn review_merge(&self, p: Value) -> Result<Value> {
+        ensure!(
+            p["execution"].is_null(),
+            "Code acceptance requires explicit human review"
+        );
         let _gate = self.review_gate.try_lock().map_err(|_| {
             anyhow::anyhow!("Another code delivery is in progress; retry after it completes")
         })?;
@@ -79,6 +83,10 @@ impl AppServer {
                 Ok(commit)=>{
                     current.delivery=Some(Delivery{target_branch:plan.target_branch.clone(),commit:commit.clone(),request_key:key.clone(),merged_at:now()});
                     current.attention=None;
+                    if let Some(gate)=current.human_gate.take() && let Some(request)=gate.request_id {
+                        let request:Request=db.get(&request)?;
+                        if request.state=="completed" { crate::workflow::advance(db,&self.config(),&mut current,&request)?; }
+                    }
                     log(db,&current,"review.merged","user",&format!("Merged into {}",plan.target_branch),None,json!({"commit":commit,"target_branch":plan.target_branch,"request_key":key}))?;
                     json!({"state":"merged","commit":commit,"target_branch":plan.target_branch,"card_id":card.id})
                 }

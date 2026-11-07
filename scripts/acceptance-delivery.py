@@ -7,7 +7,7 @@ import json, os, subprocess, sys, time
 repo = Path(__file__).resolve().parents[1]
 base = Path(sys.argv[1]).resolve()
 evidence = json.loads((base / 'evidence.json').read_text())
-env = {**os.environ, 'CANBAN_HOME': str(base / 'home')}
+env = {**{k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')}, 'CANBAN_HOME': str(base / 'home')}
 cli = repo / 'target/debug/canban'
 log = open(base / 'delivery-server.log', 'w')
 server = subprocess.Popen([str(cli), 'serve'], env=env, stdout=log, stderr=log)

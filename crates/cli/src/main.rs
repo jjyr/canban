@@ -253,8 +253,17 @@ fn run() -> Result<()> {
     {
         p["request_key"] = json!(canban_types::id());
     }
-    if matches!(method.as_str(), "note.save" | "note.write" | "note.rename")
-        && p.get("execution").is_none()
+    if matches!(
+        method.as_str(),
+        "note.save"
+            | "note.write"
+            | "note.rename"
+            | "card.continue"
+            | "card.move"
+            | "execution.retry"
+            | "review.merge"
+            | "card.archive"
+    ) && p.get("execution").is_none()
     {
         let request = std::env::var("CANBAN_REQUEST_ID").ok();
         let attempt = std::env::var("CANBAN_ATTEMPT").ok();

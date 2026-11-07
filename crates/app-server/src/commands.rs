@@ -54,6 +54,52 @@ impl AppServer {
                 )
             }
             "config.get" => Ok(serde_json::to_value(config)?),
+            "overview.list" => Ok(serde_json::to_value(canban_notifications::overview(
+                &self.snapshot()?,
+            ))?),
+            "overview.preview" => self.overview_preview(p),
+            "scheduler.status" => {
+                let snapshot = self.snapshot()?;
+                Ok(
+                    json!({"active":canban_scheduler::active_count(&snapshot),"max_agents":config.scheduler.max_agents,"queued":snapshot.requests.iter().filter(|r| r.state=="queued").count()}),
+                )
+            }
+            "scheduler.configure" => {
+                let mut active = self.config.write().unwrap();
+                let mut settings = active.scheduler.clone();
+                if let Some(max) = p.get("max_agents") {
+                    settings.max_agents = usize::try_from(
+                        max.as_u64()
+                            .context("max_agents must be a positive integer")?,
+                    )?;
+                }
+                if let Some(minutes) = p.get("idle_minutes") {
+                    settings.idle_minutes = minutes
+                        .as_u64()
+                        .context("idle_minutes must be a nonnegative integer")?;
+                    ensure!(
+                        settings.idle_minutes <= 525600,
+                        "idle_minutes must be at most one year"
+                    );
+                }
+                ensure!(
+                    settings.max_agents > 0,
+                    "max_agents must be greater than zero"
+                );
+                let path = self.home.join("config/agents.json");
+                let mut raw: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+                if !raw["scheduler"].is_object() {
+                    raw["scheduler"] = json!({});
+                }
+                raw["scheduler"]["max_agents"] = json!(settings.max_agents);
+                raw["scheduler"]["idle_minutes"] = json!(settings.idle_minutes);
+                canban_context::atomic(&path, &serde_json::to_vec_pretty(&raw)?)?;
+                active.scheduler = settings.clone();
+                drop(active);
+                self.emit("configuration", None);
+                Ok(serde_json::to_value(settings)?)
+            }
+
             "config.reload" => {
                 let (c, migration) = Self::read_config(&self.home)?;
                 self.validate_references(&c)?;
@@ -148,6 +194,10 @@ impl AppServer {
                 let mut c: Card = db.get(strp(&p, "card_id")?)?;
                 revise(&c, &p)?;
                 ensure!(c.archived_at.is_none(), "Restore the Card before moving");
+                ensure!(
+                    c.human_gate.is_none() || p["execution"].is_null(),
+                    "Human review must be approved by the user before moving this Card"
+                );
                 let target = strp(&p, "stage")?;
                 if c.stage == target {
                     return Ok(serde_json::to_value(c)?);
@@ -166,6 +216,7 @@ impl AppServer {
                 c.stage = target.into();
                 c.revision += 1;
                 c.attention = None;
+                c.human_gate = None;
                 log(
                     db,
                     &c,
@@ -188,6 +239,18 @@ impl AppServer {
                 db.save(&c)?;
                 Ok(serde_json::to_value(c)?)
             }),
+            "card.continue" => self.continue_card(p),
+            "card.workspace" => {
+                let (card, project) = {
+                    let store = self.store.lock().unwrap();
+                    let card: Card = store.db().get(strp(&p, "card_id")?)?;
+                    let project: Project = store.db().get(&card.project_id)?;
+                    (card, project)
+                };
+                Ok(serde_json::to_value(canban_workspaces::info(
+                    &project, &card,
+                )?)?)
+            }
             "card.context.update" => self.mutate(method, &p, |db| {
                 let mut card: Card = db.get(strp(&p, "card_id")?)?;
                 revise(&card, &p)?;
@@ -263,6 +326,9 @@ impl AppServer {
                     let _context = crate::sessions::conversation(db, &c, &profile)?;
                     let active = db.list::<Request>()?.into_iter().rev().find(|r| {
                         r.card_id == c.id
+                            && !(c.human_gate.is_some()
+                                && r.state == "queued"
+                                && canban_scheduler::automatic(r))
                             && r.profile.id == agent
                             && matches!(
                                 r.state.as_str(),
@@ -308,7 +374,9 @@ impl AppServer {
             }),
             "card.attention.clear" => self.mutate(method, &p, |db| {
                 let mut c: Card = db.get(strp(&p, "card_id")?)?;
-                c.attention = None;
+                if c.human_gate.is_none() {
+                    c.attention = None;
+                }
                 c.revision += 1;
                 db.save(&c)?;
                 log(
@@ -347,7 +415,11 @@ impl AppServer {
             "execution.report" => self.report(p),
             "execution.retry" => self.mutate(method, &p, |db| {
                 let mut req: Request = db.get(strp(&p, "request_id")?)?;
-                let c: Card = db.get(&req.card_id)?;
+                let mut c: Card = db.get(&req.card_id)?;
+                ensure!(
+                    p["execution"].is_null(),
+                    "Retry requires an explicit user decision"
+                );
                 ensure!(c.archived_at.is_none(), "Restore the Card before retrying");
                 ensure!(
                     !matches!(
@@ -356,7 +428,25 @@ impl AppServer {
                     ),
                     "Execution is not retryable"
                 );
+                if let Ok(mut previous) = db.get::<Attempt>(&Attempt::key(&req.id, req.attempt)) {
+                    ensure!(
+                        previous.terminal.is_none()
+                            || previous
+                                .observed
+                                .as_ref()
+                                .is_some_and(|v| v["state"] == "finished"),
+                        "End the previous Agent before retrying"
+                    );
+                    if previous.state == "unknown" {
+                        previous.state = "superseded".into();
+                        db.save(&previous)?;
+                    }
+                }
                 req.state = "queued".into();
+                c.human_gate = None;
+                c.attention = None;
+                c.revision += 1;
+                db.save(&c)?;
                 db.save(&req)?;
                 log(
                     db,

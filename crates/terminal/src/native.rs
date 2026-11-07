@@ -120,7 +120,11 @@ impl Host {
                     let s = state.lock().unwrap();
                     let size = (s.model.cols, s.model.height);
                     drop(s);
-                    client.attach(&terminal, size.0, size.1)
+                    {
+                        let mut attachment = client.attach(&terminal, size.0, size.1)?;
+                        attachment.track_view(&core, &terminal);
+                        Ok(attachment)
+                    }
                 })();
                 let attach = match attempt {
                     Ok(v) => v,

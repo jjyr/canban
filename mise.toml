@@ -52,3 +52,11 @@ run = "/usr/bin/python3 scripts/acceptance-real-workflows.py"
 [tasks.acceptance-native]
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance-native.py"
+
+[tasks.acceptance-scheduling]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-scheduling.py"
+
+[tasks.acceptance-overview]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-overview.py"

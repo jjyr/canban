@@ -68,6 +68,10 @@ impl AppServer {
         })
     }
     pub(super) fn archive(&self, p: &Value) -> Result<Value> {
+        ensure!(
+            p["execution"].is_null(),
+            "Archiving requires an explicit user decision"
+        );
         let card_id = strp(p, "card_id")?;
         self.mutate("card.archive.mark", p, |db| {
             let mut c: Card = db.get(card_id)?;

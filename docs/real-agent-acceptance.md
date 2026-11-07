@@ -43,9 +43,9 @@ For Git Projects with a commit, each Card receives a managed worktree; stages of
 The recorded implementation counted logical work until the Agent's explicit outcome, without draining residual processes. Per-Project limits and automatic provider load balancing were not implemented. Capacity controls have since been removed by user direction; the historical real-model run remains evidence of independent Sessions, worktrees, reports and workflow progression.
 
 
-## Subsequent simplification: no application concurrency limits
+## Historical simplification: no application concurrency limits
 
-The user removed concurrency limits on 2026-11-06. Current Scheduler does not count running Sessions or gate new work by global/profile capacity. Config and saved-profile capacity fields are ignored for backwards compatibility. The real-model harness now uses normal unrestricted defaults; the evidence above predates that change and was not rerun as a paid-model check.
+The user removed concurrency limits on 2026-11-06. At that revision, Scheduler did not count running Sessions or gate new work by global/profile capacity. Config and saved-profile capacity fields are ignored for backwards compatibility. The real-model harness now uses normal unrestricted defaults; the evidence above predates that change and was not rerun as a paid-model check.
 
 The model-free `mise run acceptance` regression deliberately supplies obsolete global/profile capacity=1, starts three same-profile Agents across three Boards, and holds them at a filesystem barrier. All three must reach the barrier with distinct terminal bindings before any can report completion. This verifies that the old limits no longer serialize Agents without invoking a model provider.
 
@@ -59,3 +59,6 @@ Run mise run acceptance-real-interactive explicitly for real model usage. Latest
 The deterministic interactive harness additionally verifies interrupt/continue, repeated-open coalescing, idempotent terminal control intents, restart and archive/restore without using a model. The production native UI acceptance used /private/tmp/cb-terminal-ui-t4ppye3_ with a separate core. It verified real Codex TUI rendering/input, Unicode, selection/copy/paste, host restart/reattach and explicit completion/normal exit. Fixture-only UI operations also verified Timeline replies and exact UUID reuse after resume. These temporary local evidence paths are reproducibility aids, not checked-in datasets or portable provider-history backups.
 
 Claude Code 1.0.108 smoke check: the production adapter launched its interactive TUI in the isolated native app and accepted the owned test-folder trust prompt. The model request returned Invalid API key / Please run /login. This is a concrete local authentication blocker: actual Claude report/Stop/resume acceptance is not claimed. Existing credentials/settings were not changed.
+
+
+The 2026-11-07 update supersedes the unrestricted policy with a configurable global limit of eight, later-stage priority and persistent human gates. See [current implementation/acceptance](workspace-and-scheduling.md); the historical live-model results above are not a rerun of that new policy.

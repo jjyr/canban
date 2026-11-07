@@ -45,9 +45,9 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .items_center()
                 .gap_2()
                 .child(dynamic(move || {
-                    if ui.narrow.get() && ui.page.get() == "card" {
-                        action("← Board", Variant::Quiet, move |_| {
-                            ui.page.set("board".into())
+                    if (ui.narrow.get() || ui.return_overview.get()) && ui.page.get() == "card" {
+                        action(if ui.return_overview.get_untracked() {"← Overview"} else {"← Board"}, Variant::Quiet, move |_| {
+                            if ui.return_overview.get_untracked() { ui.back_board(); } else { ui.page.set("board".into()); }
                         })
                         .into_element()
                     } else {
@@ -55,8 +55,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     }
                 }))
                 .child(action("Close Card", Variant::Quiet, move |_| {
-                    ui.card.set(String::new());
-                    ui.page.set("board".into());
+                    if ui.return_overview.get_untracked() { ui.back_board(); } else { ui.card.set(String::new()); ui.page.set("board".into()); }
                 })),
         )
         .child(heading(move || {
@@ -78,11 +77,22 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .child(status(state, tone))
                 .into_element()
         }))
+        .child(crate::components::git_workspace::panel(ui))
         .child(dynamic(move || {
             ui.current_card()
                 .and_then(|c| c.attention)
                 .map(|message| notice(message, Tone::Attention).into_element())
                 .unwrap_or_else(|| view().into_element())
+        }))
+        .child(dynamic(move || {
+            let Some(c) = ui.current_card() else { return view().into_element(); };
+            if c.human_gate.is_none() { return view().into_element(); }
+            view().gap_2()
+                .child(muted("Automatic work is paused. Review the report, answer the Agent, or choose a stage."))
+                .child(action("Reviewed · continue workflow", Variant::Primary, move |_| {
+                    if let Some(c) = ui.current_card() { dispatch(ui, "card.continue", json!({"card_id":c.id,"revision":c.revision})); }
+                }).disabled(move || ui.pending.get()))
+                .into_element()
         }))
         .child(
             scroll()
@@ -211,7 +221,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     ));
                                 }
                             }
-                            if c.stage == "review" {
+                            if ui.current_project().is_some_and(|p| p.workflow.stages.iter().any(|s| s.id == c.stage && s.require_human_review)) || c.stage == "review" {
                                 area = area.child(action(
                                     "Review changes",
                                     Variant::Primary,

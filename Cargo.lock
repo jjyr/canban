@@ -270,6 +270,7 @@ name = "canban-notifications"
 version = "0.1.0"
 dependencies = [
  "canban-types",
+ "serde",
 ]
 
 [[package]]
@@ -338,6 +339,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "canban-app-server",
+ "canban-notifications",
+ "canban-scheduler",
  "canban-terminal",
  "canban-types",
  "canban-ui-kit",

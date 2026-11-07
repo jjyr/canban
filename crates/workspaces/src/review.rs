@@ -297,11 +297,13 @@ mod tests {
             fs::write(source.join("seed"), "original\n").unwrap();
             checked(&source, &["add", "."]).unwrap();
             checked(&source, &["commit", "-m", "seed"]).unwrap();
+            let mut workflow = canban_types::Workflow::default();
+            workflow.workspace.sync_base = false;
             let project = Project {
                 id: "p".into(),
                 name: "Test".into(),
                 directory: source.to_str().unwrap().into(),
-                workflow: Default::default(),
+                workflow,
                 target_branch: Some("main".into()),
                 created_at: 0,
             };

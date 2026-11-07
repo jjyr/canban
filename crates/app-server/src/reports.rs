@@ -60,10 +60,22 @@ impl AppServer {
             }
             if current && req.state!="completed" {
                 req.state=state.into();db.save(&req)?;
-                if state=="blocked"||state=="failed"{attention(db,&mut card,if report.message.is_empty(){state}else{&report.message})?;}
+                if state=="blocked"||state=="failed" {
+                    attention(db,&mut card,if report.message.is_empty(){state}else{&report.message})?;
+                    if let Some(gate)=&mut card.human_gate && gate.request_id.is_none() { gate.request_id=Some(req.id.clone()); }
+                }
                 if state=="completed" && card.archived_at.is_none() {
-                    card.attention=None;
-                    if let Some(next)=&req.on_completed&& card.stage==req.stage {let project:Project=db.get(&card.project_id)?;let stage=canban_workflow_engine::stage(&project.workflow,next)?;let from=card.stage.clone();card.stage=next.clone();log(db,&card,"card.stage_changed","system",&format!("{from} → {next}"),Some(req.id.clone()),json!({"reason":"agent_completed"}))?;enqueue(db,&config,&mut card,&project,stage,"stage_entry",None,None)?;}
+                    if let Some(gate)=&mut card.human_gate {
+                        if gate.request_id.is_none() && req.trigger=="stage_entry" && req.stage==card.stage { gate.request_id=Some(req.id.clone()); }
+                        if gate.request_id.as_deref()==Some(&req.id) && req.stage==card.stage { gate.next_stage=req.on_completed.clone(); }
+                    } else if req.require_human_review && req.stage==card.stage {
+                        attention(db,&mut card,"Agent report ready; human review is required before continuing")?;
+                        card.human_gate=Some(HumanGate{reason:"Agent report ready; human review is required before continuing".into(),request_id:Some(req.id.clone()),next_stage:req.on_completed.clone()});
+                        log(db,&card,"workflow.waiting_for_human","system","Workflow is waiting for human review",Some(req.id.clone()),json!({"next_stage":req.on_completed}))?;
+                    } else {
+                        card.attention=None;
+                        crate::workflow::advance(db,&config,&mut card,&req)?;
+                    }
                 }
                 card.revision+=1;db.save(&card)?;
             }

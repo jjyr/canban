@@ -1,149 +1,67 @@
-# Scheduler and agent-reported progression
+# Scheduler, capacity and human approval
 
-Status: user-directed MVP behavior, updated 2026-11-06. Basic routing, unrestricted concurrent Sessions and explicit completion callbacks are implemented. Current configuration and concurrency evidence are described below; advanced mechanisms remain deferred.
+Status: implemented 2026-11-07. The default global limit is eight Agents. This supersedes the earlier unrestricted-concurrency decision; old `capacity` fields remain ignored.
 
-## Next interaction direction versus the current runtime
+## One path and one global budget
 
-The user has accepted Card/profile conversation reuse and separate configuration identities for distinct contexts such as Developer and Reviewer. The [Agent interaction design](agent-interaction.md) is authoritative for that target and records the proposed independent profile registry plus template references. Card/profile conversation reuse, stage-profile references, role instructions, interactive launch/resume and immediate active-mention delivery are implemented. The current lifecycle is described in [Sessions](sessions.md); earlier fresh-conversation wording below is historical.
-
-## One scheduling path
+Stage entry, explicit mentions and opening/resuming a conversation use the same persistent request queue. Profile routing remains unchanged: explicit mention, stage profile, then Card tags/default. Different Boards share one Scheduler and budget; there are no additional Project or profile caps.
 
 ```text
-stage entry / submitted @mention / configured action
-                         |
-                  application event
-                         |
-                   Canban Scheduler
-          task + profile + context + callbacks
-                         |
-                 persisted launch queue
-                         |
-                 new invocation / same profile history
-                         |
-              herdr-core terminal execution
-                         |
-                 agent reports outcome
-                         |
-          event -> timeline / callback / attention
+Queue -> reject archived/stale-stage automatic work
+      -> exclude automatic work for Cards waiting for human
+      -> check global Agent slots
+      -> later template stage first, FIFO within a stage
+      -> reserve starting intent
+      -> prepare/reuse workspace
+      -> start/resume through Herdr
 ```
 
-Stage defines what work to do, tags/defaults select who does it, and Scheduler decides when logical work can start. All requests use one Session model and execute through core.
+`config/agents.json` contains `scheduler.max_agents` (positive integer, default 8). Settings exposes the same value. `scheduler.configure` saves it without replacing user profile commands/presets. Reload and app restart preserve it. Lowering the value does not interrupt existing Agents; new launches wait until usage drops below the limit.
 
-## Routing
+Slots cover starting, working and unknown/uncertain runtime. Verified root blocked/idle/done/error statuses release execution capacity while retaining their terminals; disconnected or stale observations reserve it conservatively. A completed business report alone does not free a still-working/unknown runtime. Queued requests reserve no slot. A user may resume retained waiting Agents above the budget; this stops further launches without killing existing work. An exited conversation's resume is queued and needs admission. See [Agent Overview and lifecycle](../agent-overview-and-lifecycle.md) for idle reclamation and status details.
 
-- A card entering an executable stage is automatically eligible; no second Start click is needed.
-- Backlog has no automatic entry workflow.
-- An automatic stage with a profile reference selects that global profile.
-- A stage without a reference uses Card tags, then the configured default Agent for untagged work.
-- Tagged fallback work runs only on a matching configuration. Initial tags can be Agent names; tags do not override a named stage profile.
-- A submitted @mention addresses the Card/profile conversation: append immediately while live, otherwise start/resume. It does not permanently retag the Card.
-- Use Herdr's existing runnable agents/commands/templates/configuration. Do not create a separate Canban-only provider support program.
-- Show missing/ambiguous routing or unavailable startup configuration instead of pretending a launch succeeded.
+The limit covers Agents managed by this Canban home/AppServer. Unrelated Herdr terminals are outside it. Herdr status and normal closure continue while the queue is full.
 
-The current default and profile registry are application-wide; stage references, explicit mentions and legacy tags select their entries. See [profile configuration](agent-profiles.md). Per-Project default overrides are not implemented. Herdr core has no brand registry; the configured existing command/template supplies the launch setup.
+## Depth-first priority
 
-## Cross-Board concurrency and isolation
+The stage's index in its Project's saved template defines depth. A later stage wins over an earlier stage across Boards; requests at the same depth use enqueue time/insertion order. This is the agreed simple priority policy, not a graph execution engine or a hardcoded `review` name. Multiple slots can advance several Cards concurrently.
 
-One Project currently owns one Board. Boards share one Scheduler, with no global, Project or per-profile concurrency limit. Queued requests are launched in order without waiting for other Sessions to complete; launches are currently issued one at a time by the Scheduler loop, while the resulting Agents run concurrently. The queue records pending work, rather than reserving capacity. Legacy capacity fields in configuration and saved requests are ignored. Limits can be introduced later if there is a demonstrated need. Routing does not automatically switch provider or assign different brands to different Boards.
+For example, a newly queued Reviewer takes the next available slot ahead of an older Develop request. The normal workflow may move into Review immediately on the completed report, but its new Agent still waits for a physical slot if execution capacity remains occupied.
 
-Each request/attempt, context path, report and runtime binding is scoped to its Card/Project. Git Cards get separate worktrees; stages of the same Card reuse one worktree. Non-Git/unborn Projects use the configured directory directly, so choosing the same directory for multiple Projects does not create filesystem isolation. Shared external resources and same-user process permissions remain shared. Progression has no residual-process drain gate.
+## Human approval is persistent
 
-A [real two-Board Codex acceptance](../real-agent-acceptance.md) observed simultaneous development and simultaneous review, then archived both Cards and checked report readability and cross-Board associations. Cross-provider live behavior and exclusive security/resource isolation are outside that evidence.
-
-## JSON configuration
-
-Workflow/template customization is JSON-first. A UI editor and complex live migration are deferred.
-
-Example application configuration (preserve other profiles when editing):
-
-```json
-{
-  "hc": "hc",
-  "hc_session": "default",
-  "hc_env": {},
-  "default_agent": "codex",
-  "profiles": [
-    {
-      "id": "codex",
-      "argv": ["codex", "--no-daemon", "--sandbox", "workspace-write", "--add-dir", "{home}", "{prompt}"],
-      "template": null,
-      "tags": ["codex"]
-    }
-  ]
-}
-```
-
-This is Canban's config/agents.json schema, not hc configuration. Reload via Settings or config.reload and queue new work; queued requests retain their saved profile snapshot. New invocations reuse the Card/profile provider ID; reconnects refer to the existing terminal.
-
-## Completion is the agent's declaration
-
-The agent explicitly answers/reports whether it has completed. Its completed report is enough to invoke the configured workflow callback. MVP does not independently judge output quality, require test/artifact verification, or wait for process exit before moving the card.
-
-For the default development workflow:
+`Card.human_gate` records why work is paused, the related request when known, and a pending next stage. `attention` remains explanatory text and notifications remain discoverability/read state. Existing saved attention is upgraded into a gate on open.
 
 ```text
-agent says completed
-        |
-record report + completion event
-        |
-template callback: Develop -> Review
-        |
-dispatch ordinary review-report task
+Agent completed -> require_human_review?
+                  | no                  | yes
+                  v                     v
+             next stage           wait for human
+
+blocked / failed / uncertain recovery -> wait for human
+
+wait for human -> no automatic dispatch/progression
+               -> explicit user decision -> continue / retry / rework
 ```
 
-The proposed concrete encoding is execution.report through the bundled Canban CLI and local IPC; its payload/receipt and launch environment are defined in [MVP interfaces](../interfaces/mvp-contract.md). This is a shared interface, not a verification subsystem. Summary/change/check information is useful context but does not become an independent progression gate. Human acceptance, merge, and archive remain distinct.
+An executing stage can set `require_human_review: true`. Its Agent runs automatically, but the completed report waits before applying `on_completed`. The fresh default Review stage enables this flag. Blocks, errors and uncertain recovery also pause automatic work. Empty slots, reconnection, restart, notifications being read, ordinary comments and later Agent completion never approve the gate.
 
-The completion callback belongs to the initiating request. A response to an @mention is recorded against its comment; it does not acquire the development callback merely because the profile or card matches. Process an identical accepted completion once in the normal path.
+Explicit `@Agent` or open/resume remains available to help resolve the issue, subject to capacity. These invocations cannot approve the workflow through their completed report. A paused automatic request does not absorb a manual mention and prevent assistance.
 
-## MVP deliberately ignores residual old execution
+The user can choose **Reviewed · continue workflow**, move to another stage for rework, retry a failed execution after its prior terminal has ended, or accept code through Review. Approval applies a completed initiating request's saved callback once. Continuing an unresolved live blocked Agent is rejected: answer it, or end it before retrying. Unknown starts require inspection and explicit retry rather than blind replay. Without a pending callback, approval clears the pause and does not launch another run of the finished stage.
 
-The ordinary workflow advances after an agent reports completion. If an old process or mentioned agent exceptionally continues, do not build process-drain, quiescence, exclusive-writer handover, or orphan tracking before progression. This simplification is explicitly chosen by the user.
+The Agent-bound CLI marks approval/move/retry/merge/archive calls with its execution context; human-only decisions are rejected where appropriate. This is a local invocation/provenance boundary, not isolation from arbitrary same-user programs that can discard their environment.
 
-There are no application concurrency limits. Logical completion does not require observed terminal exit. Keep runtime facts visible where available, but do not introduce a completion barrier around them.
+## API
 
-Manual cancellation can use core's existing controls. Advanced coordination for moving active cards, conflicting writers, stale process activity, and descendant enforcement is deferred.
+```sh
+canban call scheduler.status '{}'
+canban call scheduler.configure '{"max_agents":8,"idle_minutes":15}'
+canban call card.continue '{"card_id":"CARD_ID","revision":7,"request_key":"approval-id"}'
+```
 
-## Worktree handling
+The status contains active usage, limit and queued count. Card approval requires its current revision and supports normal request-key idempotency. Read acknowledgements do not clear the gate. Reports retain request/attempt binding and the existing normal-exit contract.
 
-For Git work, preparation can create/reuse the card's execution worktree. Development, Review, and rework keep using it through the active card lifetime. A fresh Session does not require a new checkout.
+## Timers and deferred scope
 
-Handle managed-worktree cleanup at Archive, not after every Session or stage. A non-Git Project can use its configured directory. Ordinary preparation failures should be reported rather than silently running in a different directory. Complex resource leases/handover are outside MVP.
-
-## Blocked work and attention
-
-If the agent needs input or reports blockage, produce the relevant application event, mark the card needs attention, and generate an internal notification event. The Board stage remains identifiable; no mandatory Blocked column is added.
-
-The internal UI/notification subscriber makes the task discoverable. Native macOS notifications are later. See [events and notifications](events-and-notifications.md). A report of not completed/needs help does not invoke the completed callback.
-
-## Minimal runtime bookkeeping
-
-Persist enough request/attempt association and history to know which task was launched and which callback handles its report. Reuse core runtime identifiers and the proposed request/attempt logical key as described in [ID research](../research/herdr-identifiers.md).
-
-Core terminal.run has no durable application idempotency key. Keep basic replay protection and show an unknown launch rather than automatically starting another on every timeout. This basic control is separate from the deliberately deferred old-process coordination. Detailed leases, generation fences, and fault-recovery protocols are not extra MVP product gates.
-
-Core observations and reported status are useful input. Core status remains program-reported and may be unavailable; the common completion/blockage reporting interface must let existing launched agents express the product outcome. No provider-specific completion evaluator is required.
-
-## Timed readiness
-
-Scheduler owns queue/time readiness. A card's saved timing attributes belong to Kanban; initially implement clock waiting and due triggers as a timers module inside canban-scheduler. Workflow Engine decides a configured workflow action when a trigger fires; reminders can target Notifications. See [crates and timers](../architecture-crates-and-timers.md). This responsibility does not by itself promote advanced schedules into MVP.
-
-## Triggers and effects
-
-| Trigger | MVP behavior |
-| --- | --- |
-| Enter Backlog | Record event/history; no stage launch |
-| Enter Develop / Review / custom executable stage | Schedule configured work in a new invocation / same profile history |
-| Within-stage reorder | Update/history; no new stage entry |
-| Submitted @mention | Append/start/resume addressed profile; associate reply with comment |
-| Agent declares completed | Invoke the request's configured completion callback |
-| Agent blocked / needs input | Needs-attention card condition + internal notification event |
-| Archive | Retain card history and handle managed-worktree cleanup |
-| Description/tag/config update | Publish update; use explicit current/new request configuration, without launching on every keystroke |
-
-All internal operations participate in the Rust enum/in-memory channel/topic-subscription direction. Detailed event architecture follows MVP. Scheduled-work features remain later product work rather than a reason to build that infrastructure now.
-
-## Acceptance focus
-
-Demonstrate automatic tag/default dispatch, fresh @mentions, self-reported completion driving the default Review report, blocked-card notification, JSON bindings, worktree retention until Archive, normal replay protection, and the shared agent interface. Do not require independent task verification or residual-process shutdown coordination to pass MVP.
-
-Runtime facts are source-backed in [core API](https://github.com/herdrdev/herdr-core/blob/c6b316f87c33e6f2ab1a1ceea3e3461e2b6bb61a/schema/README.md); the chosen simplified product behavior is Canban policy.
+Scheduler remains the owner of readiness/time waiting. Advanced schedules, fairness policies, per-profile caps and generic workflow scripting remain deferred. See [workspace and acceptance](../workspace-and-scheduling.md) for current validation, and [Agent profiles](agent-profiles.md) for routing configuration.

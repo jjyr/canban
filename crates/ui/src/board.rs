@@ -5,6 +5,9 @@ use canban_ui_kit::*;
 use nsh_core::prelude::*;
 
 pub fn activity(s: &Snapshot, c: &Card) -> (String, Tone) {
+    if c.human_gate.is_some() {
+        return ("Waiting for human".into(), Tone::Attention);
+    }
     if c.attention.is_some() {
         return ("Needs attention".into(), Tone::Attention);
     }
@@ -16,7 +19,15 @@ pub fn activity(s: &Snapshot, c: &Card) -> (String, Tone) {
             )
     }) {
         return (
-            format!("@{} · {}", r.profile.id, r.state),
+            format!(
+                "@{} · {}",
+                r.profile.id,
+                if r.state == "queued" {
+                    "queued · waiting for a slot"
+                } else {
+                    &r.state
+                }
+            ),
             if r.state == "blocked" {
                 Tone::Attention
             } else {
@@ -77,6 +88,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     });
                 })),
         )
+        .child(crate::components::scheduling::summary(ui))
         .child(
             view().flex_row().flex_wrap().gap_2().children(
                 [

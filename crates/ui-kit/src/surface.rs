@@ -23,3 +23,12 @@ pub fn badge(value: impl IntoReactive<SharedString>) -> impl IntoElement {
         .bg(INSET)
         .child(muted(value))
 }
+
+/// Selectable plain content. Does not interpret terminal/Agent text as markup.
+pub fn read_text(value: impl Into<String>) -> impl IntoElement {
+    use nsh_base::text_view::{Block, Document, Inline};
+    let document = Document::new(vec![Block::Paragraph {
+        content: vec![Inline::text(value.into())],
+    }]);
+    nsh_base::text_view().document(document).selectable(true)
+}

@@ -385,3 +385,33 @@ The Notes ASCII layout now shows file editing/preview, related Cards, links/back
 The user clarified that file-like Notes are actually stored in the database, so Agent and product operations can record associations. This supersedes the physical-file interpretation above. No Note filesystem watcher or content migration is required. Notes now expose shared create/read/write/rename operations, immutable revisions, optimistic conflicts, Card/Agent provenance and stable bidirectional links. Agents use the Canban CLI; Notes do not own another chat/session model.
 
 The user approved the calm Kanban workspace and confirmed focused work behavior: clicking an Agent or Review hides the Board while retaining global navigation, with Card left and work right. Back/Close returns to the original Board/selection; drafts and scroll survive route changes. Closing the viewer does not end execution. Production components are also imported by the standalone Gallery. See [implemented contracts and validation](../notes-and-workspace-implementation.md); drag polish, full design-state coverage and crash-persistent drafts remain separate refinements.
+
+
+## 2026-11-07 — Named workspaces, synchronized base and bounded scheduling
+
+The user approved simple Workflow workspace settings rather than a Git-operation engine: optional worktree creation, base branch, remote and pre-creation synchronization. New Card work uses a named branch and worktree; Card details expose their identity/status. Fetch and fast-forward failures stop preparation. Existing active workspaces are reused, and archive retains branch history.
+
+The user replaced the previous no-cap policy with a configurable global default of eight Agents, across Boards. Later template stages get priority, FIFO within the same depth. Live blocked/idle/closing Agents still count; the queue waits without killing existing work when limits change.
+
+Human handling is a persistent stop condition. A required Review, blocked/error or uncertain recovery cannot resume automatically because a slot opens, the app restarts, a notice is read, or an Agent subsequently reports completion. Explicit human continue/rework/retry/acceptance releases the appropriate gate. Manual Agent assistance remains available without approving the workflow. Implementation and isolated/native evidence are recorded in [workspace/scheduling](../workspace-and-scheduling.md).
+
+
+## 2026-11-07 — Global human-attention workspace design
+
+The user requests distinct names for Canban task blockage and Herdr runtime waits, one highlighted in-app entry, and a Project-independent list of current human actions. The context must identify Project, Card, Agent and actual assignment, show Herdr-reported context when available, and link directly to Card or the exact terminal. macOS notifications remain out of scope.
+
+The [Needs attention proposal](needs-attention.md) recommends Execution waiting (Permission/Sign-in/Answer required), Task needs decision, Review requested and Recovery needed, with a persistent global unresolved count. It defines a list/context layout, source-specific actions, a bounded terminal preview fallback, independent runtime/task resolution, per-episode deduplication and return navigation. Labels/layout/mechanics are recommendations for review; this document update does not implement the global UI, status-based slot release or idle auto-close, and does not claim acceptance of those proposals.
+
+
+## 2026-11-07 — Broaden attention into a Herdr-style Overview
+
+The user supplied a Herdr UI screenshot and pointed to `~/Workspace/herdr-gpui`, requesting a global page covering all Agents, including work needing human action. Read-only source inspection at `a6db99b4` confirmed the grouped Overview, summary, attention emphasis, branch/host/time metadata and collapsed closed history. This replaces the proposed separate attention-only top-level destination.
+
+The [Overview proposal](overview.md) combines Agent activity and attention into one global entry while retaining Board as the workflow center. It recommends Needs attention, Ready for review, Working, Queued, Idle and Closed groups, a selected Card/assignment/terminal-context inspector, per-conversation identity, and preserved return navigation. Unlike generic runtime done, Canban review readiness still requires its own outcome/gate. Host metrics, pin/snooze/settle controls and remote-machine management remain deferred. These are documented recommendations, not an implemented UI or a new acceptance result.
+
+
+## 2026-11-07 — Implement status-aware admission, idle reclamation and Overview
+
+User authorized the discussed Agent limit and global Overview. Verified blocked/idle/done/error runtime releases execution slots; unknown/disconnected/starting work reserves them. Manual resumption can exceed the automatic budget without preemption. This supersedes the earlier all-live-terminal slot rule. Default admission remains eight and resumable idle closure defaults to fifteen minutes, configurable through Settings/JSON. Viewed terminals, outstanding questions, unfinished automatic assignments and unresolved decisions are protected. Normal exit retains exact provider history and does not complete/advance a Card.
+
+Overview replaces Agent activity and the proposed separate attention page. Its pure projection groups all Projects, counts actionable conversations once, separates execution input from task decisions, provides bounded read-only context and explicit Card/Terminal/Review/exact-Resume actions, and preserves the return destination. Native UI and isolated Herdr evidence, API and known protocol race boundary are recorded in [Agent Overview and lifecycle](../agent-overview-and-lifecycle.md).

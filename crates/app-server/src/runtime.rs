@@ -39,6 +39,20 @@ impl AppServer {
         listener.set_nonblocking(true)?;
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+        // Verify retained statuses again after restart; never reclaim immediately from old idle time.
+        self.store.lock().unwrap().write(|db| {
+            for mut a in db
+                .list::<Attempt>()?
+                .into_iter()
+                .filter(|a| !a.finished() && a.terminal.is_some())
+            {
+                a.connection_state = "checking".into();
+                a.lifecycle.observed_at = None;
+                a.lifecycle.idle_since = None;
+                db.save(&a)?;
+            }
+            Ok(())
+        })?;
         // Persisted starting intents must not be replayed as fresh launches.
         // A known binding can reconnect. A lost launch reply remains unknown.
         self.store.lock().unwrap().write(|db|{for mut req in db.list::<Request>()?.into_iter().filter(|r|r.state=="starting"){let run=db.get::<Attempt>(&Attempt::key(&req.id,req.attempt)).ok();req.state=if run.as_ref().and_then(|a|a.terminal.as_ref()).is_some(){"running"}else{"unknown"}.into();db.save(&req)?;if req.state=="unknown"{if let Some(mut run)=run {run.state="unknown".into();db.save(&run)?;}let mut card:Card=db.get(&req.card_id)?;attention(db,&mut card,"Launch interrupted before its receipt was saved. Inspect Herdr before explicitly retrying.")?;card.revision+=1;db.save(&card)?;}}Ok(())})?;
@@ -162,6 +176,7 @@ impl AppServer {
                     let _ = self.capture_output(&run);
                 }
                 let observed = canban_herdr::observation(&value);
+                self.observe_lifecycle(&run, &observed)?;
                 if run.observed.as_ref() != Some(&observed)
                     || run.connection_state != "connected"
                     || (finished && run.close_state != "closed")
@@ -178,12 +193,18 @@ impl AppServer {
                         }
                         if finished {
                             current.close_state="closed".into();
-                            if matches!(current.state.as_str(),"running"|"working"|"starting") {
+                            if current.lifecycle.close_reason == "idle" {
+                                current.state="idle_closed".into();
+                                log(db,&db.get::<Card>(&run.card_id)?,"execution.idle_closed","system","Idle Agent exited; exact conversation retained for resume",Some(run.request_id.clone()),json!({"attempt":run.number}))?;
+                                let mut req:Request=db.get(&run.request_id)?;
+                                if req.attempt==run.number && req.state!="completed" { req.state="idle_closed".into();db.save(&req)?; }
+                            } else if matches!(current.state.as_str(),"running"|"working"|"starting") {
                                 current.state="needs_report".into();
                                 let mut req:Request=db.get(&run.request_id)?;
                                 if req.attempt==run.number && req.state!="completed" {req.state="needs_report".into();db.save(&req)?;}
                                 let mut card:Card=db.get(&run.card_id)?;
                                 attention(db,&mut card,"Agent exited without an explicit outcome. Inspect the retained output before resuming.")?;
+                                if let Some(gate)=&mut card.human_gate && gate.request_id.is_none() { gate.request_id=Some(req.id.clone()); }
                                 card.revision+=1;db.save(&card)?;
                             }
                         }
@@ -198,9 +219,14 @@ impl AppServer {
                 run.close_state = "error".into();
                 run.error = Some("Agent did not exit after the normal exit request. Inspect its terminal or use End session.".into());
                 let mut card: Card = db.get(&run.card_id)?;
-                attention(db, &mut card, run.error.as_deref().unwrap())?;
-                card.revision += 1;
-                db.save(&card)?;
+                if run.lifecycle.close_reason == "idle" {
+                    db.save(&canban_notifications::attention(&card.project_id,&card.id,run.error.as_deref().unwrap()))?;
+                    log(db,&card,"execution.idle_close_failed","system",run.error.as_deref().unwrap(),Some(run.request_id.clone()),json!({"attempt":run.number}))?;
+                } else {
+                    attention(db, &mut card, run.error.as_deref().unwrap())?;
+                    card.revision += 1;
+                    db.save(&card)?;
+                }
                 db.save(&run)?;
             }
             Ok(())
@@ -215,30 +241,19 @@ impl AppServer {
         })?;
         self.deliver_questions(&client)?;
         self.close_completed(&client)?;
+        self.close_idle(&client)?;
         let snapshot = self.snapshot()?;
-        let request = snapshot
-            .requests
-            .iter()
-            .find(|req| {
-                if req.state != "queued" {
-                    return false;
-                }
-                !snapshot.attempts.iter().any(|a| {
-                    a.card_id == req.card_id
-                        && snapshot
-                            .requests
-                            .iter()
-                            .any(|r| r.id == a.request_id && r.profile.id == req.profile.id)
-                        && (a.terminal.is_some()
-                            && a.observed.as_ref().is_none_or(|v| v["state"] != "finished")
-                            || a.state == "unknown")
-                })
-            })
-            .cloned();
+        let request = canban_scheduler::next(&snapshot, self.config().scheduler.max_agents);
         if let Some(request) = request {
             let req = self.store.lock().unwrap().write(|db| {
                 let mut req: Request = db.get(&request.id)?;
                 let card: Card = db.get(&req.card_id)?;
+                let current = db.snapshot()?;
+                if canban_scheduler::active_count(&current) >= self.config().scheduler.max_agents
+                    || !canban_scheduler::eligible(&current, &req)
+                {
+                    return Ok(None);
+                }
                 if card.archived_at.is_some() {
                     req.state = "cancelled".into();
                     db.save(&req)?;
@@ -299,7 +314,9 @@ impl AppServer {
             else {
                 continue;
             };
-            if req.state == "completed" && question.state == "pending" {
+            if matches!(req.state.as_str(), "completed" | "idle_closed")
+                && question.state == "pending"
+            {
                 // A question that raced task completion follows the same conversation
                 // after close. It is never silently redirected to the Reviewer.
                 let config = self.config();
@@ -335,6 +352,9 @@ impl AppServer {
                 .as_ref()
                 .is_some_and(|v| v["state"] == "finished")
             {
+                continue;
+            }
+            if run.runtime_status() == "blocked" || run.connection_state != "connected" {
                 continue;
             }
             self.store.lock().unwrap().write(|db| {
@@ -433,6 +453,22 @@ impl AppServer {
             .find(|c| c.id == req.card_id)
             .context("Card missing")?;
         let cwd = canban_workspaces::prepare(&self.home, project, card)?;
+        let mut prepared = card.clone();
+        prepared.worktree = Some(cwd.to_string_lossy().into_owned());
+        let info = canban_workspaces::info(project, &prepared)?;
+        self.store.lock().unwrap().write(|db| {
+            let mut current: Card = db.get(&card.id)?;
+            let changed = current.worktree != prepared.worktree || current.branch != info.branch;
+            current.worktree = prepared.worktree.clone();
+            current.branch = info.branch.clone();
+            if current.base_commit.is_none() {
+                current.base_commit = info.base_commit.clone();
+            }
+            if changed {
+                log(db, &current, "workspace.prepared", "system", "Card branch and workspace prepared", Some(req.id.clone()), json!({"worktree":current.worktree,"branch":current.branch,"base_commit":current.base_commit}))?;
+            }
+            db.save(&current)
+        })?;
         let input = canban_context::capture(
             &self.home,
             project,
@@ -460,6 +496,7 @@ impl AppServer {
             Ok((c, fresh))
         })?;
         let mut run = Attempt {
+            lifecycle: Lifecycle::default(),
             id: Attempt::key(&req.id, req.attempt),
             request_id: req.id.clone(),
             project_id: req.project_id.clone(),
@@ -496,6 +533,7 @@ impl AppServer {
             }
             let mut c: Card = db.get(&card.id)?;
             c.worktree = Some(run.cwd.clone());
+
             db.save(&c)
         })?;
         let client = canban_herdr::Client {
@@ -599,6 +637,11 @@ impl AppServer {
             }
             let mut c: Card = db.get(&req.card_id)?;
             attention(db, &mut c, error)?;
+            if let Some(gate) = &mut c.human_gate
+                && gate.request_id.is_none()
+            {
+                gate.request_id = Some(req.id.clone());
+            }
             c.revision += 1;
             db.save(&c)?;
             log(

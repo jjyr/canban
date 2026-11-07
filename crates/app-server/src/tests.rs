@@ -31,6 +31,7 @@ fn admit(app: &AppServer, request: &Request) -> Attempt {
             req.state = "running".into();
             db.save(&req)?;
             let run = Attempt {
+                lifecycle: Lifecycle::default(),
                 id: Attempt::key(&req.id, req.attempt),
                 request_id: req.id.clone(),
                 project_id: req.project_id.clone(),
@@ -750,6 +751,7 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
     git(&["add", "."]);
     git(&["commit", "-m", "seed"]);
     project.target_branch = Some("main".into());
+    project.workflow.workspace.sync_base = false;
     card.stage = "review".into();
     card.worktree = Some(
         canban_workspaces::prepare(&app.home, &project, &card)
@@ -847,7 +849,17 @@ fn core_loss_during_question_delivery_becomes_unknown_without_replay() {
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    admit(&app, &app.snapshot().unwrap().requests[0]);
+    let run = admit(&app, &app.snapshot().unwrap().requests[0]);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut a: Attempt = db.get(&run.id)?;
+            a.connection_state = "connected".into();
+            a.lifecycle.observed_at = Some(now());
+            db.save(&a)
+        })
+        .unwrap();
     app.call(
         "comment.add",
         json!({"card_id":card.id,"body":"@developer explain progress"}),
@@ -1035,3 +1047,297 @@ fn upgrading_existing_notes_retains_current_revision_without_inventing_history()
     assert_eq!(rev.body, saved.body);
     assert!(store.db().list::<NoteEvent>().unwrap().is_empty());
 }
+
+#[test]
+fn global_slots_include_closing_and_unknown_agents_and_resume_after_exit() {
+    let (_dir, app, project, card) = setup();
+    assert_eq!(app.config().scheduler.max_agents, 8);
+    for i in 0..9 {
+        let c: Card = serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"project_id":project.id,"title":format!("Task {i}")}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        app.call(
+            "card.move",
+            json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+        )
+        .unwrap();
+        if i < 8 {
+            let req = app.snapshot().unwrap().requests.last().unwrap().clone();
+            admit(&app, &req);
+        }
+    }
+    let mut snapshot = app.snapshot().unwrap();
+    assert_eq!(canban_scheduler::active_count(&snapshot), 8);
+    assert!(canban_scheduler::next(&snapshot, 8).is_none());
+    snapshot.attempts[0].state = "completed".into();
+    snapshot.attempts[0].close_state = "closing".into();
+    assert!(canban_scheduler::next(&snapshot, 8).is_none());
+    snapshot.attempts[0].observed = Some(json!({"state":"finished"}));
+    assert!(canban_scheduler::next(&snapshot, 8).is_some());
+    snapshot.attempts[0].observed = None;
+    snapshot.attempts[0].terminal = None;
+    snapshot.attempts[0].state = "unknown".into();
+    assert!(canban_scheduler::next(&snapshot, 8).is_none());
+    let path = app.home.join("config/agents.json");
+    let before: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    app.call("scheduler.configure", json!({"max_agents":2}))
+        .unwrap();
+    assert_eq!(app.config().scheduler.max_agents, 2);
+    assert_eq!(app.snapshot().unwrap().attempts.len(), 8);
+    assert!(
+        app.call("scheduler.configure", json!({"max_agents":0}))
+            .is_err()
+    );
+    let after: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert_eq!(before["profiles"], after["profiles"]);
+    drop(app);
+    let reopened = AppServer::open(_dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    assert_eq!(reopened.config().scheduler.max_agents, 2);
+    assert_eq!(reopened.snapshot().unwrap().cards[0].id, card.id);
+}
+
+#[test]
+fn later_template_stages_win_across_boards_and_human_cards_are_skipped() {
+    let (_dir, app, mut project, card) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    project.id = "second-board".into();
+    project.workflow.stages[2].id = "custom-final-check".into();
+    project.workflow.stages[1].on_completed = Some("custom-final-check".into());
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&project))
+        .unwrap();
+    let second: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id":project.id,"title":"Later stage"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id":second.id,"revision":1,"stage":"custom-final-check"}),
+    )
+    .unwrap();
+    let mut snapshot = app.snapshot().unwrap();
+    assert_eq!(
+        canban_scheduler::next(&snapshot, 8).unwrap().card_id,
+        second.id
+    );
+    snapshot
+        .cards
+        .iter_mut()
+        .find(|c| c.id == second.id)
+        .unwrap()
+        .human_gate = Some(HumanGate {
+        reason: "Pause".into(),
+        request_id: None,
+        next_stage: None,
+    });
+    assert_eq!(
+        canban_scheduler::next(&snapshot, 8).unwrap().card_id,
+        card.id
+    );
+    let mut manual = snapshot.requests[1].clone();
+    manual.id = "manual".into();
+    manual.trigger = "interactive".into();
+    snapshot.requests.push(manual);
+    assert_eq!(canban_scheduler::next(&snapshot, 8).unwrap().id, "manual");
+    snapshot.requests.pop();
+    snapshot.requests[1].stage = "develop".into();
+    snapshot
+        .cards
+        .iter_mut()
+        .find(|c| c.id == second.id)
+        .unwrap()
+        .stage = "develop".into();
+    snapshot
+        .cards
+        .iter_mut()
+        .find(|c| c.id == second.id)
+        .unwrap()
+        .human_gate = None;
+    snapshot.requests[0].created_at = 1;
+    snapshot.requests[1].created_at = 1;
+    assert_eq!(
+        canban_scheduler::next(&snapshot, 8).unwrap().card_id,
+        card.id
+    );
+}
+
+#[test]
+fn human_review_gate_survives_reports_acknowledgement_restart_and_requires_explicit_approval() {
+    let (dir, app, mut project, card) = setup();
+    project.workflow.stages[1].require_human_review = true;
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&project))
+        .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let request = app.snapshot().unwrap().requests[0].clone();
+    let run = admit(&app, &request);
+    let report = json!({"execution":{"request_id":request.id,"attempt_number":run.number},"state":"completed","request_key":"human-gate-complete"});
+    app.call("execution.report", report.clone()).unwrap();
+    app.call("execution.report", report).unwrap();
+    let snapshot = app.snapshot().unwrap();
+    assert_eq!(snapshot.cards[0].stage, "develop");
+    assert_eq!(
+        snapshot.cards[0]
+            .human_gate
+            .as_ref()
+            .unwrap()
+            .next_stage
+            .as_deref(),
+        Some("review")
+    );
+    assert_eq!(snapshot.requests.len(), 1);
+    app.call("card.attention.clear", json!({"card_id":card.id}))
+        .unwrap();
+    assert!(app.snapshot().unwrap().cards[0].human_gate.is_some());
+    // Explicit manual work can run, but its completion cannot approve this gate.
+    app.call(
+        "comment.add",
+        json!({"card_id":card.id,"body":"@reviewer help me inspect"}),
+    )
+    .unwrap();
+    let manual = app.snapshot().unwrap().requests.last().unwrap().clone();
+    let manual_run = admit(&app, &manual);
+    app.call("execution.report",json!({"execution":{"request_id":manual.id,"attempt_number":manual_run.number},"state":"completed","request_key":"human-gate-manual"})).unwrap();
+    assert!(app.snapshot().unwrap().cards[0].human_gate.is_some());
+    drop(app);
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let current = app.snapshot().unwrap().cards[0].clone();
+    assert!(current.human_gate.is_some());
+    let approve =
+        json!({"card_id":card.id,"revision":current.revision,"request_key":"approve-gate"});
+    assert!(app.call("card.continue",json!({"card_id":card.id,"revision":current.revision,"execution":{"request_id":manual.id,"attempt_number":1}})).is_err());
+    assert!(app.call("card.move",json!({"card_id":card.id,"revision":current.revision,"stage":"review","execution":{"request_id":manual.id,"attempt_number":1}})).is_err());
+    app.call("card.continue", approve.clone()).unwrap();
+    app.call("card.continue", approve).unwrap();
+    let after = app.snapshot().unwrap();
+    assert_eq!(after.cards[0].stage, "review");
+    assert!(after.cards[0].human_gate.is_none());
+    assert_eq!(
+        after
+            .requests
+            .iter()
+            .filter(|r| r.trigger == "stage_entry" && r.stage == "review")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn blocked_completion_does_not_advance_until_human_continues() {
+    let (_dir, app, _project, card) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let request = app.snapshot().unwrap().requests[0].clone();
+    let run = admit(&app, &request);
+    for state in ["blocked", "completed"] {
+        app.call("execution.report",json!({"execution":{"request_id":request.id,"attempt_number":run.number},"state":state,"request_key":format!("blocked-{state}")})).unwrap();
+    }
+    let current = app.snapshot().unwrap().cards[0].clone();
+    assert_eq!(current.stage, "develop");
+    assert!(current.human_gate.is_some());
+    app.call(
+        "card.continue",
+        json!({"card_id":card.id,"revision":current.revision}),
+    )
+    .unwrap();
+    assert_eq!(app.snapshot().unwrap().cards[0].stage, "review");
+}
+
+#[test]
+fn recovery_gate_retains_completion_callback_until_human_approval() {
+    let (_dir, app, _project, card) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let request = app.snapshot().unwrap().requests[0].clone();
+    let run = admit(&app, &request);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut c: Card = db.get(&card.id)?;
+            attention(db, &mut c, "Connection needs inspection")?;
+            db.save(&c)
+        })
+        .unwrap();
+    app.call("execution.report",json!({"execution":{"request_id":request.id,"attempt_number":run.number},"state":"completed","request_key":"recovery-completed"})).unwrap();
+    let current = app.snapshot().unwrap().cards[0].clone();
+    assert_eq!(current.stage, "develop");
+    assert_eq!(
+        current.human_gate.as_ref().unwrap().next_stage.as_deref(),
+        Some("review")
+    );
+    app.call(
+        "card.continue",
+        json!({"card_id":card.id,"revision":current.revision}),
+    )
+    .unwrap();
+    assert_eq!(app.snapshot().unwrap().cards[0].stage, "review");
+}
+
+#[test]
+fn human_continue_can_retry_routing_after_tags_are_fixed() {
+    let (_dir, app, mut project, card) = setup();
+    project.workflow.stages[1].profile = None;
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&project))
+        .unwrap();
+    app.call(
+        "card.update",
+        json!({"card_id":card.id,"revision":1,"tags":["unknown-profile"]}),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":2,"stage":"develop"}),
+    )
+    .unwrap();
+    let current = app.snapshot().unwrap().cards[0].clone();
+    assert!(current.human_gate.is_some());
+    assert!(app.snapshot().unwrap().requests.is_empty());
+    app.call(
+        "card.update",
+        json!({"card_id":card.id,"revision":current.revision,"tags":[]}),
+    )
+    .unwrap();
+    let current = app.snapshot().unwrap().cards[0].clone();
+    app.call(
+        "card.continue",
+        json!({"card_id":card.id,"revision":current.revision}),
+    )
+    .unwrap();
+    let snapshot = app.snapshot().unwrap();
+    assert!(snapshot.cards[0].human_gate.is_none());
+    assert_eq!(snapshot.requests.len(), 1);
+}
+
+#[path = "tests/lifecycle.rs"]
+mod lifecycle_cases;

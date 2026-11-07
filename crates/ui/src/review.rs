@@ -115,7 +115,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .child(heading("Review and deliver"))
         .child(muted("Accept commits all reviewed Card changes and merges into the clean Project checkout. Conflicts stay in the Card worktree. Archive is separate."))
         .child(view().flex_row().flex_wrap().gap_2()
-            .child(action("← Board",Variant::Quiet,move |_|ui.back_board()))
+            .child(action(if ui.return_overview.get_untracked() {"← Overview"} else {"← Board"},Variant::Quiet,move |_|ui.back_board()))
             .child(action("Return to Develop",Variant::Secondary,move |_|{if let Some(c)=ui.current_card(){dispatch_then(ui,"card.move",json!({"card_id":c.id,"revision":c.revision,"stage":"develop"}),move |_|{ui.review.set(None);ui.page.set("card".into());});}})))
         .child(panel().child(label("Target branch")).child(field(target,"Existing local branch"))
             .child(action("Refresh diff",Variant::Secondary,move |_|refresh_diff(ui,target)))

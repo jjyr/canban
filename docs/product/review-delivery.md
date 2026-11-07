@@ -63,4 +63,6 @@ Success saves `Card.delivery` with target branch, commit, request key and merged
 
 ## Archive
 
-Archive packages Card-owned reports/context/replies/output and exported records with zstd. It does not commit or merge. Clean managed worktrees can be removed after retaining their HEAD under the Card ref; dirty worktrees remain with a notice. Restore expands content without scheduling work. Provider-owned conversation files are outside this portable archive boundary.
+Card work now uses a named branch plus worktree. A successful human merge clears the review gate and applies a configured pending completion callback; the default Review has no next stage, so it remains there until explicit Archive.
+
+Archive packages Card-owned reports/context/replies/output and exported records with zstd. It does not commit or merge. Clean managed worktrees can be removed after retaining their HEAD under the Card ref and retaining the named branch; dirty worktrees remain with a notice. Restore expands content without scheduling work. Provider-owned conversation files are outside this portable archive boundary.

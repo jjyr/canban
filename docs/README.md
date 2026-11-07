@@ -16,6 +16,7 @@ The repository now has a runnable macOS MVP. [Latest acceptance](mvp-acceptance.
 | [Kanban card workflow](product/kanban-workflow.md) | Numbers, resources, stages/run/outcome separation, comments, mentions, and archive |
 | [Notes and the Kanban workspace](product/notes-and-workspace.md) | SQLite-backed file-like Notes, related-event Timeline, bidirectional links, Agent read/write and ASCII workspace layouts |
 | [Notes/workspace implementation](notes-and-workspace-implementation.md) | Implemented document operations, Agent CLI, UI composition and acceptance limits |
+| [Workspace and scheduling implementation](workspace-and-scheduling.md) | Named branches, remote/base synchronization, global Agent limit, priority and human approval gates |
 | [Scheduler](product/scheduler.md) | Stage determines work; tags select agents; admission determines timing |
 | [Agent profile configuration](product/agent-profiles.md) | Implemented registry, role instructions, stage references, routing and JSON examples |
 | [Agent CLI and extensibility](product/agent-extensibility.md) | Current CLI surface, multi-Agent ownership and proposed command-defined lifecycle presets |
@@ -27,6 +28,9 @@ The repository now has a runnable macOS MVP. [Latest acceptance](mvp-acceptance.
 | [MVP scope review](product/mvp-scope-review.md) | User resolutions and the simplified first-release boundary |
 | [Review and code delivery](product/review-delivery.md) | Basic Diff, return-to-Develop, explicit commit/merge, conflict and receipt behavior |
 | [MVP progress and next steps](product/mvp-next-steps.md) | Current acceptance boundaries and recommended daily-use, review and code-delivery priorities |
+| [Agent lifecycle implementation](agent-overview-and-lifecycle.md) | Status-aware global budget, idle reclamation, global Overview and isolated/native validation |
+| [Global Agent Overview](product/overview.md) | Herdr UI reference, all-Agent grouped overview, attention highlight, queued/idle/closed states and context inspector |
+| [Attention handling](product/needs-attention.md) | Task/runtime naming, contextual handling inside Overview, Card/Terminal navigation and resolution rules |
 | [Events and notifications](product/events-and-notifications.md) | Rust enum/channel/topic direction, needs-attention state, internal notifications; detailed architecture deferred |
 
 Current default template: Backlog / Develop / Review. Only Backlog is mandatory. Archive retains completed work outside the active Board. Plan/Process are earlier generic planning/execution terms, not additional required columns. Earlier Space-based organization and Ready/In Progress/Done column recommendations have been superseded.

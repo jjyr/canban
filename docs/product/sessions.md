@@ -16,7 +16,7 @@ Project -> Card -> profile conversation (Card ID + profile ID)
 
 A live @profile comment becomes a durable Question associated with its comment and current request/attempt. It is sent immediately through Herdr. canban reply records the answer and Timeline event without completing the original request. An absent/exited profile starts/resumes through the same Scheduler; its follow-up request has no stage callback.
 
-Stage entry queues a request with the template's task and completion callback. If the same Card/profile is still live, the queued stage waits for that conversation boundary. Other Cards/profiles run concurrently, with no global, Board or profile capacity cap. Developer/Reviewer profiles have independent conversations even if both use Codex.
+Stage entry queues a request with the template's task and completion callback. If the same Card/profile is still live, the queued stage waits for that conversation boundary. Other Cards/profiles run concurrently within the configurable global budget (default eight); no Board/profile cap is added. Live, idle and closing terminals all occupy slots. Developer/Reviewer profiles have independent conversations even if both use Codex.
 
 Clicking a Card Agent focuses its queued/live request; an exited conversation gets a new request/attempt/terminal using the exact saved provider ID. Repeated opens do not duplicate a live invocation. Provider/session bindings cannot be shared between different Cards/profiles.
 

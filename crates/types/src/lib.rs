@@ -21,32 +21,80 @@ pub struct Stage {
     pub profile: Option<String>,
     pub instruction: String,
     pub on_completed: Option<String>,
+    #[serde(default)]
+    pub require_human_review: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Workflow {
+    #[serde(default)]
+    pub workspace: WorkspaceSettings,
     pub name: String,
     pub stages: Vec<Stage>,
+}
+/// Missing fields preserve existing local-only templates.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct WorkspaceSettings {
+    #[serde(default = "yes")]
+    pub create_worktree: bool,
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    #[serde(default)]
+    pub sync_base: bool,
+    #[serde(default = "origin")]
+    pub remote: String,
+}
+fn yes() -> bool {
+    true
+}
+fn origin() -> String {
+    "origin".into()
+}
+impl Default for WorkspaceSettings {
+    fn default() -> Self {
+        Self {
+            create_worktree: true,
+            base_branch: None,
+            sync_base: false,
+            remote: origin(),
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct HumanGate {
+    pub reason: String,
+    pub request_id: Option<String>,
+    pub next_stage: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct WorkspaceInfo {
+    pub path: Option<String>,
+    pub branch: Option<String>,
+    pub target_branch: Option<String>,
+    pub base_commit: Option<String>,
+    pub state: String,
+    pub dirty: bool,
 }
 impl Default for Workflow {
     fn default() -> Self {
         Self {
+            workspace: WorkspaceSettings { sync_base: true, ..Default::default() },
             name: "Development".into(),
             stages: vec![
                 Stage {
                     id: "backlog".into(), name: "Backlog".into(), execute: false,
-                    profile: None, instruction: String::new(), on_completed: None,
+                    profile: None, instruction: String::new(), on_completed: None, require_human_review: false,
                 },
                 Stage {
                     id: "develop".into(), name: "Develop".into(), execute: true,
                     profile: Some("developer".into()),
                     instruction: "Implement the card task in the supplied working directory. Explain your changes and validation in your report.".into(),
-                    on_completed: Some("review".into()),
+                    on_completed: Some("review".into()), require_human_review: false,
                 },
                 Stage {
                     id: "review".into(), name: "Review".into(), execute: true,
                     profile: Some("reviewer".into()),
                     instruction: "Review the work for this card. Inspect the code and earlier results, then write an ordinary Markdown review report. Report findings and any remaining concerns. Do not implement unrelated changes.".into(),
-                    on_completed: None,
+                    on_completed: None, require_human_review: true,
                 },
             ],
         }
@@ -96,8 +144,34 @@ impl Profile {
             .to_owned()
     }
 }
+pub fn default_idle_minutes() -> u64 {
+    15
+}
+pub fn default_max_agents() -> usize {
+    8
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct SchedulerSettings {
+    /// Zero disables idle reclamation.
+    #[serde(default = "default_idle_minutes")]
+    pub idle_minutes: u64,
+    #[serde(default = "default_max_agents")]
+    pub max_agents: usize,
+}
+impl Default for SchedulerSettings {
+    fn default() -> Self {
+        Self {
+            max_agents: default_max_agents(),
+            idle_minutes: default_idle_minutes(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Config {
+    #[serde(default)]
+    pub scheduler: SchedulerSettings,
     pub hc: String,
     pub hc_session: String,
     #[serde(default)]
@@ -115,6 +189,7 @@ impl Default for Config {
             ..Default::default()
         };
         Self {
+            scheduler: SchedulerSettings::default(),
             hc: "hc".into(),
             hc_session: "default".into(),
             hc_env: BTreeMap::new(),
@@ -163,6 +238,12 @@ pub struct Card {
     pub archive: Option<String>,
     pub archive_error: Option<String>,
     pub worktree: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub base_commit: Option<String>,
+    #[serde(default)]
+    pub human_gate: Option<HumanGate>,
     #[serde(default)]
     pub delivery: Option<Delivery>,
     pub created_at: u64,
@@ -215,12 +296,16 @@ pub struct Request {
     pub profile: Profile,
     pub instruction: String,
     pub on_completed: Option<String>,
+    #[serde(default)]
+    pub require_human_review: bool,
     pub state: String,
     pub attempt: u32,
     pub created_at: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Attempt {
+    #[serde(default)]
+    pub lifecycle: Lifecycle,
     pub id: String,
     pub request_id: String,
     pub project_id: String,
@@ -254,7 +339,48 @@ pub struct Attempt {
     #[serde(default)]
     pub connection_state: String,
 }
+/// Durable policy facts; runtime input waits never become workflow approvals.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Lifecycle {
+    pub observed_at: Option<u64>,
+    pub idle_since: Option<u64>,
+    pub last_interaction_at: Option<u64>,
+    pub waiting: Option<RuntimeWait>,
+    #[serde(default)]
+    pub close_reason: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct RuntimeWait {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub message: String,
+    pub since: u64,
+}
 impl Attempt {
+    pub fn finished(&self) -> bool {
+        self.observed
+            .as_ref()
+            .is_some_and(|v| v["state"] == "finished")
+    }
+    /// A stale or disconnected status must not release scheduling capacity.
+    pub fn runtime_status(&self) -> &str {
+        if self.finished() {
+            return "closed";
+        }
+        if self.connection_state != "connected"
+            || self
+                .lifecycle
+                .observed_at
+                .is_none_or(|t| now().saturating_sub(t) > 30_000)
+        {
+            return "unknown";
+        }
+        self.observed
+            .as_ref()
+            .and_then(|v| v["status"]["state"].as_str())
+            .unwrap_or("unknown")
+    }
     pub fn key(request: &str, number: u32) -> String {
         format!("{request}:{number}")
     }

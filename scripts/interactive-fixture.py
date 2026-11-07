@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Interactive, persistent deterministic provider used only in scratch acceptance."""
-import json,os,re,sys,uuid,termios,tty
+import json,os,re,sys,uuid,termios,tty,base64
 from pathlib import Path
 import subprocess
 home=Path(os.environ['CANBAN_HOME']);request=os.environ['CANBAN_REQUEST_ID'];attempt=int(os.environ['CANBAN_ATTEMPT'])
@@ -16,7 +16,12 @@ call('agent.bind',{'request_id':request,'attempt':attempt,'session_id':session})
 manifest=next(home.glob(f'projects/*/cards/*/runs/{request}/{attempt}/context.json'));context=json.loads(manifest.read_text())
 print(f'\x1b[36mINTERACTIVE_READY {session}\x1b[0m',flush=True)
 print('\x1b[?2004h',end='',flush=True)
-def state(word): print(f'\x1b]7501;state={word}\x1b\\',end='',flush=True)
+def state(word,kind=None,title='',msg=''):
+ fields=['state='+word]
+ if kind:fields.append('kind='+kind)
+ for k,v in [('title',title),('msg',msg)]:
+  if v:fields.append(k+'='+base64.b64encode(v.encode()).decode())
+ print('\x1b]7501;'+':'.join(fields)+'\x1b\\',end='',flush=True)
 def reply(q):
  f=manifest.parent/f'answer-{q["id"]}.md';f.write_text(f'Answer for {q["id"]}; session={session}; turns={saved["turns"]}; Card={context["card"]["id"]}\n')
  call('agent.reply',{'request_key':'fixture-reply:'+q['id'],'question_id':q['id'],'request_id':request,'attempt':attempt,'body':f.read_text()})
@@ -59,6 +64,15 @@ try:
     note=call('note.get',{'note_id':note_id})
     result=subprocess.run([os.environ['CANBAN_CLI'],'note','write',note_id,'--revision',str(note['revision'])],input=body,capture_output=True,text=True,check=True)
     print('\r\nNOTE_UPDATED '+note_id+'\r\n',end='',flush=True)
+   elif line in ('permission','permission-update','auth','question'):
+    state('blocked','permission' if line.startswith('permission') else line,'Agent input required','Allow git diff?' if line=='permission-update' else 'Allow git status?')
+    print('RUNTIME_WAIT '+line,flush=True)
+   elif line=='idle':state('idle');print('IDLE_READY',flush=True)
+   elif line=='working':state('working');print('WORKING_READY',flush=True)
+   elif line=='done-only':state('done');print('DONE_WITHOUT_REPORT',flush=True)
+   elif line=='block':
+    call('execution.report',{'request_key':f'fixture-block:{request}:{attempt}','execution':{'request_id':request,'attempt_number':attempt},'state':'blocked','message':'Human answer required'})
+    state('idle');print('HUMAN_INPUT_REQUIRED',flush=True)
    elif line=='finish':finish()
    else:print('\r\nINPUT '+line+'\r\n',end='',flush=True)
 finally:termios.tcsetattr(sys.stdin.fileno(),termios.TCSADRAIN,old)

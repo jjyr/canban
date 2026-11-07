@@ -36,6 +36,10 @@ try:
  (source/'test_greeting.py').write_text('import unittest\nfrom greeting import greet\nclass Tests(unittest.TestCase):\n    def test_ascii(self):self.assertEqual(greet("Ada"),"Hello, Ada!")\n    def test_unicode(self):self.assertEqual(greet("世界"),"Hello, 世界!")\n')
  (source/'.gitignore').write_text('__pycache__/\n')
  for args in [['init'],['add','.'],['-c','user.name=Acceptance','-c','user.email=acceptance@example.invalid','-c','core.hooksPath=/dev/null','commit','-m','Seed']]:subprocess.run(['git','-C',str(source),*args],check=True,capture_output=True)
+ workflow_path = home / 'config/workflows/default.json'
+ local_workflow = json.loads(workflow_path.read_text())
+ local_workflow['workspace']['sync_base'] = False  # Fixture repositories have no remote.
+ workflow_path.write_text(json.dumps(local_workflow))
  project=call('project.create',{'name':'Real interactive','directory':str(source)})
  marker='MARKER_'+base.name.replace('-','_')
  call('note.save',{'project_id':project['id'],'title':'Remember this exact marker','body':marker})

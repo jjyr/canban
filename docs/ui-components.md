@@ -57,3 +57,13 @@ The native Terminal's optional `content` property replaces a static VT preview w
 `Ui.navigate` invalidates pending resource output on sidebar changes; new Note selection does the same. Native Terminal construction is memoized by run/binding rather than unrelated snapshot changes. Closing the viewer does not issue an Agent control operation. Drafts/scroll live for the app process; they are not crash-persistent storage.
 
 Gallery workspace scenes import the exact production components, including focused Review and Note relations. Its constrained viewport controls exercise narrow composition without changing system display preferences. Current native acceptance and remaining resize/automation limits are recorded in [Notes/workspace implementation](notes-and-workspace-implementation.md).
+
+
+## Git workspace and scheduler controls
+
+`components/git_workspace.rs` projects the selected Card's branch/path/base/delivery with read-only status refresh and exact-value copy actions. Git reads run off the UI thread and are fenced against disposed routes. Visual labels compact long paths so actions remain reachable in narrow panes. `components/scheduling.rs` supplies the shared global usage/waiting summary and positive-integer limit editor; both Settings and the standalone Gallery use it. Card human gates show an explicit reviewed/continue action rather than treating notice acknowledgement as approval. See [workspace/scheduling](workspace-and-scheduling.md) for native and backend validation.
+
+
+### Overview components
+
+`ui/overview.rs` composes the global grouped list, stable Card/profile rows, filters, Closed/history disclosure, context inspector and explicit destination actions. Inputs are the shared typed pure projection plus retained UI selection/filter/scroll state; selection has no execution side effects. Inspector actions remain outside the scrolling assignment/history. Narrow layouts show the same context with an explicit return. Preview requests are asynchronous and generation/identity fenced. The Gallery Overview scene supplies every group, independent reasons, multiple Projects and request-less recovery. `ui-kit::read_text` reuses NSH selectable document behavior for plain Agent/runtime text without interpreting markup.

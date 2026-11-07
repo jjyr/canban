@@ -78,6 +78,13 @@ fn log(
 }
 fn attention(db: Db<'_>, card: &mut Card, message: &str) -> Result<()> {
     card.attention = Some(message.into());
+    if card.human_gate.is_none() {
+        card.human_gate = Some(HumanGate {
+            reason: message.into(),
+            request_id: None,
+            next_stage: None,
+        });
+    }
     db.save(&canban_notifications::attention(
         &card.project_id,
         &card.id,
@@ -123,7 +130,7 @@ fn enqueue(
             return Ok(None);
         }
     };
-    let req = canban_scheduler::request(
+    let mut req = canban_scheduler::request(
         &project.id,
         &card.id,
         &stage.id,
@@ -136,6 +143,7 @@ fn enqueue(
             stage.on_completed.clone()
         },
     );
+    req.require_human_review = explicit.is_none() && stage.require_human_review;
     db.save(&req)?;
     let mut context = crate::sessions::conversation(db, card, &req.profile)?;
     // Queued work does not replace the pointer to an invocation that is still live.
@@ -156,7 +164,35 @@ fn enqueue(
 }
 impl AppServer {
     pub fn open(home: PathBuf, cli: PathBuf) -> Result<Arc<Self>> {
-        let store = Store::open(&home)?;
+        let mut store = Store::open(&home)?;
+        // Existing attention is a real pause after upgrading, not merely a badge.
+        store.write(|db| {
+            let requests = db.list::<Request>()?;
+            for mut card in db.list::<Card>()? {
+                if let Some(reason) = card.attention.clone()
+                    && card.human_gate.is_none()
+                {
+                    let request_id = requests
+                        .iter()
+                        .rev()
+                        .find(|r| {
+                            r.card_id == card.id
+                                && matches!(
+                                    r.state.as_str(),
+                                    "blocked" | "failed" | "needs_report" | "unknown"
+                                )
+                        })
+                        .map(|r| r.id.clone());
+                    card.human_gate = Some(HumanGate {
+                        reason,
+                        request_id,
+                        next_stage: None,
+                    });
+                    db.save(&card)?;
+                }
+            }
+            Ok(())
+        })?;
         let path = home.join("config/agents.json");
         if !path.exists() {
             canban_context::atomic(&path, &serde_json::to_vec_pretty(&Config::default())?)?;
@@ -222,6 +258,14 @@ impl AppServer {
         Ok(())
     }
     fn validate_config(c: &Config) -> Result<()> {
+        ensure!(
+            c.scheduler.max_agents > 0,
+            "max_agents must be greater than zero"
+        );
+        ensure!(
+            c.scheduler.idle_minutes <= 525600,
+            "idle_minutes must be at most one year"
+        );
         let mut ids = std::collections::HashSet::new();
         for p in &c.profiles {
             ensure!(
@@ -324,8 +368,11 @@ impl AppServer {
 }
 
 mod commands;
+mod workflow;
 
+mod lifecycle;
 mod notes;
+mod overview;
 mod reports;
 mod resources;
 mod runtime;

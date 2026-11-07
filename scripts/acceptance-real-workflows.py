@@ -9,7 +9,7 @@ repo = Path(__file__).resolve().parents[1]
 base = Path(tempfile.mkdtemp(prefix='cb-real-workflows-', dir='/private/tmp'))
 home = base / 'home'
 cli = repo / 'target/debug/canban'
-env = {**os.environ, 'CANBAN_HOME': str(home)}
+env = {**{k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')}, 'CANBAN_HOME': str(home)}
 core_env = {'HC_SESSION': 'workflow-acceptance', 'HC_SOCKET': str(base / 'hc.sock'),
             'XDG_STATE_HOME': str(base / 'hc-state'), 'XDG_CONFIG_HOME': str(base / 'hc-config')}
 log = open(base / 'server.log', 'w')
@@ -65,6 +65,10 @@ def project(name, files):
     git(source, 'config', 'core.hooksPath', '/dev/null')
     git(source, 'add', '.')
     git(source, 'commit', '-m', 'Seed acceptance repository')
+    workflow_path = home / 'config/workflows/default.json'
+    workflow = json.loads(workflow_path.read_text())
+    workflow['workspace']['sync_base'] = False
+    workflow_path.write_text(json.dumps(workflow))
     return call('project.create', {'name': name, 'directory': str(source)}), source
 
 def reviewed(snapshot, card_id):

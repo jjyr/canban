@@ -2,6 +2,23 @@ use anyhow::{Result, bail, ensure};
 use canban_types::{Stage, Workflow};
 pub fn validate(flow: &Workflow) -> Result<()> {
     ensure!(!flow.name.trim().is_empty(), "Workflow name is required");
+    let workspace = &flow.workspace;
+    ensure!(
+        !workspace.sync_base || workspace.create_worktree,
+        "sync_base requires create_worktree"
+    );
+    if workspace.sync_base {
+        ensure!(
+            !workspace.remote.trim().is_empty() && !workspace.remote.starts_with('-'),
+            "A valid remote is required for sync_base"
+        );
+    }
+    if let Some(base) = &workspace.base_branch {
+        ensure!(
+            !base.trim().is_empty() && !base.starts_with('-'),
+            "Invalid base_branch"
+        );
+    }
     let mut ids = std::collections::HashSet::new();
     for stage in &flow.stages {
         ensure!(

@@ -7,7 +7,7 @@ pub mod tokens;
 pub use button::{Variant, action};
 pub use checkbox::checkbox;
 pub use input::{bound_field, field};
-pub use surface::{badge, heading, label, muted, panel};
+pub use surface::{badge, heading, label, muted, panel, read_text};
 
 pub mod navigation;
 pub mod split;

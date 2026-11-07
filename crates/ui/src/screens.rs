@@ -1,4 +1,4 @@
-use crate::{components::*, presenter::*};
+use crate::presenter::*;
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::json;
@@ -17,6 +17,30 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                 .child(heading("canban"))
                 .child(muted("HUMAN CONTEXT")),
         )
+        .child(dynamic(move || {
+            let count = canban_notifications::overview(&ui.snapshot.get())
+                .iter()
+                .filter(|r| r.actionable())
+                .count();
+            let title = if count > 0 {
+                format!("Overview   ! {count}")
+            } else {
+                "Overview".into()
+            };
+            view()
+                .gap_1()
+                .child(navigation(
+                    title,
+                    move || ui.page.get() == "overview" || ui.return_overview.get(),
+                    move |_| ui.navigate("overview"),
+                ))
+                .child(if count > 0 {
+                    status(format!("{count} need you"), Tone::Attention).into_element()
+                } else {
+                    view().into_element()
+                })
+        }))
+        .child(view().h(px(8.0)))
         .child(muted("PROJECTS"))
         .child(dynamic(move || {
             view().gap_1().children(ui.snapshot.with(|s| {
@@ -47,7 +71,6 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
     for (name, page) in [
         ("Board", "board"),
         ("Notes", "notes"),
-        ("Agent activity", "agents"),
         ("Archived Cards", "archive"),
     ] {
         side = side.child(navigation(
@@ -55,7 +78,8 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             move || {
                 let selected = ui.page.get();
                 if page == "board" {
-                    matches!(selected.as_str(), "board" | "card" | "terminal" | "review")
+                    !ui.return_overview.get()
+                        && matches!(selected.as_str(), "board" | "card" | "terminal" | "review")
                 } else {
                     selected == page
                 }
@@ -66,21 +90,6 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         ));
     }
     side.child(view().flex_1())
-        .child(action("Needs attention", Variant::Quiet, move |_| {
-            ui.board_filter.set("attention".into());
-            ui.navigate("board");
-        }))
-        .child(muted(move || {
-            ui.snapshot.with(|s| {
-                format!(
-                    "{} unread notices",
-                    s.notices
-                        .iter()
-                        .filter(|n| !n.read && n.project_id == ui.project.get())
-                        .count()
-                )
-            })
-        }))
         .child(action("Check Herdr", Variant::Quiet, move |_| {
             dispatch(ui, "herdr.status", json!({}))
         }))
@@ -106,7 +115,7 @@ pub fn screen(ui: Ui, page: &str) -> AnyElement {
         "new-project" => new_project(ui).into_element(),
         "new-card" => new_card(ui).into_element(),
         "notes" => crate::notes::screen(ui).into_element(),
-        "agents" => agents(ui).into_element(),
+        "overview" | "agents" => crate::overview::screen(ui).into_element(),
         "board" | "card" | "terminal" | "review" => crate::workspace::screen(ui).into_element(),
         "archive" => archived(ui).into_element(),
         "settings" => settings(ui).into_element(),
@@ -164,38 +173,6 @@ fn new_card(ui: Ui) -> impl IntoElement {
             dispatch_complete(ui,"card.create",p,move|result|match result{Ok(_)=>{ui.drafts.with(|m|{m.remove(&key);});},Err(e)=>{if let Some(mut value)=draft.try_get(){value.error=e;draft.try_set(value);}}});
         }).disabled(move||ui.pending.get() || draft.with(|d|d.title.trim().is_empty()))))
 }
-fn agents(ui: Ui) -> impl IntoElement {
-    layout(
-        "Agent activity",
-        "One Session model · independent conversations · runtime status from Herdr",
-    )
-    .child(
-        scroll().flex_1().child(
-            view()
-                .gap_3()
-                .child(dynamic(move || {
-                    let project = ui.project.get();
-                    view().gap_3().children(ui.snapshot.with(|s| {
-                        s.requests
-                            .iter()
-                            .filter(|r| r.project_id == project)
-                            .cloned()
-                            .map(|r| {
-                                let id = r.card_id.clone();
-                                panel()
-                                    .child(crate::sessions::execution(ui, r))
-                                    .child(action("Open Card", Variant::Quiet, move |_| {
-                                        ui.open_card(id.clone())
-                                    }))
-                                    .into_element()
-                            })
-                            .collect::<Vec<_>>()
-                    }))
-                }))
-                .child(output_panel(ui)),
-        ),
-    )
-}
 fn archived(ui: Ui) -> impl IntoElement {
     layout(
         "Archived Cards",
@@ -230,11 +207,10 @@ fn archived(ui: Ui) -> impl IntoElement {
 fn settings(ui: Ui) -> impl IntoElement {
     let home = crate::APP
         .get()
-        .unwrap()
-        .home
-        .to_string_lossy()
-        .into_owned();
+        .map(|app| app.home.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Gallery preview".into());
     layout("Settings", "JSON configuration; changes apply to newly queued work after reload.")
+        .child(crate::components::scheduling::settings(ui))
         .child(scroll().flex_1().child(view().gap_4()
             .child(panel()
                 .child(label("Application home"))

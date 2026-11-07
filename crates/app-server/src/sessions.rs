@@ -63,11 +63,19 @@ impl AppServer {
             ensure!(card.archived_at.is_none(),"Restore this Card before opening its Agent");
             let profile=canban_scheduler::select(&config,&[],Some(strp(&p,"profile_id")?))?;
             let mut context=conversation(db,&card,&profile)?;
+            if let Some(expected)=p["expected_attempt_id"].as_str() {
+                let snapshot=db.snapshot()?;
+                let row=canban_notifications::overview(&snapshot).into_iter().find(|r|r.id == context.id).context("Conversation no longer exists")?;
+                let run=row.attempt.context("Conversation has no invocation")?;
+                ensure!(run.id == expected && run.finished(),"Overview invocation changed; select it again");
+                ensure!(context.provider_session_id.is_some() && context.provider_session_id == run.provider_session_id,"Exact provider session is unavailable");
+                ensure!(!profile.resume_command().is_empty(),"Profile has no resume command");
+            }
             if let Some(id)=&context.last_request_id {
                 let req:Request=db.get(id)?;
                 let run=db.get::<Attempt>(&Attempt::key(&req.id,req.attempt)).ok();
                 let live=run.as_ref().is_some_and(|a|a.terminal.is_some() && a.observed.as_ref().is_none_or(|v|v["state"]!="finished"));
-                if matches!(req.state.as_str(),"queued"|"starting"|"unknown") || live {
+                if (matches!(req.state.as_str(),"queued"|"starting"|"unknown") && !(card.human_gate.is_some() && req.state=="queued" && canban_scheduler::automatic(&req))) || live {
                     return Ok(json!({"request_id":req.id,"reused":true,"attempt":run}));
                 }
             }

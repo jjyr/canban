@@ -13,6 +13,7 @@ pub enum Event {
     Lost(String),
 }
 pub struct Attachment {
+    viewer: Option<crate::activity::Viewer>,
     writer: Arc<Mutex<ChildStdin>>,
     receiver: mpsc::Receiver<Event>,
     child: Child,
@@ -123,6 +124,7 @@ impl Client {
             }
         });
         Ok(Attachment {
+            viewer: None,
             writer: Arc::new(Mutex::new(stdin)),
             receiver,
             child,
@@ -132,6 +134,9 @@ impl Client {
     }
 }
 impl Attachment {
+    pub fn track_view(&mut self, core: &str, terminal: &str) {
+        self.viewer = Some(crate::activity::Viewer::new(core, terminal));
+    }
     pub fn recv(&self, timeout: Duration) -> Result<Option<Event>> {
         match self.receiver.recv_timeout(timeout) {
             Ok(v) => Ok(Some(v)),
@@ -140,6 +145,9 @@ impl Attachment {
         }
     }
     pub fn input(&self, bytes: &[u8], automatic: bool) -> Result<()> {
+        if !automatic && let Some(viewer) = &self.viewer {
+            viewer.touch();
+        }
         frame(
             &mut *self.writer.lock().unwrap(),
             self.channel,

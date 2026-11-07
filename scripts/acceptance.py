@@ -18,7 +18,7 @@ home = base / "home"
 cli = repo / "target/debug/canban"
 source = base / "source"
 source.mkdir(parents=True, exist_ok=True)
-env = os.environ.copy()
+env = {k:v for k,v in os.environ.items() if not k.startswith("CANBAN_")}
 env["CANBAN_HOME"] = str(home)
 core_env = {"HC_SESSION": "canban-acceptance", "HC_SOCKET": str(base / "hc.sock"), "XDG_STATE_HOME": str(base / "hc-state"), "XDG_CONFIG_HOME": str(base / "hc-config")}
 log = open(base / "server.log", "a")
@@ -67,6 +67,10 @@ try:
     core = call("herdr.status")
     assert core["core"]["id"]
     print(f"HERDR_CONNECTED {core['version']} core={core['core']['id']}", flush=True)
+    workflow_path = home / 'config/workflows/default.json'
+    local_workflow = json.loads(workflow_path.read_text())
+    local_workflow['workspace']['sync_base'] = False  # Fixture repositories have no remote.
+    workflow_path.write_text(json.dumps(local_workflow))
     project = call("project.create", {"name": "MVP Acceptance", "directory": str(source)})
     note = call("note.save", {"project_id": project["id"], "title": "Human Context", "body": "Only modify the disposable acceptance project."})
     card = call("card.create", {"project_id": project["id"], "title": "Verify automatic development and review", "body": "Create the acceptance deliverable and report the result."})
@@ -91,7 +95,7 @@ try:
     state = wait_for(lambda s: len(s["reports"]) >= 3, "Fresh mention Session")
     assert next(c for c in state["cards"] if c["id"] == card["id"])["stage"] == "review"
     call("comment.add", {"card_id": card["id"], "body": "@fixture block-me"})
-    state = wait_for(lambda s: any(n["card_id"] == card["id"] for n in s["notices"]), "Blocked notice")
+    state = wait_for(lambda s: any(r["card_id"] == card["id"] and r["state"] == "blocked" for r in s["reports"]) and any(n["card_id"] == card["id"] for n in s["notices"]), "Blocked report and notice")
     assert next(c for c in state["cards"] if c["id"] == card["id"])["attention"]
     print("MENTION_BLOCKED_OK fresh Session and durable attention notice", flush=True)
     report = next(r for r in state["reports"] if r["path"])
@@ -122,7 +126,7 @@ try:
     barrier = home / "acceptance-barrier"
     state = wait_for(lambda s: barrier.exists() and len(list(barrier.iterdir())) == 3
                      and len([a for a in s["attempts"] if a["card_id"] in cards and a["terminal"]]) == 3,
-                     "Three same-profile Agents running across Boards without capacity limits")
+                     "Three same-profile Agents running across Boards within the global budget")
     concurrent = [a for a in state["attempts"] if a["card_id"] in cards]
     assert len({a["project_id"] for a in concurrent}) == 3
     assert len({a["terminal"] for a in concurrent}) == 3
@@ -130,7 +134,7 @@ try:
     (barrier / "release").touch()
     wait_for(lambda s: len(s["reports"]) == 7 and all(r["state"] == "completed" for r in s["requests"] if r["card_id"] in cards),
              "Concurrent Agents report independently")
-    print(f"UNLIMITED_CONCURRENCY_OK three Boards, one profile, ignored legacy capacity=1\nACCEPTANCE_HOME={home}\nACCEPTANCE_PASSED", flush=True)
+    print(f"GLOBAL_BUDGET_CONCURRENCY_OK three Boards, one profile, ignored legacy capacity=1\nACCEPTANCE_HOME={home}\nACCEPTANCE_PASSED", flush=True)
 finally:
     server.terminate()
     server.wait(timeout=10)

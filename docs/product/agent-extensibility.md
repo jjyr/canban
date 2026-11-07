@@ -37,7 +37,7 @@ Card + profile ID -> Conversation -> Request -> Attempt
                      Canban CLI <--- report / reply / bind
 ```
 
-There are no global, Board or profile concurrency caps. Separate Cards have separate conversations/worktrees; profiles on one Card share its worktree. A live Card/profile is reused. Different profiles, including two using Codex, have independent provider histories. This is the selected simple model, without writer leases or a generalized Agent-team protocol.
+The global Agent budget defaults to eight and is configurable; there are no additional Board/profile caps. Human gates pause automatic requests. Separate Cards have separate conversations/worktrees; profiles on one Card share its worktree. A live Card/profile is reused. Different profiles, including two using Codex, have independent provider histories. This is the selected simple model, without writer leases or a generalized Agent-team protocol.
 
 A live mention is additional input and a durable Question. Its explicit reply is independent of completing the original assignment. Stage entry queues work with its own completion callback. An Agent can mention another configured profile through comment.add, using ordinary scheduling; Canban does not automatically orchestrate that CLI's internal subagents.
 

@@ -6,6 +6,7 @@ pub mod card;
 pub mod components;
 pub mod drafts;
 pub mod notes;
+pub mod overview;
 pub mod presenter;
 pub mod profiles;
 pub mod review;

@@ -245,3 +245,8 @@ Editable preset files live under config/presets; embedded JSON supplies default 
 Project.target_branch captures the default local delivery branch. Card.delivery stores the latest accepted target/commit/request key/timestamp, while full delivery events remain in Timeline. review.merge persists an operations receipt with state unknown before Git effects, then replaces it with the observed result. This is deliberately not described as a transaction spanning SQLite and Git. Reusing the same operation key never blindly replays effects after a lost reply.
 
 Archive retains the Card Git ref independently of the Project's current HEAD. Restore preserves that checkout association; reopening recreates the retained Card commit even if the Project branch has since advanced. Legacy restores with a cleared path also consult the retained Card ref. Reports/replies should be written under CANBAN_RUN_DIR so temporary reporting artifacts stay out of delivered code.
+
+
+## Named Card workspaces and approval state (2026-11-07)
+
+Card records now retain branch/worktree identity, the initial base commit and an optional human gate with related request/pending transition. Workflow snapshots include simple workspace settings; Requests snapshot whether completion requires human review. These use backward-compatible JSON fields in the existing SQLite records. Existing attention seeds a human gate on open. No file content or Git history is discarded during adoption; detached Card checkouts become named branches at their current HEAD on next use. See [implementation contract](workspace-and-scheduling.md).

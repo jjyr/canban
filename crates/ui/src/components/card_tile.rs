@@ -54,6 +54,10 @@ pub fn card_tile(
                 .collect::<String>(),
         ))
         .child(status(summary, tone))
+        .child(muted(crate::components::git_workspace::compact(
+            card.branch.as_deref().unwrap_or(""),
+            28,
+        )))
         .child(
             view().flex_row().gap_1().children(
                 card.tags

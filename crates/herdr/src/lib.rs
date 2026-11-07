@@ -129,3 +129,5 @@ impl Client {
 }
 
 pub mod stream;
+
+pub mod activity;

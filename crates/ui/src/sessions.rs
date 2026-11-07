@@ -1,6 +1,5 @@
 //! One reusable Card/profile entry and native terminal screen.
-use crate::{components::run_panel, presenter::*};
-use canban_types::Request;
+use crate::presenter::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
 use serde_json::json;
@@ -101,9 +100,6 @@ pub fn card_agents(ui: Ui) -> impl IntoElement {
             rows
         }))
 }
-pub fn execution(ui: Ui, request: Request) -> impl IntoElement {
-    run_panel(ui, request)
-}
 pub fn screen(ui: Ui) -> impl IntoElement {
     let terminal_run = computed(move || {
         let request = ui.request.get();
@@ -112,7 +108,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .iter()
                 .rev()
                 .find(|a| a.request_id == request && a.terminal.is_some())
-                .cloned()
+                .map(|a|json!({"id":a.id,"terminal":a.terminal,"core_id":a.core_id,"read_only":matches!(a.close_state.as_str(),"pending"|"closing"|"closed")}))
         })
     });
     view()
@@ -225,17 +221,11 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 return label("Terminal binding requires a running application").into_element();
             };
             let binding =
-                json!({"config":app.config(),"terminal":run.terminal,"core_id":run.core_id});
+                json!({"config":app.config(),"terminal":run["terminal"],"core_id":run["core_id"]});
             native("canban/terminal")
-                .key(run.id.clone())
+                .key(run["id"].as_str().unwrap_or("").to_owned())
                 .prop("binding", binding)
-                .prop(
-                    "read_only",
-                    json!(matches!(
-                        run.close_state.as_str(),
-                        "pending" | "closing" | "closed"
-                    )),
-                )
+                .prop("read_only", run["read_only"].clone())
                 .flex_1()
                 .min_h(px(200.0))
                 .into_element()

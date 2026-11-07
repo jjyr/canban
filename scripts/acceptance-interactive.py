@@ -27,6 +27,10 @@ try:
  for p in config['profiles']:
   p.update(preset=None,exit={'type':'input','text':'/exit'},session_instruction='',argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'{prompt}'],resume_argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'--resume','{session_id}','{prompt}'])
  (home/'config/agents.json').write_text(json.dumps(config,indent=2));call('config.reload')
+ workflow_path = home / 'config/workflows/default.json'
+ local_workflow = json.loads(workflow_path.read_text())
+ local_workflow['workspace']['sync_base'] = False  # Fixture repositories have no remote.
+ workflow_path.write_text(json.dumps(local_workflow))
  project=call('project.create',{'name':'Interactive acceptance','directory':str(base/'source')})
  note=call('note.save',{'project_id':project['id'],'title':'Context.md','body':'Original captured context'})
  ref=call('note.save',{'project_id':project['id'],'title':'Reference.md','body':'[Context](note:'+note['id']+')'})
@@ -56,6 +60,9 @@ try:
  config['hc']='hc';(home/'config/agents.json').write_text(json.dumps(config));call('config.reload')
  s=wait(lambda s:s['attempts'][0].get('connection_state')=='connected','original core reconnect')
  assert len(s['attempts'])==1 and s['attempts'][0]['terminal']==terminal and s['attempts'][0]['provider_session_id']==sid
+ # Transport recovery preserves the human gate until explicitly reviewed.
+ assert s['cards'][0]['human_gate']
+ call('card.continue',{'card_id':card['id'],'revision':s['cards'][0]['revision']})
 
  for _ in range(2):
   opened=call('agent.open',{'card_id':card['id'],'profile_id':'developer'});assert opened['request_id']==first['request_id']

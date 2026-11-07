@@ -1,4 +1,6 @@
 mod context_picker;
+pub mod git_workspace;
+pub mod scheduling;
 pub use context_picker::context_picker;
 pub mod activity;
 pub use activity::{activity_header, empty};

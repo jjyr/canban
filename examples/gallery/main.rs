@@ -84,6 +84,7 @@ fn controls() -> impl IntoElement {
                                 .h(px(80.0)),
                         ),
                 )
+                .child(canban_ui::components::scheduling::settings(ui))
                 .child(profiles::registry(profile_fixture))
                 .child(review::diff_panel(fixtures::review()))
                 .child(
@@ -124,11 +125,20 @@ pub fn Gallery() -> impl IntoElement {
                 .child(label("Canban Gallery"))
                 .child(action("Board workspace", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::workspace());
                     ui.page.set("card".into());
                 }))
                 .child(action("Notes workspace", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
                     ui.page.set("notes".into());
+                }))
+                .child(action("Overview", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::overview());
+                    ui.page.set("overview".into());
+                }))
+                .child(action("Scheduling", Variant::Quiet, move |_| {
+                    scene.set("scheduling".into());
                 }))
                 .child(action("Controls", Variant::Quiet, move |_| {
                     scene.set("controls".into())
@@ -141,6 +151,13 @@ pub fn Gallery() -> impl IntoElement {
                 })),
         )
         .child(dynamic(move || {
+            if scene.get() == "scheduling" {
+                return view()
+                    .flex_1()
+                    .p_5()
+                    .child(canban_ui::components::scheduling::settings(ui))
+                    .into_element();
+            }
             if scene.get() == "controls" {
                 return controls().into_element();
             }
@@ -162,6 +179,7 @@ pub fn Gallery() -> impl IntoElement {
                             let _ = ui.card.get();
                             untracked(|| match page.as_str() {
                                 "notes" => canban_ui::notes::screen(ui).into_element(),
+                                "overview" => canban_ui::overview::screen(ui).into_element(),
                                 "board" | "card" | "terminal" | "review" => {
                                     canban_ui::workspace::screen(ui).into_element()
                                 }

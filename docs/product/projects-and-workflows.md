@@ -1,6 +1,6 @@
 # Projects, JSON workflow templates, and worktrees
 
-Status: current user directions, including the 2026-11-05 MVP simplifications. Configuration examples are drafts, not implemented formats.
+Status: updated 2026-11-07. The workspace settings and human-review gate below are implemented. Older illustrative workflow examples in this document remain conceptual; use the current types and [implementation contract](../workspace-and-scheduling.md) for actual JSON.
 
 ## Project
 
@@ -102,3 +102,27 @@ Callbacks and all other internal product operations participate in the event-dri
 Review produces an ordinary report in the card/timeline. The Shear review interface is a later integration. Agent-reported completion of a workflow is distinct from a human accepting the code, merging it, or archiving the card.
 
 Archive removes finished work from the active Board while retaining its number and history, and is the point at which Canban handles its managed worktree. A mandatory Done column is unnecessary.
+
+
+## Implemented workspace settings (2026-11-07)
+
+A Workflow has one `workspace` object rather than an operation graph:
+
+```json
+{
+  "workspace": {
+    "create_worktree": true,
+    "base_branch": "main",
+    "sync_base": true,
+    "remote": "origin"
+  }
+}
+```
+
+Fresh default templates enable worktree creation and base synchronization. An omitted `base_branch` uses the Project target/current local branch. Templates lacking the new object retain local-only preparation for compatibility; existing Project snapshots are not silently rewritten. Set both worktree and synchronization off for non-Git Projects. Sync requires worktree creation and a committed Git base.
+
+Before the first checkout, fetch the configured remote base and fast-forward the local base. Local commits already containing the remote are retained; divergence, dirty checked-out base or fetch failure stops preparation and requests human attention. A checked-out base is updated through that checkout; an unoccupied base uses a checked ref update. No automatic push or rebase occurs.
+
+Each Card gets `canban/<project-id>/<card-number>` plus its own managed worktree. Review, rework and resume reuse both without another base synchronization. Existing detached worktrees are adopted at their current HEAD without discarding edits. Card stores branch/base commit/path, and its UI exposes copies and a read-only status refresh. Archive removes clean worktrees while retaining branch and Card ref; dirty worktrees remain. Restore/open can recreate from retained history.
+
+Each stage can set `require_human_review`. It pauses after its Agent finishes and before the next callback. The default Review stage requires human approval. See [Scheduler](scheduler.md) for the global limit and persistent human gate.

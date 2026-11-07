@@ -7,6 +7,14 @@ use std::collections::BTreeMap;
 pub struct Ui {
     pub snapshot: Signal<Snapshot>,
     pub profiles: Signal<Vec<Profile>>,
+    pub max_agents: Signal<usize>,
+    pub idle_minutes: Signal<u64>,
+    pub overview_selection: Signal<String>,
+    pub overview_selected: Signal<Option<canban_notifications::OverviewRow>>,
+    pub overview_filter: Signal<String>,
+    pub overview_closed: Signal<bool>,
+    pub overview_width: Signal<f32>,
+    pub return_overview: Signal<bool>,
     pub project: Signal<String>,
     pub card: Signal<String>,
     pub request: Signal<String>,
@@ -15,6 +23,8 @@ pub struct Ui {
     pub pending: Signal<bool>,
     pub refreshing: Signal<bool>,
     pub output: Signal<String>,
+    pub output_observed_at: Signal<Option<u64>>,
+    pub overview_history: Signal<bool>,
     pub output_request: Signal<u64>,
     pub review: Signal<Option<ReviewPreview>>,
     pub review_request: Signal<u64>,
@@ -39,8 +49,10 @@ impl Ui {
         self.output_request
             .set(self.output_request.get_untracked() + 1);
         self.output.set(String::new());
+        self.output_observed_at.set(None);
     }
     pub fn navigate(self, page: &str) {
+        self.return_overview.set(false);
         self.clear_output();
         self.review_request
             .set(self.review_request.get_untracked() + 1);
@@ -49,6 +61,24 @@ impl Ui {
     pub fn new() -> Self {
         Self {
             snapshot: signal(Snapshot::default()),
+            idle_minutes: signal(
+                crate::APP
+                    .get()
+                    .map(|a| a.config().scheduler.idle_minutes)
+                    .unwrap_or(15),
+            ),
+            overview_selection: signal(String::new()),
+            overview_selected: signal(None),
+            overview_filter: signal("All".into()),
+            overview_closed: signal(false),
+            overview_width: signal(700.0),
+            return_overview: signal(false),
+            max_agents: signal(
+                crate::APP
+                    .get()
+                    .map(|a| a.config().scheduler.max_agents)
+                    .unwrap_or(8),
+            ),
             profiles: signal(
                 crate::APP
                     .get()
@@ -63,6 +93,8 @@ impl Ui {
             pending: signal(false),
             refreshing: signal(false),
             output: signal(String::new()),
+            output_observed_at: signal(None),
+            overview_history: signal(false),
             output_request: signal(0),
             review: signal(None),
             review_request: signal(0),
@@ -110,11 +142,19 @@ impl Ui {
         self.expanded.set(false);
         self.focused_card.set(false);
         self.output.set(String::new());
+        self.output_observed_at.set(None);
         self.output_request
             .set(self.output_request.get_untracked() + 1);
         self.page.set("card".into());
     }
     pub fn back_board(self) {
+        if self.return_overview.get_untracked() {
+            self.clear_output();
+            self.page.set("overview".into());
+            self.expanded.set(false);
+            self.focused_card.set(false);
+            return;
+        }
         self.review_request
             .set(self.review_request.get_untracked() + 1);
         self.page.set(
@@ -139,6 +179,7 @@ impl Ui {
         self.output_request
             .set(self.output_request.get_untracked() + 1);
         self.output.set(String::new());
+        self.output_observed_at.set(None);
         self.note.set(id);
         self.page.set("notes".into());
     }
@@ -155,13 +196,21 @@ pub fn refresh(ui: Ui) {
     };
     spawn(async move {
         let result = blocking(move || {
-            app.snapshot()
-                .map(|snapshot| (snapshot, app.config().profiles))
+            app.snapshot().map(|snapshot| {
+                (
+                    snapshot,
+                    app.config().profiles,
+                    app.config().scheduler.max_agents,
+                    app.config().scheduler.idle_minutes,
+                )
+            })
         })
         .await;
         match result {
-            Ok(Ok((snapshot, profiles))) => {
+            Ok(Ok((snapshot, profiles, max_agents, idle_minutes))) => {
                 ui.profiles.set(profiles);
+                ui.max_agents.set(max_agents);
+                ui.idle_minutes.set(idle_minutes);
                 if ui.project.get_untracked().is_empty()
                     && let Some(p) = snapshot.projects.first()
                 {
@@ -222,12 +271,20 @@ pub fn dispatch_complete(
     spawn(async move {
         let result = blocking(move || {
             let value = app.call(method, params)?;
-            Ok::<_, anyhow::Error>((value, app.snapshot()?, app.config().profiles))
+            Ok::<_, anyhow::Error>((
+                value,
+                app.snapshot()?,
+                app.config().profiles,
+                app.config().scheduler.max_agents,
+                app.config().scheduler.idle_minutes,
+            ))
         })
         .await;
         match result {
-            Ok(Ok((value, snapshot, profiles))) => {
+            Ok(Ok((value, snapshot, profiles, max_agents, idle_minutes))) => {
                 ui.profiles.set(profiles);
+                ui.max_agents.set(max_agents);
+                ui.idle_minutes.set(idle_minutes);
                 ui.snapshot.set(snapshot);
                 ui.status.set(match value["state"].as_str() {
                     Some("failed" | "unknown") => format!(
@@ -302,7 +359,21 @@ pub fn load_text(ui: Ui, method: &'static str, params: Value) {
         if ui.output_request.get_untracked() != generation {
             return;
         }
+        ui.output_observed_at.set(if method == "overview.preview" {
+            result
+                .as_ref()
+                .ok()
+                .and_then(|r| r.as_ref().ok())
+                .and_then(|v| v["observed_at"].as_u64())
+        } else {
+            None
+        });
         ui.output.set(match result {
+            Ok(Ok(v)) if method == "overview.preview" => format!(
+                "Herdr screen · {}\n\n{}",
+                v["terminal"].as_str().unwrap_or(""),
+                v["text"].as_str().unwrap_or("")
+            ),
             Ok(Ok(v)) => v["body"]
                 .as_str()
                 .or(v["text"].as_str())
@@ -386,5 +457,25 @@ pub fn open_resource(ui: Ui, card_id: String, path: String) {
             Ok(Err(e)) => ui.status.set(format!("Unable to open attachment: {e:#}")),
             Err(e) => ui.status.set(e.to_string()),
         }
+    });
+}
+
+pub fn copy_text(ui: Ui, value: String) {
+    spawn(async move {
+        let result = blocking(move || -> anyhow::Result<()> {
+            use std::io::Write;
+            let mut command = std::process::Command::new("/usr/bin/pbcopy")
+                .stdin(std::process::Stdio::piped())
+                .spawn()?;
+            command.stdin.take().unwrap().write_all(value.as_bytes())?;
+            anyhow::ensure!(command.wait()?.success(), "Clipboard copy failed");
+            Ok(())
+        })
+        .await;
+        ui.status.set(match result {
+            Ok(Ok(())) => "Copied to clipboard".into(),
+            Ok(Err(e)) => e.to_string(),
+            Err(e) => e.to_string(),
+        });
     });
 }

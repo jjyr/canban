@@ -56,7 +56,7 @@ A submitted @profile comment resolves the Card/profile conversation. If live, it
 
 Develop/Review independently select their configured profile and queue a task with the stage callback. Distinct profiles retain separate histories; repeated work for the same Card/profile resumes the same provider ID. All invocations use one request/attempt model. See [Sessions](sessions.md).
 
-A CLI reply is linked to its Question/comment in Timeline without completing the current assignment. Only an explicit completed report invokes its original callback. Different Cards/profiles run concurrently without capacity caps; duplicate live starts of one conversation are avoided.
+A CLI reply is linked to its Question/comment in Timeline without completing the current assignment. An explicit completed report invokes its original callback unless a human gate pauses progression; required human review must be approved first. Different Cards/profiles run concurrently within the configurable global budget (default eight); duplicate live starts of one conversation are avoided.
 
 Saving the description, typing a mention, and submitting a comment are different actions. Trigger a mention from a submitted, structured mention rather than every keystroke or autosave. Mentions in quoted text and code blocks remain content. These are interaction recommendations to validate.
 

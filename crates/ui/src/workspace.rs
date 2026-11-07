@@ -47,9 +47,15 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             .bg(SURFACE)
                             .border_b_1()
                             .border_color(BORDER)
-                            .child(action("← Board", Variant::Quiet, move |_| {
-                                ui.back_board()
-                            }))
+                            .child(action(
+                                if ui.return_overview.get_untracked() {
+                                    "← Overview"
+                                } else {
+                                    "← Board"
+                                },
+                                Variant::Quiet,
+                                move |_| ui.back_board(),
+                            ))
                             .child(
                                 view()
                                     .flex_row()
@@ -88,7 +94,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     .into_element();
             }
             if page == "card" && !ui.card.get().is_empty() {
-                if narrow {
+                if narrow || ui.return_overview.get_untracked() {
                     return card::screen(ui).into_element();
                 }
                 return split(

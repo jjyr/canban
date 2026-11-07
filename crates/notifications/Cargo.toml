@@ -7,3 +7,4 @@ authors.workspace = true
 
 [dependencies]
 canban-types.workspace = true
+serde.workspace = true

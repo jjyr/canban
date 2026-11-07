@@ -41,6 +41,9 @@ pub fn card(
         archive: None,
         archive_error: None,
         worktree: None,
+        branch: None,
+        base_commit: None,
+        human_gate: None,
         delivery: None,
         created_at: now(),
     })
