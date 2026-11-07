@@ -160,3 +160,39 @@ pub fn overview() -> canban_types::Snapshot {
     s.cards.push(recovery);
     s
 }
+
+/// Quick Open coverage: cross-Project duplicates, Unicode, long names, Agent
+/// states and enough results to exercise keyboard-driven list scrolling.
+pub fn search() -> canban_types::Snapshot {
+    let mut s = overview();
+    let base = s.cards[0].clone();
+    for (id, project) in [("same-a", "gallery-project"), ("same-b", "second-project")] {
+        let mut c = base.clone();
+        c.id = id.into();
+        c.project_id = project.into();
+        c.title = "Search keyboard navigation".into();
+        c.number = 42;
+        c.human_gate = None;
+        c.attention = None;
+        s.cards.push(c);
+    }
+    let note = s.notes[0].clone();
+    let mut other = note.clone();
+    other.id = "search-note".into();
+    other.project_id = "second-project".into();
+    s.notes.push(other);
+    let mut chinese = note;
+    chinese.id = "unicode-note".into();
+    chinese.title = "中文架构决策.md".into();
+    s.notes.push(chinese);
+    for i in 0..70 {
+        let mut c = base.clone();
+        c.id = format!("search-card-{i}");
+        c.number = 100 + i;
+        c.title = format!("Search fixture {i:02} · a long Card title for candidate layout checks");
+        c.human_gate = None;
+        c.attention = None;
+        s.cards.push(c);
+    }
+    s
+}

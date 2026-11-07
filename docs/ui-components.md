@@ -67,3 +67,8 @@ Gallery workspace scenes import the exact production components, including focus
 ### Overview components
 
 `ui/overview.rs` composes the global grouped list, stable Card/profile rows, filters, Closed/history disclosure, context inspector and explicit destination actions. Inputs are the shared typed pure projection plus retained UI selection/filter/scroll state; selection has no execution side effects. Inspector actions remain outside the scrolling assignment/history. Narrow layouts show the same context with an explicit return. Preview requests are asynchronous and generation/identity fenced. The Gallery Overview scene supplies every group, independent reasons, multiple Projects and request-less recovery. `ui-kit::read_text` reuses NSH selectable document behavior for plain Agent/runtime text without interpreting markup.
+
+
+### Compact navigation and search
+
+`ui-kit::Icon` and `icon_action` define original consistent line icons and 40-point accessible navigation targets. `ui/rail.rs` composes the 56-point product rail, global attention badge and Project picker. `ui-kit::SearchDialog` takes prepared `SearchChoice` values and reuses NSH Dialog/Command for the popup and candidate list; product targets and fuzzy ranking stay in `ui/quick_open`. Command+O, immediate Escape, outside dismissal, candidate highlight and exact read-only navigation share the same production components in the Gallery. See [interaction and acceptance](quick-open-and-navigation.md).

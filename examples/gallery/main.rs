@@ -104,6 +104,7 @@ pub fn Gallery() -> impl IntoElement {
     let scene = signal("workspace".to_string());
     let constrained = signal(false);
     let ui = Ui::new();
+    canban_ui::quick_open::bindings(ui);
     ui.snapshot.set(fixtures::workspace());
     ui.project.set("gallery-project".into());
     ui.card.set("card-1".into());
@@ -137,6 +138,13 @@ pub fn Gallery() -> impl IntoElement {
                     ui.snapshot.set(fixtures::overview());
                     ui.page.set("overview".into());
                 }))
+                .child(action("Quick Open", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::search());
+                    ui.card.set(String::new());
+                    ui.page.set("board".into());
+                    ui.show_search(false);
+                }))
                 .child(action("Scheduling", Variant::Quiet, move |_| {
                     scene.set("scheduling".into());
                 }))
@@ -150,6 +158,7 @@ pub fn Gallery() -> impl IntoElement {
                     constrained.set(false)
                 })),
         )
+        .child(canban_ui::quick_open::overlay(ui))
         .child(dynamic(move || {
             if scene.get() == "scheduling" {
                 return view()

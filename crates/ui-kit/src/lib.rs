@@ -15,3 +15,8 @@ pub mod status;
 pub use navigation::navigation;
 pub use split::split;
 pub use status::{Tone, notice, status};
+
+pub mod icons;
+pub use icons::{Icon, icon, icon_action};
+pub mod search_dialog;
+pub use search_dialog::{SearchChoice, search_dialog};

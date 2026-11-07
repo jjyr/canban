@@ -9,9 +9,11 @@ pub mod notes;
 pub mod overview;
 pub mod presenter;
 pub mod profiles;
+pub mod rail;
 pub mod review;
 mod screens;
-pub use screens::sidebar;
+pub use rail::sidebar;
+pub mod quick_open;
 mod sessions;
 pub mod workspace;
 use canban_ui_kit::tokens::*;
@@ -23,6 +25,7 @@ fn native(_: &mut Registry) {}
 #[component]
 pub fn Canban() -> impl IntoElement {
     let ui = Ui::new();
+    quick_open::bindings(ui);
     refresh(ui);
     let events = stored(crate::APP.get().unwrap().subscribe());
     let dirty = signal(false);
@@ -39,23 +42,20 @@ pub fn Canban() -> impl IntoElement {
         .flex_1()
         .bg(BACKGROUND)
         .child(
-            view()
-                .flex_1()
-                .flex_row()
-                .child(screens::sidebar(ui))
-                .child(
-                    view()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .on_layout(move |b: &Bounds<Points>| ui.narrow.set(b.size.width.0 < 900.0))
-                        .child(dynamic(move || {
-                            let page = ui.page.get();
-                            let _ = ui.card.get();
-                            let _ = ui.project.get();
-                            untracked(|| screens::screen(ui, &page))
-                        })),
-                ),
+            view().flex_1().flex_row().child(sidebar(ui)).child(
+                view()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .on_layout(move |b: &Bounds<Points>| ui.narrow.set(b.size.width.0 < 900.0))
+                    .child(dynamic(move || {
+                        let page = ui.page.get();
+                        let _ = ui.card.get();
+                        let _ = ui.project.get();
+                        untracked(|| screens::screen(ui, &page))
+                    })),
+            ),
         )
+        .child(quick_open::overlay(ui))
         .child(
             view()
                 .h(px(28.0))

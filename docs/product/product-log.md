@@ -415,3 +415,22 @@ The [Overview proposal](overview.md) combines Agent activity and attention into 
 User authorized the discussed Agent limit and global Overview. Verified blocked/idle/done/error runtime releases execution slots; unknown/disconnected/starting work reserves them. Manual resumption can exceed the automatic budget without preemption. This supersedes the earlier all-live-terminal slot rule. Default admission remains eight and resumable idle closure defaults to fifteen minutes, configurable through Settings/JSON. Viewed terminals, outstanding questions, unfinished automatic assignments and unresolved decisions are protected. Normal exit retains exact provider history and does not complete/advance a Card.
 
 Overview replaces Agent activity and the proposed separate attention page. Its pure projection groups all Projects, counts actionable conversations once, separates execution input from task decisions, provides bounded read-only context and explicit Card/Terminal/Review/exact-Resume actions, and preserves the return destination. Native UI and isolated Herdr evidence, API and known protocol race boundary are recorded in [Agent Overview and lifecycle](../agent-overview-and-lifecycle.md).
+
+
+## 2026-11-07 — Compact icon sidebar direction
+
+The user prefers compact icon navigation in the sidebar instead of the current large buttons. Treat the icon rail as the default direction, with selection/focus affordances, accessible names, hover labels and actionable badges preserved. Project switching and any expanded-label option remain layout details; the other Herdr UI research recommendations are not implicitly approved.
+
+Source verification confirms Herdr UI implements terminal selection annotations, Diff line notes and browser annotations. Extending source-linked quotations to Canban reports/Notes and durable Card comments is a Canban product proposal. See [Herdr UI references](../research/herdr-ui-product-and-layout.md).
+
+
+## 2026-11-07 — Quick Open candidate list and bounded UI scope
+
+The user selected fuzzy search across Projects, Cards, Notes and Agents, presented as a search field with a candidate list. Context preview is unnecessary and is removed from the proposed Quick Open. Candidate type and concise Project/Card ownership remain visible to distinguish similarly named results. Existing Overview preview is independent.
+
+The requested scope reconfirmation pairs this with the compact icon sidebar direction. Project-picker presentation, a proposed Cmd+K shortcut, destination semantics and Gallery/native acceptance are documented in [Herdr UI references](../research/herdr-ui-product-and-layout.md). General Back/Forward navigation, tool tabs, contextual quotations and advanced Review remain separate recommendations.
+
+
+## 2026-11-07 — Implement compact rail and Command+O Quick Open
+
+The user authorized the two-feature slice and selected Command+O instead of the proposed Command+K, with outside-click dismissal. The default compact icon rail and cross-Project Project/Card/Note/Agent fuzzy candidate list are implemented. Quick Open has no preview; Escape closes it in one press. Agent activation attaches the exact live conversation or opens closed/unavailable context with explicit recovery actions, without automatically resuming or approving work. Production Gallery components and isolated native/Core checks are documented in [Quick Open and navigation](../quick-open-and-navigation.md). Other UI research proposals remain deferred.

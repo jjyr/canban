@@ -5,6 +5,10 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 #[derive(Clone, Copy)]
 pub struct Ui {
+    pub quick_open: Signal<bool>,
+    pub project_picker: Signal<bool>,
+    pub search_query: Signal<String>,
+    pub recent_destinations: Stored<Vec<String>>,
     pub snapshot: Signal<Snapshot>,
     pub profiles: Signal<Vec<Profile>>,
     pub max_agents: Signal<usize>,
@@ -61,6 +65,10 @@ impl Ui {
     pub fn new() -> Self {
         Self {
             snapshot: signal(Snapshot::default()),
+            quick_open: signal(false),
+            project_picker: signal(false),
+            search_query: signal(String::new()),
+            recent_destinations: stored(Vec::new()),
             idle_minutes: signal(
                 crate::APP
                     .get()
@@ -109,6 +117,17 @@ impl Ui {
             board_width: signal(700.0),
             focus_width: signal(420.0),
         }
+    }
+    pub fn show_search(self, projects: bool) {
+        self.search_query.set(String::new());
+        self.project_picker.set(projects);
+        self.quick_open.set(true);
+    }
+    pub fn select_project(self, id: String) {
+        self.project.set(id);
+        self.card.set(String::new());
+        self.note.set(String::new());
+        self.navigate("board");
     }
     pub fn current_card(self) -> Option<Card> {
         self.snapshot.with(|s| {

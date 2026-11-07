@@ -28,3 +28,5 @@ Use this standalone example as the UI-component check surface. Agent/workflow/st
 The Cargo target is registered by `crates/ui/Cargo.toml`; direct development builds can also use `mise exec -- cargo run -p canban-ui --example gallery` after `mise run terminal-deps`.
 
 The **Overview** scene uses the production global list/inspector with deterministic fixtures for all six groups, multiple Projects, request-less recovery, Closed/history disclosure and narrow layout. It does not open an AppServer or Core.
+
+The **Quick Open** scene supplies cross-Project duplicate Card/Note names, Unicode titles, Agent lifecycle states and a long candidate list. It uses the production icon rail and search popup; Command+O works in every scene, and the compact Project picker reuses the same popup.

@@ -1,5 +1,7 @@
 # MVP implementation and development
 
+[Compact navigation and Quick Open](quick-open-and-navigation.md) covers the implemented icon rail, Command+O fuzzy destination picker and native interaction checks.
+
 [Agent Overview and lifecycle](agent-overview-and-lifecycle.md) documents the implemented status-aware execution budget, configurable resumable idle exit and global attention/Agent workspace.
 
 Status: local macOS MVP updated 2026-11-07. This is the current implementation reference; earlier design documents contain broader proposals and dated pre-implementation statements.
