@@ -1,5 +1,5 @@
 //! Global grouped Agent list + context inspector. Selection has no execution side effects.
-//! Stable conversation keys, independent filtering/scroll and explicit destination actions.
+//! Stable conversation keys, retained scroll and explicit destination actions.
 use crate::{
     drafts::{capture_scroll, scroll_position},
     presenter::*,
@@ -33,23 +33,6 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             "All Projects · Agents, workflow decisions and recovery",
         )))
         .child(crate::components::scheduling::summary(ui))
-        .child(
-            view().flex_row().flex_wrap().gap_2().children(
-                ["All", "Needs you", "Working", "Queued", "Idle"]
-                    .into_iter()
-                    .map(|filter| {
-                        navigation(
-                            filter.into(),
-                            move || ui.overview_filter.get() == filter,
-                            move |_| {
-                                ui.overview_filter.set(filter.into());
-                            },
-                        )
-                        .into_element()
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-        )
         .child(dynamic(move || {
             let selected = !ui.overview_selection.get().is_empty();
             let narrow = ui.narrow.get();
@@ -82,28 +65,16 @@ fn list(ui: Ui) -> impl IntoElement {
         .child(dynamic(move || {
             let rows = overview(&ui.snapshot.get());
             let selected = ui.overview_selection.get();
-            let filter = ui.overview_filter.get();
             let closed = ui.overview_closed.get();
-            let visible = rows
-                .iter()
-                .filter(|r| {
-                    filter == "All"
-                        || (filter == "Needs you" && r.actionable())
-                        || r.group == filter
-                })
-                .collect::<Vec<_>>();
             let mut content = view().gap_4();
-            if visible.is_empty() {
+            if rows.is_empty() {
                 return content.child(crate::components::activity::empty(
                     "No Agents here",
                     "Move a Card into an automated stage or @ an Agent on a Card.",
                 ));
             }
             for group in GROUPS {
-                let members = visible
-                    .iter()
-                    .filter(|r| r.group == group)
-                    .collect::<Vec<_>>();
+                let members = rows.iter().filter(|r| r.group == group).collect::<Vec<_>>();
                 if members.is_empty() {
                     continue;
                 }
@@ -124,7 +95,15 @@ fn list(ui: Ui) -> impl IntoElement {
                     }
                 } else {
                     section = section.child(status(
-                        format!("{group} · {}", members.len()),
+                        format!(
+                            "{} · {}",
+                            if group == "Needs attention" {
+                                "Needs you"
+                            } else {
+                                group
+                            },
+                            members.len()
+                        ),
                         if group == "Needs attention" {
                             Tone::Attention
                         } else if group == "Ready for review" {
@@ -135,7 +114,7 @@ fn list(ui: Ui) -> impl IntoElement {
                     ));
                 }
                 for row in members {
-                    section = section.child(agent_row(ui, (*row).clone(), row.id == selected));
+                    section = section.child(agent_row(ui, row.clone(), row.id == selected));
                 }
                 content = content.child(section);
             }
@@ -215,7 +194,11 @@ fn inspector(ui: Ui) -> impl IntoElement {
         .min_h(px(0.0))
         .gap_2()
         .child(action(
-            "← All Agents / close context",
+            if ui.narrow.get_untracked() {
+                "← Overview"
+            } else {
+                "Close context"
+            },
             Variant::Quiet,
             move |_| {
                 ui.clear_output();

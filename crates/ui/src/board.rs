@@ -62,6 +62,10 @@ pub fn matches_filter(s: &Snapshot, c: &Card, filter: &str) -> bool {
     }
 }
 pub fn screen(ui: Ui) -> impl IntoElement {
+    let has_project = computed(move || {
+        let _ = ui.project.get();
+        ui.current_project().is_some()
+    });
     view()
         .flex_1()
         .min_w(px(0.0))
@@ -74,49 +78,55 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .justify_between()
                 .items_center()
                 .gap_2()
-                .child(heading(move || {
-                    ui.current_project()
-                        .map(|p| p.name)
-                        .unwrap_or_else(|| "Welcome to Canban".into())
-                }))
-                .child(action("+ New Card", Variant::Primary, move |_| {
-                    ui.source_note.set(String::new());
-                    ui.page.set(if ui.project.get_untracked().is_empty() {
-                        "new-project".into()
-                    } else {
-                        "new-card".into()
-                    });
-                })),
+                .child(project_picker(ui))
+                .child(when(
+                    move || has_project.get(),
+                    move || {
+                        action("+ New Card", Variant::Primary, move |_| {
+                            ui.source_note.set(String::new());
+                            ui.navigate("new-card");
+                        })
+                        .flex_shrink_0()
+                    },
+                )),
         )
-        .child(crate::components::scheduling::summary(ui))
-        .child(
-            view().flex_row().flex_wrap().gap_2().children(
-                [
-                    ("All", "all"),
-                    ("Needs attention", "attention"),
-                    ("Running", "running"),
-                    ("Review", "review"),
-                ]
-                .into_iter()
-                .map(|(name, key)| {
-                    navigation(
-                        name.into(),
-                        move || ui.board_filter.get() == key,
-                        move |_| ui.board_filter.set(key.into()),
-                    )
-                    .into_element()
-                })
-                .collect::<Vec<_>>(),
-            ),
-        )
+        .child(when(
+            move || has_project.get(),
+            move || crate::components::scheduling::summary(ui),
+        ))
+        .child(when(
+            move || has_project.get(),
+            move || {
+                view().flex_row().flex_wrap().gap_2().children(
+                    [
+                        ("All", "all"),
+                        ("Needs attention", "attention"),
+                        ("Running", "running"),
+                        ("Review", "review"),
+                    ]
+                    .into_iter()
+                    .map(|(name, key)| {
+                        navigation(
+                            name.into(),
+                            move || ui.board_filter.get() == key,
+                            move |_| ui.board_filter.set(key.into()),
+                        )
+                        .into_element()
+                    })
+                    .collect::<Vec<_>>(),
+                )
+            },
+        ))
         .child(dynamic(move || {
             let s = ui.snapshot.get();
             let filter = ui.board_filter.get();
             let project = ui.project.get();
             let Some(p) = s.projects.iter().find(|p| p.id == project) else {
-                return empty(
+                return entry_card(
+                    Icon::Plus,
                     "Create a Project",
-                    "Each Project has a Board, Notes and a source directory.",
+                    "Organize Cards, Notes and Agent work around a source directory.",
+                    move |_| ui.navigate("new-project"),
                 )
                 .into_element();
             };
@@ -223,4 +233,55 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 )
                 .into_element()
         }))
+}
+
+/// Board owns Project selection/creation; the rail only navigates surfaces.
+fn project_picker(ui: Ui) -> impl IntoElement {
+    use canban_ui_kit::tokens::*;
+    view()
+        .flex_1()
+        .min_w(px(0.))
+        .gap_1()
+        .child(muted("Board"))
+        .child(
+            nsh_base::button()
+                .min_h(px(40.))
+                .w_full()
+                .min_w(px(0.))
+                .max_w(px(560.))
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .rounded(px(RADIUS))
+                .border_1()
+                .border_color(CLEAR)
+                .hover(|s| s.bg(INSET))
+                .focus(|s| s.border_color(ACCENT))
+                .accessibility_label(move || {
+                    let _ = ui.project.get();
+                    Some(
+                        format!(
+                            "Switch Project · {}",
+                            ui.current_project()
+                                .map(|p| p.name)
+                                .unwrap_or_else(|| "Choose Project".into())
+                        )
+                        .into(),
+                    )
+                })
+                .child(
+                    heading(move || {
+                        let _ = ui.project.get();
+                        ui.current_project()
+                            .map(|p| p.name)
+                            .unwrap_or_else(|| "Choose Project".into())
+                    })
+                    .flex_1()
+                    .truncate()
+                    .min_w(px(0.)),
+                )
+                .child(icon(Icon::ChevronDown))
+                .on_press(move |_: &()| ui.show_search(true)),
+        )
 }

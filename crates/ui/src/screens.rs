@@ -29,12 +29,27 @@ pub fn screen(ui: Ui, page: &str) -> AnyElement {
 fn new_project(ui: Ui) -> impl IntoElement {
     let name = signal(String::new());
     let directory = signal(String::new());
-    layout("New project","Each Project has a Board and a source directory. Git is optional.")
-        .child(panel().max_w(px(720.0)).child(label("Project name")).child(field(name,"Name"))
-            .child(label("Source directory")).child(field(directory,"/absolute/path/to/project"))
-            .child(muted("The directory will be created if it does not exist. Uses config/workflows/default.json."))
-            .child(action("Create project",Variant::Primary,move|_|dispatch(ui,"project.create",json!({"name":name.get_untracked(),"directory":directory.get_untracked()})))))
+    layout("New Project", "A source directory holds the work; Canban keeps its Board, Notes and history.")
+        .child(scroll().flex_1().min_h(px(0.)).child(
+            settings_section("Project details", "Choose an existing folder or enter a new directory path. Git is optional.")
+                .max_w(px(720.))
+                .child(settings_field("Project name", "You can change the suggested name before creating the Project.",
+                    field(name, "Name").label("Project name")))
+                .child(settings_field("Source directory", "A directory that does not exist will be created when you submit.",
+                    directory_field(directory, move |path| {
+                        if name.try_get().is_some_and(|s| s.trim().is_empty())
+                            && let Some(basename) = path.file_name() {
+                            name.try_set(basename.to_string_lossy().into_owned());
+                        }
+                    })))
+                .child(view().flex_row().flex_wrap().gap_2()
+                    .child(action("Create Project", Variant::Primary, move |_| {
+                        dispatch(ui, "project.create", json!({"name": name.get_untracked().trim(), "directory": directory.get_untracked().trim()}));
+                    }).disabled(move || ui.pending.get() || name.get().trim().is_empty() || directory.get().trim().is_empty()))
+                    .child(action("Cancel", Variant::Quiet, move |_| ui.navigate("board"))))
+        ))
 }
+
 fn new_card(ui: Ui) -> impl IntoElement {
     let project = ui.project.get_untracked();
     let source = ui.source_note.get_untracked();
@@ -78,10 +93,12 @@ fn new_card(ui: Ui) -> impl IntoElement {
         }).disabled(move||ui.pending.get() || draft.with(|d|d.title.trim().is_empty()))))
 }
 fn archived(ui: Ui) -> impl IntoElement {
-    layout(
-        "Archived Cards",
-        "History and execution results are retained in zstd-compressed Card packages.",
-    )
+    layout("Archived Cards", move || {
+        let _ = ui.project.get();
+        ui.current_project()
+            .map(|p| p.name)
+            .unwrap_or_else(|| "No Project selected".into())
+    })
     .child(scroll().flex_1().child(dynamic(move || {
         let project = ui.project.get();
         view().gap_3().children(ui.snapshot.with(|s| {
@@ -112,19 +129,25 @@ fn settings(ui: Ui) -> impl IntoElement {
     let home = crate::APP
         .get()
         .map(|app| app.home.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Gallery preview".into());
-    layout("Settings", "JSON configuration; changes apply to newly queued work after reload.")
-        .child(crate::components::scheduling::settings(ui))
-        .child(scroll().flex_1().child(view().gap_4()
-            .child(panel()
-                .child(label("Application home"))
-                .child(muted(home.clone()))
-                .child(label("Agent profiles / routing / Herdr endpoint"))
-                .child(muted(format!("{home}/config/agents.json")))
-                .child(label("Default workflow for new Projects"))
-                .child(muted(format!("{home}/config/workflows/default.json")))
-                .child(action("Reload agent configuration", Variant::Primary, move |_| dispatch(ui, "config.reload", json!({}))))
-                .child(action("Check Herdr connection", Variant::Secondary, move |_| dispatch(ui, "herdr.status", json!({})))))
-            .child(crate::profiles::registry(ui.profiles))
-            .child(muted("Closing the application stops scheduling. Herdr-owned programs can continue; reopen Canban to receive reports and reconcile state."))))
+        .unwrap_or_else(|| "/preview/.canban".into());
+    let runtime = crate::APP.get().map(|app| app.config()).unwrap_or_default();
+    layout("Settings", "Application preferences and JSON configuration.")
+        .child(scroll().flex_1().min_h(px(0.)).child(view().w_full().max_w(px(880.)).min_w(px(0.)).gap_4()
+            .child(crate::components::scheduling::settings(ui))
+            .child(settings_section("Agent profiles", "Define Agents once; workflow stages and @mentions reference these profiles.")
+                .child(settings_field("Configuration", "Command and profile changes apply after reloading, to newly queued work.",
+                    muted(format!("{home}/config/agents.json"))))
+                .child(crate::profiles::registry_items(ui.profiles))
+                .child(view().items_start().child(action("Reload configuration", Variant::Secondary, move |_| dispatch(ui, "config.reload", json!({}))))))
+            .child(settings_section("Workflow", "New Projects use this default template. Existing Projects retain their workflow.")
+                .child(settings_field("Default workflow configuration", "Edit this JSON file to customize stages, profiles and workspace behavior.",
+                    muted(format!("{home}/config/workflows/default.json")))))
+            .child(settings_section("Herdr", "Terminal runtime connection; configure it in agents.json.")
+                .child(settings_field("Executable", "Used to connect to the configured runtime.", muted(runtime.hc)))
+                .child(settings_field("Session", "The configured Herdr runtime session.", muted(runtime.hc_session)))
+                .child(view().items_start().child(action("Check connection", Variant::Secondary, move |_| dispatch(ui, "herdr.status", json!({}))))))
+            .child(settings_section("Storage", "Canban keeps structured data, configuration and managed artifacts in its application home.")
+                .child(settings_field("Application home", "Configuration, documents and execution history are stored here.", muted(home))))
+            .child(muted("Closing Canban stops scheduling. Herdr-owned programs can continue; reopen Canban to reconcile their state."))
+        ))
 }

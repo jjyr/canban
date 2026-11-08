@@ -2,9 +2,8 @@
 use crate::presenter::*;
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
-use serde_json::json;
 pub fn sidebar(ui: Ui) -> impl IntoElement {
-    let mut rail = view()
+    let rail = view()
         .w(px(56.))
         .flex_shrink_0()
         .py_3()
@@ -13,19 +12,26 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         .bg(SURFACE)
         .border_r_1()
         .border_color(BORDER)
-        .child(
-            view()
-                .h(px(28.))
-                .items_center()
-                .justify_center()
-                .child(label("C").font_weight(FontWeight::BOLD)),
-        )
         .child(icon_action(
             Icon::Search,
             "Quick Open · ⌘O".into(),
             move || ui.quick_open.get() && !ui.project_picker.get(),
             || 0,
             move |_| ui.show_search(false),
+        ));
+    let rail = rail
+        .child(icon_action(
+            Icon::Board,
+            "Board".into(),
+            move || {
+                !ui.return_overview.get()
+                    && matches!(
+                        ui.page.get().as_str(),
+                        "board" | "card" | "terminal" | "review" | "new-project" | "new-card"
+                    )
+            },
+            || 0,
+            move |_| ui.navigate("board"),
         ))
         .child(icon_action(
             Icon::Overview,
@@ -38,61 +44,21 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                     .count()
             },
             move |_| ui.navigate("overview"),
-        ))
-        .child(view().w(px(28.)).h(px(1.)).my_2().bg(BORDER))
-        .child(dynamic(move || {
-            let _ = ui.project.get();
-            let name = ui
-                .current_project()
-                .map(|p| p.name)
-                .unwrap_or_else(|| "Choose Project".into());
-            icon_action(
-                Icon::Projects,
-                format!("Switch Project · {name}"),
-                move || ui.quick_open.get() && ui.project_picker.get(),
-                || 0,
-                move |_| ui.show_search(true),
-            )
-        }));
+        ));
+    let mut rail = rail;
     for (kind, title, page) in [
-        (Icon::Board, "Board", "board"),
         (Icon::Note, "Notes", "notes"),
         (Icon::Archive, "Archived Cards", "archive"),
     ] {
         rail = rail.child(icon_action(
             kind,
             title.into(),
-            move || {
-                if page == "board" {
-                    !ui.return_overview.get()
-                        && matches!(
-                            ui.page.get().as_str(),
-                            "board" | "card" | "terminal" | "review"
-                        )
-                } else {
-                    ui.page.get() == page
-                }
-            },
+            move || ui.page.get() == page,
             || 0,
             move |_| ui.navigate(page),
         ));
     }
-    rail.child(icon_action(
-        Icon::Plus,
-        "New Project".into(),
-        || false,
-        || 0,
-        move |_| ui.navigate("new-project"),
-    ))
-    .child(view().flex_1())
-    .child(icon_action(
-        Icon::Connection,
-        "Check Herdr connection".into(),
-        || false,
-        || 0,
-        move |_| dispatch(ui, "herdr.status", json!({})),
-    ))
-    .child(icon_action(
+    rail.child(view().flex_1()).child(icon_action(
         Icon::Settings,
         "Settings".into(),
         move || ui.page.get() == "settings",

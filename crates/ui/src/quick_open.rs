@@ -32,6 +32,8 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                 rows.get()
                     .into_iter()
                     .map(|r| SearchChoice {
+                        selected: ui.project_picker.get()
+                            && matches!(&r.target, Target::Project(id) if *id == ui.project.get()),
                         id: r.id,
                         title: r.title,
                         detail: r.detail,
@@ -69,11 +71,29 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                 },
                 move || ui.quick_open.set(false),
                 move || {
-                    format!(
-                        "{} results · ↑ ↓ choose · Enter open · Esc close",
-                        rows.get().len()
-                    )
+                    if ui.project_picker.get() {
+                        "Search projects…".into()
+                    } else {
+                        "Search projects, cards, notes, agents…".into()
+                    }
                 },
+                view()
+                    .gap_2()
+                    .child(muted(move || {
+                        format!(
+                            "{} results · ↑ ↓ choose · Enter open · Esc close",
+                            rows.get().len()
+                        )
+                    }))
+                    .child(when(
+                        move || ui.project_picker.get(),
+                        move || {
+                            action("+ New Project", Variant::Quiet, move |_| {
+                                ui.quick_open.set(false);
+                                ui.navigate("new-project");
+                            })
+                        },
+                    )),
             )
         },
     )

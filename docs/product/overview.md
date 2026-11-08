@@ -1,6 +1,6 @@
 # Global Agent Overview
 
-Status: implemented 2026-11-07. See [implementation and validation](../agent-overview-and-lifecycle.md) for current behavior and evidence. The user-selected design below remains the product contract; macOS notifications and host/remote monitoring remain deferred.
+Status: implemented 2026-11-07, UI refined 2026-11-08. See [implementation and validation](../agent-overview-and-lifecycle.md) for current behavior and evidence. The user-selected design below remains the product contract; macOS notifications and host/remote monitoring remain deferred.
 
 ## Reference and selected direction
 
@@ -19,21 +19,15 @@ Adopt the global grouped list, compact scanning hierarchy, attention prominence,
 
 Board remains the default workspace for defining and advancing work. **Overview** is the global execution/handling workspace across Projects. It shows working, waiting, queued, idle and closed Agent conversations plus actionable Cards that have no Agent yet.
 
-Merge the current global Agent activity destination and the proposed separate Needs attention page into one **Overview** entry above Projects. A Needs attention filter/section lives inside it; Board can keep its Project-local attention filter.
+Merge the current global Agent activity destination and the proposed separate Needs attention page into one **Overview** entry immediately below Board in the compact rail. It directly shows all nonempty status groups without filters; Board can keep its Project-local attention filter.
 
 ```text
-CANBAN
-
-Overview   ! 4       <- global user-action count, not live Agent count
-
-PROJECTS
-  canban
-  fiber
-  tools
-
+Quick Open
 Board
+Overview !4  <- global user-action count
 Notes
 Archive
+   ...
 Settings
 ```
 
@@ -41,14 +35,16 @@ The entry is always visible. Its highlight/count persists until the authoritativ
 
 Changing Project does not scope Overview. Background updates do not steal focus. No macOS notification integration is required.
 
+The compact rail and Project controls supersede the earlier sidebar sketch below; see [current Project-entry and Settings contract](../workspace-entry-and-settings.md).
+
 ## Layout
 
 ```text
 +------------+-----------------------------------------------------+-------------------------------+
 | CANBAN     | Overview   Needs you 4   Executing 6/8   Queued 3    | Selected context          [x] |
-|            | All / Needs attention / Working / Queued / Idle     |                               |
+|            | All Projects (scope, no filter toolbar)             |                               |
 | Overview !4|                                                     | Permission required           |
-|            | NEEDS ATTENTION 2                                   | canban / #42 Add search        |
+|            | NEEDS YOU 2                                         | canban / #42 Add search        |
 | PROJECTS   | ! @developer  #42 Add search     canban/.../42   2m  | @developer / Develop          |
 |  canban    |   canban / Develop / Permission required             |                               |
 |  fiber     | ! @developer  #17 RPC behavior   canban/.../17   8m  | Assignment                    |
@@ -116,7 +112,7 @@ Detailed per-source lifecycle, deduplication and runtime-context rules remain in
 
 ## Navigation, recovery and history
 
-Opening Card/Terminal/Review from Overview preserves the originating row, filters and scroll; Back returns to **Overview**. Opening from Board continues to return to Board. Selecting the target Project while opening its Card must not scope the global Overview afterward.
+Opening Card/Terminal/Review from Overview preserves the originating row and scroll; Back returns to **Overview**. Opening from Board continues to return to Board. Selecting the target Project while opening its Card must not scope the global Overview afterward.
 
 Runtime status can resolve an execution-wait reason, but cannot approve a Canban task gate. Agent completion alone does not approve a task gate. Reading/selecting a row does not settle it. If its reason resolves while context/Terminal is open, update the summary without closing or switching the user's work surface. Preserve a small handled state in the selected inspector until the user moves on.
 

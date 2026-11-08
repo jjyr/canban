@@ -11,6 +11,7 @@ fn controls() -> impl IntoElement {
     let profile_draft = signal(String::new());
     let profile_fixture = signal(canban_types::Config::default().profiles);
     let count = signal(0_u32);
+    let directory = signal(String::new());
     view().flex_1().min_h(px(0.0)).p_5().gap_4().bg(BACKGROUND)
     .child(heading("Component Gallery"))
     .child(muted("Production components · local fixtures · no AppServer or Agent required"))
@@ -29,6 +30,25 @@ fn controls() -> impl IntoElement {
         scroll().flex_1().child(
             view()
                 .gap_4()
+                .child(
+                    settings_section("Entry and directory field", "Shared production controls; choosing a directory does not create or save anything.")
+                        .child(entry_card(Icon::Plus, "Create a Project", "One accessible clickable surface.", move |_| {
+                            count.set(count.get_untracked() + 1);
+                        }))
+                        .child(directory_field(directory, |_| {})),
+                )
+                .child(
+                    panel()
+                        .child(label("Shared Lucide icons · muted / selected / attention"))
+                        .child(view().flex_row().flex_wrap().gap_2().children(
+                            [Icon::Search, Icon::Board, Icon::Overview, Icon::Note,
+                             Icon::Archive, Icon::Settings, Icon::Projects, Icon::Agent,
+                             Icon::ChevronDown, Icon::Plus, Icon::Check]
+                            .into_iter().enumerate().map(|(i, kind)|
+                                icon_action(kind, format!("{kind:?}"), move || i == 1,
+                                    move || if i == 2 { 3 } else { 0 }, |_| {}).into_element()
+                            ).collect::<Vec<_>>())),
+                )
                 .child(
                     panel()
                         .child(heading("Typography and surfaces"))
@@ -127,10 +147,15 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Board workspace", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
                     ui.snapshot.set(fixtures::workspace());
+                    ui.select_project("gallery-project".into());
+                    ui.card.set("card-1".into());
                     ui.page.set("card".into());
                 }))
                 .child(action("Notes workspace", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::workspace());
+                    ui.select_project("gallery-project".into());
+                    ui.note.set("note-1".into());
                     ui.page.set("notes".into());
                 }))
                 .child(action("Overview", Variant::Secondary, move |_| {
@@ -145,8 +170,24 @@ pub fn Gallery() -> impl IntoElement {
                     ui.page.set("board".into());
                     ui.show_search(false);
                 }))
+                .child(action("Empty Board", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(Default::default());
+                    ui.select_project(String::new());
+                }))
+                .child(action("Long Project", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    let mut snapshot = fixtures::workspace();
+                    snapshot.projects[0].name = "Canban · 中文架构与一个足够长的项目名称 · Context and workflow decisions across the workspace".into();
+                    ui.snapshot.set(snapshot);
+                    ui.select_project("gallery-project".into());
+                }))
                 .child(action("Scheduling", Variant::Quiet, move |_| {
                     scene.set("scheduling".into());
+                }))
+                .child(action("Settings", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    ui.navigate("settings");
                 }))
                 .child(action("Controls", Variant::Quiet, move |_| {
                     scene.set("controls".into())
@@ -174,7 +215,7 @@ pub fn Gallery() -> impl IntoElement {
             view()
                 .flex_1()
                 .w_full()
-                .max_w(px(if narrow_preview { 1000.0 } else { 10000.0 }))
+                .max_w(px(if narrow_preview { 720.0 } else { 10000.0 }))
                 .min_h(px(0.0))
                 .flex_row()
                 .child(canban_ui::sidebar(ui))
@@ -186,18 +227,7 @@ pub fn Gallery() -> impl IntoElement {
                         .child(dynamic(move || {
                             let page = ui.page.get();
                             let _ = ui.card.get();
-                            untracked(|| match page.as_str() {
-                                "notes" => canban_ui::notes::screen(ui).into_element(),
-                                "overview" => canban_ui::overview::screen(ui).into_element(),
-                                "board" | "card" | "terminal" | "review" => {
-                                    canban_ui::workspace::screen(ui).into_element()
-                                }
-                                _ => notice(
-                                    "Component preview: use the scene selector above",
-                                    Tone::Neutral,
-                                )
-                                .into_element(),
-                            })
+                            untracked(|| canban_ui::screen(ui, &page))
                         })),
                 )
                 .into_element()

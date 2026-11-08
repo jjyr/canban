@@ -15,6 +15,7 @@ pub struct SearchChoice {
     pub title: String,
     pub detail: String,
     pub icon: Icon,
+    pub selected: bool,
 }
 pub fn search_dialog(
     title: impl Fn() -> String + Copy + 'static,
@@ -22,8 +23,19 @@ pub fn search_dialog(
     choices: Memo<Vec<SearchChoice>>,
     select: impl Fn(String) + 'static,
     close: impl Fn() + Copy + 'static,
-    footer: impl Fn() -> String + 'static,
+    placeholder: impl Fn() -> String + 'static,
+    footer: impl IntoElement,
 ) -> impl IntoElement {
+    // Escape belongs to the mounted modal, not just its input. Mode changes,
+    // list selection and the footer can all transfer focus within the dialog.
+    on_key_with(
+        "escape",
+        KeyOptions {
+            when: When::Always,
+            ..Default::default()
+        },
+        move |_| close(),
+    );
     let select = Rc::new(select);
     let highlighted = signal(None::<String>);
     let input_focused = signal(false);
@@ -54,14 +66,6 @@ pub fn search_dialog(
         if !input_focused.get() {
             return;
         }
-        on_key_with(
-            "escape",
-            KeyOptions {
-                when: When::Always,
-                ..Default::default()
-            },
-            move |_| close(),
-        );
         let submit = keyboard_submit.clone();
         on_key_with(
             "enter",
@@ -142,6 +146,7 @@ pub fn search_dialog(
                         .child(
                             view().px_4().pb_3().child(
                                 field(query, "Search projects, cards, notes, agents…")
+                                    .placeholder(placeholder)
                                     .label("Quick Open search")
                                     .auto_focus(true)
                                     .on_focus(move || input_focused.set(true))
@@ -159,7 +164,12 @@ pub fn search_dialog(
                                         .map(|c| {
                                             nsh_base::CommandItem::new(
                                                 c.id.clone(),
-                                                format!("{} · {}", c.title, c.detail),
+                                                format!(
+                                                    "{} · {}{}",
+                                                    c.title,
+                                                    c.detail,
+                                                    if c.selected { " · Current" } else { "" }
+                                                ),
                                             )
                                         })
                                         .collect::<Vec<_>>()
@@ -198,6 +208,7 @@ pub fn search_dialog(
                                                     .child(label(c.title))
                                                     .child(muted(c.detail)),
                                             )
+                                            .child(when(move || c.selected, || icon(Icon::Check)))
                                             .into_element()
                                     })
                                     .unwrap_or_else(|| view().into_element())
@@ -216,7 +227,7 @@ pub fn search_dialog(
                                 .border_color(BORDER)
                                 .px_4()
                                 .py_2()
-                                .child(muted(footer)),
+                                .child(footer),
                         ),
                 ),
         )

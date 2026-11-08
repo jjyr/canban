@@ -25,23 +25,23 @@ pub fn settings(ui: Ui) -> impl IntoElement {
     let value = signal(ui.max_agents.get_untracked().to_string());
     let error = signal(String::new());
     let idle = signal(ui.idle_minutes.get_untracked().to_string());
-    panel().gap_2().child(heading("Agent scheduling")).child(summary(ui))
-        .child(label("Maximum executing Agents"))
-        .child(field(value, "8"))
-        .child(muted("Shared across all Boards. Lowering the limit leaves running Agents alone. Later workflow stages run first; Cards waiting for human review stay paused."))
-        .child(label("Idle close after minutes · 0 disables"))
-        .child(field(idle,"15"))
-        .child(muted("Verified waits and idle Agents release scheduling slots. Resumable idle conversations close normally after this timeout; viewed terminals and unresolved work remain open."))
-        .child(action("Save Agent limit", Variant::Primary, move |_| {
+    settings_section("Agent scheduling", "Shared limits and idle behavior across all Projects.")
+        .child(summary(ui))
+        .child(settings_field("Maximum executing Agents", "Lowering the limit leaves running Agents alone. Later workflow stages run first; human review gates stay paused.",
+            field(value, "8").label("Maximum executing Agents").max_w(px(160.))))
+        .child(settings_field("Idle timeout (minutes)", "Use 0 to disable. Resumable idle Agents close after this interval; viewed terminals and unresolved work remain open.",
+            field(idle, "15").label("Idle timeout (minutes)").max_w(px(160.))))
+        .child(view().items_start()
+        .child(action("Save scheduling settings", Variant::Primary, move |_| {
             match value.get_untracked().parse::<usize>() {
                 Ok(max) if max > 0 => {
                     let Ok(minutes) = idle.get_untracked().parse::<u64>() else {error.set("Idle minutes must be a nonnegative whole number".into());return;};
                     dispatch_complete(ui, "scheduler.configure", json!({"max_agents":max,"idle_minutes":minutes}), move |result| {
-                        match result { Ok(_) => { ui.max_agents.set(max); error.try_set(String::new()); }, Err(e) => { error.try_set(e); } }
+                        match result { Ok(_) => { ui.max_agents.set(max); ui.idle_minutes.set(minutes); error.try_set(String::new()); }, Err(e) => { error.try_set(e); } }
                     });
                 },
                 _ => error.set("Enter a positive whole number".into()),
             }
-        }).disabled(move || ui.pending.get()))
+        }).disabled(move || ui.pending.get())))
         .child(dynamic(move || if error.get().is_empty() { view().into_element() } else { notice(error.get(), Tone::Danger).into_element() }))
 }

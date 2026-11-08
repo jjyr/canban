@@ -1,6 +1,6 @@
 # UI component inventory
 
-Status: implementation inventory, updated 2026-11-07. These modules are used by the native application; the Gallery imports the same implementations.
+Status: implementation inventory, updated 2026-11-08. These modules are used by the native application; the Gallery imports the same implementations.
 
 | Component/layer | Module | NSH reuse and contract | Verification |
 | --- | --- | --- | --- |
@@ -66,9 +66,14 @@ Gallery workspace scenes import the exact production components, including focus
 
 ### Overview components
 
-`ui/overview.rs` composes the global grouped list, stable Card/profile rows, filters, Closed/history disclosure, context inspector and explicit destination actions. Inputs are the shared typed pure projection plus retained UI selection/filter/scroll state; selection has no execution side effects. Inspector actions remain outside the scrolling assignment/history. Narrow layouts show the same context with an explicit return. Preview requests are asynchronous and generation/identity fenced. The Gallery Overview scene supplies every group, independent reasons, multiple Projects and request-less recovery. `ui-kit::read_text` reuses NSH selectable document behavior for plain Agent/runtime text without interpreting markup.
+`ui/overview.rs` composes the global grouped list, stable Card/profile rows, nonempty status groups, Closed/history disclosure, context inspector and explicit destination actions. Inputs are the shared typed pure projection plus retained UI selection/scroll state; selection has no execution side effects. Inspector actions remain outside the scrolling assignment/history. Narrow layouts show the same context with an explicit return. Preview requests are asynchronous and generation/identity fenced. The Gallery Overview scene supplies every group, independent reasons, multiple Projects and request-less recovery. `ui-kit::read_text` reuses NSH selectable document behavior for plain Agent/runtime text without interpreting markup.
 
 
 ### Compact navigation and search
 
-`ui-kit::Icon` and `icon_action` define original consistent line icons and 40-point accessible navigation targets. `ui/rail.rs` composes the 56-point product rail, global attention badge and Project picker. `ui-kit::SearchDialog` takes prepared `SearchChoice` values and reuses NSH Dialog/Command for the popup and candidate list; product targets and fuzzy ranking stay in `ui/quick_open`. Command+O, immediate Escape, outside dismissal, candidate highlight and exact read-only navigation share the same production components in the Gallery. See [interaction and acceptance](quick-open-and-navigation.md).
+`ui-kit::Icon` and `icon_action` define vendored Lucide native-vector icons and 40-point accessible navigation targets. `ui/rail.rs` composes the 56-point product rail, global attention badge. The Board header owns the Project picker and New Project entry. `ui-kit::SearchDialog` takes prepared `SearchChoice` values (including a current-item marker), controlled placeholder and caller-composed footer and reuses NSH Dialog/Command for the popup and candidate list; product targets and fuzzy ranking stay in `ui/quick_open`. Command+O, immediate Escape, outside dismissal, candidate highlight and exact read-only navigation share the same production components in the Gallery. See [interaction and acceptance](quick-open-and-navigation.md).
+
+
+### Project entry and Settings components (2026-11-08)
+
+`ui-kit/entry_card.rs` owns the single accessible clickable entry; `directory_field.rs` owns the editable path/native folder sheet with cancellation and disposed-owner guards; `settings.rs` owns generic section/field composition. Product UI owns Project name suggestions and creation. One screen scroll contains Agent scheduling, Agent profiles, Workflow, Herdr and Storage; the scheduler component uses the same section/field geometry. `profiles::registry_items` supplies content without nested panel styling. The Gallery includes Empty Board, Settings, all-state grouped Overview and entry/directory controls at a 720-point constrained width. See [contracts and native verification](workspace-entry-and-settings.md).

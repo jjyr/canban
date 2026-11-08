@@ -13,6 +13,7 @@ pub mod rail;
 pub mod review;
 mod screens;
 pub use rail::sidebar;
+pub use screens::screen;
 pub mod quick_open;
 mod sessions;
 pub mod workspace;

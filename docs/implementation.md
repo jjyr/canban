@@ -146,3 +146,7 @@ Use `mise exec -- python3 scripts/acceptance-native.py` to prepare an isolated p
 ## Notes and Kanban workspace update (2026-11-07)
 
 The approved calm native composition is implemented: Board with a selected-Card pane, focused Card/Terminal or Review, explicit return/expand controls and retained navigation drafts/Board scroll. Notes remain database-backed documents with file-like Agent CLI operations, immutable revisions, stable links/backlinks and transactionally associated history. The [implementation and acceptance report](notes-and-workspace-implementation.md) records contracts, real Herdr fixture integration, native interaction checks and remaining limits.
+
+Navigation refinement (2026-11-08): the rail contains only Quick Open, Board, Overview, Notes, Archive and Settings. Project switching/creation lives in the Board header; icons share vendored Lucide SVGs rendered by NSH. [Navigation behavior and native regression acceptance](quick-open-and-navigation.md#navigation-refinement-acceptance-2026-11-08) records the isolated two-Project run, modal Escape fix and long-title layout regression.
+
+[Project entry, grouped Overview and Settings](workspace-entry-and-settings.md) (2026-11-08) documents the clickable empty Board, native directory chooser, Overview without filters and a single scrolling Settings page, including isolated native acceptance.

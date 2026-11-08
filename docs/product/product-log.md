@@ -434,3 +434,21 @@ The requested scope reconfirmation pairs this with the compact icon sidebar dire
 ## 2026-11-07 — Implement compact rail and Command+O Quick Open
 
 The user authorized the two-feature slice and selected Command+O instead of the proposed Command+K, with outside-click dismissal. The default compact icon rail and cross-Project Project/Card/Note/Agent fuzzy candidate list are implemented. Quick Open has no preview; Escape closes it in one press. Agent activation attaches the exact live conversation or opens closed/unavailable context with explicit recovery actions, without automatically resuming or approving work. Production Gallery components and isolated native/Core checks are documented in [Quick Open and navigation](../quick-open-and-navigation.md). Other UI research proposals remain deferred.
+
+
+## 2026-11-08 — Simplify primary navigation and refine icons
+
+User-approved implementation direction:
+
+- Remove the decorative C. Rail order: Quick Open, Board, Overview, Notes, Archive; Settings stays at the bottom. Overview keeps its global attention count immediately below Board.
+- Consolidate Project switching and creation into the Board's Project-name control. Reuse the existing Project search popup, show the current Project and keep New Project available in its footer.
+- Remove the rail's Herdr connection check; the same diagnostic remains in Settings.
+- Use a single mature monochrome outline icon family with adaptive theme tokens, clear selected/hover/focus states, 40-point targets and retained accessibility/tooltips. Lucide SVGs render natively through NSH; preserve upstream license notices.
+- Keep Notes/Archive scoped to the current Project and visibly identify that Project; Overview remains global. Provide an actionable empty Board.
+
+See [navigation contract and acceptance](../quick-open-and-navigation.md).
+
+
+## 2026-11-08 — Project onboarding, grouped Overview and coherent Settings
+
+Approved and implemented: hide all task controls until a Project is selected; make the Create a Project card the single clickable entry; retain typed paths while adding the native folder chooser and blank-name suggestion; remove Overview filters and show all nonempty lifecycle groups together with Closed collapsed; place Agent scheduling, Agent profiles, Workflow, Herdr and Storage in one scrolling Settings layout with shared section/field styling. No new workflow policy or configuration GUI is introduced. See [current contract and acceptance](../workspace-entry-and-settings.md).

@@ -22,14 +22,33 @@ pub fn mention_picker(profiles: Signal<Vec<Profile>>, draft: Signal<String>) -> 
     })
 }
 
-pub fn registry(profiles: Signal<Vec<Profile>>) -> impl IntoElement {
-    panel().child(label("Available Agent profiles"))
-        .child(muted("Profiles are defined once in agents.json. Workflow stages reference their IDs; mentions select one directly."))
-        .child(dynamic(move || {
-            view().gap_3().children(profiles.get().into_iter().map(|profile| {
-                panel().child(label(format!("@{}",profile.id)))
-                    .child(muted(if profile.role_instruction.is_empty() { "No fixed role instruction".into() } else { profile.role_instruction }))
-                    .into_element()
-            }).collect::<Vec<_>>())
-        }))
+pub fn registry(profiles: Signal<Vec<Profile>>) -> View {
+    settings_section(
+        "Agent profiles",
+        "Workflow stages and @mentions select a profile from agents.json.",
+    )
+    .child(registry_items(profiles))
+}
+/// Content-only projection for composition inside the screen's settings group.
+pub fn registry_items(profiles: Signal<Vec<Profile>>) -> impl IntoElement {
+    dynamic(move || {
+        view().min_w(px(0.)).gap_3().children(
+            profiles
+                .get()
+                .into_iter()
+                .map(|profile| {
+                    view()
+                        .min_w(px(0.))
+                        .gap_1()
+                        .child(label(format!("@{}", profile.id)).font_weight(FontWeight::MEDIUM))
+                        .child(muted(if profile.role_instruction.is_empty() {
+                            "No fixed role instruction".into()
+                        } else {
+                            profile.role_instruction
+                        }))
+                        .into_element()
+                })
+                .collect::<Vec<_>>(),
+        )
+    })
 }

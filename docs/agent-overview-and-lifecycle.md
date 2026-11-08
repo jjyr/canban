@@ -2,6 +2,8 @@
 
 Implemented 2026-11-07. This supersedes the former policy that every retained terminal occupied an execution slot. Board remains the startup workspace. Overview is the global handling destination across all Projects in the current Canban home.
 
+Navigation update 2026-11-08: Overview now directly renders all nonempty groups without filter buttons/state; the Needs attention section is labeled **Needs you**. [Current UI contract and acceptance](workspace-entry-and-settings.md) also covers grouped Settings.
+
 ## Automatic admission and retained terminals
 
 ```text
@@ -73,7 +75,7 @@ The global badge counts actionable **rows**, including Review. Several independe
 
 Selection only opens context. Explicit actions attach the exact live invocation, open the actual Card/Review, or request exact-ID resume through the Scheduler. Resume validates the selected attempt and its bound provider ID before queueing. Missing provider history/ID, changed invocation or removed resume commands require explicit recovery rather than a silent fresh session.
 
-Filtering, selected conversation, Closed expansion, split width and list scroll survive Card/Terminal/Review navigation. Destinations opened from Overview return to Overview; Board-origin work retains Board navigation. On narrow widths the inspector replaces the list and has a close/back action. A selected context remains visible if it resolves or moves outside the current filter. Closed is collapsed initially.
+Selected conversation, Closed expansion, split width and list scroll survive Card/Terminal/Review navigation. Destinations opened from Overview return to Overview; Board-origin work retains Board navigation. On narrow widths the inspector replaces the list and has a close/back action. A selected context remains visible if its condition resolves or its group changes. Closed is collapsed initially.
 
 The screen preview is loaded on demand, read-only, at most 160 lines and 32 KiB, and bound to the selected Core/terminal/attempt. Server identity checks plus UI generation fences reject obsolete results. Terminal text is selectable plain text, never a synthesized permission form. Permissions are answered in the actual Terminal; there are no inferred Allow/Deny actions. macOS notifications, host statistics, remote management and snoozing remain deferred.
 

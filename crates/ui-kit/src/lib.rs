@@ -17,6 +17,13 @@ pub use split::split;
 pub use status::{Tone, notice, status};
 
 pub mod icons;
-pub use icons::{Icon, icon, icon_action};
+pub use icons::{Icon, icon, icon_action, icon_tinted};
 pub mod search_dialog;
 pub use search_dialog::{SearchChoice, search_dialog};
+
+pub mod entry_card;
+pub use entry_card::entry_card;
+pub mod directory_field;
+pub use directory_field::directory_field;
+pub mod settings;
+pub use settings::{settings_field, settings_section};

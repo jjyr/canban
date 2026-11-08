@@ -1,9 +1,7 @@
-//! Small, original line icons and a shared accessible 40-point navigation action.
+//! Shared Lucide vector icons and accessible 40-point navigation actions.
 use super::{label, tokens::*};
-use nsh_core::{
-    canvas::{LineCap, LineJoin},
-    prelude::*,
-};
+use nsh_core::element::ImageSrc;
+use nsh_core::prelude::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
     Search,
@@ -14,104 +12,39 @@ pub enum Icon {
     Overview,
     Archive,
     Settings,
-    Connection,
     Plus,
+    ChevronDown,
+    Check,
 }
-fn line(mut p: Painter, points: &[(f32, f32)]) -> Painter {
-    p = p.begin_path().move_to(points[0].0, points[0].1);
-    for &(x, y) in &points[1..] {
-        p = p.line_to(x, y);
-    }
-    p.stroke()
-}
-fn circle(p: Painter, x: f32, y: f32, r: f32) -> Painter {
-    p.begin_path()
-        .arc(x, y, r, 0., std::f32::consts::TAU)
-        .stroke()
-}
-fn rect(p: Painter, x: f32, y: f32, w: f32, h: f32) -> Painter {
-    line(p, &[(x, y), (x + w, y), (x + w, y + h), (x, y + h), (x, y)])
-}
-pub fn icon(kind: Icon) -> impl IntoElement {
-    canvas(move || {
-        let p = Painter::new()
-            .stroke_color(color(TEXT))
-            .line_width(1.6)
-            .line_cap(LineCap::Round)
-            .line_join(LineJoin::Round);
-        match kind {
-            Icon::Search => line(circle(p, 9., 9., 5.5), &[(13., 13.), (18., 18.)]),
-            Icon::Projects => line(
-                p,
-                &[
-                    (2., 6.),
-                    (8., 6.),
-                    (10., 8.),
-                    (18., 8.),
-                    (18., 17.),
-                    (2., 17.),
-                    (2., 6.),
-                ],
-            ),
-            Icon::Board => {
-                let p = rect(p, 2., 3., 16., 14.);
-                let p = line(p, &[(7.3, 3.), (7.3, 17.)]);
-                line(p, &[(12.7, 3.), (12.7, 17.)])
-            }
-            Icon::Note => {
-                let p = rect(p, 4., 2., 12., 16.);
-                let p = line(p, &[(7., 7.), (13., 7.)]);
-                let p = line(p, &[(7., 10.), (13., 10.)]);
-                line(p, &[(7., 13.), (11., 13.)])
-            }
-            Icon::Agent => {
-                let p = rect(p, 3., 5., 14., 12.);
-                let p = circle(p, 7., 10., 0.8);
-                let p = circle(p, 13., 10., 0.8);
-                let p = line(p, &[(7., 14.), (13., 14.)]);
-                line(p, &[(10., 2.), (10., 5.)])
-            }
-            Icon::Overview => {
-                let p = rect(p, 2., 2., 6., 6.);
-                let p = rect(p, 12., 2., 6., 6.);
-                let p = rect(p, 2., 12., 6., 6.);
-                rect(p, 12., 12., 6., 6.)
-            }
-            Icon::Archive => {
-                let p = rect(p, 2., 3., 16., 4.);
-                let p = rect(p, 4., 7., 12., 11.);
-                line(p, &[(8., 11.), (12., 11.)])
-            }
-            Icon::Settings => {
-                let p = circle(p, 10., 10., 5.);
-                let p = circle(p, 10., 10., 1.5);
-                [
-                    (10., 1., 10., 4.),
-                    (10., 16., 10., 19.),
-                    (1., 10., 4., 10.),
-                    (16., 10., 19., 10.),
-                    (3.5, 3.5, 5.7, 5.7),
-                    (14.3, 14.3, 16.5, 16.5),
-                    (3.5, 16.5, 5.7, 14.3),
-                    (14.3, 5.7, 16.5, 3.5),
-                ]
-                .into_iter()
-                .fold(p, |p, (x, y, a, b)| line(p, &[(x, y), (a, b)]))
-            }
-            Icon::Connection => {
-                let p = line(p, &[(7., 3.), (7., 7.), (13., 7.), (13., 3.)]);
-                let p = line(p, &[(5., 7.), (5., 11.), (10., 15.), (15., 11.), (15., 7.)]);
-                line(p, &[(10., 15.), (10., 19.)])
-            }
-            Icon::Plus => {
-                let p = line(p, &[(3., 10.), (17., 10.)]);
-                line(p, &[(10., 3.), (10., 17.)])
-            }
+impl Icon {
+    fn source(self) -> &'static str {
+        match self {
+            Self::Search => include_str!("../assets/lucide/search.svg"),
+            Self::Projects => include_str!("../assets/lucide/folder-open.svg"),
+            Self::Board => include_str!("../assets/lucide/square-kanban.svg"),
+            Self::Note => include_str!("../assets/lucide/file-text.svg"),
+            Self::Agent => include_str!("../assets/lucide/bot.svg"),
+            Self::Overview => include_str!("../assets/lucide/layout-dashboard.svg"),
+            Self::Archive => include_str!("../assets/lucide/archive.svg"),
+            Self::Settings => include_str!("../assets/lucide/settings.svg"),
+            Self::Plus => include_str!("../assets/lucide/plus.svg"),
+            Self::ChevronDown => include_str!("../assets/lucide/chevron-down.svg"),
+            Self::Check => include_str!("../assets/lucide/check.svg"),
         }
-    })
-    .w(px(20.))
-    .h(px(20.))
-    .pointer_events(PointerEvents::None)
+    }
+}
+/// Lucide 0.468.0 SVGs, vendored with their license. NSH renders native vectors
+/// and resolves currentColor from the same adaptive semantic tokens as text.
+pub fn icon(kind: Icon) -> Svg {
+    icon_tinted(kind, MUTED)
+}
+pub fn icon_tinted(kind: Icon, tint: impl IntoReactive<AdaptiveColor>) -> Svg {
+    svg(ImageSrc::svg_markup(kind.source()))
+        .w(px(20.))
+        .h(px(20.))
+        .flex_shrink_0()
+        .text_color(tint)
+        .pointer_events(PointerEvents::None)
 }
 pub fn icon_action(
     kind: Icon,
@@ -144,11 +77,13 @@ pub fn icon_action(
                 .items_center()
                 .justify_center()
                 .relative()
+                .group()
                 .rounded(px(RADIUS))
                 .bg(move || if selected.get() { SELECTED } else { CLEAR })
                 .border_1()
                 .border_color(CLEAR)
                 .hover(|s| s.bg(INSET))
+                .active(|s| s.opacity(0.7))
                 .focus(|s| s.border_color(ACCENT))
                 .selected(move || selected.get())
                 .accessibility_label(move || {
@@ -159,7 +94,10 @@ pub fn icon_action(
                         title.clone().into()
                     })
                 })
-                .child(icon(kind))
+                .child(
+                    icon_tinted(kind, move || if selected.get() { ACCENT } else { MUTED })
+                        .group_hover(|s| s.text_color(ACCENT)),
+                )
                 .child(dynamic(move || {
                     let n = count.get();
                     if n == 0 {

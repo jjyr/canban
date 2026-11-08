@@ -30,3 +30,7 @@ The Cargo target is registered by `crates/ui/Cargo.toml`; direct development bui
 The **Overview** scene uses the production global list/inspector with deterministic fixtures for all six groups, multiple Projects, request-less recovery, Closed/history disclosure and narrow layout. It does not open an AppServer or Core.
 
 The **Quick Open** scene supplies cross-Project duplicate Card/Note names, Unicode titles, Agent lifecycle states and a long candidate list. It uses the production icon rail and search popup; Command+O works in every scene, and the compact Project picker reuses the same popup.
+
+Navigation checks: use the production Board Project-name control to switch Projects or open New Project; use **Long Project** with **Narrow viewport** for heading truncation, and **Empty Board** for first-Project onboarding without task controls or a duplicate creation button. **Controls** includes the shared Lucide icons with selection and attention styling. The Gallery composes the production screen router, including Project forms and Settings; it has no AppServer, so save/execute actions remain previews.
+
+**Settings** renders all production groups inside the same screen scroll. **Narrow viewport** now uses a 720-point workspace. The Controls scene includes the clickable entry card and editable directory/native chooser; cancellation does not modify the field. Overview fixtures show every nonempty status group together, with no filter toolbar and independently expandable Closed history.

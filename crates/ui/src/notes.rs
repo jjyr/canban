@@ -18,6 +18,15 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             .gap_3()
             .bg(SURFACE)
             .child(
+                muted(move || {
+                    let _ = ui.project.get();
+                    ui.current_project()
+                        .map(|p| p.name)
+                        .unwrap_or_else(|| "No Project selected".into())
+                })
+                .truncate(),
+            )
+            .child(
                 view()
                     .flex_row()
                     .justify_between()
