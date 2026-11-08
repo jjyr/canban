@@ -83,6 +83,24 @@ pub fn panel(ui: Ui) -> impl IntoElement {
     view()
         .gap_1()
         .child(dynamic(move || {
+            let _ = ui.snapshot.get();
+            let location = ui
+                .current_card()
+                .and_then(|c| c.workspace.map(|w| w.location))
+                .or_else(|| ui.current_project().map(|p| p.work_location()));
+            muted(
+                location
+                    .map(|l| {
+                        format!(
+                            "{} · {}",
+                            crate::machines::name(ui, &l.machine),
+                            compact(&l.directory, 48)
+                        )
+                    })
+                    .unwrap_or_default(),
+            )
+        }))
+        .child(dynamic(move || {
             let Some(info) = info.get() else {
                 return view().into_element();
             };

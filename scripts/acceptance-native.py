@@ -63,5 +63,7 @@ try:
    os.replace(staged,bundle/'Contents/MacOS'/name)
 
 finally:
+ try: call('app.shutdown')
+ except Exception: pass
  if server.poll() is None:server.terminate();server.wait(timeout=10)
  subprocess.run(['hc','server','stop'],env={**os.environ,**core_env},capture_output=True,timeout=15);log.close()

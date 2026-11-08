@@ -43,6 +43,16 @@ pub fn run_panel(ui: Ui, req: Request) -> impl IntoElement {
                 run.terminal.as_deref().unwrap_or("no terminal"),
                 run.cwd
             )))
+            .child(muted(format!(
+                "Machine: {}",
+                crate::machines::name(
+                    ui,
+                    run.location
+                        .as_ref()
+                        .map(|l| l.machine.as_str())
+                        .unwrap_or("local")
+                )
+            )))
             .child(action(
                 "Read terminal output",
                 Variant::Secondary,

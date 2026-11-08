@@ -283,6 +283,17 @@ fn inspector(ui: Ui) -> impl IntoElement {
                 }
                 if let Some(a) = &row.attempt {
                     body = body.child(label("Herdr runtime context"));
+                    body = body.child(muted(format!(
+                        "{} · {}",
+                        crate::machines::name(
+                            ui,
+                            a.location
+                                .as_ref()
+                                .map(|l| l.machine.as_str())
+                                .unwrap_or("local")
+                        ),
+                        a.cwd
+                    )));
                     if let Some(v) = &a.observed {
                         body = body.child(read_text(format!(
                             "{}\n{}",

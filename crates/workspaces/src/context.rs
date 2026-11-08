@@ -1,92 +1,177 @@
 //! Directory context is a presentation hint, never a task assignment.
 use super::*;
 use canban_types::Snapshot;
-
-fn canonical(path: &str) -> Option<PathBuf> {
-    std::fs::canonicalize(path).ok()
-}
-fn repository(path: &Path) -> Option<PathBuf> {
-    let dir = checked(
-        path,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )
-    .ok()?;
-    std::fs::canonicalize(dir).ok()
-}
-pub fn contains(root: &str, cwd: &str) -> bool {
-    canonical(root)
-        .zip(canonical(cwd))
-        .is_some_and(|(root, cwd)| cwd.starts_with(root))
-}
-/// Match registered directories first, then other worktrees of a known repo.
-pub fn resolve(snapshot: &Snapshot, cwd: &str) -> (Option<String>, Option<String>, Option<String>) {
-    let Some(path) = canonical(cwd) else {
-        return (None, None, None);
-    };
-    let branch = review::current_branch(cwd);
-    let mut roots: Vec<_> = snapshot
-        .projects
-        .iter()
-        .filter_map(|p| canonical(&p.directory).map(|r| (r, p.id.clone())))
-        .collect();
-    roots.extend(
-        snapshot
-            .cards
-            .iter()
-            .filter_map(|c| canonical(c.worktree.as_deref()?).map(|r| (r, c.project_id.clone()))),
-    );
-    let mut matches: Vec<_> = roots.iter().filter(|(r, _)| path.starts_with(r)).collect();
-    matches.sort_by_key(|(r, _)| std::cmp::Reverse(r.components().count()));
-    let repo = repository(&path);
-    let direct = matches.first().and_then(|(root, project)| {
-        matches
-            .iter()
-            .filter(|(r, _)| r.components().count() == root.components().count())
-            .all(|(_, p)| p == project)
-            .then(|| project.clone())
-    });
-    let project = direct.or_else(|| {
-        let repo = repo.as_ref()?;
-        let mut ps = snapshot
+use serde_json::{Value, json};
+impl Ops {
+    pub fn c_contains(&self, root: &str, cwd: &str) -> bool {
+        self.host
+            .canonical(Path::new(root))
+            .ok()
+            .zip(self.host.canonical(Path::new(cwd)).ok())
+            .is_some_and(|(root, cwd)| cwd.starts_with(root))
+    }
+    /// Probe all candidate paths in one remote operation; then use one matching
+    /// algorithm for both hosts. Never apply this machine's filesystem to another.
+    pub fn directory_context(
+        &self,
+        s: &Snapshot,
+        cwd: &str,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let machine = &self.host.machine;
+        let mut roots: Vec<(String, String)> = s
             .projects
             .iter()
-            .filter(|p| repository(Path::new(&p.directory)).as_ref() == Some(repo));
-        let first = ps.next()?;
-        ps.next().is_none().then(|| first.id.clone())
-    });
-    let Some(project) = project else {
-        return (None, None, branch);
-    };
-    let cards: Vec<_> = snapshot
-        .cards
-        .iter()
-        .filter(|c| c.project_id == project && c.archived_at.is_none())
-        .collect();
-    let worktree: Vec<_> = cards
-        .iter()
-        .filter(|c| c.worktree.as_ref().is_some_and(|w| contains(w, cwd)))
-        .collect();
-    let card = if worktree.len() == 1 {
-        Some(worktree[0].id.clone())
-    } else if worktree.is_empty() && repo.is_some() {
-        // A branch name alone is never enough: verify the repository identity.
-        let candidates: Vec<_> = cards
-            .iter()
-            .filter(|c| {
-                c.branch.is_some()
-                    && c.branch == branch
-                    && snapshot
+            .filter(|p| p.work_location().machine == *machine)
+            .map(|p| (p.directory.clone(), p.id.clone()))
+            .collect();
+        let mut checkouts: Vec<(String, String)> = Vec::new();
+        let mut branches: Vec<(String, String, String, String)> = Vec::new();
+        for c in s.cards.iter().filter(|c| c.archived_at.is_none()) {
+            if c.workspace.is_none() && machine == "local" {
+                if let Some(path) = &c.worktree {
+                    roots.push((path.clone(), c.project_id.clone()));
+                    checkouts.push((path.clone(), c.id.clone()));
+                }
+                if let Some(branch) = &c.branch
+                    && let Some(p) = s
                         .projects
                         .iter()
-                        .find(|p| p.id == project)
-                        .is_some_and(|p| repository(Path::new(&p.directory)) == repo)
+                        .find(|p| p.id == c.project_id && p.work_location().machine == *machine)
+                {
+                    branches.push((
+                        c.id.clone(),
+                        c.project_id.clone(),
+                        p.directory.clone(),
+                        branch.clone(),
+                    ));
+                }
+            }
+            for w in c
+                .workspace
+                .iter()
+                .chain(c.workspace_history.iter())
+                .filter(|w| w.location.machine == *machine)
+            {
+                roots.push((w.path.clone(), c.project_id.clone()));
+                roots.push((w.location.directory.clone(), c.project_id.clone()));
+                checkouts.push((w.path.clone(), c.id.clone()));
+                if let Some(branch) = &w.branch {
+                    branches.push((
+                        c.id.clone(),
+                        c.project_id.clone(),
+                        w.location.directory.clone(),
+                        branch.clone(),
+                    ));
+                }
+            }
+        }
+        let mut paths = roots
+            .iter()
+            .map(|(p, _)| p.clone())
+            .chain(std::iter::once(cwd.to_owned()))
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        let probe = if self.host.remote() {
+            self.host.python(r#"import os,sys,json,subprocess
+rows={}
+for p in json.loads(sys.argv[1]):
+ if not os.path.exists(p):continue
+ canonical=os.path.realpath(p)
+ def git(args):
+  r=subprocess.run(['git','-C',p]+args,capture_output=True,text=True)
+  return r.stdout.strip() if r.returncode==0 else None
+ common=git(['rev-parse','--path-format=absolute','--git-common-dir'])
+ rows[p]={'path':canonical,'repo':os.path.realpath(common) if common else None}
+branch=subprocess.run(['git','-C',sys.argv[2],'symbolic-ref','--quiet','--short','HEAD'],capture_output=True,text=True)
+print(json.dumps({'paths':rows,'branch':branch.stdout.strip() if branch.returncode==0 else None}))"#,&[&serde_json::to_string(&paths).unwrap_or_default(),cwd]).ok()
+        } else {
+            let mut rows = serde_json::Map::new();
+            for p in paths {
+                if let Ok(path) = self.host.canonical(Path::new(&p)) {
+                    let repo = self
+                        .checked(
+                            Path::new(&p),
+                            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+                        )
+                        .ok()
+                        .and_then(|p| self.host.canonical(Path::new(&p)).ok());
+                    rows.insert(p, json!({"path":path,"repo":repo}));
+                }
+            }
+            Some(json!({"paths":rows,"branch":self.current_branch(cwd)}))
+        };
+        let probe = probe.unwrap_or(Value::Null);
+        let rows = &probe["paths"];
+        let canonical = |p: &str| rows[p]["path"].as_str().map(PathBuf::from);
+        let repo = |p: &str| rows[p]["repo"].as_str().map(str::to_owned);
+        let branch = probe["branch"].as_str().map(str::to_owned);
+        let Some(path) = canonical(cwd) else {
+            return (None, None, branch);
+        };
+        let mut direct = roots
+            .iter()
+            .filter_map(|(p, id)| canonical(p).map(|p| (p, id.clone())))
+            .filter(|(p, _)| path.starts_with(p))
+            .collect::<Vec<_>>();
+        direct.sort_by_key(|(p, _)| std::cmp::Reverse(p.components().count()));
+        let project = direct
+            .first()
+            .and_then(|(first, id)| {
+                direct
+                    .iter()
+                    .filter(|(p, _)| p.components().count() == first.components().count())
+                    .all(|(_, other)| other == id)
+                    .then(|| id.clone())
             })
-            .collect();
-        (candidates.len() == 1).then(|| candidates[0].id.clone())
-    } else {
-        None
-    };
-    (Some(project), card, branch)
+            .or_else(|| {
+                let common = repo(cwd)?;
+                let mut matches = roots
+                    .iter()
+                    .filter(|(p, _)| repo(p).as_ref() == Some(&common))
+                    .map(|(_, id)| id.clone())
+                    .collect::<Vec<_>>();
+                matches.sort();
+                matches.dedup();
+                (matches.len() == 1).then(|| matches[0].clone())
+            });
+        let Some(project) = project else {
+            return (None, None, branch);
+        };
+        let mut exact = checkouts
+            .iter()
+            .filter(|(p, _)| canonical(p).is_some_and(|p| path.starts_with(p)))
+            .map(|(_, id)| id.clone())
+            .collect::<Vec<_>>();
+        exact.sort();
+        exact.dedup();
+        let card = if exact.len() == 1 {
+            Some(exact[0].clone())
+        } else if exact.is_empty() {
+            let mut matches = branches
+                .iter()
+                .filter(|(_, id, p, b)| {
+                    id == &project
+                        && Some(b) == branch.as_ref()
+                        && repo(p).is_some()
+                        && repo(p) == repo(cwd)
+                })
+                .map(|(id, _, _, _)| id.clone())
+                .collect::<Vec<_>>();
+            matches.sort();
+            matches.dedup();
+            (matches.len() == 1).then(|| matches[0].clone())
+        } else {
+            None
+        };
+        (Some(project), card, branch)
+    }
+}
+pub fn contains(root: &str, cwd: &str) -> bool {
+    Ops::local().c_contains(root, cwd)
+}
+pub fn resolve(snapshot: &Snapshot, cwd: &str) -> (Option<String>, Option<String>, Option<String>) {
+    Ops::local().directory_context(snapshot, cwd)
 }
 
 #[cfg(test)]
@@ -120,6 +205,7 @@ mod tests {
         let project = Project {
             id: "p".into(),
             name: "Project".into(),
+            location: None,
             directory: source.to_str().unwrap().into(),
             workflow: Workflow::default(),
             target_branch: None,

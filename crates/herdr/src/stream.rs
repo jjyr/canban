@@ -2,7 +2,6 @@
 use super::*;
 use std::{
     io::Read,
-    process::{Child, ChildStdin},
     sync::{Arc, Mutex, mpsc},
     time::Duration,
 };
@@ -14,13 +13,13 @@ pub enum Event {
 }
 pub struct Attachment {
     viewer: Option<crate::activity::Viewer>,
-    writer: Arc<Mutex<ChildStdin>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     receiver: mpsc::Receiver<Event>,
-    child: Child,
+    transport: super::transport::Transport,
     channel: u32,
     pub automatic_input: bool,
 }
-fn frame(writer: &mut impl Write, channel: u32, kind: u8, data: &[u8]) -> Result<()> {
+fn frame(writer: &mut (impl Write + ?Sized), channel: u32, kind: u8, data: &[u8]) -> Result<()> {
     ensure!(data.len() <= 16 * 1024 * 1024, "Herdr frame too large");
     writer.write_all(&channel.to_le_bytes())?;
     writer.write_all(&[kind])?;
@@ -41,18 +40,10 @@ fn read_frame(reader: &mut impl Read) -> Result<(u32, u8, Vec<u8>)> {
 }
 impl Client {
     pub fn attach(&self, terminal: &str, cols: u16, rows: u16) -> Result<Attachment> {
-        let mut child = Command::new(&self.config.hc)
-            .arg("connect")
-            .env("HC_SESSION", &self.config.hc_session)
-            .envs(&self.config.hc_env)
-            .env_remove("HC_TERMINAL_ID")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
+        let mut transport = super::transport::connect_view(&self.config, Some(terminal))?;
         let setup = (|| -> Result<_> {
-            let mut stdin = child.stdin.take().unwrap();
-            let mut reader = BufReader::new(child.stdout.take().unwrap());
+            let mut stdin = transport.writer.take().unwrap();
+            let mut reader = BufReader::new(transport.reader.take().unwrap());
             writeln!(
                 stdin,
                 "{}",
@@ -89,8 +80,7 @@ impl Client {
         let (stdin, mut reader, channel, automatic_input) = match setup {
             Ok(v) => v,
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                drop(transport);
                 return Err(e);
             }
         };
@@ -127,7 +117,7 @@ impl Client {
             viewer: None,
             writer: Arc::new(Mutex::new(stdin)),
             receiver,
-            child,
+            transport,
             channel,
             automatic_input,
         })
@@ -184,7 +174,7 @@ impl Attachment {
 impl Drop for Attachment {
     fn drop(&mut self) {
         let _ = frame(&mut *self.writer.lock().unwrap(), self.channel, 2, &[]);
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Dropping the transport closes only this viewer/relay, never its PTY.
+        let _ = &self.transport;
     }
 }

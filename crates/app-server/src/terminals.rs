@@ -16,11 +16,21 @@ impl AppServer {
     }
     pub(super) fn create_terminal(&self, p: Value) -> Result<Value> {
         let _gate = self.terminal_gate.lock().unwrap();
-        let inherited = p["inherit_terminal_id"].as_str().and_then(|id| {
-            self.terminal_context(json!({"terminal_id":id})).ok()?["cwd"]
-                .as_str()
-                .map(str::to_owned)
-        });
+        let inherited = p["inherit_terminal_id"]
+            .as_str()
+            .map(|id| self.terminal_context(json!({"terminal_id":id})))
+            .transpose()?;
+        if p["inherit_terminal_id"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty())
+            && inherited.as_ref().is_some_and(|v| v.get("error").is_some())
+        {
+            ensure!(
+                p["machine"].is_string(),
+                "Selected terminal is unavailable; explicitly choose a machine for a new terminal"
+            );
+        }
+        let default_machine = self.config().default_machine;
         let mut launch = None;
         let saved = self.mutate("terminal.create", &p, |db| {
             let project = p["project_id"]
@@ -41,22 +51,45 @@ impl AppServer {
                     "Restore this Card before opening a terminal"
                 );
             }
+            let location = card
+                .as_ref()
+                .and_then(|c| c.workspace.as_ref().map(|w| w.location.clone()))
+                .or_else(|| project.as_ref().map(Project::work_location));
+            let inherited_machine = inherited.as_ref().and_then(|v| v["machine"].as_str());
+            let machine = self.resolve_machine(
+                p["machine"]
+                    .as_str()
+                    .or_else(|| location.as_ref().map(|l| l.machine.as_str()))
+                    .or(inherited_machine)
+                    .unwrap_or(&default_machine),
+                true,
+            )?;
+            let host = canban_herdr::host::Host::new(self.config(), &machine);
+            let explicit_machine = p["machine"].is_string();
             let cwd = p["cwd"]
                 .as_str()
                 .map(str::to_owned)
                 .or_else(|| card.as_ref().and_then(|c| c.worktree.clone()))
-                .or_else(|| project.as_ref().map(|p| p.directory.clone()))
                 .or_else(|| {
-                    card.as_ref()
-                        .and_then(|c| db.get::<Project>(&c.project_id).ok())
-                        .map(|p| p.directory)
+                    location
+                        .as_ref()
+                        .filter(|l| l.machine == machine)
+                        .map(|l| l.directory.clone())
                 })
-                .or_else(|| inherited.clone())
-                .or_else(|| std::env::var("HOME").ok())
-                .context("Home directory unavailable")?;
+                .or_else(|| {
+                    (!explicit_machine)
+                        .then(|| {
+                            inherited
+                                .as_ref()
+                                .and_then(|v| v["cwd"].as_str())
+                                .map(str::to_owned)
+                        })
+                        .flatten()
+                })
+                .unwrap_or(host.home()?);
             ensure!(
-                Path::new(&cwd).is_absolute() && Path::new(&cwd).is_dir(),
-                "Terminal directory no longer exists or is not absolute"
+                Path::new(&cwd).is_absolute() && host.is_dir(Path::new(&cwd)),
+                "Terminal directory no longer exists on the selected machine"
             );
             let item = TerminalEntry {
                 id: format!("shell-{}", id()),
@@ -66,6 +99,8 @@ impl AppServer {
                 manual_number: Some(db.counter("terminal-manual-number")?),
                 created_at: now(),
                 runtime: Some(TerminalRuntime {
+                    machine: machine.clone(),
+                    owner_core_id: None,
                     core_id: None,
                     terminal: None,
                     state: "starting".into(),
@@ -92,16 +127,41 @@ impl AppServer {
                     .context("Core has no identity")?
                     .into(),
             );
-            let shell = std::env::var("SHELL")
-                .ok()
-                .filter(|s| Path::new(s).is_absolute() && Path::new(s).is_file())
-                .unwrap_or_else(|| "/bin/zsh".into());
-            let receipt = client.launch(
-                vec![shell, "-l".into()],
+            let host = canban_herdr::host::Host::new(self.config(), &runtime.machine);
+            let shell = if runtime.machine == "local" {
+                std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+            } else {
+                host.python("import os,json,pwd;print(json.dumps(pwd.getpwuid(os.getuid()).pw_shell or '/bin/sh'))",&[])?.as_str().context("No login shell")?.into()
+            };
+            let argv = if let Some(argv) = p["setup_argv"].as_array() {
+                ensure!(
+                    runtime.machine == "local",
+                    "Setup must run on AppServer host"
+                );
+                argv.iter()
+                    .map(|v| Ok(v.as_str().context("Invalid command")?.to_owned()))
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                vec![shell, "-l".into()]
+            };
+            let mut env = std::collections::BTreeMap::new();
+            if p["setup_argv"].is_array() {
+                let c = self.config();
+                env.extend(c.hc_env);
+                env.insert("HC_SESSION".into(), c.hc_session);
+            }
+            let receipt = client.launch_on(
+                &runtime.machine,
+                argv,
                 &cwd,
-                Default::default(),
+                env,
                 std::collections::BTreeMap::from([("canban.terminal".into(), item.id.clone())]),
             )?;
+            runtime.owner_core_id = if runtime.machine == "local" {
+                runtime.core_id.clone()
+            } else {
+                Some(runtime.machine.clone())
+            };
             runtime.terminal = Some(
                 receipt["address"]
                     .as_str()
@@ -228,18 +288,21 @@ impl AppServer {
         Ok(result)
     }
     fn directory_context(
+        &self,
         s: &Snapshot,
         id: &str,
         core: &str,
         terminal: &str,
         value: &Value,
     ) -> TerminalContext {
+        let machine = terminal.split_once('/').map(|(m, _)| m).unwrap_or("local");
         let cwd = canban_herdr::cwd(value).map(str::to_owned);
         let (project_id, card_id, branch) = cwd
             .as_ref()
-            .map(|d| canban_workspaces::context::resolve(s, d))
+            .map(|d| self.ops(machine).directory_context(s, d))
             .unwrap_or_default();
         TerminalContext {
+            machine: machine.into(),
             terminal_id: id.into(),
             core_id: core.into(),
             terminal: terminal.into(),
@@ -268,7 +331,7 @@ impl AppServer {
                 "Original Core unavailable"
             );
             let value = client.get(&terminal)?;
-            Ok(Self::directory_context(&s, key, &core, &terminal, &value))
+            Ok(self.directory_context(&s, key, &core, &terminal, &value))
         })();
         match result {
             Ok(context) => Ok(serde_json::to_value(context)?),
@@ -291,7 +354,7 @@ impl AppServer {
                 .as_str()
                 .context("Core identity unavailable")?
                 .to_owned();
-            let list = client.call("terminal.list", json!({"all":true}))?;
+            let list = client.terminals()?;
             let terminals = list["terminals"]
                 .as_array()
                 .context("Terminal list unavailable")?
@@ -313,9 +376,7 @@ impl AppServer {
                     .flatten()
             });
             if let (Some((core, terminal)), Some(value)) = (&binding, value) {
-                contexts.push(Self::directory_context(
-                    &snapshot, &item.id, core, terminal, value,
-                ));
+                contexts.push(self.directory_context(&snapshot, &item.id, core, terminal, value));
             }
             if let Some(runtime) = &mut item.runtime {
                 match (&observed, value) {
@@ -345,8 +406,13 @@ impl AppServer {
             if item != before {
                 self.store.lock().unwrap().write(|db| {
                     let mut current: TerminalEntry = db.get(&item.id)?;
-                    current.runtime = item.runtime;
-                    db.save(&current)
+                    // A launch receipt may have arrived after this observation
+                    // began. Never erase its binding with an older starting row.
+                    if current.runtime == before.runtime {
+                        current.runtime = item.runtime;
+                        db.save(&current)?;
+                    }
+                    Ok(())
                 })?;
                 self.emit("terminals", None);
             }
@@ -377,12 +443,22 @@ impl AppServer {
             .filter(|t| t.conversation_id.is_none())
             .any(|t| {
                 let live = t.runtime.as_ref().is_some_and(|r| r.state != "finished");
-                live && s
-                    .terminal_contexts
-                    .iter()
-                    .find(|c| c.terminal_id == t.id)
-                    .and_then(|c| c.cwd.as_deref())
-                    .is_none_or(|cwd| canban_workspaces::context::contains(worktree, cwd))
+                let machine = t
+                    .runtime
+                    .as_ref()
+                    .map(|r| r.machine.as_str())
+                    .unwrap_or("local");
+                let owner = card
+                    .workspace
+                    .as_ref()
+                    .map(|w| w.location.machine.as_str())
+                    .unwrap_or("local");
+                live && machine == owner
+                    && s.terminal_contexts
+                        .iter()
+                        .find(|c| c.terminal_id == t.id)
+                        .and_then(|c| c.cwd.as_deref())
+                        .is_none_or(|cwd| self.ops(owner).c_contains(worktree, cwd))
             }))
     }
 }

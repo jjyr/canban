@@ -23,7 +23,7 @@ pub fn activity(s: &Snapshot, c: &Card) -> (String, Tone) {
                 "@{} · {}",
                 r.profile.id,
                 if r.state == "queued" {
-                    "queued · waiting for a slot"
+                    "queued · waiting for machine or slot"
                 } else {
                     &r.state
                 }
@@ -79,6 +79,14 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .items_center()
                 .gap_2()
                 .child(project_picker(ui))
+                .child(when(
+                    move || has_project.get(),
+                    move || {
+                        action("Work location…", Variant::Quiet, move |_| {
+                            ui.navigate("project-location")
+                        })
+                    },
+                ))
                 .child(when(
                     move || has_project.get(),
                     move || {

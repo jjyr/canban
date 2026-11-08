@@ -47,6 +47,22 @@ pub fn capture(
     endpoint: &str,
     cli: &Path,
 ) -> Result<String> {
+    capture_for(
+        home, project, card, req, attempt, snapshot, endpoint, cli, home,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub fn capture_for(
+    home: &Path,
+    project: &Project,
+    card: &Card,
+    req: &Request,
+    attempt: u32,
+    snapshot: &Snapshot,
+    endpoint: &str,
+    cli: &Path,
+    execution_home: &Path,
+) -> Result<String> {
     let dir = run_dir(home, req, attempt);
     let timeline: Vec<_> = snapshot
         .events
@@ -90,8 +106,10 @@ pub fn capture(
         req.profile.id,
         req.profile.role_instruction,
         req.instruction,
-        manifest_path.display(),
-        home.display(),
+        execution_home
+            .join(relative(home, &manifest_path)?)
+            .display(),
+        execution_home.display(),
         shell_quote(endpoint),
         shell_quote(&req.id),
         attempt,

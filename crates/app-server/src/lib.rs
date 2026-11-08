@@ -17,6 +17,7 @@ use std::{
 
 pub struct AppServer {
     pub home: PathBuf,
+    identity: String,
     store: Mutex<Store>,
     config: RwLock<Config>,
     cli: PathBuf,
@@ -25,6 +26,7 @@ pub struct AppServer {
     review_gate: Mutex<()>,
     terminal_gate: Mutex<()>,
     terminal_contexts: Mutex<Vec<TerminalContext>>,
+    remote_workers: Mutex<std::collections::HashSet<String>>,
 }
 pub struct Running {
     server: Arc<AppServer>,
@@ -146,8 +148,19 @@ fn enqueue(
         },
     );
     req.require_human_review = explicit.is_none() && stage.require_human_review;
-    db.save(&req)?;
     let mut context = crate::sessions::conversation(db, card, &req.profile)?;
+    if explicit.is_some() && context.provider_session_id.is_some() {
+        req.resume_from = db
+            .list::<Attempt>()?
+            .into_iter()
+            .rev()
+            .find(|a| {
+                a.conversation_id.as_deref() == Some(&context.id)
+                    && a.provider_session_id == context.provider_session_id
+            })
+            .map(|a| a.id);
+    }
+    db.save(&req)?;
     // Queued work does not replace the pointer to an invocation that is still live.
     if context.last_request_id.is_none() {
         context.last_request_id = Some(req.id.clone());
@@ -167,9 +180,67 @@ fn enqueue(
 impl AppServer {
     pub fn open(home: PathBuf, cli: PathBuf) -> Result<Arc<Self>> {
         let mut store = Store::open(&home)?;
+        let identity_path = home.join("server-id");
+        let mut identity_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&identity_path)?;
+        identity_file.lock()?;
+        if identity_file.metadata()?.len() == 0 {
+            identity_file.write_all(id().as_bytes())?;
+            identity_file.sync_all()?;
+        }
+        let identity = std::fs::read_to_string(&identity_path)?;
+        drop(identity_file);
+        ensure!(
+            identity.len() == 32 && identity.chars().all(|c| c.is_ascii_hexdigit()),
+            "Invalid AppServer identity"
+        );
         // Existing attention is a real pause after upgrading, not merely a badge.
         store.write(|db| {
             let requests = db.list::<Request>()?;
+            for mut project in db.list::<Project>()? {
+                if project.location.is_none() {
+                    project.location = Some(project.work_location());
+                    db.save(&project)?;
+                }
+            }
+            for mut card in db.list::<Card>()? {
+                if card.workspace.is_none()
+                    && let Some(path) = &card.worktree
+                {
+                    let p: Project = db.get(&card.project_id)?;
+                    card.workspace = Some(WorkspaceBinding {
+                        location: p.work_location(),
+                        path: path.clone(),
+                        branch: card.branch.clone(),
+                        base_commit: card.base_commit.clone(),
+                        target_branch: p.target_branch.clone(),
+                    });
+                    db.save(&card)?;
+                }
+            }
+            for mut a in db.list::<Attempt>()? {
+                if a.location.is_none() {
+                    let p: Project = db.get(&a.project_id)?;
+                    let location = WorkLocation {
+                        machine: "local".into(),
+                        directory: p.directory.clone(),
+                    };
+                    a.location = Some(location.clone());
+                    a.owner_core_id = a.core_id.clone();
+                    a.workspace = Some(WorkspaceBinding {
+                        location,
+                        path: a.cwd.clone(),
+                        branch: None,
+                        base_commit: None,
+                        target_branch: p.target_branch.clone(),
+                    });
+                    db.save(&a)?;
+                }
+            }
             for mut card in db.list::<Card>()? {
                 if let Some(reason) = card.attention.clone()
                     && card.human_gate.is_none()
@@ -223,6 +294,7 @@ impl AppServer {
         }
         Self::publish_migration(&home, migration)?;
         Ok(Arc::new(Self {
+            identity,
             home,
             store: Mutex::new(store),
             config: RwLock::new(config),
@@ -232,6 +304,7 @@ impl AppServer {
             review_gate: Mutex::new(()),
             terminal_gate: Mutex::new(()),
             terminal_contexts: Mutex::new(Vec::new()),
+            remote_workers: Mutex::new(Default::default()),
         }))
     }
     fn read_config(home: &Path) -> Result<(Config, Option<Vec<u8>>)> {
@@ -262,6 +335,10 @@ impl AppServer {
         Ok(())
     }
     fn validate_config(c: &Config) -> Result<()> {
+        ensure!(
+            c.relay_endpoint.is_none(),
+            "relay_endpoint is a client transport option; do not configure it on AppServer"
+        );
         ensure!(
             c.scheduler.max_agents > 0,
             "max_agents must be greater than zero"
@@ -307,6 +384,9 @@ impl AppServer {
                 .with_context(|| format!("Project {} workflow", project.name))?;
         }
         Ok(())
+    }
+    pub fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
     }
     pub fn endpoint(&self) -> PathBuf {
         self.home.join("app.sock")
@@ -387,7 +467,11 @@ impl AppServer {
     }
 }
 
+mod client;
 mod commands;
+pub use client::AppClient;
+mod machines;
+mod remote;
 mod workflow;
 
 mod lifecycle;

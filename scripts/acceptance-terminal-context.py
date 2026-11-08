@@ -52,6 +52,8 @@ try:
         for name in ('canban-ui','canban'):
             shutil.copy2(repo/'.local/Canban.app/Contents/MacOS'/name,bundle/'Contents/MacOS'/name)
 finally:
+    try: call('app.shutdown')
+    except Exception: pass
     if server.poll() is None: server.terminate();server.wait(timeout=10)
     subprocess.run(['hc','server','stop'],env={**os.environ,**core_env},capture_output=True,timeout=20)
     log.close()

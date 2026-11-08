@@ -469,3 +469,29 @@ The user approved creating Terminals without Projects. Canban-managed Agent conv
 ## Agent and independent Terminal display names (2026-11-08)
 
 The user selected two-line Agent inventory rows: Card number/title with execution stage, followed by provider icon/Profile with runtime state. Keep tabs single-line with the same information order and prioritize truncating long Card titles. Place the provider icon directly before the Profile, not before the Card. Independent Terminals use Terminal 1, Terminal 2, etc., a separate durable sequence without a type icon. Custom names take precedence; clearing restores the automatic title. Shorten long branch/worktree path presentation with complete hover values. Keep the native viewer's runtime identity independent from title changes.
+
+## Multi-machine architecture boundary (2026-11-08)
+
+The user rejected the proposed Project-to-machine binding. Project is centered
+on Kanban and human context; physical placement belongs to execution and
+concrete working directories. Compare Profile/stage/explicit/Scheduler target
+selection and AppServer deployment independently before implementation. See
+[composition options](../research/multi-machine.md). These alternatives remain
+under discussion; no machine pool, remote worker or distributed database design
+has been approved.
+
+## UI-independent AppServer and machine assignment (2026-11-08)
+
+The user selected an AppServer that is not tied to UI lifetime, like Herdr's
+runtime service. The existing headless `canban serve` is a starting point;
+desktop attachment and service lifecycle still need implementation. Machine
+assignment rules are being discussed separately from the existing queue order.
+Preserve Project independence and existing workflow/human-gate/global-budget
+rules. The proposed placement policy and its unresolved configuration/remote
+delivery interfaces are recorded in [multi-machine research](../research/multi-machine.md).
+
+## 2026-11-09: multi-machine implementation
+
+Implemented one persistent AppServer authority with UI RPC/Terminal relay, Core-backed Machines settings, one editable Project work location and immutable execution/workspace snapshots. Existing Resume and Review use the original environment. Remote Agents receive a thin CLI and staged context through Core; a private request/reply spool reuses the same connection without a public service port. Profile command names resolve on their execution host.
+
+Native checks covered machine/path selection, remote browsing, Agent input and independent remote shells. Real isolated remote workflow verification is recorded in [multi-machine acceptance](../multi-machine-acceptance.md), including the clock-independent completion fence and launch-observation race repair.

@@ -71,6 +71,17 @@ fn context(ui: Ui) -> impl IntoElement {
                     a.state,
                     a.terminal.as_deref().unwrap_or("No terminal")
                 )))
+                .child(muted(format!(
+                    "{} · {}",
+                    crate::machines::name(
+                        ui,
+                        a.location
+                            .as_ref()
+                            .map(|l| l.machine.as_str())
+                            .unwrap_or("local")
+                    ),
+                    a.cwd
+                )))
                 .child(action("Read saved output", Variant::Quiet, move |_| {
                     load_text(ui, "execution.output", json!({"attempt_id":id}))
                 }));

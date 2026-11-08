@@ -132,6 +132,7 @@ pub fn Gallery() -> impl IntoElement {
     ui.page.set("card".into());
     ui.note.set("note-1".into());
     ui.profiles.set(canban_types::Config::default().profiles);
+    ui.machines.set(json!({"machines":[{"id":"gallery-remote","name":"Build machine","state":"connected","target":"ssh-host"},{"id":"gallery-offline","name":"Offline machine","state":"unreachable","target":"another-host"}]}));
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminals") {
         nsh_core::element::desktop::set_title_bar(
             nsh_core::desktop::TitleBarStyle::Hidden,
@@ -215,6 +216,7 @@ pub fn Gallery() -> impl IntoElement {
                     scene.set("workspace".into());
                     ui.navigate("settings");
                 }))
+                .child(action("Work location",Variant::Quiet,move |_|{scene.set("workspace".into());ui.navigate("project-location");}))
                 .child(action("Controls", Variant::Quiet, move |_| {
                     scene.set("controls".into())
                 }))

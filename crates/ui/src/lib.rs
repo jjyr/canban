@@ -6,6 +6,7 @@ pub mod card;
 pub mod components;
 pub mod drafts;
 pub mod frame;
+pub mod machines;
 pub mod notes;
 pub mod overview;
 pub mod presenter;
@@ -21,7 +22,7 @@ pub mod terminals;
 pub mod workspace;
 use nsh_core::prelude::*;
 use presenter::*;
-static APP: std::sync::OnceLock<Arc<canban_app_server::AppServer>> = std::sync::OnceLock::new();
+static APP: std::sync::OnceLock<Arc<canban_app_server::AppClient>> = std::sync::OnceLock::new();
 #[native_module("canban/native")]
 fn native(_: &mut Registry) {}
 #[component]
@@ -39,6 +40,10 @@ pub fn Canban() -> impl IntoElement {
         Some(px(42.)),
     );
     refresh(ui);
+    machines::refresh_catalog(ui);
+    set_interval(std::time::Duration::from_secs(5), move || {
+        machines::refresh_catalog(ui)
+    });
     let events = stored(crate::APP.get().unwrap().subscribe());
     let dirty = signal(false);
     set_interval(std::time::Duration::from_millis(250), move || {
@@ -60,8 +65,7 @@ pub fn run() -> Result<()> {
         cli.exists(),
         "Build the Agent CLI first: mise exec -- cargo build -p canban-cli"
     );
-    let app = canban_app_server::AppServer::open(home, cli)?;
-    let _runtime = app.start()?;
+    let app = canban_app_server::AppClient::connect_or_start(home, &cli)?;
     APP.set(app).ok();
     nsh_platform_macos::set_components(canban_terminal::native::register);
     nsh_platform_macos::set_ui_sets(vec![nsh_base::registry(), registry()]);

@@ -1,0 +1,276 @@
+//! Shared machine picker, server-side directory browser and Project location form.
+use crate::presenter::*;
+use canban_types::*;
+use canban_ui_kit::*;
+use nsh_core::prelude::*;
+use serde_json::{Value, json};
+pub fn refresh_catalog(ui: Ui) {
+    if ui.machines_loading.get_untracked() {
+        return;
+    }
+    let Some(app) = crate::APP.get().cloned() else {
+        return;
+    };
+    ui.machines_loading.set(true);
+    ui.spawn(async move {
+        let result = blocking(move || app.call("machine.list", json!({}))).await;
+        if !ui.machines_loading.try_set(false) {
+            return;
+        }
+        match result {
+            Ok(Ok(value)) => {
+                ui.machines.try_set(value);
+            }
+            Ok(Err(e)) => {
+                ui.machines
+                    .try_set(json!({"machines":[],"error":format!("{e:#}")}));
+            }
+            Err(e) => {
+                ui.machines
+                    .try_set(json!({"machines":[],"error":e.to_string()}));
+            }
+        }
+    });
+}
+pub fn name(ui: Ui, id: &str) -> String {
+    if id == "local" {
+        return "AppServer host".into();
+    }
+    ui.machines
+        .with(|v| {
+            v["machines"]
+                .as_array()
+                .and_then(|ms| ms.iter().find(|m| m["id"] == id))
+                .and_then(|m| m["name"].as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| id.chars().take(8).collect())
+}
+pub fn picker(ui: Ui, machine: Signal<String>, directory: Signal<String>) -> impl IntoElement {
+    use nsh_core::element::desktop::{MenuItem, popup_menu};
+    dynamic(move || {
+        action(name(ui, &machine.get()), Variant::Secondary, move |_| {
+            ui.spawn(async move {
+                let mut rows = vec![("local".to_owned(), "AppServer host".to_owned())];
+                rows.extend(
+                    ui.machines
+                        .with_untracked(|v| v["machines"].as_array().cloned().unwrap_or_default())
+                        .iter()
+                        .filter_map(|m| {
+                            Some((
+                                m["id"].as_str()?.into(),
+                                format!("{} · {}", m["name"].as_str()?, m["state"].as_str()?),
+                            ))
+                        }),
+                );
+                let mut items = Vec::new();
+                for (id, label) in rows {
+                    items.push(MenuItem::new(label).on_select(move || {
+                        if machine.try_get().is_some_and(|old| old != id) {
+                            machine.try_set(id.clone());
+                            directory.try_set(String::new());
+                        }
+                    }));
+                }
+                items.push(MenuItem::separator());
+                items.push(
+                    MenuItem::new("Manage machines…").on_select(move || ui.navigate("machines")),
+                );
+                popup_menu(items).await;
+            });
+        })
+    })
+}
+fn browse(
+    ui: Ui,
+    machine: Signal<String>,
+    path: String,
+    result: Signal<Value>,
+    busy: Signal<bool>,
+    error: Signal<String>,
+    epoch: Signal<u64>,
+) {
+    let Some(app) = crate::APP.get().cloned() else {
+        return;
+    };
+    let host = machine.get_untracked();
+    let generation = epoch.get_untracked() + 1;
+    epoch.set(generation);
+    busy.set(true);
+    error.set(String::new());
+    ui.spawn(async move {
+        let target = host.clone();
+        let value =
+            blocking(move || app.call("directory.list", json!({"machine":target,"path":path})))
+                .await;
+        if epoch.try_get() != Some(generation) || machine.try_get() != Some(host) {
+            return;
+        }
+        busy.try_set(false);
+        match value {
+            Ok(Ok(v)) => {
+                result.try_set(v);
+            }
+            Ok(Err(e)) => {
+                error.try_set(format!("{e:#}"));
+            }
+            Err(e) => {
+                error.try_set(e.to_string());
+            }
+        }
+    });
+}
+pub fn location_fields(
+    ui: Ui,
+    machine: Signal<String>,
+    directory: Signal<String>,
+) -> impl IntoElement {
+    let open = signal(false);
+    let result = signal(Value::Null);
+    let busy = signal(false);
+    let error = signal(String::new());
+    let epoch = signal(0u64);
+    effect(move || {
+        let _ = machine.get();
+        epoch.update(|n| *n += 1);
+        open.set(false);
+        busy.set(false);
+        result.set(Value::Null);
+        error.set(String::new());
+    });
+    settings_field(
+        "Execution machine",
+        "New work uses this machine. Existing Agents retain their original environment.",
+        picker(ui, machine, directory),
+    )
+    .child(settings_field(
+        "Source directory",
+        "Enter an absolute path on the selected machine. New directories are created on save.",
+        view()
+            .gap_2()
+            .child(dynamic(move || {
+                if machine.get() == "local" && std::env::var_os("CANBAN_ENDPOINT").is_none() {
+                    directory_field(directory, |_| {}).into_element()
+                } else {
+                    field(directory, "/absolute/path/to/project")
+                        .label("Source directory")
+                        .into_element()
+                }
+            }))
+            .child(
+                view().items_start().child(
+                    action("Browse on machine…", Variant::Quiet, move |_| {
+                        open.set(true);
+                        browse(
+                            ui,
+                            machine,
+                            directory.get_untracked(),
+                            result,
+                            busy,
+                            error,
+                            epoch,
+                        );
+                    })
+                    .disabled(move || busy.get()),
+                ),
+            )
+            .child(dynamic(move || {
+                if !open.get() {
+                    return view();
+                }
+                let v = result.get();
+                let path = v["path"].as_str().unwrap_or("").to_owned();
+                let mut panel = panel().gap_2().max_h(px(320.));
+                if !error.get().is_empty() {
+                    panel = panel.child(notice(error.get(), Tone::Attention));
+                }
+                if !path.is_empty() {
+                    let choose = path.clone();
+                    let parent = v["parent"].as_str().unwrap_or("/").to_owned();
+                    panel = panel.child(label(path)).child(
+                        view()
+                            .flex_row()
+                            .gap_2()
+                            .child(action("Use this directory", Variant::Primary, move |_| {
+                                directory.set(choose.clone());
+                                open.set(false);
+                            }))
+                            .child(
+                                action("Parent", Variant::Quiet, move |_| {
+                                    browse(ui, machine, parent.clone(), result, busy, error, epoch)
+                                })
+                                .disabled(move || busy.get()),
+                            ),
+                    );
+                }
+                let mut dirs = view().gap_1();
+                for row in v["directories"].as_array().cloned().unwrap_or_default() {
+                    let path = row["path"].as_str().unwrap_or("").to_owned();
+                    let title = row["name"].as_str().unwrap_or("").to_owned();
+                    dirs = dirs.child(
+                        action(title, Variant::Quiet, move |_| {
+                            browse(ui, machine, path.clone(), result, busy, error, epoch)
+                        })
+                        .disabled(move || busy.get()),
+                    );
+                }
+                panel
+                    .child(scroll().max_h(px(200.)).child(dirs))
+                    .child(action("Close browser", Variant::Quiet, move |_| {
+                        epoch.update(|v| *v += 1);
+                        busy.set(false);
+                        open.set(false);
+                    }))
+            })),
+    ))
+}
+pub fn project_location(ui: Ui) -> impl IntoElement {
+    let p = ui.current_project();
+    let initial = p
+        .as_ref()
+        .map(Project::work_location)
+        .unwrap_or(WorkLocation {
+            machine: "local".into(),
+            directory: String::new(),
+        });
+    let machine = signal(initial.machine.clone());
+    let directory = signal(initial.directory.clone());
+    let title = p
+        .as_ref()
+        .map(|p| format!("Work location · {}", p.name))
+        .unwrap_or_else(|| "Select a Project".into());
+    let expected = initial.clone();
+    let id = p.map(|p| p.id).unwrap_or_default();
+    view().flex_1().p_5().gap_4().child(heading(title)).child(scroll().flex_1().child(settings_section("Work location","Changes affect new executions. Resume, Review and code delivery stay on the original machine and directory.")
+        .max_w(px(760.)).child(location_fields(ui,machine,directory))
+        .child(action("Save work location",Variant::Primary,move |_|{let id=id.clone();dispatch_then(ui,"project.location",json!({"project_id":id,"expected_location":expected,"location":{"machine":machine.get_untracked(),"directory":directory.get_untracked().trim()}}),move |_|ui.navigate("board"));}).disabled(move||ui.pending.get()||directory.get().trim().is_empty()))))
+}
+pub fn settings(ui: Ui) -> impl IntoElement {
+    let default_machine = signal(
+        crate::APP
+            .get()
+            .map(|a| a.config().default_machine)
+            .unwrap_or_else(|| "local".into()),
+    );
+    let unused = signal(String::new());
+    let target = signal(String::new());
+    let alias = signal(String::new());
+    let session = signal(String::new());
+    let remove = signal(String::new());
+    settings_section("Machines","Connections use AppServer's SSH configuration. Remote programs and history remain when a connection is removed.")
+        .child(muted("AppServer host · Local execution"))
+        .child(settings_field("Default Terminal machine","Used when no Terminal is selected. An unavailable target never falls back silently.",view().flex_row().gap_2().child(picker(ui,default_machine,unused)).child(action("Save default",Variant::Quiet,move |_|dispatch(ui,"machine.default",json!({"machine":default_machine.get_untracked()}))))))
+        .child(dynamic(move||{let v=ui.machines.get();let mut list=view().gap_2();
+            if let Some(error)=v["error"].as_str(){list=list.child(notice(error.to_owned(),Tone::Attention));}
+            for row in v["machines"].as_array().cloned().unwrap_or_default(){let id=row["id"].as_str().unwrap_or("").to_owned();let confirmed=remove.get()==id;let display=format!("{} · {}",row["name"].as_str().unwrap_or("Machine"),row["state"].as_str().unwrap_or("unknown"));
+                let choose=id.clone();let refs=ui.snapshot.with(|s|s.projects.iter().filter(|p|p.work_location().machine==id).count());
+                list=list.child(panel().child(label(display)).child(muted(format!("{} · {refs} Project references",row["target"].as_str().unwrap_or(""))))
+                    .child(action(if confirmed{"Confirm disconnect · retain programs"}else{"Disconnect…"},Variant::Quiet,move |_|{if confirmed{dispatch_then(ui,"machine.remove",json!({"machine":choose,"confirmed":true}),move |_|refresh_catalog(ui));remove.set(String::new());}else{remove.set(choose.clone());}})));
+            }list}))
+        .child(settings_field("Add an SSH machine","Login, host-key and installation prompts open in a setup Terminal on the AppServer host.",view().gap_2()
+            .child(field(alias,"Display name (optional)").label("Machine name"))
+            .child(field(target,"SSH target, for example user@host").label("SSH target"))
+            .child(field(session,"Remote Core session (optional)").label("Remote Core session"))
+            .child(action("Connect machine…",Variant::Secondary,move |_|dispatch_then(ui,"machine.add",json!({"name":alias.get_untracked(),"target":target.get_untracked().trim(),"session":session.get_untracked()}),move |v|{if let Some(id)=v["id"].as_str(){ui.open_terminal(id.into());}})).disabled(move||ui.pending.get()||target.get().trim().is_empty()))))
+        .child(action("Refresh machines",Variant::Quiet,move |_|refresh_catalog(ui)))
+}

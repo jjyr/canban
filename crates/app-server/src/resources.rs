@@ -217,15 +217,7 @@ impl AppServer {
                     Ok(())
                 })?;
                 canban_context::compact_files(&self.home, &card, &path)?;
-                let has_shell = self.terminal_retains_worktree(&card)?;
-                let notice = if has_shell {
-                    Some("Archive saved; worktree retained while a manual terminal may still be running.".into())
-                } else {
-                    match canban_workspaces::archive(&self.home, &project, &card) {
-                        Ok(n) => n,
-                        Err(e) => Some(format!("Archive saved; worktree retained: {e:#}")),
-                    }
-                };
+                let notice = self.archive_workspaces(&project, &card);
                 if let Some(message) = notice {
                     self.store.lock().unwrap().write(|db| {
                         let mut c: Card = db.get(card_id)?;
@@ -245,6 +237,63 @@ impl AppServer {
                 Err(e)
             }
         }
+    }
+    fn archive_workspaces(&self, project: &Project, card: &Card) -> Option<String> {
+        let snapshot = match self.snapshot() {
+            Ok(s) => s,
+            Err(e) => return Some(format!("Archive saved; workspace cleanup deferred: {e:#}")),
+        };
+        let mut workspaces = card.workspace_history.clone();
+        if let Some(w) = &card.workspace {
+            workspaces.push(w.clone())
+        } else if let Some(path) = &card.worktree {
+            workspaces.push(WorkspaceBinding {
+                location: project.work_location(),
+                path: path.clone(),
+                branch: card.branch.clone(),
+                base_commit: card.base_commit.clone(),
+                target_branch: project.target_branch.clone(),
+            });
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut notes = Vec::new();
+        for w in workspaces {
+            if !seen.insert((w.location.machine.clone(), w.path.clone())) {
+                continue;
+            }
+            let mut c = card.clone();
+            c.worktree = Some(w.path.clone());
+            c.branch = w.branch.clone();
+            c.base_commit = w.base_commit.clone();
+            c.workspace = Some(w.clone());
+            let result = (|| -> Result<Option<String>> {
+                if snapshot.attempts.iter().any(|a| {
+                    a.card_id == card.id
+                        && a.cwd == w.path
+                        && a.location
+                            .as_ref()
+                            .is_some_and(|l| l.machine == w.location.machine)
+                        && a.terminal.is_some()
+                        && a.observed.as_ref().is_none_or(|v| v["state"] != "finished")
+                }) || self.terminal_retains_worktree(&c)?
+                {
+                    return Ok(Some("A terminal may still be using this worktree".into()));
+                }
+                let p = self.bound_project(project, &c);
+                self.ops(&w.location.machine).archive(
+                    &self.execution_home(&w.location.machine)?,
+                    &p,
+                    &c,
+                )
+            })();
+            match result {
+                Ok(Some(message)) => notes.push(format!("{}: {message}", w.location.machine)),
+                Err(e) => notes.push(format!("{}: {e:#}", w.location.machine)),
+                _ => {}
+            }
+        }
+        (!notes.is_empty())
+            .then(|| format!("Archive saved; workspaces retained: {}", notes.join("; ")))
     }
     pub(super) fn restore(&self, p: &Value) -> Result<Value> {
         let id = strp(p, "card_id")?;

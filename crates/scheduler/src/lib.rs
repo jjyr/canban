@@ -44,6 +44,8 @@ pub fn request(
     on_completed: Option<String>,
 ) -> Request {
     Request {
+        location: None,
+        resume_from: None,
         id: id(),
         project_id: project.into(),
         card_id: card.into(),

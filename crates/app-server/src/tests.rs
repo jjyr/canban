@@ -31,6 +31,10 @@ fn admit(app: &AppServer, request: &Request) -> Attempt {
             req.state = "running".into();
             db.save(&req)?;
             let run = Attempt {
+                runtime_home: None,
+                location: None,
+                owner_core_id: None,
+                workspace: None,
                 lifecycle: Lifecycle::default(),
                 id: Attempt::key(&req.id, req.attempt),
                 request_id: req.id.clone(),
@@ -1343,3 +1347,5 @@ fn human_continue_can_retry_routing_after_tags_are_fixed() {
 mod lifecycle_cases;
 #[path = "tests/terminals.rs"]
 mod terminal_cases;
+
+mod machines_cases;

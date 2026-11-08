@@ -6,7 +6,7 @@
 
 [Agent Overview and lifecycle](agent-overview-and-lifecycle.md) documents the implemented status-aware execution budget, configurable resumable idle exit and global attention/Agent workspace.
 
-Status: local macOS MVP updated 2026-11-07. This is the current implementation reference; earlier design documents contain broader proposals and dated pre-implementation statements.
+Status: native macOS MVP with multi-machine execution, updated 2026-11-09. This is the current implementation reference; earlier design documents contain broader proposals and dated pre-implementation statements.
 
 ## Build and launch
 
@@ -17,12 +17,12 @@ mise run build
 mise run run
 ```
 
-Build creates target/debug/canban, target/debug/canban-ui and a local .local/Canban.app containing both executables. The development package is unsigned and has not been notarized or released. The Gallery is a separate development example: `mise run gallery` builds/opens `.local/CanbanGallery.app`. It is not part of the production window or its startup modes; it uses local fixtures without starting AppServer or reading application data. See [examples](../examples/README.md). Launch one instance per application home; a second AppServer is rejected while the first owns its socket.
+Build creates target/debug/canban, target/debug/canban-ui and a local .local/Canban.app containing both executables. The development package is unsigned and has not been notarized or released. The Gallery is a separate development example: `mise run gallery` builds/opens `.local/CanbanGallery.app`. It is not part of the production window or its startup modes; it uses local fixtures without starting AppServer or reading application data. See [examples](../examples/README.md). Several UI clients can share an application home; a second AppServer is rejected while the first owns its service lock.
 
-CANBAN_HOME selects an alternate absolute application-data directory. Its default is ~/.canban/. Native UI calls the co-hosted AppServer directly through background operations. A same-user, mode-0600 Unix socket exposes JSON-RPC to the CLI. The home directory is mode 0700.
+CANBAN_HOME selects an alternate absolute application-data directory. Its default is ~/.canban/. Native UI connects through AppClient RPC to a separate, persistent AppServer. A same-user, mode-0600 Unix socket exposes JSON-RPC to the CLI. The home directory is mode 0700.
 
 ```text
-canban-ui -> product components/presenters -> AppServer
+canban-ui -> components/presenters -> AppClient -- RPC --> AppServer
      |                                         |
 canban-ui-kit -> nsh-base                 owner crates / storage
                                                |
@@ -34,11 +34,12 @@ canban-ui-kit -> nsh-base                 owner crates / storage
                                                              herdr-core
 ```
 
-The UI process hosts scheduling and the endpoint. Quit or closing the standalone window stops those functions (the MVP uses NSH's default keep_alive_on_close=false); Herdr-owned programs may continue. An Agent cannot report while AppServer is absent and must retry its CLI submission after the app returns. Launching a second UI is not an attach-to-existing-server mode. The CLI's serve command is an alternative headless host using the same operations, not an additional production daemon.
+
+Current service lifecycle (2026-11-09): the desktop attaches to or starts an independent AppServer. Closing a window leaves scheduling active. Multiple UI clients share one authority; explicit CANBAN_ENDPOINT attaches only. Remote execution, directory browsing, saved workspace/Resume bindings and Terminal byte relay are implemented. See [multi-machine execution](multi-machine.md) and [acceptance](multi-machine-acceptance.md). Earlier same-process lifecycle descriptions are superseded.
 
 ## Configuration
 
-First startup creates config/agents.json and config/workflows/default.json. Installed hc/codex/claude paths are resolved when available so Finder launch is less dependent on PATH. Edit JSON and choose Reload agent configuration in Settings, or call config.reload. Invalid configuration leaves the previous in-memory configuration active. Stage profile IDs are validated at startup, Project creation and configuration reload against the global registry; removing a profile referenced by the default/saved Project workflow is rejected. Requests already queued keep their profile/instruction/callback snapshot.
+First startup creates config/agents.json and config/workflows/default.json. The local hc path resolves when available. Profile commands remain portable and resolve on the selected execution host at launch. Edit JSON and choose Reload agent configuration in Settings, or call config.reload. Invalid configuration leaves the previous in-memory configuration active. Stage profile IDs are validated at startup, Project creation and configuration reload against the global registry; removing a profile referenced by the default/saved Project workflow is rejected. Requests already queued keep their profile/instruction/callback snapshot.
 
 Fresh homes receive developer and reviewer starter profiles (both initially using the existing Codex launch setup), plus codex/claude profiles for direct mentions. The default workflow references developer from Develop and reviewer from Review. Existing registries/workflow files and saved Project workflows are preserved without injecting or rewriting roles. If a workflow file is missing under an older registry, generated stages omit references to unavailable starter profiles and keep legacy tag/default routing.
 

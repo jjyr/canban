@@ -1,5 +1,8 @@
 # Workspace preparation, scheduling and human gates
 
+Multi-machine update, 2026-11-09: see [current execution/location and service contract](multi-machine.md). Profile commands resolve on their execution host; Resume and Review retain their original workspace, while new work uses the Project's current location.
+
+
 Status: implemented 2026-11-07. This update supersedes detached Card checkouts, unrestricted scheduling and attention-as-display-only behavior. The mechanism stays within existing crates; no operation graph or scripting engine was introduced.
 
 ## Workflow settings

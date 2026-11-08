@@ -4,6 +4,30 @@ impl AppServer {
     pub fn call(&self, method: &str, p: Value) -> Result<Value> {
         let config = self.config();
         match method {
+            "app.shutdown" => {
+                self.stop.store(true, Ordering::SeqCst);
+                Ok(json!({"stopping":true}))
+            }
+            "app.state" => {
+                Ok(json!({"snapshot":self.snapshot()?,"config":self.config(),"home":self.home}))
+            }
+            "machine.list" => self.machines(),
+            "machine.default" => {
+                let machine = self.resolve_machine(strp(&p, "machine")?, false)?;
+                let mut active = self.config.write().unwrap();
+                let path = self.home.join("config/agents.json");
+                let mut raw: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+                raw["default_machine"] = json!(machine);
+                canban_context::atomic(&path, &serde_json::to_vec_pretty(&raw)?)?;
+                active.default_machine = machine.clone();
+                drop(active);
+                self.emit("configuration", None);
+                Ok(json!({"machine":machine}))
+            }
+            "machine.add" => self.add_machine(p),
+            "machine.remove" => self.remove_machine(p),
+            "directory.list" => self.browse_directory(p),
+            "project.location" => self.update_location(p),
             "terminal.create" => self.create_terminal(p),
             "terminal.rename" => self.rename_terminal(p),
             "terminal.interrupt" => self.control_terminal(p, false),
@@ -124,12 +148,21 @@ impl AppServer {
                     )?)?
                 };
                 Self::validate_workflow(&config, &workflow)?;
-                let mut project =
-                    canban_kanban::project(strp(&p, "name")?, strp(&p, "directory")?, workflow)?;
-                project.target_branch = p["target_branch"]
-                    .as_str()
-                    .map(str::to_owned)
-                    .or_else(|| canban_workspaces::review::current_branch(&project.directory));
+                let location = self.work_location(&p)?;
+                let name = strp(&p, "name")?.trim();
+                ensure!(!name.is_empty(), "Project name is required");
+                let project = Project {
+                    id: id(),
+                    name: name.into(),
+                    directory: location.directory.clone(),
+                    location: Some(location.clone()),
+                    workflow,
+                    target_branch: p["target_branch"].as_str().map(str::to_owned).or_else(|| {
+                        self.ops(&location.machine)
+                            .current_branch(&location.directory)
+                    }),
+                    created_at: now(),
+                };
                 self.mutate(method, &p, |db| {
                     db.save(&project)?;
                     Ok(serde_json::to_value(project)?)
@@ -252,9 +285,11 @@ impl AppServer {
                     let project: Project = store.db().get(&card.project_id)?;
                     (card, project)
                 };
-                Ok(serde_json::to_value(canban_workspaces::info(
-                    &project, &card,
-                )?)?)
+                let project = self.bound_project(&project, &card);
+                Ok(serde_json::to_value(
+                    self.ops(&project.work_location().machine)
+                        .info(&project, &card)?,
+                )?)
             }
             "card.context.update" => self.mutate(method, &p, |db| {
                 let mut card: Card = db.get(strp(&p, "card_id")?)?;

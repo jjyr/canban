@@ -4,6 +4,7 @@ fn fixture() -> Snapshot {
     let mut s = Snapshot::default();
     for (id, name) in [("p1", "Canban"), ("p2", "Tools")] {
         s.projects.push(Project {
+            location: None,
             id: id.into(),
             name: name.into(),
             directory: format!("/example/{id}"),

@@ -1,5 +1,8 @@
 # Dedicated Terminal workspace
 
+Multi-machine update, 2026-11-09: see [current execution/location and service contract](multi-machine.md). Profile commands resolve on their execution host; Resume and Review retain their original workspace, while new work uses the Project's current location.
+
+
 Implemented user-approved direction, 2026-11-08. Native/runtime acceptance is recorded below. This supersedes the Terminal portion of the earlier Card-focused split layout. Review retains its own delivery interface.
 
 ## Product layout (updated user-approved direction)

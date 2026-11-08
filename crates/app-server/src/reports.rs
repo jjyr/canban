@@ -27,6 +27,37 @@ impl AppServer {
             let card: Card = db.get(&req.card_id)?;
             (req, attempt, card)
         };
+        // Remote Core clocks need not agree with AppServer. Capture the current
+        // root turn before acknowledging completion; the Agent cannot emit its
+        // post-report done until that acknowledgment reaches its CLI.
+        let remote_completion_turn = if state == "completed"
+            && attempt
+                .location
+                .as_ref()
+                .is_some_and(|l| l.machine != "local")
+        {
+            if let Some(terminal) = &attempt.terminal {
+                let client = canban_herdr::Client {
+                    config: self.config(),
+                };
+                Some(
+                    (|| -> Result<u64> {
+                        ensure!(
+                            client.status()?["core"]["id"].as_str() == attempt.core_id.as_deref(),
+                            "Original Core unavailable"
+                        );
+                        client.get(terminal)?["turn"]
+                            .as_u64()
+                            .context("No runtime turn")
+                    })()
+                    .unwrap_or(u64::MAX),
+                )
+            } else {
+                Some(0)
+            }
+        } else {
+            None
+        };
         let report_id = id();
         let path = if let Some(body) = p["body"].as_str() {
             let path = canban_context::run_dir(&self.home, &req, number)
@@ -54,7 +85,7 @@ impl AppServer {
                 run.state=state.into();
                 if state=="completed" {
                     run.close_state=if matches!(req.profile.exit,Some(ExitAction::Input{..})){"waiting"}else{"manual"}.into();
-                    run.completed_at=Some(now());run.completion_turn=Some(run.observed.as_ref().and_then(|v|v["turn"].as_u64()).unwrap_or(0));run.turn_ended_at=None;
+                    run.completed_at=Some(now());run.completion_turn=Some(remote_completion_turn.unwrap_or_else(||run.observed.as_ref().and_then(|v|v["turn"].as_u64()).unwrap_or(0)));run.turn_ended_at=None;
                 }
                 db.save(&run)?;
             }

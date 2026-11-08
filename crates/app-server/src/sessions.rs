@@ -43,11 +43,26 @@ impl AppServer {
                     "Provider conversation changed unexpectedly; inspect the selected terminal"
                 );
             }
+            let attempts = db.list::<Attempt>()?;
+            let machine = run
+                .location
+                .as_ref()
+                .map(|l| l.machine.as_str())
+                .unwrap_or("local");
             ensure!(
                 !db.list::<Conversation>()?.iter().any(|c| c.id != context.id
                     && c.provider == context.provider
-                    && c.provider_session_id.as_deref() == Some(session)),
-                "Provider session is already bound to another Card/profile"
+                    && c.provider_session_id.as_deref() == Some(session)
+                    && attempts
+                        .iter()
+                        .any(|a| a.conversation_id.as_deref() == Some(&c.id)
+                            && a.provider_session_id.as_deref() == Some(session)
+                            && a.location
+                                .as_ref()
+                                .map(|l| l.machine.as_str())
+                                .unwrap_or("local")
+                                == machine)),
+                "Provider session is already bound to another Card/profile on this machine"
             );
             context.provider_session_id = Some(session.into());
             run.provider_session_id = Some(session.into());

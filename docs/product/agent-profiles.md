@@ -1,5 +1,8 @@
 # Agent profiles and workflow references
 
+Multi-machine update, 2026-11-09: see [current execution/location and service contract](../multi-machine.md). Profile commands resolve on their execution host; Resume and Review retain their original workspace, while new work uses the Project's current location.
+
+
 Status: implemented 2026-11-07. This is the current schema. Earlier provider/Herdr-template/hook proposals are superseded. See [MVP acceptance](../mvp-acceptance.md) for evidence and limits.
 
 ## Ownership

@@ -10,6 +10,7 @@ pub fn project(name: &str, directory: &str, workflow: Workflow) -> Result<Projec
     ensure!(path.is_absolute(), "Project directory must be absolute");
     std::fs::create_dir_all(path)?;
     Ok(Project {
+        location: None,
         id: id(),
         name: name.trim().into(),
         directory: std::fs::canonicalize(path)?.to_string_lossy().into_owned(),
@@ -27,6 +28,8 @@ pub fn card(
 ) -> Result<Card> {
     ensure!(!title.trim().is_empty(), "Card title is required");
     Ok(Card {
+        workspace: None,
+        workspace_history: Vec::new(),
         id: id(),
         project_id: project.id.clone(),
         number,

@@ -112,6 +112,8 @@ fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() 
         name: Some("Server".into()),
         manual_number: Some(1),
         runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("shell-pty".into()),
             state: "running".into(),
@@ -166,6 +168,8 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
         name: None,
         manual_number: None,
         runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
             core_id: Some("core".into()),
             terminal: Some("pty".into()),
             state: "running".into(),
@@ -185,6 +189,7 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
     );
     for id in ["shell", agent.as_str()] {
         s.terminal_contexts.push(TerminalContext {
+            machine: "local".into(),
             terminal_id: id.into(),
             core_id: "core".into(),
             terminal: "pty".into(),

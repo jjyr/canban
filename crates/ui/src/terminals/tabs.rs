@@ -312,6 +312,10 @@ pub fn header(ui: Ui) -> impl IntoElement {
             move || ui.pending.get(),
             move |_| new_tab(ui),
         ))
+        .child(
+            action("▾", Variant::Quiet, move |_| machine_menu(ui))
+                .accessibility_label(|| Some("Choose terminal machine".into())),
+        )
         .child(view().flex_1().min_w(px(24.)).h_full().window_drag(true))
         .child(dynamic(move || {
             let _ = context.get();

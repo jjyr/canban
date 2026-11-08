@@ -92,6 +92,11 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
                         .gap_2()
                         .child(label(e.title()).flex_1().min_w(px(0.)).truncate())
                         .child(
+                            muted(crate::machines::name(ui, e.machine()))
+                                .max_w(px(82.))
+                                .truncate(),
+                        )
+                        .child(
                             view()
                                 .w(px(5.))
                                 .h(px(5.))

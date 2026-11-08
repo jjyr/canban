@@ -20,7 +20,7 @@ Status: current naming/crate direction and timer placement proposal, 2026-11-06.
 | Storage | canban-storage | crates/storage | Shared local persistence/attachment IO implementations |
 | Shared boundary types | canban-types | crates/types | Only shared IDs, command/event/report/action payloads needed across crates |
 | UI Kit | canban-ui-kit | crates/ui-kit | Generic tokens, styled reusable NSH controls, and shared interaction conventions; no product/service dependencies |
-| UI/desktop host | canban-ui | crates/ui | Reusable product UI library, presenters/screens, UI state and co-hosted desktop entry; standalone Gallery imports it from examples/gallery |
+| UI/desktop host | canban-ui | crates/ui | Reusable product UI library, presenters/screens, UI state and independent-service desktop client; standalone Gallery imports it from examples/gallery |
 | Agent CLI | canban-cli | crates/cli | Thin agent-facing adapter to AppServer operations |
 
 This layout is now represented by workspace crates in the initial MVP. Core components have compile-time boundaries and run in one Canban process; the CLI also provides a headless host without linking NSH UI. Timer internals and future capabilities below remain proposals. See [implementation and acceptance](implementation.md).
@@ -55,6 +55,8 @@ canban-app-server <--- IPC adapter <--- canban-cli
 ```
 
 AppServer wires components and routes operations/actions. Template progression belongs to Workflow Engine; queue/time and execution belong to Scheduler. Keeping these policies out of the entry layer avoids making AppServer the whole workflow implementation.
+
+Implementation update, 2026-11-09: UI clients attach to a persistent AppServer, started by desktop startup or `canban serve`. One authority owns scheduling across execution machines. UI exit does not stop it. See [multi-machine execution](multi-machine.md).
 
 ## Rust dependencies must stay acyclic
 
@@ -144,7 +146,7 @@ These are timing intents/actions, not new Session types. All resulting agent wor
 
 Saved timing configuration belongs in persistent product state. An in-memory wait/registration is runtime state that can be rebuilt from it when the owner starts. This records ownership only; detailed missed-run, timezone/DST, recurrence, and replay policy remains deferred until the corresponding feature is implemented.
 
-If the co-hosted AppServer process is not running, its timers/Scheduler do not run even if Herdr terminals survive. Running timed actions after Canban quits is a reason to consider a daemon later, not a capability supplied by a card's timer UI.
+If AppServer itself stops, its Scheduler does not run even if Herdr terminals survive. Closing a UI leaves the independent service running. Timer placement does not imply recurring-job support.
 
 The earlier MVP excludes advanced scheduled-task management. Discussing where a card timer belongs does not commit to shipping cron, recurrence, a Timer service, or always-on execution now. The existing blocked-card internal notification remains in MVP, independently of timed reminders.
 

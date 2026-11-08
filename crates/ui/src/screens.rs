@@ -16,6 +16,12 @@ fn layout(
 }
 pub fn screen(ui: Ui, page: &str) -> AnyElement {
     match page {
+        "machines" => view()
+            .flex_1()
+            .p_5()
+            .child(scroll().flex_1().child(crate::machines::settings(ui)))
+            .into_element(),
+        "project-location" => crate::machines::project_location(ui).into_element(),
         "new-project" => new_project(ui).into_element(),
         "new-card" => new_card(ui).into_element(),
         "notes" => crate::notes::screen(ui).into_element(),
@@ -30,22 +36,17 @@ pub fn screen(ui: Ui, page: &str) -> AnyElement {
 fn new_project(ui: Ui) -> impl IntoElement {
     let name = signal(String::new());
     let directory = signal(String::new());
+    let machine = signal("local".to_owned());
     layout("New Project", "A source directory holds the work; Canban keeps its Board, Notes and history.")
         .child(scroll().flex_1().min_h(px(0.)).child(
             settings_section("Project details", "Choose an existing folder or enter a new directory path. Git is optional.")
                 .max_w(px(720.))
                 .child(settings_field("Project name", "You can change the suggested name before creating the Project.",
                     field(name, "Name").label("Project name")))
-                .child(settings_field("Source directory", "A directory that does not exist will be created when you submit.",
-                    directory_field(directory, move |path| {
-                        if name.try_get().is_some_and(|s| s.trim().is_empty())
-                            && let Some(basename) = path.file_name() {
-                            name.try_set(basename.to_string_lossy().into_owned());
-                        }
-                    })))
+                .child(crate::machines::location_fields(ui,machine,directory))
                 .child(view().flex_row().flex_wrap().gap_2()
                     .child(action("Create Project", Variant::Primary, move |_| {
-                        dispatch(ui, "project.create", json!({"name": name.get_untracked().trim(), "directory": directory.get_untracked().trim()}));
+                        dispatch(ui, "project.create", json!({"name": name.get_untracked().trim(), "location":{"machine":machine.get_untracked(),"directory": directory.get_untracked().trim()}}));
                     }).disabled(move || ui.pending.get() || name.get().trim().is_empty() || directory.get().trim().is_empty()))
                     .child(action("Cancel", Variant::Quiet, move |_| ui.navigate("board"))))
         ))
@@ -135,6 +136,8 @@ fn settings(ui: Ui) -> impl IntoElement {
     layout("Settings", "Application preferences and JSON configuration.")
         .child(scroll().flex_1().min_h(px(0.)).child(view().w_full().max_w(px(880.)).min_w(px(0.)).gap_4()
             .child(crate::components::scheduling::settings(ui))
+            .child(crate::machines::settings(ui))
+            .child(settings_section("Project work location","Change where future work runs for the selected Project.").child(action("Edit work location…",Variant::Secondary,move |_|ui.navigate("project-location"))))
             .child(settings_section("Agent profiles", "Define Agents once; workflow stages and @mentions reference these profiles.")
                 .child(settings_field("Configuration", "Command and profile changes apply after reloading, to newly queued work.",
                     muted(format!("{home}/config/agents.json"))))
@@ -149,6 +152,6 @@ fn settings(ui: Ui) -> impl IntoElement {
                 .child(view().items_start().child(action("Check connection", Variant::Secondary, move |_| dispatch(ui, "herdr.status", json!({}))))))
             .child(settings_section("Storage", "Canban keeps structured data, configuration and managed artifacts in its application home.")
                 .child(settings_field("Application home", "Configuration, documents and execution history are stored here.", muted(home))))
-            .child(muted("Closing Canban stops scheduling. Herdr-owned programs can continue; reopen Canban to reconcile their state."))
+            .child(muted("Closing this window keeps AppServer and scheduling running. Herdr owns the terminal programs."))
         ))
 }

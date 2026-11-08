@@ -1,5 +1,5 @@
 use super::*;
-fn core(app: &AppServer, dir: &Path) {
+pub(super) fn core(app: &AppServer, dir: &Path) {
     let script = dir.join("test-hc");
     std::fs::write(&script,r#"#!/usr/bin/python3
 import sys,json,os

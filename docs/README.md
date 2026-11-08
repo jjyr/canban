@@ -1,6 +1,6 @@
 # Canban product design and runtime research
 
-Canban is the product; Human Context names the proposed approach. Current user directions center on native Rust/NSH UI, directory-backed Projects, local Boards/cards, stage-triggered workflows, tag/default automatic scheduling, and a unified card timeline. AppServer is a logical component co-hosted in the desktop process for MVP; WebView is embedded only as needed. Documentation is English; proposals and unresolved decisions are identified.
+Canban is the product; Human Context names the proposed approach. Current user directions center on native Rust/NSH UI, directory-backed Projects, local Boards/cards, stage-triggered workflows, tag/default automatic scheduling, and a unified card timeline. AppServer is an independent service shared by UI clients and local/remote executions; WebView is embedded only as needed. Documentation is English; proposals and unresolved decisions are identified.
 
 The repository now has a runnable macOS MVP. [Latest acceptance](mvp-acceptance.md) covers the command-defined profile update, real Codex human-input/rework tasks, explicit Review commit/merge, and Terminal recovery checks. Start with [implementation, development and acceptance](implementation.md) for actual behavior, commands and validation limits. Dated pre-implementation statements in the design/research documents describe their original scope; they are not the current implementation status.
 
@@ -11,6 +11,8 @@ The repository now has a runnable macOS MVP. [Latest acceptance](mvp-acceptance.
 | Document | Purpose |
 | --- | --- |
 | [Vision and scope](product/vision.md) | Current user requirements and MVP boundary |
+| [Multi-machine execution](multi-machine.md) | Independent AppServer, mutable Project work location, remote Agent CLI and native Terminal routing |
+| [Multi-machine acceptance](multi-machine-acceptance.md) | Isolated local/remote verification, limits and reproduction |
 | [Product discussion and decisions](product/product-log.md) | Rationale, superseded proposals, and open questions |
 | [Projects and workflow templates](product/projects-and-workflows.md) | Directory/Board ownership, required Backlog, callbacks, customization, and template migration |
 | [Kanban card workflow](product/kanban-workflow.md) | Numbers, resources, stages/run/outcome separation, comments, mentions, and archive |
@@ -43,7 +45,7 @@ Current default template: Backlog / Develop / Review. Only Backlog is mandatory.
 
 Start with [MVP interface contracts](interfaces/mvp-contract.md) for the proposed concrete reporting/call mechanism, then use the architecture/source references below for ownership and feasibility.
 
-1. [Proposed Canban architecture](architecture.md): native UI, logical/co-hosted AppServer, storage, callbacks, runtime binding, and future daemon extraction.
+1. [Canban architecture](architecture.md): native UI clients, independent AppServer, storage, callbacks and local/remote runtime bindings.
    [Internal architecture comparison](architecture-internal-options.md) compares module/call organizations; [crates and timers](architecture-crates-and-timers.md) records the user-requested crate split, AppServer/Workflow Engine/Scheduler names, and card timer placement.
    [Data architecture](data-architecture.md) records ~/.canban/, SQLite with WAL, file-backed execution context/reports, and zstd/lz4-compressed Card archives; detailed schema and archive mechanisms remain proposals.
    [UI architecture and design system](ui-architecture.md) records the approved NSH reuse, separate UI Kit, component contracts, native gallery, and regression workflow.
@@ -56,6 +58,7 @@ Start with [MVP interface contracts](interfaces/mvp-contract.md) for the propose
 7. [Interactive Agent lifecycle](research/interactive-agent-lifecycle.md): provider conversation IDs, real terminal attachment, graceful exit/resume, renderer options and acceptance gates.
 8. [Native libghostty terminal](research/native-terminal.md): VT library versus native renderer, NSH host, Herdr stream ownership and source reuse.
 9. [Active @question replies](research/agent-reply-options.md): explicit CLI replies versus Herdr terminal observation, association limits and the proposed combined boundary.
+10. [Multi-machine execution](research/multi-machine.md): verified Core machine routing/recovery, current Canban gaps and a proposed first remote scope.
 
 Core executes terminals; it has no Canban Project, Board, Card, workflow, or scheduler. Space belongs to herdr-app. Canban's Project is its own directory-backed product object and need not synchronize with a Herdr Space.
 

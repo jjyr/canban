@@ -6,7 +6,7 @@ The first macOS MVP implements local Projects/Boards/Cards, JSON workflows and r
 
 ## Run
 
-Prerequisites: macOS, Xcode command-line tools, mise (pinned Rust and Zig 0.16.0), and an installed compatible hc. Agent executables/templates use your existing installation and authentication.
+Prerequisites: macOS, Xcode command-line tools, mise (pinned Rust and Zig), and an installed compatible hc. Agent profiles use your existing executables and authentication.
 
 ```sh
 mise run build
@@ -28,7 +28,7 @@ For an explicit real-model check, mise run acceptance-real runs actual Codex dev
 
 Start with the [documentation guide](docs/README.md), particularly the [herdr-core integration recommendation](docs/research/herdr-core-integration.md) and the separate [product concepts explanation](docs/research/herdr-core-concepts.md).
 
-The MVP uses separate crates for Kanban, Workflow Engine, Scheduler, storage/context/history, Herdr, AppServer, UI Kit and product UI. The logical AppServer is co-hosted in the desktop process; the CLI can also host it without a UI. Main surfaces are native; advanced Shear review integration is deferred.
+The MVP uses separate crates for Kanban, Workflow Engine, Scheduler, storage/context/history, Herdr, AppServer, UI Kit and product UI. AppServer runs independently of UI windows; the desktop starts or attaches to it, and `canban serve` can host it directly. Project execution can use local or remote Core machines, preserving original Resume and Review workspaces. Main surfaces are native; advanced Shear review integration is deferred. See [multi-machine behavior and acceptance](docs/multi-machine.md).
 
 Cargo package names use canban-xxx; crate directories and source filenames omit that prefix. See [development conventions](docs/development-conventions.md).
 

@@ -36,6 +36,8 @@ pub struct Ui {
     pub recent_destinations: Stored<Vec<String>>,
     pub snapshot: Signal<Snapshot>,
     pub profiles: Signal<Vec<Profile>>,
+    pub machines: Signal<Value>,
+    pub machines_loading: Signal<bool>,
     pub max_agents: Signal<usize>,
     pub idle_minutes: Signal<u64>,
     pub overview_selection: Signal<String>,
@@ -104,6 +106,8 @@ impl Ui {
     pub fn new() -> Self {
         Self {
             owner: Owner::current(),
+            machines: signal(json!({"machines":[]})),
+            machines_loading: signal(false),
             terminal_selection: signal(String::new()),
             terminal_tabs: signal(Vec::new()),
             terminal_details: signal(false),

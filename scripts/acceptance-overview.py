@@ -95,5 +95,7 @@ try:
  (base/'evidence.json').write_text(json.dumps({'rows':rows(),'snapshot':s,'status':call('scheduler.status'),'preview':preview},indent=2))
  print('IDLE_NORMAL_EXIT_AND_EXACT_RESUME_OK\nOVERVIEW_ACCEPTANCE_PASSED\nBASE='+str(base),flush=True)
 finally:
+ try: call('app.shutdown')
+ except Exception: pass
  if server.poll() is None:server.terminate();server.wait(timeout=10)
  subprocess.run(['hc','server','stop'],env={**os.environ,**core_env},capture_output=True,timeout=20);log.close()

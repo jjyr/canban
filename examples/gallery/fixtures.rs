@@ -15,6 +15,7 @@ pub fn workspace() -> canban_types::Snapshot {
     use canban_types::*;
     let mut s = Snapshot::default();
     s.projects.push(Project {
+        location: None,
         id: "gallery-project".into(),
         name: "Canban workspace".into(),
         directory: "/example/project".into(),
@@ -37,7 +38,7 @@ pub fn workspace() -> canban_types::Snapshot {
         ),
         (3, "Explore a smaller navigation layout", "backlog", None),
     ] {
-        s.cards.push(Card{id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,title:title.into(),body:"## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.".into(),tags:vec!["developer".into()],context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery:None,created_at:now()});
+        s.cards.push(Card{workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,title:title.into(),body:"## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.".into(),tags:vec!["developer".into()],context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery:None,created_at:now()});
     }
     s.notes.push(Note{id:"note-1".into(),project_id:"gallery-project".into(),title:"Search ideas.md".into(),body:"# Search experience\n\nFind a Card without remembering its number.\n\nSee [Architecture](note:note-2).".into(),revision:1,created_at:now(),updated_at:now(),links:vec!["note-2".into()],card_ids:vec!["card-1".into()]});
     s.notes.push(Note {
@@ -257,6 +258,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         name: None,
         manual_number: Some(1),
         runtime: Some(canban_types::TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
             core_id: Some("gallery".into()),
             terminal: Some("shell".into()),
             state: "running".into(),
@@ -273,6 +276,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     s.terminals.push(linked);
     let card = s.cards.iter().find(|c| c.archived_at.is_none()).unwrap();
     s.terminal_contexts.push(canban_types::TerminalContext {
+        machine: "local".into(),
         terminal_id: "gallery-linked-shell".into(),
         core_id: "gallery".into(),
         terminal: "linked-shell".into(),

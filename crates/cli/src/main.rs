@@ -142,9 +142,10 @@ fn run() -> Result<()> {
         let app = canban_app_server::AppServer::open(home, std::env::current_exe()?)?;
         let _runtime = app.start()?;
         println!("Canban AppServer listening at {}", app.endpoint().display());
-        loop {
-            std::thread::park();
+        while !app.stopped() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
+        return Ok(());
     }
     let raw_note = matches!(
         &args.command,

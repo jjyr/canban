@@ -1,257 +1,291 @@
 use anyhow::{Context, Result, ensure};
 use canban_types::{Card, Project, WorkspaceInfo};
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
-fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
-    Ok(Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_INDEX_FILE")
-        .output()?)
+use std::path::{Path, PathBuf};
+pub struct Ops {
+    pub host: canban_herdr::host::Host,
 }
-fn checked(dir: &Path, args: &[&str]) -> Result<String> {
-    let out = git(dir, args)?;
-    ensure!(
-        out.status.success(),
-        "git {}: {}",
-        args[0],
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-    Ok(String::from_utf8(out.stdout)?.trim_end_matches('\n').into())
+impl Ops {
+    pub fn local() -> Self {
+        Self {
+            host: canban_herdr::host::Host::local(),
+        }
+    }
+    fn git(&self, dir: &Path, args: &[&str]) -> Result<std::process::Output> {
+        let mut argv = vec!["git", "-C", dir.to_str().context("Invalid path")?];
+        argv.extend(args);
+        self.host.run(Path::new("/"), &argv, None)
+    }
+    fn checked(&self, dir: &Path, args: &[&str]) -> Result<String> {
+        let out = self.git(dir, args)?;
+        ensure!(
+            out.status.success(),
+            "git {}: {}",
+            args[0],
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(String::from_utf8(out.stdout)?.trim_end_matches('\n').into())
+    }
 }
 pub fn card_branch(project: &Project, card: &Card) -> String {
     card.branch
         .clone()
         .unwrap_or_else(|| format!("canban/{}/{}", project.id, card.number))
 }
-fn sync_base(source: &Path, base: &str, remote: &str) -> Result<()> {
-    ensure!(
-        !remote.is_empty() && !remote.starts_with('-'),
-        "Invalid remote name"
-    );
-    checked(source, &["check-ref-format", "--branch", base])?;
-    let local = format!("refs/heads/{base}");
-    let tracking = format!("refs/remotes/{remote}/{base}");
-    checked(
-        source,
-        &[
-            "fetch",
-            "--",
-            remote,
-            &format!("+refs/heads/{base}:{tracking}"),
-        ],
-    )?;
-    let old = checked(source, &["rev-parse", "--verify", &local])?;
-    let latest = checked(source, &["rev-parse", "--verify", &tracking])?;
-    if git(source, &["merge-base", "--is-ancestor", &latest, &old])?
-        .status
-        .success()
-    {
-        return Ok(());
-    }
-    ensure!(
-        git(source, &["merge-base", "--is-ancestor", &old, &latest])?
-            .status
-            .success(),
-        "Base branch and remote have diverged; review them before continuing"
-    );
-    // A checked-out base must be updated through that checkout, never update-ref.
-    let worktrees = checked(source, &["worktree", "list", "--porcelain"])?;
-    for record in worktrees.split("\n\n") {
-        if record.lines().any(|l| l == format!("branch {local}")) {
-            let path = record
-                .lines()
-                .find_map(|l| l.strip_prefix("worktree "))
-                .context("Base checkout path missing")?;
-            let cwd = Path::new(path);
-            ensure!(
-                checked(cwd, &["status", "--porcelain", "--untracked-files=all"])?.is_empty(),
-                "Base checkout has local changes; preserve them before synchronizing"
-            );
-            ensure!(
-                checked(cwd, &["rev-parse", "HEAD"])? == old,
-                "Base changed during synchronization; retry after inspection"
-            );
-            checked(
-                cwd,
-                &["merge", "--ff-only", "--no-overwrite-ignore", &latest],
-            )?;
-            return Ok(());
-        }
-    }
-    checked(source, &["update-ref", &local, &latest, &old])?;
-    Ok(())
-}
-pub fn prepare(home: &Path, project: &Project, card: &Card) -> Result<PathBuf> {
-    let source = Path::new(&project.directory);
-    let branch = card_branch(project, card);
-    if let Some(path) = &card.worktree {
-        let p = PathBuf::from(path);
-        if p.is_dir() {
-            if p.canonicalize()? != source.canonicalize()? && review::current_branch(path).is_none()
-            {
-                // Adopt legacy detached checkouts at their current HEAD, preserving edits.
-                checked(&p, &["switch", "-c", &branch])?;
-            }
-            return Ok(p);
-        }
+impl Ops {
+    fn sync_base(&self, source: &Path, base: &str, remote: &str) -> Result<()> {
         ensure!(
-            p == home.join("worktrees").join(&project.id).join(&card.id),
-            "Saved working directory is missing: {}",
-            p.display()
+            !remote.is_empty() && !remote.starts_with('-'),
+            "Invalid remote name"
         );
-    }
-    if !project.workflow.workspace.create_worktree {
-        return Ok(source.into());
-    }
-    if !git(source, &["rev-parse", "--verify", "HEAD"])?
-        .status
-        .success()
-    {
-        ensure!(
-            !project.workflow.workspace.sync_base,
-            "Initialize a Git repository with a base commit, or disable worktree/sync_base in the template"
-        );
-        return Ok(source.into());
-    }
-    let target = home.join("worktrees").join(&project.id).join(&card.id);
-    std::fs::create_dir_all(target.parent().unwrap())?;
-    let keep = format!("refs/canban/cards/{}", card.id);
-    let branch_ref = format!("refs/heads/{branch}");
-    if git(source, &["rev-parse", "--verify", &branch_ref])?
-        .status
-        .success()
-    {
-        ensure!(
-            card.worktree.is_some()
-                || git(source, &["rev-parse", "--verify", &keep])?
-                    .status
-                    .success(),
-            "Card branch already exists without a saved binding; inspect it before retrying"
-        );
-        checked(
-            source,
-            &["worktree", "add", target.to_str().unwrap(), &branch],
-        )?;
-    } else {
-        let start = if git(source, &["rev-parse", "--verify", &keep])?
-            .status
-            .success()
-        {
-            keep
-        } else {
-            let base = project
-                .workflow
-                .workspace
-                .base_branch
-                .clone()
-                .or_else(|| project.target_branch.clone())
-                .or_else(|| review::current_branch(&project.directory))
-                .context("Choose a base_branch for the workspace")?;
-            checked(source, &["check-ref-format", "--branch", &base])?;
-            if project.workflow.workspace.sync_base {
-                sync_base(source, &base, &project.workflow.workspace.remote)?;
-            }
-            format!("refs/heads/{base}")
-        };
-        checked(
+        self.checked(source, &["check-ref-format", "--branch", base])?;
+        let local = format!("refs/heads/{base}");
+        let tracking = format!("refs/remotes/{remote}/{base}");
+        self.checked(
             source,
             &[
-                "worktree",
-                "add",
-                "-b",
-                &branch,
-                target.to_str().unwrap(),
-                &start,
+                "fetch",
+                "--",
+                remote,
+                &format!("+refs/heads/{base}:{tracking}"),
             ],
         )?;
-    }
-    Ok(target)
-}
-/// Read-only projection for the Card's workspace panel.
-pub fn info(project: &Project, card: &Card) -> Result<WorkspaceInfo> {
-    let mut value = WorkspaceInfo {
-        path: card.worktree.clone(),
-        branch: card.branch.clone(),
-        target_branch: project
-            .target_branch
-            .clone()
-            .or_else(|| project.workflow.workspace.base_branch.clone()),
-        base_commit: card.base_commit.clone(),
-        state: "not_created".into(),
-        dirty: false,
-    };
-    if let Some(path) = &card.worktree {
-        let cwd = Path::new(path);
-        value.state = if !cwd.is_dir() {
-            "missing"
-        } else if !git(cwd, &["rev-parse", "--verify", "HEAD"])?
+        let old = self.checked(source, &["rev-parse", "--verify", &local])?;
+        let latest = self.checked(source, &["rev-parse", "--verify", &tracking])?;
+        if self
+            .git(source, &["merge-base", "--is-ancestor", &latest, &old])?
             .status
             .success()
         {
-            "directory"
-        } else {
-            "available"
+            return Ok(());
         }
-        .into();
-        if value.state == "available" {
-            value.branch = review::current_branch(path);
-            value.base_commit = card
-                .base_commit
-                .clone()
-                .or_else(|| checked(cwd, &["rev-parse", "HEAD"]).ok());
-            value.dirty =
-                !checked(cwd, &["status", "--porcelain", "--untracked-files=all"])?.is_empty();
-            if !checked(cwd, &["diff", "--name-only", "--diff-filter=U"])?.is_empty() {
-                value.state = "conflict".into();
+        ensure!(
+            self.git(source, &["merge-base", "--is-ancestor", &old, &latest])?
+                .status
+                .success(),
+            "Base branch and remote have diverged; review them before continuing"
+        );
+        // A checked-out base must be updated through that checkout, never update-ref.
+        let worktrees = self.checked(source, &["worktree", "list", "--porcelain"])?;
+        for record in worktrees.split("\n\n") {
+            if record.lines().any(|l| l == format!("branch {local}")) {
+                let path = record
+                    .lines()
+                    .find_map(|l| l.strip_prefix("worktree "))
+                    .context("Base checkout path missing")?;
+                let cwd = Path::new(path);
+                ensure!(
+                    self.checked(cwd, &["status", "--porcelain", "--untracked-files=all"])?
+                        .is_empty(),
+                    "Base checkout has local changes; preserve them before synchronizing"
+                );
+                ensure!(
+                    self.checked(cwd, &["rev-parse", "HEAD"])? == old,
+                    "Base changed during synchronization; retry after inspection"
+                );
+                self.checked(
+                    cwd,
+                    &["merge", "--ff-only", "--no-overwrite-ignore", &latest],
+                )?;
+                return Ok(());
             }
         }
+        self.checked(source, &["update-ref", &local, &latest, &old])?;
+        Ok(())
     }
-    Ok(value)
+    pub fn prepare(&self, home: &Path, project: &Project, card: &Card) -> Result<PathBuf> {
+        let source = Path::new(&project.directory);
+        let branch = card_branch(project, card);
+        if let Some(path) = &card.worktree {
+            let p = PathBuf::from(path);
+            if self.host.is_dir(&p) {
+                if self.host.canonical(&p)? != self.host.canonical(source)?
+                    && self.current_branch(path).is_none()
+                {
+                    // Adopt legacy detached checkouts at their current HEAD, preserving edits.
+                    self.checked(&p, &["switch", "-c", &branch])?;
+                }
+                return Ok(p);
+            }
+            ensure!(
+                p == home.join("worktrees").join(&project.id).join(&card.id),
+                "Saved working directory is missing: {}",
+                p.display()
+            );
+        }
+        if !project.workflow.workspace.create_worktree {
+            return Ok(source.into());
+        }
+        if !self
+            .git(source, &["rev-parse", "--verify", "HEAD"])?
+            .status
+            .success()
+        {
+            ensure!(
+                !project.workflow.workspace.sync_base,
+                "Initialize a Git repository with a base commit, or disable worktree/sync_base in the template"
+            );
+            return Ok(source.into());
+        }
+        let target = home.join("worktrees").join(&project.id).join(&card.id);
+        self.host.mkdir(target.parent().unwrap())?;
+        let keep = format!("refs/canban/cards/{}", card.id);
+        let branch_ref = format!("refs/heads/{branch}");
+        if self
+            .git(source, &["rev-parse", "--verify", &branch_ref])?
+            .status
+            .success()
+        {
+            ensure!(
+                card.worktree.is_some()
+                    || self
+                        .git(source, &["rev-parse", "--verify", &keep])?
+                        .status
+                        .success(),
+                "Card branch already exists without a saved binding; inspect it before retrying"
+            );
+            self.checked(
+                source,
+                &["worktree", "add", target.to_str().unwrap(), &branch],
+            )?;
+        } else {
+            let start = if self
+                .git(source, &["rev-parse", "--verify", &keep])?
+                .status
+                .success()
+            {
+                keep
+            } else {
+                let base = project
+                    .workflow
+                    .workspace
+                    .base_branch
+                    .clone()
+                    .or_else(|| project.target_branch.clone())
+                    .or_else(|| self.current_branch(&project.directory))
+                    .context("Choose a base_branch for the workspace")?;
+                self.checked(source, &["check-ref-format", "--branch", &base])?;
+                if project.workflow.workspace.sync_base {
+                    self.sync_base(source, &base, &project.workflow.workspace.remote)?;
+                }
+                format!("refs/heads/{base}")
+            };
+            self.checked(
+                source,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    &branch,
+                    target.to_str().unwrap(),
+                    &start,
+                ],
+            )?;
+        }
+        Ok(target)
+    }
+    /// Read-only projection for the Card's workspace panel.
+    pub fn info(&self, project: &Project, card: &Card) -> Result<WorkspaceInfo> {
+        let mut value = WorkspaceInfo {
+            path: card.worktree.clone(),
+            branch: card.branch.clone(),
+            target_branch: project
+                .target_branch
+                .clone()
+                .or_else(|| project.workflow.workspace.base_branch.clone()),
+            base_commit: card.base_commit.clone(),
+            state: "not_created".into(),
+            dirty: false,
+        };
+        if let Some(path) = &card.worktree {
+            let cwd = Path::new(path);
+            value.state = if !self.host.is_dir(cwd) {
+                "missing"
+            } else if !self
+                .git(cwd, &["rev-parse", "--verify", "HEAD"])?
+                .status
+                .success()
+            {
+                "directory"
+            } else {
+                "available"
+            }
+            .into();
+            if value.state == "available" {
+                value.branch = self.current_branch(path);
+                value.base_commit = card
+                    .base_commit
+                    .clone()
+                    .or_else(|| self.checked(cwd, &["rev-parse", "HEAD"]).ok());
+                value.dirty = !self
+                    .checked(cwd, &["status", "--porcelain", "--untracked-files=all"])?
+                    .is_empty();
+                if !self
+                    .checked(cwd, &["diff", "--name-only", "--diff-filter=U"])?
+                    .is_empty()
+                {
+                    value.state = "conflict".into();
+                }
+            }
+        }
+        Ok(value)
+    }
+    pub fn archive(&self, home: &Path, project: &Project, card: &Card) -> Result<Option<String>> {
+        let Some(path) = &card.worktree else {
+            return Ok(None);
+        };
+        let p = Path::new(path);
+        if !p.starts_with(home.join("worktrees")) || !self.host.exists(p) {
+            return Ok(None);
+        }
+        let status = self.git(p, &["status", "--porcelain"])?;
+        if !status.status.success() || !status.stdout.is_empty() {
+            return Ok(Some(
+                "Managed worktree retained: it contains changes or could not be checked".into(),
+            ));
+        }
+        // Retain commits not reachable from the source HEAD before removing the checkout.
+        let keep = format!("refs/canban/cards/{}", card.id);
+        let sha = self.git(p, &["rev-parse", "HEAD"])?;
+        let sha = String::from_utf8(sha.stdout)?;
+        let out = self.git(
+            Path::new(&project.directory),
+            &["update-ref", &keep, sha.trim()],
+        )?;
+        ensure!(out.status.success(), "Could not retain Card commit");
+        let out = self.git(
+            Path::new(&project.directory),
+            &["worktree", "remove", p.to_str().unwrap()],
+        )?;
+        ensure!(
+            out.status.success(),
+            "Could not remove clean worktree: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Ok(None)
+    }
+}
+pub fn prepare(home: &Path, project: &Project, card: &Card) -> Result<PathBuf> {
+    Ops::local().prepare(home, project, card)
+}
+pub fn info(project: &Project, card: &Card) -> Result<WorkspaceInfo> {
+    Ops::local().info(project, card)
 }
 pub fn archive(home: &Path, project: &Project, card: &Card) -> Result<Option<String>> {
-    let Some(path) = &card.worktree else {
-        return Ok(None);
-    };
-    let p = Path::new(path);
-    if !p.starts_with(home.join("worktrees")) || !p.exists() {
-        return Ok(None);
-    }
-    let status = git(p, &["status", "--porcelain"])?;
-    if !status.status.success() || !status.stdout.is_empty() {
-        return Ok(Some(
-            "Managed worktree retained: it contains changes or could not be checked".into(),
-        ));
-    }
-    // Retain commits not reachable from the source HEAD before removing the checkout.
-    let keep = format!("refs/canban/cards/{}", card.id);
-    let sha = git(p, &["rev-parse", "HEAD"])?;
-    let sha = String::from_utf8(sha.stdout)?;
-    let out = git(
-        Path::new(&project.directory),
-        &["update-ref", &keep, sha.trim()],
-    )?;
-    ensure!(out.status.success(), "Could not retain Card commit");
-    let out = git(
-        Path::new(&project.directory),
-        &["worktree", "remove", p.to_str().unwrap()],
-    )?;
-    ensure!(
-        out.status.success(),
-        "Could not remove clean worktree: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    Ok(None)
+    Ops::local().archive(home, project, card)
+}
+#[cfg(test)]
+fn checked(dir: &Path, args: &[&str]) -> Result<String> {
+    Ops::local().checked(dir, args)
+}
+#[cfg(test)]
+fn git(dir: &Path, args: &[&str]) -> Result<std::process::Output> {
+    Ops::local().git(dir, args)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     #[test]
     fn worktree_reuses_retains_changes_and_preserves_commits_on_cleanup() {
         let dir = tempfile::tempdir().unwrap();
@@ -292,6 +326,7 @@ mod tests {
         let project = Project {
             id: "project".into(),
             name: "Test".into(),
+            location: None,
             directory: source.to_str().unwrap().into(),
             workflow,
             target_branch: None,
@@ -311,6 +346,8 @@ mod tests {
             archived_at: None,
             archive: None,
             archive_error: None,
+            workspace: None,
+            workspace_history: Vec::new(),
             worktree: None,
             branch: None,
             base_commit: None,
@@ -423,6 +460,7 @@ mod sync_tests {
             let project = Project {
                 id: "p".into(),
                 name: "Test".into(),
+                location: None,
                 directory: source.to_string_lossy().into(),
                 workflow: Default::default(),
                 target_branch: Some("main".into()),

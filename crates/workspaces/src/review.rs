@@ -1,26 +1,274 @@
 //! Review and delivery use Git in the Card checkout first. A conflict never
 //! leaves the Project checkout in a half-merged state.
-use super::git;
+use super::Ops;
 use anyhow::{Context, Result, ensure};
 use canban_types::{Card, Project, ReviewPreview};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-fn checked(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let out = git(dir, args)?;
-    ensure!(
-        out.status.success(),
-        "git {}: {}",
-        args.first().unwrap_or(&""),
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-    Ok(out.stdout)
-}
-fn text(dir: &Path, args: &[&str]) -> Result<String> {
-    Ok(String::from_utf8(checked(dir, args)?)
-        .context("Git returned a non-UTF-8 path/ref")?
-        .trim_end_matches('\n')
-        .into())
+impl Ops {
+    fn r_checked(&self, dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
+        let out = self.git(dir, args)?;
+        ensure!(
+            out.status.success(),
+            "git {}: {}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        Ok(out.stdout)
+    }
+    fn r_text(&self, dir: &Path, args: &[&str]) -> Result<String> {
+        Ok(String::from_utf8(self.r_checked(dir, args)?)
+            .context("Git returned a non-UTF-8 path/ref")?
+            .trim_end_matches('\n')
+            .into())
+    }
+    fn r_common(&self, dir: &Path) -> Result<PathBuf> {
+        let path = PathBuf::from(self.r_text(dir, &["rev-parse", "--git-common-dir"])?);
+        self.host.canonical(&if path.is_absolute() {
+            path
+        } else {
+            dir.join(path)
+        })
+    }
+    pub fn current_branch(&self, directory: &str) -> Option<String> {
+        let out = self
+            .git(
+                Path::new(directory),
+                &["symbolic-ref", "--quiet", "--short", "HEAD"],
+            )
+            .ok()?;
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    }
+
+    pub fn review_preview(
+        &self,
+        project: &Project,
+        card: &Card,
+        target: Option<&str>,
+    ) -> Result<ReviewPreview> {
+        ensure!(
+            card.archived_at.is_none(),
+            "Restore the Card before reviewing its checkout"
+        );
+        let source = Path::new(&project.directory);
+        let cwd = Path::new(
+            card.worktree
+                .as_deref()
+                .context("This Card has no prepared worktree")?,
+        );
+        ensure!(
+            self.host.is_dir(cwd),
+            "Card worktree is missing; restore/open the Card Agent before reviewing"
+        );
+        ensure!(
+            self.host.canonical(source)? != self.host.canonical(cwd)?,
+            "Merge delivery requires a separate Git Card worktree"
+        );
+        ensure!(
+            self.r_common(source)? == self.r_common(cwd)?,
+            "Card worktree belongs to a different Git repository"
+        );
+        let source_branch = self.current_branch(&project.directory).unwrap_or_default();
+        let target = target
+            .map(str::to_owned)
+            .or_else(|| project.target_branch.clone())
+            .unwrap_or_else(|| source_branch.clone());
+        ensure!(
+            !target.is_empty(),
+            "Choose a target branch; the Project checkout is detached"
+        );
+        self.r_checked(source, &["check-ref-format", "--branch", &target])?;
+        let target_ref = format!("refs/heads/{target}");
+        let target_head = self.r_text(
+            source,
+            &["rev-parse", "--verify", &format!("{target_ref}^{{commit}}")],
+        )?;
+        let card_head = self.r_text(cwd, &["rev-parse", "--verify", "HEAD"])?;
+        let base = self.r_text(cwd, &["merge-base", &target_head, &card_head])?;
+        let status = self.r_checked(
+            cwd,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?;
+        let mut files = names(&self.r_checked(
+            cwd,
+            &["diff", "--no-ext-diff", "--name-only", "-z", &base, "--"],
+        )?)?;
+        let mut patch = self.r_checked(
+            cwd,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--binary",
+                &base,
+                "--",
+            ],
+        )?;
+        for path in
+            names(&self.r_checked(cwd, &["ls-files", "--others", "--exclude-standard", "-z"])?)?
+        {
+            let out = self.git(
+                cwd,
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--binary",
+                    "--no-index",
+                    "--",
+                    "/dev/null",
+                    &path,
+                ],
+            )?;
+            ensure!(
+                out.status.code() == Some(1) || out.status.success(),
+                "Could not read untracked file {path}"
+            );
+            patch.extend_from_slice(&out.stdout);
+            files.push(path);
+        }
+        files.sort();
+        files.dedup();
+        let conflicts =
+            names(&self.r_checked(cwd, &["diff", "--name-only", "--diff-filter=U", "-z"])?)?;
+        let source_status = self.r_checked(
+            source,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?;
+        let in_merge = self
+            .git(cwd, &["rev-parse", "--verify", "MERGE_HEAD"])?
+            .status
+            .success();
+        let reason = if source_branch != target {
+            Some(format!(
+                "Project checkout is on {source_branch}; switch it to {target} before accepting"
+            ))
+        } else if !source_status.is_empty() {
+            Some(
+            "Project checkout has local changes. Preserve/commit them before accepting this Card."
+                .into(),
+        )
+        } else if in_merge || !conflicts.is_empty() {
+            Some("Finish or abort the existing merge in the Card terminal before accepting.".into())
+        } else {
+            None
+        };
+        let mut hash = Sha256::new();
+        for value in [
+            &target,
+            &target_head,
+            &card_head,
+            &source_branch,
+            &card.revision.to_string(),
+        ] {
+            hash.update(value.as_bytes());
+            hash.update([0]);
+        }
+        hash.update(&status);
+        hash.update(&source_status);
+        hash.update(&patch);
+        let token = format!("{:x}", hash.finalize());
+        let truncated = patch.len() > 2 * 1024 * 1024;
+        let patch =
+            String::from_utf8_lossy(&patch[..patch.len().min(2 * 1024 * 1024)]).into_owned();
+        Ok(ReviewPreview {
+            card_id: card.id.clone(),
+            revision: card.revision,
+            target_branch: target,
+            target_head,
+            card_head,
+            source_branch,
+            worktree: cwd.to_string_lossy().into_owned(),
+            files,
+            patch,
+            truncated,
+            dirty: !status.is_empty(),
+            conflicts,
+            token,
+            merge_allowed: reason.is_none(),
+            reason,
+        })
+    }
+
+    /// The caller has persisted a delivery intent before invoking this operation.
+    pub fn review_merge(
+        &self,
+        project: &Project,
+        card: &Card,
+        target: Option<&str>,
+        token: &str,
+        message: &str,
+    ) -> Result<String> {
+        let plan = self.review_preview(project, card, target)?;
+        ensure!(
+            plan.token == token,
+            "Review is stale: files or branch heads changed. Refresh the diff before accepting."
+        );
+        ensure!(
+            plan.merge_allowed,
+            "{}",
+            plan.reason.as_deref().unwrap_or("Merge unavailable")
+        );
+        let cwd = Path::new(&plan.worktree);
+        let source = Path::new(&project.directory);
+        ensure!(!message.trim().is_empty(), "Commit message is empty");
+        if plan.dirty {
+            // Explicit Commit and merge accepts the complete reviewed Card checkout.
+            self.r_checked(cwd, &["add", "-A", "--", "."])?;
+            let reviewed_tree = self.r_text(cwd, &["write-tree"])?;
+            self.r_checked(cwd, &["commit", "-m", message])?;
+            ensure!(
+                self.r_text(cwd, &["rev-parse", "HEAD^{tree}"])? == reviewed_tree,
+                "Git hooks changed the committed tree. Inspect the retained Card commit and refresh the review; the Project branch was not updated."
+            );
+        }
+        // Integrate the target into the Card checkout, leaving any conflict there
+        // for the user/Agent. The Project's branch stays untouched on failure.
+        let integrate = self.git(cwd, &["merge", "--no-edit", &plan.target_head])?;
+        ensure!(
+            integrate.status.success(),
+            "Merge needs attention in the Card worktree; the Project branch was not updated. {} {}",
+            String::from_utf8_lossy(&integrate.stdout).trim(),
+            String::from_utf8_lossy(&integrate.stderr).trim()
+        );
+        ensure!(
+            self.r_checked(
+                cwd,
+                &["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+            )?
+            .is_empty(),
+            "Git hooks left Card changes after commit/merge; inspect and refresh before delivery"
+        );
+        let head = self.r_text(cwd, &["rev-parse", "HEAD"])?;
+        ensure!(
+            self.current_branch(&project.directory).as_deref() == Some(&plan.target_branch),
+            "Project branch changed while preparing the merge; Card commit is retained"
+        );
+        ensure!(
+            self.r_text(source, &["rev-parse", "HEAD"])? == plan.target_head,
+            "Target branch advanced; refresh the review. Card commit is retained."
+        );
+        ensure!(
+            self.r_checked(
+                source,
+                &["status", "--porcelain=v1", "-z", "--untracked-files=all"]
+            )?
+            .is_empty(),
+            "Project checkout changed; Card commit is retained"
+        );
+        self.r_checked(
+            source,
+            &["merge", "--ff-only", "--no-overwrite-ignore", &head],
+        )?;
+        ensure!(
+            self.r_text(source, &["rev-parse", "HEAD"])? == head,
+            "Target HEAD did not reach the accepted Card commit"
+        );
+        Ok(head)
+    }
 }
 fn names(bytes: &[u8]) -> Result<Vec<String>> {
     bytes
@@ -29,173 +277,13 @@ fn names(bytes: &[u8]) -> Result<Vec<String>> {
         .map(|s| Ok(std::str::from_utf8(s)?.to_owned()))
         .collect()
 }
-fn common(dir: &Path) -> Result<PathBuf> {
-    let path = PathBuf::from(text(dir, &["rev-parse", "--git-common-dir"])?);
-    Ok(if path.is_absolute() {
-        path
-    } else {
-        dir.join(path)
-    }
-    .canonicalize()?)
-}
-pub fn current_branch(directory: &str) -> Option<String> {
-    let out = git(
-        Path::new(directory),
-        &["symbolic-ref", "--quiet", "--short", "HEAD"],
-    )
-    .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
-}
 
+pub fn current_branch(dir: &str) -> Option<String> {
+    Ops::local().current_branch(dir)
+}
 pub fn preview(project: &Project, card: &Card, target: Option<&str>) -> Result<ReviewPreview> {
-    ensure!(
-        card.archived_at.is_none(),
-        "Restore the Card before reviewing its checkout"
-    );
-    let source = Path::new(&project.directory);
-    let cwd = Path::new(
-        card.worktree
-            .as_deref()
-            .context("This Card has no prepared worktree")?,
-    );
-    ensure!(
-        cwd.is_dir(),
-        "Card worktree is missing; restore/open the Card Agent before reviewing"
-    );
-    ensure!(
-        source.canonicalize()? != cwd.canonicalize()?,
-        "Merge delivery requires a separate Git Card worktree"
-    );
-    ensure!(
-        common(source)? == common(cwd)?,
-        "Card worktree belongs to a different Git repository"
-    );
-    let source_branch = current_branch(&project.directory).unwrap_or_default();
-    let target = target
-        .map(str::to_owned)
-        .or_else(|| project.target_branch.clone())
-        .unwrap_or_else(|| source_branch.clone());
-    ensure!(
-        !target.is_empty(),
-        "Choose a target branch; the Project checkout is detached"
-    );
-    checked(source, &["check-ref-format", "--branch", &target])?;
-    let target_ref = format!("refs/heads/{target}");
-    let target_head = text(
-        source,
-        &["rev-parse", "--verify", &format!("{target_ref}^{{commit}}")],
-    )?;
-    let card_head = text(cwd, &["rev-parse", "--verify", "HEAD"])?;
-    let base = text(cwd, &["merge-base", &target_head, &card_head])?;
-    let status = checked(
-        cwd,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )?;
-    let mut files = names(&checked(
-        cwd,
-        &["diff", "--no-ext-diff", "--name-only", "-z", &base, "--"],
-    )?)?;
-    let mut patch = checked(
-        cwd,
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--binary",
-            &base,
-            "--",
-        ],
-    )?;
-    for path in names(&checked(
-        cwd,
-        &["ls-files", "--others", "--exclude-standard", "-z"],
-    )?)? {
-        let out = git(
-            cwd,
-            &[
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--binary",
-                "--no-index",
-                "--",
-                "/dev/null",
-                &path,
-            ],
-        )?;
-        ensure!(
-            out.status.code() == Some(1) || out.status.success(),
-            "Could not read untracked file {path}"
-        );
-        patch.extend_from_slice(&out.stdout);
-        files.push(path);
-    }
-    files.sort();
-    files.dedup();
-    let conflicts = names(&checked(
-        cwd,
-        &["diff", "--name-only", "--diff-filter=U", "-z"],
-    )?)?;
-    let source_status = checked(
-        source,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )?;
-    let in_merge = git(cwd, &["rev-parse", "--verify", "MERGE_HEAD"])?
-        .status
-        .success();
-    let reason = if source_branch != target {
-        Some(format!(
-            "Project checkout is on {source_branch}; switch it to {target} before accepting"
-        ))
-    } else if !source_status.is_empty() {
-        Some(
-            "Project checkout has local changes. Preserve/commit them before accepting this Card."
-                .into(),
-        )
-    } else if in_merge || !conflicts.is_empty() {
-        Some("Finish or abort the existing merge in the Card terminal before accepting.".into())
-    } else {
-        None
-    };
-    let mut hash = Sha256::new();
-    for value in [
-        &target,
-        &target_head,
-        &card_head,
-        &source_branch,
-        &card.revision.to_string(),
-    ] {
-        hash.update(value.as_bytes());
-        hash.update([0]);
-    }
-    hash.update(&status);
-    hash.update(&source_status);
-    hash.update(&patch);
-    let token = format!("{:x}", hash.finalize());
-    let truncated = patch.len() > 2 * 1024 * 1024;
-    let patch = String::from_utf8_lossy(&patch[..patch.len().min(2 * 1024 * 1024)]).into_owned();
-    Ok(ReviewPreview {
-        card_id: card.id.clone(),
-        revision: card.revision,
-        target_branch: target,
-        target_head,
-        card_head,
-        source_branch,
-        worktree: cwd.to_string_lossy().into_owned(),
-        files,
-        patch,
-        truncated,
-        dirty: !status.is_empty(),
-        conflicts,
-        token,
-        merge_allowed: reason.is_none(),
-        reason,
-    })
+    Ops::local().review_preview(project, card, target)
 }
-
-/// The caller has persisted a delivery intent before invoking this operation.
 pub fn merge(
     project: &Project,
     card: &Card,
@@ -203,74 +291,17 @@ pub fn merge(
     token: &str,
     message: &str,
 ) -> Result<String> {
-    let plan = preview(project, card, target)?;
-    ensure!(
-        plan.token == token,
-        "Review is stale: files or branch heads changed. Refresh the diff before accepting."
-    );
-    ensure!(
-        plan.merge_allowed,
-        "{}",
-        plan.reason.as_deref().unwrap_or("Merge unavailable")
-    );
-    let cwd = Path::new(&plan.worktree);
-    let source = Path::new(&project.directory);
-    ensure!(!message.trim().is_empty(), "Commit message is empty");
-    if plan.dirty {
-        // Explicit Commit and merge accepts the complete reviewed Card checkout.
-        checked(cwd, &["add", "-A", "--", "."])?;
-        let reviewed_tree = text(cwd, &["write-tree"])?;
-        checked(cwd, &["commit", "-m", message])?;
-        ensure!(
-            text(cwd, &["rev-parse", "HEAD^{tree}"])? == reviewed_tree,
-            "Git hooks changed the committed tree. Inspect the retained Card commit and refresh the review; the Project branch was not updated."
-        );
-    }
-    // Integrate the target into the Card checkout, leaving any conflict there
-    // for the user/Agent. The Project's branch stays untouched on failure.
-    let integrate = git(cwd, &["merge", "--no-edit", &plan.target_head])?;
-    ensure!(
-        integrate.status.success(),
-        "Merge needs attention in the Card worktree; the Project branch was not updated. {} {}",
-        String::from_utf8_lossy(&integrate.stdout).trim(),
-        String::from_utf8_lossy(&integrate.stderr).trim()
-    );
-    ensure!(
-        checked(
-            cwd,
-            &["status", "--porcelain=v1", "-z", "--untracked-files=all"]
-        )?
-        .is_empty(),
-        "Git hooks left Card changes after commit/merge; inspect and refresh before delivery"
-    );
-    let head = text(cwd, &["rev-parse", "HEAD"])?;
-    ensure!(
-        current_branch(&project.directory).as_deref() == Some(&plan.target_branch),
-        "Project branch changed while preparing the merge; Card commit is retained"
-    );
-    ensure!(
-        text(source, &["rev-parse", "HEAD"])? == plan.target_head,
-        "Target branch advanced; refresh the review. Card commit is retained."
-    );
-    ensure!(
-        checked(
-            source,
-            &["status", "--porcelain=v1", "-z", "--untracked-files=all"]
-        )?
-        .is_empty(),
-        "Project checkout changed; Card commit is retained"
-    );
-    checked(
-        source,
-        &["merge", "--ff-only", "--no-overwrite-ignore", &head],
-    )?;
-    ensure!(
-        text(source, &["rev-parse", "HEAD"])? == head,
-        "Target HEAD did not reach the accepted Card commit"
-    );
-    Ok(head)
+    Ops::local().review_merge(project, card, target, token, message)
 }
 
+#[cfg(test)]
+fn checked(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    Ops::local().r_checked(dir, args)
+}
+#[cfg(test)]
+fn text(dir: &Path, args: &[&str]) -> Result<String> {
+    Ops::local().r_text(dir, args)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,6 +333,7 @@ mod tests {
             let project = Project {
                 id: "p".into(),
                 name: "Test".into(),
+                location: None,
                 directory: source.to_str().unwrap().into(),
                 workflow,
                 target_branch: Some("main".into()),

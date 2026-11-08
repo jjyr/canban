@@ -25,11 +25,15 @@ impl AppServer {
             let db = store.db();
             let c: Card = db.get(strp(&p, "card_id")?)?;
             let project: Project = db.get(&c.project_id)?;
+            let project = self.bound_project(&project, &c);
             let reason = blocker(db, &c)?;
             (c, project, reason)
         };
-        let mut plan =
-            canban_workspaces::review::preview(&project, &card, p["target_branch"].as_str())?;
+        let mut plan = self.ops(&project.work_location().machine).review_preview(
+            &project,
+            &card,
+            p["target_branch"].as_str(),
+        )?;
         if reason.is_some() {
             plan.merge_allowed = false;
             plan.reason = reason;
@@ -53,8 +57,8 @@ impl AppServer {
             let card:Card=db.get(strp(&p,"card_id")?)?;revise(&card,&p)?;
             ensure!(card.archived_at.is_none(),"Restore the Card before accepting");
             if let Some(reason)=blocker(db,&card)? {bail!("{reason}");}
-            let project:Project=db.get(&card.project_id)?;
-            let plan=canban_workspaces::review::preview(&project,&card,p["target_branch"].as_str())?;
+            let project:Project=db.get(&card.project_id)?;let project=self.bound_project(&project,&card);
+            let plan=self.ops(&project.work_location().machine).review_preview(&project,&card,p["target_branch"].as_str())?;
             ensure!(plan.token==strp(&p,"token")?,"Review is stale; refresh the diff before accepting");
             ensure!(plan.merge_allowed,"{}",plan.reason.as_deref().unwrap_or("Merge unavailable"));
             log(db,&card,"review.merge_started","user","Accepted reviewed changes for commit/merge",None,json!({"request_key":key,"target_branch":plan.target_branch,"target_head":plan.target_head,"card_head":plan.card_head,"token":plan.token}))?;
@@ -70,7 +74,7 @@ impl AppServer {
             .filter(|s| !s.trim().is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| format!("Canban #{}: {}", card.number, card.title));
-        let result = canban_workspaces::review::merge(
+        let result = self.ops(&project.work_location().machine).review_merge(
             &project,
             &card,
             Some(&plan.target_branch),

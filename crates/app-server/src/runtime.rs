@@ -19,13 +19,23 @@ pub(super) fn completion_ready(run: &Attempt, value: &Value) -> bool {
         && value["turn"]
             .as_u64()
             .is_some_and(|t| t > run.completion_turn.unwrap_or(u64::MAX))
-        && run
-            .completed_at
-            .is_some_and(|at| value["status_ms"].as_u64().is_some_and(|t| t >= at))
+        && (run.location.as_ref().is_some_and(|l| l.machine != "local")
+            || run
+                .completed_at
+                .is_some_and(|at| value["status_ms"].as_u64().is_some_and(|t| t >= at)))
 }
 
 impl AppServer {
     pub fn start(self: &Arc<Self>) -> Result<Running> {
+        // The lock is held by the accept loop, including socket removal.
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(self.home.join("server.lock"))?;
+        lock.try_lock()
+            .context("Another Canban AppServer owns this home")?;
         let socket = self.endpoint();
         if socket.exists() {
             ensure!(
@@ -96,6 +106,7 @@ impl AppServer {
                 }
             }
             let _ = std::fs::remove_file(socket);
+            drop(lock);
         });
         let weak = Arc::downgrade(self);
         std::thread::spawn(move || {
@@ -103,6 +114,7 @@ impl AppServer {
                 if server.stop.load(Ordering::SeqCst) {
                     break;
                 }
+                server.start_remote_workers();
                 if let Err(e) = server.tick() {
                     eprintln!("Canban scheduler: {e:#}");
                 }
@@ -124,6 +136,9 @@ impl AppServer {
             .take(48 * 1024 * 1024)
             .read_line(&mut line)?;
         let input: Value = serde_json::from_str(&line)?;
+        if input["method"] == "herdr.connect" {
+            return self.relay(stream, &input["params"]);
+        }
         let id = input["id"].clone();
         let reply = match self.call(strp(&input, "method")?, input["params"].clone()) {
             Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
@@ -252,7 +267,40 @@ impl AppServer {
         self.close_completed(&client)?;
         self.close_idle(&client)?;
         let snapshot = self.snapshot()?;
-        let request = canban_scheduler::next(&snapshot, self.config().scheduler.max_agents);
+        let mut available = snapshot.clone();
+        if snapshot
+            .projects
+            .iter()
+            .any(|p| p.work_location().machine != "local")
+            || snapshot.requests.iter().any(|r| r.resume_from.is_some())
+        {
+            let catalog = self.machines().ok();
+            available.requests.retain(|r| {
+                let machine = r
+                    .resume_from
+                    .as_ref()
+                    .and_then(|id| snapshot.attempts.iter().find(|a| &a.id == id))
+                    .and_then(|a| a.location.as_ref())
+                    .map(|l| l.machine.clone())
+                    .or_else(|| {
+                        snapshot
+                            .projects
+                            .iter()
+                            .find(|p| p.id == r.project_id)
+                            .map(|p| p.work_location().machine)
+                    })
+                    .unwrap_or_else(|| "local".into());
+                machine == "local"
+                    || catalog
+                        .as_ref()
+                        .and_then(|v| v["machines"].as_array())
+                        .is_some_and(|ms| {
+                            ms.iter()
+                                .any(|m| m["id"] == machine && m["state"] == "connected")
+                        })
+            });
+        }
+        let request = canban_scheduler::next(&available, self.config().scheduler.max_agents);
         if let Some(request) = request {
             let req = self.store.lock().unwrap().write(|db| {
                 let mut req: Request = db.get(&request.id)?;
@@ -268,6 +316,14 @@ impl AppServer {
                     db.save(&req)?;
                     return Ok(None);
                 }
+                let project: Project = db.get(&req.project_id)?;
+                req.location = Some(if let Some(id) = &req.resume_from {
+                    db.get::<Attempt>(id)?
+                        .location
+                        .context("Resume location missing")?
+                } else {
+                    project.work_location()
+                });
                 req.state = "starting".into();
                 req.attempt += 1;
                 db.save(&req)?;
@@ -461,35 +517,138 @@ impl AppServer {
             .iter()
             .find(|c| c.id == req.card_id)
             .context("Card missing")?;
-        let cwd = canban_workspaces::prepare(&self.home, project, card)?;
+        let location = req
+            .location
+            .clone()
+            .context("Execution location was not admitted")?;
+        self.resolve_machine(&location.machine, true)?;
+        let ops = self.ops(&location.machine);
+        let remote = location.machine != "local";
+        let prior = req
+            .resume_from
+            .as_ref()
+            .and_then(|id| snapshot.attempts.iter().find(|a| &a.id == id));
+        let home = prior
+            .and_then(|a| a.runtime_home.as_ref())
+            .map(PathBuf::from)
+            .map(Ok)
+            .unwrap_or_else(|| self.execution_home(&location.machine))?;
+        let mut project = project.clone();
+        project.directory = location.directory.clone();
+        project.location = Some(location.clone());
         let mut prepared = card.clone();
+        if let Some(old) = prior {
+            ensure!(
+                ops.host.is_dir(Path::new(&old.cwd)),
+                "Original execution directory is missing; Resume cannot move to another location"
+            );
+            prepared.worktree = Some(old.cwd.clone());
+            if let Some(w) = &old.workspace {
+                prepared.branch = w.branch.clone();
+                prepared.base_commit = w.base_commit.clone();
+                project.target_branch = w.target_branch.clone();
+            }
+        } else if prepared
+            .workspace
+            .as_ref()
+            .is_some_and(|w| w.location != location)
+        {
+            ensure!(
+                card.delivery.is_some(),
+                "This Card has undelivered work in its previous environment. Accept/hand off that work before starting a stage in the new location; Resume still uses the original environment."
+            );
+            prepared.worktree = None;
+            prepared.branch = None;
+            prepared.base_commit = None;
+        }
+        let cwd = if prior.is_some() {
+            PathBuf::from(prepared.worktree.as_ref().unwrap())
+        } else {
+            ops.prepare(&home, &project, &prepared)?
+        };
         prepared.worktree = Some(cwd.to_string_lossy().into_owned());
-        let info = canban_workspaces::info(project, &prepared)?;
-        self.store.lock().unwrap().write(|db| {
-            let mut current: Card = db.get(&card.id)?;
-            let changed = current.worktree != prepared.worktree || current.branch != info.branch;
-            current.worktree = prepared.worktree.clone();
-            current.branch = info.branch.clone();
-            if current.base_commit.is_none() {
-                current.base_commit = info.base_commit.clone();
-            }
-            if changed {
-                log(db, &current, "workspace.prepared", "system", "Card branch and workspace prepared", Some(req.id.clone()), json!({"worktree":current.worktree,"branch":current.branch,"base_commit":current.base_commit}))?;
-            }
-            db.save(&current)
-        })?;
-        let input = canban_context::capture(
+        let info = ops.info(&project, &prepared)?;
+        let workspace = WorkspaceBinding {
+            location: location.clone(),
+            path: cwd.to_string_lossy().into_owned(),
+            branch: info.branch.clone(),
+            base_commit: info.base_commit.clone(),
+            target_branch: project.target_branch.clone(),
+        };
+        if prior.is_none()
+            || card
+                .workspace
+                .as_ref()
+                .is_none_or(|w| w.location == location)
+        {
+            self.store.lock().unwrap().write(|db| {
+                let mut current: Card = db.get(&card.id)?;
+                if current.workspace.as_ref() != Some(&workspace) {
+                    if let Some(old) = current.workspace.replace(workspace.clone())
+                        && old.location != workspace.location
+                    {
+                        current.workspace_history.push(old);
+                        current.delivery = None;
+                    }
+                    current.worktree = Some(workspace.path.clone());
+                    current.branch = workspace.branch.clone();
+                    current.base_commit = workspace.base_commit.clone();
+                    log(
+                        db,
+                        &current,
+                        "workspace.prepared",
+                        "system",
+                        "Card workspace prepared",
+                        Some(req.id.clone()),
+                        json!({"workspace":workspace}),
+                    )?;
+                    db.save(&current)?;
+                }
+                Ok(())
+            })?;
+        }
+        let endpoint = if remote {
+            format!("spool:{}", home.join("rpc").display())
+        } else {
+            self.endpoint().to_string_lossy().into_owned()
+        };
+        let cli = if remote {
+            home.join("bin/canban")
+        } else {
+            self.cli.clone()
+        };
+        let input = canban_context::capture_for(
             &self.home,
-            project,
-            card,
+            &project,
+            &prepared,
             req,
             req.attempt,
             snapshot,
-            &self.endpoint().to_string_lossy(),
-            &self.cli,
+            &endpoint,
+            &cli,
+            &home,
         )?;
+        if remote {
+            self.stage_remote(&ops.host, &home, card)?;
+        }
         let (mut context, fresh) = self.store.lock().unwrap().write(|db| {
             let mut c = crate::sessions::conversation(db, card, &req.profile)?;
+            if let Some(old) = prior {
+                c.provider_session_id = old.provider_session_id.clone();
+            } else if c
+                .last_request_id
+                .as_ref()
+                .and_then(|id| snapshot.requests.iter().find(|r| &r.id == id))
+                .and_then(|r| {
+                    snapshot
+                        .attempts
+                        .iter()
+                        .find(|a| a.request_id == r.id && a.number == r.attempt)
+                })
+                .is_some_and(|a| a.location.as_ref() != Some(&location))
+            {
+                c.provider_session_id = None;
+            }
             let fresh = c.provider_session_id.is_none();
             if fresh
                 && req
@@ -505,6 +664,10 @@ impl AppServer {
             Ok((c, fresh))
         })?;
         let mut run = Attempt {
+            runtime_home: Some(home.to_string_lossy().into_owned()),
+            workspace: Some(workspace),
+            location: req.location.clone(),
+            owner_core_id: None,
             lifecycle: Lifecycle::default(),
             id: Attempt::key(&req.id, req.attempt),
             request_id: req.id.clone(),
@@ -540,24 +703,18 @@ impl AppServer {
                 q.attempt = req.attempt;
                 db.save(&q)?;
             }
-            let mut c: Card = db.get(&card.id)?;
-            c.worktree = Some(run.cwd.clone());
-
-            db.save(&c)
+            Ok(())
         })?;
         let client = canban_herdr::Client {
             config: self.config(),
         };
         let core = client.status()?;
         let env = std::collections::BTreeMap::from([
-            (
-                "CANBAN_ENDPOINT".into(),
-                self.endpoint().to_string_lossy().into_owned(),
-            ),
+            ("CANBAN_ENDPOINT".into(), endpoint.clone()),
             ("CANBAN_REQUEST_ID".into(), req.id.clone()),
             (
                 "CANBAN_RUN_DIR".into(),
-                canban_context::run_dir(&self.home, req, req.attempt)
+                canban_context::run_dir(&home, req, req.attempt)
                     .to_string_lossy()
                     .into_owned(),
             ),
@@ -568,11 +725,8 @@ impl AppServer {
             // Do not misidentify a child invocation using its launching Agent's ID.
             ("CANBAN_PROFILE_ID".into(), req.profile.id.clone()),
             ("CANBAN_ATTEMPT".into(), req.attempt.to_string()),
-            ("CANBAN_CLI".into(), self.cli.to_string_lossy().into_owned()),
-            (
-                "CANBAN_HOME".into(),
-                self.home.to_string_lossy().into_owned(),
-            ),
+            ("CANBAN_CLI".into(), cli.to_string_lossy().into_owned()),
+            ("CANBAN_HOME".into(), home.to_string_lossy().into_owned()),
         ]);
         let labels = std::collections::BTreeMap::from([
             ("canban.project".into(), req.project_id.clone()),
@@ -581,23 +735,34 @@ impl AppServer {
             ("canban.attempt".into(), req.attempt.to_string()),
         ]);
         let prompt = std::fs::read_to_string(self.home.join(input))?;
-        let argv = canban_profiles::command(
+        let mut argv = canban_profiles::command(
             &req.profile,
             context.provider_session_id.as_deref(),
             fresh,
             &[
-                ("home", &self.home.to_string_lossy()),
+                ("home", &home.to_string_lossy()),
                 ("prompt", &prompt),
-                ("cli", &self.cli.to_string_lossy()),
+                ("cli", &cli.to_string_lossy()),
             ],
         )?;
-        let terminal = client.launch(argv, &run.cwd, env, labels)?;
+        if !remote {
+            argv[0] = canban_profiles::executable(&argv[0]);
+        } else if Path::new(&argv[0]).components().count() == 1 {
+            let program=ops.host.python("import os,shutil,json,sys;h=os.path.expanduser('~');p=os.environ.get('PATH','')+os.pathsep+os.path.join(h,'.local/bin')+os.pathsep+os.path.join(h,'.cargo/bin');print(json.dumps(shutil.which(sys.argv[1],path=p) or sys.argv[1]))",&[&argv[0]])?;
+            argv[0] = program.as_str().context("No remote executable")?.into();
+        }
+        let terminal = client.launch_on(&location.machine, argv, &run.cwd, env, labels)?;
+        run.owner_core_id = if remote {
+            Some(location.machine.clone())
+        } else {
+            core["core"]["id"].as_str().map(str::to_owned)
+        };
         run.core_id = Some(strp(&core["core"], "id")?.into());
         run.terminal = Some(strp(&terminal, "address")?.into());
         let delivery_error=terminal.get("first_message").filter(|v|v["sent"]==false).map(|v|format!("Herdr did not deliver the initial task: {v}. Inspect this terminal before retrying."));
         run.observed = Some(canban_herdr::observation(&terminal));
         run.state = "running".into();
-        self.store.lock().unwrap().write(|db|{let current:Attempt=db.get(&run.id)?;if current.state!="starting"{run.state=current.state;}db.save(&run)?;let mut r:Request=db.get(&req.id)?;if r.state=="starting"{r.state="running".into();db.save(&r)?;}let c:Card=db.get(&req.card_id)?;log(db,&c,"execution.started","system",&format!("@{} started",req.profile.id),Some(req.id.clone()),json!({"attempt":req.attempt,"terminal":run.terminal,"core_id":run.core_id,"cwd":run.cwd}))})?;
+        self.store.lock().unwrap().write(|db|{let current:Attempt=db.get(&run.id)?;if current.state!="starting"{run.state=current.state;}db.save(&run)?;let mut r:Request=db.get(&req.id)?;if r.state=="starting"{r.state="running".into();db.save(&r)?;}let c:Card=db.get(&req.card_id)?;log(db,&c,"execution.started","system",&format!("@{} started",req.profile.id),Some(req.id.clone()),json!({"attempt":req.attempt,"terminal":run.terminal,"core_id":run.core_id,"owner_core_id":run.owner_core_id,"location":run.location,"cwd":run.cwd}))})?;
         self.store.lock().unwrap().write(|db| {
             for q in snapshot
                 .questions

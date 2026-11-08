@@ -71,19 +71,11 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
             );
         }
         profile.exit.get_or_insert(ExitAction::Manual);
-        for args in [&mut profile.argv, &mut profile.resume_argv]
-            .into_iter()
-            .flatten()
-        {
-            if let Some(program) = args.first_mut() {
-                *program = executable(program);
-            }
-        }
     }
     Ok(config)
 }
 
-fn executable(program: &str) -> String {
+pub fn executable(program: &str) -> String {
     if Path::new(program).components().count() != 1 {
         return program.into();
     }
@@ -299,5 +291,19 @@ mod tests {
         assert_eq!(args.last().unwrap(), "literal {home} {session_id} {cli}");
         let mut custom = json!({"profiles":[{"id":"custom","argv":["own-command","-p","value"]}]});
         assert!(!migrate(&mut custom).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod machine_tests {
+    use super::*;
+    #[test]
+    fn profile_commands_remain_portable_until_execution_placement_is_known() {
+        let home = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.profiles[0].argv = Some(vec!["sh".into(), "-l".into()]);
+        let resolved = resolve(config, home.path()).unwrap();
+        assert_eq!(resolved.profiles[0].command()[0], "sh");
+        assert!(Path::new(&executable("sh")).is_absolute());
     }
 }

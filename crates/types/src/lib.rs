@@ -170,6 +170,11 @@ impl Default for SchedulerSettings {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Config {
+    #[serde(default = "local_machine")]
+    pub default_machine: String,
+    /// Client-only relay to AppServer; never used by its own Core adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_endpoint: Option<String>,
     #[serde(default)]
     pub scheduler: SchedulerSettings,
     pub hc: String,
@@ -189,6 +194,8 @@ impl Default for Config {
             ..Default::default()
         };
         Self {
+            default_machine: "local".into(),
+            relay_endpoint: None,
             scheduler: SchedulerSettings::default(),
             hc: "hc".into(),
             hc_session: "default".into(),
@@ -216,13 +223,46 @@ pub struct Project {
     pub id: String,
     pub name: String,
     pub directory: String,
+    /// Current execution default. `directory` remains a compatibility mirror.
+    #[serde(default)]
+    pub location: Option<WorkLocation>,
     pub workflow: Workflow,
     #[serde(default)]
     pub target_branch: Option<String>,
     pub created_at: u64,
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkLocation {
+    /// `local` means AppServer's Core; remote values are owning Core IDs.
+    #[serde(default = "local_machine")]
+    pub machine: String,
+    pub directory: String,
+}
+pub fn local_machine() -> String {
+    "local".into()
+}
+impl Project {
+    pub fn work_location(&self) -> WorkLocation {
+        self.location.clone().unwrap_or_else(|| WorkLocation {
+            machine: local_machine(),
+            directory: self.directory.clone(),
+        })
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct WorkspaceBinding {
+    pub location: WorkLocation,
+    pub path: String,
+    pub branch: Option<String>,
+    pub base_commit: Option<String>,
+    pub target_branch: Option<String>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Card {
+    #[serde(default)]
+    pub workspace: Option<WorkspaceBinding>,
+    #[serde(default)]
+    pub workspace_history: Vec<WorkspaceBinding>,
     pub id: String,
     pub project_id: String,
     pub number: u64,
@@ -288,6 +328,10 @@ pub struct Event {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Request {
+    #[serde(default)]
+    pub location: Option<WorkLocation>,
+    #[serde(default)]
+    pub resume_from: Option<String>,
     pub id: String,
     pub project_id: String,
     pub card_id: String,
@@ -304,6 +348,14 @@ pub struct Request {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Attempt {
+    #[serde(default)]
+    pub runtime_home: Option<String>,
+    #[serde(default)]
+    pub workspace: Option<WorkspaceBinding>,
+    #[serde(default)]
+    pub location: Option<WorkLocation>,
+    #[serde(default)]
+    pub owner_core_id: Option<String>,
     #[serde(default)]
     pub lifecycle: Lifecycle,
     pub id: String,
@@ -561,6 +613,10 @@ impl TerminalEntry {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TerminalRuntime {
+    #[serde(default = "local_machine")]
+    pub machine: String,
+    #[serde(default)]
+    pub owner_core_id: Option<String>,
     pub core_id: Option<String>,
     pub terminal: Option<String>,
     pub state: String,
@@ -569,6 +625,8 @@ pub struct TerminalRuntime {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TerminalContext {
+    #[serde(default = "local_machine")]
+    pub machine: String,
     pub terminal_id: String,
     pub core_id: String,
     pub terminal: String,

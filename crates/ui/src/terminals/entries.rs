@@ -111,6 +111,15 @@ impl Entry {
     pub fn cwd(&self) -> Option<String> {
         self.location.as_ref()?.cwd.clone()
     }
+    pub fn machine(&self) -> &str {
+        self.agent
+            .as_ref()
+            .and_then(|r| r.attempt.as_ref())
+            .and_then(|a| a.location.as_ref())
+            .map(|l| l.machine.as_str())
+            .or_else(|| self.saved.runtime.as_ref().map(|r| r.machine.as_str()))
+            .unwrap_or("local")
+    }
     pub fn hint(&self) -> String {
         let context = self
             .card
@@ -138,6 +147,7 @@ impl Entry {
         if let Some(branch) = self.location.as_ref().and_then(|c| c.branch.as_ref()) {
             lines.push(format!("Branch: {branch}"));
         }
+        lines.push(format!("Machine: {}", self.machine()));
         lines.join("\n")
     }
 }

@@ -49,17 +49,8 @@ impl Client {
     /// hc connect speaks the public JSON-RPC protocol and resolves the installed
     /// core's socket/config without linking Herdr's private implementation.
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
-        let mut child = Command::new(&self.config.hc)
-            .arg("connect")
-            .env("HC_SESSION", &self.config.hc_session)
-            .envs(&self.config.hc_env)
-            .env_remove("HC_TERMINAL_ID")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("Could not start hc connect; configure the installed hc executable")?;
-        let mut input = child.stdin.take().unwrap();
+        let mut transport = transport::connect(&self.config)?;
+        let mut input = transport.writer.take().unwrap();
         writeln!(
             input,
             "{}",
@@ -71,7 +62,7 @@ impl Client {
             json!({"jsonrpc":"2.0","id":2,"method":method,"params":params})
         )?;
         input.flush()?;
-        let output = child.stdout.take().unwrap();
+        let output = transport.reader.take().unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut reader = BufReader::new(output);
@@ -100,12 +91,13 @@ impl Client {
         });
         let reply = rx.recv_timeout(Duration::from_secs(if method == "terminal.run" {
             45
+        } else if method == "machine.exec" {
+            75
         } else {
             12
         }));
         drop(input);
-        let _ = child.kill();
-        let _ = child.wait();
+        drop(transport);
         let reply = reply.context("Herdr reply timed out; launch effects may be unknown")??;
         ensure!(
             reply.get("error").is_none(),
@@ -127,9 +119,51 @@ impl Client {
         env: BTreeMap<String, String>,
         labels: BTreeMap<String, String>,
     ) -> Result<Value> {
+        self.launch_on("local", argv, cwd, env, labels)
+    }
+    pub fn launch_on(
+        &self,
+        machine: &str,
+        argv: Vec<String>,
+        cwd: &str,
+        env: BTreeMap<String, String>,
+        labels: BTreeMap<String, String>,
+    ) -> Result<Value> {
         ensure!(!argv.is_empty(), "Agent profile has no launch command");
-        let result=self.call("terminal.run",json!({"argv":argv,"cwd":cwd,"env":env,"labels":labels,"no_parent":true,"no_notify":true,"outlive_parent":true,"wait":false}))?;
+        let mut p = json!({"argv":argv,"cwd":cwd,"env":env,"labels":labels,"no_parent":true,"no_notify":true,"outlive_parent":true,"wait":false});
+        if machine != "local" {
+            p["on"] = json!(machine);
+        }
+        let mut result = self.call("terminal.run", p)?;
+        // Stable owner prefix survives route rename and cannot follow a reused alias.
+        if machine != "local" {
+            let address = result["address"].as_str().context("No terminal address")?;
+            let local = address.rsplit('/').next().unwrap();
+            result["address"] = json!(format!("{machine}/{local}"));
+        }
         Ok(result)
+    }
+    pub fn terminals(&self) -> Result<Value> {
+        let mut list = self.call("terminal.list", json!({"all":true}))?;
+        let machines = self
+            .call("machine.list", json!({}))
+            .unwrap_or(json!({"machines":[]}));
+        if let Some(rows) = list["terminals"].as_array_mut() {
+            for row in rows {
+                if let Some((prefix, local)) =
+                    row["address"].as_str().and_then(|v| v.split_once('/'))
+                    && let Some(m) = machines["machines"]
+                        .as_array()
+                        .and_then(|ms| ms.iter().find(|m| m["name"] == prefix))
+                {
+                    row["address"] = json!(format!(
+                        "{}/{local}",
+                        m["id"].as_str().context("No owner ID")?
+                    ));
+                }
+            }
+        }
+        Ok(list)
     }
     pub fn get(&self, terminal: &str) -> Result<Value> {
         self.call("terminal.get", json!({"terminal":terminal}))
@@ -142,3 +176,6 @@ impl Client {
 pub mod stream;
 
 pub mod activity;
+
+pub mod host;
+pub mod transport;

@@ -118,6 +118,8 @@ fn launch(ui: Ui, params: serde_json::Value) {
             ),
             created_at: 0,
             runtime: Some(canban_types::TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
                 core_id: Some("gallery".into()),
                 terminal: Some(id.clone()),
                 state: "running".into(),
@@ -152,6 +154,30 @@ pub fn new_tab(ui: Ui) {
         ui,
         json!({"inherit_terminal_id":ui.terminal_selection.get_untracked()}),
     );
+}
+pub fn machine_menu(ui: Ui) {
+    use nsh_core::element::desktop::{MenuItem, popup_menu};
+    ui.spawn(async move {
+        let mut items = vec![
+            MenuItem::new("AppServer host")
+                .on_select(move || launch(ui, json!({"machine":"local"}))),
+        ];
+        for m in ui
+            .machines
+            .with_untracked(|v| v["machines"].as_array().cloned().unwrap_or_default())
+        {
+            let id = m["id"].as_str().unwrap_or("").to_owned();
+            let title = format!(
+                "{} · {}",
+                m["name"].as_str().unwrap_or("Machine"),
+                m["state"].as_str().unwrap_or("unknown")
+            );
+            items.push(MenuItem::new(title).on_select(move || launch(ui, json!({"machine":id}))));
+        }
+        items.push(MenuItem::separator());
+        items.push(MenuItem::new("Add machine…").on_select(move || ui.navigate("machines")));
+        popup_menu(items).await;
+    });
 }
 pub fn reopen(ui: Ui, id: String) {
     launch(ui, json!({"inherit_terminal_id":id}));
