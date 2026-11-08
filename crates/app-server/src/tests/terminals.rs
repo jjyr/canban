@@ -409,3 +409,22 @@ fn manual_labels_have_their_own_durable_sequence_and_v5_migration_keeps_runtime_
         "Terminal 3"
     );
 }
+
+#[test]
+fn first_terminal_accepts_empty_inheritance_without_a_project_or_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    core(&app, dir.path());
+    assert!(app.snapshot().unwrap().terminals.is_empty());
+    let first = app
+        .call("terminal.create", json!({"inherit_terminal_id":""}))
+        .unwrap();
+    assert_eq!(first["runtime"]["state"], "running");
+    assert_eq!(first["runtime"]["machine"], "local");
+    assert_eq!(first["manual_number"], 1);
+    assert!(first["runtime"]["terminal"].is_string());
+    let s = app.snapshot().unwrap();
+    assert!(s.projects.is_empty() && s.conversations.is_empty());
+    assert!(s.requests.is_empty() && s.attempts.is_empty());
+    assert_eq!(s.terminals.len(), 1);
+}

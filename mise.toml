@@ -45,6 +45,10 @@ run = "/usr/bin/python3 scripts/acceptance-interactive.py"
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance-real-interactive.py"
 
+[tasks.acceptance-real-claude]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-real-claude.py"
+
 [tasks.acceptance-real-workflows]
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance-real-workflows.py"

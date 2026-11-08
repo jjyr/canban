@@ -92,6 +92,56 @@ impl Ops {
         self.checked(source, &["update-ref", &local, &latest, &old])?;
         Ok(())
     }
+    /// Resume always returns to the saved location. A removed managed Card
+    /// checkout can be reconstructed from its retained branch/commit, without
+    /// fetching a new base or falling back to a different directory.
+    pub fn resume(&self, home: &Path, project: &Project, card: &Card) -> Result<PathBuf> {
+        let path = PathBuf::from(
+            card.worktree
+                .as_ref()
+                .context("Original working directory is missing")?,
+        );
+        if self.host.is_dir(&path) {
+            return Ok(path);
+        }
+        ensure!(
+            path == home.join("worktrees").join(&project.id).join(&card.id),
+            "Original working directory is missing; only a managed Card worktree can be restored"
+        );
+        let source = Path::new(&project.directory);
+        let branch = card
+            .branch
+            .as_ref()
+            .context("Original Card branch is unavailable; inspect before resuming")?;
+        self.checked(source, &["check-ref-format", "--branch", branch])?;
+        let retained = format!("refs/canban/cards/{}", card.id);
+        let branch_ref = format!("refs/heads/{branch}");
+        ensure!(
+            self.git(
+                source,
+                &["rev-parse", "--verify", &format!("{retained}^{{commit}}")]
+            )?
+            .status
+            .success()
+                || self
+                    .git(
+                        source,
+                        &["rev-parse", "--verify", &format!("{branch_ref}^{{commit}}")]
+                    )?
+                    .status
+                    .success(),
+            "Original Card branch and retained commit are unavailable; Resume cannot start from a fresh base"
+        );
+        let mut saved = project.clone();
+        saved.workflow.workspace.create_worktree = true;
+        saved.workflow.workspace.sync_base = false;
+        let actual = self.prepare(home, &saved, card)?;
+        ensure!(
+            actual == path,
+            "Resume must restore the original Card directory"
+        );
+        Ok(actual)
+    }
     pub fn prepare(&self, home: &Path, project: &Project, card: &Card) -> Result<PathBuf> {
         let source = Path::new(&project.directory);
         let branch = card_branch(project, card);
@@ -485,6 +535,47 @@ mod sync_tests {
         fn prepare(&self) -> Result<PathBuf> {
             prepare(&self.dir.path().join("home"), &self.project, &self.card)
         }
+    }
+    #[test]
+    fn resume_restores_archived_checkout_without_fetch_or_new_base_and_rejects_missing_history() {
+        let mut f = Fixture::new();
+        let cwd = f.prepare().unwrap();
+        f.card.worktree = Some(cwd.to_string_lossy().into());
+        f.card.branch = Some("canban/p/42".into());
+        let original = checked(&cwd, &["rev-parse", "HEAD"]).unwrap();
+        let home = f.dir.path().join("home");
+        archive(&home, &f.project, &f.card).unwrap();
+        assert!(!cwd.exists());
+        // Rebuild even if the ordinary branch was removed: Archive's retained
+        // Card ref is authoritative, rather than the now-current Project base.
+        checked(&f.source, &["branch", "-D", "canban/p/42"]).unwrap();
+        // The template can change after archiving. Resume uses the saved binding.
+        f.project.workflow.workspace.create_worktree = false;
+        checked(&f.source, &["remote", "remove", "origin"]).unwrap();
+        let restored = Ops::local().resume(&home, &f.project, &f.card).unwrap();
+        assert_eq!(restored, cwd);
+        assert_eq!(checked(&cwd, &["rev-parse", "HEAD"]).unwrap(), original);
+        archive(&home, &f.project, &f.card).unwrap();
+        checked(&f.source, &["update-ref", "-d", "refs/canban/cards/c"]).unwrap();
+        checked(&f.source, &["branch", "-D", "canban/p/42"]).unwrap();
+        assert!(
+            Ops::local()
+                .resume(&home, &f.project, &f.card)
+                .unwrap_err()
+                .to_string()
+                .contains("fresh base")
+        );
+        assert!(!cwd.exists());
+        let outside = f.dir.path().join("removed-manual-directory");
+        f.card.worktree = Some(outside.to_string_lossy().into());
+        assert!(
+            Ops::local()
+                .resume(&home, &f.project, &f.card)
+                .unwrap_err()
+                .to_string()
+                .contains("only a managed")
+        );
+        assert!(!outside.exists());
     }
     #[test]
     fn fresh_worktree_syncs_base_and_keeps_branch_across_archive_restore() {

@@ -538,10 +538,6 @@ impl AppServer {
         project.location = Some(location.clone());
         let mut prepared = card.clone();
         if let Some(old) = prior {
-            ensure!(
-                ops.host.is_dir(Path::new(&old.cwd)),
-                "Original execution directory is missing; Resume cannot move to another location"
-            );
             prepared.worktree = Some(old.cwd.clone());
             if let Some(w) = &old.workspace {
                 prepared.branch = w.branch.clone();
@@ -562,7 +558,7 @@ impl AppServer {
             prepared.base_commit = None;
         }
         let cwd = if prior.is_some() {
-            PathBuf::from(prepared.worktree.as_ref().unwrap())
+            ops.resume(&home, &project, &prepared)?
         } else {
             ops.prepare(&home, &project, &prepared)?
         };

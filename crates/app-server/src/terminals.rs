@@ -18,6 +18,7 @@ impl AppServer {
         let _gate = self.terminal_gate.lock().unwrap();
         let inherited = p["inherit_terminal_id"]
             .as_str()
+            .filter(|id| !id.is_empty())
             .map(|id| self.terminal_context(json!({"terminal_id":id})))
             .transpose()?;
         if p["inherit_terminal_id"]

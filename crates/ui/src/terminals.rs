@@ -150,10 +150,13 @@ fn launch(ui: Ui, params: serde_json::Value) {
     });
 }
 pub fn new_tab(ui: Ui) {
-    launch(
-        ui,
-        json!({"inherit_terminal_id":ui.terminal_selection.get_untracked()}),
-    );
+    let selected = ui.terminal_selection.get_untracked();
+    let params = if selected.is_empty() {
+        json!({})
+    } else {
+        json!({"inherit_terminal_id":selected})
+    };
+    launch(ui, params);
 }
 pub fn machine_menu(ui: Ui) {
     use nsh_core::element::desktop::{MenuItem, popup_menu};

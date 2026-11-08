@@ -145,3 +145,24 @@ All **80 Rust tests**, workspace/all-target Clippy (`-D warnings`), app/Gallery 
 Native acceptance used `/private/tmp/cb-terminals-bu7qw2bz` with two Projects, deterministic interactive Agents and real login Shells on a scratch Core. Agent entries preceded the first two independent Terminals, which still displayed Terminal 1 and Terminal 2. Renaming Terminal 1 to Build shell, restarting the app and clearing the custom name preserved its number and Core/PTy. Updating a live Card to a long mixed Chinese/English title changed its row/Tab title and still delivered `TITLE_CHANGED_INPUT_OK` to the original Agent. Request counts and runtime identities stayed unchanged. Evidence: `labels-before-restart.json`, `labels-final.json`, `label-checks.json`, `labels-cleanup.json`. Both the disposable app and Core were stopped; the user's app/Core were untouched.
 
 Gallery checks covered 740-point dark and 1120-point light layouts, Codex/Claude marks, long Unicode Card names, queued/working/attention states and numbered independent entries. The checks exposed and fixed undersized standard-stage labels, header overcommit when long tabs were added, and Card-number loss when a narrow tab truncated its title. A narrow tab retains the Card number/stage/provider/Profile and close control, with title details available in chrome/hover. Full branch/directory tooltip values were checked in the component source and accessibility data; long branch shortening was checked visually in the real app. These checks used fixtures, not live paid Codex/Claude sessions.
+
+## First-Terminal regression (2026-11-09)
+
+After multi-machine integration, opening Terminals with no selected entry and
+clicking New terminal sent `inherit_terminal_id: ""`. AppServer attempted to
+resolve that empty ID and returned `Terminal not found` before reaching Core.
+The UI now omits inheritance when nothing is selected; AppServer also accepts
+an empty legacy inheritance ID as absent. A nonempty selected ID still follows
+the existing machine/live-cwd rules and does not silently fall back.
+
+A regression test reproduces the exact empty-string request in a fresh home
+without Projects, conversations or Terminals. It failed before the fix and
+passed afterward; 89 workspace Rust tests and Clippy passed. In an isolated
+native app backed by a real Core, the empty-state New terminal button opened
+Terminal 1 and accepted shell input. Closing the last tab and pressing Command+T
+opened Terminal 2; another Command+T after changing cwd opened Terminal 3 in
+that observed directory. These checks created no scheduled Agent work.
+
+## Post-Archive Agent Resume (2026-11-09)
+
+Real model acceptance found that Restore could leave a historical Agent's original managed worktree absent. Resume now reconstructs that exact checkout from retained Card Git refs on its original machine. It never substitutes the Project's new location or a fresh base. Missing unmanaged directories or lost refs still require inspection. A real Codex session was restored after Archive, received a native Terminal question, recalled its original context and completed/closed normally; code and Notes remained unchanged. See [real Agent acceptance](real-agent-acceptance-20261109.md).
