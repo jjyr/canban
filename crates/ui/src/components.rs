@@ -31,21 +31,7 @@ pub fn run_panel(ui: Ui, req: Request) -> impl IntoElement {
         "Open / resume Agent",
         Variant::Secondary,
         move |_| {
-            dispatch_then(
-                ui,
-                "agent.open",
-                json!({"card_id":card_id,"profile_id":profile_id}),
-                {
-                    let card_id = card_id.clone();
-                    move |v| {
-                        if let Some(id) = v["request_id"].as_str() {
-                            ui.open_card(card_id);
-                            ui.request.set(id.into());
-                            ui.page.set("terminal".into());
-                        }
-                    }
-                },
-            );
+            crate::sessions::open(ui, card_id.clone(), profile_id.clone());
         },
     ));
     if let Some(run) = run {

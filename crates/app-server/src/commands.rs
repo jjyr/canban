@@ -4,6 +4,11 @@ impl AppServer {
     pub fn call(&self, method: &str, p: Value) -> Result<Value> {
         let config = self.config();
         match method {
+            "terminal.create" => self.create_terminal(p),
+            "terminal.rename" => self.rename_terminal(p),
+            "terminal.interrupt" => self.control_terminal(p, false),
+            "terminal.end" => self.control_terminal(p, true),
+            "terminal.context" => self.terminal_context(p),
             "app.ping" => Ok(json!({"version":env!("CARGO_PKG_VERSION"),"home":self.home})),
             "app.snapshot" => Ok(serde_json::to_value(self.snapshot()?)?),
             "project.list" => Ok(serde_json::to_value(

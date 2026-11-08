@@ -53,6 +53,14 @@ impl AppServer {
             }
             Ok(())
         })?;
+        self.store.lock().unwrap().write(|db| {
+            for mut item in db.list::<TerminalEntry>()? {
+                if let Some(TerminalRuntime {state,connection,error,..})=&mut item.runtime && state=="starting" {
+                    *state="unknown".into(); *connection="unavailable".into(); *error=Some("AppServer restarted before the launch receipt was saved; inspect Herdr before opening another terminal.".into()); db.save(&item)?;
+                }
+            }
+            Ok(())
+        })?;
         // Persisted starting intents must not be replayed as fresh launches.
         // A known binding can reconnect. A lost launch reply remains unknown.
         self.store.lock().unwrap().write(|db|{for mut req in db.list::<Request>()?.into_iter().filter(|r|r.state=="starting"){let run=db.get::<Attempt>(&Attempt::key(&req.id,req.attempt)).ok();req.state=if run.as_ref().and_then(|a|a.terminal.as_ref()).is_some(){"running"}else{"unknown"}.into();db.save(&req)?;if req.state=="unknown"{if let Some(mut run)=run {run.state="unknown".into();db.save(&run)?;}let mut card:Card=db.get(&req.card_id)?;attention(db,&mut card,"Launch interrupted before its receipt was saved. Inspect Herdr before explicitly retrying.")?;card.revision+=1;db.save(&card)?;}}Ok(())})?;
@@ -127,6 +135,7 @@ impl AppServer {
         Ok(())
     }
     pub(super) fn tick(&self) -> Result<()> {
+        self.observe_terminals()?;
         let client = canban_herdr::Client {
             config: self.config(),
         };

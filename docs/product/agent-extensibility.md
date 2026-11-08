@@ -54,3 +54,7 @@ A live mention is additional input and a durable Question. Its explicit reply is
 Commands can run without every optional capability. A command without Resume uses explicit fresh context. A command without usable status stays available for manual exit. Herdr status does not prove business completion or provider-history durability; real-provider acceptance establishes the latter boundary.
 
 Presets are editable configuration defaults, not provider hook registrations. Rust expands commands and consumes the common contracts. Optional wrappers supply provider-specific ID acquisition or command syntax when necessary; they must not duplicate sufficient Herdr lifecycle observations. There is no plugin/SDK requirement. Workflow templates select profiles and stage work; Herdr launch templates do not provide universal history Resume and are not an alternate runtime mode.
+
+## Manual Terminal API
+
+The same AppServer operation boundary now supports `terminal.create` (`project_id`, optional `card_id`, `request_key`), `terminal.rename` (`terminal_id`, `name`), `terminal.context`, `terminal.interrupt` and `terminal.end` (`terminal_id`, `request_key`). These are available through `canban call METHOD JSON`; transport never bypasses the owning Core identity. Create/control request keys prevent effect replay after uncertain receipts. A manual Shell does not become a Workflow Agent merely because an Agent command is run inside it. Tab selection/close are UI navigation and have no execution side effect.

@@ -41,7 +41,7 @@ fn controls() -> impl IntoElement {
                     panel()
                         .child(label("Shared Lucide icons · muted / selected / attention"))
                         .child(view().flex_row().flex_wrap().gap_2().children(
-                            [Icon::Search, Icon::Board, Icon::Overview, Icon::Note,
+                            [Icon::Search, Icon::Terminal, Icon::Board, Icon::Overview, Icon::Note,
                              Icon::Archive, Icon::Settings, Icon::Projects, Icon::Agent,
                              Icon::ChevronDown, Icon::Plus, Icon::Check]
                             .into_iter().enumerate().map(|(i, kind)|
@@ -125,12 +125,28 @@ pub fn Gallery() -> impl IntoElement {
     let constrained = signal(false);
     let ui = Ui::new();
     canban_ui::quick_open::bindings(ui);
+    canban_ui::terminals::bindings(ui);
     ui.snapshot.set(fixtures::workspace());
     ui.project.set("gallery-project".into());
     ui.card.set("card-1".into());
     ui.page.set("card".into());
     ui.note.set("note-1".into());
     ui.profiles.set(canban_types::Config::default().profiles);
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminals") {
+        nsh_core::element::desktop::set_title_bar(
+            nsh_core::desktop::TitleBarStyle::Hidden,
+            Some(px(42.)),
+        );
+        ui.snapshot.set(fixtures::terminal_workspace());
+        ui.open_terminal("gallery-manual".into());
+        match std::env::var("CANBAN_GALLERY_APPEARANCE").as_deref() {
+            Ok("dark") => set_color_scheme(Appearance::Dark),
+            Ok("light") => set_color_scheme(Appearance::Light),
+            _ => {}
+        }
+        return canban_ui::frame::screen(ui).into_element();
+    }
+
     view()
         .flex_1()
         .min_h(px(0.0))
@@ -162,6 +178,16 @@ pub fn Gallery() -> impl IntoElement {
                     scene.set("workspace".into());
                     ui.snapshot.set(fixtures::overview());
                     ui.page.set("overview".into());
+                }))
+                .child(action("Terminals", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::terminal_workspace());
+                    let mut profiles=canban_types::Config::default().profiles;
+                    for p in &mut profiles {p.argv=Some(vec!["fixture-agent".into()]);p.resume_argv=Some(vec!["fixture-agent".into(),"--resume".into(),"{session_id}".into()]);}
+                    ui.profiles.set(profiles);
+                    ui.navigate("terminals");
+                    ui.terminal_sidebar.set(true);
+                    ui.open_terminal(canban_types::Conversation::key("overview-card-2","codex"));
                 }))
                 .child(action("Quick Open", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
@@ -211,6 +237,7 @@ pub fn Gallery() -> impl IntoElement {
             if scene.get() == "controls" {
                 return controls().into_element();
             }
+            if ui.page.get()=="terminals" {return canban_ui::terminals::screen(ui).into_element();}
             let narrow_preview = constrained.get();
             view()
                 .flex_1()
@@ -231,7 +258,7 @@ pub fn Gallery() -> impl IntoElement {
                         })),
                 )
                 .into_element()
-        }))
+        })).into_element()
 }
 
 fn main() {
@@ -246,7 +273,13 @@ fn main() {
         nsh_platform_macos::AppOptions {
             title: "Canban Gallery".into(),
             app_id,
-            size: (1440, 960),
+            size: (
+                std::env::var("CANBAN_GALLERY_WIDTH")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1440),
+                960,
+            ),
             ..Default::default()
         },
     );

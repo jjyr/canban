@@ -4,7 +4,7 @@ Implemented 2026-11-07; navigation refined 2026-11-08. This follows the user-sel
 
 ## Interaction contract
 
-The sidebar is a 56-point rail with 40-point icon targets. Its top-to-bottom order is Quick Open, Board, global Overview, Notes and Archive, with Settings pinned to the bottom. There is no brand letter, separate Project picker, New Project or connection-check action in the rail. Herdr connection diagnostics remain in Settings. Selected state, keyboard focus, accessible names and hover tooltips accompany the icons. Overview retains its global actionable-row badge.
+The sidebar is a 56-point rail with 40-point icon targets. Its top-to-bottom order is Quick Open, Board, global Overview, Terminals, Notes and Archive, with Settings pinned to the bottom. There is no brand letter, separate Project picker, New Project or connection-check action in the rail. Herdr connection diagnostics remain in Settings. Selected state, keyboard focus, accessible names and hover tooltips accompany the icons. Overview retains its global actionable-row badge.
 
 The Board header owns a Project-name button with a chevron. It opens the same search popup restricted to Projects, with a Project-specific placeholder, a checkmark/current label for the active Project and a persistent **New Project** footer action even when no matches remain. New Project closes the popup and opens the existing creation form. Command+O switches an open Project picker into global Quick Open, removing that footer action and current marker. Picking a Project opens its Board, clears the previous Card/Note selection and updates the visible Project name. Empty Boards provide one fully clickable **Create a Project** card; scheduling statistics, task filters and **New Card** stay hidden until a valid Project is selected. Long Project names truncate while preserving the chevron and Card action. Notes and Archive identify their current Project; Overview remains global.
 
@@ -28,7 +28,7 @@ Quick Open searches local metadata across the current Canban home's Projects:
 | Project | Name and directory | Open its Board |
 | Card | Number/title, Project, tags and branch | Open Card detail in its owning Project |
 | Note | Title and owning Project | Open that Note's editor |
-| Agent | Existing Card/profile conversation, profile command name, Card/Project and state | Attach its exact live Terminal, or open its retained Overview context for explicit Resume/recovery |
+| Agent | Existing Card/profile conversation, profile command name, Card/Project and state | Open its conversation in Terminals; attach its live PTY or show retained context for explicit Resume/recovery |
 
 Result types are also searchable words. A candidate has an icon, primary title and concise ownership/status labels. Duplicate names and Project-local Card numbers remain distinguishable. Search does not index full Note bodies, reports or terminal output.
 
@@ -90,3 +90,9 @@ The Gallery adds production icon states (muted, selected, attention) and an Empt
 `mise run test` passed all 62 Rust tests; all-target Clippy (`-D warnings`), application/Gallery builds, formatting and whitespace checks passed. Chinese IME remains excluded as requested; Unicode names were entered using clipboard paste. This is navigation acceptance, not new Agent/provider workflow acceptance.
 
 The subsequent [Project-entry and Settings refinement](workspace-entry-and-settings.md) replaces the disabled New Card/extra-button empty state with one clickable entry, adds the native folder chooser, removes Overview filters and unifies Settings scrolling. Its current contract supersedes the earlier empty-state acceptance details above.
+
+Terminal navigation update (2026-11-08): all Agent results now use the [dedicated Terminal workspace](terminal-workspace.md), including queued/closed/archived records. The former closed-result Overview-inspector route in the historical acceptance above is superseded. Browsing remains read-only; explicit Resume remains separate.
+
+## Terminal tabs
+
+Quick Open now also indexes saved manual Terminal names/numbers and directories. Opening an Agent or Terminal destination reuses its existing tab/binding without launching work. Command+T creates a Shell in the selected Project/Card context; Command+W closes its tab view; Command+Shift+[ / ] cycles opened tabs. Search and rename dialogs suspend these shortcuts and restore native Terminal focus on dismissal. The left inventory and right tab strip extend separately into window chrome.

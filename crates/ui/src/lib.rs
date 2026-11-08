@@ -5,6 +5,7 @@ pub mod board;
 pub mod card;
 pub mod components;
 pub mod drafts;
+pub mod frame;
 pub mod notes;
 pub mod overview;
 pub mod presenter;
@@ -16,8 +17,8 @@ pub use rail::sidebar;
 pub use screens::screen;
 pub mod quick_open;
 mod sessions;
+pub mod terminals;
 pub mod workspace;
-use canban_ui_kit::tokens::*;
 use nsh_core::prelude::*;
 use presenter::*;
 static APP: std::sync::OnceLock<Arc<canban_app_server::AppServer>> = std::sync::OnceLock::new();
@@ -27,6 +28,16 @@ fn native(_: &mut Registry) {}
 pub fn Canban() -> impl IntoElement {
     let ui = Ui::new();
     quick_open::bindings(ui);
+    terminals::bindings(ui);
+    effect(move || {
+        if ui.page.get() != "terminals" {
+            nsh_core::element::desktop::set_title("Canban — Human Context");
+        }
+    });
+    nsh_core::element::desktop::set_title_bar(
+        nsh_core::desktop::TitleBarStyle::Hidden,
+        Some(px(42.)),
+    );
     refresh(ui);
     let events = stored(crate::APP.get().unwrap().subscribe());
     let dirty = signal(false);
@@ -39,34 +50,9 @@ pub fn Canban() -> impl IntoElement {
             refresh(ui);
         }
     });
-    view()
-        .flex_1()
-        .bg(BACKGROUND)
-        .child(
-            view().flex_1().flex_row().child(sidebar(ui)).child(
-                view()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .on_layout(move |b: &Bounds<Points>| ui.narrow.set(b.size.width.0 < 900.0))
-                    .child(dynamic(move || {
-                        let page = ui.page.get();
-                        let _ = ui.card.get();
-                        let _ = ui.project.get();
-                        untracked(|| screens::screen(ui, &page))
-                    })),
-            ),
-        )
-        .child(quick_open::overlay(ui))
-        .child(
-            view()
-                .h(px(28.0))
-                .px_4()
-                .justify_center()
-                .border_t_1()
-                .border_color(BORDER)
-                .child(canban_ui_kit::muted(move || ui.status.get())),
-        )
+    frame::screen(ui)
 }
+
 pub fn run() -> Result<()> {
     let home = canban_app_server::default_home()?;
     let cli = std::env::current_exe()?.with_file_name("canban");

@@ -1036,7 +1036,7 @@ fn upgrading_existing_notes_retains_current_revision_without_inventing_history()
     )
     .unwrap();
     let db = rusqlite::Connection::open(d.path().join("home/canban.sqlite")).unwrap();
-    db.execute_batch("DROP TABLE note_events; DROP TABLE note_revisions; PRAGMA user_version=2;")
+    db.execute_batch("DROP TABLE note_events; DROP TABLE note_revisions; DROP TABLE terminals; PRAGMA user_version=2;")
         .unwrap();
     drop(db);
     drop(app);
@@ -1341,3 +1341,5 @@ fn human_continue_can_retry_routing_after_tags_are_fixed() {
 
 #[path = "tests/lifecycle.rs"]
 mod lifecycle_cases;
+#[path = "tests/terminals.rs"]
+mod terminal_cases;

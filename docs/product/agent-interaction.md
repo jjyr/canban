@@ -180,3 +180,10 @@ Immediate means Canban attempts delivery now, rather than waiting for the Agent'
 For a live invocation, the question keeps its comment reference and original task/callback remains active. If explicit CLI replies are used, replying to Q records the answer only; execution.report(completed) still refers to completion of the original assignment. There is no separate question Session type and no new scheduled invocation merely for appending Q to an already-active Agent.
 
 Implemented: Card/profile reuse, live append and canban reply are verified with real Codex and the deterministic interactive fixture. An interrupted delivery becomes delivery_unknown with attention on restart rather than being resent.
+
+
+## Terminal workspace UI update (2026-11-08)
+
+The native Terminal now lives in the [dedicated Terminal workspace](../terminal-workspace.md), with Project/Card/profile navigation. This supersedes the Terminal portion of focused Card/work layouts described earlier. Overview and Quick Open open the same conversation destination; closed browsing has explicit Resume, and wide sidebar visibility preserves the current viewer. Review stays in the existing delivery interface. Execution/report/exit semantics are unchanged.
+
+The Terminal workspace also opens ordinary Shells directly. All terminal rendering, input, reconnection, interrupt and end transport are shared; Agent task reporting and exact provider resume remain Agent-specific. Manual commands, including manually launched Agent programs, do not enroll in Scheduler/Workflow. Closing a tab only detaches its view. Shells have no automatic Agent idle timeout. See [Terminal workspace](../terminal-workspace.md).

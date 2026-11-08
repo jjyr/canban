@@ -2,9 +2,34 @@ use crate::drafts::Draft;
 use canban_types::*;
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Location {
+    pub page: String,
+    pub project: String,
+    pub card: String,
+    pub request: String,
+    pub note: String,
+    pub return_overview: bool,
+}
+
 #[derive(Clone, Copy)]
 pub struct Ui {
+    /// Commands outlive transient buttons/lists, but end with the window.
+    pub owner: Owner,
+    pub terminal_selection: Signal<String>,
+    pub terminal_tabs: Signal<Vec<String>>,
+    pub terminal_details: Signal<bool>,
+    pub terminal_focus: Signal<u64>,
+    pub terminal_rename: Signal<Option<String>>,
+    pub operation_error: Signal<String>,
+    pub terminal_origin: Signal<Option<Location>>,
+    pub terminal_card_return: Signal<bool>,
+    pub terminal_sidebar: Signal<bool>,
+    pub terminal_closed: Signal<bool>,
+    pub terminal_folds: Signal<BTreeSet<String>>,
+    pub terminal_width: Signal<f32>,
     pub quick_open: Signal<bool>,
     pub project_picker: Signal<bool>,
     pub search_query: Signal<String>,
@@ -25,6 +50,7 @@ pub struct Ui {
     pub status: Signal<String>,
     pub pending: Signal<bool>,
     pub refreshing: Signal<bool>,
+    pub snapshot_epoch: Signal<u64>,
     pub output: Signal<String>,
     pub output_observed_at: Signal<Option<u64>>,
     pub overview_history: Signal<bool>,
@@ -48,6 +74,11 @@ impl Default for Ui {
     }
 }
 impl Ui {
+    pub fn spawn<T: 'static>(self, future: impl std::future::Future<Output = T> + 'static) {
+        self.owner.run(|| {
+            spawn(future);
+        });
+    }
     pub fn clear_output(self) {
         self.output_request
             .set(self.output_request.get_untracked() + 1);
@@ -55,6 +86,15 @@ impl Ui {
         self.output_observed_at.set(None);
     }
     pub fn navigate(self, page: &str) {
+        self.terminal_card_return.set(false);
+        if page == "terminals" {
+            self.terminal_focus.update(|v| *v += 1);
+            self.terminal_origin.set(None);
+            crate::terminals::restore_selection(self);
+            if self.narrow.get_untracked() && !self.terminal_selection.get_untracked().is_empty() {
+                self.terminal_sidebar.set(false);
+            }
+        }
         self.return_overview.set(false);
         self.clear_output();
         self.review_request
@@ -63,6 +103,19 @@ impl Ui {
     }
     pub fn new() -> Self {
         Self {
+            owner: Owner::current(),
+            terminal_selection: signal(String::new()),
+            terminal_tabs: signal(Vec::new()),
+            terminal_details: signal(false),
+            terminal_focus: signal(0),
+            terminal_rename: signal(None),
+            operation_error: signal(String::new()),
+            terminal_origin: signal(None),
+            terminal_card_return: signal(false),
+            terminal_sidebar: signal(true),
+            terminal_closed: signal(false),
+            terminal_folds: signal(BTreeSet::new()),
+            terminal_width: signal(260.),
             snapshot: signal(Snapshot::default()),
             quick_open: signal(false),
             project_picker: signal(false),
@@ -95,9 +148,10 @@ impl Ui {
             card: signal(String::new()),
             request: signal(String::new()),
             page: signal("board".into()),
-            status: signal("Opening local workspace…".into()),
+            status: signal(String::new()),
             pending: signal(false),
             refreshing: signal(false),
+            snapshot_epoch: signal(0),
             output: signal(String::new()),
             output_observed_at: signal(None),
             overview_history: signal(false),
@@ -115,6 +169,62 @@ impl Ui {
             board_width: signal(700.0),
             focus_width: signal(420.0),
         }
+    }
+    pub fn location(self) -> Location {
+        Location {
+            page: self.page.get_untracked(),
+            project: self.project.get_untracked(),
+            card: self.card.get_untracked(),
+            request: self.request.get_untracked(),
+            note: self.note.get_untracked(),
+            return_overview: self.return_overview.get_untracked(),
+        }
+    }
+    pub fn open_terminal(self, conversation: String) {
+        if self.page.get_untracked() != "terminals" && !self.terminal_card_return.get_untracked() {
+            self.terminal_origin.set(Some(self.location()));
+        }
+        self.terminal_card_return.set(false);
+        self.clear_output();
+        self.review_request
+            .set(self.review_request.get_untracked() + 1);
+        self.terminal_details.set(false);
+        self.terminal_focus.update(|v| *v += 1);
+        self.terminal_tabs.update(|tabs| {
+            if !tabs.contains(&conversation) {
+                tabs.push(conversation.clone());
+            }
+        });
+        self.terminal_selection.set(conversation.clone());
+        crate::terminals::reveal(self, &conversation);
+        self.page.set("terminals".into());
+    }
+    pub fn terminal_source(self) {
+        if let Some(source) = self.terminal_origin.get_untracked() {
+            self.clear_output();
+            self.review_request
+                .set(self.review_request.get_untracked() + 1);
+            self.project.set(source.project);
+            self.card.set(source.card);
+            self.request.set(source.request);
+            self.note.set(source.note);
+            self.return_overview.set(source.return_overview);
+            self.page.set(source.page);
+            self.terminal_origin.set(None);
+        }
+    }
+    pub fn terminal_card(self, card: String) {
+        self.return_overview.set(false);
+        self.open_card(card);
+        self.terminal_card_return.set(true);
+    }
+    pub fn return_terminal(self) {
+        self.terminal_card_return.set(false);
+        self.clear_output();
+        self.review_request
+            .set(self.review_request.get_untracked() + 1);
+        self.terminal_focus.update(|v| *v += 1);
+        self.page.set("terminals".into());
     }
     pub fn show_search(self, projects: bool) {
         self.search_query.set(String::new());
@@ -144,6 +254,7 @@ impl Ui {
         })
     }
     pub fn open_card(self, id: String) {
+        self.terminal_card_return.set(false);
         self.review.set(None);
         self.review_request
             .set(self.review_request.get_untracked() + 1);
@@ -165,6 +276,10 @@ impl Ui {
         self.page.set("card".into());
     }
     pub fn back_board(self) {
+        if self.terminal_card_return.get_untracked() {
+            self.return_terminal();
+            return;
+        }
         if self.return_overview.get_untracked() {
             self.clear_output();
             self.page.set("overview".into());
@@ -185,6 +300,7 @@ impl Ui {
         self.focused_card.set(false);
     }
     pub fn open_note(self, id: String) {
+        self.terminal_card_return.set(false);
         if let Some(project) = self.snapshot.with_untracked(|s| {
             s.notes
                 .iter()
@@ -211,7 +327,8 @@ pub fn refresh(ui: Ui) {
             .set("Gallery preview: no AppServer connected".into());
         return;
     };
-    spawn(async move {
+    let epoch = ui.snapshot_epoch.get_untracked();
+    ui.spawn(async move {
         let result = blocking(move || {
             app.snapshot().map(|snapshot| {
                 (
@@ -223,6 +340,10 @@ pub fn refresh(ui: Ui) {
             })
         })
         .await;
+        if ui.snapshot_epoch.get_untracked() != epoch {
+            ui.refreshing.set(false);
+            return;
+        }
         match result {
             Ok(Ok((snapshot, profiles, max_agents, idle_minutes))) => {
                 ui.profiles.set(profiles);
@@ -239,12 +360,9 @@ pub fn refresh(ui: Ui) {
                 if different {
                     ui.snapshot.set(snapshot);
                 }
-                if ui.status.get_untracked() == "Opening local workspace…" {
-                    ui.status.set("Local workspace ready · SQLite WAL".into());
-                }
             }
-            Ok(Err(e)) => ui.status.set(format!("Could not refresh: {e:#}")),
-            Err(e) => ui.status.set(format!("Refresh worker: {e}")),
+            Ok(Err(e)) => ui.operation_error.set(format!("Could not refresh: {e:#}")),
+            Err(e) => ui.operation_error.set(format!("Refresh worker: {e}")),
         }
         ui.refreshing.set(false);
     });
@@ -281,11 +399,13 @@ pub fn dispatch_complete(
         return;
     };
     ui.pending.set(true);
+    ui.operation_error.set(String::new());
     ui.status.set(format!("{method}…"));
     if params.get("request_key").is_none() {
         params["request_key"] = json!(id());
     }
-    spawn(async move {
+    let source = ui.location();
+    ui.spawn(async move {
         let result = blocking(move || {
             let value = app.call(method, params)?;
             Ok::<_, anyhow::Error>((
@@ -297,8 +417,10 @@ pub fn dispatch_complete(
             ))
         })
         .await;
+        ui.pending.set(false);
         match result {
             Ok(Ok((value, snapshot, profiles, max_agents, idle_minutes))) => {
+                ui.snapshot_epoch.update(|v| *v += 1);
                 ui.profiles.set(profiles);
                 ui.max_agents.set(max_agents);
                 ui.idle_minutes.set(idle_minutes);
@@ -313,41 +435,46 @@ pub fn dispatch_complete(
                     ),
                     _ => "Saved".into(),
                 });
+                let active = ui.location() == source;
                 match method {
-                    "project.create" => {
+                    "project.create" if active => {
                         if let Some(id) = value["id"].as_str() {
                             ui.project.set(id.into());
                             ui.card.set(String::new());
                             ui.page.set("board".into());
                         }
                     }
-                    "card.create" => {
+                    "card.create" if active => {
                         if let Some(id) = value["id"].as_str() {
                             ui.open_card(id.into());
                             ui.source_note.set(String::new());
                         }
                     }
-                    "card.archive" => ui.page.set("archive".into()),
+                    "card.archive" if active => ui.page.set("archive".into()),
                     "herdr.status" => ui.status.set(format!(
                         "Herdr connected · core {}",
                         value["core"]["id"].as_str().unwrap_or("")
                     )),
                     _ => {}
                 }
+                if matches!(value["state"].as_str(), Some("failed" | "unknown")) {
+                    ui.operation_error.set(ui.status.get_untracked());
+                }
                 after(Ok(value));
             }
             Ok(Err(e)) => {
                 let error = format!("{e:#}");
                 ui.status.set(error.clone());
+                ui.operation_error.set(error.clone());
                 after(Err(error));
             }
             Err(e) => {
                 let error = e.to_string();
                 ui.status.set(error.clone());
+                ui.operation_error.set(error.clone());
                 after(Err(error));
             }
         }
-        ui.pending.set(false);
     });
 }
 pub fn move_card(ui: Ui, card_id: &str, target: &str) {
@@ -371,7 +498,7 @@ pub fn load_text(ui: Ui, method: &'static str, params: Value) {
             .set("Gallery preview: no AppServer connected".into());
         return;
     };
-    spawn(async move {
+    ui.spawn(async move {
         let result = blocking(move || app.call(method, params)).await;
         if ui.output_request.get_untracked() != generation {
             return;
@@ -417,7 +544,7 @@ pub fn paste_resources(
         return;
     };
     let owner = format!("card:{card_id}");
-    spawn(async move {
+    ui.spawn(async move {
         let result=blocking(move||{let mut refs=Vec::new();for file in files{let value=app.call("attachment.add",json!({"card_id":card_id,"name":file.name,"media_type":file.mime,"bytes":file.data,"request_key":id()}))?;refs.push(format!("[{}](attachment:{})",value["name"].as_str().unwrap_or("Attachment"),value["id"].as_str().unwrap_or("")));}Ok::<_,anyhow::Error>(refs)}).await;
         match result {
             Ok(Ok(refs)) => {
@@ -439,7 +566,7 @@ pub fn paste_resources(
                 ui.status.set("Pasted attachments saved".into());
                 refresh(ui);
             }
-            Ok(Err(e)) => ui.status.set(format!("Attachment save failed: {e:#}")),
+            Ok(Err(e)) => ui.operation_error.set(format!("Attachment save failed: {e:#}")),
             Err(e) => ui.status.set(e.to_string()),
         }
     });
@@ -451,7 +578,7 @@ pub fn open_resource(ui: Ui, card_id: String, path: String) {
             .set("Gallery preview: no AppServer connected".into());
         return;
     };
-    spawn(async move {
+    ui.spawn(async move {
         match blocking(move || {
             let value = app.call(
                 "resource.materialize",
@@ -471,14 +598,16 @@ pub fn open_resource(ui: Ui, card_id: String, path: String) {
         .await
         {
             Ok(Ok(())) => ui.status.set("Attachment opened".into()),
-            Ok(Err(e)) => ui.status.set(format!("Unable to open attachment: {e:#}")),
+            Ok(Err(e)) => ui
+                .operation_error
+                .set(format!("Unable to open attachment: {e:#}")),
             Err(e) => ui.status.set(e.to_string()),
         }
     });
 }
 
 pub fn copy_text(ui: Ui, value: String) {
-    spawn(async move {
+    ui.spawn(async move {
         let result = blocking(move || -> anyhow::Result<()> {
             use std::io::Write;
             let mut command = std::process::Command::new("/usr/bin/pbcopy")

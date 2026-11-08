@@ -132,6 +132,20 @@ impl AppServer {
             .unwrap()
             .clone();
         let filtered = Snapshot {
+            terminal_contexts: Vec::new(),
+            terminals: snapshot
+                .terminals
+                .iter()
+                .filter(|v| {
+                    v.conversation_id.as_ref().is_some_and(|id| {
+                        snapshot
+                            .conversations
+                            .iter()
+                            .any(|c| &c.id == id && c.card_id == card_id)
+                    })
+                })
+                .cloned()
+                .collect(),
             note_events: snapshot
                 .note_events
                 .iter()
@@ -203,9 +217,14 @@ impl AppServer {
                     Ok(())
                 })?;
                 canban_context::compact_files(&self.home, &card, &path)?;
-                let notice = match canban_workspaces::archive(&self.home, &project, &card) {
-                    Ok(n) => n,
-                    Err(e) => Some(format!("Archive saved; worktree retained: {e:#}")),
+                let has_shell = self.terminal_retains_worktree(&card)?;
+                let notice = if has_shell {
+                    Some("Archive saved; worktree retained while a manual terminal may still be running.".into())
+                } else {
+                    match canban_workspaces::archive(&self.home, &project, &card) {
+                        Ok(n) => n,
+                        Err(e) => Some(format!("Archive saved; worktree retained: {e:#}")),
+                    }
                 };
                 if let Some(message) = notice {
                     self.store.lock().unwrap().write(|db| {

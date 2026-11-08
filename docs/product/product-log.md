@@ -452,3 +452,20 @@ See [navigation contract and acceptance](../quick-open-and-navigation.md).
 ## 2026-11-08 — Project onboarding, grouped Overview and coherent Settings
 
 Approved and implemented: hide all task controls until a Project is selected; make the Create a Project card the single clickable entry; retain typed paths while adding the native folder chooser and blank-name suggestion; remove Overview filters and show all nonempty lifecycle groups together with Closed collapsed; place Agent scheduling, Agent profiles, Workflow, Herdr and Storage in one scrolling Settings layout with shared section/field styling. No new workflow policy or configuration GUI is introduced. See [current contract and acceptance](../workspace-entry-and-settings.md).
+
+
+## 2026-11-08 — Dedicated Terminal workspace
+
+User approved and requested implementation of a Terminals entry directly below Overview, with a page-local resizable/collapsible Project -> Card/worktree -> Agent-profile conversation tree. All Card/Overview/Quick Open Terminal destinations converge there. Keep stable conversation identity across resume, explicit execution actions, source-aware returns and Card back-links; selection does not change Board context or dispatch work. Only the selected live conversation has a viewer. Reuse the existing native renderer and Herdr adapter; Review keeps its focused delivery layout. [Implementation and native PTY acceptance](../terminal-workspace.md) records the exact runtime/UI boundaries.
+
+## 2026-11-08 — Split Terminal chrome, direct Shells and numbered tabs
+
+The user replaced the conversation-only Terminal page with a Project-level Terminal workspace. Manual Shells and automatic Agents share inventory/rendering/controls, while Agent Workflow ownership remains explicit. Native window chrome follows the left/right content split, matching Herdr UI's layout: traffic lights/navigation over the inventory, tabs and current Card/branch over the Terminal. Other details are secondary controls. New tabs open immediately with default names `1`, `2`, `3`; rename is optional afterwards. Closing a tab leaves its PTY alive. Remove the technical readiness/SQLite footer and redundant Terminal/conversation headings. Native focus, dialog return, overflow, narrow layout and restart/reconnection are implementation acceptance requirements.
+
+## Independent Terminals and weak directory association (2026-11-08)
+
+The user approved creating Terminals without Projects. Canban-managed Agent conversations retain durable task ownership, including manual @profile requests; independent Terminals derive Project context from Herdr-observed cwd. A known Card worktree or unique repository/branch may add a navigation hint but never a task assignment. Remove TerminalSource and persistent Shell cwd; reuse Herdr runtime facts and existing Conversation/Attempt ownership. Global +/Command+T inherits current observed cwd, falling back to home. Project/Card launch entries only choose the starting directory. Keep Project/Other grouping, stable numeric tabs, split window chrome and Card/branch links. Directory changes must not alter workflow, Board selection, focus or PTY identity.
+
+## Agent and independent Terminal display names (2026-11-08)
+
+The user selected two-line Agent inventory rows: Card number/title with execution stage, followed by provider icon/Profile with runtime state. Keep tabs single-line with the same information order and prioritize truncating long Card titles. Place the provider icon directly before the Profile, not before the Card. Independent Terminals use Terminal 1, Terminal 2, etc., a separate durable sequence without a type icon. Custom names take precedence; clearing restores the automatic title. Shorten long branch/worktree path presentation with complete hover values. Keep the native viewer's runtime identity independent from title changes.

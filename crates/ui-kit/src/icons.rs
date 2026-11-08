@@ -4,11 +4,21 @@ use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
+    Info,
+    Branch,
+    More,
+    Close,
+    Forward,
+    Back,
+    Sidebar,
+    Terminal,
     Search,
     Projects,
     Board,
     Note,
     Agent,
+    Codex,
+    Claude,
     Overview,
     Archive,
     Settings,
@@ -19,11 +29,21 @@ pub enum Icon {
 impl Icon {
     fn source(self) -> &'static str {
         match self {
+            Self::Info => include_str!("../assets/lucide/info.svg"),
+            Self::Branch => include_str!("../assets/lucide/git-branch.svg"),
+            Self::More => include_str!("../assets/lucide/ellipsis.svg"),
+            Self::Close => include_str!("../assets/lucide/x.svg"),
+            Self::Forward => include_str!("../assets/lucide/chevron-right.svg"),
+            Self::Back => include_str!("../assets/lucide/chevron-left.svg"),
+            Self::Sidebar => include_str!("../assets/lucide/panel-left.svg"),
+            Self::Terminal => include_str!("../assets/lucide/terminal.svg"),
             Self::Search => include_str!("../assets/lucide/search.svg"),
             Self::Projects => include_str!("../assets/lucide/folder-open.svg"),
             Self::Board => include_str!("../assets/lucide/square-kanban.svg"),
             Self::Note => include_str!("../assets/lucide/file-text.svg"),
             Self::Agent => include_str!("../assets/lucide/bot.svg"),
+            Self::Codex => include_str!("../assets/providers/codex.svg"),
+            Self::Claude => include_str!("../assets/providers/claude.svg"),
             Self::Overview => include_str!("../assets/lucide/layout-dashboard.svg"),
             Self::Archive => include_str!("../assets/lucide/archive.svg"),
             Self::Settings => include_str!("../assets/lucide/settings.svg"),

@@ -15,6 +15,12 @@ typedef void (*InputFn)(void *, const char *);
 @property NSPoint selectionEnd;
 @property BOOL selecting;
 @property BOOL selectAll;
+@property BOOL autoFocus;
+@property BOOL inputSuspended;
+@property NSSet<NSString *> *uiCommandKeys;
+@property id keyMonitor;
+@property BOOL accessibilityDirty;
+@property NSTimeInterval accessibilityUpdatedAt;
 @property NSRect lastWindowRect;
 @property NSRect lastVisibleRect;
 @property NSRect lastLayerRect;
@@ -22,6 +28,11 @@ typedef void (*InputFn)(void *, const char *);
 @property double scrollRemainder;
 @end
 @implementation CanbanTerminal
+- (void)viewDidMoveToWindow {
+  [super viewDidMoveToWindow];
+  if (self.autoFocus && self.window)
+    [self.window makeFirstResponder:self];
+}
 - (BOOL)isFlipped {
   return YES;
 }
@@ -38,6 +49,9 @@ typedef void (*InputFn)(void *, const char *);
   return YES;
 }
 - (void)emit:(NSDictionary *)value {
+  NSString *kind = value[@"kind"];
+  if (self.inputSuspended && ([kind isEqual:@"text"] || [kind isEqual:@"key"] || [kind isEqual:@"paste"]))
+    return;
   if (!self.host)
     return;
   NSData *d = [NSJSONSerialization dataWithJSONObject:value
@@ -77,7 +91,14 @@ typedef void (*InputFn)(void *, const char *);
                                dataUsingEncoding:NSUTF8StringEncoding]
                    options:0
                      error:nil];
+    self.accessibilityDirty = YES;
     [self setNeedsDisplay:YES];
+  }
+  NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+  if (self.accessibilityDirty && now - self.accessibilityUpdatedAt >= 0.25) {
+    self.accessibilityDirty = NO;
+    self.accessibilityUpdatedAt = now;
+    NSAccessibilityPostNotification(self, NSAccessibilityValueChangedNotification);
   }
 }
 - (NSColor *)color:(NSArray *)rgb {
@@ -357,7 +378,7 @@ typedef void (*InputFn)(void *, const char *);
   return NSAccessibilityTextAreaRole;
 }
 - (NSString *)accessibilityLabel {
-  return @"Agent terminal";
+  return @"Terminal";
 }
 - (id)accessibilityValue {
   NSMutableString *s = [NSMutableString string];
@@ -366,6 +387,9 @@ typedef void (*InputFn)(void *, const char *);
       [s appendString:cell[@"text"] ?: @""];
     [s appendString:@"\n"];
   }
+  NSString *status = self.frameData[@"status"];
+  if (status.length)
+    [s appendFormat:@"\n%@", status];
   return s;
 }
 @end
@@ -381,6 +405,17 @@ void *cb_terminal_new(void *host, FrameFn frame, InputFn input) {
   view.inputFn = input;
   view.marked = @"";
   __weak CanbanTerminal *weak = view;
+  // Observe UI shortcuts before the asynchronous engine mounts its next focus
+  // target. The existing window/keymap still owns command handling.
+  view.keyMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
+      handler:^NSEvent *(NSEvent *event) {
+        CanbanTerminal *terminal = weak;
+        if (terminal && event.window == terminal.window && terminal.window.firstResponder == terminal &&
+            (event.modifierFlags & NSEventModifierFlagCommand) &&
+            [terminal.uiCommandKeys containsObject:event.charactersIgnoringModifiers.lowercaseString])
+          terminal.inputSuspended = YES;
+        return event;
+      }];
   view.timer = [NSTimer timerWithTimeInterval:0.033
                                       repeats:YES
                                         block:^(NSTimer *timer) {
@@ -393,6 +428,23 @@ void *cb_terminal_new(void *host, FrameFn frame, InputFn input) {
 void cb_terminal_detach(void *ptr) {
   CanbanTerminal *view = (__bridge CanbanTerminal *)ptr;
   view.host = NULL;
+  if (view.keyMonitor) [NSEvent removeMonitor:view.keyMonitor];
+  view.keyMonitor = nil;
   [view.timer invalidate];
   view.timer = nil;
+}
+
+void cb_terminal_auto_focus(void *ptr, bool enabled) {
+  CanbanTerminal *view = (__bridge CanbanTerminal *)ptr;
+  view.autoFocus = enabled;
+  view.inputSuspended = !enabled;
+  if (enabled && view.window)
+    [view.window makeFirstResponder:view];
+}
+
+void cb_terminal_ui_command_keys(void *ptr, const char *json) {
+  CanbanTerminal *view = (__bridge CanbanTerminal *)ptr;
+  NSData *data = [[NSString stringWithUTF8String:json] dataUsingEncoding:NSUTF8StringEncoding];
+  NSArray *keys = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+  view.uiCommandKeys = [NSSet setWithArray:keys ?: @[]];
 }

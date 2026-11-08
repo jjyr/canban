@@ -402,7 +402,7 @@ fn row_actions(ui: Ui) -> impl IntoElement {
         if !a.finished() && a.terminal.is_some() {
             let terminal_row = row.clone();
             actions = actions.child(action("Open terminal", Variant::Primary, move |_| {
-                destination(ui, &terminal_row, "terminal")
+                ui.open_terminal(terminal_row.id.clone())
             }));
         } else if a.finished() && row.card.archived_at.is_none() {
             let resume_row = row.clone();
@@ -415,9 +415,10 @@ fn row_actions(ui: Ui) -> impl IntoElement {
                         .any(|p| p.id == profile && !p.resume_command().is_empty())
                 });
             actions=actions.child(action("Resume exact session",Variant::Secondary,move |_| {
+                let origin=ui.location();
                 let saved=resume_row.clone();
                 dispatch_then(ui,"agent.open",json!({"card_id":card_id,"profile_id":profile,"expected_attempt_id":attempt_id}),move |v| {
-                    destination(ui,&saved,"terminal");if let Some(id)=v["request_id"].as_str() {ui.request.set(id.into());}
+                    if v["request_id"].is_string() && ui.location()==origin { ui.open_terminal(saved.id); }
                 });
             }).disabled(!can_resume));
             if !can_resume {

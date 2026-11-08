@@ -361,6 +361,7 @@ mod tests {
     }
 }
 
+pub mod context;
 pub mod review;
 
 #[cfg(test)]

@@ -1,0 +1,258 @@
+use super::*;
+fn fixture() -> Snapshot {
+    let mut s = Snapshot::default();
+    for (project, card) in [("p1", "c1"), ("p2", "c2")] {
+        s.projects.push(serde_json::from_value(json!({"id":project,"name":project,"directory":"/tmp/project","workflow":Workflow::default(),"created_at":1})).unwrap());
+        s.cards.push(serde_json::from_value(json!({"id":card,"project_id":project,"number":1,"title":"Same title","body":"","tags":[],"stage":"develop","revision":1,"created_at":1})).unwrap());
+        let mut r = canban_scheduler::request(
+            project,
+            card,
+            "develop",
+            "interactive",
+            Config::default().profiles[0].clone(),
+            "task".into(),
+            None,
+        );
+        r.id = format!("request-{card}");
+        r.created_at = 1;
+        r.state = "running".into();
+        r.attempt = 1;
+        s.attempts.push(serde_json::from_value(json!({"id":format!("run-{card}"),"request_id":r.id,"project_id":project,"card_id":card,"number":1,"state":"running","core_id":"core","terminal":format!("t-{card}"),"cwd":"/tmp","input_path":"input","created_at":1,"observed":{"state":"live","status":{"state":"working"}},"provider_session_id":format!("provider-{card}")})).unwrap());
+        s.requests.push(r);
+    }
+    s
+}
+#[test]
+fn tree_keeps_projects_and_profiles_distinct_and_excludes_unassigned_recovery() {
+    let mut s = fixture();
+    let mut req = s.requests[0].clone();
+    req.id = "reviewer".into();
+    req.profile.id = "reviewer".into();
+    req.state = "queued".into();
+    s.requests.push(req);
+    let mut recovery = s.cards[0].clone();
+    recovery.id = "unassigned".into();
+    recovery.attention = Some("No profile".into());
+    s.cards.push(recovery);
+    let groups = groups(&s, false);
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].cards.len(), 1);
+    assert_eq!(groups[0].cards[0].rows.len(), 2);
+    assert_eq!(conversations(&s).len(), 3);
+    assert_ne!(groups[0].cards[0].rows[0].id, groups[1].cards[0].rows[0].id);
+}
+#[test]
+fn live_invocation_precedes_queued_followup_and_resume_keeps_identity() {
+    let mut s = fixture();
+    let key = Conversation::key("c1", "codex");
+    let mut next = s.requests[0].clone();
+    next.id = "followup".into();
+    next.created_at = 2;
+    next.state = "queued".into();
+    s.requests.push(next);
+    let row = conversations(&s).into_iter().find(|r| r.id == key).unwrap();
+    assert_eq!(row.request.unwrap().id, "request-c1");
+    s.attempts[0].observed = Some(json!({"state":"finished"}));
+    let row = conversations(&s).into_iter().find(|r| r.id == key).unwrap();
+    assert_eq!(row.request.as_ref().unwrap().id, "followup");
+    assert!(!closed(&row));
+    assert!(binding(&row).is_none());
+    let mut a = s.attempts[0].clone();
+    a.id = "new-run".into();
+    a.request_id = "followup".into();
+    a.terminal = Some("new-terminal".into());
+    a.observed = Some(json!({"state":"live"}));
+    s.attempts.push(a);
+    let row = conversations(&s).into_iter().find(|r| r.id == key).unwrap();
+    assert_eq!(binding(&row).unwrap()["terminal"], "new-terminal");
+    assert_eq!(row.history.len(), 2);
+}
+#[test]
+fn closed_archived_and_missing_bindings_never_create_viewers_or_implicit_resume() {
+    let mut s = fixture();
+    s.attempts[0].observed = Some(json!({"state":"finished"}));
+    let mut profiles = Config::default().profiles;
+    profiles[0].resume_argv = Some(vec!["resume".into()]);
+    let row = conversations(&s)
+        .into_iter()
+        .find(|r| r.card.id == "c1")
+        .unwrap();
+    assert!(closed(&row));
+    assert!(binding(&row).is_none());
+    assert!(can_resume(&row, &profiles));
+    assert_eq!(groups(&s, true).len(), 1);
+    s.cards[0].archived_at = Some(3);
+    let row = conversations(&s)
+        .into_iter()
+        .find(|r| r.card.id == "c1")
+        .unwrap();
+    assert!(!can_resume(&row, &profiles));
+    assert!(binding(&row).is_none());
+    s.attempts[1].core_id = None;
+    let row = conversations(&s)
+        .into_iter()
+        .find(|r| r.card.id == "c2")
+        .unwrap();
+    assert!(binding(&row).is_none());
+    assert_eq!(s.requests.len(), 2);
+}
+#[test]
+fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() {
+    let mut s = fixture();
+    s.terminals = crate::terminals::entries(&s)
+        .into_iter()
+        .map(|e| e.saved)
+        .collect();
+    let key = Conversation::key("c1", "codex");
+    let label = s.terminals.iter().find(|t| t.id == key).unwrap().number;
+    s.terminals.push(TerminalEntry {
+        id: "manual".into(),
+        conversation_id: None,
+        number: 9,
+        name: Some("Server".into()),
+        manual_number: Some(1),
+        runtime: Some(TerminalRuntime {
+            core_id: Some("core".into()),
+            terminal: Some("shell-pty".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+        }),
+        created_at: 0,
+    });
+    let rows = crate::terminals::entries(&s);
+    let shell = rows.iter().find(|e| e.saved.id == "manual").unwrap();
+    assert_eq!(shell.saved.title(), "Server");
+    assert!(shell.card.is_none());
+    assert!(shell.agent.is_none());
+    assert_eq!(shell.binding().unwrap()["terminal"], "shell-pty");
+    s.attempts[0].terminal = Some("resumed-pty".into());
+    let row = crate::terminals::entries(&s)
+        .into_iter()
+        .find(|e| e.saved.id == key)
+        .unwrap();
+    assert_eq!(row.saved.number, label);
+    assert_eq!(row.binding().unwrap()["terminal"], "resumed-pty");
+    if let Some(TerminalRuntime { state, .. }) = &mut s.terminals.last_mut().unwrap().runtime {
+        *state = "finished".into();
+    }
+    let ended = crate::terminals::entries(&s)
+        .into_iter()
+        .find(|e| e.saved.id == "manual")
+        .unwrap();
+    assert!(ended.ended());
+    assert!(ended.binding().is_none());
+    assert_eq!(s.requests.len(), 2);
+}
+#[test]
+fn workspace_shortcuts_are_valid_nsh_keystrokes() {
+    for (key, _) in crate::terminals::TAB_KEYS {
+        nsh_core::desktop::Shortcut::parse(key, false).unwrap();
+    }
+}
+
+#[test]
+fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agent_assignment() {
+    let mut s = fixture();
+    s.terminals = crate::terminals::entries(&s)
+        .into_iter()
+        .map(|e| e.saved)
+        .collect();
+    let agent = s.terminals[0].id.clone();
+    let shell = TerminalEntry {
+        id: "shell".into(),
+        conversation_id: None,
+        number: 9,
+        name: None,
+        manual_number: None,
+        runtime: Some(TerminalRuntime {
+            core_id: Some("core".into()),
+            terminal: Some("pty".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+        }),
+        created_at: 0,
+    };
+    s.terminals.push(shell.clone());
+    let rows = crate::terminals::entries(&s);
+    assert!(
+        rows.iter()
+            .find(|e| e.saved.id == "shell")
+            .unwrap()
+            .project_id
+            .is_none()
+    );
+    for id in ["shell", agent.as_str()] {
+        s.terminal_contexts.push(TerminalContext {
+            terminal_id: id.into(),
+            core_id: "core".into(),
+            terminal: "pty".into(),
+            cwd: Some("/project-2".into()),
+            project_id: Some("p2".into()),
+            card_id: Some("c2".into()),
+            branch: Some("feature".into()),
+        });
+    }
+    let rows = crate::terminals::entries(&s);
+    let manual = rows.iter().find(|e| e.saved.id == "shell").unwrap();
+    assert_eq!(manual.saved, shell);
+    assert_eq!(manual.project_id.as_deref(), Some("p2"));
+    assert!(manual.inferred_card);
+    assert!(manual.agent.is_none());
+    let task = rows.iter().find(|e| e.saved.id == agent).unwrap();
+    assert_eq!(task.project_id.as_deref(), Some("p1"));
+    assert_eq!(task.card.as_ref().unwrap().id, "c1");
+    assert!(!task.inferred_card);
+    s.terminal_contexts.clear();
+    assert!(
+        crate::terminals::entries(&s)
+            .into_iter()
+            .find(|e| e.saved.id == "shell")
+            .unwrap()
+            .project_id
+            .is_none()
+    );
+}
+
+#[test]
+fn automatic_labels_follow_execution_stage_and_profile_without_changing_binding() {
+    use canban_ui_kit::Icon;
+    let mut s = fixture();
+    s.cards[0].stage = "review".into();
+    s.cards[0].title = "非常长的任务标题 / a long task title with important details".repeat(8);
+    s.requests[0].profile.id = "developer".into();
+    let key = Conversation::key("c1", "developer");
+    let entry = crate::terminals::entries(&s)
+        .into_iter()
+        .find(|e| e.saved.id == key)
+        .unwrap();
+    let binding = entry.binding();
+    assert!(entry.title().starts_with("#1 非常长的任务标题"));
+    assert_eq!(entry.stage.as_deref(), Some("Develop"));
+    assert_eq!(entry.profile(), Some("developer"));
+    assert_eq!(entry.provider().unwrap().0, Icon::Codex);
+    assert!(entry.hint().contains(&s.cards[0].title));
+    s.terminals.push(entry.saved.clone());
+    s.terminals[0].name = Some("My review desk".into());
+    let named = crate::terminals::entries(&s)
+        .into_iter()
+        .find(|e| e.saved.id == key)
+        .unwrap();
+    assert_eq!(named.title(), "My review desk");
+    assert_eq!(named.binding(), binding);
+    s.terminals[0].name = None;
+    s.requests[0].profile.argv = Some(vec!["/opt/bin/claude".into()]);
+    let entry = crate::terminals::entries(&s)
+        .into_iter()
+        .find(|e| e.saved.id == key)
+        .unwrap();
+    assert_eq!(entry.provider().unwrap().0, Icon::Claude);
+    s.requests[0].profile.preset = None;
+    s.requests[0].profile.argv = Some(vec!["my-agent".into()]);
+    let entry = crate::terminals::entries(&s)
+        .into_iter()
+        .find(|e| e.saved.id == key)
+        .unwrap();
+    assert_eq!(entry.provider(), Some((Icon::Agent, "my-agent".into())));
+}

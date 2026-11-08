@@ -64,6 +64,15 @@ record!(Artifact, "artifacts", card);
 record!(Report, "reports", card);
 record!(Conversation, "conversations", card);
 record!(Question, "questions", card);
+impl Record for TerminalEntry {
+    const TABLE: &'static str = "terminals";
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn number(&self) -> u64 {
+        self.number
+    }
+}
 impl Record for Card {
     const TABLE: &'static str = "cards";
     fn id(&self) -> &str {
@@ -150,7 +159,7 @@ impl Store {
         anyhow::ensure!(mode == "wal", "SQLite WAL could not be enabled");
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 3,
+            version <= 6,
             "Database schema is newer than this application"
         );
         if version == 0 {
@@ -199,6 +208,39 @@ impl Store {
             }
             conn.execute_batch("PRAGMA user_version=3; COMMIT;")?;
         }
+        if version < 4 {
+            conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE terminals (id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),card_id TEXT REFERENCES cards(id),state TEXT NOT NULL,number INTEGER NOT NULL UNIQUE,data TEXT NOT NULL);")?;
+            let db = Db { conn: &conn };
+            for c in db.list::<Conversation>()? {
+                db.agent_terminal(&c)?;
+            }
+            conn.execute_batch("PRAGMA user_version=4; COMMIT;")?;
+        }
+        if version < 5 {
+            conn.execute_batch("BEGIN IMMEDIATE;")?;
+            let rows = {
+                let mut q = conn.prepare("SELECT data FROM terminals")?;
+                q.query_map([], |r| r.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let db = Db { conn: &conn };
+            for row in rows {
+                let item = TerminalEntry::from_json(serde_json::from_str(&row)?)?;
+                db.save(&item)?;
+            }
+            conn.execute_batch("PRAGMA user_version=5; COMMIT;")?;
+        }
+        if version < 6 {
+            conn.execute_batch("BEGIN IMMEDIATE;")?;
+            let db = Db { conn: &conn };
+            let mut entries = db.list::<TerminalEntry>()?;
+            entries.sort_by_key(|t| t.number);
+            for mut t in entries.into_iter().filter(|t| t.conversation_id.is_none()) {
+                t.manual_number = Some(db.counter("terminal-manual-number")?);
+                db.save(&t)?;
+            }
+            conn.execute_batch("PRAGMA user_version=6; COMMIT;")?;
+        }
         Ok(Self {
             conn,
             home: home.to_owned(),
@@ -220,6 +262,24 @@ impl Store {
     }
 }
 impl Db<'_> {
+    pub fn agent_terminal(&self, c: &Conversation) -> Result<()> {
+        if !self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM terminals WHERE id=?1)",
+            [&c.id],
+            |r| r.get::<_, bool>(0),
+        )? {
+            self.save(&TerminalEntry {
+                id: c.id.clone(),
+                conversation_id: Some(c.id.clone()),
+                number: self.counter("terminal-number")?,
+                name: None,
+                manual_number: None,
+                runtime: None,
+                created_at: c.created_at,
+            })?;
+        }
+        Ok(())
+    }
     pub fn save<T: Record>(&self, record: &T) -> Result<()> {
         self.conn.execute(&format!("INSERT INTO {}(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,card_id=excluded.card_id,state=excluded.state,number=excluded.number,data=excluded.data",T::TABLE),params![record.id(),record.project(),record.card(),record.state(),record.number(),serde_json::to_string(record)?])?;
         Ok(())
@@ -257,6 +317,8 @@ impl Db<'_> {
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
         Ok(Snapshot {
+            terminals: self.list()?,
+            terminal_contexts: Vec::new(),
             projects: self.list()?,
             cards: self.list()?,
             events: self.list()?,

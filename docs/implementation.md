@@ -1,3 +1,5 @@
+[Dedicated Terminal workspace](terminal-workspace.md) (2026-11-08) is the current Terminal UI contract: its separate icon/tree, Card/Overview/Quick Open convergence and isolated multi-PTY acceptance supersede the older Card-plus-Terminal focused split. Review retains the Card-focused delivery layout.
+
 # MVP implementation and development
 
 [Compact navigation and Quick Open](quick-open-and-navigation.md) covers the implemented icon rail, Command+O fuzzy destination picker and native interaction checks.
@@ -150,3 +152,15 @@ The approved calm native composition is implemented: Board with a selected-Card 
 Navigation refinement (2026-11-08): the rail contains only Quick Open, Board, Overview, Notes, Archive and Settings. Project switching/creation lives in the Board header; icons share vendored Lucide SVGs rendered by NSH. [Navigation behavior and native regression acceptance](quick-open-and-navigation.md#navigation-refinement-acceptance-2026-11-08) records the isolated two-Project run, modal Escape fix and long-title layout regression.
 
 [Project entry, grouped Overview and Settings](workspace-entry-and-settings.md) (2026-11-08) documents the clickable empty Board, native directory chooser, Overview without filters and a single scrolling Settings page, including isolated native acceptance.
+
+## Terminal workspace chrome and manual Shells (2026-11-08)
+
+The [Terminal workspace](terminal-workspace.md) now shares a Project/Card inventory, numbered tabs and a single native renderer across Scheduler Agents and manually opened Shells. NSH's custom window titlebar is split at the same resizable boundary as the content; Card and branch stay in chrome, with secondary controls in native menus. New tabs open immediately, rename happens afterwards, and closing a tab leaves its PTY alive. The technical status footer is removed; failures remain dismissible notices. SQLite schema v4 preserves entry names/numbers and manual Core/PTy bindings. Manual Shells do not consume Scheduler slots, create workflow Requests or inherit Agent idle reclamation.
+
+### Independent Terminal context update (2026-11-08)
+
+Terminal creation no longer requires Project: `terminal.create {}` starts at home; optional `cwd`, `project_id`, `card_id` or `inherit_terminal_id` selects the launch directory. Project/Card arguments do not persist ownership. `terminal.context` returns Herdr-observed cwd, optional Project/Card hints and branch; unavailable runtime returns null hints with an error. Schema v5 removes TerminalSource and stored Shell cwd, retaining optional Conversation association and independent runtime binding. In-memory snapshot contexts drive Project/Other grouping and chrome. See [Terminal contract](terminal-workspace.md) for migration, inference and acceptance details.
+
+### Agent labels and independent Terminal sequence
+
+Schema v6 adds a separate durable manual Terminal sequence. Agent inventory entries show two lines (Card/title + execution stage; provider/Profile + status), with one-line bounded tabs. Independent entries display Terminal N without a type icon. Custom names override the title portion and clearing them restores the generated title. Codex/Claude vector marks are shared UI Kit assets with preserved Herdr notices. Branch/directory labels shorten visually while full values remain in hover/actions. See [Terminal workspace](terminal-workspace.md) for contracts and current validation.

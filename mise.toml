@@ -60,3 +60,11 @@ run = "/usr/bin/python3 scripts/acceptance-scheduling.py"
 [tasks.acceptance-overview]
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance-overview.py"
+
+[tasks.acceptance-terminals]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-terminals.py"
+
+[tasks.acceptance-terminal-context]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-terminal-context.py"

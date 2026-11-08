@@ -47,7 +47,7 @@ fn refresh_diff(ui: Ui, target: Signal<String>) {
             .set("Gallery preview: no AppServer connected".into());
         return;
     };
-    spawn(async move {
+    ui.spawn(async move {
         let expected = card.clone();
         let expected_branch = branch.clone();
         let result = blocking(move || {
@@ -70,10 +70,14 @@ fn refresh_diff(ui: Ui, target: Signal<String>) {
                     ui.review.set(Some(p));
                     ui.status.set("Diff ready · refresh if files change".into());
                 }
-                Err(e) => ui.status.set(format!("Invalid review preview: {e}")),
+                Err(e) => ui
+                    .operation_error
+                    .set(format!("Invalid review preview: {e}")),
             },
-            Ok(Err(e)) => ui.status.set(format!("Could not load diff: {e:#}")),
-            Err(e) => ui.status.set(format!("Diff worker: {e}")),
+            Ok(Err(e)) => ui
+                .operation_error
+                .set(format!("Could not load diff: {e:#}")),
+            Err(e) => ui.operation_error.set(format!("Diff worker: {e}")),
         }
     });
 }
@@ -116,13 +120,14 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .child(muted("Accept commits all reviewed Card changes and merges into the clean Project checkout. Conflicts stay in the Card worktree. Archive is separate."))
         .child(view().flex_row().flex_wrap().gap_2()
             .child(action(if ui.return_overview.get_untracked() {"← Overview"} else {"← Board"},Variant::Quiet,move |_|ui.back_board()))
-            .child(action("Return to Develop",Variant::Secondary,move |_|{if let Some(c)=ui.current_card(){dispatch_then(ui,"card.move",json!({"card_id":c.id,"revision":c.revision,"stage":"develop"}),move |_|{ui.review.set(None);ui.page.set("card".into());});}})))
+            .child(action("Return to Develop",Variant::Secondary,move |_|{if let Some(c)=ui.current_card(){let source=ui.location();dispatch_then(ui,"card.move",json!({"card_id":c.id,"revision":c.revision,"stage":"develop"}),move |_|{if ui.location()==source{ui.review.set(None);ui.page.set("card".into());}});}})))
         .child(panel().child(label("Target branch")).child(field(target,"Existing local branch"))
             .child(action("Refresh diff",Variant::Secondary,move |_|refresh_diff(ui,target)))
             .child(label("Commit message")).child(field(message,"Commit message"))
             .child(action("Accept · commit and merge",Variant::Primary,move |_|{
                 if let Some(p)=ui.review.get_untracked() {
-                    dispatch_then(ui,"review.merge",json!({"card_id":p.card_id,"revision":p.revision,"token":p.token,"target_branch":p.target_branch,"message":message.get_untracked()}),move |_|ui.review.set(None));
+                    let source=ui.location();
+                    dispatch_then(ui,"review.merge",json!({"card_id":p.card_id,"revision":p.revision,"token":p.token,"target_branch":p.target_branch,"message":message.get_untracked()}),move |_|{if ui.location()==source{ui.review.set(None);}});
                 }
             }).disabled(move ||ui.pending.get() || ui.review.get().is_none_or(|p|!p.merge_allowed || p.target_branch!=target.get() || ui.current_card().is_none_or(|c|c.revision!=p.revision || c.id!=p.card_id))))
             .child(dynamic(move ||ui.current_card().and_then(|c|c.delivery).map(|d|muted(format!("Last accepted delivery: {} · {}",d.target_branch,d.commit)).into_element()).unwrap_or_else(||view().into_element()))))

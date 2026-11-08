@@ -340,12 +340,10 @@ pub fn relations(ui: Ui, note_id: Option<String>, draft: Signal<Draft>) -> impl 
                     }
                     if let (Some(request), Some(card)) = (&e.request_id, &e.card_id) {
                         let request = request.clone();
-                        let card = card.clone();
+                        let _ = card;
                         row =
                             row.child(action("View Agent execution", Variant::Quiet, move |_| {
-                                ui.open_card(card.clone());
-                                ui.request.set(request.clone());
-                                ui.page.set("terminal".into());
+                                crate::terminals::open_request(ui, &request);
                             }));
                     }
                     if let Some(source) = e.data["source_note_id"].as_str() {

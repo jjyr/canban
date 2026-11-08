@@ -27,6 +27,8 @@ unsafe extern "C" {
         input: extern "C" fn(*mut c_void, *const i8),
     ) -> *mut NSView;
     fn cb_terminal_detach(view: *mut c_void);
+    fn cb_terminal_auto_focus(view: *mut c_void, enabled: bool);
+    fn cb_terminal_ui_command_keys(view: *mut c_void, json: *const i8);
 }
 struct State {
     model: Model,
@@ -252,14 +254,23 @@ extern "C" fn frame(host: *mut c_void, cols: u16, rows: u16) -> *const i8 {
             let _ = tx.send(Input::Resize(cols, rows));
         }
     }
-    if state.model.revision == host.seen && state.status == host.seen_status {
+    let status = if host.read_only {
+        if state.status.is_empty() {
+            "Read-only · input disabled".into()
+        } else {
+            format!("{} · input disabled", state.status)
+        }
+    } else {
+        state.status.clone()
+    };
+    if state.model.revision == host.seen && status == host.seen_status {
         return std::ptr::null();
     }
     host.seen = state.model.revision;
-    host.seen_status = state.status.clone();
+    host.seen_status = status.clone();
     let f = state.model.frame();
     let rows:Vec<_>=f.rows.iter().map(|row|row.iter().map(|c|json!({"text":c.text,"fg":c.fg,"bg":c.bg,"bold":c.bold,"underline":c.underline,"tail":c.tail})).collect::<Vec<_>>()).collect();
-    host.json=CString::new(json!({"rows":rows,"cursor":f.cursor.map(|(x,y)|vec![x,y]),"background":f.background,"status":state.status}).to_string()).unwrap();
+    host.json=CString::new(json!({"rows":rows,"cursor":f.cursor.map(|(x,y)|vec![x,y]),"background":f.background,"status":status}).to_string()).unwrap();
     host.json.as_ptr()
 }
 fn key(code: u64, text: &str) -> GhosttyKey {
@@ -369,6 +380,25 @@ impl NativeComponent for Terminal {
         self.view.clone()
     }
     fn set_prop(&mut self, name: &str, value: Option<&nsh_core::JsonValue>) {
+        if name == "ui_command_keys"
+            && let Some(value) = value
+        {
+            let data = CString::new(value.to_string()).unwrap();
+            unsafe {
+                cb_terminal_ui_command_keys(
+                    Retained::as_ptr(&self.view) as *mut c_void,
+                    data.as_ptr(),
+                )
+            };
+        }
+        if name == "focus" {
+            unsafe {
+                cb_terminal_auto_focus(
+                    Retained::as_ptr(&self.view) as *mut c_void,
+                    value.is_some_and(|v| v["enabled"] == true),
+                )
+            };
+        }
         if name == "read_only" {
             self.host.read_only = value == Some(&json!(true));
         }
@@ -404,6 +434,29 @@ pub fn register(components: &Components) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn read_only_observation_disables_input_and_updates_status_without_rebinding() {
+        let mut host = Host::new();
+        host.state.lock().unwrap().connected = true;
+        let (tx, rx) = mpsc::channel();
+        host.input = Some(tx);
+        host.read_only = true;
+        let ptr = &mut host as *mut Host as *mut c_void;
+        let value: Value =
+            serde_json::from_slice(unsafe { CStr::from_ptr(frame(ptr, 80, 24)) }.to_bytes())
+                .unwrap();
+        assert!(value["status"].as_str().unwrap().contains("input disabled"));
+        let text = CString::new(json!({"kind":"text","text":"offline"}).to_string()).unwrap();
+        input(ptr, text.as_ptr());
+        assert!(rx.try_recv().is_err());
+        host.read_only = false;
+        let value: Value =
+            serde_json::from_slice(unsafe { CStr::from_ptr(frame(ptr, 80, 24)) }.to_bytes())
+                .unwrap();
+        assert_eq!(value["status"], "");
+        input(ptr, text.as_ptr());
+        assert!(matches!(rx.try_recv(),Ok(Input::Bytes(bytes)) if !bytes.is_empty()));
+    }
     #[test]
     fn function_and_navigation_keys_use_vt_encoding() {
         let mut model = Model::new(40, 8);

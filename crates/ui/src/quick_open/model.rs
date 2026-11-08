@@ -6,6 +6,7 @@ pub enum Target {
     Card(String),
     Note(String),
     Agent(String),
+    Terminal(String),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
@@ -93,6 +94,23 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
                 row.project_name,
                 req.profile.command_name(),
                 row.group,
+            ],
+        });
+    }
+    for e in crate::terminals::entries(s)
+        .into_iter()
+        .filter(|e| e.saved.conversation_id.is_none())
+    {
+        rows.push(Candidate {
+            id: format!("terminal:{}", e.saved.id),
+            title: e.saved.title(),
+            detail: format!("Terminal · {}", e.project_name),
+            kind: "Terminal",
+            target: Target::Terminal(e.saved.id.clone()),
+            fields: vec![
+                e.saved.title(),
+                e.project_name.clone(),
+                e.cwd().unwrap_or_default(),
             ],
         });
     }

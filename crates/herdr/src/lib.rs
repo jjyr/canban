@@ -32,7 +32,18 @@ pub fn observation(value: &Value) -> Value {
             out.insert(key.into(), v.clone());
         }
     }
+    if let Some(cwd) = value["foreground"]["cwd"].as_str() {
+        out.insert("foreground".into(), json!({"cwd":cwd}));
+    }
     Value::Object(out)
+}
+
+/// Observed foreground directory, with the Core's terminal directory fallback.
+pub fn cwd(value: &Value) -> Option<&str> {
+    value["foreground"]["cwd"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .or_else(|| value["cwd"].as_str().filter(|s| !s.is_empty()))
 }
 impl Client {
     /// hc connect speaks the public JSON-RPC protocol and resolves the installed

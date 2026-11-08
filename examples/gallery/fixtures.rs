@@ -196,3 +196,92 @@ pub fn search() -> canban_types::Snapshot {
     }
     s
 }
+
+/// Terminal navigation adds two profiles on one Card and closed archived history.
+pub fn terminal_workspace() -> canban_types::Snapshot {
+    let mut s = overview();
+    let mut reviewer = s
+        .requests
+        .iter()
+        .find(|r| r.card_id == "overview-card-2")
+        .unwrap()
+        .clone();
+    reviewer.id = "terminal-reviewer-queued".into();
+    reviewer.profile.id = "reviewer".into();
+    reviewer.profile.preset = Some("claude".into());
+    reviewer.stage = "review".into();
+    reviewer.state = "queued".into();
+    reviewer.created_at += 1;
+    s.requests.push(reviewer);
+    let mut card = s
+        .cards
+        .iter()
+        .find(|c| c.id == "overview-card-5")
+        .unwrap()
+        .clone();
+    card.id = "terminal-archived".into();
+    card.title = "Archived investigation".into();
+    card.archived_at = Some(canban_types::now());
+    let mut req = s
+        .requests
+        .iter()
+        .find(|r| r.card_id == "overview-card-5")
+        .unwrap()
+        .clone();
+    req.id = "terminal-archive-request".into();
+    req.card_id = card.id.clone();
+    let mut run = s
+        .attempts
+        .iter()
+        .find(|a| a.request_id == "overview-request-5")
+        .unwrap()
+        .clone();
+    run.id = "terminal-archive-run".into();
+    run.request_id = req.id.clone();
+    run.card_id = card.id.clone();
+    s.cards.push(card);
+    s.requests.push(req);
+    s.attempts.push(run);
+    if let Some(card) = s.cards.iter_mut().find(|c| c.id == "overview-card-2") {
+        card.title="修复跨项目调度中的上下文关联并验证长标题不会挤掉阶段与操作 / Preserve the full Agent context across recovery".into();
+    }
+    s.terminals = canban_ui::terminals::entries(&s)
+        .into_iter()
+        .map(|e| e.saved)
+        .collect();
+    let number = s.terminals.iter().map(|t| t.number).max().unwrap_or(0) + 1;
+    s.terminals.push(canban_types::TerminalEntry {
+        id: "gallery-manual".into(),
+        conversation_id: None,
+        number,
+        name: None,
+        manual_number: Some(1),
+        runtime: Some(canban_types::TerminalRuntime {
+            core_id: Some("gallery".into()),
+            terminal: Some("shell".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+        }),
+        created_at: 0,
+    });
+    let mut linked = s.terminals.last().unwrap().clone();
+    linked.id = "gallery-linked-shell".into();
+    linked.number += 1;
+    linked.manual_number = Some(2);
+    linked.runtime.as_mut().unwrap().terminal = Some("linked-shell".into());
+    s.terminals.push(linked);
+    let card = s.cards.iter().find(|c| c.archived_at.is_none()).unwrap();
+    s.terminal_contexts.push(canban_types::TerminalContext {
+        terminal_id: "gallery-linked-shell".into(),
+        core_id: "gallery".into(),
+        terminal: "linked-shell".into(),
+        cwd: Some("/tmp/gallery/worktree".into()),
+        project_id: Some(card.project_id.clone()),
+        card_id: Some(card.id.clone()),
+        branch: Some(
+            "canban/very-long-worktree-and-branch-name/context-navigation-acceptance-42".into(),
+        ),
+    });
+    s
+}

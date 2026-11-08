@@ -1,0 +1,411 @@
+use super::*;
+fn core(app: &AppServer, dir: &Path) {
+    let script = dir.join("test-hc");
+    std::fs::write(&script,r#"#!/usr/bin/python3
+import sys,json,os
+base=os.path.dirname(__file__)
+for line in sys.stdin:
+ p=json.loads(line);m=p['method'];args=p.get('params',{});r={}
+ if m=='hello':r={'generation':1}
+ elif m=='server.status':r={'core':{'id':'replacement' if os.path.exists(base+'/replace') else 'original'}}
+ elif m=='terminal.run':
+  with open(base+'/launches','a') as f:f.write(json.dumps(args)+'\n')
+  r={'address':'t1'}
+ elif m in ['terminal.get','terminal.list']:
+  launches=[json.loads(l) for l in open(base+'/launches')] if os.path.exists(base+'/launches') else []
+  cwd=open(base+'/cwd').read() if os.path.exists(base+'/cwd') else (launches[-1]['cwd'] if launches else base)
+  t={'address':'t1','cwd':launches[-1]['cwd'] if launches else base,'foreground':{'cwd':cwd},'state':'finished' if os.path.exists(base+'/finished') else 'live'}
+  r={'terminals':[t]} if m=='terminal.list' else t
+ elif m in ['terminal.kill','terminal.interrupt']:
+  with open(base+'/controls','a') as f:f.write(m+'\n')
+  r={'sent':True}
+ print(json.dumps({'jsonrpc':'2.0','id':p['id'],'result':r}),flush=True)
+"#).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    app.config.write().unwrap().hc = script.to_string_lossy().into();
+}
+#[test]
+fn manual_launch_is_idempotent_and_preserves_workflow_budget_names_and_runtime_on_restart() {
+    let (dir, app, p, c) = setup();
+    core(&app, dir.path());
+    let before = app.snapshot().unwrap().events;
+    let args = json!({"project_id":p.id,"card_id":c.id,"request_key":"shell-once"});
+    let item: TerminalEntry =
+        serde_json::from_value(app.call("terminal.create", args.clone()).unwrap()).unwrap();
+    assert_eq!(app.call("terminal.create", args).unwrap()["id"], item.id);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("launches"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    let launch: Value = serde_json::from_str(
+        std::fs::read_to_string(dir.path().join("launches"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(launch["cwd"], p.directory);
+    assert_eq!(launch["labels"]["canban.terminal"], item.id);
+    let s = app.snapshot().unwrap();
+    assert!(s.requests.is_empty());
+    assert!(s.attempts.is_empty());
+    assert_eq!(s.events, before);
+    assert_eq!(s.cards[0].stage, "backlog");
+    assert_eq!(s.cards[0].revision, c.revision);
+    assert_eq!(canban_scheduler::active_count(&s), 0);
+    app.call(
+        "terminal.rename",
+        json!({"terminal_id":item.id,"name":"Dev server"}),
+    )
+    .unwrap();
+    let _ = app
+        .call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
+        .unwrap();
+    let s = app.snapshot().unwrap();
+    assert_ne!(s.terminals[0].number, s.terminals[1].number);
+    assert_eq!(s.terminals[0].title(), "Dev server");
+    drop(app);
+    let reopened = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let retained = reopened.snapshot().unwrap().terminals[0].clone();
+    assert_eq!(retained.runtime, item.runtime);
+    assert_eq!(retained.title(), "Dev server");
+    reopened
+        .call("terminal.rename", json!({"terminal_id":item.id,"name":""}))
+        .unwrap();
+    assert_eq!(
+        reopened.snapshot().unwrap().terminals[0].title(),
+        "Terminal 1"
+    );
+}
+#[test]
+fn manual_observation_and_controls_fence_core_identity_without_advancing_cards() {
+    let (dir, app, p, c) = setup();
+    core(&app, dir.path());
+    let item = app
+        .call("terminal.create", json!({"project_id":p.id}))
+        .unwrap();
+    let tid = item["id"].as_str().unwrap();
+    let args = json!({"terminal_id":tid,"request_key":"interrupt-once"});
+    app.call("terminal.interrupt", args.clone()).unwrap();
+    app.call("terminal.interrupt", args).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("controls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    std::fs::write(dir.path().join("replace"), "").unwrap();
+    app.observe_terminals().unwrap();
+    assert!(
+        matches!(&app.snapshot().unwrap().terminals[0].runtime,Some(TerminalRuntime {connection,..}) if connection=="replaced")
+    );
+    assert!(
+        app.call("terminal.end", json!({"terminal_id":tid}))
+            .is_err()
+    );
+    std::fs::remove_file(dir.path().join("replace")).unwrap();
+    std::fs::write(dir.path().join("finished"), "").unwrap();
+    app.observe_terminals().unwrap();
+    assert!(
+        matches!(&app.snapshot().unwrap().terminals[0].runtime,Some(TerminalRuntime {state,..}) if state=="finished")
+    );
+    assert_eq!(app.snapshot().unwrap().cards[0].revision, c.revision);
+}
+#[test]
+fn manual_directory_validation_and_unknown_receipts_never_replay_a_launch() {
+    let (dir, app, p, c) = setup();
+    app.config.write().unwrap().hc = "/usr/bin/false".into();
+    let args = json!({"project_id":p.id,"request_key":"lost-launch"});
+    let value = app.call("terminal.create", args.clone()).unwrap();
+    app.call("terminal.create", args).unwrap();
+    let s = app.snapshot().unwrap();
+    assert_eq!(s.terminals.len(), 1);
+    assert_eq!(value["runtime"]["state"], "unknown");
+    assert!(
+        app.call(
+            "terminal.create",
+            json!({"project_id":"wrong","card_id":c.id})
+        )
+        .is_err()
+    );
+    std::fs::remove_dir(dir.path().join("source")).unwrap();
+    assert!(
+        app.call("terminal.create", json!({"project_id":p.id}))
+            .is_err()
+    );
+    assert_eq!(app.snapshot().unwrap().terminals.len(), 1);
+}
+#[test]
+fn upgrading_conversations_allocates_stable_numbers_without_runtime_changes() {
+    let (dir, app, _p, c) = setup();
+    app.call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
+        .unwrap();
+    let before = app.snapshot().unwrap();
+    app.store.lock().unwrap().db().conn.execute_batch("DROP TABLE terminals; DELETE FROM counters WHERE id='terminal-number'; PRAGMA user_version=3;").unwrap();
+    drop(app);
+    let upgraded = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let s = upgraded.snapshot().unwrap();
+    assert_eq!(s.requests, before.requests);
+    assert_eq!(s.conversations, before.conversations);
+    assert_eq!(s.terminals[0].id, s.conversations[0].id);
+    assert_eq!(s.terminals[0].title(), "1");
+    drop(upgraded);
+    let reopened = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    assert_eq!(reopened.snapshot().unwrap().terminals, s.terminals);
+}
+
+#[test]
+fn independent_terminals_inherit_observed_cwd_and_only_derive_project_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    core(&app, dir.path());
+    let first = app.call("terminal.create", json!({})).unwrap();
+    assert!(app.snapshot().unwrap().projects.is_empty());
+    assert!(first.get("source").is_none());
+    assert!(first.get("project_id").is_none());
+    assert!(first["conversation_id"].is_null());
+    assert!(first["runtime"].get("cwd").is_none());
+    let p = app
+        .call(
+            "project.create",
+            json!({"name":"Observed","directory":dir.path().join("project with spaces")}),
+        )
+        .unwrap();
+    std::fs::write(dir.path().join("cwd"), p["directory"].as_str().unwrap()).unwrap();
+    app.observe_terminals().unwrap();
+    let s = app.snapshot().unwrap();
+    assert_eq!(
+        s.terminal_contexts[0].project_id.as_deref(),
+        p["id"].as_str()
+    );
+    let second = app
+        .call(
+            "terminal.create",
+            json!({"inherit_terminal_id":first["id"]}),
+        )
+        .unwrap();
+    assert_ne!(first["id"], second["id"]);
+    let lines = std::fs::read_to_string(dir.path().join("launches")).unwrap();
+    let last: Value = serde_json::from_str(lines.lines().last().unwrap()).unwrap();
+    assert_eq!(last["cwd"], p["directory"]);
+    // Reading a current foreground cwd must take precedence over launch cwd.
+    std::fs::write(dir.path().join("cwd"), dir.path().to_str().unwrap()).unwrap();
+    app.observe_terminals().unwrap();
+    assert!(
+        app.snapshot()
+            .unwrap()
+            .terminal_contexts
+            .iter()
+            .all(|c| c.project_id.is_none())
+    );
+    app.config.write().unwrap().hc = "/usr/bin/false".into();
+    app.observe_terminals().unwrap();
+    assert!(app.snapshot().unwrap().terminal_contexts.is_empty());
+    let context = app
+        .call("terminal.context", json!({"terminal_id":first["id"]}))
+        .unwrap();
+    assert!(context["cwd"].is_null());
+    assert!(context["project_id"].is_null());
+    assert!(app.snapshot().unwrap().requests.is_empty());
+}
+
+#[test]
+fn agent_directory_context_cannot_reassign_its_card_or_follow_a_stale_binding() {
+    let (dir, app, p, c) = setup();
+    core(&app, dir.path());
+    let other = app
+        .call(
+            "project.create",
+            json!({"name":"Other","directory":dir.path().join("other")}),
+        )
+        .unwrap();
+    std::fs::write(dir.path().join("cwd"), other["directory"].as_str().unwrap()).unwrap();
+    app.call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
+        .unwrap();
+    let mut run = admit(&app, &app.snapshot().unwrap().requests[0]);
+    run.core_id = Some("original".into());
+    app.store.lock().unwrap().write(|db| db.save(&run)).unwrap();
+    app.observe_terminals().unwrap();
+    let s = app.snapshot().unwrap();
+    assert_eq!(
+        s.terminal_contexts[0].project_id.as_deref(),
+        other["id"].as_str()
+    );
+    assert_eq!(s.conversations[0].project_id, p.id);
+    assert_eq!(s.conversations[0].card_id, c.id);
+    run.terminal = Some("new-pty".into());
+    app.store.lock().unwrap().write(|db| db.save(&run)).unwrap();
+    assert!(app.snapshot().unwrap().terminal_contexts.is_empty());
+}
+
+#[test]
+fn v4_terminal_migration_keeps_identity_and_runtime_but_drops_shell_ownership() {
+    let (dir, app, p, c) = setup();
+    app.call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
+        .unwrap();
+    let agent = app.snapshot().unwrap().terminals[0].clone();
+    let old_agent = json!({"id":agent.id,"project_id":p.id,"card_id":c.id,"number":agent.number,"name":"Agent name","source":{"kind":"agent"},"created_at":1});
+    let old_shell = json!({"id":"legacy-shell","project_id":p.id,"card_id":c.id,"number":9,"name":"Server","source":{"kind":"shell","cwd":"/old/path","core_id":"original","terminal":"t9","state":"running","connection":"connected","error":null},"created_at":2});
+    let receipt_args = json!({"request_key":"legacy-receipt"});
+    let fingerprint = canban_context::digest(
+        &serde_json::to_vec(&json!(["terminal.create", receipt_args])).unwrap(),
+    );
+    let store = app.store.lock().unwrap();
+    store
+        .db()
+        .conn
+        .execute(
+            "INSERT INTO operations VALUES(?1,?2,?3)",
+            params!["legacy-receipt", fingerprint, old_shell.to_string()],
+        )
+        .unwrap();
+    store
+        .db()
+        .conn
+        .execute(
+            "UPDATE terminals SET data=?2 WHERE id=?1",
+            params![agent.id, old_agent.to_string()],
+        )
+        .unwrap();
+    store
+        .db()
+        .conn
+        .execute(
+            "INSERT INTO terminals VALUES(?1,?2,?3,'',9,?4)",
+            params!["legacy-shell", p.id, c.id, old_shell.to_string()],
+        )
+        .unwrap();
+    store
+        .db()
+        .conn
+        .execute_batch("PRAGMA user_version=4;")
+        .unwrap();
+    drop(store);
+    drop(app);
+    let upgraded = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let s = upgraded.snapshot().unwrap();
+    let receipt = upgraded.call("terminal.create", receipt_args).unwrap();
+    assert_eq!(receipt["runtime"]["terminal"], "t9");
+    assert!(receipt.get("source").is_none());
+    let unchanged: String = upgraded
+        .store
+        .lock()
+        .unwrap()
+        .db()
+        .conn
+        .query_row(
+            "SELECT result FROM operations WHERE id='legacy-receipt'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(unchanged, old_shell.to_string());
+    let shell = s.terminals.iter().find(|t| t.id == "legacy-shell").unwrap();
+    assert_eq!(shell.title(), "Server");
+    assert_eq!(shell.number, 9);
+    assert!(shell.conversation_id.is_none());
+    assert_eq!(
+        shell.runtime.as_ref().unwrap().terminal.as_deref(),
+        Some("t9")
+    );
+    let agent = s.terminals.iter().find(|t| t.id == agent.id).unwrap();
+    assert_eq!(agent.conversation_id.as_deref(), Some(agent.id.as_str()));
+    assert!(agent.runtime.is_none());
+    let data: String = upgraded
+        .store
+        .lock()
+        .unwrap()
+        .db()
+        .conn
+        .query_row(
+            "SELECT data FROM terminals WHERE id='legacy-shell'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!data.contains("/old/path"));
+    assert!(!data.contains("project_id"));
+    drop(upgraded);
+    let reopened = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    assert_eq!(reopened.snapshot().unwrap().terminals, s.terminals);
+}
+
+#[test]
+fn archive_protects_a_worktree_entered_from_an_unrelated_independent_terminal() {
+    let (dir, app, _p, mut c) = setup();
+    core(&app, dir.path());
+    let worktree = dir.path().join("worktree");
+    std::fs::create_dir(&worktree).unwrap();
+    c.worktree = Some(worktree.to_str().unwrap().into());
+    app.call("terminal.create", json!({"cwd":dir.path()}))
+        .unwrap();
+    assert!(!app.terminal_retains_worktree(&c).unwrap());
+    std::fs::write(dir.path().join("cwd"), worktree.to_str().unwrap()).unwrap();
+    assert!(app.terminal_retains_worktree(&c).unwrap());
+    app.config.write().unwrap().hc = "/usr/bin/false".into();
+    assert!(app.terminal_retains_worktree(&c).unwrap());
+}
+
+#[test]
+fn manual_labels_have_their_own_durable_sequence_and_v5_migration_keeps_runtime_and_names() {
+    let (dir, app, _p, c) = setup();
+    core(&app, dir.path());
+    app.call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
+        .unwrap();
+    let first = app.call("terminal.create", json!({})).unwrap();
+    app.call(
+        "agent.open",
+        json!({"card_id":c.id,"profile_id":"reviewer"}),
+    )
+    .unwrap();
+    let second = app.call("terminal.create", json!({})).unwrap();
+    assert_eq!(first["manual_number"], 1);
+    assert_eq!(second["manual_number"], 2);
+    assert_eq!(second["number"], 4);
+    app.call(
+        "terminal.rename",
+        json!({"terminal_id":first["id"],"name":"Server"}),
+    )
+    .unwrap();
+    let before = app.snapshot().unwrap();
+    {
+        let store = app.store.lock().unwrap();
+        // Reproduce the exact v5 representation: only the new display sequence is absent.
+        store.db().conn.execute_batch("UPDATE terminals SET data=json_remove(data,'$.manual_number'); DELETE FROM counters WHERE id='terminal-manual-number'; PRAGMA user_version=5;").unwrap();
+    }
+    drop(app);
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    core(&app, dir.path());
+    let migrated = app.snapshot().unwrap();
+    assert_eq!(before.requests, migrated.requests);
+    assert_eq!(before.attempts, migrated.attempts);
+    let one = migrated
+        .terminals
+        .iter()
+        .find(|t| t.id == first["id"])
+        .unwrap();
+    assert_eq!(one.title(), "Server");
+    assert_eq!(one.manual_number, Some(1));
+    assert_eq!(one.runtime, before.terminals[1].runtime);
+    let two = migrated
+        .terminals
+        .iter()
+        .find(|t| t.id == second["id"])
+        .unwrap();
+    assert_eq!(two.title(), "Terminal 2");
+    app.call("terminal.rename", json!({"terminal_id":one.id,"name":""}))
+        .unwrap();
+    assert_eq!(app.snapshot().unwrap().terminals[1].title(), "Terminal 1");
+    let third = app.call("terminal.create", json!({})).unwrap();
+    assert_eq!(third["manual_number"], 3);
+    assert_eq!(
+        app.snapshot().unwrap().terminals.last().unwrap().title(),
+        "Terminal 3"
+    );
+}

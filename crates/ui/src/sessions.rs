@@ -14,6 +14,15 @@ pub fn card_agents(ui: Ui) -> impl IntoElement {
                 .justify_between()
                 .items_center()
                 .child(label("Agents"))
+                .child(chrome_button(
+                    Icon::Terminal,
+                    "Open Shell in Card directory",
+                    move |_| {
+                        if let Some(card) = ui.current_card() {
+                            crate::terminals::create(ui, card.project_id, Some(card.id));
+                        }
+                    },
+                ))
                 .child(action("Other Agents", Variant::Quiet, move |_| {
                     more.set(!more.get_untracked())
                 })),
@@ -51,19 +60,13 @@ pub fn card_agents(ui: Ui) -> impl IntoElement {
             if profiles.is_empty() {
                 rows = rows.child(muted("Choose an Agent to discuss or work on this Card."));
             }
+            let conversations = crate::terminals::model::conversations(&snapshot);
             for profile in profiles {
-                let latest = snapshot
-                    .requests
+                let row = conversations
                     .iter()
-                    .rev()
-                    .find(|r| r.card_id == card && r.profile.id == profile.id);
-                let run = latest.and_then(|r| {
-                    snapshot
-                        .attempts
-                        .iter()
-                        .rev()
-                        .find(|a| a.request_id == r.id)
-                });
+                    .find(|r| r.id == canban_types::Conversation::key(&card, &profile.id));
+                let latest = row.and_then(|r| r.request.as_ref());
+                let run = row.and_then(|r| r.attempt.as_ref());
                 let exited = run.is_some_and(|a| {
                     a.observed
                         .as_ref()
@@ -71,7 +74,7 @@ pub fn card_agents(ui: Ui) -> impl IntoElement {
                 });
                 let state = if exited {
                     "Resume"
-                } else if run.is_some() {
+                } else if latest.is_some() {
                     "Open terminal"
                 } else {
                     "Start"
@@ -81,153 +84,27 @@ pub fn card_agents(ui: Ui) -> impl IntoElement {
                     format!("@{} · {state}", profile.id),
                     Variant::Secondary,
                     move |_| {
-                        dispatch_then(
-                            ui,
-                            "agent.open",
-                            json!({"card_id":card_id,"profile_id":profile.id}),
-                            move |v| {
-                                if let Some(id) = v["request_id"].as_str() {
-                                    ui.request.set(id.into());
-                                    ui.page.set("terminal".into());
-                                    ui.expanded.set(false);
-                                    ui.focused_card.set(false);
-                                }
-                            },
-                        )
+                        open(ui, card_id.clone(), profile.id.clone());
                     },
                 ));
             }
             rows
         }))
 }
-pub fn screen(ui: Ui) -> impl IntoElement {
-    let terminal_run = computed(move || {
-        let request = ui.request.get();
-        ui.snapshot.with(|s| {
-            s.attempts
-                .iter()
-                .rev()
-                .find(|a| a.request_id == request && a.terminal.is_some())
-                .map(|a|json!({"id":a.id,"terminal":a.terminal,"core_id":a.core_id,"read_only":matches!(a.close_state.as_str(),"pending"|"closing"|"closed")}))
-        })
-    });
-    view()
-        .flex_1()
-        .min_h(px(0.0))
-        .p_4()
-        .gap_3()
-        .child(dynamic(move || {
-            let request_id = ui.request.get();
-            let snapshot = ui.snapshot.get();
-            let Some(request) = snapshot.requests.iter().find(|r| r.id == request_id) else {
-                return label("Select a Card Agent to open its terminal").into_element();
-            };
-            let card_id = request.card_id.clone();
-            let profile_id = request.profile.id.clone();
-            let run = snapshot
-                .attempts
-                .iter()
-                .rev()
-                .find(|a| a.request_id == request.id);
-            let mut toolbar = view()
-                .gap_2()
-                .child(heading(format!("@{}", profile_id)))
-                .child(muted(format!(
-                    "{} · {} · {}",
-                    request.stage,
-                    request.state,
-                    run.map(|a| format!("{} · {}", a.close_state, a.connection_state))
-                        .unwrap_or_default()
-                )))
-                .child(
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(action("Open Card", Variant::Quiet, {
-                            let card_id = card_id.clone();
-                            move |_| ui.open_card(card_id.clone())
-                        }))
-                        .child(action("Open / resume conversation", Variant::Primary, {
-                            let card_id = card_id.clone();
-                            let profile_id = profile_id.clone();
-                            move |_| {
-                                dispatch_then(
-                                    ui,
-                                    "agent.open",
-                                    json!({"card_id":card_id,"profile_id":profile_id}),
-                                    move |v| {
-                                        if let Some(id) = v["request_id"].as_str() {
-                                            ui.request.set(id.into());
-                                        }
-                                    },
-                                )
-                            }
-                        })),
-                );
-            if let Some(run) = run {
-                let interrupt = run.id.clone();
-                let end = run.id.clone();
-                toolbar = toolbar.child(
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(action("Interrupt", Variant::Secondary, move |_| {
-                            dispatch(ui, "agent.interrupt", json!({"attempt_id":interrupt}))
-                        }))
-                        .child(action("End session", Variant::Danger, move |_| {
-                            dispatch(ui, "agent.end", json!({"attempt_id":end}))
-                        })),
-                );
-                if run
-                    .observed
-                    .as_ref()
-                    .is_some_and(|v| v["state"] == "finished")
-                {
-                    let card_id = card_id.clone();
-                    let profile_id = profile_id.clone();
-                    toolbar = toolbar.child(action(
-                        "Start with retained Card context",
-                        Variant::Secondary,
-                        move |_| {
-                            dispatch_then(
-                                ui,
-                                "agent.open",
-                                json!({"card_id":card_id,"profile_id":profile_id,"fresh":true}),
-                                move |v| {
-                                    if let Some(id) = v["request_id"].as_str() {
-                                        ui.request.set(id.into());
-                                    }
-                                },
-                            )
-                        },
-                    ));
-                }
-                if let Some(error) = &run.error {
-                    toolbar = toolbar.child(label(error.clone()));
-                }
+
+/// Explicit Start/Resume intent shared by Card components. A late operation
+/// receipt updates saved state without redirecting a user who has navigated away.
+pub fn open(ui: Ui, card: String, profile: String) {
+    let origin = ui.location();
+    let conversation = canban_types::Conversation::key(&card, &profile);
+    dispatch_then(
+        ui,
+        "agent.open",
+        json!({"card_id":card,"profile_id":profile}),
+        move |v| {
+            if v["request_id"].is_string() && ui.location() == origin {
+                ui.open_terminal(conversation);
             }
-            toolbar.into_element()
-        }))
-        .child(dynamic(move || {
-            let current_run = terminal_run.get();
-            let Some(run) = current_run.as_ref() else {
-                return panel()
-                    .child(label("Waiting for the Agent terminal…"))
-                    .into_element();
-            };
-            let Some(app) = crate::APP.get() else {
-                return label("Terminal binding requires a running application").into_element();
-            };
-            let binding =
-                json!({"config":app.config(),"terminal":run["terminal"],"core_id":run["core_id"]});
-            native("canban/terminal")
-                .key(run["id"].as_str().unwrap_or("").to_owned())
-                .prop("binding", binding)
-                .prop("read_only", run["read_only"].clone())
-                .flex_1()
-                .min_h(px(200.0))
-                .into_element()
-        }))
+        },
+    );
 }

@@ -27,7 +27,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                 !ui.return_overview.get()
                     && matches!(
                         ui.page.get().as_str(),
-                        "board" | "card" | "terminal" | "review" | "new-project" | "new-card"
+                        "board" | "card" | "review" | "new-project" | "new-card"
                     )
             },
             || 0,
@@ -36,7 +36,10 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         .child(icon_action(
             Icon::Overview,
             "Overview".into(),
-            move || ui.page.get() == "overview" || ui.return_overview.get(),
+            move || {
+                ui.page.get() == "overview"
+                    || (ui.return_overview.get() && ui.page.get() != "terminals")
+            },
             move || {
                 canban_notifications::overview(&ui.snapshot.get())
                     .iter()
@@ -45,7 +48,13 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             },
             move |_| ui.navigate("overview"),
         ));
-    let mut rail = rail;
+    let mut rail = rail.child(icon_action(
+        Icon::Terminal,
+        "Terminals".into(),
+        move || ui.page.get() == "terminals",
+        || 0,
+        move |_| ui.navigate("terminals"),
+    ));
     for (kind, title, page) in [
         (Icon::Note, "Notes", "notes"),
         (Icon::Archive, "Archived Cards", "archive"),

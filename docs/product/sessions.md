@@ -32,3 +32,12 @@ Turn-end, idle, a reply and process exit are not completion. Exit without a repo
 SQLite WAL stores Conversation and Question metadata alongside requests/attempts. Long captured context, replies, reports and retained terminal output are Card-owned files. Historical final-response snapshots remain readable; the current lifecycle does not capture provider callback payloads. Archive compresses these files and record exports but does not back up provider-owned histories. Restore is required before invoking an archived Card; a removed clean worktree can be recreated from its retained Card ref. Missing provider history fails visibly; Start with retained Card context is an explicit fresh-context recovery action.
 
 AppServer restart never blindly replays a launch without its receipt, an uncertain question delivery or a physical terminal control intent. These remain unknown/attention for inspection. Provider lifecycle/terminal acceptance limits are in [implementation](../implementation.md).
+
+
+## Dedicated Terminal navigation (2026-11-08)
+
+The [Terminal workspace](../terminal-workspace.md) projects one stable Card/profile conversation row across executions. Card Agent actions, Overview, Quick Open and related Note execution links select that conversation; the selected live attempt supplies the owning Core/Terminal binding. Queue/closed/history browsing creates no invocation. Explicit Resume creates a new request/attempt using the saved provider ID. Terminal navigation selection is independent of the Board's Project/Card; source returns retain drafts and context.
+
+## Terminal entries and opened tabs
+
+[TerminalEntry](../terminal-workspace.md) is a navigation/presentation record, not another Agent Session model. An Agent entry retains the Card/profile conversation key and follows its current Attempt. A manually opened Shell has its own entry and owning Core/PTy, with no required Project and only directory-derived Project/Card hints. Agents use Card/stage/Profile labels; independent Terminals use a separate monotonic Terminal N sequence. Both may be renamed and have one opened tab each. Shells never manufacture Requests/Attempts or advance Workflow. Closed Shells reopen as a new PTY/entry; Agent Resume keeps its existing conversation entry and uses the provider's configured resume command. Tab views are process-local; durable names/bindings survive restart.

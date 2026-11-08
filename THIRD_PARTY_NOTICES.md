@@ -6,4 +6,6 @@ Canban is Copyright 2026 JJy <jjyruby@gmail.com>, Apache-2.0.
 - libghostty-vt is built from ghostty-org/ghostty 5813c9461d5af78b6307a1254d00b1bc190eaccd, Copyright 2024 Mitchell Hashimoto and Ghostty contributors, MIT. See third_party/Ghostty-LICENSE.txt. The commit-verified upstream source checkout, including its applicable notices, is retained under .local/deps/ghostty for the build; unused GUI resources are excluded.
 - The vendored UI icons in crates/ui-kit/assets/lucide are from Lucide 0.468.0 (https://github.com/lucide-icons/lucide/tree/0.468.0/icons), ISC. Copyright Lucide Contributors 2022; portions derived from Feather are Copyright Cole Bemis 2013–2022 (MIT). See third_party/Lucide-LICENSE.txt and the preserved upstream assets/lucide/LICENSE. Their original 24-unit geometry and 2-unit stroke render at 20 points in Canban.
 
+- Provider marks in crates/ui-kit/assets/providers reuse the monochrome agent-codex.svg and agent-claude.svg assets from herdr-app a6db99b4edab37b2038ac1016bd0af82ed0a5ebc (https://github.com/herdrdev/herdr-app), Apache-2.0. See third_party/Herdr-LICENSE.txt. OpenAI/Codex and Claude marks identify their respective providers.
+
 NSH and other Cargo dependencies retain their upstream licenses. No third-party attribution replaces Canban's Apache-2.0 license.

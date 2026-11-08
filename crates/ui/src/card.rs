@@ -45,9 +45,9 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .items_center()
                 .gap_2()
                 .child(dynamic(move || {
-                    if (ui.narrow.get() || ui.return_overview.get()) && ui.page.get() == "card" {
-                        action(if ui.return_overview.get_untracked() {"← Overview"} else {"← Board"}, Variant::Quiet, move |_| {
-                            if ui.return_overview.get_untracked() { ui.back_board(); } else { ui.page.set("board".into()); }
+                    if (ui.narrow.get() || ui.return_overview.get() || ui.terminal_card_return.get()) && ui.page.get() == "card" {
+                        action(if ui.terminal_card_return.get_untracked() {"← Terminals"} else if ui.return_overview.get_untracked() {"← Overview"} else {"← Board"}, Variant::Quiet, move |_| {
+                            if ui.terminal_card_return.get_untracked() {ui.return_terminal();} else if ui.return_overview.get_untracked() { ui.back_board(); } else { ui.page.set("board".into()); }
                         })
                         .into_element()
                     } else {
@@ -55,7 +55,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     }
                 }))
                 .child(action("Close Card", Variant::Quiet, move |_| {
-                    if ui.return_overview.get_untracked() { ui.back_board(); } else { ui.card.set(String::new()); ui.page.set("board".into()); }
+                    if ui.terminal_card_return.get_untracked() {ui.return_terminal();} else if ui.return_overview.get_untracked() { ui.back_board(); } else { ui.card.set(String::new()); ui.page.set("board".into()); }
                 })),
         )
         .child(heading(move || {

@@ -1,5 +1,5 @@
 //! Board -> selected Card -> focused work; viewer close never controls the PTY.
-use crate::{board, card, presenter::*, review, sessions};
+use crate::{board, card, presenter::*, review};
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 pub fn screen(ui: Ui) -> impl IntoElement {
@@ -10,13 +10,12 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         let show_card = ui.focused_card.get();
         let _ = ui.card.get();
         untracked(|| {
-            let focus = page == "terminal" || page == "review";
+            if page == "card" && ui.terminal_card_return.get_untracked() {
+                return card::screen(ui).into_element();
+            }
+            let focus = page == "review";
             if focus {
-                let tool = if page == "terminal" {
-                    sessions::screen(ui).into_element()
-                } else {
-                    review::screen(ui).into_element()
-                };
+                let tool = review::screen(ui).into_element();
                 let body = if expanded || narrow {
                     if show_card {
                         card::screen(ui).into_element()
@@ -48,13 +47,21 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             .border_b_1()
                             .border_color(BORDER)
                             .child(action(
-                                if ui.return_overview.get_untracked() {
+                                if ui.terminal_card_return.get_untracked() {
+                                    "← Terminals"
+                                } else if ui.return_overview.get_untracked() {
                                     "← Overview"
                                 } else {
                                     "← Board"
                                 },
                                 Variant::Quiet,
-                                move |_| ui.back_board(),
+                                move |_| {
+                                    if ui.terminal_card_return.get_untracked() {
+                                        ui.return_terminal();
+                                    } else {
+                                        ui.back_board();
+                                    }
+                                },
                             ))
                             .child(
                                 view()

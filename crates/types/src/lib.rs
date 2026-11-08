@@ -493,6 +493,11 @@ pub struct Artifact {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub terminals: Vec<TerminalEntry>,
+    /// Ephemeral Herdr observations, never persisted as Terminal ownership.
+    #[serde(default)]
+    pub terminal_contexts: Vec<TerminalContext>,
     pub projects: Vec<Project>,
     pub cards: Vec<Card>,
     pub events: Vec<Event>,
@@ -508,6 +513,69 @@ pub struct Snapshot {
     pub questions: Vec<Question>,
     #[serde(default)]
     pub note_events: Vec<NoteEvent>,
+}
+/// Durable navigation identity. Agent runtime bindings remain on Attempts.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TerminalEntry {
+    pub id: String,
+    pub conversation_id: Option<String>,
+    pub number: u64,
+    pub name: Option<String>,
+    /// Separate durable sequence for independently opened Terminal labels.
+    pub manual_number: Option<u64>,
+    /// Independent terminals own a binding; Agent bindings remain on Attempts.
+    pub runtime: Option<TerminalRuntime>,
+    pub created_at: u64,
+}
+impl TerminalEntry {
+    pub fn title(&self) -> String {
+        self.name.clone().unwrap_or_else(|| {
+            if self.conversation_id.is_none() {
+                format!("Terminal {}", self.manual_number.unwrap_or(self.number))
+            } else {
+                self.number.to_string()
+            }
+        })
+    }
+    /// Decode v4 records/receipts without rewriting historical operation data.
+    pub fn from_json(mut value: Value) -> serde_json::Result<Self> {
+        if let Some(mut source) = value.as_object_mut().and_then(|o| o.remove("source")) {
+            let agent = source["kind"] == "agent";
+            value["conversation_id"] = if agent {
+                value["id"].clone()
+            } else {
+                Value::Null
+            };
+            if agent {
+                value["runtime"] = Value::Null;
+            } else {
+                if let Some(fields) = source.as_object_mut() {
+                    fields.remove("kind");
+                    fields.remove("cwd");
+                }
+                value["runtime"] = source;
+            }
+        }
+        serde_json::from_value(value)
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TerminalRuntime {
+    pub core_id: Option<String>,
+    pub terminal: Option<String>,
+    pub state: String,
+    pub connection: String,
+    pub error: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TerminalContext {
+    pub terminal_id: String,
+    pub core_id: String,
+    pub terminal: String,
+    pub cwd: Option<String>,
+    pub project_id: Option<String>,
+    pub card_id: Option<String>,
+    pub branch: Option<String>,
 }
 #[derive(Clone, Debug)]
 pub enum AppEvent {

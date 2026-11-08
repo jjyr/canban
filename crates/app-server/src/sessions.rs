@@ -16,6 +16,7 @@ pub(super) fn conversation(db: Db<'_>, card: &Card, profile: &Profile) -> Result
         created_at: now(),
     };
     db.save(&item)?;
+    db.agent_terminal(&item)?;
     Ok(item)
 }
 

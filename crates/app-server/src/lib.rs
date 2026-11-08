@@ -23,6 +23,8 @@ pub struct AppServer {
     listeners: Mutex<Vec<mpsc::Sender<AppEvent>>>,
     stop: AtomicBool,
     review_gate: Mutex<()>,
+    terminal_gate: Mutex<()>,
+    terminal_contexts: Mutex<Vec<TerminalContext>>,
 }
 pub struct Running {
     server: Arc<AppServer>,
@@ -228,6 +230,8 @@ impl AppServer {
             listeners: Mutex::new(Vec::new()),
             stop: AtomicBool::new(false),
             review_gate: Mutex::new(()),
+            terminal_gate: Mutex::new(()),
+            terminal_contexts: Mutex::new(Vec::new()),
         }))
     }
     fn read_config(home: &Path) -> Result<(Config, Option<Vec<u8>>)> {
@@ -323,7 +327,23 @@ impl AppServer {
             .retain(|tx| tx.send(event.clone()).is_ok());
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
-        self.store.lock().unwrap().snapshot()
+        let mut snapshot = self.store.lock().unwrap().snapshot()?;
+        snapshot.terminal_contexts = self
+            .terminal_contexts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| {
+                snapshot.terminals.iter().any(|t| {
+                    t.id == c.terminal_id
+                        && Self::terminal_binding(&snapshot, t).is_some_and(|(core, terminal)| {
+                            core == c.core_id && terminal == c.terminal
+                        })
+                })
+            })
+            .cloned()
+            .collect();
+        Ok(snapshot)
     }
     pub fn config(&self) -> Config {
         self.config.read().unwrap().clone()
@@ -377,6 +397,7 @@ mod reports;
 mod resources;
 mod runtime;
 mod sessions;
+mod terminals;
 
 pub fn default_home() -> Result<PathBuf> {
     if let Some(v) = std::env::var_os("CANBAN_HOME") {

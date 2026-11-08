@@ -1,3 +1,5 @@
+Update 2026-11-08: the Terminal portion of the focused-work layout below has been replaced by the [dedicated Terminal workspace](terminal-workspace.md). Card/Overview/search/Note execution links open its stable conversation tree and native viewer. Review remains in its existing focused-work composition. Earlier acceptance is dated evidence for the former layout.
+
 # Notes and workspace implementation
 
 Status: implemented and checked on macOS, 2026-11-07. This records the approved Kanban-centered composition and database Note model. It does not turn the older UI audit into current runtime evidence.
