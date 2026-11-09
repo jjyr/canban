@@ -542,3 +542,11 @@ The user replaced view-only tab closure: X, Command+W and the context-menu close
 
 
 The user clarified that keys/buttons must dispatch one close intent rather than deciding which process-control API to invoke. AppServer `terminal.close` now owns runtime resolution, durable close intent, termination and replay-safe receipts for both Agent and independent Terminals; the UI only updates its tab list after a successful close receipt. The user also selected explicit Connecting / Disconnected / Closing presentation in place of generic read-only copy.
+
+
+## 2026-11-09 — Desktop utility bar and Usage visibility
+
+The user accepted the shared bottom utility-bar direction for subscription Usage, Caffeine, Theme and Shortcuts, then specified that unsigned-in Codex/Claude providers must not appear. With neither signed in, hide the entire Usage group; distinguish confirmed logout from refresh/access failure so an existing reading can remain stale rather than misleadingly disappear. Add a right-hand Report issue button that opens the Canban repository feedback page with editable version/platform/report context. Report submission stays with the user in GitHub and is independent of Canban GitHub App login. [Source-backed design](../research/herdr-desktop-utilities.md) records the layout, Claude credential reading, cross-Project creation and detailed feedback/visibility contracts. These new utilities are design decisions, not yet runtime implementation.
+
+
+The implementation is recorded in [Desktop utilities](../desktop-utilities.md), including isolated/native acceptance and remaining provider limits. The user clarified that the bar must not cross the navigation rail and requested a compact reset countdown after each Usage percentage (`7d`, `5d`). The summary uses the reset from the displayed quota window; the top border begins to the right of the rail.

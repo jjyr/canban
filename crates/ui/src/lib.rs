@@ -3,6 +3,7 @@ use anyhow::Result;
 use std::sync::Arc;
 pub mod board;
 pub mod card;
+pub mod commands;
 pub mod components;
 pub mod drafts;
 pub mod frame;
@@ -15,6 +16,7 @@ pub mod profiles;
 pub mod rail;
 pub mod review;
 mod screens;
+pub mod utilities;
 pub use rail::sidebar;
 pub use screens::screen;
 pub mod quick_open;
@@ -29,7 +31,9 @@ fn native(_: &mut Registry) {}
 #[component]
 pub fn Canban() -> impl IntoElement {
     let ui = Ui::new();
-    quick_open::bindings(ui);
+    canban_ui_kit::tokens::install_theme();
+    commands::bindings(ui);
+    utilities::init(ui);
     terminals::bindings(ui);
     effect(move || {
         if ui.page.get() != "terminals" {

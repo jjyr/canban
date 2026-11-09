@@ -166,7 +166,7 @@ typedef void (*InputFn)(void *, const char *);
   if (cursor.count == 2) {
     NSPoint p = NSMakePoint(6 + [cursor[0] integerValue] * 8,
                             6 + [cursor[1] integerValue] * 18);
-    [NSColor.systemBlueColor setFill];
+    [[self color:f[@"cursor_color"] ?: @[ @128, @170, @255 ]] setFill];
     NSRectFill(NSMakeRect(p.x, p.y + 16, 8, 2));
     if (self.marked.length)
       [self.marked drawAtPoint:p

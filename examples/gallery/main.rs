@@ -121,10 +121,12 @@ fn controls() -> impl IntoElement {
 
 #[component]
 pub fn Gallery() -> impl IntoElement {
+    canban_ui_kit::tokens::install_theme();
     let scene = signal("workspace".to_string());
     let constrained = signal(false);
     let ui = Ui::new();
-    canban_ui::quick_open::bindings(ui);
+    canban_ui::commands::bindings(ui);
+    canban_ui::utilities::init(ui);
     canban_ui::terminals::bindings(ui);
     ui.snapshot.set(fixtures::workspace());
     ui.project.set("gallery-project".into());
@@ -215,6 +217,10 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Card states", Variant::Quiet, move |_| {
                     scene.set("workspace".into());ui.snapshot.set(fixtures::board_cards());ui.card.set(String::new());ui.page.set("board".into());
                 }))
+                .child(action("Usage fixtures", Variant::Quiet, move |_| {
+                    ui.usage.set(json!({"machine":"local","updated_at":canban_types::now(),"readings":[{"provider":"codex","auth":"present","account":"demo@example.invalid","windows":[{"name":"Session","used":22,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+5*86400) as i64,0).unwrap().to_rfc3339()}]},{"provider":"claude","auth":"present","account":"other@example.invalid","stale":true,"error":"HTTP 429","windows":[{"name":"Weekly","used":68,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+7*86400) as i64,0).unwrap().to_rfc3339()}]}]}));
+                }))
+                .child(action("No signed-in providers", Variant::Quiet, move |_| {ui.usage.set(json!({"readings":[]}));}))
                 .child(action("New Card", Variant::Quiet, move |_| {
                     let mut snapshot=fixtures::workspace();
                     snapshot.projects[0].github=Some(canban_types::GitHubSource { repository:"jjyr/canban".into(),repository_id:1,generation:"gallery".into(),intake:canban_types::GitHubIntake::All,synced_at:None,error:None });
@@ -243,7 +249,6 @@ pub fn Gallery() -> impl IntoElement {
                     constrained.set(false)
                 })),
         )
-        .child(canban_ui::quick_open::overlay(ui))
         .child(dynamic(move || {
             if scene.get() == "scheduling" {
                 return view()
@@ -255,26 +260,13 @@ pub fn Gallery() -> impl IntoElement {
             if scene.get() == "controls" {
                 return controls().into_element();
             }
-            if ui.page.get()=="terminals" {return canban_ui::terminals::screen(ui).into_element();}
             let narrow_preview = constrained.get();
             view()
                 .flex_1()
                 .w_full()
                 .max_w(px(if narrow_preview { 720.0 } else { 10000.0 }))
                 .min_h(px(0.0))
-                .flex_row()
-                .child(canban_ui::sidebar(ui))
-                .child(
-                    view()
-                        .flex_1()
-                        .min_w(px(0.0))
-                        .on_layout(move |b: &Bounds<Points>| ui.narrow.set(b.size.width.0 < 900.0))
-                        .child(dynamic(move || {
-                            let page = ui.page.get();
-                            let _ = ui.card.get();
-                            untracked(|| canban_ui::screen(ui, &page))
-                        })),
-                )
+                .child(canban_ui::frame::screen(ui))
                 .into_element()
         })).into_element()
 }

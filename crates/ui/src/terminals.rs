@@ -242,16 +242,35 @@ fn remove_tab(ui: Ui, id: &str) {
         }
     }
 }
+pub fn cycle(ui: Ui, forward: bool) {
+    let tabs = ui.terminal_tabs.get_untracked();
+    if tabs.is_empty() {
+        return;
+    }
+    let old = tabs
+        .iter()
+        .position(|t| *t == ui.terminal_selection.get_untracked())
+        .unwrap_or(0);
+    let next = if forward {
+        (old + 1) % tabs.len()
+    } else {
+        (old + tabs.len() - 1) % tabs.len()
+    };
+    ui.open_terminal(tabs[next].clone());
+}
 pub(crate) const TAB_KEYS: [(&str, u8); 4] = [
-    ("mod+t", 0),
-    ("mod+w", 1),
-    ("mod+shift+]", 2),
-    ("mod+shift+[", 3),
+    (crate::commands::CATALOG[3].key, 0),
+    (crate::commands::CATALOG[4].key, 1),
+    (crate::commands::CATALOG[5].key, 2),
+    (crate::commands::CATALOG[6].key, 3),
 ];
 pub fn bindings(ui: Ui) {
     use nsh_core::keymap::When;
     effect(move || {
-        if ui.page.get() != "terminals" || ui.quick_open.get() || ui.terminal_rename.get().is_some()
+        if ui.page.get() != "terminals"
+            || ui.quick_open.get()
+            || ui.terminal_rename.get().is_some()
+            || !ui.utility_popup.get().is_empty()
         {
             return;
         }

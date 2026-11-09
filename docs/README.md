@@ -37,6 +37,7 @@ The repository now has a runnable macOS MVP. [Real Agent acceptance, 2026-11-09]
 | [Dedicated Terminal workspace](terminal-workspace.md) | Independent Terminals, live directory context, Project grouping, split chrome, Agent resume and isolated PTY acceptance |
 | [Project entry, grouped Overview and Settings](workspace-entry-and-settings.md) | Clickable empty Board, native directory chooser, filter-free Overview and unified Settings groups |
 | [Compact navigation and Quick Open](quick-open-and-navigation.md) | Implemented icon rail, Command+O fuzzy search, candidate navigation and native acceptance |
+| [Desktop utilities](desktop-utilities.md) | Implemented Usage/reset countdown, Caffeine, Theme, Shortcuts, target-Project creation and acceptance |
 | [Herdr UI layout and product references](research/herdr-ui-product-and-layout.md) | Source-backed recommendations for workspace chrome, navigation, Quick Open, contextual feedback and Review |
 | [Global Agent Overview](product/overview.md) | Herdr UI reference, all-Agent grouped overview, attention highlight, queued/idle/closed states and context inspector |
 | [Attention handling](product/needs-attention.md) | Task/runtime naming, contextual handling inside Overview, Card/Terminal navigation and resolution rules |
@@ -72,6 +73,7 @@ Project-wide [development conventions](development-conventions.md) specify prefi
 | Document | Purpose |
 | --- | --- |
 | [NSH, WebView, and Shear](research/nsh-webview-and-shear.md) | UI composition, terminal-client obligations, reusable analysis, review-port cost |
+| [Desktop utilities and cross-Project creation](research/herdr-desktop-utilities.md) | Source-backed Usage, Caffeine, Theme, Shortcuts and New Card target-Project source research |
 | [Related products](research/product-landscape.md) | Official-documentation workflow comparison and hypotheses |
 | [Sources and verification](research/sources.md) | Pinned source revisions and research verification boundary |
 

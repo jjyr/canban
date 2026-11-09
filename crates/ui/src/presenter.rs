@@ -18,6 +18,16 @@ pub struct Location {
 pub struct Ui {
     /// Commands outlive transient buttons/lists, but end with the window.
     pub owner: Owner,
+    pub card_target: Signal<String>,
+    pub utility: Signal<Value>,
+    pub utility_popup: Signal<String>,
+    pub utility_query: Signal<String>,
+    pub utility_loading: Signal<bool>,
+    pub utility_epoch: Signal<u64>,
+    pub usage: Signal<Value>,
+    pub usage_machine: Signal<String>,
+    pub usage_loading: Signal<bool>,
+    pub usage_epoch: Signal<u64>,
     pub terminal_selection: Signal<String>,
     pub terminal_tabs: Signal<Vec<String>>,
     pub terminal_details: Signal<bool>,
@@ -87,6 +97,16 @@ impl Ui {
         self.output.set(String::new());
         self.output_observed_at.set(None);
     }
+    pub fn new_card(self, source_note: String) {
+        if self.page.get_untracked() == "new-card" {
+            return;
+        }
+        self.utility_popup.set(String::new());
+        self.quick_open.set(false);
+        self.card_target.set(self.project.get_untracked());
+        self.source_note.set(source_note);
+        self.navigate("new-card");
+    }
     pub fn navigate(self, page: &str) {
         self.terminal_card_return.set(false);
         if page == "terminals" {
@@ -106,6 +126,18 @@ impl Ui {
     pub fn new() -> Self {
         Self {
             owner: Owner::current(),
+            card_target: signal(String::new()),
+            utility: signal(
+                json!({"preferences":{"appearance":"system","palette":"canban"},"awake":false}),
+            ),
+            utility_popup: signal(String::new()),
+            utility_query: signal(String::new()),
+            utility_loading: signal(false),
+            utility_epoch: signal(0),
+            usage: signal(json!({"readings":[]})),
+            usage_machine: signal(String::new()),
+            usage_loading: signal(false),
+            usage_epoch: signal(0),
             machines: signal(json!({"machines":[]})),
             machines_loading: signal(false),
             terminal_selection: signal(String::new()),
@@ -231,6 +263,7 @@ impl Ui {
         self.page.set("terminals".into());
     }
     pub fn show_search(self, projects: bool) {
+        self.utility_popup.set(String::new());
         self.search_query.set(String::new());
         self.project_picker.set(projects);
         self.quick_open.set(true);

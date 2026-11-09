@@ -36,6 +36,7 @@ struct State {
     connected: bool,
     size_ready: bool,
     focused: bool,
+    theme: Option<Value>,
 }
 enum Input {
     Bytes(Vec<u8>),
@@ -63,6 +64,7 @@ impl Host {
                 connected: false,
                 size_ready: false,
                 focused: false,
+                theme: None,
             })),
             input: None,
             stop: Arc::new(AtomicBool::new(false)),
@@ -84,12 +86,14 @@ impl Host {
         self.content = None;
         self.stop.store(true, Ordering::SeqCst);
         self.stop = Arc::new(AtomicBool::new(false));
+        let theme = self.state.lock().unwrap().theme.clone();
         self.state = Arc::new(Mutex::new(State {
             model: Model::new(80, 24),
             status: "Connecting…".into(),
             connected: false,
             size_ready: false,
             focused: false,
+            theme,
         }));
         self.seen = u64::MAX;
         let Ok(config) = serde_json::from_value::<Config>(value["config"].clone()) else {
@@ -153,6 +157,9 @@ impl Host {
                     let mut s = state.lock().unwrap();
                     let size = (s.model.cols, s.model.height);
                     s.model = Model::new(size.0, size.1);
+                    if let Some(theme) = s.theme.clone() {
+                        s.model.theme(&theme);
+                    }
                     s.status = String::new();
                     // Size/focus may have changed while the attach handshake
                     // was in flight. Dropping stale keystrokes must not lose
@@ -282,7 +289,7 @@ extern "C" fn frame(host: *mut c_void, cols: u16, rows: u16) -> *const i8 {
     host.seen_status = status.clone();
     let f = state.model.frame();
     let rows:Vec<_>=f.rows.iter().map(|row|row.iter().map(|c|json!({"text":c.text,"fg":c.fg,"bg":c.bg,"bold":c.bold,"underline":c.underline,"tail":c.tail})).collect::<Vec<_>>()).collect();
-    host.json=CString::new(json!({"rows":rows,"cursor":f.cursor.map(|(x,y)|vec![x,y]),"background":f.background,"status":status}).to_string()).unwrap();
+    host.json=CString::new(json!({"rows":rows,"cursor":f.cursor.map(|(x,y)|vec![x,y]),"background":f.background,"cursor_color":f.cursor_color,"status":status}).to_string()).unwrap();
     host.json.as_ptr()
 }
 fn key(code: u64, text: &str) -> GhosttyKey {
@@ -411,6 +418,15 @@ impl NativeComponent for Terminal {
                 )
             };
         }
+        if name == "theme"
+            && let Some(theme) = value
+        {
+            let mut state = self.host.state.lock().unwrap();
+            if state.theme.as_ref() != Some(theme) {
+                state.model.theme(theme);
+                state.theme = Some(theme.clone());
+            }
+        }
         if name == "input_status" {
             self.host.input_status = value.and_then(Value::as_str).unwrap_or("").to_owned();
         }
@@ -431,6 +447,9 @@ impl NativeComponent for Terminal {
                 let mut state = self.host.state.lock().unwrap();
                 state.model = Model::new(state.model.cols, state.model.height);
                 state.model.write(content.unwrap_or("").as_bytes());
+                if let Some(theme) = state.theme.clone() {
+                    state.model.theme(&theme);
+                }
                 self.host.seen = u64::MAX;
             }
         }

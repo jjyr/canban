@@ -43,3 +43,49 @@ pub fn chrome_button_disabled(
                 .on_press(press),
         )
 }
+
+/// Selected utility action, shared by the compact global tools.
+pub fn utility_button(
+    kind: Icon,
+    title: impl Into<String>,
+    selected: impl Fn() -> bool + 'static,
+    disabled: impl Fn() -> bool + 'static,
+    press: impl Fn(&()) + 'static,
+) -> View {
+    let title = title.into();
+    let hint = title.clone();
+    let selected = computed(selected);
+    view()
+        .flex_shrink_0()
+        .tooltip(
+            nsh_base::tooltip()
+                .placement(Placement::Top)
+                .px_3()
+                .py_2()
+                .bg(SURFACE)
+                .border_1()
+                .border_color(BORDER)
+                .child(label(hint)),
+        )
+        .child(
+            nsh_base::button()
+                .w(px(30.))
+                .h(px(28.))
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .bg(move || if selected.get() { SELECTED } else { CLEAR })
+                .hover(|s| s.bg(INSET))
+                .focus(|s| s.border_1().border_color(ACCENT))
+                .selected(move || selected.get())
+                .disabled(disabled)
+                .disabled_style(|s| s.opacity(0.4))
+                .accessibility_label(move || Some(title.clone().into()))
+                .child(
+                    super::icon_tinted(kind, move || if selected.get() { ACCENT } else { MUTED })
+                        .w(px(16.))
+                        .h(px(16.)),
+                )
+                .on_press(press),
+        )
+}

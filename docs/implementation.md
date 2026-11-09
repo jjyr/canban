@@ -8,6 +8,8 @@
 
 Status: native macOS MVP with multi-machine execution, updated 2026-11-09. This is the current implementation reference; earlier design documents contain broader proposals and dated pre-implementation statements.
 
+[Desktop utilities](desktop-utilities.md) covers the shared bottom bar, subscription Usage, Caffeine, persisted appearance, command catalog and cross-Project Card creation.
+
 ## Build and launch
 
 Use the pinned mise Rust toolchain. NSH 0.4.0 is pinned to aca7b8f92a33af9d83c3693a516f649f7ea5c5e5 in Cargo.toml and Cargo.lock. Install macOS Xcode command-line tools and a compatible hc separately. This implementation was verified with hc 0.1.18 and Codex CLI 0.166.0.

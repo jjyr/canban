@@ -227,6 +227,10 @@ fn project_settings(ui: Ui, id: String, name: String) -> impl IntoElement {
 }
 pub fn new_card(ui: Ui) -> impl IntoElement {
     let project = ui.project.get_untracked();
+    let target = ui.card_target;
+    if target.get_untracked().is_empty() {
+        target.set(project.clone());
+    }
     let note_id = ui.source_note.get_untracked();
     let note = ui
         .snapshot
@@ -260,13 +264,28 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
     let loading = signal(false);
     let search_error = signal(String::new());
     let epoch = signal(0u64);
-    let search_project = project.clone();
+    let previous_target = signal(target.get_untracked());
+    effect(move || {
+        let next = target.get();
+        if next != previous_target.get_untracked() {
+            draft.update(|d| d.selected_issue = None);
+            previous_target.set(next);
+        }
+    });
     let query_text = computed(move || draft.with(|d| d.issue_query.clone()));
     let selected_issue = computed(move || draft.with(|d| d.selected_issue.clone()));
-    let current_source = computed(move || ui.current_project().and_then(|p| p.github));
+    let current_source = computed(move || {
+        ui.snapshot.with(|s| {
+            s.projects
+                .iter()
+                .find(|p| p.id == target.get())
+                .and_then(|p| p.github.clone())
+        })
+    });
     let source_available = computed(move || current_source.get().is_some());
     effect(move || {
         let query = query_text.get();
+        let project = target.get();
         let _source_generation = current_source.get().map(|s| s.generation);
         let enabled = kind.get() == "github";
         epoch.update(|n| *n += 1);
@@ -278,7 +297,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
             return;
         }
         loading.set(true);
-        let project = search_project.clone();
+
         set_timeout(std::time::Duration::from_millis(250), move || {
             if epoch.try_get() != Some(generation) {
                 return;
@@ -313,7 +332,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
             });
         });
     });
-    let submit_project = project.clone();
+    let source_project = note.as_ref().map(|n| n.project_id.clone());
     let submit_key = key.clone();
     let submit_note = note_id.clone();
     let mut form = view()
@@ -322,6 +341,39 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
         .p_5()
         .gap_3()
         .child(heading("New Card"))
+        .child(
+            action(
+                move || {
+                    format!(
+                        "Project: {} ▾",
+                        ui.snapshot.with(|s| s
+                            .projects
+                            .iter()
+                            .find(|p| p.id == target.get())
+                            .map(|p| p.name.clone())
+                            .unwrap_or_else(|| "Choose Project".into()))
+                    )
+                },
+                Variant::Secondary,
+                move |_| crate::utilities::open(ui, "card-project"),
+            )
+            .self_start()
+            .max_w(px(800.))
+            .accessibility_label(move || {
+                Some(
+                    format!(
+                        "Choose target Project · {}",
+                        ui.snapshot.with(|s| s
+                            .projects
+                            .iter()
+                            .find(|p| p.id == target.get())
+                            .map(|p| p.name.clone())
+                            .unwrap_or_else(|| "None selected".into()))
+                    )
+                    .into(),
+                )
+            }),
+        )
         .child(
             segmented()
                 .child(segment(
@@ -338,10 +390,17 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                 )),
         );
     if let Some(n) = note {
-        form = form.child(notice(
-            format!("Source Note: {} · included in this Card's context", n.title),
-            Tone::Info,
-        ));
+        form = form.child(dynamic(move || {
+            let text = if target.get() == n.project_id {
+                format!("Source Note: {} · included in this Card's context", n.title)
+            } else {
+                format!(
+                    "Copied from {} · Note link stays in the original Project",
+                    n.title
+                )
+            };
+            notice(text, Tone::Info)
+        }));
     }
     form.child(scroll().flex_1().min_h(px(0.)).child(panel().max_w(px(800.)).child(dynamic(move||{
         if kind.get()=="local"{
@@ -371,11 +430,11 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
     }))))
         .child(view().flex_row().gap_2().child(action("Cancel",Variant::Quiet,move |_|ui.navigate("board")))
         .child(action(move||if kind.get()=="github"{"Add to Backlog"}else{"Create in Backlog"},Variant::Primary,move |_|{
-            let d=draft.get_untracked();let is_github=kind.get_untracked()=="github";
+            let d=draft.get_untracked();let is_github=kind.get_untracked()=="github";let submit_project=target.get_untracked();
             let mut params=if is_github{json!({"project_id":submit_project,"number":d.selected_issue.as_ref().map(|r|&r["issue"]["number"]),"source_generation":d.selected_issue.as_ref().map(|r|&r["source_generation"]),"instructions":d.instructions})}else{json!({"project_id":submit_project,"title":d.title,"body":d.body,"tags":d.tags.split(',').map(str::trim).filter(|s|!s.is_empty()).collect::<Vec<_>>()})};
-            if !submit_note.is_empty(){params["source_note_id"]=json!(submit_note);}
+            if !submit_note.is_empty() && source_project.as_deref()==Some(submit_project.as_str()){params["source_note_id"]=json!(submit_note);}
             let key=submit_key.clone();dispatch_complete(ui,if is_github{"github.issue.add"}else{"card.create"},params,move|r|{if r.is_ok(){ui.drafts.with(|d|{d.remove(&key);});}});
-        }).disabled(move||ui.pending.get() || if kind.get()=="github"{draft.get().selected_issue.is_none()}else{draft.get().title.trim().is_empty()})))
+        }).disabled(move||ui.pending.get() || target.get().is_empty() || if kind.get()=="github"{draft.get().selected_issue.is_none()}else{draft.get().title.trim().is_empty()})))
 }
 pub fn card_source(ui: Ui) -> impl IntoElement {
     dynamic(move || {

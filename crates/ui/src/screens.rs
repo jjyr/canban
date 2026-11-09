@@ -96,6 +96,7 @@ fn settings(ui: Ui) -> impl IntoElement {
     let runtime = crate::APP.get().map(|app| app.config()).unwrap_or_default();
     layout("Settings", "Application preferences and JSON configuration.")
         .child(scroll().flex_1().min_h(px(0.)).child(view().w_full().max_w(px(880.)).min_w(px(0.)).gap_4()
+            .child(crate::utilities::settings(ui))
             .child(crate::components::scheduling::settings(ui))
             .child(crate::machines::settings(ui))
             .child(crate::github::settings(ui))

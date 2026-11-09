@@ -50,6 +50,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 }
             })
         }))
+        .child(crate::utilities::bar(ui))
         .child(when(
             move || !ui.operation_error.get().is_empty(),
             move || {
@@ -72,4 +73,5 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             },
         ))
         .child(quick_open::overlay(ui))
+        .child(crate::utilities::overlay(ui))
 }

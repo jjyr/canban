@@ -16,6 +16,7 @@ use std::{
 };
 
 pub struct AppServer {
+    utilities: utilities::Utilities,
     pub home: PathBuf,
     github: canban_github::auth::Service,
     github_sync_due: AtomicBool,
@@ -300,6 +301,7 @@ impl AppServer {
         }
         Self::publish_migration(&home, migration)?;
         Ok(Arc::new(Self {
+            utilities: utilities::Utilities::new(&home),
             github_sync_due: AtomicBool::new(false),
             github: canban_github::auth::Service::new(home.clone()),
             identity,
@@ -526,3 +528,5 @@ pub fn rpc(endpoint: &Path, method: &str, params: Value) -> Result<Value> {
 mod tests;
 
 mod review;
+
+mod utilities;

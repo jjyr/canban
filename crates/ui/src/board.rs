@@ -48,8 +48,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     move || has_project.get(),
                     move || {
                         action("+ Add Card", Variant::Primary, move |_| {
-                            ui.source_note.set(String::new());
-                            ui.navigate("new-card");
+                            ui.new_card(String::new());
                         })
                         .flex_shrink_0()
                     },

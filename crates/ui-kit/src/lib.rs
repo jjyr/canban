@@ -28,7 +28,7 @@ pub use directory_field::directory_field;
 pub mod settings;
 pub use settings::{settings_field, settings_section};
 pub mod chrome;
-pub use chrome::{chrome_button, chrome_button_disabled};
+pub use chrome::{chrome_button, chrome_button_disabled, utility_button};
 
 pub mod segmented;
 pub use segmented::{segment, segmented};

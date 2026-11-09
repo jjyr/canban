@@ -5,6 +5,9 @@ impl AppServer {
         if method.starts_with("github.") || method == "project.github" || method == "card.remove" {
             return self.github_call(method, p);
         }
+        if method.starts_with("utilities.") || method.starts_with("usage.") {
+            return self.utility_call(method, p);
+        }
         let config = self.config();
         match method {
             "app.shutdown" => {

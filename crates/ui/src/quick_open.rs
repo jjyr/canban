@@ -12,7 +12,10 @@ pub fn bindings(ui: Ui) {
             when: When::Always,
             ..Default::default()
         },
-        move |_| ui.show_search(false),
+        move |_| {
+            ui.utility_popup.set(String::new());
+            ui.show_search(false)
+        },
     );
 }
 pub fn overlay(ui: Ui) -> impl IntoElement {

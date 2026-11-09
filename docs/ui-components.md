@@ -117,3 +117,10 @@ Isolated real-PTY acceptance at `/private/tmp/cb-close-000lb28a/close-evidence.j
 
 
 Final checks for this lifecycle update: 108 workspace Rust tests passed, including close receipt replay against a changed binding, Agent history/no-completion semantics, replaced-Core protection, explicit input-state projection and native frame/input gating. Application and Gallery packaging passed. A fresh cloned native acceptance window could not be inspected because computer-use access to Canban Acceptance was not approved; click-level validation of this update is not claimed. The real-PTY acceptance above exercised the production AppServer API directly.
+
+
+### Desktop utilities (2026-11-09)
+
+`ui-kit/tokens.rs` owns reactive semantic palettes; `chrome::utility_button` owns compact selected/disabled/hover/focus/accessibility states. `ui/commands.rs` supplies the shared key/help catalog. `ui/utilities.rs` and its panel module compose machine-scoped Usage, countdown, power/theme/help actions and one controlled popup, with generation-fenced async reads/writes. `ui/frame.rs` composes the shared bottom bar; its border excludes the navigation rail. `ui/github.rs` owns the retained target-Project Card composer and source-query invalidation. Native Terminal keeps its runtime identity while applying new foreground/background/ANSI/cursor colors.
+
+Gallery workspace scenes now use the exact production frame, including utilities/overlays, with **Usage fixtures**, **No signed-in providers**, and full/720-point viewport controls. See [implementation and actual acceptance](desktop-utilities.md).

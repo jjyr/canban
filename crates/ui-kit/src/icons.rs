@@ -5,6 +5,10 @@ use nsh_core::prelude::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
     Info,
+    Coffee,
+    Theme,
+    Keyboard,
+    Bug,
     Branch,
     More,
     Grip,
@@ -31,6 +35,10 @@ pub enum Icon {
 impl Icon {
     fn source(self) -> &'static str {
         match self {
+            Self::Coffee => include_str!("../assets/utility/coffee.svg"),
+            Self::Theme => include_str!("../assets/utility/palette.svg"),
+            Self::Keyboard => include_str!("../assets/utility/keyboard.svg"),
+            Self::Bug => include_str!("../assets/utility/bug.svg"),
             Self::Info => include_str!("../assets/lucide/info.svg"),
             Self::Branch => include_str!("../assets/lucide/git-branch.svg"),
             Self::Grip => include_str!("../assets/lucide/grip-vertical.svg"),

@@ -16,3 +16,7 @@ The GitHub mark in `crates/ui-kit/assets/providers/github.svg` is from
 [Primer Octicons](https://github.com/primer/octicons), `icons/mark-github-16.svg`.
 Its MIT license is preserved in `third_party/octicons-LICENSE.txt` and alongside
 the asset. The path fill uses `currentColor` to follow native theme tokens.
+
+## Desktop utilities
+
+Subscription provider contracts and selected host/power-management patterns reference herdr-gpui `a6db99b4edab37b2038ac1016bd0af82ed0a5ebc` (Apache-2.0), whose provider ports credit CodexBar (MIT). The Python probe is a Canban implementation of these contracts, not a linked GPUI or CodexBar library. See `third_party/Herdr-LICENSE.txt`. The utility glyphs under `crates/ui-kit/assets/utility` are Canban vector drawings using the shared 24-unit/2-unit-stroke design grid.

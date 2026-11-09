@@ -17,6 +17,7 @@ pub struct Frame {
     pub rows: Vec<Vec<Cell>>,
     pub cursor: Option<(u16, u16)>,
     pub background: [u8; 3],
+    pub cursor_color: [u8; 3],
 }
 struct Shared {
     replies: Vec<u8>,
@@ -125,6 +126,63 @@ impl Model {
                 revision: 0,
             }
         }
+    }
+    /// Change display defaults without resetting the terminal or its scrollback.
+    pub fn theme(&mut self, value: &serde_json::Value) {
+        let parse = |v: &serde_json::Value| -> Option<GhosttyColorRgb> {
+            let a = v.as_array()?;
+            if a.len() != 3 {
+                return None;
+            }
+            Some(GhosttyColorRgb {
+                r: u8::try_from(a[0].as_u64()?).ok()?,
+                g: u8::try_from(a[1].as_u64()?).ok()?,
+                b: u8::try_from(a[2].as_u64()?).ok()?,
+            })
+        };
+        for (key, option) in [
+            ("foreground", GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND),
+            ("background", GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND),
+            ("cursor", GHOSTTY_TERMINAL_OPT_COLOR_CURSOR),
+        ] {
+            if let Some(color) = parse(&value[key]) {
+                unsafe {
+                    ok(ghostty_terminal_set(
+                        self.term,
+                        option,
+                        &color as *const _ as *const c_void,
+                    ));
+                }
+            }
+        }
+        let first: Vec<_> = value["ansi"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(parse)
+            .collect();
+        if first.len() == 16 {
+            let mut colors = first;
+            for r in [0, 95, 135, 175, 215, 255] {
+                for g in [0, 95, 135, 175, 215, 255] {
+                    for b in [0, 95, 135, 175, 215, 255] {
+                        colors.push(GhosttyColorRgb { r, g, b });
+                    }
+                }
+            }
+            for n in 0..24 {
+                let c = 8 + n * 10;
+                colors.push(GhosttyColorRgb { r: c, g: c, b: c });
+            }
+            unsafe {
+                ok(ghostty_terminal_set(
+                    self.term,
+                    GHOSTTY_TERMINAL_OPT_COLOR_PALETTE,
+                    colors.as_ptr().cast(),
+                ));
+            }
+        }
+        self.revision += 1;
     }
     pub fn write(&mut self, data: &[u8]) {
         unsafe { ghostty_terminal_vt_write(self.term, data.as_ptr(), data.len()) };
@@ -242,6 +300,11 @@ impl Model {
             let rgb = |c: GhosttyColorRgb| [c.r, c.g, c.b];
             let background = rgb(colors.background);
             let mut frame = Frame {
+                cursor_color: rgb(if colors.cursor_has_value {
+                    colors.cursor
+                } else {
+                    colors.foreground
+                }),
                 background,
                 ..Default::default()
             };
@@ -423,6 +486,19 @@ mod tests {
         assert!(row[2].text.is_empty());
     }
 
+    #[test]
+    fn theme_updates_defaults_without_resetting_content_or_geometry() {
+        let mut model = Model::new(40, 8);
+        model.write(b"Keep this output\r\nsecond line");
+        model.theme(&serde_json::json!({"foreground":[220,230,240],"background":[16,25,20],"cursor":[80,190,130]}));
+        assert!(text(&mut model).contains("Keep this output"));
+        assert_eq!((model.cols, model.height), (40, 8));
+        assert_eq!(model.frame().background, [16, 25, 20]);
+        assert_eq!(model.frame().cursor_color, [80, 190, 130]);
+        model.theme(&serde_json::json!({"foreground":[27,37,51],"background":[255,255,255]}));
+        assert!(text(&mut model).contains("second line"));
+        assert_eq!(model.frame().background, [255, 255, 255]);
+    }
     #[test]
     fn redraw_unicode_alternate_screen_and_bracketed_paste() {
         let mut model = Model::new(40, 8);

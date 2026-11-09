@@ -296,8 +296,7 @@ pub fn relations(ui: Ui, note_id: Option<String>, draft: Signal<Draft>) -> impl 
                 }
                 area = area.child(
                     action("Create Card from Note", Variant::Secondary, move |_| {
-                        ui.source_note.set(id.clone());
-                        ui.page.set("new-card".into());
+                        ui.new_card(id.clone());
                     })
                     .disabled(move || draft.with(|d| d.dirty())),
                 );
