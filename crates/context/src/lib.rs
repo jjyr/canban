@@ -95,7 +95,13 @@ pub fn capture_for(
         .iter()
         .filter(|q| q.request_id == req.id && q.state != "replied")
         .collect();
-    let manifest = serde_json::json!({"schema_version":1,"project":project,"card":card,"request":req,"attempt":attempt,"timeline":timeline,"notes":notes,"reports":reports,"artifacts":artifacts,"questions":questions});
+    let github_issue = snapshot.github_issues.iter().find(|i| {
+        i.project_id == card.project_id
+            && card.github_issue().is_some_and(|r| {
+                r.issue_id == i.source.issue_id && r.repository_id == i.source.repository_id
+            })
+    });
+    let manifest = serde_json::json!({"schema_version":1,"github_issue":github_issue,"project":project,"card":card,"request":req,"attempt":attempt,"timeline":timeline,"notes":notes,"reports":reports,"artifacts":artifacts,"questions":questions});
     let manifest_path = dir.join("context.json");
     atomic(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
     let prompt = format!(
@@ -116,6 +122,9 @@ pub fn capture_for(
         shell_quote(&cli.to_string_lossy())
     );
     let mut prompt = prompt;
+    if let Some(issue) = github_issue {
+        prompt.push_str(&format!("\n## GitHub source: {}#{}\n{}\n\n{}\n\nThe Card description above is local Additional instructions. GitHub Labels are not Agent routing tags.\n",issue.source.repository,issue.source.number,issue.title,issue.body));
+    }
     prompt.push_str("\nSave reports and question replies under $CANBAN_RUN_DIR, outside the source checkout. Keep only deliverable source/tests/docs in the Card worktree. Canban review acceptance commits all reviewed checkout changes.\n");
     prompt.push_str("\n## Conversation binding and follow-up questions\nThis invocation's Canban request/attempt binding supersedes older commands in conversation history.\n");
     if let Some(instruction) = &req.profile.session_instruction {

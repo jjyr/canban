@@ -121,6 +121,48 @@ impl AppServer {
                 std::thread::sleep(Duration::from_millis(500));
             }
         });
+        let weak = Arc::downgrade(self);
+        std::thread::spawn(move || {
+            let mut next_sync = std::time::Instant::now();
+            while let Some(server) = weak.upgrade() {
+                if server.stopped() {
+                    break;
+                }
+                if let Err(e) = server.github.poll() {
+                    eprintln!("Canban GitHub sign-in: {e}");
+                }
+                if (std::time::Instant::now() >= next_sync
+                    || server.github_sync_due.swap(false, Ordering::SeqCst))
+                    && server.github.status().state == "connected"
+                {
+                    next_sync = std::time::Instant::now() + Duration::from_secs(120);
+                    let projects = server
+                        .store
+                        .lock()
+                        .unwrap()
+                        .db()
+                        .list::<Project>()
+                        .unwrap_or_default();
+                    for project in projects.into_iter().filter(|p| p.github.is_some()) {
+                        let _ = server.github_sync(&project.id);
+                    }
+                    let cards = server
+                        .store
+                        .lock()
+                        .unwrap()
+                        .db()
+                        .list::<Card>()
+                        .unwrap_or_default();
+                    for c in cards.into_iter().filter(|c| {
+                        c.active() && c.pull_request.as_ref().is_some_and(|pr| !pr.merged)
+                    }) {
+                        let _ = server.github_pr_refresh(json!({"card_id":c.id}));
+                    }
+                }
+                drop(server);
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        });
         Ok(Running {
             server: self.clone(),
         })
@@ -311,7 +353,7 @@ impl AppServer {
                 {
                     return Ok(None);
                 }
-                if card.archived_at.is_some() {
+                if !card.active() {
                     req.state = "cancelled".into();
                     db.save(&req)?;
                     return Ok(None);
@@ -389,7 +431,7 @@ impl AppServer {
                     let mut q:Question=db.get(&question.id)?;
                     if q.state=="replied"{return Ok(());}
                     let mut card:Card=db.get(&q.card_id)?;
-                    if card.archived_at.is_some(){return Ok(());}
+                    if !card.active(){return Ok(());}
                     let project:Project=db.get(&card.project_id)?;
                     let stage=canban_workflow_engine::stage(&project.workflow,&card.stage)?;
                     let request=enqueue(db,&config,&mut card,&project,stage,&format!("comment:{}",q.comment_id),Some(&q.profile_id),Some(format!("Answer this retained question, publish its reply, then report completion.\n{}",q.body)))?.context("Could not retain question")?;

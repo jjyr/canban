@@ -24,6 +24,7 @@ nsh-core = { git = "https://github.com/longbridge/nsh", rev = "aca7b8f92a33af9d8
 nsh-base = { git = "https://github.com/longbridge/nsh", rev = "aca7b8f92a33af9d83c3693a516f649f7ea5c5e5", default-features = false }
 nsh-platform-macos = { git = "https://github.com/longbridge/nsh", rev = "aca7b8f92a33af9d83c3693a516f649f7ea5c5e5", default-features = false }
 canban-types = { path = "crates/types" }
+canban-github = { path = "crates/github" }
 canban-profiles = { path = "crates/profiles" }
 canban-storage = { path = "crates/storage" }
 canban-kanban = { path = "crates/kanban" }

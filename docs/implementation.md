@@ -156,7 +156,7 @@ Navigation refinement (2026-11-08): the rail contains only Quick Open, Board, Ov
 
 ## Terminal workspace chrome and manual Shells (2026-11-08)
 
-The [Terminal workspace](terminal-workspace.md) now shares a Project/Card inventory, numbered tabs and a single native renderer across Scheduler Agents and manually opened Shells. NSH's custom window titlebar is split at the same resizable boundary as the content; Card and branch stay in chrome, with secondary controls in native menus. New tabs open immediately, rename happens afterwards, and closing a tab leaves its PTY alive. The technical status footer is removed; failures remain dismissible notices. SQLite schema v4 preserves entry names/numbers and manual Core/PTy bindings. Manual Shells do not consume Scheduler slots, create workflow Requests or inherit Agent idle reclamation.
+The [Terminal workspace](terminal-workspace.md) now shares a Project/Card inventory, numbered tabs and a single native renderer across Scheduler Agents and manually opened Shells. NSH's custom window titlebar is split at the same resizable boundary as the content; Card and branch stay in chrome, with secondary controls in native menus. New tabs open immediately, rename happens afterwards, and closing a tab terminates its associated live PTY before removing the tab. The technical status footer is removed; failures remain dismissible notices. SQLite schema v4 preserves entry names/numbers and manual Core/PTy bindings. Manual Shells do not consume Scheduler slots, create workflow Requests or inherit Agent idle reclamation.
 
 ### Independent Terminal context update (2026-11-08)
 

@@ -56,3 +56,49 @@ pub fn empty(title: &str, description: &str) -> impl IntoElement {
         .child(label(title.to_owned()))
         .child(muted(description.to_owned()))
 }
+
+/// Quiet Cards have no placeholder status; current work and human gates remain visible.
+pub fn card_activity(snapshot: &canban_types::Snapshot, card: &canban_types::Card) -> Option<View> {
+    let mut row = view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_2()
+        .min_w(px(0.));
+    let mut visible = false;
+    if card.human_gate.is_some() || card.attention.is_some() {
+        row = row.child(status(
+            if card.human_gate.is_some() && card.stage == "review" {
+                "Needs review"
+            } else {
+                "Needs attention"
+            },
+            Tone::Attention,
+        ));
+        visible = true;
+    }
+    let mut profiles = std::collections::BTreeSet::new();
+    for request in snapshot.requests.iter().rev().filter(|r| {
+        r.card_id == card.id && matches!(r.state.as_str(), "starting" | "running" | "working")
+    }) {
+        if !profiles.insert(&request.profile.id) {
+            continue;
+        }
+        let (mark, provider) = crate::profiles::provider(&request.profile);
+        row = row.child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .min_w(px(0.))
+                .tooltip(
+                    nsh_base::tooltip()
+                        .child(label(format!("{provider} · @{}", request.profile.id))),
+                )
+                .child(icon(mark).w(px(14.)).h(px(14.)))
+                .child(muted(request.profile.id.clone()).truncate().min_w(px(0.))),
+        );
+        visible = true;
+    }
+    visible.then_some(row)
+}

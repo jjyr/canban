@@ -261,3 +261,24 @@ fn automatic_labels_follow_execution_stage_and_profile_without_changing_binding(
         .unwrap();
     assert_eq!(entry.provider(), Some((Icon::Agent, "my-agent".into())));
 }
+
+#[test]
+fn input_gating_has_a_specific_lifecycle_label_and_keeps_binding_identity() {
+    let mut s = fixture();
+    let key = Conversation::key("c1", "codex");
+    for (connection, close, label) in [
+        ("connecting", "", "Connecting"),
+        ("unavailable", "", "Disconnected"),
+        ("connected", "closing", "Closing"),
+        ("connected", "pending", "Closing"),
+        ("connected", "", ""),
+    ] {
+        s.attempts[0].connection_state = connection.into();
+        s.attempts[0].close_state = close.into();
+        let row = conversations(&s).into_iter().find(|r| r.id == key).unwrap();
+        let b = binding(&row).unwrap();
+        assert_eq!(b["input_status"].as_str().unwrap(), label);
+        assert_eq!(b["read_only"], !label.is_empty());
+        assert_eq!(b["terminal"], s.attempts[0].terminal.as_deref().unwrap());
+    }
+}

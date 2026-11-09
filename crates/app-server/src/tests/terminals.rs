@@ -18,12 +18,105 @@ for line in sys.stdin:
   r={'terminals':[t]} if m=='terminal.list' else t
  elif m in ['terminal.kill','terminal.interrupt']:
   with open(base+'/controls','a') as f:f.write(m+'\n')
+  if m=='terminal.kill':open(base+'/finished','w').close()
   r={'sent':True}
  print(json.dumps({'jsonrpc':'2.0','id':p['id'],'result':r}),flush=True)
 "#).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     app.config.write().unwrap().hc = script.to_string_lossy().into();
+}
+#[test]
+fn close_owns_shell_termination_and_receipt_replay_never_targets_a_new_binding() {
+    let (dir, app, p, _) = setup();
+    core(&app, dir.path());
+    let terminal = app
+        .call("terminal.create", json!({"project_id":p.id}))
+        .unwrap();
+    let params = json!({"terminal_id":terminal["id"],"request_key":"close-shell"});
+    let closed = app.call("terminal.close", params.clone()).unwrap();
+    assert_eq!(closed["state"], "closed");
+    app.observe_terminals().unwrap();
+    assert_eq!(
+        app.snapshot().unwrap().terminals[0]
+            .runtime
+            .as_ref()
+            .unwrap()
+            .state,
+        "finished"
+    );
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut t: TerminalEntry = db.get(terminal["id"].as_str().unwrap())?;
+            t.runtime.as_mut().unwrap().terminal = Some("t-new".into());
+            t.runtime.as_mut().unwrap().state = "running".into();
+            db.save(&t)
+        })
+        .unwrap();
+    assert_eq!(app.call("terminal.close", params).unwrap(), closed);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("controls")).unwrap(),
+        "terminal.kill\n"
+    );
+}
+
+#[test]
+fn close_owns_agent_termination_preserves_session_and_never_reports_completion() {
+    let (dir, app, _, card) = setup();
+    core(&app, dir.path());
+    app.call(
+        "agent.open",
+        json!({"card_id":card.id,"profile_id":"codex"}),
+    )
+    .unwrap();
+    let before = app.snapshot().unwrap();
+    let mut run = admit(&app, &before.requests[0]);
+    run.core_id = Some("original".into());
+    run.provider_session_id = Some("saved-session".into());
+    app.store.lock().unwrap().write(|db| db.save(&run)).unwrap();
+    let params = json!({"terminal_id":before.terminals[0].id,"request_key":"close-agent"});
+    let closed = app.call("terminal.close", params.clone()).unwrap();
+    assert_eq!(closed["state"], "closed");
+    assert_eq!(app.call("terminal.close", params).unwrap(), closed);
+    let after = app.snapshot().unwrap();
+    assert_eq!(after.requests.len(), before.requests.len());
+    assert_eq!(after.cards[0].stage, before.cards[0].stage);
+    assert!(after.reports.is_empty());
+    assert_eq!(
+        after.attempts[0].provider_session_id.as_deref(),
+        Some("saved-session")
+    );
+    assert_eq!(after.attempts[0].close_state, "closing");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("controls")).unwrap(),
+        "terminal.kill\n"
+    );
+}
+
+#[test]
+fn close_refuses_a_replaced_core_and_preserves_an_inspectable_terminal() {
+    let (dir, app, p, _) = setup();
+    core(&app, dir.path());
+    let t = app
+        .call("terminal.create", json!({"project_id":p.id}))
+        .unwrap();
+    std::fs::write(dir.path().join("replace"), "").unwrap();
+    let result = app
+        .call(
+            "terminal.close",
+            json!({"terminal_id":t["id"],"request_key":"close-unavailable"}),
+        )
+        .unwrap();
+    assert_eq!(result["state"], "unknown");
+    assert!(!dir.path().join("controls").exists());
+    let s = app.snapshot().unwrap();
+    assert_eq!(s.terminals.len(), 1);
+    assert_eq!(
+        s.terminals[0].runtime.as_ref().unwrap().connection,
+        "unavailable"
+    );
 }
 #[test]
 fn manual_launch_is_idempotent_and_preserves_workflow_budget_names_and_runtime_on_restart() {
@@ -147,7 +240,7 @@ fn upgrading_conversations_allocates_stable_numbers_without_runtime_changes() {
     app.call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
         .unwrap();
     let before = app.snapshot().unwrap();
-    app.store.lock().unwrap().db().conn.execute_batch("DROP TABLE terminals; DELETE FROM counters WHERE id='terminal-number'; PRAGMA user_version=3;").unwrap();
+    app.store.lock().unwrap().db().conn.execute_batch("DROP TABLE terminals; DELETE FROM counters WHERE id='terminal-number'; DROP TABLE github_issues; DROP INDEX github_card_source; PRAGMA user_version=3;").unwrap();
     drop(app);
     let upgraded = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
     let s = upgraded.snapshot().unwrap();
@@ -284,7 +377,9 @@ fn v4_terminal_migration_keeps_identity_and_runtime_but_drops_shell_ownership() 
     store
         .db()
         .conn
-        .execute_batch("PRAGMA user_version=4;")
+        .execute_batch(
+            "DROP TABLE github_issues; DROP INDEX github_card_source; PRAGMA user_version=4;",
+        )
         .unwrap();
     drop(store);
     drop(app);
@@ -377,7 +472,7 @@ fn manual_labels_have_their_own_durable_sequence_and_v5_migration_keeps_runtime_
     {
         let store = app.store.lock().unwrap();
         // Reproduce the exact v5 representation: only the new display sequence is absent.
-        store.db().conn.execute_batch("UPDATE terminals SET data=json_remove(data,'$.manual_number'); DELETE FROM counters WHERE id='terminal-manual-number'; PRAGMA user_version=5;").unwrap();
+        store.db().conn.execute_batch("UPDATE terminals SET data=json_remove(data,'$.manual_number'); DELETE FROM counters WHERE id='terminal-manual-number'; DROP TABLE github_issues; DROP INDEX github_card_source; PRAGMA user_version=5;").unwrap();
     }
     drop(app);
     let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();

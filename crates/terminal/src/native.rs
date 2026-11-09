@@ -52,6 +52,7 @@ struct Host {
     binding: String,
     content: Option<String>,
     read_only: bool,
+    input_status: String,
 }
 impl Host {
     fn new() -> Self {
@@ -71,6 +72,7 @@ impl Host {
             binding: String::new(),
             content: None,
             read_only: false,
+            input_status: String::new(),
         }
     }
     fn bind(&mut self, value: &Value) {
@@ -134,9 +136,7 @@ impl Host {
                         {
                             let mut s = state.lock().unwrap();
                             s.connected = false;
-                            s.status = format!(
-                                "Could not attach: {e:#} · retrying original terminal; input disabled"
-                            );
+                            s.status = format!("Disconnected · {e:#} · reconnecting");
                         }
                         for _ in rx.try_iter() {} // Never replay input across a lost connection.
                         for _ in 0..10 {
@@ -215,7 +215,7 @@ impl Host {
                         }
                         Ok(Some(Event::Lost(error))) => {
                             state.lock().unwrap().status =
-                                format!("Connection lost · {error} · reconnecting");
+                                format!("Disconnected · {error} · reconnecting");
                             reconnect = true;
                             break;
                         }
@@ -255,14 +255,26 @@ extern "C" fn frame(host: *mut c_void, cols: u16, rows: u16) -> *const i8 {
         }
     }
     let status = if host.read_only {
-        if state.status.is_empty() {
-            "Read-only · input disabled".into()
+        let reason = if !host.input_status.is_empty() {
+            host.input_status.as_str()
+        } else if host.content.is_some() {
+            "Preview"
+        } else if !state.connected && state.status.starts_with("Connecting") {
+            "Connecting"
         } else {
-            format!("{} · input disabled", state.status)
+            "Disconnected"
+        };
+        if state.status.is_empty() || reason == "Closing" {
+            reason.to_owned()
+        } else if state.status.starts_with(reason) {
+            state.status.clone()
+        } else {
+            format!("{reason} · {}", state.status)
         }
     } else {
         state.status.clone()
     };
+
     if state.model.revision == host.seen && status == host.seen_status {
         return std::ptr::null();
     }
@@ -399,6 +411,9 @@ impl NativeComponent for Terminal {
                 )
             };
         }
+        if name == "input_status" {
+            self.host.input_status = value.and_then(Value::as_str).unwrap_or("").to_owned();
+        }
         if name == "read_only" {
             self.host.read_only = value == Some(&json!(true));
         }
@@ -441,14 +456,24 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         host.input = Some(tx);
         host.read_only = true;
+        host.input_status = "Closing".into();
         let ptr = &mut host as *mut Host as *mut c_void;
         let value: Value =
             serde_json::from_slice(unsafe { CStr::from_ptr(frame(ptr, 80, 24)) }.to_bytes())
                 .unwrap();
-        assert!(value["status"].as_str().unwrap().contains("input disabled"));
+        assert_eq!(value["status"], "Closing");
         let text = CString::new(json!({"kind":"text","text":"offline"}).to_string()).unwrap();
         input(ptr, text.as_ptr());
         assert!(rx.try_recv().is_err());
+        for reason in ["Connecting", "Disconnected"] {
+            host.input_status = reason.into();
+            let value: Value =
+                serde_json::from_slice(unsafe { CStr::from_ptr(frame(ptr, 80, 24)) }.to_bytes())
+                    .unwrap();
+            assert_eq!(value["status"], reason);
+            input(ptr, text.as_ptr());
+            assert!(rx.try_recv().is_err());
+        }
         host.read_only = false;
         let value: Value =
             serde_json::from_slice(unsafe { CStr::from_ptr(frame(ptr, 80, 24)) }.to_bytes())

@@ -186,6 +186,47 @@ pub fn reopen(ui: Ui, id: String) {
     launch(ui, json!({"inherit_terminal_id":id}));
 }
 pub fn close_tab(ui: Ui, id: &str) {
+    if id.is_empty()
+        || !ui
+            .terminal_tabs
+            .with_untracked(|tabs| tabs.iter().any(|t| t == id))
+    {
+        return;
+    }
+    if crate::APP.get().is_none() {
+        // A static Gallery has no runtime; simulate the same closed outcome.
+        let entry = entries(&ui.snapshot.get_untracked())
+            .into_iter()
+            .find(|e| e.saved.id == id);
+        ui.snapshot.update(|s| {
+            if let Some(t) = s.terminals.iter_mut().find(|t| t.id == id)
+                && let Some(runtime) = &mut t.runtime
+            {
+                runtime.state = "finished".into();
+            }
+            if let Some(attempt) = entry.and_then(|e| e.agent).and_then(|r| r.attempt)
+                && let Some(run) = s.attempts.iter_mut().find(|a| a.id == attempt.id)
+            {
+                run.observed = Some(json!({"state":"finished"}));
+            }
+        });
+        remove_tab(ui, id);
+        return;
+    }
+    let id = id.to_owned();
+    dispatch_complete(
+        ui,
+        "terminal.close",
+        json!({"terminal_id":id}),
+        move |result| {
+            if result.is_ok_and(|value| value["state"] == "closed") {
+                remove_tab(ui, &id);
+            }
+        },
+    );
+}
+
+fn remove_tab(ui: Ui, id: &str) {
     ui.terminal_focus.update(|v| *v += 1);
     let mut tabs = ui.terminal_tabs.get_untracked();
     let next = tabs.iter().position(|t| t == id).and_then(|i| {

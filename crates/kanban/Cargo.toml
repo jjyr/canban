@@ -8,3 +8,11 @@ authors.workspace = true
 [dependencies]
 anyhow.workspace = true
 canban-types.workspace = true
+
+canban-github.workspace = true
+canban-storage.workspace = true
+canban-timeline.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

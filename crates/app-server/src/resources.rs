@@ -132,6 +132,17 @@ impl AppServer {
             .unwrap()
             .clone();
         let filtered = Snapshot {
+            github: Default::default(),
+            github_issues: snapshot
+                .github_issues
+                .iter()
+                .filter(|i| {
+                    card.github_issue().is_some_and(|r| {
+                        r.issue_id == i.source.issue_id && r.repository_id == i.source.repository_id
+                    }) && i.project_id == card.project_id
+                })
+                .cloned()
+                .collect(),
             terminal_contexts: Vec::new(),
             terminals: snapshot
                 .terminals

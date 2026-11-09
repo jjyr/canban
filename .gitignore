@@ -2,3 +2,6 @@
 /.local/
 /.DS_Store
 /.nsh/
+
+# AppServer-owned local credentials, including custom homes inside a checkout.
+**/credentials/

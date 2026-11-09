@@ -448,13 +448,17 @@ pub fn dispatch_complete(
                             ui.page.set("board".into());
                         }
                     }
-                    "card.create" if active => {
+                    "card.create" | "github.issue.add" if active => {
                         if let Some(id) = value["id"].as_str() {
                             ui.open_card(id.into());
                             ui.source_note.set(String::new());
                         }
                     }
                     "card.archive" if active => ui.page.set("archive".into()),
+                    "card.remove" if active => {
+                        ui.card.set(String::new());
+                        ui.page.set("board".into());
+                    }
                     "herdr.status" => ui.status.set(format!(
                         "Herdr connected · core {}",
                         value["core"]["id"].as_str().unwrap_or("")

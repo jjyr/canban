@@ -15,6 +15,8 @@ pub fn workspace() -> canban_types::Snapshot {
     use canban_types::*;
     let mut s = Snapshot::default();
     s.projects.push(Project {
+        github: None,
+        delivery_mode: Default::default(),
         location: None,
         id: "gallery-project".into(),
         name: "Canban workspace".into(),
@@ -38,7 +40,7 @@ pub fn workspace() -> canban_types::Snapshot {
         ),
         (3, "Explore a smaller navigation layout", "backlog", None),
     ] {
-        s.cards.push(Card{workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,title:title.into(),body:"## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.".into(),tags:vec!["developer".into()],context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery:None,created_at:now()});
+        s.cards.push(Card{content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,title:title.into(),body:"## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.".into(),tags:vec!["developer".into()],context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery:None,created_at:now()});
     }
     s.notes.push(Note{id:"note-1".into(),project_id:"gallery-project".into(),title:"Search ideas.md".into(),body:"# Search experience\n\nFind a Card without remembering its number.\n\nSee [Architecture](note:note-2).".into(),revision:1,created_at:now(),updated_at:now(),links:vec!["note-2".into()],card_ids:vec!["card-1".into()]});
     s.notes.push(Note {
@@ -287,5 +289,61 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
             "canban/very-long-worktree-and-branch-name/context-navigation-acceptance-42".into(),
         ),
     });
+    s
+}
+
+/// Board density: quiet, queued, executing and human-gated Cards share one renderer.
+pub fn board_cards() -> canban_types::Snapshot {
+    use canban_types::*;
+    let mut s = workspace();
+    for c in &mut s.cards {
+        c.tags.clear();
+        c.branch = None;
+        c.worktree = None;
+    }
+    s.cards[0].human_gate = Some(HumanGate {
+        reason: "Review the report".into(),
+        request_id: None,
+        next_stage: None,
+    });
+    s.cards[1].attention = None;
+    let profile = Config::default()
+        .profiles
+        .into_iter()
+        .find(|p| p.id == "developer")
+        .unwrap();
+    let mut running = canban_scheduler::request(
+        "gallery-project",
+        "card-2",
+        "develop",
+        "stage_entry",
+        profile.clone(),
+        "Work on the Card".into(),
+        None,
+    );
+    running.state = "working".into();
+    s.requests.push(running);
+    let mut queued = s.cards[2].clone();
+    queued.id = "queued-card".into();
+    queued.number = 4;
+    queued.title = "Waiting for a free execution slot".into();
+    queued.stage = "develop".into();
+    let request = canban_scheduler::request(
+        "gallery-project",
+        &queued.id,
+        "develop",
+        "stage_entry",
+        profile,
+        "Wait".into(),
+        None,
+    );
+    s.requests.push(request);
+    s.cards.push(queued);
+    let mut long = s.cards[2].clone();
+    long.id = "long-card".into();
+    long.number = 5;
+    long.title="Keep a long Card title readable without repeating the stage, routing configuration or empty execution state".into();
+    long.body = String::new();
+    s.cards.push(long);
     s
 }

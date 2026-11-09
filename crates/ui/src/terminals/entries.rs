@@ -32,23 +32,21 @@ impl Entry {
     }
     pub fn provider(&self) -> Option<(Icon, String)> {
         let profile = &self.agent.as_ref()?.request.as_ref()?.profile;
-        let command = profile.command_name();
-        let provider = match command.as_str() {
-            "codex" | "claude" => command.as_str(),
-            _ => profile.preset.as_deref().unwrap_or(&command),
-        };
-        Some(match provider {
-            "codex" => (Icon::Codex, "Codex".into()),
-            "claude" => (Icon::Claude, "Claude".into()),
-            other => (Icon::Agent, other.into()),
-        })
+        Some(crate::profiles::provider(profile))
     }
     pub fn display_status(&self) -> String {
-        if self.needs_attention() {
-            return "Needs you".into();
-        }
         if self.ended() {
             return "Ended".into();
+        }
+        if let Some(reason) = self
+            .binding()
+            .and_then(|b| b["input_status"].as_str().map(str::to_owned))
+            .filter(|s| !s.is_empty())
+        {
+            return reason;
+        }
+        if self.needs_attention() {
+            return "Needs you".into();
         }
         match self.status().as_str() {
             "running" | "working" => "Working",
@@ -104,8 +102,17 @@ impl Entry {
         }
         let r = self.saved.runtime.as_ref()?;
         (r.state != "finished").then_some(())?;
+        let input_status = if r.state == "closing" {
+            "Closing"
+        } else if r.connection == "connecting" {
+            "Connecting"
+        } else if r.connection != "connected" {
+            "Disconnected"
+        } else {
+            ""
+        };
         Some(
-            json!({"id":self.saved.id,"core_id":r.core_id.as_ref()?,"terminal":r.terminal.as_ref()?,"read_only":r.connection != "connected"}),
+            json!({"id":self.saved.id,"core_id":r.core_id.as_ref()?,"terminal":r.terminal.as_ref()?,"read_only":!input_status.is_empty(),"input_status":input_status}),
         )
     }
     pub fn cwd(&self) -> Option<String> {

@@ -6,6 +6,7 @@ pub mod card;
 pub mod components;
 pub mod drafts;
 pub mod frame;
+pub mod github;
 pub mod machines;
 pub mod notes;
 pub mod overview;

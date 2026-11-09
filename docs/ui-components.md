@@ -79,6 +79,10 @@ Gallery workspace scenes import the exact production components, including focus
 `ui-kit/entry_card.rs` owns the single accessible clickable entry; `directory_field.rs` owns the editable path/native folder sheet with cancellation and disposed-owner guards; `settings.rs` owns generic section/field composition. Product UI owns Project name suggestions and creation. One screen scroll contains Agent scheduling, Agent profiles, Workflow, Herdr and Storage; the scheduler component uses the same section/field geometry. `profiles::registry_items` supplies content without nested panel styling. The Gallery includes Empty Board, Settings, all-state grouped Overview and entry/directory controls at a 720-point constrained width. See [contracts and native verification](workspace-entry-and-settings.md).
 
 
+### GitHub Card and unified creation (2026-11-09)
+
+`ui/github.rs` composes account/source Settings, the unified Local/GitHub form and source/PR sections from shared controls. Add Card opens that form directly. Query/result/selection projections isolate reactive updates so search responses do not replace the text input; type changes preserve separate drafts. Long remote descriptions live inside the Card's main scroll area. Card tiles use a compact GitHub mark and source-number tooltip. `ui-kit::action` now accepts reactive labels, and `Icon::GitHub` uses the official MIT-licensed Octicons mark with theme color. The Gallery includes the production GitHub Card scene. See [implementation and validation](github-integration.md); a fixture scene is not live GitHub authorization acceptance.
+
 ### Dedicated Terminal workspace (2026-11-08)
 
 `ui/terminals/entries.rs` projects Agent conversations and durable manual Shells into one inventory. `tree.rs` and `tabs.rs` retain native pointer/focus targets across irrelevant runtime timestamp updates. `terminals.rs` owns a full-height resizable split: traffic lights/navigation over the left inventory, and numbered tabs/Card/branch over the native viewer. `ui/frame.rs` is the production frame shared with the standalone Gallery. UI Kit's `chrome_button` provides compact accessible icon controls; all secondary actions use native NSH menus anchored to their trigger or context-menu pointer. Native Terminal focus is explicit and suspended for search/rename; its accessibility value includes connection status and emits throttled change notifications. The permanent technical footer is removed; operation failures use dismissible notices. See [contracts and acceptance](terminal-workspace.md) for manual Shells, close-versus-end, exact Agent resume and validation limits.
@@ -92,3 +96,24 @@ The production inventory groups entries by task Project (managed Agents), observ
 ### Terminal title presentation
 
 `ui/terminals/labels.rs` is the shared product component for provider/Profile marks and bounded tab labels. `Entry` derives automatic titles and the selected Request stage. The inventory reserves its first-line stage and second-line status around a flexible title/Profile, while independent Terminals stay single-line without a type icon. Tab labels reserve stage/Profile and a separate close button. Native tooltips/accessibility text retain full source values. Long branch/directory labels use middle ellipsis; their hover retains the complete value. The Gallery has Codex/Claude, custom providers, Unicode/long Card titles, multiple Profiles and independent numbered entries. UI Kit only supplies reusable provider vector assets and generic rendering.
+
+
+### Quiet Board Cards and direct type selection (2026-11-09)
+
+`ui-kit/segmented.rs` provides direct single-choice buttons with shared adaptive tokens and separate selected, hover and keyboard-focus states. The New Card form uses Local / GitHub Issue segments, including the official GitHub mark, instead of a type menu. Drafts remain independent across type switches.
+
+Board headers show only the workflow stage name and count. Default Agent routing is available in the header tooltip, so Develop / Review stages cannot be mistaken for developer / reviewer Profiles. Custom workflow stage names remain unchanged. Card tiles omit repeated stage labels, drag instructions, empty metadata rows and inactive/completed/queued execution summaries. A compact top-right grip retains the existing drag behavior. Titles remain primary, excerpts are single-line, branch text is bounded with a full tooltip, and tags wrap. `components/activity.rs::card_activity` shares active provider/Profile identity and actionable human-gate signals between tiles and Card details; provider detection is shared with Terminal rows through `profiles::provider`.
+
+The standalone Gallery adds Card states and New Card scenes, including queued, executing, human-gated and long-title Cards at constrained width. Native acceptance at `/private/tmp/cb-native-o55cpz5o` verified small-grip Backlog → Develop drag with actual fixture scheduling, direct type switching with exact title/body retention, and Local Card creation. UI tests (12), targeted strict all-target Clippy, application/Gallery packaging and diff whitespace checks passed. These interaction fixtures do not invoke a model or use the user's live Core.
+
+
+### Terminal close lifecycle and input state (2026-11-09)
+
+X, Command+W and context-menu Close terminal invoke one AppServer `terminal.close` operation with a Terminal ID. UI does not choose Agent-vs-Shell kill commands. AppServer resolves the owning runtime, records intent before IO and persists a replay-safe receipt; an old receipt cannot close a resumed invocation. UI removes the tab only on `closed`, retaining it on error/uncertain delivery. Closed history remains in inventory.
+
+`TerminalEntry` projection and the native viewer name input-gating reasons Connecting / Disconnected / Closing. The internal `read_only` flag still rejects text/key/paste; it is no longer shown as a generic state. Static Gallery content is labeled Preview. The native stream still supplies precise connection-error details and retains immutable binding identity.
+
+Isolated real-PTY acceptance at `/private/tmp/cb-close-000lb28a/close-evidence.json` passed manual and Agent termination, neighboring-Shell isolation, provider-history Resume, duplicate-close protection after Resume and unavailable-Core/explicit-retry behavior. These are deterministic Agent fixtures, not model invocations.
+
+
+Final checks for this lifecycle update: 108 workspace Rust tests passed, including close receipt replay against a changed binding, Agent history/no-completion semantics, replaced-Core protection, explicit input-state projection and native frame/input gating. Application and Gallery packaging passed. A fresh cloned native acceptance window could not be inspected because computer-use access to Canban Acceptance was not approved; click-level validation of this update is not claimed. The real-PTY acceptance above exercised the production AppServer API directly.

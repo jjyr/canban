@@ -44,7 +44,7 @@ pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
         MenuItem::separator(),
         MenuItem::new("Rename tab…")
             .on_select(move || ui.terminal_rename.set(Some(rename.clone()))),
-        MenuItem::new("Close tab").on_select(move || close_tab(ui, &close)),
+        MenuItem::new("Close terminal").on_select(move || close_tab(ui, &close)),
     ];
     if let Some(card) = &e.card {
         let card = card.id.clone();
@@ -64,15 +64,10 @@ pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
             && e.card.as_ref().is_some_and(|c| c.archived_at.is_none())
         {
             let attempt = agent.attempt.as_ref().unwrap().id.clone();
-            let end = attempt.clone();
             items.push(
                 MenuItem::new("Interrupt").on_select(move || {
                     dispatch(ui, "agent.interrupt", json!({"attempt_id":attempt}))
                 }),
-            );
-            items.push(
-                MenuItem::new("End terminal")
-                    .on_select(move || dispatch(ui, "agent.end", json!({"attempt_id":end}))),
             );
         }
         items.push(
@@ -83,14 +78,9 @@ pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
         );
     } else if !e.ended() && e.binding().is_some() {
         let interrupt = e.saved.id.clone();
-        let end = interrupt.clone();
         items.push(MenuItem::new("Interrupt").on_select(move || {
             dispatch(ui, "terminal.interrupt", json!({"terminal_id":interrupt}))
         }));
-        items.push(
-            MenuItem::new("End terminal")
-                .on_select(move || dispatch(ui, "terminal.end", json!({"terminal_id":end}))),
-        );
     } else if e.ended() {
         let id = e.saved.id.clone();
         items.push(MenuItem::new("Reopen terminal").on_select(move || reopen(ui, id.clone())));
@@ -195,7 +185,7 @@ fn tab(ui: Ui, e: Entry, capacity: f32) -> impl IntoElement {
         )
         .child(chrome_button(
             Icon::Close,
-            format!("Close tab {}", e.title()),
+            format!("Close terminal {}", e.title()),
             move |_| close_tab(ui, &close),
         ))
 }

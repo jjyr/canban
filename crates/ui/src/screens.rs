@@ -53,46 +53,7 @@ fn new_project(ui: Ui) -> impl IntoElement {
 }
 
 fn new_card(ui: Ui) -> impl IntoElement {
-    let project = ui.project.get_untracked();
-    let source = ui.source_note.get_untracked();
-    let note = ui
-        .snapshot
-        .with_untracked(|s| s.notes.iter().find(|n| n.id == source).cloned());
-    let key = format!("new-card:{project}:{source}");
-    let initial = note
-        .as_ref()
-        .map(|n| crate::drafts::Draft {
-            title: n.title.clone(),
-            body: n.body.clone(),
-            ..Default::default()
-        })
-        .unwrap_or_default();
-    let draft = crate::drafts::document(ui, key.clone(), initial);
-    let mut form = layout("New Card", "Define the scope, then create it in Backlog.").child(
-        action("← Back", Variant::Quiet, move |_| {
-            if source.is_empty() {
-                ui.page.set("board".into());
-            } else {
-                ui.open_note(source.clone());
-            }
-        }),
-    );
-    if let Some(n) = note {
-        form = form.child(notice(
-            format!("Source Note: {} · included in this Card's context", n.title),
-            Tone::Info,
-        ));
-    }
-    form.child(panel().max_w(px(800.0)).child(bound_field(move||draft.get().title,move|s|draft.update(|d|d.title=s.into()),"Card title"))
-        .child(bound_field(move||draft.get().body,move|s|draft.update(|d|d.body=s.into()),"Task description").multiline(true).h(px(220.0)))
-        .child(bound_field(move||draft.get().tags,move|s|draft.update(|d|d.tags=s.into()),"Routing tags"))
-        .child(muted(move||draft.get().error))
-        .child(action("Create in Backlog",Variant::Primary,move|_|{
-            let value=draft.get_untracked();let mut p=json!({"project_id":project,"title":value.title,"body":value.body,"tags":value.tags.split(',').map(str::trim).filter(|s|!s.is_empty()).collect::<Vec<_>>()});
-            let source=ui.source_note.get_untracked();if !source.is_empty(){p["source_note_id"]=json!(source);}
-            let key=key.clone();
-            dispatch_complete(ui,"card.create",p,move|result|match result{Ok(_)=>{ui.drafts.with(|m|{m.remove(&key);});},Err(e)=>{if let Some(mut value)=draft.try_get(){value.error=e;draft.try_set(value);}}});
-        }).disabled(move||ui.pending.get() || draft.with(|d|d.title.trim().is_empty()))))
+    crate::github::new_card(ui)
 }
 fn archived(ui: Ui) -> impl IntoElement {
     layout("Archived Cards", move || {
@@ -137,6 +98,7 @@ fn settings(ui: Ui) -> impl IntoElement {
         .child(scroll().flex_1().min_h(px(0.)).child(view().w_full().max_w(px(880.)).min_w(px(0.)).gap_4()
             .child(crate::components::scheduling::settings(ui))
             .child(crate::machines::settings(ui))
+            .child(crate::github::settings(ui))
             .child(settings_section("Project work location","Change where future work runs for the selected Project.").child(action("Edit work location…",Variant::Secondary,move |_|ui.navigate("project-location"))))
             .child(settings_section("Agent profiles", "Define Agents once; workflow stages and @mentions reference these profiles.")
                 .child(settings_field("Configuration", "Command and profile changes apply after reloading, to newly queued work.",

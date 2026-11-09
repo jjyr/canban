@@ -2,6 +2,9 @@ use super::*;
 
 impl AppServer {
     pub fn call(&self, method: &str, p: Value) -> Result<Value> {
+        if method.starts_with("github.") || method == "project.github" || method == "card.remove" {
+            return self.github_call(method, p);
+        }
         let config = self.config();
         match method {
             "app.shutdown" => {
@@ -32,6 +35,7 @@ impl AppServer {
             "terminal.rename" => self.rename_terminal(p),
             "terminal.interrupt" => self.control_terminal(p, false),
             "terminal.end" => self.control_terminal(p, true),
+            "terminal.close" => self.close_terminal(p),
             "terminal.context" => self.terminal_context(p),
             "app.ping" => Ok(json!({"version":env!("CARGO_PKG_VERSION"),"home":self.home})),
             "app.snapshot" => Ok(serde_json::to_value(self.snapshot()?)?),
@@ -50,6 +54,7 @@ impl AppServer {
                 Ok(serde_json::to_value(
                     cards
                         .into_iter()
+                        .filter(|c| c.removed_at.is_none() || p["include_removed"] == true)
                         .filter(|c| p["project_id"].as_str().is_none_or(|id| c.project_id == id))
                         .collect::<Vec<_>>(),
                 )?)
@@ -152,6 +157,8 @@ impl AppServer {
                 let name = strp(&p, "name")?.trim();
                 ensure!(!name.is_empty(), "Project name is required");
                 let project = Project {
+                    github: None,
+                    delivery_mode: Default::default(),
                     id: id(),
                     name: name.into(),
                     directory: location.directory.clone(),
@@ -170,13 +177,13 @@ impl AppServer {
             }
             "card.create" => self.mutate(method, &p, |db| {
                 let project: Project = db.get(strp(&p, "project_id")?)?;
-                let number = db.counter(&format!("cards:{}", project.id))?;
-                let mut c = canban_kanban::card(
+                let mut c = canban_kanban::create(
+                    db,
                     &project,
-                    number,
                     strp(&p, "title")?,
                     p["body"].as_str().unwrap_or(""),
                     strings(&p, "tags"),
+                    "user",
                 )?;
                 if let Some(note_id) = p["source_note_id"].as_str() {
                     let note: Note = db.get(note_id)?;
@@ -190,22 +197,21 @@ impl AppServer {
                 } else {
                     db.save(&c)?;
                 }
-                log(
-                    db,
-                    &c,
-                    "card.created",
-                    "user",
-                    "Card created",
-                    None,
-                    json!({"title":c.title,"body":c.body}),
-                )?;
                 Ok(serde_json::to_value(c)?)
             }),
             "card.update" => self.mutate(method, &p, |db| {
                 let mut c: Card = db.get(strp(&p, "card_id")?)?;
                 revise(&c, &p)?;
                 ensure!(c.archived_at.is_none(), "Restore the Card before editing");
+                ensure!(
+                    c.removed_at.is_none(),
+                    "Restore the removed Card before editing"
+                );
                 if let Some(t) = p["title"].as_str() {
+                    ensure!(
+                        c.github_issue().is_none() || t == c.title,
+                        "GitHub Issue titles are source content; edit local instructions instead"
+                    );
                     ensure!(!t.trim().is_empty(), "Title is required");
                     c.title = t.trim().into();
                 }
@@ -214,6 +220,9 @@ impl AppServer {
                 }
                 if p.get("tags").is_some() {
                     c.tags = strings(&p, "tags");
+                }
+                if let Some(mode) = p.get("delivery_mode") {
+                    c.delivery_mode = serde_json::from_value(mode.clone())?;
                 }
                 c.revision += 1;
                 log(
@@ -231,7 +240,7 @@ impl AppServer {
             "card.move" => self.mutate(method, &p, |db| {
                 let mut c: Card = db.get(strp(&p, "card_id")?)?;
                 revise(&c, &p)?;
-                ensure!(c.archived_at.is_none(), "Restore the Card before moving");
+                ensure!(c.active(), "Restore the Card before moving");
                 ensure!(
                     c.human_gate.is_none() || p["execution"].is_null(),
                     "Human review must be approved by the user before moving this Card"
@@ -331,10 +340,7 @@ impl AppServer {
             }),
             "comment.add" => self.mutate(method, &p, |db| {
                 let mut c: Card = db.get(strp(&p, "card_id")?)?;
-                ensure!(
-                    c.archived_at.is_none(),
-                    "Restore the Card before commenting"
-                );
+                ensure!(c.active(), "Restore the Card before commenting");
                 let body = strp(&p, "body")?;
                 ensure!(!body.trim().is_empty(), "Comment is empty");
                 let event = db.append(canban_timeline::event(

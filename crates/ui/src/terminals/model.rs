@@ -55,9 +55,17 @@ pub fn binding(row: &OverviewRow) -> Option<Value> {
     if a.finished() || row.card.archived_at.is_some() {
         return None;
     }
+    let input_status = if matches!(a.close_state.as_str(), "pending" | "closing" | "closed") {
+        "Closing"
+    } else if a.connection_state == "connecting" {
+        "Connecting"
+    } else if a.connection_state != "connected" {
+        "Disconnected"
+    } else {
+        ""
+    };
     Some(
-        json!({"id":a.id,"terminal":a.terminal.as_ref()?,"core_id":a.core_id.as_ref()?,
-        "read_only":a.connection_state != "connected" || matches!(a.close_state.as_str(),"pending"|"closing"|"closed")}),
+        json!({"id":a.id,"terminal":a.terminal.as_ref()?,"core_id":a.core_id.as_ref()?,"read_only":!input_status.is_empty(),"input_status":input_status}),
     )
 }
 pub fn groups(snapshot: &Snapshot, history: bool) -> Vec<ProjectGroup> {

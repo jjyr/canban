@@ -7,6 +7,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     let Some(card) = ui.current_card() else {
         return view().child(muted("Select a Card")).into_element();
     };
+    let github_content = card.github_issue().is_some();
     let id = card.id.clone();
     let key = format!("card:{id}");
     let draft = document(ui, key.clone(), Draft::card(&card));
@@ -68,14 +69,9 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 return view().into_element();
             };
             let s = ui.snapshot.get();
-            let (state, tone) = crate::board::activity(&s, &c);
-            view()
-                .flex_row()
-                .flex_wrap()
-                .gap_2()
-                .child(badge(c.stage))
-                .child(status(state, tone))
-                .into_element()
+            let mut row = view().flex_row().flex_wrap().items_center().gap_2().child(badge(c.stage.clone()));
+            if let Some(activity) = crate::components::activity::card_activity(&s, &c) { row = row.child(activity); }
+            row.into_element()
         }))
         .child(crate::components::git_workspace::panel(ui))
         .child(dynamic(move || {
@@ -103,12 +99,13 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .child(
                     view()
                         .gap_4()
+                        .child(crate::github::card_source(ui))
                         .child(
                             view()
                                 .flex_row()
                                 .justify_between()
                                 .items_center()
-                                .child(label("Task").font_weight(FontWeight::SEMIBOLD))
+                                .child(label(if github_content{"Additional instructions"}else{"Task"}).font_weight(FontWeight::SEMIBOLD))
                                 .child(action(move_label(&card), Variant::Quiet, move |_| {
                                     draft.update(|d| d.editing = !d.editing)
                                 })),
@@ -122,9 +119,9 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                         move || draft.get().title,
                                         move |s| draft.update(|d| d.title = s.into()),
                                         "Card title",
-                                    ))
+                                    ).disabled(github_content))
                                     .child(
-                                        field(body_proxy, "Task description")
+                                        field(body_proxy, if github_content{"Additional instructions · local to Canban"}else{"Task description"})
                                             .multiline(true)
                                             .h(px(180.0))
                                             .on_paste({

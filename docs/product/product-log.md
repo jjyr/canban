@@ -495,3 +495,50 @@ delivery interfaces are recorded in [multi-machine research](../research/multi-m
 Implemented one persistent AppServer authority with UI RPC/Terminal relay, Core-backed Machines settings, one editable Project work location and immutable execution/workspace snapshots. Existing Resume and Review use the original environment. Remote Agents receive a thin CLI and staged context through Core; a private request/reply spool reuses the same connection without a public service port. Profile command names resolve on their execution host.
 
 Native checks covered machine/path selection, remote browsing, Agent input and independent remote shells. Real isolated remote workflow verification is recorded in [multi-machine acceptance](../multi-machine-acceptance.md), including the clock-independent completion fence and launch-observation race repair.
+
+## 2026-11-09 — GitHub Cards, automatic intake and unified creation
+
+The user selected distinct Local and GitHub Issue Cards with shared visual language, mandatory source identity for GitHub Issue Cards, related Issue/PR links for either kind, and PR publication as an alternative to local merge. Automatic intake has two modes: all Open Issues or Open Issues authored by repository collaborators. Closed Issues can be added manually. Local removal must not change GitHub or allow automatic re-addition.
+
+The approved Add Card interaction opens one form immediately, defaulting to Local. Select GitHub Issue inside that form, search the Project repository by title or number, select a source, optionally add local instructions, then submit to Backlog. This supersedes both the preliminary type-selection menu and immediate addition on search-result click. Preserve drafts across type changes and keep existing-Card navigation and explicit re-addition in this flow.
+
+[GitHub Cards and unified creation](github-cards.md) distinguishes confirmed product behavior from recommended storage/shared-code organization and unresolved PR/removal details. Official API research confirms collaborator checks exist but require suitable repository access; `author_association` alone is not the exact collaborator list. No GitHub implementation or account-specific acceptance is claimed.
+
+## 2026-11-09 — Canban-owned GitHub App and Device Flow
+
+The user requested Device Flow and suggested an application such as `canban-app`. Official documentation confirms GitHub Apps support device authorization and Client-Secret-free refresh for tokens issued through that flow. The [authentication plan](github-authentication.md) records a registration worksheet, recommended permissions, secure AppServer-owned token rotation and the distinction between user sign-in and installation/repository access. Candidate name availability, registration owner and actual registration are unresolved; no application has been created and no authentication implementation/acceptance is claimed.
+
+## 2026-11-09 — Isolate provider and product integration code
+
+The user requested explicit crate boundaries for the new integration code. The initial proposal placed provider/authentication IO in `canban-github` and product-specific source intake/sync/binding in a separate `canban-integrations` crate. The user rejected the second crate in the following decision. See the [current boundaries](github-cards.md#crate-and-module-boundaries); no module scaffolding was implemented.
+
+## 2026-11-09 — Keep GitHub product integration inside Kanban
+
+The user selected `canban-kanban::github` as an ordinary module for product-specific integration and rejected a separate `canban-integrations` crate. Only `canban-github` is a new crate, owning authentication/provider APIs. Common Card rules remain shared inside Kanban; source binding, intake, reconciliation, removal exclusions and delivery policy live in its GitHub module. AppServer hosts/routes and composes existing Git/workspace operations. This is a selected architecture direction, not an implementation or acceptance result.
+
+## 2026-11-09 — Implement GitHub integration and register canban-app
+
+The user authorized implementation, App creation and test authorization, then explicitly selected any-account installation availability. Registered `jjyr/canban-app` (App ID `5671006`) with Device Flow and the agreed repository permissions; public API metadata confirms the identity and permissions. Implemented the provider crate and Kanban module, source/Card persistence and intake, unified native creation, account/source Settings, explicit local removal/restoration and PR publication/merge/reconciliation. Automatic approval review initially required confirmation at installation submission; the user subsequently completed installation and authorization. The live acceptance and later local-credential storage decision below supersede that interim blocker. See [implementation and acceptance](../github-integration.md).
+
+
+## 2026-11-09 — Live GitHub delivery acceptance and local credentials
+
+The user completed the App installation and Device Flow grant. The isolated live harness passed automatic/manual Issue intake, collaborator verification, source Timeline boundaries, removal/re-add, two real Codex development/review invocations, publication and receipt replay, GitHub merge and explicit Archive. Delivery: [private acceptance PR #3](https://github.com/jjyr/canban-github-acceptance-20261109/pull/3). This supersedes the earlier pending-authorization status; see [implementation and evidence](../github-integration.md).
+
+After observing Keychain prompts, the user explicitly selected local file storage. Replace the Keychain dependency with AppServer-owned `credentials/github.json` under Canban home, Unix directory/file permissions `0700`/`0600`, atomic rotation and removal on disconnect. No implicit Keychain migration or runtime access remains; reconnect once for the local store. Keep credentials out of Git, snapshots, Agent context and Card archives. Also reconcile externally updated GitHub settings without overwriting unsaved edits, and prevent the native search field from sharing edit state with Issue instructions.
+
+
+Local-storage follow-up acceptance passed: fresh Device Flow, real token refresh, AppServer restart/account restoration, another atomic token rotation, installation access and collaborator-mode synchronization, all without Keychain. Native regression checks passed mounted Settings reconciliation while preserving dirty input/focus, and closed-Issue selection/addition with exact local instructions including trailing punctuation. Final validation: 104 Rust tests, strict workspace/all-target Clippy, application/Gallery packaging and `git diff --check`.
+
+
+## 2026-11-09 — Reduce Board noise and separate stages from Agents
+
+The user requested direct New Card type buttons, removal of repetitive drag and Not scheduled copy, and only provider/Profile identity for executing Agents. Use shared Local / GitHub Issue segments with retained drafts; use a compact grip instead of drag text. Board headers show stage names and counts, with Agent routing in a tooltip. Do not repeat a Card's stage inside its column or reserve space for absent content/metadata. Keep actionable review/attention feedback visible. Production components and Gallery/native acceptance are recorded in the [component inventory](../ui-components.md#quiet-board-cards-and-direct-type-selection-2026-11-09).
+
+
+## 2026-11-09 — Closing a Terminal tab terminates its PTY
+
+The user replaced view-only tab closure: X, Command+W and the context-menu close action terminate the exact live Agent/independent Terminal, then remove its tab on a successful receipt. Failed or uncertain termination keeps the tab visible for inspection. Provider history remains resumable; exiting the UI or navigating elsewhere still leaves processes running. See the [Terminal lifecycle contract](../terminal-workspace.md#close-terminates-the-terminal-2026-11-09).
+
+
+The user clarified that keys/buttons must dispatch one close intent rather than deciding which process-control API to invoke. AppServer `terminal.close` now owns runtime resolution, durable close intent, termination and replay-safe receipts for both Agent and independent Terminals; the UI only updates its tab list after a successful close receipt. The user also selected explicit Connecting / Disconnected / Closing presentation in place of generic read-only copy.

@@ -16,6 +16,9 @@ The repository now has a runnable macOS MVP. [Real Agent acceptance, 2026-11-09]
 | [Product discussion and decisions](product/product-log.md) | Rationale, superseded proposals, and open questions |
 | [Projects and workflow templates](product/projects-and-workflows.md) | Directory/Board ownership, required Backlog, callbacks, customization, and template migration |
 | [Kanban card workflow](product/kanban-workflow.md) | Numbers, resources, stages/run/outcome separation, comments, mentions, and archive |
+| [GitHub integration implementation](github-integration.md) | Registered App, provider/Kanban boundaries, Issue intake, native creation, PR delivery, API and explicit live-acceptance limits |
+| [GitHub Cards and unified creation](product/github-cards.md) | Product decisions, automatic Issue intake, local removal and collaborator API research |
+| [GitHub App and device authorization](product/github-authentication.md) | Canban-owned App, Device Flow, installation access and secret-free token refresh |
 | [Notes and the Kanban workspace](product/notes-and-workspace.md) | SQLite-backed file-like Notes, related-event Timeline, bidirectional links, Agent read/write and ASCII workspace layouts |
 | [Notes/workspace implementation](notes-and-workspace-implementation.md) | Implemented document operations, Agent CLI, UI composition and acceptance limits |
 | [Workspace and scheduling implementation](workspace-and-scheduling.md) | Named branches, remote/base synchronization, global Agent limit, priority and human approval gates |

@@ -9,7 +9,7 @@ pub enum Variant {
     Quiet,
 }
 pub fn action(
-    label: impl Into<SharedString>,
+    label: impl IntoReactive<SharedString>,
     variant: Variant,
     on_press: impl Fn(&()) + 'static,
 ) -> nsh_base::ButtonElement {
@@ -43,7 +43,7 @@ pub fn action(
         .focus(|s| s.border_color(ACCENT))
         .disabled_style(|s| s.opacity(0.4))
         .child(
-            text(label.into())
+            text(label)
                 .text_size(px(12.0))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(foreground),

@@ -23,5 +23,7 @@ canban-scheduler.workspace = true
 canban-herdr.workspace = true
 canban-workspaces.workspace = true
 
+canban-github.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

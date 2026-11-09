@@ -2,6 +2,87 @@
 use super::*;
 
 impl AppServer {
+    /// Close is a product lifecycle operation, independent of UI tab shortcuts.
+    pub(super) fn close_terminal(&self, p: Value) -> Result<Value> {
+        let _gate = self.terminal_gate.lock().unwrap();
+        ensure!(
+            p["execution"].is_null(),
+            "Closing a terminal requires a user action"
+        );
+        let terminal_id = strp(&p, "terminal_id")?;
+        let mut target = None;
+        let mut invocation = None;
+        let saved = self.mutate("terminal.close", &p, |db| {
+            let mut item: TerminalEntry = db.get(terminal_id)?;
+            if let Some(conversation) = &item.conversation_id {
+                let row = canban_notifications::overview(&db.snapshot()?).into_iter().find(|r| &r.id == conversation);
+                if let Some(mut run) = row.and_then(|r| r.attempt)
+                    && !run.finished() {
+                        let core = run.core_id.clone().context("Original Core binding unavailable")?;
+                        let terminal = run.terminal.clone().context("Terminal is still starting; wait before closing")?;
+                        target = Some((core, terminal));
+                        run.close_state = "closing".into();
+                        run.close_requested_at = Some(now());
+                        db.save(&run)?;
+                        let card: Card = db.get(&run.card_id)?;
+                        log(db, &card, "execution.close_requested", "user", "Terminal closed by user", Some(run.request_id.clone()), json!({"attempt":run.number}))?;
+                        invocation = Some(run.id);
+                }
+            } else if let Some(runtime) = &mut item.runtime
+                && runtime.state != "finished" {
+                target = Some((runtime.core_id.clone().context("Original Core binding unavailable")?, runtime.terminal.clone().context("Terminal binding unavailable; inspect before closing")?));
+                runtime.state = "closing".into();
+                db.save(&item)?;
+            }
+            Ok(json!({"state":if target.is_some(){"closing"}else{"closed"},"terminal_id":terminal_id}))
+        })?;
+        let Some((core, terminal)) = target else {
+            return Ok(saved);
+        };
+        let client = canban_herdr::Client {
+            config: self.config(),
+        };
+        let result = (|| -> Result<Value> {
+            ensure!(
+                client.status()?["core"]["id"] == core,
+                "Original Herdr core is unavailable"
+            );
+            client.call("terminal.kill", json!({"terminal":terminal}))
+        })();
+        let value = match &result {
+            Ok(_) => json!({"state":"closed","terminal_id":terminal_id}),
+            Err(e) => {
+                json!({"state":"unknown","terminal_id":terminal_id,"message":format!("{e:#}; inspect before retrying close")})
+            }
+        };
+        self.store.lock().unwrap().write(|db| {
+            if let Some(key) = p["request_key"].as_str() {
+                db.conn.execute(
+                    "UPDATE operations SET result=?2 WHERE id=?1",
+                    params![key, serde_json::to_string(&value)?],
+                )?;
+            }
+            if let Some(id) = invocation {
+                let mut run: Attempt = db.get(&id)?;
+                if let Err(e) = &result {
+                    run.close_state = "error".into();
+                    run.error = Some(format!("Terminal close failed: {e:#}"));
+                    db.save(&run)?;
+                }
+            } else if result.is_err() {
+                let mut item: TerminalEntry = db.get(terminal_id)?;
+                if let Some(r) = &mut item.runtime {
+                    r.state = "unknown".into();
+                    r.connection = "unavailable".into();
+                    r.error = Some(value["message"].as_str().unwrap_or("").into());
+                }
+                db.save(&item)?;
+            }
+            Ok(())
+        })?;
+        self.emit("terminals", None);
+        Ok(value)
+    }
     /// Resolve exactly one owning binding; Agent Attempts remain authoritative.
     pub(super) fn terminal_binding(s: &Snapshot, item: &TerminalEntry) -> Option<(String, String)> {
         if let Some(conversation) = &item.conversation_id {

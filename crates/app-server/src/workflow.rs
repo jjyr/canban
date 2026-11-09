@@ -9,7 +9,7 @@ pub(super) fn advance(
 ) -> Result<()> {
     if let Some(next) = &request.on_completed
         && card.stage == request.stage
-        && card.archived_at.is_none()
+        && card.active()
     {
         let project: Project = db.get(&card.project_id)?;
         let stage = canban_workflow_engine::stage(&project.workflow, next)?;
@@ -38,10 +38,7 @@ impl AppServer {
         self.mutate("card.continue", &p, |db| {
             let mut card: Card = db.get(strp(&p, "card_id")?)?;
             revise(&card, &p)?;
-            ensure!(
-                card.archived_at.is_none(),
-                "Restore the Card before continuing"
-            );
+            ensure!(card.active(), "Restore the Card before continuing");
             let gate = card
                 .human_gate
                 .clone()

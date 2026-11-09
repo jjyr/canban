@@ -220,6 +220,10 @@ impl Default for Config {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Project {
+    #[serde(default)]
+    pub github: Option<GitHubSource>,
+    #[serde(default)]
+    pub delivery_mode: DeliveryMode,
     pub id: String,
     pub name: String,
     pub directory: String,
@@ -259,6 +263,16 @@ pub struct WorkspaceBinding {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Card {
+    #[serde(default)]
+    pub content: CardContent,
+    #[serde(default)]
+    pub removed_at: Option<u64>,
+    #[serde(default)]
+    pub pull_request: Option<GitHubPr>,
+    #[serde(default)]
+    pub pull_request_history: Vec<GitHubPr>,
+    #[serde(default)]
+    pub delivery_mode: Option<DeliveryMode>,
     #[serde(default)]
     pub workspace: Option<WorkspaceBinding>,
     #[serde(default)]
@@ -546,6 +560,10 @@ pub struct Artifact {
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub struct Snapshot {
     #[serde(default)]
+    pub github: GitHubAccount,
+    #[serde(default)]
+    pub github_issues: Vec<GitHubIssueSnapshot>,
+    #[serde(default)]
     pub terminals: Vec<TerminalEntry>,
     /// Ephemeral Herdr observations, never persisted as Terminal ownership.
     #[serde(default)]
@@ -647,4 +665,97 @@ pub struct Command {
     pub method: String,
     #[serde(default)]
     pub params: Value,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryMode {
+    #[default]
+    Local,
+    #[serde(rename = "github_pr")]
+    GitHubPr,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubIntake {
+    #[default]
+    All,
+    Collaborators,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct GitHubSource {
+    pub repository: String,
+    pub repository_id: u64,
+    pub generation: String,
+    pub intake: GitHubIntake,
+    pub synced_at: Option<u64>,
+    pub error: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct GitHubIssueRef {
+    pub repository: String,
+    pub repository_id: u64,
+    pub issue_id: u64,
+    pub number: u64,
+    pub url: String,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CardContent {
+    #[default]
+    Local,
+    #[serde(rename = "github_issue")]
+    GitHubIssue { source: GitHubIssueRef },
+}
+impl Card {
+    pub fn github_issue(&self) -> Option<&GitHubIssueRef> {
+        match &self.content {
+            CardContent::GitHubIssue { source } => Some(source),
+            CardContent::Local => None,
+        }
+    }
+    pub fn active(&self) -> bool {
+        self.removed_at.is_none() && self.archived_at.is_none()
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct GitHubIssueSnapshot {
+    pub id: String,
+    pub project_id: String,
+    pub source: GitHubIssueRef,
+    pub title: String,
+    pub body: String,
+    pub state: String,
+    pub author_id: u64,
+    pub author_login: String,
+    pub labels: Vec<String>,
+    pub updated_at: String,
+    pub synced_at: u64,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct GitHubAccount {
+    #[serde(default)]
+    pub installation_url: Option<String>,
+    pub state: String,
+    pub login: Option<String>,
+    pub user_code: Option<String>,
+    pub verification_uri: Option<String>,
+    pub expires_at: Option<u64>,
+    pub error: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct GitHubPr {
+    #[serde(default)]
+    pub review_summary: String,
+    pub repository: String,
+    pub repository_id: u64,
+    pub number: u64,
+    pub url: String,
+    pub state: String,
+    pub head: String,
+    pub head_branch: String,
+    pub base_branch: String,
+    pub merged: bool,
+    pub checks: String,
+    pub workspace: WorkspaceBinding,
 }

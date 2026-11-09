@@ -52,3 +52,17 @@ pub fn registry_items(profiles: Signal<Vec<Profile>>) -> impl IntoElement {
         )
     })
 }
+
+/// Same provider identity on Cards, Terminal inventory and tabs.
+pub fn provider(profile: &Profile) -> (Icon, String) {
+    let command = profile.command_name();
+    let provider = match command.as_str() {
+        "codex" | "claude" => command.as_str(),
+        _ => profile.preset.as_deref().unwrap_or(&command),
+    };
+    match provider {
+        "codex" => (Icon::Codex, "Codex".into()),
+        "claude" => (Icon::Claude, "Claude".into()),
+        other => (Icon::Agent, other.into()),
+    }
+}

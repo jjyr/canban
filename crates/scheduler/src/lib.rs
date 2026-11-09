@@ -99,7 +99,8 @@ pub fn eligible(snapshot: &canban_types::Snapshot, request: &Request) -> bool {
     let Some(card) = snapshot.cards.iter().find(|c| c.id == request.card_id) else {
         return false;
     };
-    if card.archived_at.is_some()
+    if card.removed_at.is_some()
+        || card.archived_at.is_some()
         || (automatic(request)
             && (card.human_gate.is_some()
                 || card.attention.is_some()

@@ -42,7 +42,7 @@ fn controls() -> impl IntoElement {
                         .child(label("Shared Lucide icons · muted / selected / attention"))
                         .child(view().flex_row().flex_wrap().gap_2().children(
                             [Icon::Search, Icon::Terminal, Icon::Board, Icon::Overview, Icon::Note,
-                             Icon::Archive, Icon::Settings, Icon::Projects, Icon::Agent,
+                             Icon::Archive, Icon::Settings, Icon::Projects, Icon::Agent, Icon::GitHub,
                              Icon::ChevronDown, Icon::Plus, Icon::Check]
                             .into_iter().enumerate().map(|(i, kind)|
                                 icon_action(kind, format!("{kind:?}"), move || i == 1,
@@ -211,6 +211,22 @@ pub fn Gallery() -> impl IntoElement {
                 }))
                 .child(action("Scheduling", Variant::Quiet, move |_| {
                     scene.set("scheduling".into());
+                }))
+                .child(action("Card states", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());ui.snapshot.set(fixtures::board_cards());ui.card.set(String::new());ui.page.set("board".into());
+                }))
+                .child(action("New Card", Variant::Quiet, move |_| {
+                    let mut snapshot=fixtures::workspace();
+                    snapshot.projects[0].github=Some(canban_types::GitHubSource { repository:"jjyr/canban".into(),repository_id:1,generation:"gallery".into(),intake:canban_types::GitHubIntake::All,synced_at:None,error:None });
+                    scene.set("workspace".into());ui.snapshot.set(snapshot);ui.source_note.set(String::new());ui.page.set("new-card".into());
+                }))
+                .child(action("GitHub Card",Variant::Quiet,move |_|{
+                    let mut snapshot=fixtures::workspace();
+                    let source=canban_types::GitHubIssueRef{repository:"jjyr/canban".into(),repository_id:1,issue_id:186,number:186,url:"https://github.com/jjyr/canban/issues/186".into()};
+                    snapshot.cards[0].id="github-card".into();
+                    snapshot.cards[0].content=canban_types::CardContent::GitHubIssue{source:source.clone()};
+                    snapshot.github_issues.push(canban_types::GitHubIssueSnapshot{id:"gallery-issue".into(),project_id:"gallery-project".into(),source,title:"Improve search".into(),body:"## Remote issue\nPreserve context when searching.".into(),state:"open".into(),author_id:1,author_login:"jjyr".into(),labels:vec![],updated_at:"2026-11-09".into(),synced_at:0});
+                    ui.snapshot.set(snapshot);scene.set("workspace".into());ui.open_card("github-card".into());
                 }))
                 .child(action("Settings", Variant::Quiet, move |_| {
                     scene.set("workspace".into());

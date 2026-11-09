@@ -17,6 +17,8 @@ use std::{
 
 pub struct AppServer {
     pub home: PathBuf,
+    github: canban_github::auth::Service,
+    github_sync_due: AtomicBool,
     identity: String,
     store: Mutex<Store>,
     config: RwLock<Config>,
@@ -110,6 +112,10 @@ fn enqueue(
     explicit: Option<&str>,
     instruction: Option<String>,
 ) -> Result<Option<Request>> {
+    ensure!(
+        card.removed_at.is_none(),
+        "Restore the removed Card before scheduling"
+    );
     if !stage.execute && explicit.is_none() {
         return Ok(None);
     }
@@ -294,6 +300,8 @@ impl AppServer {
         }
         Self::publish_migration(&home, migration)?;
         Ok(Arc::new(Self {
+            github_sync_due: AtomicBool::new(false),
+            github: canban_github::auth::Service::new(home.clone()),
             identity,
             home,
             store: Mutex::new(store),
@@ -408,6 +416,7 @@ impl AppServer {
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
         let mut snapshot = self.store.lock().unwrap().snapshot()?;
+        snapshot.github = serde_json::from_value(serde_json::to_value(self.github.status())?)?;
         snapshot.terminal_contexts = self
             .terminal_contexts
             .lock()
@@ -469,6 +478,7 @@ impl AppServer {
 
 mod client;
 mod commands;
+mod github;
 pub use client::AppClient;
 mod machines;
 mod remote;

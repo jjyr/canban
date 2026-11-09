@@ -95,4 +95,4 @@ Terminal navigation update (2026-11-08): all Agent results now use the [dedicate
 
 ## Terminal tabs
 
-Quick Open now also indexes saved manual Terminal names/numbers and directories. Opening an Agent or Terminal destination reuses its existing tab/binding without launching work. Command+T creates a Shell in the selected Project/Card context; Command+W closes its tab view; Command+Shift+[ / ] cycles opened tabs. Search and rename dialogs suspend these shortcuts and restore native Terminal focus on dismissal. The left inventory and right tab strip extend separately into window chrome.
+Quick Open now also indexes saved manual Terminal names/numbers and directories. Opening an Agent or Terminal destination reuses its existing tab/binding without launching work. Command+T creates a Shell in the selected Project/Card context; Command+W terminates its live PTY and closes the tab; Command+Shift+[ / ] cycles opened tabs. Search and rename dialogs suspend these shortcuts and restore native Terminal focus on dismissal. The left inventory and right tab strip extend separately into window chrome.

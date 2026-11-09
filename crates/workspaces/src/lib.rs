@@ -374,6 +374,8 @@ mod tests {
         let mut workflow = canban_types::Workflow::default();
         workflow.workspace.sync_base = false;
         let project = Project {
+            github: None,
+            delivery_mode: Default::default(),
             id: "project".into(),
             name: "Test".into(),
             location: None,
@@ -383,6 +385,11 @@ mod tests {
             created_at: 0,
         };
         let mut card = Card {
+            content: Default::default(),
+            removed_at: None,
+            pull_request: None,
+            pull_request_history: Vec::new(),
+            delivery_mode: None,
             id: "card".into(),
             project_id: project.id.clone(),
             number: 1,
@@ -508,6 +515,8 @@ mod sync_tests {
                 checked(&writer, &["config", k, v]).unwrap();
             }
             let project = Project {
+                github: None,
+                delivery_mode: Default::default(),
                 id: "p".into(),
                 name: "Test".into(),
                 location: None,
@@ -685,3 +694,5 @@ mod sync_tests {
         assert!(info(&f.project, &f.card).unwrap().dirty);
     }
 }
+
+mod publish;

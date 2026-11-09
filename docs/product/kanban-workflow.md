@@ -82,7 +82,7 @@ Cards support arbitrary resource references through extensible typed links: note
 
 ## Local-first backends
 
-Confirmed: local cards first. GitHub issue cards later should retain the same external card experience.
+Confirmed: local cards first. GitHub Issue Cards use the same workflow and visual language, with source-specific content and editing. The [2026-11-09 GitHub Card design](github-cards.md) records the confirmed unified Add Card form, automatic Open-Issue intake modes and local removal/re-addition. See [implementation and acceptance](../github-integration.md) for current code and live-acceptance limits.
 
 Proposed seam:
 
@@ -94,7 +94,7 @@ Card presentation + local workflow + unified timeline
                Local card       GitHub issue (later)
 ```
 
-A future remote source binding stores provider/repository/issue identity independently of the internal card ID and project-local number. Remote synchronization and which service owns description/comments need a later explicit contract. Do not promise offline GitHub writes or build synchronization now. A GitHub issue backend is also separate from an optional PR/change link on a local card.
+A remote source binding stores provider/repository/issue identity independently of the internal Card ID and Project-local number. A GitHub Issue Card requires one source Issue; a Local Card may merely link to an Issue. The approved creation form previews remote title/body and edits local Additional instructions. Source identity, related Issue/PR links and delivery PRs have distinct meanings. Remote publication/conflict behavior still needs an explicit contract; do not promise offline GitHub writes. See the GitHub design for proposed caching and shared-core/content-enum organization.
 
 ## Custom card blocks
 

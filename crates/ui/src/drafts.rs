@@ -5,6 +5,10 @@ use nsh_core::prelude::*;
 use serde_json::{Value, json};
 #[derive(Clone, Default, PartialEq)]
 pub struct Draft {
+    pub card_kind: String,
+    pub issue_query: String,
+    pub selected_issue: Option<Value>,
+    pub instructions: String,
     pub title: String,
     pub body: String,
     pub tags: String,

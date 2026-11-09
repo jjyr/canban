@@ -331,6 +331,8 @@ mod tests {
             let mut workflow = canban_types::Workflow::default();
             workflow.workspace.sync_base = false;
             let project = Project {
+                github: None,
+                delivery_mode: Default::default(),
                 id: "p".into(),
                 name: "Test".into(),
                 location: None,

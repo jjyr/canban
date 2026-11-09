@@ -1040,7 +1040,7 @@ fn upgrading_existing_notes_retains_current_revision_without_inventing_history()
     )
     .unwrap();
     let db = rusqlite::Connection::open(d.path().join("home/canban.sqlite")).unwrap();
-    db.execute_batch("DROP TABLE note_events; DROP TABLE note_revisions; DROP TABLE terminals; PRAGMA user_version=2;")
+    db.execute_batch("DROP TABLE note_events; DROP TABLE note_revisions; DROP TABLE terminals; DROP TABLE github_issues; DROP INDEX github_card_source; PRAGMA user_version=2;")
         .unwrap();
     drop(db);
     drop(app);

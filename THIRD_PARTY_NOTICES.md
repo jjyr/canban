@@ -9,3 +9,10 @@ Canban is Copyright 2026 JJy <jjyruby@gmail.com>, Apache-2.0.
 - Provider marks in crates/ui-kit/assets/providers reuse the monochrome agent-codex.svg and agent-claude.svg assets from herdr-app a6db99b4edab37b2038ac1016bd0af82ed0a5ebc (https://github.com/herdrdev/herdr-app), Apache-2.0. See third_party/Herdr-LICENSE.txt. OpenAI/Codex and Claude marks identify their respective providers.
 
 NSH and other Cargo dependencies retain their upstream licenses. No third-party attribution replaces Canban's Apache-2.0 license.
+
+## GitHub mark (Octicons)
+
+The GitHub mark in `crates/ui-kit/assets/providers/github.svg` is from
+[Primer Octicons](https://github.com/primer/octicons), `icons/mark-github-16.svg`.
+Its MIT license is preserved in `third_party/octicons-LICENSE.txt` and alongside
+the asset. The path fill uses `currentColor` to follow native theme tokens.

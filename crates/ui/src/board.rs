@@ -4,49 +4,6 @@ use canban_types::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
 
-pub fn activity(s: &Snapshot, c: &Card) -> (String, Tone) {
-    if c.human_gate.is_some() {
-        return ("Waiting for human".into(), Tone::Attention);
-    }
-    if c.attention.is_some() {
-        return ("Needs attention".into(), Tone::Attention);
-    }
-    if let Some(r) = s.requests.iter().rev().find(|r| {
-        r.card_id == c.id
-            && matches!(
-                r.state.as_str(),
-                "queued" | "starting" | "running" | "working" | "blocked"
-            )
-    }) {
-        return (
-            format!(
-                "@{} · {}",
-                r.profile.id,
-                if r.state == "queued" {
-                    "queued · waiting for machine or slot"
-                } else {
-                    &r.state
-                }
-            ),
-            if r.state == "blocked" {
-                Tone::Attention
-            } else {
-                Tone::Info
-            },
-        );
-    }
-    if let Some(r) = s.requests.iter().rev().find(|r| r.card_id == c.id) {
-        return (
-            format!("@{} · {}", r.profile.id, r.state),
-            if r.state == "failed" {
-                Tone::Danger
-            } else {
-                Tone::Neutral
-            },
-        );
-    }
-    ("Not scheduled".into(), Tone::Neutral)
-}
 pub fn matches_filter(s: &Snapshot, c: &Card, filter: &str) -> bool {
     match filter {
         "attention" => c.attention.is_some(),
@@ -90,7 +47,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .child(when(
                     move || has_project.get(),
                     move || {
-                        action("+ New Card", Variant::Primary, move |_| {
+                        action("+ Add Card", Variant::Primary, move |_| {
                             ui.source_note.set(String::new());
                             ui.navigate("new-card");
                         })
@@ -181,36 +138,38 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                         .collect::<Vec<_>>();
                                     let key = format!("board:{project}:{}", stage.id);
                                     let position = scroll_position(ui, &key);
+                                    let explanation = if stage.execute {
+                                        stage
+                                            .profile
+                                            .as_ref()
+                                            .map(|p| format!("Workflow Agent: @{p}"))
+                                            .unwrap_or_else(|| {
+                                                "Workflow Agent selected by tags or project default"
+                                                    .into()
+                                            })
+                                    } else {
+                                        "No automatic Agent execution in this stage".into()
+                                    };
                                     let mut column = view()
-                                        .w(px(240.0))
+                                        .w(px(240.))
                                         .flex_1()
-                                        .min_w(px(200.0))
-                                        .min_h(px(0.0))
+                                        .min_w(px(200.))
+                                        .min_h(px(0.))
                                         .gap_3()
                                         .child(
                                             view()
                                                 .flex_row()
                                                 .justify_between()
                                                 .items_center()
+                                                .tooltip(
+                                                    nsh_base::tooltip().child(label(explanation)),
+                                                )
                                                 .child(
                                                     label(stage.name.clone())
                                                         .font_weight(FontWeight::SEMIBOLD),
                                                 )
                                                 .child(badge(cards.len().to_string())),
-                                        )
-                                        .child(muted(
-                                            stage
-                                                .profile
-                                                .as_ref()
-                                                .map(|p| format!("@{p}"))
-                                                .unwrap_or_else(|| {
-                                                    if stage.execute {
-                                                        "Tags / default Agent".into()
-                                                    } else {
-                                                        "Ideas and planned work".into()
-                                                    }
-                                                }),
-                                        ));
+                                        );
                                     let mut items = view().gap_3();
                                     if cards.is_empty() {
                                         items = items.child(muted("No cards"));

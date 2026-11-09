@@ -1,5 +1,5 @@
 use super::*;
-fn blocker(db: Db<'_>, card: &Card) -> Result<Option<String>> {
+pub(super) fn blocker(db: Db<'_>, card: &Card) -> Result<Option<String>> {
     if db.list::<Attempt>()?.iter().any(|a| {
         a.card_id == card.id
             && a.terminal.is_some()
@@ -55,7 +55,8 @@ impl AppServer {
         let mut context = None;
         let saved=self.mutate("review.merge",&p,|db|{
             let card:Card=db.get(strp(&p,"card_id")?)?;revise(&card,&p)?;
-            ensure!(card.archived_at.is_none(),"Restore the Card before accepting");
+            ensure!(card.active(),"Restore the Card before accepting");
+            ensure!(card.pull_request.as_ref().is_none_or(|pr|pr.merged),"Resolve the existing PR delivery before local merge");
             if let Some(reason)=blocker(db,&card)? {bail!("{reason}");}
             let project:Project=db.get(&card.project_id)?;let project=self.bound_project(&project,&card);
             let plan=self.ops(&project.work_location().machine).review_preview(&project,&card,p["target_branch"].as_str())?;
@@ -85,6 +86,7 @@ impl AppServer {
             let mut current:Card=db.get(&card.id)?;
             let value=match result {
                 Ok(commit)=>{
+                    current.delivery_mode=Some(DeliveryMode::Local);
                     current.delivery=Some(Delivery{target_branch:plan.target_branch.clone(),commit:commit.clone(),request_key:key.clone(),merged_at:now()});
                     current.attention=None;
                     if let Some(gate)=current.human_gate.take() && let Some(request)=gate.request_id {

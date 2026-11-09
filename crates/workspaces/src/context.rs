@@ -203,6 +203,8 @@ mod tests {
         )
         .unwrap();
         let project = Project {
+            github: None,
+            delivery_mode: Default::default(),
             id: "p".into(),
             name: "Project".into(),
             location: None,

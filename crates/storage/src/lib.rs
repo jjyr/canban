@@ -56,6 +56,7 @@ macro_rules! record {
     };
 }
 record!(Project, "projects");
+record!(GitHubIssueSnapshot, "github_issues", project);
 record!(Note, "notes", project);
 record!(NoteRevision, "note_revisions", project);
 record!(NoteEvent, "note_events", project);
@@ -159,7 +160,7 @@ impl Store {
         anyhow::ensure!(mode == "wal", "SQLite WAL could not be enabled");
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 6,
+            version <= 7,
             "Database schema is newer than this application"
         );
         if version == 0 {
@@ -241,6 +242,9 @@ impl Store {
             }
             conn.execute_batch("PRAGMA user_version=6; COMMIT;")?;
         }
+        if version < 7 {
+            conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE github_issues (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id), card_id TEXT, state TEXT NOT NULL, number INTEGER NOT NULL,data TEXT NOT NULL); CREATE UNIQUE INDEX github_card_source ON cards(project_id,json_extract(data,'$.content.source.repository_id'),json_extract(data,'$.content.source.issue_id')) WHERE json_extract(data,'$.content.kind')='github_issue'; PRAGMA user_version=7; COMMIT;")?;
+        }
         Ok(Self {
             conn,
             home: home.to_owned(),
@@ -317,10 +321,16 @@ impl Db<'_> {
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
         Ok(Snapshot {
+            github: Default::default(),
+            github_issues: self.list()?,
             terminals: self.list()?,
             terminal_contexts: Vec::new(),
             projects: self.list()?,
-            cards: self.list()?,
+            cards: self
+                .list::<Card>()?
+                .into_iter()
+                .filter(|c| c.removed_at.is_none())
+                .collect(),
             events: self.list()?,
             requests: self.list()?,
             attempts: self.list()?,
