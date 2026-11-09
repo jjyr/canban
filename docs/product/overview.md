@@ -1,6 +1,6 @@
 # Global Agent Overview
 
-Status: implemented 2026-11-07, UI refined 2026-11-08. See [implementation and validation](../agent-overview-and-lifecycle.md) for current behavior and evidence. The user-selected design below remains the product contract; macOS notifications and host/remote monitoring remain deferred.
+Status: implemented; current contract reconciled 2026-11-10. See [implementation and validation](../agent-overview-and-lifecycle.md) for current behavior and evidence. The user-selected design below remains the product contract; macOS notifications and host resource monitoring remain deferred; machine connections/execution are covered by the [multi-machine contract](../multi-machine.md).
 
 ## Reference and selected direction
 
@@ -19,53 +19,45 @@ Adopt the global grouped list, compact scanning hierarchy, attention prominence,
 
 Board remains the default workspace for defining and advancing work. **Overview** is the global execution/handling workspace across Projects. It shows working, waiting, queued, idle and closed Agent conversations plus actionable Cards that have no Agent yet.
 
-Merge the current global Agent activity destination and the proposed separate Needs attention page into one **Overview** entry immediately below Board in the compact rail. It directly shows all nonempty status groups without filters; Board can keep its Project-local attention filter.
+The **Overview** entry sits immediately below Board in the compact rail, replacing the earlier Agent activity/separate Needs attention destinations. It directly shows all nonempty status groups without filters. Board also has no attention/execution filter toolbar; it shows all active Cards for its selected Project.
 
 ```text
 Quick Open
 Board
 Overview !4  <- global user-action count
+Terminals
 Notes
 Archive
-   ...
-Settings
+
+Bottom utility bar: Usage / Caffeine / Theme / Shortcuts / Report issue / Settings
 ```
 
 The entry is always visible. Its highlight/count persists until the authoritative user actions are resolved; visiting the page is not resolution. Include rows needing task decisions, execution input, recovery and human Review in the Canban attention count. This differs deliberately from the reference code's blocked/failed-only activity count. A separate summary shows execution usage, queue and idle counts.
 
 Changing Project does not scope Overview. Background updates do not steal focus. No macOS notification integration is required.
 
-The compact rail and Project controls supersede the earlier sidebar sketch below; see [current Project-entry and Settings contract](../workspace-entry-and-settings.md).
+Project controls belong in Board, and Settings belongs in the bottom utility bar. See [Project entry](../workspace-entry-and-settings.md) and [desktop utilities](../desktop-utilities.md).
 
 ## Layout
 
 ```text
-+------------+-----------------------------------------------------+-------------------------------+
-| CANBAN     | Overview   Needs you 4   Executing 6/8   Queued 3    | Selected context          [x] |
-|            | All Projects (scope, no filter toolbar)             |                               |
-| Overview !4|                                                     | Permission required           |
-|            | NEEDS YOU 2                                         | canban / #42 Add search        |
-| PROJECTS   | ! @developer  #42 Add search     canban/.../42   2m  | @developer / Develop          |
-|  canban    |   canban / Develop / Permission required             |                               |
-|  fiber     | ! @developer  #17 RPC behavior   canban/.../17   8m  | Assignment                    |
-|  tools     |   fiber / Develop / Task needs decision              | Implement local search...     |
-|            |                                                     |                               |
-| Board      | READY FOR REVIEW 2                                  | Reported by Agent via Herdr   |
-| Notes      | * @reviewer   #8 Export data     canban/.../8    5m  | Title/message, when supplied  |
-| Archive    |   tools / Review / Report ready                      |                               |
-|            |                                                     | Terminal context              |
-|            | WORKING                                             | Bounded read-only screen      |
-|            | * @developer  #51 Add shortcuts  canban/.../51  30s  | Connected / freshness         |
-|            |   canban / Develop / Implement keyboard navigation   |                               |
-|            |                                                     | [Open terminal] [Open Card]   |
-|            | QUEUED                                              |                               |
-|            |   @reviewer   #22 Indexing       Waiting for a slot   |                               |
-|            |                                                     |                               |
-|            | IDLE                                                |                               |
-|            | o @codex      #31 Explore API   Last reply 4m ago    |                               |
-|            |                                                     |                               |
-| Settings   | > Closed 12                                         |                               |
-+------------+-----------------------------------------------------+-------------------------------+
++------------+-----------------------------------------------+--------------------------+
+| Quick Open | Overview - All Projects                       | Selected context [x]     |
+| Board      | Needs you / Executing / Queued summary        | Project / #42 / profile  |
+| Overview   |                                               | Permission required      |
+| !4         | NEEDS YOU                                     |                          |
+| Terminals  | @developer #42 Add search / canban / Develop  | Captured assignment      |
+| Notes      | @developer #17 RPC / fiber / Develop          | Original @question/task  |
+| Archive    |                                               |                          |
+|            | READY FOR REVIEW                              | Herdr title/message      |
+|            | @reviewer #8 Export data / tools / Review     | Bounded terminal preview |
+|            |                                               | or saved output          |
+|            | WORKING / QUEUED / IDLE                       |                          |
+|            | (nonempty groups; no filter toolbar)          | [Terminal] [Card/Review] |
+|            | > Closed                                      |                          |
++------------+-----------------------------------------------+--------------------------+
+|            | Bottom utilities / Settings                                              |
++------------+--------------------------------------------------------------------------+
 ```
 
 The grouped list is the default primary surface and fills the available space when no context is selected. A context inspector opens on selection and can collapse. This adapts the reference's right-hand column to Canban's immediate need: Card/assignment/permission context. CPU/memory/ports/remote-host monitoring can follow later and should not be prerequisites for this page.
@@ -76,7 +68,7 @@ A single click selects context. An explicit Terminal/Card/Review action jumps di
 
 ## Row identity and grouping
 
-The canonical Agent row is a **Card/profile conversation**, projected from its latest relevant request/attempt. Different profiles working on the same Card stay distinct. Older attempts are expandable history, not another primary row for every poll/run. A pending request without a terminal still has a row. If routing/preparation failed before an Agent/request exists, include a Card-level recovery row so the error is not hidden by an Agent-only list.
+The canonical Agent row is a **Card/profile conversation**, projected from its latest relevant request/attempt. Different profiles working on the same Card stay distinct. Older attempts are expandable history, not another primary row for every event/run. A pending request without a terminal still has a row. If routing/preparation failed before an Agent/request exists, include a Card-level recovery row so the error is not hidden by an Agent-only list.
 
 An attention condition attaches to its actual initiating invocation/profile; do not repeat a Card gate on every Agent associated with the Card. Independent reasons remain independently resolved. If one invocation has both a task gate and a permission wait, show both reasons in one row; count that actionable row once. Distinct Agents with their own waits remain distinct rows. The row/inspector may expose several reasons without losing their individual source identities.
 
@@ -84,7 +76,7 @@ Choose one primary group per row, in this order:
 
 | Group | Source/meaning | Primary destination |
 | --- | --- | --- |
-| Needs attention | Task needs decision, runtime input wait, error or unverifiable recovery | Card or exact Terminal according to reason |
+| Needs you (`Needs attention` API key) | Task needs decision, runtime input wait, actionable error or unverifiable recovery | Card or exact Terminal according to reason |
 | Ready for review | Saved Card/stage result has an actual human review gate | Existing Review workspace, or Card for a non-code review |
 | Working | A current invocation is starting/working or closing, without a higher-priority reason | Attach exact live Terminal |
 | Queued | No current live invocation; a request awaits scheduling | Read queued assignment/Card; do not bypass capacity |
@@ -118,13 +110,13 @@ Runtime status can resolve an execution-wait reason, but cannot approve a Canban
 
 Closed means the invocation ended, not that its provider history was deleted or Card archived. Resume uses the existing Card/profile binding and command-defined profile, under Scheduler admission. Missing history and archived Cards keep the current explicit recovery/Restore rules. Disconnection is not evidence that a terminal closed. The reference's client-local closed-row retention/keying must not replace Canban's durable Card/profile/request/attempt associations.
 
-Idle reclamation can eventually move a verified unused Agent into Closed with a visible reason such as **Closed after inactivity**. Its timeout and safeguards are a separate policy and were not implemented by this research/document update.
+Idle reclamation moves verified unused Agents to Closed while retaining history. Its implemented timeout/activity guards live in [Terminal interaction](../terminal-interaction.md). Finished sessions leave the Terminal workspace tree/tabs; Closed history remains available here and on the Card. A confirmed unreported exit becomes Failed history, not a new human gate or a stale live input request. Independent task/Review gates can still keep that row actionable.
 
 ## First implementation boundary
 
 Reuse existing NSH UI Kit navigation/status/splits and production Card/Terminal/Review components. Add a typed Overview projection, summary, grouped row and context inspector. Build rows from prepared AppServer state; no render-time remote/Git/process calls. Load detailed terminal context asynchronously only for the selected row, with identity/generation fences.
 
-The first version should cover all Canban-managed conversations across Projects, plus their queued/recovery/Card review items. Do not list unrelated terminals from the user's Herdr account without an explicit product decision. Local Core/host identity can be shown as metadata; remote-machine management and CPU/memory monitoring remain later work.
+The first version should cover all Canban-managed conversations across Projects, plus their queued/recovery/Card review items. Do not list unrelated terminals from the user's Herdr account without an explicit product decision. Local/remote machine identity can be shown as metadata. Machine setup and routing follow the existing multi-machine implementation; CPU/memory monitoring remains deferred.
 
 Pinned/Snoozed/Settled shelves, notification mutes, presets and forgetting provider history are not needed for the first slice. Hiding a row must never be an implicit workflow approval. Keep exact resume, task/runtime separation and Card association from the current design.
 

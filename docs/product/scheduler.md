@@ -18,7 +18,7 @@ Queue -> reject archived/stale-stage automatic work
 
 `config/agents.json` contains `scheduler.max_agents` (positive integer, default 8). Settings exposes the same value. `scheduler.configure` saves it without replacing user profile commands/presets. Reload and app restart preserve it. Lowering the value does not interrupt existing Agents; new launches wait until usage drops below the limit.
 
-Slots cover starting, working and unknown/uncertain runtime. Verified root blocked/idle/done/error statuses release execution capacity while retaining their terminals; disconnected or stale observations reserve it conservatively. A completed business report alone does not free a still-working/unknown runtime. Queued requests reserve no slot. A user may resume retained waiting Agents above the budget; this stops further launches without killing existing work. An exited conversation's resume is queued and needs admission. See [Agent Overview and lifecycle](../agent-overview-and-lifecycle.md) for idle reclamation and status details.
+Slots cover starting, working, closing and unknown/uncertain runtime. A pending close reserves its slot until resolved, even when the last root status was idle/done. Verified root blocked/idle/done/error statuses release execution capacity while retaining their terminals; disconnected or stale observations reserve it conservatively. A completed business report alone does not free a still-working/unknown runtime. Queued requests reserve no slot. A user may resume retained waiting Agents above the budget; this stops further launches without killing existing work. An exited conversation's resume is queued and needs admission. See [Agent Overview and lifecycle](../agent-overview-and-lifecycle.md) for idle reclamation and status details.
 
 The limit covers Agents managed by this Canban home/AppServer. Unrelated Herdr terminals are outside it. Herdr status and normal closure continue while the queue is full.
 
@@ -38,13 +38,13 @@ Agent completed -> require_human_review?
                   v                     v
              next stage           wait for human
 
-blocked / failed / uncertain recovery -> wait for human
+explicit blocked/failed report / uncertain recovery -> wait for human
 
 wait for human -> no automatic dispatch/progression
                -> explicit user decision -> continue / retry / rework
 ```
 
-An executing stage can set `require_human_review: true`. Its Agent runs automatically, but the completed report waits before applying `on_completed`. The fresh default Review stage enables this flag. Blocks, errors and uncertain recovery also pause automatic work. Empty slots, reconnection, restart, notifications being read, ordinary comments and later Agent completion never approve the gate.
+An executing stage can set `require_human_review: true`. Its Agent runs automatically, but the completed report waits before applying `on_completed`. The fresh default Review stage enables this flag. Explicit blocked/failed reports and uncertain recovery also pause automatic work. A confirmed unreported process exit or preparation/launch failure records Failed history and does not manufacture a task gate; it stays in its stage without automatic retry/progression. Existing independent gates remain. See [runtime observation](../runtime-observation.md). Empty slots, reconnection, restart, notifications being read, ordinary comments and later Agent completion never approve the gate.
 
 Explicit `@Agent` or open/resume remains available to help resolve the issue, subject to capacity. These invocations cannot approve the workflow through their completed report. A paused automatic request does not absorb a manual mention and prevent assistance.
 

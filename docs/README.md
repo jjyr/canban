@@ -6,6 +6,16 @@ The repository now has a runnable macOS MVP. [Real Agent acceptance, 2026-11-09]
 
 [Real Agent workflow and cross-Board acceptance](real-agent-acceptance.md) records the two-Board, four-Codex-Session Develop/Review/Archive run and the exact concurrency/isolation limits.
 
+## Reading and maintaining the current contract
+
+Documentation has three roles:
+
+- **Current contract:** feature documents describe the accepted behavior and ownership. Start with [implementation](implementation.md), then follow the feature references below. [Development conventions](development-conventions.md) and [UI architecture](ui-architecture.md) describe cross-cutting rules.
+- **Decision history and proposals:** [product-log](product/product-log.md), dated research and explicitly marked proposals explain alternatives and rationale. They do not override the current feature contract. When a decision changes, rewrite the affected current section and retain the old rationale as clearly dated history.
+- **Acceptance evidence:** dated verification sections/reports record the build, environment, exercised actions and limits. Keep earlier results intact and mark superseded behavior; historical evidence is not a fresh verification of today's code.
+
+The latest explicit user decision takes precedence over earlier discussion. Before changing an existing feature, check its current contract and any later superseding decision. If code and documents disagree, record the discrepancy rather than declaring a proposal implemented. Use the current code/shared types for exact RPC payloads. Documentation-only reconciliation does not constitute new runtime acceptance.
+
 ## Current product documents
 
 | Document | Purpose |
@@ -24,7 +34,7 @@ The repository now has a runnable macOS MVP. [Real Agent acceptance, 2026-11-09]
 | [Workspace and scheduling implementation](workspace-and-scheduling.md) | Named branches, remote/base synchronization, global Agent limit, priority and human approval gates |
 | [Scheduler](product/scheduler.md) | Stage determines work; tags select agents; admission determines timing |
 | [Agent profile configuration](product/agent-profiles.md) | Implemented registry, role instructions, stage references, routing and JSON examples |
-| [Agent CLI and extensibility](product/agent-extensibility.md) | Current CLI surface, multi-Agent ownership and proposed command-defined lifecycle presets |
+| [Agent CLI and extensibility](product/agent-extensibility.md) | CLI capabilities and integration boundaries; use Agent profile configuration for the current command/preset schema |
 | [Agent interaction](product/agent-interaction.md) | Interactive terminal execution, completion/exit, resume and acceptance limits |
 | [One Session model](product/sessions.md) | Card/profile conversations, request/attempt lifetimes and live replies through one execution model |
 | [Unified timeline](product/timeline.md) | Proposed event envelope, event catalog, comment revisions, attachments, ordering, and recovery |
@@ -34,7 +44,7 @@ The repository now has a runnable macOS MVP. [Real Agent acceptance, 2026-11-09]
 | [Review and code delivery](product/review-delivery.md) | Basic Diff, return-to-Develop, explicit commit/merge, conflict and receipt behavior |
 | [MVP progress and next steps](product/mvp-next-steps.md) | Current acceptance boundaries and recommended daily-use, review and code-delivery priorities |
 | [Event-driven runtime observation](runtime-observation.md) | Subscription, connection recovery, bounded discovery, Git caches and exit classification |
-| [Runtime observation cost](runtime-observation-cost.md) | Isolated polling measurements, current overhead and a proposed shared-inventory boundary |
+| [Runtime observation cost](runtime-observation-cost.md) | Historical polling baseline and prototype; superseded by event-driven runtime observation |
 | [Agent lifecycle implementation](agent-overview-and-lifecycle.md) | Status-aware global budget, idle reclamation, global Overview and isolated/native validation |
 | [Terminal interaction and navigation](terminal-interaction.md) | Delayed idle exit, live inactive filtering, input pipeline, global Back/Forward and current acceptance |
 | [Dedicated Terminal workspace](terminal-workspace.md) | Independent Terminals, live directory context, Project grouping, split chrome, Agent resume and isolated PTY acceptance |
@@ -84,4 +94,4 @@ Project-wide [development conventions](development-conventions.md) specify prefi
 
 The user's latest MVP decisions are authoritative: agent-reported completion, no residual-process coordination, worktree handling at Archive, ordinary Review reports, JSON templates, existing runnable agent setup, and internal attention/notification events. Detailed event architecture, native macOS notifications, template GUI, and Shear UI come later.
 
-Source facts are tied to inspected revisions. Product examples and API/configuration schemas are design drafts, not implemented features. The runtime integration recommendation remains a protocol client of compatible installed core, with Canban owning task/context/history and scheduling.
+Source facts are tied to inspected revisions. Research examples and proposed API/configuration schemas are not implementation evidence; documents explicitly marked implemented describe the current feature contract. Canban integrates with compatible Herdr Core through its protocol, owning task/context/history and scheduling while Core owns PTYs and observed runtime state.

@@ -1,10 +1,10 @@
 # Agent CLI and extension boundary
 
-Status: implemented 2026-11-07. [Profile schema](agent-profiles.md) and [MVP acceptance](../mvp-acceptance.md) are the current references. The earlier provider-specific Rust adapters and mandatory notify/Stop callbacks were removed.
+Status: implemented 2026-11-07; current lifecycle/API description reconciled 2026-11-10. [Profile schema](agent-profiles.md) and [MVP acceptance](../mvp-acceptance.md) are the current references. The earlier provider-specific Rust adapters and mandatory notify/Stop callbacks were removed.
 
 ## CLI capability surface
 
-The CLI and native UI call the same AppServer operations through a local, same-user socket. Dedicated helpers are `report`, `reply`, `bind-session`, `status` and `snapshot`; the general form is `canban call METHOD JSON`. `serve` hosts the same AppServer without the UI.
+The CLI and native UI call the same AppServer operations through a same-user socket. Remote Agents use the [Core-backed CLI bridge](../multi-machine.md#remote-context-and-agent-cli) to that same authority, not a second product server. Dedicated helpers are `report`, `reply`, `bind-session`, `status` and `snapshot`; the general form is `canban call METHOD JSON`. `serve` hosts the same AppServer without the UI.
 
 | Area | Operations |
 | --- | --- |
@@ -49,12 +49,12 @@ A live mention is additional input and a durable Question. Its explicit reply is
 | Advance workflow | Explicit Canban report with current request/attempt |
 | Durable question answer | Canban reply with Question ID |
 | Exact history Resume | Known/preallocated provider ID, bind-session where needed, resume_argv |
-| Automatic normal exit | Later valid Herdr root done after explicit completion, plus profile exit action |
+| Automatic idle exit | Verified idle/done, exact resumable history, configured exit action, elapsed inactivity timeout and no protected pending work |
 
-Commands can run without every optional capability. A command without Resume uses explicit fresh context. A command without usable status stays available for manual exit. Herdr status does not prove business completion or provider-history durability; real-provider acceptance establishes the latter boundary.
+Commands can run without every optional capability. A command without Resume uses explicit fresh context. Completion keeps the live Terminal available. A command without usable status stays available for manual exit; completion itself does not send an exit command. See [Terminal interaction](../terminal-interaction.md). Herdr status does not prove business completion or provider-history durability; real-provider acceptance establishes the latter boundary.
 
 Presets are editable configuration defaults, not provider hook registrations. Rust expands commands and consumes the common contracts. Optional wrappers supply provider-specific ID acquisition or command syntax when necessary; they must not duplicate sufficient Herdr lifecycle observations. There is no plugin/SDK requirement. Workflow templates select profiles and stage work; Herdr launch templates do not provide universal history Resume and are not an alternate runtime mode.
 
 ## Manual Terminal API
 
-The same AppServer operation boundary now supports `terminal.create` (`project_id`, optional `card_id`, `request_key`), `terminal.rename` (`terminal_id`, `name`), `terminal.context`, `terminal.interrupt` and `terminal.end` (`terminal_id`, `request_key`). These are available through `canban call METHOD JSON`; transport never bypasses the owning Core identity. Create/control request keys prevent effect replay after uncertain receipts. A manual Shell does not become a Workflow Agent merely because an Agent command is run inside it. Tab selection/close are UI navigation and have no execution side effect.
+The same AppServer boundary supports `terminal.create` with optional `machine`, `cwd`, `inherit_terminal_id`, `project_id` or `card_id` launch context and a `request_key`; a Project is not required. It also supports `terminal.rename` (`terminal_id`, `name`), `terminal.context`, `terminal.interrupt`, `terminal.end` and the unified `terminal.close` lifecycle (`terminal_id`, `request_key`). These are available through `canban call METHOD JSON`; transport never bypasses the owning Core identity. Create/control request keys prevent effect replay after uncertain receipts. A manual Shell does not become a Workflow Agent merely because an Agent command is run inside it. Tab selection and leaving the viewer are navigation only. Tab X, Command+W and Close terminal instead invoke `terminal.close`: AppServer resolves and terminates the exact live runtime, and UI removes the tab on a successful receipt. Failed/uncertain closure remains reachable. History and explicit exact Resume survive closure.

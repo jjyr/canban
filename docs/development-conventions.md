@@ -1,6 +1,15 @@
 # Development conventions
 
-Status: user-selected conventions, 2026-11-06, applied by the initial Rust workspace and macOS MVP.
+Status: user-selected conventions, updated 2026-11-10. Applied by the Rust workspace and macOS MVP; documentation/evidence rules below consolidate the subsequent product discussions.
+
+## Scope and application operations
+
+- Read the current feature contract and later superseding decisions before extending existing behavior. Follow the [documentation roles](README.md#reading-and-maintaining-the-current-contract); keep product documentation in English.
+- Implement the confirmed use case with the existing boundaries first. Add abstractions, entities and configuration layers only when a concrete need warrants them. Preserve execution identity, history and explicit human approval while simplifying implementation.
+- Buttons, shortcuts and menus for one operation dispatch the same intent with the same eligibility/pending checks. AppServer owns durable effects, runtime resolution and receipts; UI controls do not independently choose Agent/Shell process-control paths. Terminal close is the reference example.
+- Navigation, list selection and Back/Forward restore context without replaying launch, Resume, retry, merge or approval. An explicitly labelled Start/Resume action may invoke execution; merely inspecting history does not.
+- Keep workflow stage, assignment outcome, runtime status, connection health and human decision state distinct. A process exit or Herdr `done` cannot substitute for an Agent report, and a reply/read acknowledgement cannot approve a human gate. See the [state model](product/sessions.md#independent-state-dimensions).
+- Use existing events and shared projections/caches before adding background polling or per-row queries. Define cache invalidation, disconnect recovery and query bounds. The [runtime observation contract](runtime-observation.md) specifies the current subscription, deadlines and on-demand Git checks; it does not prohibit unrelated mechanisms such as GitHub synchronization.
 
 ## Cargo package names and filesystem names
 
@@ -60,6 +69,14 @@ Follow the user-approved [UI architecture and design system](ui-architecture.md)
 - Build the system through a useful Board -> Card detail -> comment/mention -> Timeline slice, then extend it with subsequent product surfaces. Do not build an exhaustive speculative component library first.
 
 The implementation now includes UI Kit, a native Gallery and an opt-in real-Herdr acceptance harness. See [component inventory](ui-components.md) and [implementation/acceptance](implementation.md) for coverage; further components and tooling remain refinements.
+
+## Verification and documentation updates
+
+For implementation changes, use `mise run build`, `mise run test` and the affected acceptance tasks. UI component changes use `mise run gallery`; application-flow changes also need the running production components in `.local/Canban.app`, with an isolated home/Core for Herdr checks. `mise run run` defaults to the user's existing data and replaces its AppServer, so it is not an isolated acceptance launcher. See [development startup](development-startup.md).
+
+Record what was exercised, the environment/build and material omissions. Distinguish deterministic providers over real PTYs from real Codex/Claude runs, Gallery checks from actual App integration, and transport timing from end-to-end input latency. A passing build or a screenshot alone proves neither interaction correctness nor provider readiness. Do not silently count an unavailable/failed check as passed or rerun unrelated suites for a documentation-only correction.
+
+Update current feature prose when behavior changes; do not leave contradictory rules under a newer disclaimer. Keep dated acceptance results and decision rationale identifiable as history, with links to their replacement. Do not rewrite an earlier test count or imply new runtime verification when only documentation changed. Chinese IME checks remain excluded from the current acceptance scope at the user's request.
 
 ## License
 

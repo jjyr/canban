@@ -35,7 +35,7 @@ Navigation update 2026-11-08: Overview now directly renders all nonempty groups 
 
 | Verified runtime condition | Slot policy |
 | --- | --- |
-| Starting or uncertain launch | Reserve |
+| Starting, closing or uncertain launch | Reserve |
 | Working, missing/unrecognized status | Reserve |
 | Disconnected, replaced Core, stale observation (over 30 seconds) | Reserve conservatively |
 | Root blocked, idle, done or error | Release |
@@ -47,24 +47,26 @@ Canban completion and runtime status are separate. A `done` status cannot produc
 
 Configuration and Settings expose `scheduler.idle_minutes`, default **15**, with **0** disabling reclamation. Existing JSON files get the default without migration. Scheduler configuration preserves other settings and profile commands.
 
-A candidate must have a verified live root idle/done status for the entire timeout, a bound provider session ID, a resume command and a normal-exit input action. User input, opening/viewing a native Terminal, a changed idle status or reconnecting resets/protects the idle interval. Restart requires fresh observations and a new idle interval.
+A candidate needs verified live root idle/done, a bound provider session ID, a resume command and a normal-exit input action. The timeout uses the later of the observed idle boundary and actual human interaction. A renewed working state stops idle candidacy; reconnect/restart requires fresh observations and a new idle interval. Opening/viewing alone does not indefinitely protect the process.
 
-Reclamation excludes unfinished automatic stage assignments, unresolved task gates, outstanding @questions, blocked/auth/question/permission dialogs, working/unknown/disconnected Agents and viewed native Terminals. A local transport viewer lease protects the attachment independently of keyboard focus; protocol-generated VT replies do not count as user input. No separate Session class is introduced.
+Reclamation excludes unfinished automatic stage assignments, outstanding @questions, blocked/auth/question/permission dialogs and working/unknown/disconnected Agents. An unresolved task gate protects unfinished work; a completed Agent may be reclaimed while the Card awaits human Review. Human input through the framed relay renews activity; automatic VT replies, resize/output acknowledgements and viewer presence do not provide indefinite protection. No separate Session class is introduced.
 
-The normal-exit intent is saved before sending input. Herdr's `if: idle` condition is used where supported; its public conditional schema has no `done` variant, so a done Agent is rechecked immediately before its ordinary, unforced exit command. Herdr refuses blocked dialog input without force. There is no atomic cross-process viewer/terminal transaction; external activity can race the last status check. Normal completion uses the same provider-defined exit behavior.
+The normal-exit intent is saved before sending input. Herdr's `if: idle` condition is used where supported; its public conditional schema has no `done` variant, so a done Agent is rechecked immediately before its ordinary, unforced exit command. Herdr refuses blocked dialog input without force. There is no atomic cross-process viewer/terminal transaction; external activity can race the last status check. Completion itself no longer sends exit; the provider-defined exit action is used after the inactivity deadline. Explicit tab closure instead uses the separate AppServer close-and-terminate operation.
 
 Exit is confirmed by observing the original Core/terminal finish. No forced kill or blind retry follows a failed/uncertain normal exit. The failure appears as recovery context. An idle exit produces `idle_closed` invocation history, not a completed report or workflow transition. Provider history/ID is retained. A pending question racing closure is retained and queued against the same conversation for exact resume.
 
 ## Global Overview
 
+Overview sits below Board in the compact rail. Project controls live in Board; Settings is in the bottom utility bar. The inspector uses the same destinations and lifecycle operations as Card and Terminal views.
+
 ```text
-Canban sidebar             Global grouped list           Context inspector
+Compact rail               Global grouped list           Context inspector
 +-------------------+   +--------------------------+   +-------------------------+
-| Overview ! N      |   | Needs attention          |   | Project / Card / profile|
-|                   |   | Ready for review         |   | Independent reasons     |
-| Projects          |   | Working                  |   | Open Card / Terminal    |
-| Board / Notes     |   | Queued                   |   | Review / exact Resume   |
-| Archive / Settings|   | Idle                     |   | Assignment / @questions |
+| Board             |   | Needs you                |   | Project / Card / profile|
+| Overview ! N      |   | Ready for review         |   | Independent reasons     |
+| Terminals         |   | Working                  |   | Open Card / Terminal    |
+| Notes             |   | Queued                   |   | Review / exact Resume   |
+| Archived Cards    |   | Idle                     |   | Assignment / @questions |
 +-------------------+   | > Closed                 |   | Saved result / history  |
                         +--------------------------+   | Herdr title/message     |
                                                        | Read-only screen preview|
@@ -79,7 +81,7 @@ Selection only opens context. Explicit actions attach the exact live invocation,
 
 Selected conversation, Closed expansion, split width and list scroll survive Card/Terminal/Review navigation. Destinations opened from Overview return to Overview; Board-origin work retains Board navigation. On narrow widths the inspector replaces the list and has a close/back action. A selected context remains visible if its condition resolves or its group changes. Closed is collapsed initially.
 
-The screen preview is loaded on demand, read-only, at most 160 lines and 32 KiB, and bound to the selected Core/terminal/attempt. Server identity checks plus UI generation fences reject obsolete results. Terminal text is selectable plain text, never a synthesized permission form. Permissions are answered in the actual Terminal; there are no inferred Allow/Deny actions. macOS notifications, host statistics, remote management and snoozing remain deferred.
+The screen preview is loaded on demand, read-only, at most 160 lines and 32 KiB, and bound to the selected Core/terminal/attempt. Server identity checks plus UI generation fences reject obsolete results. Terminal text is selectable plain text, never a synthesized permission form. Permissions are answered in the actual Terminal; there are no inferred Allow/Deny actions. macOS notifications, host statistics and snoozing remain deferred; machine connection management follows the [multi-machine contract](multi-machine.md).
 
 ## Public operations
 
@@ -93,7 +95,9 @@ canban call agent.open '{"card_id":"CARD_ID","profile_id":"developer","expected_
 
 `overview.list` returns typed rows with group, Project/Card, request/attempt, independent reasons and history IDs. Preview returns text, capture time and exact source identity. Existing generic `canban call` exposes these operations; no new Agent provider protocol or MCP service is required.
 
-## Validation
+## Earlier validation (2026-11-07/08)
+
+These results describe the original implementation, including viewer-based idle protection and the former Theme modes. That protection is superseded by [retained interaction acceptance](terminal-interaction.md#verification), and Theme modes by [named-theme acceptance](desktop-utilities.md#named-theme-acceptance-2026-11-09). Keep the recorded results as historical evidence, not the current contract.
 
 - Rust regression coverage: conservative slots, retained-conversation exclusivity, above-limit resumption, full runtime wait deduplication, independent task gates, timeout/activity/viewer/resume guards, global grouping and gate ownership, configuration preservation.
 - `mise run acceptance-overview`: actual isolated Herdr PTYs with deterministic provider fixtures, two Projects, permission waits/updated context, manual resumption above capacity, idle/done slot release, independent task/runtime resolution, bounded preview/stale identity rejection, one-minute normal idle exit and exact-session resume. Final passing evidence (including both idle and done discussion reclamation, with unfinished stage protection): `/private/tmp/cb-overview-fkxtkjsi/evidence.json`.
@@ -106,13 +110,15 @@ Final checks: 58 Rust tests passed, all-target Clippy with warnings denied, main
 
 ## Exited Agent recovery (2026-11-09)
 
-Superseded behavior: the earlier implementation kept `needs_report` and an automatic Card gate after an unreported exit. The [event-driven runtime update](runtime-observation.md) now records Failed history and removes that automatic gate; explicit task/Review decisions remain pending. The following describes the earlier UI acceptance. Overview now labels the invocation **Agent exited · exit code N** (when known), distinguishes it from live **Agent needs Terminal input**, and explains that the remaining action belongs to the task. It offers Open Card / exact Resume as appropriate rather than Open terminal for a finished invocation.
+Current policy: the [event-driven runtime update](runtime-observation.md) records Failed history for an unreported exit and removes only the historical automatically generated missing-outcome gate; explicit task/Review decisions remain pending. The UI/output behavior below still applies when an independent task gate exists or the user opens Closed history. Overview now labels the invocation **Agent exited · exit code N** (when known), distinguishes it from live **Agent needs Terminal input**, and explains that the remaining action belongs to the task. It offers Open Card / exact Resume as appropriate rather than Open terminal for a finished invocation.
 
 Finished invocations use **Read saved output**. `overview.preview` reads the Card-owned captured output directly without querying the original Core, bounds the returned UTF-8 text to 32 KiB and preserves the exact invocation check. Its source is `Saved execution output (read-only)` and its `observed_at` is null; a saved file is not presented as a freshly observed runtime screen. Missing saved output is shown honestly. `execution.output` also prefers saved output for finished invocations. Live read-only previews retain their existing Core identity/freshness guards.
 
 Card's Needs attention shortcut now selects its actual actionable Overview row; a conversation-level gate does not necessarily have a `card:<id>` row. A row removed from the current projection displays a handled message instead of exposing actions from a cached historical selection.
 
-Validation:
+Historical validation before the final event-driven exit policy:
+
+These checks exercised the earlier automatic missing-outcome gate. The [event-driven verification](runtime-observation.md#verification) supersedes that classification, proving runtime-wait removal and Failed history without a new task gate. Saved-output/Resume checks below retain their original scope.
 
 - 131 Rust tests passed, including a confirmed exit with an old blocked status, the preserved task gate, bounded Unicode saved output with an unavailable Core, stale-attempt rejection and Closed grouping after the task gate is handled.
 - `mise run acceptance-overview` passed with isolated real Herdr and deterministic providers: permission wait -> unreported exit -> task-only attention, captured output, Core shutdown -> readable saved context, one-minute idle exit and exact Resume. Its launch wait now requires the provider binding as well as the execution receipt.

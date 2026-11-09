@@ -10,15 +10,19 @@ Implemented user-approved direction, 2026-11-08. Native/runtime acceptance is re
 ## Product layout (updated user-approved direction)
 
 ```text
-+-----------------------------+----------------------------------------------+
-| traffic lights  [Back]       | [1 x] [2 x] [+]        #42 Card / branch [...] |
-|                             +----------------------------------------------+
-| rail | Project groups       |                                              |
-|      | v Canban         [+] |             Native Terminal                  |
-|      |   1                  |                                              |
-|      | v Other              |                                              |
-|      |   2                  |                                              |
-+-----------------------------+----------------------------------------------+
++----------------------------------+----------------------------------------------------------+
+| traffic lights [<] [>] list      | [#42 ... x] [Terminal 1 x] [+]    Card / branch [...]    |
++----------------------------------+----------------------------------------------------------+
+| rail | Project groups            |                                                          |
+|      | [Show inactive]           | Native Terminal                                          |
+|      | v Canban [+]              |                                                          |
+|      |   #42 Card title  Develop |                                                          |
+|      |   [icon] Codex   Working  |                                                          |
+|      |   Local                   |                                                          |
+|      | v Other                   |                                                          |
+|      |   Terminal 1     Active   |                                                          |
+|      |   Build machine           |                                                          |
++----------------------------------+----------------------------------------------------------+
 ```
 
 The window chrome follows the same left/right divider as the content. The left panel owns the native traffic-light clearance, source navigation and sidebar controls; the right panel owns tabs, current Card and branch, and a compact actions menu. Resizing the left panel moves its full-height divider. With the list hidden, tab controls clear the native window buttons. NSH owns window dragging, system double-click behavior, traffic-light geometry and resizable panels. Terminal content has no separate title, toolbar, tab strip, placeholder asking to select a conversation, or permanent technical status footer.
@@ -27,13 +31,13 @@ The window chrome follows the same left/right divider as the content. The left p
 
 The Project-grouped inventory lists both automatically scheduled Agent conversations and manually opened Shells. Tabs are currently opened views of those entries: at most one tab per entry, including across Projects. Clicking an entry or opening it from Card, Overview, Notes or Quick Open selects its existing tab or adds one. Background Agent scheduling never steals focus or opens a foreground tab.
 
-Managed Agent entries use two lines in the inventory: `#42 Card title…` with the execution stage reserved on the right, then `[provider icon] profile` with the runtime status on the right. The stage belongs to the selected Request; moving a Card does not relabel an older Agent's task as the new stage. Codex/Claude marks sit directly before the Profile name; custom providers use the generic Agent mark. A recognized launch executable determines the mark, otherwise a declared preset supplies the presentation hint. This never selects runtime behavior.
+Managed Agent entries show `#42 Card title…` with the execution stage reserved on the right, then `[provider icon] Provider · profile` with textual runtime status, then the execution-machine name. Identical Provider/Profile names collapse to one label. Selected titles/Profile text wrap; unselected rows truncate. Rows and their Provider labels have no metadata tooltip or current-directory text. The stage belongs to the selected Request; moving a Card does not relabel an older Agent's task as the new stage. Codex/Claude marks sit directly before the Profile name; custom providers use the generic Agent mark. A recognized launch executable determines the mark, otherwise a declared preset supplies the presentation hint. This never selects runtime behavior.
 
 Agent tabs remain single-line: `#42 Card title… · Develop · [provider icon] developer`. Card titles get flexible space and trailing ellipsis. Stage/Profile widths are reserved, tabs have bounded widths fitted to the strip, and the strip scrolls horizontally. Header space is explicitly budgeted between tabs, context and controls, keeping selected-tab close, New terminal and actions reachable. Hover/accessibility text contains the full Card title, Project, stage, provider/Profile and runtime context.
 
-Independent Terminals have no type icon and default to **Terminal 1**, **Terminal 2**, etc. Their durable sequence is separate from global entry ordering: Agent creation/resume does not consume it, and closing a view does not renumber it. A small status dot still indicates runtime state. Custom names override the automatic title portion for both kinds; Agent stage/Profile remain visible. Double-click or use the actions menu to rename. The optional field starts empty for automatic names; clearing it restores the automatic title. Closing a tab retains its saved entry/history and terminates its live PTY. The native window title exposes the same context.
+Independent Terminals have no type icon and default to **Terminal 1**, **Terminal 2**, etc. Their durable sequence is separate from global entry ordering: Agent creation/resume does not consume it, and closing a Terminal does not renumber surviving entries. Textual state is directly visible beside the name, with machine on the next line. Custom names override the automatic title portion for both kinds; Agent stage/Profile remain visible. Double-click or use the actions menu to rename. The optional field starts empty for automatic names; clearing it restores the automatic title. Closing a tab retains its saved entry/history and terminates its live PTY. The native window title exposes the same context.
 
-`+` / Command+T immediately opens the user's Shell without requiring a Project or a naming confirmation. It inherits the selected Terminal's current directory from Herdr, otherwise starts at the user's home directory. Board selection does not supply an implicit owner. Project `+` opens in that Project directory; Card's Open Shell action uses its existing worktree, otherwise its Project directory. These are launch conveniences, not permanent Shell associations. Missing explicit directories are actionable failures; no worktree, fetch, merge or workflow action is implicit.
+`+` / Command+T immediately opens the user's Shell without requiring a Project or a naming confirmation. It inherits the selected Terminal's machine and current directory from Herdr; without a selection it uses the configured default machine and its home. The machine menu explicitly opens a Shell on another host. Board selection does not supply an implicit owner. Project `+` opens in that Project directory; Card's Open Shell action uses its existing worktree, otherwise its Project directory. These are launch conveniences, not permanent Shell associations. Missing explicit directories are actionable failures; no worktree, fetch, merge or workflow action is implicit.
 
 The left inventory groups managed Agents by their task Project, independent Terminals by their observed directory's Project, and unmatched entries under **Other**. There is no nested Card hierarchy or separate source filter. Regrouping reveals the selected row without changing tab order, selection, Board selection or the mounted native viewer. New Projects are never created by directory detection.
 
@@ -56,7 +60,7 @@ TerminalEntry (stable ID / ordering number / optional manual number / custom nam
 
 SQLite schema v5 migrates v4 Terminal entries transactionally, preserving IDs, names, numbers and Core/PTy bindings. `TerminalSource`, permanent Shell Project/Card ownership and stored Shell cwd are removed. Agent bindings remain on Attempts; `conversation_id` expresses the optional task association. Existing operation receipts are decoded compatibly when read and are not rewritten. Manual Terminals create no Card, Request, Attempt or workflow outcome.
 
-Launch cwd is only an API argument. Live cwd comes from nonempty `foreground.cwd`, falling back to `terminal.cwd`, matching the Herdr UI client. It is an observation of the foreground process, not a guaranteed shell-prompt directory. AppServer observes `terminal.list(all=true)` in its background runtime loop and publishes in-memory, Core/PTy-fenced `terminal_contexts` in snapshots. Contexts are recomputed after restart and disappear when unavailable. `Attempt.cwd` remains historical execution context, never a substitute for live location.
+Launch cwd is only an API argument. Live cwd comes from nonempty `foreground.cwd`, falling back to `terminal.cwd`, matching the Herdr UI client. It is an observation of the foreground process, not a guaranteed shell-prompt directory. AppServer consumes one Core event subscription with an initial snapshot/reconnect recovery and publishes in-memory, Core/PTY-fenced `terminal_contexts` in snapshots. Directory/Git discovery is bounded and cached; there is no periodic inventory/status scan. See [runtime observation](runtime-observation.md). Contexts are recomputed after restart and disappear when unavailable. `Attempt.cwd` remains historical execution context, never a substitute for live location.
 
 Project matching uses canonical path boundaries, the most specific registered directory, known Card worktrees, or an unambiguous common Git repository. Card hints require one known active worktree match or one active Card matching both repository and branch; ambiguous matches remain unassigned. A task Card always takes precedence for managed Agents, even if their foreground directory belongs to another Project. Hints never authorize reporting, resuming, workflow advancement or merging.
 
@@ -68,9 +72,9 @@ Only the selected eligible live entry mounts the existing libghostty-vt componen
 
 ## Lifecycle and controls
 
-- Agent Resume explicitly uses its provider profile and expected historical attempt, retaining the Card/profile identity. Selecting a queued/closed/archived entry never starts work. Existing human gates and Scheduler admission remain authoritative.
+- Agent Resume explicitly uses its provider profile and expected historical attempt, retaining the Card/profile identity and original environment. Browsing queued/history/archived context never starts work. Finished entries are absent from the live Terminal inventory/tabs; Card and Overview provide saved history and explicit Resume. Existing human gates and Scheduler admission remain authoritative.
 - A finished Shell can be **Reopened** as a new entry/PTy using its Herdr-observed directory, falling back to home if unavailable; this is not process resume. Unknown launch outcomes remain visible and are never automatically replayed. Launch intent is durable before network IO; request keys prevent duplicate manual launches.
-- Closing a tab using X, Command+W or Close terminal ends its associated live Herdr PTY before removing the tab. All close triggers call the same AppServer `terminal.close` lifecycle operation. AppServer resolves the exact owning Agent Attempt or independent Terminal binding and persists the close intent before runtime IO. Existing original-Core checks remain authoritative. Failed or uncertain termination keeps the tab reachable and displays an error. Closed entries/history remain available, and Agent conversations can explicitly Resume. Hiding the sidebar, leaving the page or quitting the UI only detaches the viewer and leaves runtime processes running.
+- Closing a tab using X, Command+W or Close terminal ends its associated live Herdr PTY before removing the tab. All close triggers call the same AppServer `terminal.close` lifecycle operation. AppServer resolves the exact owning Agent Attempt or independent Terminal binding and persists the close intent before runtime IO. Existing original-Core checks remain authoritative. Failed or uncertain termination keeps the tab reachable and displays an error. Finished entries leave the Terminal list/tabs; saved Agent history and explicit Resume remain available through Card/Overview. Hiding the sidebar, leaving the page or quitting the UI only detaches the viewer and leaves runtime processes running.
 - Manual Shells do not consume automatic Agent slots or inherit Agent idle reclamation. Running an Agent command manually in a Shell does not enroll it in Workflow or automatically move a Card.
 - Manual Shell state is observed separately from Agent lifecycle, including original-Core checks. Archiving a Card retains its worktree if any independent Terminal is observed inside that worktree, regardless of its creation origin; unresolved live Terminal locations conservatively retain the checkout, and records the retention reason.
 - Command+T creates, Command+W terminates the current Terminal and closes its tab, and Command+Shift+[ / ] cycles tabs while the Terminal workspace owns focus. Rename and Quick Open temporarily suspend Terminal shortcuts. Closing the active tab selects a neighboring tab; closing the last leaves a direct New terminal action.
@@ -78,9 +82,9 @@ Only the selected eligible live entry mounts the existing libghostty-vt componen
 ## Implementation ownership
 
 - `types::TerminalEntry` and storage: presentation identity, numeric allocation and schema migration.
-- `app-server/terminals.rs`: manual Shell intent/receipt, rename, control, directory context and observation; no Scheduler admission.
+- `app-server/terminals.rs`: manual Shell intent/receipt, rename/control and unified close; no Scheduler admission for Shells. `observation.rs` owns the shared runtime inventory, and `directory.rs` owns bounded cached context discovery.
 - `ui/terminals/entries.rs`: common Agent/Shell projection and binding eligibility.
-- `ui/terminals.rs`, `tree.rs`, `tabs.rs`, `viewer.rs`: navigation, split chrome, complete inventory, open tabs, secondary actions, rename and single selected native viewer.
+- `ui/terminals.rs`, `tree.rs`, `tabs.rs`, `viewer.rs`: navigation, split chrome, live inventory, open tabs, secondary actions, rename and single selected native viewer.
 - `ui-kit/chrome.rs`: generic compact icon controls shared across production and Gallery.
 
 ## Previous split-chrome acceptance (before weak association)
@@ -140,7 +144,7 @@ Native CUA acceptance used `/private/tmp/cb-terminal-context-hgcqbvyq`, a copied
 
 ## Two-line Agent labels (2026-11-08)
 
-The current title policy supersedes the numeric Agent labels used in earlier acceptance sections. Production `terminals/labels.rs` shares provider/Profile rendering between two-line inventory rows and single-line tabs; UI Kit owns the licensed provider SVGs. Presentation tests cover execution-stage ownership, auto/custom names, executable/preset marks and generic fallback. Storage tests cover v5-to-v6 backfill, independent numbering among Agent entries, immutable runtime bindings and clearing a custom name.
+This acceptance introduced Card/stage/Profile titles in place of numeric Agent labels. At that time, production `terminals/labels.rs` shared Provider/Profile rendering between two-line inventory rows and single-line tabs; the later [inline metadata contract](#inline-session-metadata-2026-11-09) adds machine names and separates list/tab tooltip behavior. UI Kit owns the licensed provider SVGs. Presentation tests cover execution-stage ownership, auto/custom names, executable/preset marks and generic fallback. Storage tests cover v5-to-v6 backfill, independent numbering among Agent entries, immutable runtime bindings and clearing a custom name.
 
 All **80 Rust tests**, workspace/all-target Clippy (`-D warnings`), app/Gallery builds, fmt and whitespace checks passed. `mise run acceptance` passed the isolated real-Herdr workflow, archive/restore, restart and multi-Board checks (`/private/tmp/cb-mltmm8_8`).
 

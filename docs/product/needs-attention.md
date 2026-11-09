@@ -1,6 +1,6 @@
 # Attention handling inside Overview
 
-Status: implemented 2026-11-07 inside the global [Overview](overview.md). See [implementation and validation](../agent-overview-and-lifecycle.md) for current contracts and evidence. macOS notifications remain deferred.
+Status: implemented inside the global [Overview](overview.md); current contract reconciled 2026-11-10. See [implementation and validation](../agent-overview-and-lifecycle.md) for current contracts and evidence. macOS notifications remain deferred.
 
 ## Current implementation
 
@@ -8,7 +8,7 @@ Canban blocked/failed reports persist task attention and a human gate. Herdr roo
 
 ## Terminology
 
-Use **Needs attention** for the highlighted group/filter within Overview. It contains current user actions rather than every application event or an unread-message feed. Overview also includes Ready for review, Working, Queued, Idle and Closed.
+The UI labels the highlighted Overview group **Needs you**; its projection/API group key remains `Needs attention`. Overview displays groups directly, without filter buttons. It contains current user actions rather than every application event or an unread-message feed. Overview also includes Ready for review, Working, Queued, Idle and Closed.
 
 | User-facing name | Meaning | Source | Primary action |
 | --- | --- | --- | --- |
@@ -23,9 +23,9 @@ Task and execution waits remain independent. User input can resume the current A
 
 ## Global entry, list and context
 
-The global sidebar entry is **Overview**, above Projects, with a persistent count of actionable rows across Projects (including human Review). It replaces the existing Agent activity entry and the proposed separate Needs attention page. Visiting it does not approve a gate. Board remains the normal startup/workflow destination; its local attention filter remains a shortcut.
+The compact rail places **Overview** immediately below **Board**, with a persistent count of actionable rows across Projects (including human Review). Project selection/creation lives in Board rather than a rail Project list. Overview replaces the earlier Agent activity/separate Needs attention destinations. Visiting it does not approve a gate. Board remains the normal startup/workflow destination and displays all active Cards in their stages without the retired attention/execution filter toolbar. Card attention actions open the actual actionable Overview row.
 
-Use the grouped full-Agent list and collapsible context inspector in [Overview](overview.md). The attention group leads, followed by actual Review requests, Working, Queued and Idle; Closed is collapsed. No selection opens/resumes an Agent until the user invokes the appropriate action. Narrow context has a clear Back to Overview control, with selection/scroll/filters retained.
+Use the grouped full-Agent list and collapsible context inspector in [Overview](overview.md). The attention group leads, followed by actual Review requests, Working, Queued and Idle; Closed is collapsed. No selection opens/resumes an Agent until the user invokes the appropriate action. Narrow context has a clear Back to Overview control, with selection/scroll retained.
 
 Each list item makes the following visible without opening another Project:
 
@@ -37,7 +37,7 @@ The selected context includes Card scope, the initiating stage/@question assignm
 
 A Card-only recovery issue may have no Agent or terminal yet. Show that honestly, with the failure reason and Card action; do not manufacture an Agent identity. Raw request/attempt/Core IDs belong in expandable diagnostics.
 
-For narrow widths, show the list and then selected context as separate surfaces with **Back to Overview**. Preserve list selection, scroll and filters.
+For narrow widths, show the list and then selected context as separate surfaces with **Back to Overview**. Preserve list selection and scroll.
 
 ## Herdr context boundary
 
@@ -58,7 +58,7 @@ Primary source: [Herdr status schema](https://github.com/herdrdev/herdr-core/blo
 1. Select the item to see Project, Card, assignment, Agent and reported/terminal context.
 2. Choose **Open terminal**. Attach the exact live invocation; do not start another Agent or resume an unrelated conversation.
 3. Respond in the native terminal. Preserve the underlying provider's approval/authentication behavior.
-4. When a trustworthy status leaves blocked for working/idle/done, resolve that runtime wait item. A terminal exit ends that wait but may create a separate recovery issue if its assignment lacks an outcome. Disconnection alone does not resolve it.
+4. When a trustworthy status leaves blocked for working/idle/done, resolve that runtime wait item. A confirmed unreported exit ends that wait and records Failed history without automatically creating a task-decision gate. Explicit task/Review gates remain. Disconnection alone does not resolve it.
 5. Keep the current view open. Decrement the global count without automatically returning the user to the list or switching to a new item.
 
 A runtime response authorizes continuing the current invocation; it does not approve a task-level gate. Do not add a generic Continue-workflow click solely because a terminal permission was answered. If Canban also holds a task gate, that separate item remains pending.
@@ -75,7 +75,7 @@ Open the existing focused Review workspace (Card context plus report/Diff). The 
 
 ### Return destination
 
-Opening Card/Terminal/Review from Overview stores the originating selection/filters/scroll. Its back action returns to **Overview**. Opening work from Board still returns to Board. Jumping to an item may select its Project for that Card/terminal, but it must not convert the global list into that Project's filter.
+Opening Card/Terminal/Review from Overview stores the originating selection/scroll. Its back action returns to **Overview**. Opening work from Board still returns to Board. Jumping to an item may select its Project for that Card/terminal, but it must not convert the global list into that Project's filter.
 
 If the selected item resolves while its context is open, keep a small **Handled** state until the user leaves or selects another item. Avoid removing the selected panel mid-read. The pending list/count can update independently.
 
@@ -100,7 +100,7 @@ Use stable source references: Card gate/report for task items; Core ID + termina
 
 The same Card may have an independent task decision and one or more Agent input waits. Keep these reason records independently resolved. Overview attaches reasons to the actual initiating Card/profile row; a row with several reasons counts once, while distinct profiles remain distinct rows. Deduplicate repeated observations of one source episode, not unrelated reasons merely sharing a Card.
 
-Sorting can start with most recently created waiting item first. Repeated polling/message refresh does not move an item to the top every time. Selecting an item does not change its unresolved status.
+Sorting can start with most recently created waiting item first. Repeated runtime events/message refresh do not move an item to the top every time. Selecting an item does not change its unresolved status.
 
 ## Minimal architecture and reusable components
 
@@ -125,7 +125,7 @@ UI components should include the shared Overview navigation indicator/grouped ro
 3. Exact Card/Terminal/Review jump and return-origin preservation; per-source resolution and deduplication.
 4. Native Gallery/application acceptance; macOS notifications remain excluded.
 
-Acceptance scenarios must demonstrate a permission/auth/question wait from one Project while viewing another; repeated root observations producing one item; runtime resumption leaving a separate Canban gate untouched; task reply/completion not silently approving a gate; missing runtime metadata falling back to bounded context; obsolete invocation/Core identity never receiving input; loss/reconnect not appearing handled; and list/selection state surviving cross-Project navigation.
+Acceptance scenarios must demonstrate a permission/auth/question wait from one Project while viewing another; repeated root observations producing one item; runtime resumption leaving a separate Canban gate untouched; task reply/completion not silently approving a gate; missing runtime metadata falling back to bounded context; obsolete invocation/Core identity never receiving input; loss/reconnect not appearing handled; and list/selection state surviving cross-Project navigation. A confirmed permission-wait exit must clear only its runtime reason, preserve saved output and leave independent task/Review gates intact.
 
 Status-based slot release and idle Terminal reclamation share these runtime facts but remain separate policies. Resolving an attention item does not itself kill a terminal, start a duplicate Agent, mark a task completed or merge code.
 

@@ -5,7 +5,7 @@ Current behavior update, 2026-11-09: [Terminal interaction and navigation](../te
 Multi-machine update, 2026-11-09: see [current execution/location and service contract](../multi-machine.md). Profile commands resolve on their execution host; Resume and Review retain their original workspace, while new work uses the Project's current location.
 
 
-Status: implemented 2026-11-07. This is the current schema. Earlier provider/Herdr-template/hook proposals are superseded. See [MVP acceptance](../mvp-acceptance.md) for evidence and limits.
+Status: implemented 2026-11-07; current contract reconciled 2026-11-10. This is the current schema. Earlier provider/Herdr-template/hook proposals are superseded. See [MVP acceptance](../mvp-acceptance.md) for evidence and limits.
 
 ## Ownership
 
@@ -78,7 +78,7 @@ A user overriding Codex's executable/options can set both complete command array
 
 Codex starts interactively with `--no-daemon --sandbox workspace-write --add-dir {home}` and resumes the exact ID. Its prompt recipe asks the Agent to call `"$CANBAN_CLI" bind-session --session-id "$CODEX_THREAD_ID"` before other work. Claude starts with `--session-id {session_id}` and resumes with `--resume {session_id}`. Both configure normal `/exit` input. Neither installs notify/Stop hooks or changes global provider settings. Claude still needs successful local authentication for real acceptance.
 
-Normal exit requires **explicit Canban completion plus a later Herdr root `done`** for the same invocation. Idle after interruption, blocked/error, exit or a bare turn increment are insufficient. If no usable status is available after 60 seconds, automatic exit is disabled and the Card receives an explanation; manual terminal control remains available. A working Agent is not timed out by this fallback. A sent exit that does not finish within 30 seconds is visible as an error and is not repeatedly sent.
+The `exit` recipe supplies a normal provider exit command; it is not a completion hook. An explicit completed report records the outcome and applies its callback or human gate without immediately closing the Terminal. Idle reclamation later requires verified root idle/done, a resumable binding, no protected pending work and the configured timeout. Actual human input renews activity; merely viewing the Terminal does not indefinitely protect it. Providers without usable status or Resume/normal-exit support retain manual control. A sent normal exit that does not finish within 30 seconds remains visible for inspection and is not repeatedly sent. See [Terminal interaction](../terminal-interaction.md) for the current lifecycle; the earlier completion-plus-later-done immediate-exit rule is superseded.
 
 ## Workflow and routing
 
@@ -92,4 +92,4 @@ Recognized legacy provider/batch configuration is converted once. Canban first s
 
 ## UI
 
-Settings shows resolved profiles and reload controls; Board headers show automatic roles; Card comments offer the same configured mentions. Clicking a live Card Agent attaches to its terminal. Clicking an exited Agent resumes its exact conversation in a new terminal. Missing history is visible, with a separate **Start with retained Card context** action. Closing the view only detaches it.
+Settings shows resolved profiles and reload controls; Board headers show stage names/counts with automatic roles in their tooltip; Card comments offer the same configured mentions. Clicking a live Card Agent attaches to its terminal. Clicking an exited Agent resumes its exact conversation in a new terminal. Missing history is visible, with a separate **Start with retained Card context** action. Leaving the page/hiding the viewer only detaches it. X, Command+W and Close terminal instead invoke the unified AppServer close-and-terminate lifecycle. Exited entries leave the Terminal list/tabs; Card and Overview retain history and explicit Resume.

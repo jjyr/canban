@@ -33,7 +33,7 @@ a replacement authority. `app.shutdown` explicitly stops the service.
 UI Terminal bytes also pass through AppServer. Its transparent `herdr.connect`
 relay carries Core's native framed attach protocol. The renderer remains
 libghostty; a UI needs no SSH/Core configuration for individual execution hosts.
-Viewer leases live in AppServer so its idle reclaimer can see remote UI viewers.
+The AppServer relay observes actual human activity for idle reclamation. Viewer attachment alone does not indefinitely protect an Agent; see [Terminal interaction](terminal-interaction.md).
 The initial product-state client polls snapshots; a network push subscription
 and service-manager installation are separate refinements.
 
@@ -110,13 +110,15 @@ independent shells do not consume Agent slots.
 `+` and Command+T inherit the selected Terminal's machine and observed live cwd.
 With no selection they use the configured default machine and its home.
 `+ ▾` explicitly selects a machine and opens that host's login shell in its home.
-No Project or name is required. Manual titles remain `Terminal N`; machine labels
-and hover details distinguish hosts. Directory association uses machine identity
+No Project or name is required. Manual titles remain `Terminal N`; machine names
+are visible inline in the session list. Current directories are omitted there;
+full context stays in the selected chrome/details. Directory association uses machine identity
 as well as cwd. Known Card worktrees/branches can provide a presentation hint;
 a manual shell never becomes a scheduled Card invocation.
 
-Agent entries retain their two-line Card/stage and provider/profile display.
-Actual machine, path and execution provenance remain available in details and
+Agent list entries show Card/stage, Provider/Profile with state, then machine.
+Selected titles expand and unselected titles truncate, without a row metadata
+popover. Full paths and execution provenance remain available in details and
 Timeline. Stored remote addresses use `owner-Core-ID/terminal-ID`, so renaming
 a route does not redirect existing terminal input to a different machine.
 
@@ -158,9 +160,11 @@ bounded chunks. Only submitted report/reply/Note content becomes authoritative
 Canban history; arbitrary provider-local files are not automatically synchronized.
 
 Product completion still comes from `canban report`. Runtime idle, blocked and
-done remain distinct. For automatic exit, remote reporting samples the same
-Terminal's current root turn before acknowledgment and requires a later done
-turn. It never compares clocks on different machines.
+done remain distinct. Completion does not immediately exit the remote process;
+verified idle/done and the configured inactivity deadline govern normal exit,
+using AppServer-observed activity. Old provider turn metadata is not a substitute
+for a current outcome or an idle deadline. The same lifecycle applies on local
+and remote machines.
 
 ## Operations
 
