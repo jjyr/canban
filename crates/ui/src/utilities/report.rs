@@ -21,11 +21,8 @@ fn encode(s: &str) -> String {
 }
 pub fn url() -> String {
     format!(
-        "https://github.com/jjyr/canban/issues/new?body={}",
-        encode(&format!(
-            "## Expected behavior\n\n\n## Actual behavior\n\n\n## Steps to reproduce\n\n1. \n\n## Environment\n\n{}\n",
-            diagnostics()
-        ))
+        "https://github.com/jjyr/canban/issues/new?template=bug_report.yml&environment={}",
+        encode(&diagnostics())
     )
 }
 pub fn open(ui: Ui) {
@@ -48,11 +45,24 @@ pub fn external(ui: Ui, url: &'static str) {
 mod tests {
     use super::*;
     #[test]
-    fn report_only_prefills_public_metadata_and_never_submits() {
+    fn report_opens_bug_form_and_only_prefills_public_environment() {
         let u = url();
-        assert!(u.starts_with("https://github.com/jjyr/canban/issues/new?body="));
+        assert!(u.starts_with(
+            "https://github.com/jjyr/canban/issues/new?template=bug_report.yml&environment="
+        ));
         assert!(!u.contains('\n'));
-        assert!(u.contains("Expected%20behavior"));
+        assert!(u.contains(&format!(
+            "Canban%20{}%0APlatform%3A%20",
+            env!("CARGO_PKG_VERSION")
+        )));
+        assert!(u.ends_with(&format!(
+            "{}%20{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )));
+        assert!(!u.contains("&body="));
+        assert!(!u.contains("&title="));
         assert!(!u.contains("token"));
+        assert!(u.len() < 1024);
     }
 }

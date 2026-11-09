@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest an improvement to Canban.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the situation and what you are trying to achieve.
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: How would you like it to work?
+      description: Describe the behavior or interaction you would find useful.
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add examples, alternatives, or screenshots if helpful.
+    validations:
+      required: false

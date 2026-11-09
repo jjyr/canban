@@ -550,3 +550,7 @@ The user accepted the shared bottom utility-bar direction for subscription Usage
 
 
 The implementation is recorded in [Desktop utilities](../desktop-utilities.md), including isolated/native acceptance and remaining provider limits. The user clarified that the bar must not cross the navigation rail and requested a compact reset countdown after each Usage percentage (`7d`, `5d`). The summary uses the reset from the displayed quota window; the top border begins to the right of the rail.
+
+## 2026-11-09 — Shared GitHub Issue Forms
+
+The user approved Bug report and Feature request forms shared by the repository and App feedback entry. Report issue opens Bug report directly and prefills only the editable Environment field; the user supplies the title, problem and triggering context, then submits on GitHub. Feature request requires a problem statement with optional desired behavior/context. See [form ownership and URL contract](../desktop-utilities.md#repository-issue-forms).

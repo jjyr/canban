@@ -39,3 +39,7 @@ Licensed under the [Apache License, Version 2.0](LICENSE).
 For interactive real-Codex acceptance, run mise run acceptance-real-interactive. It verifies active @ replies, separate Developer/Reviewer histories, normal exit, exact-ID resume and archived replies. Folder trust/permission prompts still require normal interactive handling. Ghostty source is checksum-pinned by the terminal-deps task; bundled third-party notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 UI component development uses the standalone [Gallery example](examples/README.md) (`mise run gallery`); it is separate from the production app.
+
+## Feedback
+
+Use **Report issue** in the App to open the Bug report form with your environment filled in. You can also [report a bug](https://github.com/jjyr/canban/issues/new?template=bug_report.yml) or [suggest a feature](https://github.com/jjyr/canban/issues/new?template=feature_request.yml) directly on GitHub. Review the form and submit it there.

@@ -25,7 +25,27 @@ New Card initially targets the current Project. Its searchable Project selector 
 
 Theme offers System/Light/Dark and Canban/Forest/Plum. UI Kit semantic tokens and native Terminal foreground/background/ANSI/cursor colors update together, preserving terminal identity, content and geometry. Appearance and palette are saved in `config/desktop.json`. Caffeine holds a system-idle sleep assertion while allowing display sleep; its dedicated AppServer worker owns the guard, so closing the UI does not release it. It is off after AppServer restart.
 
-Report issue opens an editable `jjyr/canban` GitHub issue draft with English reproduction sections and public version/OS/architecture metadata. It does not submit an issue or require the Canban GitHub connection. Settings also offers Copy diagnostics with the same public metadata. Tokens, Terminal output and logs are not appended to the URL.
+Report issue opens the repository's **Bug report** Issue Form directly, with public version/OS/architecture metadata prefilled in its editable Environment field. It does not submit an issue or require the Canban GitHub connection. Settings also offers Copy diagnostics with the same public metadata. Tokens, Terminal output and logs are not appended to the URL.
+
+## Repository Issue Forms
+
+The App and GitHub entry points share the same form instead of maintaining separate Markdown bodies:
+
+```text
+App Report issue ----> Bug report + prefilled Environment
+                              |
+GitHub New issue -----+-------+----> user completes form --> Submit
+                      |
+                      +-- Feature request ----------------> Submit
+```
+
+`.github/ISSUE_TEMPLATE/bug_report.yml` requires **What happened?** and **Steps or triggering context**. Expected behavior, Environment and screenshots/additional context are optional. Intermittent problems can describe their triggering context rather than requiring reliable reproduction. GitHub supplies the normal Issue title field.
+
+`.github/ISSUE_TEMPLATE/feature_request.yml` requires the problem the feature would solve, with optional desired behavior and additional context. Neither form inserts a title prefix, assignee or submission checklist. GitHub's blank-Issue option remains available.
+
+The App URL uses `template=bug_report.yml&environment=<URL-encoded diagnostics>`. `environment` is the Bug form field ID; preserve this ID and filename when editing the form, or update `ui/utilities/report.rs` in the same change. Other form contents remain owned by the repository template. This follows GitHub's documented [Issue URL query parameters](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/creating-an-issue#creating-an-issue-from-a-url-query) and [field ID prefill contract](https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/syntax-for-githubs-form-schema#keys).
+
+Both form schemas and required fields were checked locally, including the URL-to-template/field mapping. The report-link regression test, application build and UI/all-target Clippy passed. The form files take effect on GitHub after they reach the default branch.
 
 ## Ownership and API
 
