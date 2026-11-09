@@ -231,6 +231,7 @@ pub fn search() -> canban_types::Snapshot {
 /// Terminal navigation adds two profiles on one Card and closed archived history.
 pub fn terminal_workspace() -> canban_types::Snapshot {
     let mut s = overview();
+    s.projects[0].name="Canban workspace with a long Project name".into();
     let mut reviewer = s
         .requests
         .iter()
@@ -298,12 +299,33 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         }),
         created_at: 0,
     });
+    let mut remote = s.terminals.last().unwrap().clone();
+    remote.id = "gallery-remote-shell".into();
+    remote.number += 2;
+    remote.manual_number = Some(3);
+    remote.name = Some("Remote shell with a long custom name for layout checks".into());
+    let runtime = remote.runtime.as_mut().unwrap();
+    runtime.machine = "gallery-remote".into();
+    runtime.terminal = Some("gallery-remote/shell".into());
+    runtime.connection = "unavailable".into();
     let mut linked = s.terminals.last().unwrap().clone();
     linked.id = "gallery-linked-shell".into();
     linked.number += 1;
     linked.manual_number = Some(2);
     linked.runtime.as_mut().unwrap().terminal = Some("linked-shell".into());
     s.terminals.push(linked);
+    s.terminals.push(remote);
+    for attempt in s
+        .attempts
+        .iter_mut()
+        .filter(|a| a.card_id == "overview-card-2")
+    {
+        attempt.location = Some(canban_types::WorkLocation {
+            machine: "gallery-remote".into(),
+            directory: "/remote/workspaces/canban".into(),
+        });
+        attempt.terminal = Some("gallery-remote/t3".into());
+    }
     let card = s.cards.iter().find(|c| c.archived_at.is_none()).unwrap();
     s.terminal_contexts.push(canban_types::TerminalContext {
         machine: "local".into(),

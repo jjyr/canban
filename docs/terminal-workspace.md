@@ -185,3 +185,13 @@ Close lifecycle acceptance: real isolated Core/PTys at `/private/tmp/cb-close-00
 ## Compact Card entry (2026-11-09)
 
 The [Card conversation](card-conversation.md) header/Timeline link into the existing Terminal workspace. Navigation alone never starts/resumes a process. A Card without a conversation opens a Card-context empty view; **Choose Agent** (or the chrome Agent control) explicitly invokes `agent.open`. Existing terminal menus and ended-session controls own lifecycle management and history. Back to source restores the Card's draft and scroll offset.
+
+## Inline session metadata (2026-11-09)
+
+The middle session list presents its metadata directly, with no row-wide or nested Provider tooltip. Agent rows show Card/custom title and stage, then Provider/Profile and state, then execution-machine name. Identical Provider/Profile names collapse to one label. Manual Shells show their name and state followed by machine name; they have no Terminal-type icon. Local execution is labelled **Local**; remote execution uses the machine catalog's display name.
+
+Unselected titles remain compact. Selecting a row wraps the complete title and Provider/Profile text; a renamed Agent also reveals its original Card number/title. The selected fill remains stable while hovered, and keyboard focus remains visible. Current directories are absent from both visual rows and their accessibility labels. Project grouping supplies Project context, and branch remains in the selected Terminal chrome. Compact top tabs, branch hover and secondary action menus retain their existing contracts.
+
+This is a presentation change only: Terminal identity, activation, admission, input, Resume and directory association are unchanged. Cwd-only changes within the same association no longer invalidate the list's display signature. Gallery fixtures cover a remote Agent, a differently named Claude reviewer, a long custom remote Shell, Local/remote names and disconnected state. Check title expand/collapse, list scrolling and hover without an information popup, then verify actual session switching and input using an isolated production App.
+
+Executed acceptance: wide and narrow native Gallery layouts passed title expansion, Provider/Profile deduplication, Local/remote machine labels, disconnected Shell selection, scrolling and hover without a metadata popup. Long Project headings truncate without obscuring New terminal. An isolated production App with a real Core and deterministic Agent passed Agent/Shell switching, native input, state updates and retained output; current directories were absent from session rows. Evidence is under `/private/tmp/cb-terminal-sidebar-native-203neuzo`. Build, Clippy and all 136 workspace tests passed.

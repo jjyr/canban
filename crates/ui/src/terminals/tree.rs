@@ -18,8 +18,64 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
     } else {
         SUCCESS
     };
-    let hint = e.hint();
+    let machine = if e.machine() == "local" {
+        "Local".into()
+    } else {
+        crate::machines::name(ui, e.machine())
+    };
+    let hint = super::labels::sidebar_hint(&e, &machine);
     let context_id = id.clone();
+    let title = label(e.title()).flex_1().min_w(px(0.));
+    let title = if selected { title } else { title.truncate() };
+    let mut content = view().w_full().min_w(px(0.)).gap_1();
+    let mut first = view()
+        .w_full()
+        .min_w(px(0.))
+        .flex_row()
+        .items_start()
+        .gap_2()
+        .child(title);
+    if e.agent.is_some() {
+        let stage = muted(e.stage.clone().unwrap_or_default())
+            .w(px(super::labels::stage_width(&e)))
+            .flex_shrink_0();
+        first = first.child(if selected { stage } else { stage.truncate() });
+    } else {
+        first = first.child(
+            muted(super::labels::sidebar_status(&e))
+                .text_color(color)
+                .flex_shrink_0(),
+        );
+    }
+    content = content.child(first);
+    if e.agent.is_some() {
+        if selected
+            && e.saved.name.is_some()
+            && let Some(card) = &e.card
+        {
+            content = content.child(
+                muted(format!("#{} {}", card.number, card.title))
+                    .w_full()
+                    .min_w(px(0.)),
+            );
+        }
+        content = content.child(
+            view()
+                .w_full()
+                .min_w(px(0.))
+                .flex_row()
+                .items_start()
+                .gap_2()
+                .child(super::labels::sidebar_provider(&e, selected).flex_1())
+                .child(muted(e.display_status()).text_color(color).flex_shrink_0()),
+        );
+    }
+    let machine = muted(machine).w_full().min_w(px(0.));
+    content = content.child(if selected {
+        machine
+    } else {
+        machine.truncate()
+    });
     view()
         .on_context_menu(move |event: &nsh_core::ContextMenuEvent| {
             ui.spawn(super::tabs::menu(
@@ -28,87 +84,22 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
                 Some(event.page_position),
             ));
         })
-        .tooltip(
-            nsh_base::tooltip()
-                .placement(Placement::Right)
-                .px_3()
-                .py_2()
-                .bg(SURFACE)
-                .border_1()
-                .border_color(BORDER)
-                .child(label(hint.clone())),
-        )
         .child(
             nsh_base::button()
                 .w_full()
-                .min_h(px(if e.agent.is_some() { 56. } else { 32. }))
+                .min_h(px(if e.agent.is_some() { 72. } else { 48. }))
                 .px_2()
                 .flex_row()
                 .items_center()
                 .gap_2()
                 .rounded(px(5.))
                 .bg(if selected { SELECTED } else { CLEAR })
-                .hover(|s| s.bg(INSET))
+                .hover(move |s| s.bg(if selected { SELECTED } else { INSET }))
                 .focus(|s| s.border_1().border_color(ACCENT))
                 .selected(move || selected)
                 .accessibility_label(move || Some(hint.clone().into()))
                 .py_2()
-                .child(if e.agent.is_some() {
-                    view()
-                        .w_full()
-                        .min_w(px(0.))
-                        .gap_1()
-                        .child(
-                            view()
-                                .w_full()
-                                .min_w(px(0.))
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(label(e.title()).flex_1().min_w(px(0.)).truncate())
-                                .child(
-                                    muted(e.stage.clone().unwrap_or_default())
-                                        .w(px(super::labels::stage_width(&e)))
-                                        .flex_shrink_0()
-                                        .truncate(),
-                                ),
-                        )
-                        .child(
-                            view()
-                                .w_full()
-                                .min_w(px(0.))
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(super::labels::provider(&e).flex_1())
-                                .child(muted(e.display_status()).text_color(color).flex_shrink_0()),
-                        )
-                } else {
-                    view()
-                        .w_full()
-                        .min_w(px(0.))
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(label(e.title()).flex_1().min_w(px(0.)).truncate())
-                        .child(
-                            muted(if e.machine() == "local" {
-                                String::new()
-                            } else {
-                                crate::machines::name(ui, e.machine())
-                            })
-                            .max_w(px(82.))
-                            .truncate(),
-                        )
-                        .child(
-                            view()
-                                .w(px(5.))
-                                .h(px(5.))
-                                .rounded(px(3.))
-                                .bg(color)
-                                .flex_shrink_0(),
-                        )
-                })
+                .child(content)
                 .on_press(move |_: &()| ui.open_terminal(id.clone())),
         )
 }
@@ -131,7 +122,14 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                     (
                         e.saved.id.clone(),
                         e.project_id.clone(),
-                        e.hint(),
+                        super::labels::sidebar_hint(
+                            &e,
+                            &if e.machine() == "local" {
+                                "Local".into()
+                            } else {
+                                crate::machines::name(ui, e.machine())
+                            },
+                        ),
                         e.ended(),
                         e.inactive(),
                         e.needs_attention(),
@@ -220,6 +218,8 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                 .child(icon(Icon::Folder).w(px(14.)).h(px(14.)))
                                 .child(
                                     label(name.clone())
+                                        .flex_1()
+                                        .min_w(px(0.))
                                         .text_color(MUTED)
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .truncate(),

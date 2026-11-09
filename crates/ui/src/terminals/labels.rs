@@ -28,6 +28,51 @@ pub fn provider(e: &Entry) -> View {
                 .truncate(),
         )
 }
+/// Sidebar metadata is visible text, without a nested provider tooltip.
+pub fn sidebar_provider(e: &Entry, expanded: bool) -> View {
+    let Some((mark, provider)) = e.provider() else {
+        return view();
+    };
+    let profile = e.profile().unwrap_or_default();
+    let title = if provider.eq_ignore_ascii_case(profile) {
+        provider
+    } else {
+        format!("{provider} · {profile}")
+    };
+    let name = muted(title).flex_1().min_w(px(0.));
+    view()
+        .flex_row()
+        .items_start()
+        .gap_1()
+        .min_w(px(0.))
+        .child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0())
+        .child(if expanded { name } else { name.truncate() })
+}
+pub fn sidebar_status(e: &Entry) -> String {
+    if e.agent.is_none() && matches!(e.status().as_str(), "running" | "live") {
+        "Active".into()
+    } else {
+        e.display_status()
+    }
+}
+pub fn sidebar_hint(e: &Entry, machine: &str) -> String {
+    let mut lines = vec![e.title(), format!("Project: {}", e.project_name)];
+    if let Some(profile) = e.profile() {
+        lines.push(format!(
+            "{} · {} · @{profile}",
+            e.stage.as_deref().unwrap_or(""),
+            e.provider().map(|(_, p)| p).unwrap_or_default()
+        ));
+        if e.saved.name.is_some()
+            && let Some(c) = &e.card
+        {
+            lines.push(format!("#{} {}", c.number, c.title));
+        }
+    }
+    lines.push(sidebar_status(e));
+    lines.push(format!("Machine: {machine}"));
+    lines.join("\n")
+}
 pub fn profile_width(e: &Entry) -> f32 {
     (text_width(e.profile().unwrap_or_default()) + 22.).clamp(52., 128.)
 }
