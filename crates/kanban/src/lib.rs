@@ -1,6 +1,8 @@
 use anyhow::{Result, ensure};
 use canban_types::{Card, Project, Workflow, id, now};
 pub mod github;
+mod lifecycle;
+pub use lifecycle::remove;
 /// One transactional insertion path for local creation and external intake.
 pub fn create(
     db: canban_storage::Db<'_>,

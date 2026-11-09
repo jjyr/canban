@@ -13,7 +13,7 @@ mise run build
 mise run run
 ```
 
-The local development bundle is .local/Canban.app. Configuration and managed data default to ~/.canban/. Set CANBAN_HOME to an absolute alternate directory for an isolated instance. Only one AppServer may own a home at a time.
+`mise run run` builds the current UI/CLI, gracefully replaces the AppServer for `~/.canban`, and opens `.local/CanbanDev.app`. Herdr and its existing Agent PTYs remain alive. Repeating the command replaces only the tracked development UI; the ordinary `.local/Canban.app` has a separate bundle identity. Set CANBAN_HOME to an absolute alternate directory for an isolated instance. Explicit CANBAN_ENDPOINT connections remain attach-only. See [development startup and acceptance](docs/development-startup.md).
 
 ```sh
 mise run gallery

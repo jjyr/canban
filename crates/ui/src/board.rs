@@ -1,23 +1,8 @@
 //! Board composition; stage scroll positions survive focused work and refreshes.
 use crate::{components::*, drafts::*, presenter::*};
-use canban_types::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
 
-pub fn matches_filter(s: &Snapshot, c: &Card, filter: &str) -> bool {
-    match filter {
-        "attention" => c.attention.is_some(),
-        "running" => s.requests.iter().any(|r| {
-            r.card_id == c.id
-                && matches!(
-                    r.state.as_str(),
-                    "queued" | "starting" | "running" | "working"
-                )
-        }),
-        "review" => c.stage == "review",
-        _ => true,
-    }
-}
 pub fn screen(ui: Ui) -> impl IntoElement {
     let has_project = computed(move || {
         let _ = ui.project.get();
@@ -54,36 +39,8 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     },
                 )),
         )
-        .child(when(
-            move || has_project.get(),
-            move || crate::components::scheduling::summary(ui),
-        ))
-        .child(when(
-            move || has_project.get(),
-            move || {
-                view().flex_row().flex_wrap().gap_2().children(
-                    [
-                        ("All", "all"),
-                        ("Needs attention", "attention"),
-                        ("Running", "running"),
-                        ("Review", "review"),
-                    ]
-                    .into_iter()
-                    .map(|(name, key)| {
-                        navigation(
-                            name.into(),
-                            move || ui.board_filter.get() == key,
-                            move |_| ui.board_filter.set(key.into()),
-                        )
-                        .into_element()
-                    })
-                    .collect::<Vec<_>>(),
-                )
-            },
-        ))
         .child(dynamic(move || {
             let s = ui.snapshot.get();
-            let filter = ui.board_filter.get();
             let project = ui.project.get();
             let Some(p) = s.projects.iter().find(|p| p.id == project) else {
                 return entry_card(
@@ -130,8 +87,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                         .filter(|c| {
                                             c.project_id == project
                                                 && c.stage == stage.id
-                                                && c.archived_at.is_none()
-                                                && matches_filter(&s, c, &filter)
+                                                && c.active()
                                         })
                                         .cloned()
                                         .collect::<Vec<_>>();

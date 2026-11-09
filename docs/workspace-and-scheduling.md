@@ -35,8 +35,8 @@ First Card invocation
   -> reserve a global starting slot
   -> fetch configured remote/base
   -> fast-forward local base (or retain local-ahead commits)
-  -> create branch canban/<project-id>/<card-number>
-  -> create ~/.canban/worktrees/<project-id>/<card-id>
+  -> create branch canban/<card-number>
+  -> create ~/.canban/worktrees/<project-id>/<card-number>
   -> persist workspace identity/base commit + Timeline event
   -> capture context and start Agent
 
@@ -57,7 +57,7 @@ Archive
 
 Fetch updates the remote-tracking ref. If the remote is ahead, update the local base by fast-forward only; if local already contains remote, retain local commits. Divergence, fetch failure and a dirty checked-out base that needs updating stop preparation. If base is checked out in another worktree, update through that checkout; otherwise update its ref with the expected previous commit. Preserve ignored local data during fast-forward. No automatic push, forced reset or rebase occurs.
 
-A saved existing workspace bypasses synchronization. A retained Card branch/ref can recreate an archived checkout without fetching. An unbound conflicting branch is an error rather than permission to overwrite it. Preparation and metadata association happen before Agent launch. The initial base commit remains fixed when later invocations reuse the directory.
+A saved existing workspace bypasses synchronization. A retained Card branch/ref can recreate an archived checkout without fetching. New branches use a short numeric suffix (`canban/42-2`, `canban/42-3`) when the default name already belongs to unrelated work, including another Project sharing the repository. An explicitly saved conflicting branch is never overwritten. The actual branch/path are persisted before Agent launch; subsequent stages, title changes and Resume use that binding. Existing `canban/<project-id>/<number>` branches and UUID worktree directories remain unchanged and can still be restored after Archive. The initial base commit remains fixed when later invocations reuse the directory. Card numbers are Project-local Canban numbers, not necessarily a linked GitHub Issue number.
 
 Card details show branch/target, path, base commit, latest delivery and read-only Git status. Refresh detects missing workspaces, dirty state and merge conflicts. Long values use compact visual labels; **Copy branch** and **Copy workspace path** retain exact values. Board tiles show a compact branch label. These controls are shared production components used by the Gallery.
 
@@ -69,7 +69,7 @@ Card details show branch/target, path, base commit, latest delivery and read-onl
 { "scheduler": { "max_agents": 8 } }
 ```
 
-Only positive integers are valid. Settings and `scheduler.configure` persist the same field without replacing presets/commands. Lowering the limit leaves existing Agents alive. `scheduler.status` returns `active`, `max_agents` and `queued`; Board/Settings show global usage plus Cards waiting for human.
+Only positive integers are valid. Settings and `scheduler.configure` persist the same field without replacing presets/commands. Lowering the limit leaves existing Agents alive. `scheduler.status` returns `active`, `max_agents` and `queued`; Settings retains scheduler configuration and usage, while Overview provides global Agent/attention status. Board omits the Execution slots summary and task filter toolbar.
 
 Slots now count starting, working and unknown/uncertain runtime. Verified blocked/idle/done/error statuses release execution capacity while retaining the terminal; stale/disconnected observations remain reserved. This supersedes the original all-live-terminal accounting. See [Agent Overview and lifecycle](agent-overview-and-lifecycle.md) for the configurable idle timeout, native activity tracking, global Overview and current acceptance.
 

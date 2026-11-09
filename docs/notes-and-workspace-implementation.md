@@ -75,7 +75,7 @@ Execution snapshots contain the content/revision captured at launch. Later Note 
 
 ```text
 Board browsing
-  Sidebar | Board [scroll/filter] | selected Card [read/edit/timeline/composer]
+  Sidebar | Board [scroll/stages] | selected Card [read/edit/timeline/composer]
 
 Click Agent or Review changes
   Sidebar | Card [context/timeline/composer] | Terminal or Review

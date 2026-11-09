@@ -13,6 +13,7 @@ pub fn card_tile(
     let y = animated_value(0.0);
     let dragged = signal(false);
     let snapshot = ui.snapshot.get_untracked();
+    let context_card = card.clone();
     let mut tile = panel()
         .p_3()
         .min_w(px(0.))
@@ -31,6 +32,9 @@ pub fn card_tile(
         })
         .hover(|s| s.border_color(ACCENT))
         .focus(|s| s.border_color(ACCENT))
+        .on_context_menu(move |e: &nsh_core::ContextMenuEvent| {
+            crate::card_actions::menu(ui, context_card.clone(), e.page_position)
+        })
         .on_press(move || {
             if !dragged.get_untracked() {
                 ui.open_card(open_id.clone());

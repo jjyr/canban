@@ -1349,3 +1349,91 @@ mod lifecycle_cases;
 mod terminal_cases;
 
 mod machines_cases;
+
+#[test]
+fn explicit_comment_recipients_override_prose_scanning() {
+    let (_d, app, _p, c) = setup();
+    app.call(
+        "comment.add",
+        json!({"card_id":c.id,"body":"The UI shows Ask @claude", "mentions":[]}),
+    )
+    .unwrap();
+    assert!(app.snapshot().unwrap().requests.is_empty());
+    app.call(
+        "comment.add",
+        json!({"card_id":c.id,"body":"Compare @claude and @codex", "mentions":["codex"]}),
+    )
+    .unwrap();
+    let s = app.snapshot().unwrap();
+    assert_eq!(s.requests.len(), 1);
+    assert_eq!(s.requests[0].profile.id, "codex");
+    assert_eq!(s.questions.len(), 1);
+    assert_eq!(
+        s.events
+            .iter()
+            .filter(|e| e.kind == "comment.created")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn local_card_removal_is_reversible_cancels_queue_and_retains_history() {
+    let (_d, app, _p, c) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":c.id,"revision":c.revision,"stage":"develop"}),
+    )
+    .unwrap();
+    let current = app.snapshot().unwrap().cards[0].clone();
+    app.call(
+        "card.remove",
+        json!({"card_id":c.id,"revision":current.revision}),
+    )
+    .unwrap();
+    let s = app.snapshot().unwrap();
+    assert!(s.cards.is_empty());
+    assert!(s.requests.iter().all(|r| r.state == "cancelled"));
+    assert!(s.events.iter().any(|e| e.kind == "card.removed"));
+    let removed: Card =
+        serde_json::from_value(app.call("card.get", json!({"card_id":c.id})).unwrap()).unwrap();
+    assert!(removed.removed_at.is_some());
+    let listed = app
+        .call("card.list", json!({"include_removed":true}))
+        .unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    app.call(
+        "card.restore",
+        json!({"card_id":c.id,"revision":removed.revision}),
+    )
+    .unwrap();
+    let s = app.snapshot().unwrap();
+    assert_eq!(s.cards[0].id, c.id);
+    assert_eq!(s.cards[0].number, c.number);
+    assert!(s.cards[0].active());
+    assert_eq!(s.cards[0].body, c.body);
+    assert_eq!(s.requests.len(), 1);
+    assert_eq!(s.requests[0].state, "cancelled");
+}
+#[test]
+fn local_card_removal_cannot_orphan_a_live_agent() {
+    let (_d, app, _p, c) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":c.id,"revision":c.revision,"stage":"develop"}),
+    )
+    .unwrap();
+    let run = admit(&app, &app.snapshot().unwrap().requests[0]);
+    let current = app.snapshot().unwrap().cards[0].clone();
+    let error = app
+        .call(
+            "card.remove",
+            json!({"card_id":c.id,"revision":current.revision}),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("End active Card Agents"));
+    let s = app.snapshot().unwrap();
+    assert!(s.cards[0].active());
+    assert_eq!(s.attempts[0].id, run.id);
+    assert!(!s.events.iter().any(|e| e.kind == "card.removed"));
+}

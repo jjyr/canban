@@ -347,3 +347,41 @@ pub fn board_cards() -> canban_types::Snapshot {
     s.cards.push(long);
     s
 }
+
+/// The production Card reader under long conversational history and background activity.
+pub fn conversation() -> canban_types::Snapshot {
+    let mut s = workspace();
+    s.cards[0].body = "## Goal\nKeep the Card conversation readable while task context stays available.\n\nAcceptance: a compact header, collapsed task, inline reports, preserved draft and reading position.\n".repeat(12);
+    for i in 1..=32 {
+        s.events.push(Event {
+            id: format!("conversation-{i}"),
+            project_id: "gallery-project".into(),
+            card_id: "card-1".into(),
+            sequence: i + 1,
+            kind: if i % 4 == 0 {
+                "execution.started"
+            } else {
+                "comment.created"
+            }
+            .into(),
+            actor: if i % 2 == 0 {
+                "agent:developer"
+            } else {
+                "user"
+            }
+            .into(),
+            message: if i % 4 == 0 {
+                "Agent execution started".into()
+            } else {
+                format!(
+                    "Message {i}: **conversation context**\n\n{}",
+                    "Keep this reading position while new activity arrives. ".repeat(4)
+                )
+            },
+            request_id: None,
+            data: json!({}),
+            created_at: canban_types::now(),
+        });
+    }
+    s
+}

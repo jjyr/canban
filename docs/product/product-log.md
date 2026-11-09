@@ -554,3 +554,28 @@ The implementation is recorded in [Desktop utilities](../desktop-utilities.md), 
 ## 2026-11-09 — Shared GitHub Issue Forms
 
 The user approved Bug report and Feature request forms shared by the repository and App feedback entry. Report issue opens Bug report directly and prefills only the editable Environment field; the user supplies the title, problem and triggering context, then submits on GitHub. Feature request requires a problem statement with optional desired behavior/context. See [form ownership and URL contract](../desktop-utilities.md#repository-issue-forms).
+
+## 2026-11-09 — Directory-first Project creation
+
+The user selected a quieter creation form: Directory first, automatic editable Name, local execution by default with a collapsed machine picker, and one Choose action that opens the appropriate host's directory chooser. Routine descriptions and the Project details section title are removed. Automatic names follow directory changes until explicitly edited; machine changes clear the path and retain a custom name. The [current form and acceptance](../workspace-entry-and-settings.md#simplified-new-project-form-2026-11-09) describe the implementation.
+
+## 2026-11-09 — Development launch and numeric workspaces
+
+The user's Theme failure exposed a new UI attached to an older persistent AppServer that had no utilities API. Development launch now builds a matched UI/service pair, replaces the local service through its shutdown API and opens an independently identified development UI. The user explicitly chose to reuse `~/.canban` rather than an empty development home. Agent PTYs remain owned by Herdr; explicit remote endpoints are never replaced. See [startup/acceptance](../development-startup.md).
+
+New Card workspaces use a numeric final directory and `canban/<card-number>` branches, independent of Chinese/English titles. Numeric suffixes disambiguate existing unrelated branches. Saved branch/path bindings, including earlier UUID directories, remain stable across title changes, Archive and Resume.
+
+
+## 2026-11-09 — Quiet Board and Create shortcut
+
+The user removed Board's Execution slots summary and its All/Needs attention/Running/Review filter toolbar. The old filter state is removed too, so every active Card in the selected Project remains visible in its stage. Scheduler controls remain in Settings and global activity/attention in Overview. New Card's final action is simply Create; Command+Enter, the button and command help share one scoped submit intent with the same validity/pending/modal guards. Card creation still targets Backlog.
+
+App/Gallery builds, 15 UI tests and UI/all-target Clippy passed. Native acceptance in the disposable home `/private/tmp/cb-utilities-zl_w4pdq/home` verified the quiet Board, Create label, rejection of an empty-title shortcut, successful Command+Enter from the description editor and no repeat creation after leaving New Card. AppServer confirmed exactly one `Keyboard Create acceptance` Card. The later popup/button/Gallery checks were interrupted by CUA `cgWindowNotFound`, which also affected the separate development and Gallery apps; their processes remained running. Those later native checks are not claimed complete.
+
+## 2026-11-09 — Compact Card conversation
+
+Approved and implemented: a two-row Card header; task/context and conversation share one scroll region; workspace metadata is on demand; Agent lifecycle controls belong in Terminals. Comments use Command+Enter and explicit leading @profile recipients with removable labels; inline prose mentions do not dispatch from the desktop. Replies/reports render inline, routine events collapse without deleting history, and older-message reading is preserved when new activity arrives. See [implementation and native checks](../card-conversation.md).
+
+## 2026-11-09 — Accessible Card lifecycle and minimal Usage
+
+Card Archive/Restore is a direct header action. Board right-click and the Card action menu share Archive/Restore and local Delete (GitHub: Remove from Board). Removal is reversible, retains history, cancels queued work and requires live/uncertain executions to be resolved first. Archived Cards includes Deleted Cards recovery. X closes only the detail pane. The Usage bar shows provider data directly without a machine-prefix caption.

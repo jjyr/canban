@@ -13,56 +13,44 @@ pub fn directory_field(
     view()
         .min_w(px(0.))
         .gap_2()
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(
-                    field(value, "/absolute/path/to/project")
-                        .label("Source directory")
-                        .flex_1()
-                        .min_w(px(0.)),
-                )
-                .child(
-                    action("Choose…", Variant::Secondary, move |_| {
-                        picking.set(true);
-                        error.set(String::new());
-                        let mut dialog = OpenDialog::folders()
-                            .title("Choose directory")
-                            .button_label("Choose");
-                        let current = value.get_untracked();
-                        if let Some(parent) = Path::new(&current)
-                            .ancestors()
-                            .find(|p| p.is_absolute() && p.is_dir())
-                        {
-                            dialog = dialog.directory(parent);
+        .child(directory_input(
+            value,
+            move || picking.get(),
+            move |_| {
+                picking.set(true);
+                error.set(String::new());
+                let mut dialog = OpenDialog::folders()
+                    .title("Choose directory")
+                    .button_label("Choose");
+                let current = value.get_untracked();
+                if let Some(parent) = Path::new(&current)
+                    .ancestors()
+                    .find(|p| p.is_absolute() && p.is_dir())
+                {
+                    dialog = dialog.directory(parent);
+                }
+                let selected = selected.clone();
+                spawn(async move {
+                    let result = pick_paths(dialog).await;
+                    if !picking.try_set(false) {
+                        return;
+                    }
+                    match result {
+                        Ok(Some(paths)) => {
+                            if let Some(path) = paths.first()
+                                && value.try_set(path.to_string_lossy().into_owned())
+                            {
+                                selected(path);
+                            }
                         }
-                        let selected = selected.clone();
-                        spawn(async move {
-                            let result = pick_paths(dialog).await;
-                            if !picking.try_set(false) {
-                                return;
-                            }
-                            match result {
-                                Ok(Some(paths)) => {
-                                    if let Some(path) = paths.first()
-                                        && value.try_set(path.to_string_lossy().into_owned())
-                                    {
-                                        selected(path);
-                                    }
-                                }
-                                Ok(None) => {}
-                                Err(message) => {
-                                    error.try_set(message);
-                                }
-                            }
-                        });
-                    })
-                    .flex_shrink_0()
-                    .disabled(move || picking.get()),
-                ),
-        )
+                        Ok(None) => {}
+                        Err(message) => {
+                            error.try_set(message);
+                        }
+                    }
+                });
+            },
+        ))
         .child(dynamic(move || {
             if error.get().is_empty() {
                 view().into_element()
@@ -70,4 +58,28 @@ pub fn directory_field(
                 notice(error.get(), Tone::Danger).into_element()
             }
         }))
+}
+
+/// One path field and one Choose action; the caller supplies the browser behavior.
+pub fn directory_input(
+    value: Signal<String>,
+    busy: impl Fn() -> bool + 'static,
+    choose: impl Fn(&()) + 'static,
+) -> View {
+    view()
+        .min_w(px(0.))
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .child(
+            field(value, "/absolute/path/to/project")
+                .label("Directory")
+                .flex_1()
+                .min_w(px(0.)),
+        )
+        .child(
+            action("Choose…", Variant::Secondary, choose)
+                .flex_shrink_0()
+                .disabled(busy),
+        )
 }

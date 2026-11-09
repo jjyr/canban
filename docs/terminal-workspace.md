@@ -179,3 +179,7 @@ The native viewer and inventory show Connecting, Disconnected or Closing as the 
 
 
 Close lifecycle acceptance: real isolated Core/PTys at `/private/tmp/cb-close-000lb28a` passed Shell close with neighboring PTY isolation, Agent close without workflow completion, same-provider Resume, old-receipt replay after Resume and unavailable-Core/explicit retry. 108 workspace tests passed. Native automation access to the fresh cloned acceptance app was not approved in this run; the close-button click and new state-label layout are not claimed as native interaction acceptance.
+
+## Compact Card entry (2026-11-09)
+
+The [Card conversation](card-conversation.md) header/Timeline link into the existing Terminal workspace. Navigation alone never starts/resumes a process. A Card without a conversation opens a Card-context empty view; **Choose Agent** (or the chrome Agent control) explicitly invokes `agent.open`. Existing terminal menus and ended-session controls own lifecycle management and history. Back to source restores the Card's draft and scroll offset.

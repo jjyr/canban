@@ -2,7 +2,7 @@ use super::*;
 
 impl AppServer {
     pub fn call(&self, method: &str, p: Value) -> Result<Value> {
-        if method.starts_with("github.") || method == "project.github" || method == "card.remove" {
+        if method.starts_with("github.") || method == "project.github" {
             return self.github_call(method, p);
         }
         if method.starts_with("utilities.") || method.starts_with("usage.") {
@@ -40,7 +40,9 @@ impl AppServer {
             "terminal.end" => self.control_terminal(p, true),
             "terminal.close" => self.close_terminal(p),
             "terminal.context" => self.terminal_context(p),
-            "app.ping" => Ok(json!({"version":env!("CARGO_PKG_VERSION"),"home":self.home})),
+            "app.ping" => Ok(
+                json!({"version":env!("CARGO_PKG_VERSION"),"api_version":API_VERSION,"pid":std::process::id(),"home":self.home}),
+            ),
             "app.snapshot" => Ok(serde_json::to_value(self.snapshot()?)?),
             "project.list" => Ok(serde_json::to_value(
                 self.store.lock().unwrap().db().list::<Project>()?,
@@ -358,13 +360,17 @@ impl AppServer {
                 let project: Project = db.get(&c.project_id)?;
                 let stage = canban_workflow_engine::stage(&project.workflow, &c.stage)?;
                 let mut mentions = strings(&p, "mentions");
-                for word in body.split_whitespace() {
-                    if let Some(name) = word.strip_prefix('@') {
-                        let name = name.trim_end_matches(|ch: char| {
-                            !ch.is_alphanumeric() && ch != '-' && ch != '_'
-                        });
-                        if config.profiles.iter().any(|a| a.id == name) {
-                            mentions.push(name.into());
+                // Explicit recipients distinguish addressing an Agent from discussing its name.
+                // Older CLI clients without the field retain their text-mention behavior.
+                if p.get("mentions").is_none() {
+                    for word in body.split_whitespace() {
+                        if let Some(name) = word.strip_prefix('@') {
+                            let name = name.trim_end_matches(|ch: char| {
+                                !ch.is_alphanumeric() && ch != '-' && ch != '_'
+                            });
+                            if config.profiles.iter().any(|a| a.id == name) {
+                                mentions.push(name.into());
+                            }
                         }
                     }
                 }
@@ -550,6 +556,18 @@ impl AppServer {
                 }
             }
             "attachment.add" => self.add_attachment(&p),
+            "card.remove" => {
+                ensure!(
+                    p["execution"].is_null(),
+                    "Removing a Card requires an explicit user decision"
+                );
+                self.mutate(method, &p, |db| {
+                    let mut c: Card = db.get(strp(&p, "card_id")?)?;
+                    revise(&c, &p)?;
+                    canban_kanban::remove(db, &mut c)?;
+                    Ok(json!({"removed":true,"card_id":c.id}))
+                })
+            }
             "card.archive" => self.archive(&p),
             "card.restore" => self.restore(&p),
             _ => bail!("Unknown operation: {method}"),

@@ -9,6 +9,20 @@ pub struct Command {
     pub display: &'static str,
     pub context: &'static str,
 }
+pub const CREATE_CARD: Command = Command {
+    id: "create-card",
+    title: "Create Card",
+    key: "mod+enter",
+    display: "⌘Enter",
+    context: "New Card",
+};
+pub const SEND_COMMENT: Command = Command {
+    id: "send-comment",
+    title: "Send comment",
+    key: "mod+enter",
+    display: "⌘Enter",
+    context: "Card comment",
+};
 pub const CATALOG: &[Command] = &[
     Command {
         id: "new-card",
@@ -59,11 +73,17 @@ pub const CATALOG: &[Command] = &[
         display: "⌘⇧[",
         context: "Terminals",
     },
+    CREATE_CARD,
+    SEND_COMMENT,
 ];
 pub fn execute(ui: Ui, id: &str) {
     crate::utilities::close(ui);
     match id {
         "new-card" => ui.new_card(String::new()),
+        "create-card" if ui.page.get_untracked() == "new-card" => {
+            ui.card_submit.update(|n| *n += 1)
+        }
+        "send-comment" if ui.current_card().is_some() => ui.comment_submit.update(|n| *n += 1),
         "quick-open" => ui.show_search(false),
         "shortcuts" => crate::utilities::open(ui, "shortcuts"),
         "new-terminal" => {
@@ -79,6 +99,21 @@ pub fn execute(ui: Ui, id: &str) {
     }
 }
 pub fn bindings(ui: Ui) {
+    effect(move || {
+        if ui.page.get() == "new-card" && !ui.quick_open.get() && ui.utility_popup.get().is_empty()
+        {
+            on_key_with(
+                CREATE_CARD.key,
+                KeyOptions {
+                    when: When::Always,
+                    ..Default::default()
+                },
+                move |_| {
+                    ui.card_submit.update(|n| *n += 1);
+                },
+            );
+        }
+    });
     for command in CATALOG.iter().filter(|c| c.context == "Global") {
         on_key_with(
             command.key,

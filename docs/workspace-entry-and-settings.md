@@ -4,24 +4,47 @@ Implemented 2026-11-08. This refines the [compact navigation](quick-open-and-nav
 
 ## Project entry
 
-Without a valid selected Project, the Board shows only its Project selector and a **Create a Project** entry card. It does not render scheduling statistics, task filters, New Card or workflow columns. The entire entry card is one accessible NSH Button, with shared hover/pressed/focus styling; there is no second creation button below it. Selecting/creating a Project restores the normal Board's controls and filters.
+Without a valid selected Project, the Board shows only its Project selector and a **Create a Project** entry card. It does not render New Card or workflow columns. The entire entry card is one accessible NSH Button, with shared hover/pressed/focus styling; there is no second creation button below it. Selecting/creating a Project restores the Project/work-location/Add Card header and stage columns. Board has no Execution slots summary or task filter toolbar.
 
 ```text
 No selected Project                       Selected Project
 Board                                     Board
 [Choose Project v]                        [Project name v]    [+ New Card]
-[ + Create a Project                    ]  execution summary
-                                          All / Needs attention / Running / Review
+[ + Create a Project                    ]
                                           Backlog / Develop / Review
 ```
 
-The Project-name selector still offers existing Projects and New Project in its footer. Clicking the entry opens the same creation form. The form requires a name and source directory; Cancel returns to Board without creating anything.
+The Project-name selector still offers existing Projects and New Project in its footer. Clicking the entry opens the same creation form. Cancel returns to Board without creating anything.
+
+### Simplified New Project form (2026-11-09)
+
+The creation form now shows Directory first, then Name, a collapsed Execution machine disclosure, and Cancel / Create Project. The page subtitle, Project details section heading and routine field descriptions are removed. Fields retain accessible labels, shared focus/disabled styling and necessary error feedback.
+
+```text
+New Project
+
+Directory
+[/absolute/path/to/canban                 ] [Choose…]
+
+Name
+[canban                                            ]
+
+▸ Execution machine
+
+                         [Cancel] [Create Project]
+```
+
+The default execution machine is local (the AppServer host); users do not need to open or fill the machine setting. Expanding it reveals the existing machine picker. A selected remote machine remains named in the collapsed summary. Switching machines clears the previous directory, resets browser results and invalidates pending responses; a custom Project name is retained.
+
+Name follows the directory basename, including typed/pasted paths and either chooser. It keeps following directory changes until the user explicitly edits Name; later directory changes preserve that custom text. Trailing directory separators are handled. Empty names/directories disable Create Project. New paths are still created by the existing server operation.
+
+There is one Choose action beside the path: directly local UI uses the macOS folder picker, while remote machines and explicit AppServer endpoints use the server-side browser. The duplicate Browse on machine action is removed. Work location settings reuse this same path control while retaining their execution-change explanation.
 
 ## Source directory
 
 The shared `ui-kit::directory_field` combines an editable path with **Choose…**. It uses NSH `pick_paths(OpenDialog::folders())`, so macOS displays its native folder-selection sheet; no new native bridge or dialog dependency is introduced.
 
-- Choosing a folder fills the path. A blank Project name is suggested from its basename; an existing user-supplied name is preserved.
+- Choosing a folder fills the path. The New Project presenter generates its name from the basename until the user edits it; a user-supplied name is preserved.
 - Cancelling preserves the path and name. The chooser disables its own launch action while open, reports picker failures inline and ignores answers after its owning field has been disposed.
 - If a path has already been entered, the chooser starts at its nearest existing absolute directory. Typed/pasted paths remain supported, including a directory that will be created on submit.
 - Choosing a folder does not create a Project. The explicit Create Project action remains the commit point.
@@ -77,3 +100,14 @@ Verified through actual native UI interactions:
 The scratch `native-checks.json` records the checked interactions; `final-snapshot.json` retains one Project and zero Cards, requests or attempts, and `agents.json` retains concurrency 6 / idle timeout 0. The task-owned acceptance app and Gallery were closed after verification.
 
 All 62 Rust tests, all-target Clippy with `-D warnings`, application/Gallery builds, formatting and whitespace checks passed. Chinese IME remains excluded at the user's request. Provider execution, new workflow behavior and macOS notifications are outside this UI refinement's acceptance scope.
+
+
+## Simplified form acceptance (2026-11-09)
+
+An independent `Canban Auto Acceptance` app used the disposable home `/private/tmp/cb-utilities-zl_w4pdq/home`; the user's running Canban window and default data were left alone. No Agent was launched.
+
+- Native form showed only New Project, Directory/Choose, Name, collapsed Execution machine and Cancel/Create. Typed directory changes updated the generated name, including a trailing slash; explicit name edits survived subsequent path changes.
+- Native Choose opened the macOS folder sheet. Cancel preserved path/name. Selecting `directory-picked` generated that name; Create opened its empty Board. AppServer snapshot confirmed the saved name, directory and local machine.
+- A second launch with an explicit isolated AppServer endpoint used the same Choose action to open the server browser. Navigating into `directory-picked` and selecting it updated both path and generated name. This exercises the server browser path, not live SSH-machine acceptance.
+- Gallery's 720-point New Project scene retained a manual name while switching to Build machine, cleared the old directory, disabled creation until a new path was entered and kept Build machine visible after collapse. No duplicate Browse action remained.
+- Application/Gallery builds, 113 workspace Rust tests, UI/all-target Clippy with warnings denied, and whitespace checks passed.

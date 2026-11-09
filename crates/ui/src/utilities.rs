@@ -221,12 +221,6 @@ fn usage_summary(ui: Ui, now: u64) -> View {
         .items_center()
         .gap_1()
         .overflow_hidden();
-    if !ui.narrow.get() {
-        area = area.child(muted(format!(
-            "Usage: {}",
-            crate::machines::name(ui, v["machine"].as_str().unwrap_or("local"))
-        )));
-    }
     for provider in ["codex", "claude"] {
         let values: Vec<_> = rows.iter().filter(|r| r["provider"] == provider).collect();
         if values.is_empty() {

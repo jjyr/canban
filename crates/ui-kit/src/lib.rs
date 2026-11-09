@@ -24,7 +24,7 @@ pub use search_dialog::{SearchChoice, search_dialog};
 pub mod entry_card;
 pub use entry_card::entry_card;
 pub mod directory_field;
-pub use directory_field::directory_field;
+pub use directory_field::{directory_field, directory_input};
 pub mod settings;
 pub use settings::{settings_field, settings_section};
 pub mod chrome;

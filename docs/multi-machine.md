@@ -97,8 +97,10 @@ independent shells do not consume Agent slots.
 - Disconnect requires confirmation when references exist; remote programs,
   execution records and files remain. Existing Core `--via` connections also
   appear and can be used without inventing a second connection catalog.
-- New Project and Board → Work location share the machine/path component.
-  Changing machine clears the path. Browse operates on the selected host.
+- New Project and Board → Work location share the path/Choose component.
+  New Project defaults to local with its machine picker collapsed; choosing a
+  remote machine keeps that name in the collapsed summary. Changing machine
+  clears the path. The single Choose action operates on the selected host.
   Native folder selection is used only for a directly launched local UI sharing
   the service filesystem; forwarded/explicit endpoints use server browsing.
 - Default Terminal machine is configurable in Settings/`machine.default`.

@@ -37,7 +37,9 @@ The repository now has a runnable macOS MVP. [Real Agent acceptance, 2026-11-09]
 | [Dedicated Terminal workspace](terminal-workspace.md) | Independent Terminals, live directory context, Project grouping, split chrome, Agent resume and isolated PTY acceptance |
 | [Project entry, grouped Overview and Settings](workspace-entry-and-settings.md) | Clickable empty Board, native directory chooser, filter-free Overview and unified Settings groups |
 | [Compact navigation and Quick Open](quick-open-and-navigation.md) | Implemented icon rail, Command+O fuzzy search, candidate navigation and native acceptance |
+| [Card conversation workspace](card-conversation.md) | Compact Card header, scrolling task/Timeline, explicit recipients, comment shortcuts and Terminal boundary |
 | [Desktop utilities](desktop-utilities.md) | Implemented Usage/reset countdown, Caffeine, Theme, Shortcuts, target-Project creation and acceptance |
+| [Development startup](development-startup.md) | Matched UI/AppServer development launches, API compatibility checks, existing-data reuse and live-PTY acceptance |
 | [Herdr UI layout and product references](research/herdr-ui-product-and-layout.md) | Source-backed recommendations for workspace chrome, navigation, Quick Open, contextual feedback and Review |
 | [Global Agent Overview](product/overview.md) | Herdr UI reference, all-Agent grouped overview, attention highlight, queued/idle/closed states and context inspector |
 | [Attention handling](product/needs-attention.md) | Task/runtime naming, contextual handling inside Overview, Card/Terminal navigation and resolution rules |

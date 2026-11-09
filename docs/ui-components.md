@@ -22,7 +22,7 @@ Components use their current typed Rust inputs/events; longer-form component API
 
 ## Interactive Agent components (2026-11-07)
 
-crates/ui/src/sessions.rs owns the shared Card profile entries and explicit Start/Resume intent. The dedicated Terminal page/tree/viewer now live in crates/ui/src/terminals.rs and terminals/; the earlier Card/Terminal focused split is superseded. Input is the selected request/attempt and profile registry; actions open/resume, interrupt, end or explicitly start fresh context. Navigation detaches only the viewer. crates/terminal owns the native canban/terminal component with immutable binding (config, core ID, terminal address), read_only input gating and an independent stream worker. It has no Card/workflow/storage dependency. The Gallery uses this production native component with a deterministic VT fixture. Read-only is enabled during completed/closing/closed states; uncertain-close errors remain inspectable.
+crates/ui/src/sessions.rs owns the explicit Start/Resume intent; Card entries now navigate through the compact header and the Terminal Choose Agent control. The dedicated Terminal page/tree/viewer now live in crates/ui/src/terminals.rs and terminals/; the earlier Card/Terminal focused split is superseded. Input is the selected request/attempt and profile registry; actions open/resume, interrupt, end or explicitly start fresh context. Navigation detaches only the viewer. crates/terminal owns the native canban/terminal component with immutable binding (config, core ID, terminal address), read_only input gating and an independent stream worker. It has no Card/workflow/storage dependency. The Gallery uses this production native component with a deterministic VT fixture. Read-only is enabled during completed/closing/closed states; uncertain-close errors remain inspectable.
 
 Native terminal regression scenarios also cover hidden cursor/null cursor metadata, wide-glyph background ordering, clipping to native bounds and scrolling a static Gallery fixture into view. The component redraws on native visibility/window-position changes as well as VT revision changes.
 
@@ -47,7 +47,7 @@ The native Terminal's optional `content` property replaces a static VT preview w
 | `ui-kit/status.rs` | Semantic `Tone`, chip/notice text; state remains textual as well as colored | Runtime/attention/result feedback in Board, Card and Notes |
 | `ui-kit/split.rs` | Left/right elements, retained width signal, minimum widths; NSH owns resizing/focus/accessibility | Board/Card, focused work and Notes layouts |
 | `ui-kit/input.rs` | `bound_field` reads/writes a structured draft through the shared NSH Input | Card and Note editors keep the same geometry/focus behavior |
-| `ui/board.rs` | Project snapshot, selected Card, filter, stage scroll store; open/move intents | All/attention/running/review filters, horizontal overflow and independent column scroll |
+| `ui/board.rs` | Project snapshot, selected Card, stage scroll store; open/move intents | Project/work-location/Add Card header, all active stage Cards, horizontal overflow and independent column scroll |
 | `ui/card.rs` | Saved Card plus retained draft; read/edit, context disclosure, Agent entries, history and reachable composer | Default reading view; opening work retains drafts and Board position |
 | `ui/workspace.rs` | Route, selected Card, viewport, expanded state and split widths | Board/Card or Card/work; narrow mode shows one surface with back/toggle controls |
 | `ui/notes.rs` | Note selection/query, saved snapshot, retained draft and related-pane state | Edit/preview, revision/conflict feedback, insert-link, backlinks, related Cards, Timeline and Card creation |
@@ -77,6 +77,8 @@ Gallery workspace scenes import the exact production components, including focus
 ### Project entry and Settings components (2026-11-08)
 
 `ui-kit/entry_card.rs` owns the single accessible clickable entry; `directory_field.rs` owns the editable path/native folder sheet with cancellation and disposed-owner guards; `settings.rs` owns generic section/field composition. Product UI owns Project name suggestions and creation. One screen scroll contains Agent scheduling, Agent profiles, Workflow, Herdr and Storage; the scheduler component uses the same section/field geometry. `profiles::registry_items` supplies content without nested panel styling. The Gallery includes Empty Board, Settings, all-state grouped Overview and entry/directory controls at a 720-point constrained width. See [contracts and native verification](workspace-entry-and-settings.md).
+
+The simplified creation presenter lives in `ui/projects.rs`: Directory precedes Name, basename suggestions stop after an explicit name edit, and NSH Collapsible keeps Execution machine secondary. `ui-kit::directory_input` owns the common path/Choose row geometry; `directory_field` supplies its native picker, while `ui/machines::directory_picker` supplies the selected host's server browser. New Project and Work location share that path component, with one chooser action each. Gallery has an explicit New Project entry and machine fixtures for path clearing, custom-name preservation and collapsed remote summaries.
 
 
 ### GitHub Card and unified creation (2026-11-09)
@@ -124,3 +126,9 @@ Final checks for this lifecycle update: 108 workspace Rust tests passed, includi
 `ui-kit/tokens.rs` owns reactive semantic palettes; `chrome::utility_button` owns compact selected/disabled/hover/focus/accessibility states. `ui/commands.rs` supplies the shared key/help catalog. `ui/utilities.rs` and its panel module compose machine-scoped Usage, countdown, power/theme/help actions and one controlled popup, with generation-fenced async reads/writes. `ui/frame.rs` composes the shared bottom bar; its border excludes the navigation rail. `ui/github.rs` owns the retained target-Project Card composer and source-query invalidation. Native Terminal keeps its runtime identity while applying new foreground/background/ANSI/cursor colors.
 
 Gallery workspace scenes now use the exact production frame, including utilities/overlays, with **Usage fixtures**, **No signed-in providers**, and full/720-point viewport controls. See [implementation and actual acceptance](desktop-utilities.md).
+
+## Compact Card composition (2026-11-09)
+
+`card/` separates fixed header, scrolling task/context/details, Timeline projection and fixed composer. `components/timeline_item.rs` owns inline file-backed Markdown replies/reports; `profiles.rs` owns the shared explicit-recipient menu/projection; `terminals.rs` owns Card-context navigation and explicit Agent selection. See [contracts and native evidence](card-conversation.md). Gallery **Card conversation** and **Append reply** cover long histories, narrow layouts and reading-position behavior through production components.
+
+`card_actions.rs` shares lifecycle intents between the Card header, Board right-click menu and Archive recovery rows. Direct Archive/Restore, reversible local Delete/Remove, archive failures and recovery use existing UI Kit chrome/buttons/panels. Gallery **Archived / deleted** covers both recovery groups. The compact bottom bar omits the redundant Usage/machine prefix.

@@ -66,6 +66,48 @@ pub fn reveal_group(ui: Ui, id: &str) {
         });
     }
 }
+/// Navigation never creates/resumes an invocation; that requires an explicit Agent action.
+pub fn open_card(ui: Ui, card_id: &str) {
+    let existing = entries(&ui.snapshot.get_untracked())
+        .into_iter()
+        .filter(|e| e.agent.is_some() && e.card.as_ref().is_some_and(|c| c.id == card_id))
+        .min_by_key(|e| e.ended());
+    if let Some(entry) = existing {
+        ui.open_terminal(entry.saved.id);
+    } else {
+        let origin = ui.location();
+        ui.navigate("terminals");
+        ui.terminal_selection.set(String::new());
+        ui.terminal_origin.set(Some(origin));
+    }
+}
+pub fn card_context(ui: Ui) -> Option<canban_types::Card> {
+    if let Some(entry) = current(ui) {
+        return entry.card;
+    }
+    let source = ui.terminal_origin.get()?;
+    ui.snapshot
+        .with(|s| s.cards.iter().find(|c| c.id == source.card).cloned())
+}
+pub fn choose_card_agent(ui: Ui) {
+    use nsh_core::element::desktop::{MenuItem, popup_menu};
+    let Some(card) = card_context(ui).filter(|c| c.archived_at.is_none()) else {
+        return;
+    };
+    ui.spawn(async move {
+        let items = ui
+            .profiles
+            .get_untracked()
+            .into_iter()
+            .map(|p| {
+                let card = card.id.clone();
+                MenuItem::new(format!("Open @{}", p.id))
+                    .on_select(move || crate::sessions::open(ui, card.clone(), p.id.clone()))
+            })
+            .collect();
+        popup_menu(items).await;
+    });
+}
 pub fn open_request(ui: Ui, request_id: &str) {
     let key = ui.snapshot.with_untracked(|s| {
         s.requests

@@ -43,3 +43,7 @@ The Terminal fixture includes a long mixed Chinese/English Card title and both D
 
 
 Workspace scenes reuse the complete production window frame and utility overlays. **Usage fixtures** supplies Codex/Claude windows with relative reset times (5d/7d) and a stale reading; **No signed-in providers** checks group hiding. At the 720-point viewport, inspect the rail/bar boundary, provider summaries, action reachability, theme selection and popup dismissal. Caffeine and Theme changes in Gallery are fixture-only; real power/credential verification belongs to isolated AppServer acceptance.
+
+**New Project** opens the production directory-first form. Check automatic basename suggestions, retained manual names, collapsed Execution machine, remote summary and directory clearing after a machine change. Use **Narrow viewport** to check path/Choose and footer reachability. Remote directory contents still require an isolated live AppServer; Gallery does not make host calls.
+
+The **Card conversation** scene uses the production compact reader with a long task, comments, Agent messages and collapsed runtime events. **Append reply** tests new-activity and bottom-follow behavior; use full/narrow viewport controls while checking header truncation and composer space.

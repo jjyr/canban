@@ -21,9 +21,15 @@ Only signed-in providers appear. With neither Codex nor Claude signed in, the Us
 
 The right-side actions are always reachable. Only one utility dialog is open at once. Escape/outside click dismisses it; Terminal input is gated while it is open and focus returns after dismissal. `⌘/` opens searchable Shortcuts; `⌘N` opens New Card even when the native Terminal owns focus. Terminal `⌘T`, `⌘W` and tab cycling share the command catalog.
 
+New Card uses a **Create** button for both Local and GitHub Issue Cards. `⌘Enter` submits through the same form intent and validation as the button; its hint appears in the button tooltip/accessibility label and Shortcuts catalog. This binding is active only on New Card without another popup. Empty titles, missing Issue selection/Project and pending submissions do not create anything. Normal Enter still belongs to the editor, and successful creation still enters Backlog.
+
+Card comments use **Send** and focused-editor `⌘Enter`, while Enter inserts a newline. The same command catalog lists this contextual action; empty/pending/archived submissions and active utility/search popups are guarded. See [Card conversation](card-conversation.md).
+
 New Card initially targets the current Project. Its searchable Project selector changes only the composer destination, preserving title/body/tags. Changing Project clears a selected GitHub Issue, replaces source-specific results and invalidates outstanding searches. A Note's copied text survives a target change; its context link is submitted only within its original Project. Successful creation opens the Card in its owning Project.
 
 Theme offers System/Light/Dark and Canban/Forest/Plum. UI Kit semantic tokens and native Terminal foreground/background/ANSI/cursor colors update together, preserving terminal identity, content and geometry. Appearance and palette are saved in `config/desktop.json`. Caffeine holds a system-idle sleep assertion while allowing display sleep; its dedicated AppServer worker owns the guard, so closing the UI does not release it. It is off after AppServer restart.
+
+The later real-use failure was an older persistent AppServer returning `Unknown operation: utilities.state` to a new UI. Desktop startup now checks the API level before opening the workspace, and `mise run run` replaces the local service with the current build. See [development startup and upgrade acceptance](development-startup.md). Earlier fresh-service tests did not cover this upgrade scenario.
 
 Report issue opens the repository's **Bug report** Issue Form directly, with public version/OS/architecture metadata prefilled in its editable Environment field. It does not submit an issue or require the Canban GitHub connection. Settings also offers Copy diagnostics with the same public metadata. Tokens, Terminal output and logs are not appended to the URL.
 
@@ -94,3 +100,7 @@ All application/runtime tests used a disposable home and isolated Core; the user
 - Report issue opened a New issue browser tab. URL/template behavior has a test; inspecting the full browser draft was stopped by automatic approval review because the active browser contained unrelated private pages. No issue was submitted.
 
 Live Claude quota and remote-machine quota probing were not accepted in this run; fixtures cover Claude's response/file/cswap contracts. Theme-file import, font customization, native notifications and a full shortcut rebinding editor remain outside this change.
+
+## Minimal Usage summary (2026-11-09)
+
+The bottom bar shows provider icons, percentages and reset countdowns directly. It no longer prefixes them with **Usage: AppServer host** or a machine name. Machine/account selection remains in the Usage details popup. Signed-out provider hiding and the existing usage/reset behavior are preserved.

@@ -335,6 +335,56 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
     let source_project = note.as_ref().map(|n| n.project_id.clone());
     let submit_key = key.clone();
     let submit_note = note_id.clone();
+    let can_create = computed(move || {
+        !ui.pending.get()
+            && !target.get().is_empty()
+            && if kind.get() == "github" {
+                draft.get().selected_issue.is_some()
+            } else {
+                !draft.get().title.trim().is_empty()
+            }
+    });
+    // Button, command help and keyboard all dispatch the same scoped form intent.
+    let seen_submit = stored(ui.card_submit.get_untracked());
+    effect(move || {
+        let ticket = ui.card_submit.get();
+        if seen_submit.replace(ticket) == ticket
+            || ui.page.get_untracked() != "new-card"
+            || !ui.utility_popup.get_untracked().is_empty()
+            || ui.quick_open.get_untracked()
+            || !can_create.get_untracked()
+        {
+            return;
+        }
+        let d = draft.get_untracked();
+        let is_github = kind.get_untracked() == "github";
+        let submit_project = target.get_untracked();
+        let mut params = if is_github {
+            json!({"project_id":submit_project,"number":d.selected_issue.as_ref().map(|r|&r["issue"]["number"]),"source_generation":d.selected_issue.as_ref().map(|r|&r["source_generation"]),"instructions":d.instructions})
+        } else {
+            json!({"project_id":submit_project,"title":d.title,"body":d.body,"tags":d.tags.split(',').map(str::trim).filter(|s|!s.is_empty()).collect::<Vec<_>>()})
+        };
+        if !submit_note.is_empty() && source_project.as_deref() == Some(submit_project.as_str()) {
+            params["source_note_id"] = json!(submit_note);
+        }
+        let key = submit_key.clone();
+        dispatch_complete(
+            ui,
+            if is_github {
+                "github.issue.add"
+            } else {
+                "card.create"
+            },
+            params,
+            move |result| {
+                if result.is_ok() {
+                    ui.drafts.with(|d| {
+                        d.remove(&key);
+                    });
+                }
+            },
+        );
+    });
     let mut form = view()
         .flex_1()
         .min_h(px(0.))
@@ -402,39 +452,172 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
             notice(text, Tone::Info)
         }));
     }
-    form.child(scroll().flex_1().min_h(px(0.)).child(panel().max_w(px(800.)).child(dynamic(move||{
-        if kind.get()=="local"{
-            return view().key("local-card-editor").gap_3().child(bound_field(move||draft.get().title,move|v|draft.update(|d|d.title=v.into()),"Card title").key("local-card-title"))
-                .child(bound_field(move||draft.get().body,move|v|draft.update(|d|d.body=v.into()),"Task description").key("local-card-body").multiline(true).h(px(220.)))
-                .child(bound_field(move||draft.get().tags,move|v|draft.update(|d|d.tags=v.into()),"Routing tags").key("local-card-tags")).into_element()
-        }
-        if !source_available.get(){return view().gap_2().child(muted("Connect this Project to a GitHub repository first.")).child(action("Open GitHub settings",Variant::Secondary,move |_|ui.navigate("settings"))).into_element()}
-        let selected=selected_issue.get();
-        let mut area=view().key("github-card-editor").gap_3().child(muted(current_source.get_untracked().map(|s|s.repository).unwrap_or_default()));
-        if let Some(row)=selected {
-            let i=row["issue"].clone();
-            area=area.child(view().key("github-source-preview").flex_row().gap_2().child(icon(Icon::GitHub)).child(label(format!("#{} · {}",i["number"],i["title"].as_str().unwrap_or("")))).child(action("Change Issue",Variant::Quiet,move |_|draft.update(|d|d.selected_issue=None))))
-                .child(nsh_base::text_view().markdown(i["body"].as_str().unwrap_or("").to_owned()).max_h(px(220.)));
-        }else{
-            area=area.child(bound_field(move||draft.get().issue_query,move|v|draft.update(|d|d.issue_query=v.into()),"Search by title or #number").key("github-issue-search").label("Search GitHub Issues"));
-            area=area.child(dynamic(move||{
-                let mut results=view().gap_2();
-                if loading.get(){results=results.child(muted("Searching…"));}
-                if !search_error.get().is_empty(){results=results.child(notice(search_error.get(),Tone::Attention));}
-                for row in rows.get(){let issue=&row["issue"];let existing=row["card_id"].as_str().map(str::to_owned).filter(|_|row["removed"]!=true);let text=format!("#{}  {} · {}",issue["number"],issue["title"].as_str().unwrap_or(""),if existing.is_some(){"Open existing"}else{issue["state"].as_str().unwrap_or("")});results=results.child(action(text,Variant::Secondary,move |_|{if let Some(id)=&existing{ui.open_card(id.clone());}else{draft.update(|d|d.selected_issue=Some(row.clone()));}}));}
-                if !loading.get() && search_error.get().is_empty() && !query_text.get().trim().is_empty() && rows.get().is_empty(){results=results.child(muted("No matching Issues"));}
-                results
-            }));
-        }
-        area.child(bound_field(move||draft.get().instructions,move|v|draft.update(|d|d.instructions=v.into()),"Additional instructions · local to Canban").key("github-issue-instructions").multiline(true).h(px(160.))).into_element()
-    }))))
-        .child(view().flex_row().gap_2().child(action("Cancel",Variant::Quiet,move |_|ui.navigate("board")))
-        .child(action(move||if kind.get()=="github"{"Add to Backlog"}else{"Create in Backlog"},Variant::Primary,move |_|{
-            let d=draft.get_untracked();let is_github=kind.get_untracked()=="github";let submit_project=target.get_untracked();
-            let mut params=if is_github{json!({"project_id":submit_project,"number":d.selected_issue.as_ref().map(|r|&r["issue"]["number"]),"source_generation":d.selected_issue.as_ref().map(|r|&r["source_generation"]),"instructions":d.instructions})}else{json!({"project_id":submit_project,"title":d.title,"body":d.body,"tags":d.tags.split(',').map(str::trim).filter(|s|!s.is_empty()).collect::<Vec<_>>()})};
-            if !submit_note.is_empty() && source_project.as_deref()==Some(submit_project.as_str()){params["source_note_id"]=json!(submit_note);}
-            let key=submit_key.clone();dispatch_complete(ui,if is_github{"github.issue.add"}else{"card.create"},params,move|r|{if r.is_ok(){ui.drafts.with(|d|{d.remove(&key);});}});
-        }).disabled(move||ui.pending.get() || target.get().is_empty() || if kind.get()=="github"{draft.get().selected_issue.is_none()}else{draft.get().title.trim().is_empty()})))
+    form.child(
+        scroll()
+            .flex_1()
+            .min_h(px(0.))
+            .child(panel().max_w(px(800.)).child(dynamic(move || {
+                if kind.get() == "local" {
+                    return view()
+                        .key("local-card-editor")
+                        .gap_3()
+                        .child(
+                            bound_field(
+                                move || draft.get().title,
+                                move |v| draft.update(|d| d.title = v.into()),
+                                "Card title",
+                            )
+                            .key("local-card-title"),
+                        )
+                        .child(
+                            bound_field(
+                                move || draft.get().body,
+                                move |v| draft.update(|d| d.body = v.into()),
+                                "Task description",
+                            )
+                            .key("local-card-body")
+                            .multiline(true)
+                            .h(px(220.)),
+                        )
+                        .child(
+                            bound_field(
+                                move || draft.get().tags,
+                                move |v| draft.update(|d| d.tags = v.into()),
+                                "Routing tags",
+                            )
+                            .key("local-card-tags"),
+                        )
+                        .into_element();
+                }
+                if !source_available.get() {
+                    return view()
+                        .gap_2()
+                        .child(muted("Connect this Project to a GitHub repository first."))
+                        .child(action(
+                            "Open GitHub settings",
+                            Variant::Secondary,
+                            move |_| ui.navigate("settings"),
+                        ))
+                        .into_element();
+                }
+                let selected = selected_issue.get();
+                let mut area = view().key("github-card-editor").gap_3().child(muted(
+                    current_source
+                        .get_untracked()
+                        .map(|s| s.repository)
+                        .unwrap_or_default(),
+                ));
+                if let Some(row) = selected {
+                    let i = row["issue"].clone();
+                    area = area
+                        .child(
+                            view()
+                                .key("github-source-preview")
+                                .flex_row()
+                                .gap_2()
+                                .child(icon(Icon::GitHub))
+                                .child(label(format!(
+                                    "#{} · {}",
+                                    i["number"],
+                                    i["title"].as_str().unwrap_or("")
+                                )))
+                                .child(action("Change Issue", Variant::Quiet, move |_| {
+                                    draft.update(|d| d.selected_issue = None)
+                                })),
+                        )
+                        .child(
+                            nsh_base::text_view()
+                                .markdown(i["body"].as_str().unwrap_or("").to_owned())
+                                .max_h(px(220.)),
+                        );
+                } else {
+                    area = area.child(
+                        bound_field(
+                            move || draft.get().issue_query,
+                            move |v| draft.update(|d| d.issue_query = v.into()),
+                            "Search by title or #number",
+                        )
+                        .key("github-issue-search")
+                        .label("Search GitHub Issues"),
+                    );
+                    area = area.child(dynamic(move || {
+                        let mut results = view().gap_2();
+                        if loading.get() {
+                            results = results.child(muted("Searching…"));
+                        }
+                        if !search_error.get().is_empty() {
+                            results = results.child(notice(search_error.get(), Tone::Attention));
+                        }
+                        for row in rows.get() {
+                            let issue = &row["issue"];
+                            let existing = row["card_id"]
+                                .as_str()
+                                .map(str::to_owned)
+                                .filter(|_| row["removed"] != true);
+                            let text = format!(
+                                "#{}  {} · {}",
+                                issue["number"],
+                                issue["title"].as_str().unwrap_or(""),
+                                if existing.is_some() {
+                                    "Open existing"
+                                } else {
+                                    issue["state"].as_str().unwrap_or("")
+                                }
+                            );
+                            results = results.child(action(text, Variant::Secondary, move |_| {
+                                if let Some(id) = &existing {
+                                    ui.open_card(id.clone());
+                                } else {
+                                    draft.update(|d| d.selected_issue = Some(row.clone()));
+                                }
+                            }));
+                        }
+                        if !loading.get()
+                            && search_error.get().is_empty()
+                            && !query_text.get().trim().is_empty()
+                            && rows.get().is_empty()
+                        {
+                            results = results.child(muted("No matching Issues"));
+                        }
+                        results
+                    }));
+                }
+                area.child(
+                    bound_field(
+                        move || draft.get().instructions,
+                        move |v| draft.update(|d| d.instructions = v.into()),
+                        "Additional instructions · local to Canban",
+                    )
+                    .key("github-issue-instructions")
+                    .multiline(true)
+                    .h(px(160.)),
+                )
+                .into_element()
+            }))),
+    )
+    .child(
+        view()
+            .flex_row()
+            .gap_2()
+            .child(action("Cancel", Variant::Quiet, move |_| {
+                ui.navigate("board")
+            }))
+            .child(
+                view()
+                    .tooltip(
+                        nsh_base::tooltip()
+                            .placement(Placement::Top)
+                            .child(label("Create · ⌘Enter")),
+                    )
+                    .child(
+                        action("Create", Variant::Primary, move |_| {
+                            ui.card_submit.update(|n| *n += 1)
+                        })
+                        .accessibility_label(|| Some("Create · ⌘Enter".into()))
+                        .disabled(move || !can_create.get()),
+                    ),
+            ),
+    )
 }
 pub fn card_source(ui: Ui) -> impl IntoElement {
     dynamic(move || {

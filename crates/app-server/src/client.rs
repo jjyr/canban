@@ -33,9 +33,12 @@ impl AppClient {
         }
         let mut state = None;
         for _ in 0..100 {
-            if let Ok(v) = rpc(&endpoint, "app.state", json!({})) {
-                state = Some(v);
-                break;
+            if let Ok(ping) = rpc(&endpoint, "app.ping", json!({})) {
+                check_api(&ping)?;
+                if let Ok(v) = rpc(&endpoint, "app.state", json!({})) {
+                    state = Some(v);
+                    break;
+                }
             }
             if explicit.is_some() {
                 break;
@@ -90,6 +93,17 @@ impl AppClient {
         rx
     }
 }
+
+fn check_api(ping: &Value) -> Result<()> {
+    ensure!(
+        ping["api_version"]
+            .as_u64()
+            .is_some_and(|v| v >= u64::from(API_VERSION)),
+        "The running AppServer is older than this UI. Use `mise run run` to restart the local service with the current development build. For CANBAN_ENDPOINT, update the service on its owning host."
+    );
+    Ok(())
+}
+
 impl AppServer {
     pub(super) fn relay(&self, mut stream: UnixStream, params: &Value) -> Result<()> {
         let _viewer = if let Some(terminal) = params["terminal"].as_str() {
@@ -116,5 +130,16 @@ impl AppServer {
         let _ = child.wait();
         let _ = reverse.join();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn old_service_is_rejected_even_when_package_versions_match() {
+        assert!(check_api(&json!({"version":env!("CARGO_PKG_VERSION")})).is_err());
+        assert!(check_api(&json!({"api_version":0})).is_err());
+        check_api(&json!({"api_version":API_VERSION})).unwrap();
     }
 }

@@ -129,7 +129,11 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     }
                     content
                 } else {
-                    view().gap_3().child(action("New terminal",Variant::Primary,move |_|new_tab(ui)).disabled(move||ui.pending.get())).child(muted("⌘T"))
+                    view().gap_3().child(when(move || card_context(ui).is_some(), move || {
+                        let card = card_context(ui).unwrap();
+                        view().gap_2().child(label(format!("#{} {}",card.number,card.title)))
+                            .child(action("Choose Agent",Variant::Primary,move |_|choose_card_agent(ui)).disabled(move || ui.pending.get() || card_context(ui).is_none_or(|c| c.archived_at.is_some())))
+                    })).child(action("New terminal",Variant::Secondary,move |_|new_tab(ui)).disabled(move||ui.pending.get())).child(muted("⌘T"))
                 })).into_element();
             };
             let Some(app)=crate::APP.get() else {

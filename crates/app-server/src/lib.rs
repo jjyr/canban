@@ -15,6 +15,9 @@ use std::{
     time::Duration,
 };
 
+/// Increment when desktop clients need operations unavailable in older services.
+pub const API_VERSION: u32 = 1;
+
 pub struct AppServer {
     utilities: utilities::Utilities,
     pub home: PathBuf,

@@ -173,12 +173,6 @@ impl AppServer {
                 self.github_sync(strp(&p, "project_id")?)?;
                 Ok(json!({"synced":true}))
             }
-            "card.remove" => self.mutate(method, &p, |db| {
-                let mut c: Card = db.get(strp(&p, "card_id")?)?;
-                revise(&c, &p)?;
-                integration::remove(db, &mut c)?;
-                Ok(json!({"removed":true,"card_id":c.id}))
-            }),
             "github.pr.publish" => self.github_publish(p),
             "github.pr.refresh" => self.github_pr_refresh(p),
             "github.pr.merge" => self.github_pr_merge(p),

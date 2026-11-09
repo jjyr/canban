@@ -306,6 +306,17 @@ pub fn header(ui: Ui) -> impl IntoElement {
             action("▾", Variant::Quiet, move |_| machine_menu(ui))
                 .accessibility_label(|| Some("Choose terminal machine".into())),
         )
+        .child(when(
+            move || card_context(ui).is_some_and(|c| c.archived_at.is_none()),
+            move || {
+                chrome_button_disabled(
+                    Icon::Agent,
+                    "Choose Card Agent",
+                    move || ui.pending.get(),
+                    move |_| choose_card_agent(ui),
+                )
+            },
+        ))
         .child(view().flex_1().min_w(px(24.)).h_full().window_drag(true))
         .child(dynamic(move || {
             let _ = context.get();

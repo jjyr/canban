@@ -15,7 +15,7 @@ run = "cargo test --workspace"
 
 [tasks.run]
 depends = ["build"]
-run = ".local/Canban.app/Contents/MacOS/canban-ui"
+run = "/usr/bin/python3 scripts/dev.py"
 
 [tasks.build]
 depends = ["terminal-deps"]
@@ -28,6 +28,10 @@ run = ["cargo build -p canban-ui --example gallery", "/usr/bin/python3 scripts/p
 [tasks.gallery]
 depends = ["build-gallery"]
 run = ".local/CanbanGallery.app/Contents/MacOS/gallery"
+
+[tasks.acceptance-dev]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-dev.py"
 
 [tasks.acceptance]
 depends = ["build"]

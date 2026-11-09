@@ -19,6 +19,8 @@ pub struct Ui {
     /// Commands outlive transient buttons/lists, but end with the window.
     pub owner: Owner,
     pub card_target: Signal<String>,
+    pub card_submit: Signal<u64>,
+    pub comment_submit: Signal<u64>,
     pub utility: Signal<Value>,
     pub utility_popup: Signal<String>,
     pub utility_query: Signal<String>,
@@ -69,7 +71,6 @@ pub struct Ui {
     pub output_request: Signal<u64>,
     pub review: Signal<Option<ReviewPreview>>,
     pub review_request: Signal<u64>,
-    pub board_filter: Signal<String>,
     pub note: Signal<String>,
     pub source_note: Signal<String>,
     pub drafts: Stored<BTreeMap<String, Draft>>,
@@ -127,6 +128,8 @@ impl Ui {
         Self {
             owner: Owner::current(),
             card_target: signal(String::new()),
+            card_submit: signal(0),
+            comment_submit: signal(0),
             utility: signal(
                 json!({"preferences":{"appearance":"system","palette":"canban"},"awake":false}),
             ),
@@ -194,7 +197,6 @@ impl Ui {
             output_request: signal(0),
             review: signal(None),
             review_request: signal(0),
-            board_filter: signal("all".into()),
             note: signal(String::new()),
             source_note: signal(String::new()),
             drafts: stored(BTreeMap::new()),

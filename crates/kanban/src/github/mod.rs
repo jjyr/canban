@@ -247,41 +247,8 @@ fn event(
     Ok(())
 }
 pub fn remove(db: Db<'_>, card: &mut Card) -> Result<()> {
-    ensure!(
-        card.github_issue().is_some(),
-        "Remove from Board applies to GitHub Issue Cards"
-    );
-    ensure!(
-        !db.list::<Attempt>()?.iter().any(|a| a.card_id == card.id
-            && a.terminal.is_some()
-            && a.observed.as_ref().is_none_or(|s| s["state"] != "finished")),
-        "End active Card Agents before removing this Card"
-    );
-    ensure!(
-        !db.list::<Request>()?
-            .iter()
-            .any(|r| r.card_id == card.id && matches!(r.state.as_str(), "starting" | "unknown")),
-        "Resolve uncertain Card executions before removal"
-    );
-    for mut r in db
-        .list::<Request>()?
-        .into_iter()
-        .filter(|r| r.card_id == card.id && r.state == "queued")
-    {
-        r.state = "cancelled".into();
-        db.save(&r)?;
-    }
-    card.removed_at = Some(now());
-    card.revision += 1;
-    db.save(card)?;
-    event(
-        db,
-        card,
-        "card.removed",
-        "user",
-        "Removed from Board; GitHub Issue unchanged",
-        json!({}),
-    )
+    super::remove(db, card)
 }
+
 #[cfg(test)]
 mod tests;

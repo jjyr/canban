@@ -19,6 +19,8 @@ pub struct Draft {
     pub revision: u64,
     pub editing: bool,
     pub details: bool,
+    pub task_expanded: bool,
+    pub workspace_details: bool,
     pub error: String,
 }
 impl Draft {

@@ -170,6 +170,20 @@ pub fn Gallery() -> impl IntoElement {
                     ui.card.set("card-1".into());
                     ui.page.set("card".into());
                 }))
+                .child(action("Card conversation", Variant::Secondary, move |_| {
+                    scene.set("workspace".into()); ui.snapshot.set(fixtures::conversation());
+                    ui.card.set("card-1".into()); ui.page.set("card".into());
+                }))
+                .child(action("Append reply", Variant::Quiet, move |_| {
+                    ui.snapshot.update(|s| {
+                        let mut event=fixtures::timeline();
+                        event.sequence=s.events.iter().map(|e|e.sequence).max().unwrap_or(0)+1;
+                        event.id=format!("new-{}",event.sequence); event.card_id="card-1".into();
+                        event.kind="comment.replied".into(); event.actor="agent:developer".into();
+                        event.message="New reply arrived while you were reading.\n\nContinue from your current position, or jump to latest.".into();
+                        s.events.push(event);
+                    });
+                }))
                 .child(action("Notes workspace", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
                     ui.snapshot.set(fixtures::workspace());
@@ -214,6 +228,12 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Scheduling", Variant::Quiet, move |_| {
                     scene.set("scheduling".into());
                 }))
+                .child(action("Archived / deleted", Variant::Quiet, move |_| {
+                    let mut snapshot=fixtures::workspace();
+                    snapshot.cards[0].archived_at=Some(canban_types::now());
+                    snapshot.cards[1].removed_at=Some(canban_types::now());
+                    ui.snapshot.set(snapshot);ui.card.set(String::new());ui.page.set("archive".into());scene.set("workspace".into());
+                }))
                 .child(action("Card states", Variant::Quiet, move |_| {
                     scene.set("workspace".into());ui.snapshot.set(fixtures::board_cards());ui.card.set(String::new());ui.page.set("board".into());
                 }))
@@ -221,6 +241,10 @@ pub fn Gallery() -> impl IntoElement {
                     ui.usage.set(json!({"machine":"local","updated_at":canban_types::now(),"readings":[{"provider":"codex","auth":"present","account":"demo@example.invalid","windows":[{"name":"Session","used":22,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+5*86400) as i64,0).unwrap().to_rfc3339()}]},{"provider":"claude","auth":"present","account":"other@example.invalid","stale":true,"error":"HTTP 429","windows":[{"name":"Weekly","used":68,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+7*86400) as i64,0).unwrap().to_rfc3339()}]}]}));
                 }))
                 .child(action("No signed-in providers", Variant::Quiet, move |_| {ui.usage.set(json!({"readings":[]}));}))
+                .child(action("New Project", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    ui.navigate("new-project");
+                }))
                 .child(action("New Card", Variant::Quiet, move |_| {
                     let mut snapshot=fixtures::workspace();
                     snapshot.projects[0].github=Some(canban_types::GitHubSource { repository:"jjyr/canban".into(),repository_id:1,generation:"gallery".into(),intake:canban_types::GitHubIntake::All,synced_at:None,error:None });

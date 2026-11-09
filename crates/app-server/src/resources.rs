@@ -317,6 +317,7 @@ impl AppServer {
             let mut c: Card = db.get(id)?;
             revise(&c, p)?;
             c.archived_at = None;
+            c.removed_at = None;
             c.archive = None;
             c.revision += 1;
             db.save(&c)?;

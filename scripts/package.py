@@ -9,10 +9,12 @@ import tempfile
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument("--gallery", action="store_true", help="Package only the standalone component example")
+kind = parser.add_mutually_exclusive_group()
+kind.add_argument("--gallery", action="store_true", help="Package only the standalone component example")
+kind.add_argument("--dev", action="store_true", help="Package the development app with its own bundle identity")
 args = parser.parse_args()
-name = "CanbanGallery" if args.gallery else "Canban"
-app_id = "com.canban.gallery" if args.gallery else "com.canban.desktop"
+name = "CanbanGallery" if args.gallery else "CanbanDev" if args.dev else "Canban"
+app_id = "com.canban.gallery" if args.gallery else "com.canban.dev" if args.dev else "com.canban.desktop"
 executable = "gallery" if args.gallery else "canban-ui"
 app = root / ".local" / (name + ".app")
 binaries = {"gallery": root / "target/debug/examples/gallery"} if args.gallery else {

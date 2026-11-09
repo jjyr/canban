@@ -22,7 +22,7 @@ pub fn screen(ui: Ui, page: &str) -> AnyElement {
             .child(scroll().flex_1().child(crate::machines::settings(ui)))
             .into_element(),
         "project-location" => crate::machines::project_location(ui).into_element(),
-        "new-project" => new_project(ui).into_element(),
+        "new-project" => crate::projects::new_project(ui).into_element(),
         "new-card" => new_card(ui).into_element(),
         "notes" => crate::notes::screen(ui).into_element(),
         "terminals" | "terminal" => crate::terminals::screen(ui).into_element(),
@@ -33,60 +33,114 @@ pub fn screen(ui: Ui, page: &str) -> AnyElement {
         _ => crate::workspace::screen(ui).into_element(),
     }
 }
-fn new_project(ui: Ui) -> impl IntoElement {
-    let name = signal(String::new());
-    let directory = signal(String::new());
-    let machine = signal("local".to_owned());
-    layout("New Project", "A source directory holds the work; Canban keeps its Board, Notes and history.")
-        .child(scroll().flex_1().min_h(px(0.)).child(
-            settings_section("Project details", "Choose an existing folder or enter a new directory path. Git is optional.")
-                .max_w(px(720.))
-                .child(settings_field("Project name", "You can change the suggested name before creating the Project.",
-                    field(name, "Name").label("Project name")))
-                .child(crate::machines::location_fields(ui,machine,directory))
-                .child(view().flex_row().flex_wrap().gap_2()
-                    .child(action("Create Project", Variant::Primary, move |_| {
-                        dispatch(ui, "project.create", json!({"name": name.get_untracked().trim(), "location":{"machine":machine.get_untracked(),"directory": directory.get_untracked().trim()}}));
-                    }).disabled(move || ui.pending.get() || name.get().trim().is_empty() || directory.get().trim().is_empty()))
-                    .child(action("Cancel", Variant::Quiet, move |_| ui.navigate("board"))))
-        ))
-}
 
 fn new_card(ui: Ui) -> impl IntoElement {
     crate::github::new_card(ui)
 }
+fn archived_row(ui: Ui, card: canban_types::Card) -> View {
+    let id = card.id.clone();
+    let mut row = panel().child(label(format!("#{} · {}", card.number, card.title)));
+    if let Some(error) = &card.archive_error {
+        row = row.child(notice(error.clone(), Tone::Attention));
+    }
+    row.child(
+        view()
+            .flex_row()
+            .gap_2()
+            .child(action("Open Card", Variant::Secondary, move |_| {
+                ui.open_card(id.clone())
+            }))
+            .child(
+                action("Restore", Variant::Quiet, move |_| {
+                    crate::card_actions::apply(
+                        ui,
+                        card.clone(),
+                        crate::card_actions::Action::Restore,
+                    )
+                })
+                .disabled(move || ui.pending.get()),
+            ),
+    )
+}
 fn archived(ui: Ui) -> impl IntoElement {
-    layout("Archived Cards", move || {
-        let _ = ui.project.get();
-        ui.current_project()
-            .map(|p| p.name)
-            .unwrap_or_else(|| "No Project selected".into())
-    })
-    .child(scroll().flex_1().child(dynamic(move || {
-        let project = ui.project.get();
-        view().gap_3().children(ui.snapshot.with(|s| {
+    let removed = signal(Vec::<canban_types::Card>::new());
+    let error = signal(String::new());
+    let epoch = signal(0_u64);
+    let active = computed(move || {
+        ui.snapshot.with(|s| {
             s.cards
                 .iter()
-                .filter(|c| c.project_id == project && c.archived_at.is_some())
-                .map(|c| {
-                    let id = c.id.clone();
-                    panel()
-                        .child(label(format!("#{} · {}", c.number, c.title)))
-                        .child(muted(c.archive.clone().unwrap_or_else(|| {
-                            c.archive_error
-                                .clone()
-                                .unwrap_or_else(|| "Compression pending".into())
-                        })))
-                        .child(action(
-                            "Open archived Card",
-                            Variant::Secondary,
-                            move |_| ui.open_card(id.clone()),
-                        ))
-                        .into_element()
-                })
+                .map(|c| (c.id.clone(), c.revision))
                 .collect::<Vec<_>>()
+        })
+    });
+    effect(move || {
+        let project = ui.project.get();
+        let _ = active.get();
+        let Some(app) = crate::APP.get().cloned() else {
+            removed.set(ui.snapshot.with_untracked(|s| {
+                s.cards
+                    .iter()
+                    .filter(|c| c.project_id == project && c.removed_at.is_some())
+                    .cloned()
+                    .collect()
+            }));
+            return;
+        };
+        let ticket = epoch.get_untracked() + 1;
+        epoch.set(ticket);
+        removed.set(Vec::new());
+        error.set(String::new());
+        ui.spawn(async move {
+            let result = blocking(move || {
+                app.call(
+                    "card.list",
+                    json!({"project_id":project,"include_removed":true}),
+                )
+                .and_then(|v| Ok(serde_json::from_value::<Vec<canban_types::Card>>(v)?))
+            })
+            .await;
+            if epoch.try_get() != Some(ticket) {
+                return;
+            }
+            match result {
+                Ok(Ok(cards)) => {
+                    removed.set(
+                        cards
+                            .into_iter()
+                            .filter(|c| c.removed_at.is_some())
+                            .collect(),
+                    );
+                }
+                Ok(Err(e)) => {
+                    error.set(format!("{e:#}"));
+                }
+                Err(e) => {
+                    error.set(e.to_string());
+                }
+            }
+        });
+    });
+    layout("Archived Cards", move || {
+        let _ = ui.project.get();
+        ui.current_project().map(|p| p.name).unwrap_or_else(|| "No Project selected".into())
+    }).child(scroll().flex_1().child(view().w_full().max_w(px(880.)).gap_3()
+        .child(dynamic(move || {
+            let project=ui.project.get();
+            view().gap_3().children(ui.snapshot.with(|s| s.cards.iter().filter(|c|c.project_id==project && c.archived_at.is_some() && c.removed_at.is_none()).map(|c|{
+                archived_row(ui,c.clone()).into_element()
+            }).collect::<Vec<_>>()))
         }))
-    })))
+        .child(when(move || !removed.get().is_empty(),move || {
+            view().gap_3().child(label("Deleted Cards")).child(dynamic(move || {
+                view().gap_3().children(removed.get().into_iter().map(|c|{
+                    panel().child(label(format!("#{} · {}",c.number,c.title)))
+                        .child(view().flex_row().child(action("Restore",Variant::Quiet,move |_|crate::card_actions::apply(ui,c.clone(),crate::card_actions::Action::Restore)).disabled(move || ui.pending.get()))).into_element()
+                }).collect::<Vec<_>>())
+            }))
+        }))
+        .child(when(move || !error.get().is_empty(),move || notice(error.get(),Tone::Attention)))
+    ))
 }
 fn settings(ui: Ui) -> impl IntoElement {
     let home = crate::APP

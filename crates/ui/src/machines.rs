@@ -120,7 +120,8 @@ fn browse(
         }
     });
 }
-pub fn location_fields(
+/// Editable path with one machine-appropriate chooser, shared by creation/settings.
+pub fn directory_picker(
     ui: Ui,
     machine: Signal<String>,
     directory: Signal<String>,
@@ -138,28 +139,17 @@ pub fn location_fields(
         result.set(Value::Null);
         error.set(String::new());
     });
-    settings_field(
-        "Execution machine",
-        "New work uses this machine. Existing Agents retain their original environment.",
-        picker(ui, machine, directory),
-    )
-    .child(settings_field(
-        "Source directory",
-        "Enter an absolute path on the selected machine. New directories are created on save.",
-        view()
-            .gap_2()
-            .child(dynamic(move || {
-                if machine.get() == "local" && std::env::var_os("CANBAN_ENDPOINT").is_none() {
-                    directory_field(directory, |_| {}).into_element()
-                } else {
-                    field(directory, "/absolute/path/to/project")
-                        .label("Source directory")
-                        .into_element()
-                }
-            }))
-            .child(
-                view().items_start().child(
-                    action("Browse on machine…", Variant::Quiet, move |_| {
+    view()
+        .min_w(px(0.))
+        .gap_2()
+        .child(dynamic(move || {
+            if machine.get() == "local" && std::env::var_os("CANBAN_ENDPOINT").is_none() {
+                directory_field(directory, |_| {}).into_element()
+            } else {
+                directory_input(
+                    directory,
+                    move || busy.get(),
+                    move |_| {
                         open.set(true);
                         browse(
                             ui,
@@ -170,60 +160,83 @@ pub fn location_fields(
                             error,
                             epoch,
                         );
-                    })
-                    .disabled(move || busy.get()),
-                ),
-            )
-            .child(dynamic(move || {
-                if !open.get() {
-                    return view();
-                }
-                let v = result.get();
-                let path = v["path"].as_str().unwrap_or("").to_owned();
-                let mut panel = panel().gap_2().max_h(px(320.));
-                if !error.get().is_empty() {
-                    panel = panel.child(notice(error.get(), Tone::Attention));
-                }
-                if !path.is_empty() {
-                    let choose = path.clone();
-                    let parent = v["parent"].as_str().unwrap_or("/").to_owned();
-                    panel = panel.child(label(path)).child(
-                        view()
-                            .flex_row()
-                            .gap_2()
-                            .child(action("Use this directory", Variant::Primary, move |_| {
+                    },
+                )
+                .into_element()
+            }
+        }))
+        .child(dynamic(move || {
+            if !open.get() {
+                return view();
+            }
+            let v = result.get();
+            let path = v["path"].as_str().unwrap_or("").to_owned();
+            let mut panel = panel().gap_2().max_h(px(320.));
+            if busy.get() {
+                panel = panel.child(muted("Loading directories…"));
+            }
+            if !error.get().is_empty() {
+                panel = panel.child(notice(error.get(), Tone::Attention));
+            }
+            if !path.is_empty() {
+                let choose = path.clone();
+                let parent = v["parent"].as_str().unwrap_or("/").to_owned();
+                panel = panel.child(label(path)).child(
+                    view()
+                        .flex_row()
+                        .gap_2()
+                        .child(
+                            action("Use this directory", Variant::Primary, move |_| {
                                 directory.set(choose.clone());
                                 open.set(false);
-                            }))
-                            .child(
-                                action("Parent", Variant::Quiet, move |_| {
-                                    browse(ui, machine, parent.clone(), result, busy, error, epoch)
-                                })
-                                .disabled(move || busy.get()),
-                            ),
-                    );
-                }
-                let mut dirs = view().gap_1();
-                for row in v["directories"].as_array().cloned().unwrap_or_default() {
-                    let path = row["path"].as_str().unwrap_or("").to_owned();
-                    let title = row["name"].as_str().unwrap_or("").to_owned();
-                    dirs = dirs.child(
-                        action(title, Variant::Quiet, move |_| {
-                            browse(ui, machine, path.clone(), result, busy, error, epoch)
-                        })
-                        .disabled(move || busy.get()),
-                    );
-                }
-                panel
-                    .child(scroll().max_h(px(200.)).child(dirs))
-                    .child(action("Close browser", Variant::Quiet, move |_| {
-                        epoch.update(|v| *v += 1);
-                        busy.set(false);
-                        open.set(false);
-                    }))
-            })),
+                            })
+                            .disabled(move || busy.get()),
+                        )
+                        .child(
+                            action("Parent", Variant::Quiet, move |_| {
+                                browse(ui, machine, parent.clone(), result, busy, error, epoch)
+                            })
+                            .disabled(move || busy.get()),
+                        ),
+                );
+            }
+            let mut dirs = view().gap_1();
+            for row in v["directories"].as_array().cloned().unwrap_or_default() {
+                let path = row["path"].as_str().unwrap_or("").to_owned();
+                let title = row["name"].as_str().unwrap_or("").to_owned();
+                dirs = dirs.child(
+                    action(title, Variant::Quiet, move |_| {
+                        browse(ui, machine, path.clone(), result, busy, error, epoch)
+                    })
+                    .disabled(move || busy.get()),
+                );
+            }
+            panel
+                .child(scroll().max_h(px(200.)).child(dirs))
+                .child(action("Close browser", Variant::Quiet, move |_| {
+                    epoch.update(|v| *v += 1);
+                    busy.set(false);
+                    open.set(false);
+                }))
+        }))
+}
+pub fn location_fields(
+    ui: Ui,
+    machine: Signal<String>,
+    directory: Signal<String>,
+) -> impl IntoElement {
+    settings_field(
+        "Execution machine",
+        "New work uses this machine. Existing Agents retain their original environment.",
+        picker(ui, machine, directory),
+    )
+    .child(settings_field(
+        "Directory",
+        "Enter an absolute path on the selected machine. New directories are created on save.",
+        directory_picker(ui, machine, directory),
     ))
 }
+
 pub fn project_location(ui: Ui) -> impl IntoElement {
     let p = ui.current_project();
     let initial = p
