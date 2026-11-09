@@ -131,7 +131,7 @@ fn appserver_rejects_a_second_owner_and_supports_explicit_shutdown() {
     drop(running);
 }
 #[test]
-fn remote_completion_uses_a_later_root_turn_without_comparing_host_clocks() {
+fn remote_completion_keeps_terminal_without_an_exit_intent_or_clock_comparison() {
     let (_dir, app, _, c) = setup();
     app.call(
         "card.move",
@@ -139,22 +139,18 @@ fn remote_completion_uses_a_later_root_turn_without_comparing_host_clocks() {
     )
     .unwrap();
     let s = app.snapshot().unwrap();
-    let mut a = admit(&app, &s.requests[0]);
-    a.location = Some(WorkLocation {
-        machine: "remote-owner".into(),
-        directory: "/repo".into(),
-    });
-    a.completion_turn = Some(5);
-    a.completed_at = Some(100000);
-    assert!(crate::runtime::completion_ready(
+    let a = admit(&app, &s.requests[0]);
+    app.call("execution.report",json!({"execution":{"request_id":a.request_id,"attempt_number":a.number},"state":"completed","message":"Done","request_key":"remote-retain"})).unwrap();
+    app.observe_lifecycle(
         &a,
-        &json!({"state":"live","status":{"state":"done"},"turn":6,"status_ms":100})
-    ));
-    assert!(!crate::runtime::completion_ready(
-        &a,
-        &json!({"state":"live","status":{"state":"done"},"turn":5,"status_ms":200000})
-    ));
+        &json!({"state":"live","status":{"state":"done"},"turn":6,"status_ms":100}),
+    )
+    .unwrap();
+    let a = &app.snapshot().unwrap().attempts[0];
+    assert!(a.close_state.is_empty());
+    assert!(!a.finished());
 }
+
 #[test]
 fn offline_work_does_not_starve_local_boards_or_fall_back_for_terminals() {
     let (dir, app, p, c) = setup();

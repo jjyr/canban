@@ -112,13 +112,9 @@ pub fn activate(ui: Ui, row: Candidate) {
     match row.target {
         Target::Project(id) => ui.select_project(id),
         Target::Card(id) => {
-            if ui.page.get_untracked() == "overview" {
-                ui.return_overview.set(true);
-            }
             ui.open_card(id);
         }
         Target::Note(id) => {
-            ui.return_overview.set(false);
             ui.open_note(id);
         }
         Target::Agent(id) | Target::Terminal(id) => ui.open_terminal(id),

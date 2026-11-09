@@ -425,9 +425,13 @@ pub struct RuntimeWait {
 }
 impl Attempt {
     pub fn finished(&self) -> bool {
-        self.observed
-            .as_ref()
-            .is_some_and(|v| v["state"] == "finished")
+        self.state == "continued"
+            || self.connection_state == "missing"
+            || self.terminal.is_none() && self.state == "failed"
+            || self
+                .observed
+                .as_ref()
+                .is_some_and(|v| v["state"] == "finished")
     }
     /// A stale or disconnected status must not release scheduling capacity.
     pub fn runtime_status(&self) -> &str {

@@ -82,7 +82,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                 let title = if popup == "usage" {
                     "Subscription usage"
                 } else {
-                    "Appearance"
+                    "Theme"
                 };
                 on_key_with(
                     "escape",
@@ -116,11 +116,14 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                 panel()
                                     .w(px(460.))
                                     .max_w(Percentage(0.95))
+                                    .h(px(if popup == "usage" { 480. } else { 660. }))
                                     .max_h(Percentage(0.8))
+                                    .overflow_hidden()
                                     .border_1()
                                     .border_color(BORDER)
                                     .child(
                                         view()
+                                            .flex_shrink_0()
                                             .flex_row()
                                             .justify_between()
                                             .items_center()
@@ -129,11 +132,15 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                                 close(ui)
                                             })),
                                     )
-                                    .child(scroll().min_h(px(0.)).child(if popup == "usage" {
-                                        usage_panel(ui).into_element()
-                                    } else {
-                                        theme_panel(ui).into_element()
-                                    })),
+                                    .child(
+                                        scroll().flex_1().min_h(px(0.)).overflow_hidden().child(
+                                            if popup == "usage" {
+                                                usage_panel(ui).into_element()
+                                            } else {
+                                                theme_panel(ui).into_element()
+                                            },
+                                        ),
+                                    ),
                             ),
                     )
                     .into_element()
@@ -142,73 +149,42 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
     )
 }
 fn theme_panel(ui: Ui) -> impl IntoElement {
-    view()
-        .gap_3()
-        .child(muted("Appearance"))
-        .child(
-            view().flex_row().gap_2().children(
-                [("system", "System"), ("light", "Light"), ("dark", "Dark")]
-                    .into_iter()
-                    .map(|(key, title)| {
-                        segment(
-                            title,
-                            None,
-                            move || {
-                                ui.utility.with(|v| {
-                                    v["preferences"]["appearance"].as_str().unwrap_or("system")
-                                        == key
-                                })
-                            },
-                            move |_| {
-                                let palette = ui.utility.with_untracked(|v| {
-                                    v["preferences"]["palette"]
-                                        .as_str()
-                                        .unwrap_or("canban")
-                                        .to_owned()
-                                });
-                                configure(ui, key.into(), palette);
-                            },
-                        )
-                        .disabled(move || ui.pending.get())
-                        .into_element()
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-        )
-        .child(muted("Palette · shared by the application and Terminal"))
-        .child(
-            view().flex_row().flex_wrap().gap_2().children(
-                [("canban", "Canban"), ("forest", "Forest"), ("plum", "Plum")]
-                    .into_iter()
-                    .map(|(key, title)| {
-                        segment(
-                            title,
-                            Some(Icon::Theme),
-                            move || {
-                                ui.utility.with(|v| {
-                                    v["preferences"]["palette"].as_str().unwrap_or("canban") == key
-                                })
-                            },
-                            move |_| {
-                                let appearance = ui.utility.with_untracked(|v| {
-                                    v["preferences"]["appearance"]
-                                        .as_str()
-                                        .unwrap_or("system")
-                                        .to_owned()
-                                });
-                                configure(ui, appearance, key.into());
-                            },
-                        )
-                        .disabled(move || ui.pending.get())
-                        .into_element()
-                    })
-                    .collect::<Vec<_>>(),
-            ),
-        )
-        .child(muted(
-            "Changes apply immediately and are saved. Terminal history stays intact.",
-        ))
+    view().gap_3().child(
+        view().flex_row().flex_wrap().gap_2().children(
+            canban_themes::THEMES
+                .iter()
+                .map(|theme| {
+                    theme_choice(
+                        theme,
+                        move || {
+                            ui.utility.with(|v| {
+                                v["preferences"]["theme"]
+                                    .as_str()
+                                    .unwrap_or(canban_themes::DEFAULT)
+                                    == theme.id
+                            })
+                        },
+                        move |hovered| {
+                            if hovered && ui.utility_popup.get_untracked() == "theme" {
+                                ui.theme_preview.set(Some(theme.id.into()));
+                            } else if ui
+                                .theme_preview
+                                .with_untracked(|v| v.as_deref() == Some(theme.id))
+                            {
+                                // A late leave from the previous tile cannot clear the next preview.
+                                ui.theme_preview.set(None);
+                            }
+                        },
+                        move || ui.pending.get(),
+                        move |_| configure(ui, theme.id.into()),
+                    )
+                    .into_element()
+                })
+                .collect::<Vec<_>>(),
+        ),
+    )
 }
+
 fn machine_menu(ui: Ui) {
     use nsh_core::element::desktop::{MenuItem, popup_menu};
     ui.spawn(async move {

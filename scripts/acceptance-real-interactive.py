@@ -31,7 +31,7 @@ def wait(predicate,label,timeout=300):
 try:
  wait(lambda _:True,'startup',20)
  config=json.loads((home/'config/agents.json').read_text());config['hc_env']=core_env;config['hc_session']=core_env['HC_SESSION']
- (home/'config/agents.json').write_text(json.dumps(config,indent=2));call('config.reload')
+ (home/'config/agents.json').write_text(json.dumps(config,indent=2));call('config.reload');call('scheduler.configure',{'idle_minutes':1})
  source=base/'source';source.mkdir();(source/'greeting.py').write_text('def greet(name):\n    return "TODO"\n')
  (source/'test_greeting.py').write_text('import unittest\nfrom greeting import greet\nclass Tests(unittest.TestCase):\n    def test_ascii(self):self.assertEqual(greet("Ada"),"Hello, Ada!")\n    def test_unicode(self):self.assertEqual(greet("世界"),"Hello, 世界!")\n')
  (source/'.gitignore').write_text('__pycache__/\n')

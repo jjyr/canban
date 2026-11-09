@@ -1,5 +1,7 @@
 # Agent Overview and lifecycle implementation
 
+Current behavior update, 2026-11-09: [Terminal interaction and navigation](terminal-interaction.md) supersedes immediate completion exit, indefinite viewer protection and ended-session pages. Completed Agents stay interactive until their configurable idle timeout; actual user input renews activity, exited sessions leave the Terminal list/tabs, and exact Resume lives on the Card.
+
 Implemented 2026-11-07. This supersedes the former policy that every retained terminal occupied an execution slot. Board remains the startup workspace. Overview is the global handling destination across all Projects in the current Canban home.
 
 Navigation update 2026-11-08: Overview now directly renders all nonempty groups without filter buttons/state; the Needs attention section is labeled **Needs you**. [Current UI contract and acceptance](workspace-entry-and-settings.md) also covers grouped Settings.
@@ -101,3 +103,19 @@ canban call agent.open '{"card_id":"CARD_ID","profile_id":"developer","expected_
 These are deterministic providers running through real Herdr terminals, not new paid/live Claude/Codex task acceptance. Chinese IME remains explicitly excluded; Claude authentication remains a separate existing prerequisite.
 
 Final checks: 58 Rust tests passed, all-target Clippy with warnings denied, main/Gallery builds, formatting, diff whitespace and Python syntax checks. General acceptance passed at `/private/tmp/cb-6uo6vrpk/home`; interactive/recovery acceptance passed at `/private/tmp/cb-interactive-0f0z7z1l/home`. Native viewer protection exceeded the configured one-minute timeout (99 seconds observed); leaving the Terminal restarted the timeout and then confirmed normal idle exit. Evidence: `/private/tmp/cb-native-muzjif13/viewed-idle.json`. The final Gallery checked light/dark appearance, wide/narrow inspector navigation and invocation-history disclosure.
+
+## Exited Agent recovery (2026-11-09)
+
+Superseded behavior: the earlier implementation kept `needs_report` and an automatic Card gate after an unreported exit. The [event-driven runtime update](runtime-observation.md) now records Failed history and removes that automatic gate; explicit task/Review decisions remain pending. The following describes the earlier UI acceptance. Overview now labels the invocation **Agent exited · exit code N** (when known), distinguishes it from live **Agent needs Terminal input**, and explains that the remaining action belongs to the task. It offers Open Card / exact Resume as appropriate rather than Open terminal for a finished invocation.
+
+Finished invocations use **Read saved output**. `overview.preview` reads the Card-owned captured output directly without querying the original Core, bounds the returned UTF-8 text to 32 KiB and preserves the exact invocation check. Its source is `Saved execution output (read-only)` and its `observed_at` is null; a saved file is not presented as a freshly observed runtime screen. Missing saved output is shown honestly. `execution.output` also prefers saved output for finished invocations. Live read-only previews retain their existing Core identity/freshness guards.
+
+Card's Needs attention shortcut now selects its actual actionable Overview row; a conversation-level gate does not necessarily have a `card:<id>` row. A row removed from the current projection displays a handled message instead of exposing actions from a cached historical selection.
+
+Validation:
+
+- 131 Rust tests passed, including a confirmed exit with an old blocked status, the preserved task gate, bounded Unicode saved output with an unavailable Core, stale-attempt rejection and Closed grouping after the task gate is handled.
+- `mise run acceptance-overview` passed with isolated real Herdr and deterministic providers: permission wait -> unreported exit -> task-only attention, captured output, Core shutdown -> readable saved context, one-minute idle exit and exact Resume. Its launch wait now requires the provider binding as well as the execution receipt.
+- The production-component Gallery includes an exited-before-reporting fixture alongside live input waits and disconnected recovery.
+- Native isolated App: Card attention opened the correct context, exit code 1 and Read saved output were visible, saved failure output loaded after the original Core stopped, exact Resume preserved the provider session and accepted `FOLLOWUP_AFTER_RESUME`. A subsequent exit removed the Terminal row/tab; after UI restart the saved output had the correct source label and retained the follow-up text.
+- No real Claude/Codex invocation was started, and no human gate in the user's regular home was changed.

@@ -8,3 +8,4 @@ authors.workspace = true
 [dependencies]
 nsh-core.workspace = true
 nsh-base.workspace = true
+canban-themes.workspace = true

@@ -101,6 +101,7 @@ try:
     config.update(hc_env=core_env, hc_session=core_env['HC_SESSION'])
     (home / 'config/agents.json').write_text(json.dumps(config, indent=2))
     call('config.reload')
+    call('scheduler.configure', {'idle_minutes': 1})
     p1, source1 = project('human-input', {'slug.py': 'def slug(text):\n    return text\n',
         'test_slug.py': 'import unittest\nfrom slug import slug\nclass Tests(unittest.TestCase):\n    def test_words(self): self.assertEqual(slug("Hello World"),"hello-world")\n    def test_unicode(self): self.assertEqual(slug("  CAFÉ  世界  "),"café-世界")\n'})
     p2, source2 = project('review-rework', {'totals.py': 'def total(values):\n    return 0\n',

@@ -2,14 +2,9 @@ use super::*;
 use nsh_core::element::desktop::{MenuItem, popup_menu};
 use serde_json::json;
 fn close(ui: Ui) {
-    if ui.terminal_card_return.get_untracked() {
-        ui.return_terminal();
-    } else if ui.return_overview.get_untracked() {
-        ui.back_board();
-    } else {
-        ui.card.set(String::new());
-        ui.page.set("board".into());
-    }
+    ui.card.set(String::new());
+    ui.card_standalone.set(false);
+    ui.page.set("board".into());
 }
 fn review(ui: Ui) {
     ui.review.set(None);
@@ -73,12 +68,6 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .child(when(
-                    move || {
-                        ui.narrow.get() || ui.return_overview.get() || ui.terminal_card_return.get()
-                    },
-                    move || chrome_button(Icon::Back, "Back to source", move |_| close(ui)),
-                ))
                 .child(
                     view()
                         .flex_1()
@@ -193,7 +182,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             {
                 let req = agent.request.as_ref().unwrap();
                 let (mark, _) = crate::profiles::provider(&req.profile);
-                let text = if agent
+                let text = if crate::terminals::model::closed(&agent) {
+                    "Resume"
+                } else if agent
                     .attempt
                     .as_ref()
                     .is_some_and(|a| a.connection_state != "connected" && !a.finished())
@@ -218,6 +209,10 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     .join("\n");
                 let title = format!("{} · {text}", req.profile.id);
                 let id = agent.id.clone();
+                let ended = crate::terminals::model::closed(&agent);
+                let can_open = c.active();
+                let profile = req.profile.id.clone();
+                let card_id = c.id.clone();
                 row = row.child(
                     view()
                         .min_w(px(0.))
@@ -235,6 +230,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                                 .items_center()
                                 .gap_1()
                                 .bg(CLEAR)
+                                .disabled(!can_open)
                                 .accessibility_label(move || {
                                     Some(format!("Open Agent {title}").into())
                                 })
@@ -248,7 +244,13 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                                         })
                                         .truncate(),
                                 )
-                                .on_press(move |_: &()| ui.open_terminal(id.clone())),
+                                .on_press(move |_: &()| {
+                                    if ended {
+                                        crate::sessions::open(ui, card_id.clone(), profile.clone());
+                                    } else {
+                                        ui.open_terminal(id.clone());
+                                    }
+                                }),
                         ),
                 );
             }
@@ -275,9 +277,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         .tooltip(nsh_base::tooltip().child(label(reason)))
                         .child(
                             action("Needs attention", Variant::Quiet, move |_| {
-                                ui.overview_selection
-                                    .set(format!("card:{}", ui.card.get_untracked()));
-                                ui.navigate("overview");
+                                crate::overview::show_card_attention(ui, &ui.card.get_untracked());
                             })
                             .text_color(ATTENTION),
                         ),

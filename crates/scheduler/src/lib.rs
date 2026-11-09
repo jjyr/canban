@@ -69,10 +69,12 @@ pub fn active_count(snapshot: &canban_types::Snapshot) -> usize {
         .iter()
         .filter(|a| {
             (a.terminal.is_some()
-                && !matches!(
-                    a.runtime_status(),
-                    "closed" | "blocked" | "idle" | "done" | "error"
-                ))
+                && !a.finished()
+                && (a.close_state == "closing"
+                    || !matches!(
+                        a.runtime_status(),
+                        "closed" | "blocked" | "idle" | "done" | "error"
+                    )))
                 || (a.terminal.is_none() && matches!(a.state.as_str(), "starting" | "unknown"))
         })
         .count();
@@ -92,6 +94,39 @@ pub fn active_count(snapshot: &canban_types::Snapshot) -> usize {
 pub fn automatic(request: &Request) -> bool {
     request.trigger == "stage_entry"
 }
+/// A completed, idle invocation may take another assignment in the same environment.
+pub fn retained<'a>(
+    snapshot: &'a canban_types::Snapshot,
+    request: &Request,
+) -> Option<&'a canban_types::Attempt> {
+    let location = request.location.clone().or_else(|| {
+        snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == request.project_id)
+            .map(|p| p.work_location())
+    });
+    snapshot.attempts.iter().rev().find(|a| {
+        a.card_id == request.card_id
+            && a.terminal.is_some()
+            && a.close_state.is_empty()
+            && !a.finished()
+            && a.location == location
+            && a.connection_state == "connected"
+            && matches!(a.runtime_status(), "idle" | "done")
+            && snapshot.requests.iter().any(|r| {
+                r.id == a.request_id
+                    && r.state == "completed"
+                    && r.profile.id == request.profile.id
+                    && r.profile.command() == request.profile.command()
+                    && r.profile.resume_command() == request.profile.resume_command()
+            })
+            && !snapshot
+                .questions
+                .iter()
+                .any(|q| q.request_id == a.request_id && q.state != "replied")
+    })
+}
 pub fn eligible(snapshot: &canban_types::Snapshot, request: &Request) -> bool {
     if request.state != "queued" {
         return false;
@@ -108,15 +143,15 @@ pub fn eligible(snapshot: &canban_types::Snapshot, request: &Request) -> bool {
     {
         return false;
     }
+    let retained = retained(snapshot, request).map(|a| a.id.as_str());
     !snapshot.attempts.iter().any(|a| {
         a.card_id == request.card_id
             && snapshot
                 .requests
                 .iter()
                 .any(|r| r.id == a.request_id && r.profile.id == request.profile.id)
-            && ((a.terminal.is_some()
-                && a.observed.as_ref().is_none_or(|v| v["state"] != "finished"))
-                || a.state == "unknown")
+            && retained != Some(a.id.as_str())
+            && ((!a.finished() && a.terminal.is_some()) || a.state == "unknown")
     })
 }
 pub fn next(snapshot: &canban_types::Snapshot, max_agents: usize) -> Option<Request> {

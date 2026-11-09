@@ -3,12 +3,29 @@ use super::*;
 use canban_herdr::host::Host;
 impl AppServer {
     pub(super) fn machines(&self) -> Result<Value> {
+        let _permit = self.check("local");
         let client = canban_herdr::Client {
             config: self.config(),
         };
-        let status = client.status()?;
+        let known = self.inventory.lock().unwrap().core.clone();
+        let status = if known.is_empty() {
+            client.status()?
+        } else {
+            json!({"core":{"id":known}})
+        };
         let mut value = client.call("machine.list", json!({}))?;
         value["local"] = json!({"id":"local","name":"AppServer host","state":"connected","core_id":status["core"]["id"]});
+        {
+            let mut inv = self.inventory.lock().unwrap();
+            inv.machines = value.clone();
+            inv.remote_error = None;
+            let records = std::mem::take(&mut inv.records);
+            for (key, mut record) in records {
+                let key = inv.address(&key);
+                record["address"] = json!(key);
+                inv.records.insert(key, record);
+            }
+        }
         Ok(value)
     }
     pub(super) fn resolve_machine(&self, machine: &str, connected: bool) -> Result<String> {

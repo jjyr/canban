@@ -1,43 +1,6 @@
 //! Selected conversation controls, retained context and one native attachment.
 use super::*;
 use serde_json::json;
-fn resume(ui: Ui, row: canban_notifications::OverviewRow, fresh: bool) {
-    let req = row.request.as_ref().unwrap();
-    let mut params = json!({"card_id":row.card.id,"profile_id":req.profile.id});
-    if fresh {
-        params["fresh"] = json!(true);
-    } else if let Some(a) = row.attempt {
-        params["expected_attempt_id"] = json!(a.id);
-    }
-    // The selected conversation is stable. Snapshot refresh updates its attempt;
-    // a late response must not navigate away from another selected conversation.
-    dispatch(ui, "agent.open", params);
-}
-fn ended_actions(ui: Ui, row: canban_notifications::OverviewRow) -> View {
-    let mut actions = view().flex_row().flex_wrap().gap_2();
-    if row.card.archived_at.is_none() && model::closed(&row) {
-        let can_resume = model::can_resume(&row, &ui.profiles.get());
-        let saved = row.clone();
-        actions = actions.child(
-            action("Resume", Variant::Primary, move |_| {
-                resume(ui, saved.clone(), false)
-            })
-            .disabled(move || !can_resume || ui.pending.get()),
-        );
-        if ui.profiles.with(|ps| {
-            ps.iter()
-                .any(|p| p.id == row.request.as_ref().unwrap().profile.id)
-        }) {
-            actions = actions.child(
-                action("Start fresh", Variant::Secondary, move |_| {
-                    resume(ui, row.clone(), true)
-                })
-                .disabled(move || ui.pending.get()),
-            );
-        }
-    }
-    actions
-}
 fn context(ui: Ui) -> impl IntoElement {
     dynamic(move || {
         let Some(row) = selected(ui) else {
@@ -114,32 +77,20 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .child(dynamic(move|| {
             let Some(run)=binding.get() else {
                 let entry=current(ui);
-                return scroll().flex_1().min_h(px(0.)).child(view().flex_1().p_5().gap_3().child(if let Some(e)=entry {
-                    let mut content=view().gap_3();
-                    if let Some(row)=e.agent {
-                        let msg=if row.card.archived_at.is_some(){"Archived Card"}else if model::closed(&row){"Agent session ended"}else if row.attempt.is_none(){"Waiting for the Agent…"}else{"Original terminal unavailable"};
-                        content=content.child(label(msg)).child(ended_actions(ui,row)).child(context(ui));
-                    } else {
-                        let ended=e.ended();
-                        content=content.child(label(if ended{"Terminal ended"}else{"Terminal unavailable"}));
-                        if let Some(canban_types::TerminalRuntime {error:Some(message),..})=&e.saved.runtime {content=content.child(notice(message.clone(),Tone::Attention));}
-                        if ended {
-                            content=content.child(action("Reopen terminal",Variant::Primary,move |_|reopen(ui,e.saved.id.clone())));
-                        }
-                    }
-                    content
+                return view().flex_1().min_h(px(0.)).p_5().gap_3().child(if entry.is_some() {
+                    view().gap_2().child(muted("Connecting…"))
                 } else {
-                    view().gap_3().child(when(move || card_context(ui).is_some(), move || {
-                        let card = card_context(ui).unwrap();
-                        view().gap_2().child(label(format!("#{} {}",card.number,card.title)))
-                            .child(action("Choose Agent",Variant::Primary,move |_|choose_card_agent(ui)).disabled(move || ui.pending.get() || card_context(ui).is_none_or(|c| c.archived_at.is_some())))
-                    })).child(action("New terminal",Variant::Secondary,move |_|new_tab(ui)).disabled(move||ui.pending.get())).child(muted("⌘T"))
-                })).into_element();
+                    view().items_start().gap_3().child(when(move || card_context(ui).is_some(), move || {
+                        let c=card_context(ui).unwrap();
+                        view().gap_2().child(label(format!("#{} {}",c.number,c.title)))
+                            .child(action("Choose Agent",Variant::Primary,move |_|choose_card_agent(ui)).disabled(move ||ui.pending.get()))
+                    })).child(action("New terminal",Variant::Secondary,move |_|new_tab(ui)).disabled(move||ui.pending.get()))
+                }).into_element();
             };
             let Some(app)=crate::APP.get() else {
-                return native("canban/terminal").prop("theme",crate::utilities::terminal_theme).prop("ui_command_keys",json!(["o","n","/","t","w","[","]","{","}"])).prop("focus",move||json!({"ticket":ui.terminal_focus.get(),"enabled":!ui.quick_open.get() && ui.utility_popup.get().is_empty() && ui.terminal_rename.get().is_none() && !ui.pending.get()})).key(run["id"].as_str().unwrap_or("").to_owned()).prop("content",json!("Canban native Terminal\r\nGallery preview · no Core connection\r\n")).prop("read_only",json!(true)).flex_1().min_h(px(0.)).into_element();
+                return native("canban/terminal").prop("theme",crate::utilities::terminal_theme).prop("ui_command_keys",json!(["o","n","/","t","w","[","]","{","}"])).prop("focus",move||json!({"ticket":ui.terminal_focus.get(),"enabled":!ui.quick_open.get() && ui.utility_popup.get().is_empty() && ui.terminal_rename.get().is_none()})).key(run["id"].as_str().unwrap_or("").to_owned()).prop("content",json!("Canban native Terminal\r\nGallery preview · no Core connection\r\n")).prop("read_only",json!(true)).flex_1().min_h(px(0.)).into_element();
             };
-            native("canban/terminal").prop("theme",crate::utilities::terminal_theme).prop("ui_command_keys",json!(["o","n","/","t","w","[","]","{","}"])).prop("focus",move||json!({"ticket":ui.terminal_focus.get(),"enabled":!ui.quick_open.get() && ui.utility_popup.get().is_empty() && ui.terminal_rename.get().is_none() && !ui.pending.get()})).key(run["id"].as_str().unwrap_or("").to_owned()).prop("binding",json!({"config":app.config(),"terminal":run["terminal"],"core_id":run["core_id"]})).prop("read_only",run["read_only"].clone()).prop("input_status",run["input_status"].clone()).flex_1().min_h(px(0.)).into_element()
+            native("canban/terminal").prop("theme",crate::utilities::terminal_theme).prop("ui_command_keys",json!(["o","n","/","t","w","[","]","{","}"])).prop("focus",move||json!({"ticket":ui.terminal_focus.get(),"enabled":!ui.quick_open.get() && ui.utility_popup.get().is_empty() && ui.terminal_rename.get().is_none()})).key(run["id"].as_str().unwrap_or("").to_owned()).prop("binding",json!({"config":app.config(),"terminal":run["terminal"],"core_id":run["core_id"]})).prop("read_only",run["read_only"].clone()).prop("input_status",run["input_status"].clone()).flex_1().min_h(px(0.)).into_element()
         }))
         .child(when(move||ui.terminal_details.get() && binding.get().is_some(),move||scroll().h(px(220.)).border_t_1().border_color(BORDER).child(view().p_4().gap_2().child(action("Hide details",Variant::Quiet,move |_|ui.terminal_details.set(false))).child(context(ui)))))
 }

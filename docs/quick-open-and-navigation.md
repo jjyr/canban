@@ -96,3 +96,7 @@ Terminal navigation update (2026-11-08): all Agent results now use the [dedicate
 ## Terminal tabs
 
 Quick Open now also indexes saved manual Terminal names/numbers and directories. Opening an Agent or Terminal destination reuses its existing tab/binding without launching work. Command+T creates a Shell in the selected Project/Card context; Command+W terminates its live PTY and closes the tab; Command+Shift+[ / ] cycles opened tabs. Search and rename dialogs suspend these shortcuts and restore native Terminal focus on dismissal. The left inventory and right tab strip extend separately into window chrome.
+
+## Unified window history (2026-11-09)
+
+All pages now share Back/Forward controls and Command+[ / Command+] through navigation.rs. These replace separate source-return flags; route traversal preserves window-owned drafts/scroll state and never repeats operations. See [current implementation and native evidence](terminal-interaction.md).

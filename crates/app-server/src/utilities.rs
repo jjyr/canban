@@ -2,16 +2,29 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "SavedPreferences")]
 struct Preferences {
-    appearance: String,
-    palette: String,
+    theme: String,
+}
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SavedPreferences {
+    theme: Option<String>,
+    // Accept the previous schema on disk, but persist only the named theme.
+    palette: Option<String>,
+}
+impl From<SavedPreferences> for Preferences {
+    fn from(saved: SavedPreferences) -> Self {
+        let requested = saved.theme.or(saved.palette).unwrap_or_default();
+        Self {
+            theme: canban_themes::resolve(&requested).id.into(),
+        }
+    }
 }
 impl Default for Preferences {
     fn default() -> Self {
         Self {
-            appearance: "system".into(),
-            palette: "canban".into(),
+            theme: canban_themes::DEFAULT.into(),
         }
     }
 }
@@ -94,19 +107,10 @@ impl AppServer {
         match method {
             "utilities.state" => Ok(self.utilities.state()),
             "utilities.configure" => {
-                let appearance = p["appearance"].as_str().context("appearance required")?;
-                let palette = p["palette"].as_str().context("palette required")?;
-                ensure!(
-                    ["system", "light", "dark"].contains(&appearance),
-                    "Unknown appearance"
-                );
-                ensure!(
-                    ["canban", "forest", "plum"].contains(&palette),
-                    "Unknown palette"
-                );
+                let theme = p["theme"].as_str().context("theme required")?;
+                ensure!(canban_themes::find(theme).is_some(), "Unknown theme");
                 let next = Preferences {
-                    appearance: appearance.into(),
-                    palette: palette.into(),
+                    theme: theme.into(),
                 };
                 let mut prefs = self.utilities.preferences.lock().unwrap();
                 canban_context::atomic(
@@ -151,25 +155,53 @@ mod tests {
     fn preferences_validate_before_atomic_save_and_survive_restart_without_power_state() {
         let dir = tempfile::tempdir().unwrap();
         let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+        assert_eq!(
+            app.call("utilities.state", json!({})).unwrap()["preferences"],
+            json!({"theme":"canban"})
+        );
+        app.call("utilities.configure", json!({"theme":"dracula"}))
+            .unwrap();
+        let path = app.home.join("config/desktop.json");
+        let saved = std::fs::read(&path).unwrap();
+        assert!(
+            app.call("utilities.configure", json!({"theme":"unknown"}))
+                .is_err()
+        );
         assert!(
             app.call(
                 "utilities.configure",
-                json!({"appearance":"dark","palette":"unknown"})
+                json!({"appearance":"light","palette":"canban"})
             )
             .is_err()
         );
-        app.call(
-            "utilities.configure",
-            json!({"appearance":"dark","palette":"forest"}),
-        )
-        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
         let reopened = AppServer::open(app.home.clone(), PathBuf::from("/bin/echo")).unwrap();
         let s = reopened.call("utilities.state", json!({})).unwrap();
-        assert_eq!(s["preferences"]["appearance"], "dark");
+        assert_eq!(s["preferences"], json!({"theme":"dracula"}));
         assert_eq!(s["awake"], false);
         assert!(
             app.call("utilities.awake", json!({"execution":{},"enabled":true}))
                 .is_err()
         );
+    }
+    #[test]
+    fn legacy_and_unknown_preferences_load_without_retaining_appearance_modes() {
+        for (saved, expected) in [
+            (json!({"appearance":"light","palette":"forest"}), "canban"),
+            (json!({"appearance":"system","palette":"plum"}), "canban"),
+            (json!({"appearance":"light","palette":"canban"}), "canban"),
+            (json!({"theme":"nord"}), "nord"),
+            (json!({"theme":"removed"}), "canban"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(dir.path().join("config")).unwrap();
+            let path = dir.path().join("config/desktop.json");
+            let bytes = serde_json::to_vec(&saved).unwrap();
+            std::fs::write(&path, &bytes).unwrap();
+            let utilities = Utilities::new(dir.path());
+            assert_eq!(utilities.state()["preferences"], json!({"theme":expected}));
+            // Loading does not rewrite an existing configuration.
+            assert_eq!(std::fs::read(path).unwrap(), bytes);
+        }
     }
 }

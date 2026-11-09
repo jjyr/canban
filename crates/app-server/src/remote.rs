@@ -8,15 +8,10 @@ impl AppServer {
             return;
         };
         let machines: std::collections::HashSet<_> = snapshot
-            .projects
+            .attempts
             .iter()
-            .map(|p| p.work_location().machine)
-            .chain(
-                snapshot
-                    .attempts
-                    .iter()
-                    .filter_map(|a| a.location.as_ref().map(|l| l.machine.clone())),
-            )
+            .filter(|a| !a.finished())
+            .filter_map(|a| a.location.as_ref().map(|l| l.machine.clone()))
             .filter(|m| m != "local")
             .collect();
         for machine in machines {
@@ -29,15 +24,31 @@ impl AppServer {
                     if server.stopped() {
                         break;
                     }
+                    let active = server.snapshot().is_ok_and(|s| {
+                        s.attempts.iter().any(|a| {
+                            !a.finished()
+                                && a.location.as_ref().is_some_and(|l| l.machine == machine)
+                        })
+                    });
+                    if !active {
+                        break;
+                    }
                     let _ = server.poll_remote(&machine);
                     drop(server);
                     std::thread::sleep(Duration::from_millis(750));
+                }
+                if let Some(server) = weak.upgrade() {
+                    server.remote_workers.lock().unwrap().remove(&machine);
+                    server.wake_runtime();
                 }
             });
         }
     }
     fn poll_remote(&self, machine: &str) -> Result<()> {
-        self.resolve_machine(machine, true)?;
+        ensure!(
+            self.remote_connected(&format!("{machine}/bridge")),
+            "Remote reporting connection is unavailable"
+        );
         let host = Host::new(self.config(), machine);
         let root = self.execution_home(machine)?.join("rpc");
         let result = host.python(

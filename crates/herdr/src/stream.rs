@@ -19,6 +19,29 @@ pub struct Attachment {
     channel: u32,
     pub automatic_input: bool,
 }
+/// A dedicated input writer lets human keystrokes bypass output receive waits.
+#[derive(Clone)]
+pub struct InputWriter {
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    channel: u32,
+}
+impl InputWriter {
+    pub fn input(&self, data: &[u8]) -> Result<()> {
+        frame(&mut *self.writer.lock().unwrap(), self.channel, 0, data)
+    }
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        let data = [cols.to_le_bytes(), rows.to_le_bytes()].concat();
+        frame(&mut *self.writer.lock().unwrap(), self.channel, 3, &data)
+    }
+    pub fn focus(&self, on: bool) -> Result<()> {
+        frame(
+            &mut *self.writer.lock().unwrap(),
+            self.channel,
+            4,
+            &[u8::from(on)],
+        )
+    }
+}
 fn frame(writer: &mut (impl Write + ?Sized), channel: u32, kind: u8, data: &[u8]) -> Result<()> {
     ensure!(data.len() <= 16 * 1024 * 1024, "Herdr frame too large");
     writer.write_all(&channel.to_le_bytes())?;
@@ -124,6 +147,12 @@ impl Client {
     }
 }
 impl Attachment {
+    pub fn input_writer(&self) -> InputWriter {
+        InputWriter {
+            writer: self.writer.clone(),
+            channel: self.channel,
+        }
+    }
     pub fn track_view(&mut self, core: &str, terminal: &str) {
         self.viewer = Some(crate::activity::Viewer::new(core, terminal));
     }
@@ -176,5 +205,69 @@ impl Drop for Attachment {
         let _ = frame(&mut *self.writer.lock().unwrap(), self.channel, 2, &[]);
         // Dropping the transport closes only this viewer/relay, never its PTY.
         let _ = &self.transport;
+    }
+}
+
+/// Forward a viewer's handshake and framed input; only human operations renew its lease.
+pub fn relay_input(
+    source: impl Read,
+    mut writer: impl Write,
+    target: Option<(String, String)>,
+) -> Result<()> {
+    use std::io::{BufRead, BufReader};
+    let mut reader = BufReader::new(source);
+    let mut hello = Vec::new();
+    reader.by_ref().take(65536).read_until(b'\n', &mut hello)?;
+    ensure!(hello.last() == Some(&b'\n'), "Invalid viewer greeting");
+    writer.write_all(&hello)?;
+    writer.flush()?;
+    loop {
+        let mut header = [0; 9];
+        if let Err(e) = reader.read_exact(&mut header) {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                return Ok(());
+            }
+            return Err(e.into());
+        }
+        let channel = u32::from_le_bytes(header[..4].try_into().unwrap());
+        let length = u32::from_le_bytes(header[5..].try_into().unwrap()) as usize;
+        ensure!(length <= 16 * 1024 * 1024, "Invalid viewer frame size");
+        let mut data = vec![0; length];
+        reader.read_exact(&mut data)?;
+        if channel != 0
+            && (header[4] == 0 && !data.is_empty() || header[4] == 4 && data == [1])
+            && let Some((core, terminal)) = &target
+        {
+            crate::activity::touch(core, terminal);
+        }
+        writer.write_all(&header)?;
+        writer.write_all(&data)?;
+        writer.flush()?;
+    }
+}
+
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+    #[test]
+    fn render_acknowledgments_do_not_refresh_user_activity_but_human_input_does() {
+        let _lease = crate::activity::Viewer::new("relay-test", "terminal");
+        let before = crate::activity::get("relay-test", "terminal").last_at;
+        let target = Some(("relay-test".into(), "terminal".into()));
+        std::thread::sleep(Duration::from_millis(2));
+        let mut bytes = b"{\"method\":\"hello\"}\n".to_vec();
+        frame(&mut bytes, 7, 1, &[0, 0, 0, 0]).unwrap();
+        frame(&mut bytes, 7, 6, b"automatic reply").unwrap();
+        let mut output = Vec::new();
+        relay_input(bytes.as_slice(), &mut output, target.clone()).unwrap();
+        assert_eq!(output, bytes);
+        assert_eq!(
+            crate::activity::get("relay-test", "terminal").last_at,
+            before
+        );
+        let mut bytes = b"{\"method\":\"hello\"}\n".to_vec();
+        frame(&mut bytes, 7, 0, b"human input").unwrap();
+        relay_input(bytes.as_slice(), Vec::new(), target).unwrap();
+        assert!(crate::activity::get("relay-test", "terminal").last_at > before);
     }
 }

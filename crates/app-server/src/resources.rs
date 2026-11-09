@@ -72,6 +72,7 @@ impl AppServer {
             p["execution"].is_null(),
             "Archiving requires an explicit user decision"
         );
+        let _gate = self.terminal_gate.lock().unwrap();
         let card_id = strp(p, "card_id")?;
         self.mutate("card.archive.mark", p, |db| {
             let mut c: Card = db.get(card_id)?;
@@ -100,6 +101,15 @@ impl AppServer {
             }
             Ok(json!({"ok":true}))
         })?;
+        if let Err(error) = self.close_archived_agents(card_id) {
+            self.store.lock().unwrap().write(|db| {
+                let mut card: Card = db.get(card_id)?;
+                card.archive_error = Some(format!("Archive cleanup needs retry: {error:#}"));
+                db.save(&card)
+            })?;
+            self.emit("archive", Some(card_id.into()));
+            return Err(error);
+        }
         // A receipt retry reuses the already published package.
         let already: Card = self.store.lock().unwrap().db().get(card_id)?;
         if let Some(path) = already
@@ -249,6 +259,56 @@ impl AppServer {
             }
         }
     }
+    fn close_archived_agents(&self, card_id: &str) -> Result<()> {
+        let client = canban_herdr::Client {
+            config: self.config(),
+        };
+        let attempts = self.snapshot()?.attempts;
+        for run in attempts
+            .iter()
+            .filter(|a| a.card_id == card_id && a.terminal.is_some() && !a.finished())
+        {
+            let terminal = run.terminal.as_ref().unwrap();
+            ensure!(
+                client.status()?["core"]["id"].as_str() == run.core_id.as_deref(),
+                "Original Core is unavailable; restore its connection and retry Archive"
+            );
+            let actual = client.get(terminal)?;
+            if actual["state"] != "finished" {
+                client.call("terminal.kill", json!({"terminal":terminal}))?;
+            }
+            let actual = client.get(terminal)?;
+            ensure!(
+                actual["state"] == "finished",
+                "Terminal close is not confirmed; retry Archive"
+            );
+            self.capture_output(run)?;
+            self.store.lock().unwrap().write(|db| {
+                let mut a: Attempt = db.get(&run.id)?;
+                a.observed = Some(canban_herdr::observation(&actual));
+                a.close_state = "closed".into();
+                a.close_requested_at = Some(now());
+                a.lifecycle.close_reason = "archive".into();
+                a.connection_state = "connected".into();
+                db.save(&a)?;
+                let mut r: Request = db.get(&run.request_id)?;
+                if r.state != "completed" {
+                    r.state = "cancelled".into();
+                    db.save(&r)?;
+                }
+                log(
+                    db,
+                    &db.get::<Card>(card_id)?,
+                    "execution.archived",
+                    "system",
+                    "Closed Card Agent after saving its terminal history",
+                    Some(run.request_id.clone()),
+                    json!({"attempt":run.number}),
+                )
+            })?;
+        }
+        Ok(())
+    }
     fn archive_workspaces(&self, project: &Project, card: &Card) -> Option<String> {
         let snapshot = match self.snapshot() {
             Ok(s) => s,
@@ -336,7 +396,7 @@ impl AppServer {
     pub(super) fn output(&self, id: &str) -> Result<Value> {
         let run: Attempt = self.store.lock().unwrap().db().get(id)?;
         let c: Card = self.store.lock().unwrap().db().get(&run.card_id)?;
-        if c.archived_at.is_some()
+        if (c.archived_at.is_some() || run.finished())
             && let Some(path) = &run.output_path
         {
             return self.read_resource(&c.id, path);

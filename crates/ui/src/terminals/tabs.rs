@@ -81,7 +81,7 @@ pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
         items.push(MenuItem::new("Interrupt").on_select(move || {
             dispatch(ui, "terminal.interrupt", json!({"terminal_id":interrupt}))
         }));
-    } else if e.ended() {
+    } else if e.ended() || e.inactive() {
         let id = e.saved.id.clone();
         items.push(MenuItem::new("Reopen terminal").on_select(move || reopen(ui, id.clone())));
     }
@@ -165,7 +165,7 @@ fn tab(ui: Ui, e: Entry, capacity: f32) -> impl IntoElement {
                         .rounded(px(3.))
                         .bg(if e.needs_attention() {
                             ATTENTION
-                        } else if e.ended() {
+                        } else if e.ended() || e.inactive() {
                             MUTED
                         } else {
                             SUCCESS

@@ -1,5 +1,7 @@
 # Card-scoped Agent conversations and native terminals
 
+Current behavior update, 2026-11-09: [Terminal interaction and navigation](../terminal-interaction.md) supersedes immediate completion exit, indefinite viewer protection and ended-session pages. Completed Agents stay interactive until their configurable idle timeout; actual user input renews activity, exited sessions leave the Terminal list/tabs, and exact Resume lives on the Card.
+
 Status: implemented on 2026-11-07. One provider conversation per (Card, profile), interactive start/resume, immediate active mentions with separate CLI replies, native libghostty-vt terminals and turn-boundary normal exit. Real Codex and deterministic Herdr acceptance passed; see [implementation and acceptance](../implementation.md). Claude's preset is implemented; live Claude acceptance still needs valid local authentication.
 
 ## Product model

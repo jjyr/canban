@@ -369,6 +369,7 @@ impl AppServer {
         self.emit("terminals", None);
         Ok(result)
     }
+    #[cfg(test)]
     fn directory_context(
         &self,
         s: &Snapshot,
@@ -405,15 +406,33 @@ impl AppServer {
         let result = (|| -> Result<TerminalContext> {
             let (core, terminal) =
                 Self::terminal_binding(&s, item).context("No runtime binding")?;
-            let client = canban_herdr::Client {
-                config: self.config(),
-            };
-            ensure!(
-                client.status()?["core"]["id"] == core,
-                "Original Core unavailable"
-            );
-            let value = client.get(&terminal)?;
-            Ok(self.directory_context(&s, key, &core, &terminal, &value))
+            #[cfg(test)]
+            if !self.observer_running.load(Ordering::SeqCst) {
+                let client = canban_herdr::Client {
+                    config: self.config(),
+                };
+                ensure!(
+                    client.status()?["core"]["id"] == core,
+                    "Original Core unavailable"
+                );
+                return Ok(self.directory_context(
+                    &s,
+                    key,
+                    &core,
+                    &terminal,
+                    &client.get(&terminal)?,
+                ));
+            }
+            let (observed_core, values) = self.runtime_inventory()?;
+            ensure!(observed_core == core, "Original Core unavailable");
+            let value = values
+                .iter()
+                .find(|v| v["address"] == terminal)
+                .context("Terminal is not in the current inventory")?;
+            if p["refresh"] == true {
+                self.invalidate_contexts();
+            }
+            self.refresh_context(&s, key, &core, &terminal, value)
         })();
         match result {
             Ok(context) => Ok(serde_json::to_value(context)?),
@@ -428,26 +447,9 @@ impl AppServer {
         if snapshot.terminals.is_empty() {
             return Ok(());
         }
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
-        let observed = (|| -> Result<(String, Vec<Value>)> {
-            let core = client.status()?["core"]["id"]
-                .as_str()
-                .context("Core identity unavailable")?
-                .to_owned();
-            let list = client.terminals()?;
-            let terminals = list["terminals"]
-                .as_array()
-                .context("Terminal list unavailable")?
-                .clone();
-            ensure!(
-                client.status()?["core"]["id"] == core,
-                "Core changed during observation"
-            );
-            Ok((core, terminals))
-        })();
+        let observed = self.runtime_inventory();
         let mut contexts = Vec::new();
+        let mut wanted = std::collections::BTreeSet::new();
         for mut item in snapshot.terminals.clone() {
             let before = item.clone();
             let binding = Self::terminal_binding(&snapshot, &item);
@@ -457,8 +459,26 @@ impl AppServer {
                     .then(|| values.iter().find(|v| v["address"] == *terminal))
                     .flatten()
             });
-            if let (Some((core, terminal)), Some(value)) = (&binding, value) {
-                contexts.push(self.directory_context(&snapshot, &item.id, core, terminal, value));
+            let value = value.filter(|_| {
+                binding
+                    .as_ref()
+                    .is_none_or(|(_, terminal)| self.remote_connected(terminal))
+            });
+            if let (Some((core, terminal)), Some(value)) = (&binding, value)
+                && value["state"] != "finished"
+            {
+                #[cfg(test)]
+                if !self.observer_running.load(Ordering::SeqCst) {
+                    contexts
+                        .push(self.directory_context(&snapshot, &item.id, core, terminal, value));
+                }
+                wanted.insert(item.id.clone());
+                self.queue_context(&snapshot, &item.id, core, terminal, value);
+                if let Some(context) =
+                    self.cached_context(&item.id, core, terminal, canban_herdr::cwd(value))
+                {
+                    contexts.push(context);
+                }
             }
             if let Some(runtime) = &mut item.runtime {
                 match (&observed, value) {
@@ -498,6 +518,10 @@ impl AppServer {
                 })?;
                 self.emit("terminals", None);
             }
+        }
+        if observed.is_ok() {
+            let mut q = self.contexts.lock().unwrap();
+            q.retain_targets(&wanted);
         }
         let changed = {
             let mut current = self.terminal_contexts.lock().unwrap();

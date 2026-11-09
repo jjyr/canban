@@ -24,6 +24,8 @@ pub fn activity_header(actor: String, kind: &str, time: u64) -> impl IntoElement
         "execution.queued" => "Queued",
         "execution.started" => "Agent started",
         "execution.reported" => "Result submitted",
+        "execution.failed" => "Execution failed",
+        "execution.missing" => "Terminal record unavailable",
         "execution.input_required" => "Agent input required",
         "execution.input_resolved" => "Agent input resolved",
         "execution.idle_close_requested" => "Closing idle Agent",
@@ -74,6 +76,24 @@ pub fn card_activity(snapshot: &canban_types::Snapshot, card: &canban_types::Car
                 "Needs attention"
             },
             Tone::Attention,
+        ));
+        visible = true;
+    }
+    let mut latest = std::collections::BTreeMap::new();
+    for request in snapshot
+        .requests
+        .iter()
+        .filter(|r| r.card_id == card.id && r.stage == card.stage)
+    {
+        let previous: Option<&&canban_types::Request> = latest.get(&request.profile.id);
+        if previous.is_none_or(|r| r.created_at <= request.created_at) {
+            latest.insert(request.profile.id.clone(), request);
+        }
+    }
+    for request in latest.values().filter(|r| r.state == "failed") {
+        row = row.child(status(
+            format!("@{} failed", request.profile.id),
+            Tone::Danger,
         ));
         visible = true;
     }

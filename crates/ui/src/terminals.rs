@@ -12,6 +12,48 @@ pub use entries::{Entry, entries};
 use nsh_core::prelude::*;
 use serde_json::json;
 
+/// Finished/archived entries retain Card history but never leave stale tabs in Terminals.
+pub fn watch(ui: Ui) {
+    effect(move || {
+        let terminal = ui.terminal_selection.get();
+        let page = ui.page.get();
+        if page != "terminals" || terminal.is_empty() {
+            return;
+        }
+        if let Some(app) = crate::APP.get().cloned() {
+            ui.spawn(async move {
+                let _ =
+                    blocking(move || app.call("terminal.context", json!({"terminal_id":terminal})))
+                        .await;
+            });
+        }
+    });
+    let listed = computed(move || {
+        entries(&ui.snapshot.get())
+            .into_iter()
+            .filter(Entry::listed)
+            .map(|e| e.saved.id)
+            .collect::<Vec<_>>()
+    });
+    effect(move || {
+        let ids = listed.get();
+        let tabs = ui.terminal_tabs.get();
+        let kept: Vec<_> = tabs.iter().filter(|id| ids.contains(id)).cloned().collect();
+        if tabs != kept {
+            batch(move || {
+                let selected = ui.terminal_selection.get_untracked();
+                ui.terminal_tabs.set(kept.clone());
+                if !selected.is_empty() && !ids.contains(&selected) {
+                    ui.terminal_selection
+                        .set(kept.last().cloned().unwrap_or_default());
+                    ui.terminal_card_context.set(String::new());
+                    ui.terminal_details.set(false);
+                    crate::navigation::replace(ui);
+                }
+            });
+        }
+    });
+}
 pub fn selected(ui: Ui) -> Option<OverviewRow> {
     model::conversations(&ui.snapshot.get())
         .into_iter()
@@ -34,7 +76,8 @@ pub fn restore_selection(ui: Ui) {
                 .and_then(|id| rows.iter().find(|e| &e.saved.id == id))
                 .cloned()
         })
-        .or_else(|| rows.into_iter().find(|e| !e.ended()))
+        .filter(Entry::listed)
+        .or_else(|| rows.into_iter().find(Entry::listed))
     {
         ui.terminal_selection.set(entry.saved.id.clone());
         ui.terminal_tabs.update(|tabs| {
@@ -55,9 +98,6 @@ pub fn reveal_group(ui: Ui, id: &str) {
         .into_iter()
         .find(|r| r.saved.id == id)
     {
-        if row.ended() {
-            ui.terminal_closed.set(true);
-        }
         ui.terminal_folds.update(|folds| {
             folds.remove(&format!("project:{}", row.project_id.unwrap_or_default()));
             if let Some(card) = row.card.map(|c| c.id) {
@@ -75,19 +115,18 @@ pub fn open_card(ui: Ui, card_id: &str) {
     if let Some(entry) = existing {
         ui.open_terminal(entry.saved.id);
     } else {
-        let origin = ui.location();
         ui.navigate("terminals");
         ui.terminal_selection.set(String::new());
-        ui.terminal_origin.set(Some(origin));
+        ui.terminal_card_context.set(card_id.into());
     }
 }
 pub fn card_context(ui: Ui) -> Option<canban_types::Card> {
     if let Some(entry) = current(ui) {
         return entry.card;
     }
-    let source = ui.terminal_origin.get()?;
+    let card = ui.terminal_card_context.get();
     ui.snapshot
-        .with(|s| s.cards.iter().find(|c| c.id == source.card).cloned())
+        .with(|s| s.cards.iter().find(|c| c.id == card).cloned())
 }
 pub fn choose_card_agent(ui: Ui) {
     use nsh_core::element::desktop::{MenuItem, popup_menu};
@@ -203,10 +242,8 @@ pub fn new_tab(ui: Ui) {
 pub fn machine_menu(ui: Ui) {
     use nsh_core::element::desktop::{MenuItem, popup_menu};
     ui.spawn(async move {
-        let mut items = vec![
-            MenuItem::new("AppServer host")
-                .on_select(move || launch(ui, json!({"machine":"local"}))),
-        ];
+        let mut items =
+            vec![MenuItem::new("Local").on_select(move || launch(ui, json!({"machine":"local"})))];
         for m in ui
             .machines
             .with_untracked(|v| v["machines"].as_array().cloned().unwrap_or_default())
@@ -362,19 +399,11 @@ fn controls(ui: Ui) -> impl IntoElement {
                     .set(!ui.terminal_sidebar.get_untracked())
             },
         ))
-        .child(when(
-            move || ui.terminal_origin.get().is_some(),
-            move || chrome_button(Icon::Back, "Back to source", move |_| ui.terminal_source()),
-        ))
+        .child(when(|| true, move || crate::navigation::controls(ui)))
 }
 pub fn screen(ui: Ui) -> impl IntoElement {
     tabs::context_updates(ui);
-    let ended = computed(move || current(ui).is_some_and(|e| e.ended()));
-    effect(move || {
-        if ended.get() {
-            ui.terminal_closed.set(true);
-        }
-    });
+
     view()
         .flex_1()
         .min_h(px(0.))

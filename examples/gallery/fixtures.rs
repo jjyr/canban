@@ -76,6 +76,24 @@ pub fn workspace() -> canban_types::Snapshot {
     s
 }
 
+/// Three overflowing columns for independent scrolling and overlay thumb regression checks.
+pub fn overflowing_board() -> canban_types::Snapshot {
+    let mut s = workspace();
+    let base = s.cards[2].clone();
+    s.cards.clear();
+    for (stage_index, stage) in ["backlog", "develop", "review"].iter().enumerate() {
+        for i in 1..=24 {
+            let mut card = base.clone();
+            card.number = (stage_index * 24 + i) as u64;
+            card.id = format!("overflow-{}", card.number);
+            card.stage = (*stage).into();
+            card.title = format!("Card {} · Preserve context while scrolling", card.number);
+            s.cards.push(card);
+        }
+    }
+    s
+}
+
 /// All Overview groups, independent reasons on one row, multiple Projects and long context.
 pub fn overview() -> canban_types::Snapshot {
     use canban_types::*;
@@ -87,7 +105,7 @@ pub fn overview() -> canban_types::Snapshot {
     let base = s.cards[0].clone();
     s.cards.clear();
     for (i, state) in [
-        "blocked", "review", "working", "queued", "idle", "closed", "unknown",
+        "blocked", "review", "working", "queued", "idle", "closed", "unknown", "exited",
     ]
     .iter()
     .enumerate()
@@ -104,7 +122,8 @@ pub fn overview() -> canban_types::Snapshot {
                 "Build the next iteration",
                 "Discuss the API",
                 "Resume previous investigation",
-                "Recover disconnected Agent"
+                "Recover disconnected Agent",
+                "Recover Agent that exited before reporting"
             ][i],
             state
         );
@@ -127,6 +146,9 @@ pub fn overview() -> canban_types::Snapshot {
             "running"
         }
         .into();
+        if *state == "exited" {
+            req.state = "failed".into();
+        }
         if *state == "review" {
             card.human_gate = Some(HumanGate {
                 reason: "Agent report ready; human review required".into(),
@@ -135,7 +157,13 @@ pub fn overview() -> canban_types::Snapshot {
             });
         }
         if *state != "queued" {
-            let mut run:Attempt=serde_json::from_value(json!({"id":Attempt::key(&req.id,1),"request_id":req.id,"project_id":card.project_id,"card_id":card.id,"number":1,"state":req.state,"core_id":"gallery-core","terminal":format!("t{}",i+1),"cwd":"/example/card-worktree","input_path":"input.md","output_path":null,"observed":{"state":if *state=="closed" {"finished"} else {"live"},"status":{"state":if *state=="review" {"done"} else {state},"kind":"permission","title":"Allow repository command?","msg":"Agent requests permission to run git status in the Card worktree."}},"error":null,"created_at":now()-180_000,"provider_session_id":format!("session-{i}"),"connection_state":if *state=="unknown" {"unavailable"} else {"connected"}})).unwrap();
+            let mut run:Attempt=serde_json::from_value(json!({"id":Attempt::key(&req.id,1),"request_id":req.id,"project_id":card.project_id,"card_id":card.id,"number":1,"state":req.state,"core_id":"gallery-core","terminal":format!("t{}",i+1),"cwd":"/example/card-worktree","input_path":"input.md","output_path":null,"observed":{"state":if matches!(*state,"closed"|"exited") {"finished"} else {"live"},"status":{"state":if *state=="review" {"done"} else {state},"kind":"permission","title":"Allow repository command?","msg":"Agent requests permission to run git status in the Card worktree."}},"error":null,"created_at":now()-180_000,"provider_session_id":format!("session-{i}"),"connection_state":if *state=="unknown" {"unavailable"} else {"connected"}})).unwrap();
+            if *state == "exited" {
+                run.observed = Some(json!({"state":"finished","exit_code":1,"status":null}));
+                run.output_path = Some("saved-output.txt".into());
+                run.close_state = "closed".into();
+                run.error = Some("Agent exited without reporting an outcome".into());
+            }
             // A Gallery fixture has no polling runtime; keep its declared status fresh.
             run.lifecycle.observed_at = Some(u64::MAX);
             if *state == "blocked" {

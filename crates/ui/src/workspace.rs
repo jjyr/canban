@@ -10,7 +10,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         let show_card = ui.focused_card.get();
         let _ = ui.card.get();
         untracked(|| {
-            if page == "card" && ui.terminal_card_return.get_untracked() {
+            if page == "card" && ui.card_standalone.get_untracked() {
                 return card::screen(ui).into_element();
             }
             let focus = page == "review";
@@ -46,23 +46,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             .bg(SURFACE)
                             .border_b_1()
                             .border_color(BORDER)
-                            .child(action(
-                                if ui.terminal_card_return.get_untracked() {
-                                    "← Terminals"
-                                } else if ui.return_overview.get_untracked() {
-                                    "← Overview"
-                                } else {
-                                    "← Board"
-                                },
-                                Variant::Quiet,
-                                move |_| {
-                                    if ui.terminal_card_return.get_untracked() {
-                                        ui.return_terminal();
-                                    } else {
-                                        ui.back_board();
-                                    }
-                                },
-                            ))
+                            .child(action("← Back", Variant::Quiet, move |_| ui.back()))
                             .child(
                                 view()
                                     .flex_row()
@@ -93,7 +77,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                         .disabled(!expanded),
                                     )
                                     .child(action("Close panel", Variant::Quiet, move |_| {
-                                        ui.back_board()
+                                        ui.back()
                                     })),
                             ),
                     )
@@ -101,7 +85,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     .into_element();
             }
             if page == "card" && !ui.card.get().is_empty() {
-                if narrow || ui.return_overview.get_untracked() {
+                if narrow || ui.card_standalone.get_untracked() {
                     return card::screen(ui).into_element();
                 }
                 return split(

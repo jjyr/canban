@@ -16,17 +16,6 @@ fn controls() -> impl IntoElement {
     .child(heading("Component Gallery"))
     .child(muted("Production components · local fixtures · no AppServer or Agent required"))
     .child(
-        view()
-            .flex_row()
-            .gap_2()
-            .child(action("Light appearance", Variant::Secondary, |_| {
-                set_color_scheme(Appearance::Light)
-            }))
-            .child(action("Dark appearance", Variant::Secondary, |_| {
-                set_color_scheme(Appearance::Dark)
-            })),
-    )
-    .child(
         scroll().flex_1().child(
             view()
                 .gap_4()
@@ -128,6 +117,15 @@ pub fn Gallery() -> impl IntoElement {
     canban_ui::commands::bindings(ui);
     canban_ui::utilities::init(ui);
     canban_ui::terminals::bindings(ui);
+    set_interval(std::time::Duration::from_secs(5), move || {
+        ui.snapshot.update(|s| {
+            for a in &mut s.attempts {
+                if a.connection_state == "connected" && !a.finished() {
+                    a.lifecycle.observed_at = Some(canban_types::now());
+                }
+            }
+        });
+    });
     ui.snapshot.set(fixtures::workspace());
     ui.project.set("gallery-project".into());
     ui.card.set("card-1".into());
@@ -135,6 +133,11 @@ pub fn Gallery() -> impl IntoElement {
     ui.note.set("note-1".into());
     ui.profiles.set(canban_types::Config::default().profiles);
     ui.machines.set(json!({"machines":[{"id":"gallery-remote","name":"Build machine","state":"connected","target":"ssh-host"},{"id":"gallery-offline","name":"Offline machine","state":"unreachable","target":"another-host"}]}));
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("board-overflow") {
+        ui.snapshot.set(fixtures::overflowing_board());
+        ui.page.set("board".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminals") {
         nsh_core::element::desktop::set_title_bar(
             nsh_core::desktop::TitleBarStyle::Hidden,
@@ -142,11 +145,6 @@ pub fn Gallery() -> impl IntoElement {
         );
         ui.snapshot.set(fixtures::terminal_workspace());
         ui.open_terminal("gallery-manual".into());
-        match std::env::var("CANBAN_GALLERY_APPEARANCE").as_deref() {
-            Ok("dark") => set_color_scheme(Appearance::Dark),
-            Ok("light") => set_color_scheme(Appearance::Light),
-            _ => {}
-        }
         return canban_ui::frame::screen(ui).into_element();
     }
 
@@ -169,6 +167,12 @@ pub fn Gallery() -> impl IntoElement {
                     ui.select_project("gallery-project".into());
                     ui.card.set("card-1".into());
                     ui.page.set("card".into());
+                }))
+                .child(action("Overflowing Board", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::overflowing_board());
+                    ui.select_project("gallery-project".into());
+                    ui.page.set("board".into());
                 }))
                 .child(action("Card conversation", Variant::Secondary, move |_| {
                     scene.set("workspace".into()); ui.snapshot.set(fixtures::conversation());
@@ -205,6 +209,16 @@ pub fn Gallery() -> impl IntoElement {
                     ui.navigate("terminals");
                     ui.terminal_sidebar.set(true);
                     ui.open_terminal(canban_types::Conversation::key("overview-card-2","codex"));
+                }))
+                .child(action("Inactive Terminals",Variant::Secondary,move |_|{
+                    let mut snapshot=fixtures::terminal_workspace();
+                    for card in &mut snapshot.cards {card.human_gate=None;card.attention=None;}
+                    for r in &mut snapshot.requests {r.state="completed".into();}
+                    for a in &mut snapshot.attempts {
+                        if !a.finished() {a.observed=Some(json!({"state":"live","status":{"state":"done"}}));a.connection_state="connected".into();a.lifecycle.observed_at=Some(canban_types::now());a.lifecycle.last_interaction_at=None;}
+                    }
+                    ui.snapshot.set(snapshot);ui.terminal_tabs.set(Vec::new());ui.terminal_selection.set(String::new());
+                    ui.terminal_inactive.set(false);ui.navigate("terminals");scene.set("workspace".into());
                 }))
                 .child(action("Quick Open", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
@@ -312,7 +326,10 @@ fn main() {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(1440),
-                960,
+                std::env::var("CANBAN_GALLERY_HEIGHT")
+                    .ok()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(960),
             ),
             ..Default::default()
         },

@@ -103,6 +103,146 @@ impl AppServer {
             Ok(json!({"request_id":req.id,"reused":false}))
         })
     }
+    pub(super) fn continue_assignment(
+        &self,
+        req: &Request,
+        old: &Attempt,
+        snapshot: &Snapshot,
+    ) -> Result<()> {
+        let project = snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == req.project_id)
+            .context("Project missing")?;
+        let card = snapshot
+            .cards
+            .iter()
+            .find(|c| c.id == req.card_id)
+            .context("Card missing")?;
+        let location = old
+            .location
+            .as_ref()
+            .context("Retained execution location missing")?;
+        let runtime_home =
+            PathBuf::from(old.runtime_home.as_ref().context("Runtime home missing")?);
+        let remote = location.machine != "local";
+        let endpoint = if remote {
+            runtime_home.join("app.sock")
+        } else {
+            self.endpoint()
+        };
+        let cli = if remote {
+            runtime_home.join("bin/canban")
+        } else {
+            self.cli.clone()
+        };
+        let input = canban_context::capture_for(
+            &self.home,
+            project,
+            card,
+            req,
+            req.attempt,
+            snapshot,
+            &endpoint.to_string_lossy(),
+            &cli,
+            &runtime_home,
+        )?;
+        if remote {
+            self.stage_remote(&self.ops(&location.machine).host, &runtime_home, card)?;
+        }
+        let client = canban_herdr::Client {
+            config: self.config(),
+        };
+        ensure!(
+            client.status()?["core"]["id"].as_str() == old.core_id.as_deref(),
+            "Original Core changed"
+        );
+        let terminal = old.terminal.as_ref().context("Terminal missing")?;
+        let actual = client.get(terminal)?;
+        ensure!(
+            actual["state"] == "live"
+                && matches!(actual["status"]["state"].as_str(), Some("idle" | "done")),
+            "Retained Agent is no longer idle"
+        );
+        self.capture_output(old)?;
+        let mut run = old.clone();
+        run.id = Attempt::key(&req.id, req.attempt);
+        run.request_id = req.id.clone();
+        run.number = req.attempt;
+        run.state = "running".into();
+        run.input_path = input.clone();
+        run.output_path = None;
+        run.response_path = None;
+        run.close_state.clear();
+        run.error = None;
+        run.completed_at = None;
+        run.completion_turn = None;
+        run.turn_ended_at = None;
+        run.close_requested_at = None;
+        run.created_at = now();
+        run.observed = Some(json!({"state":"live","status":{"state":"working"}}));
+        run.lifecycle.observed_at = Some(now());
+        run.lifecycle.waiting = None;
+        run.lifecycle.idle_since = None;
+        self.store.lock().unwrap().write(|db| {
+            let mut previous: Attempt = db.get(&old.id)?;
+            previous.state = "continued".into();
+            db.save(&previous)?;
+            db.save(&run)?;
+            let mut current: Request = db.get(&req.id)?;
+            current.state = "running".into();
+            db.save(&current)?;
+            let mut context = conversation(db, card, &req.profile)?;
+            context.last_request_id = Some(req.id.clone());
+            db.save(&context)?;
+            for mut q in db
+                .list::<Question>()?
+                .into_iter()
+                .filter(|q| q.request_id == req.id && q.attempt == 0)
+            {
+                q.attempt = req.attempt;
+                db.save(&q)?;
+            }
+            log(
+                db,
+                card,
+                "execution.continued",
+                "system",
+                "Started a new assignment in the retained Agent terminal",
+                Some(req.id.clone()),
+                json!({"previous_attempt":old.id,"attempt":req.attempt}),
+            )
+        })?;
+        let prompt = std::fs::read_to_string(self.home.join(&input))?;
+        let binding = json!({"request_id":req.id,"attempt":req.attempt,"run_dir":canban_context::run_dir(&runtime_home,req,req.attempt),"manifest":canban_context::run_dir(&runtime_home,req,req.attempt).join("context.json")});
+        let text = format!(
+            "Canban assignment {}\n{}\n\nUse this assignment's explicit request/attempt values for every Canban CLI call. The launching environment belongs to the preceding assignment.\n{}",
+            binding,
+            format_args!(
+                "CANBAN_REQUEST_ID={} CANBAN_ATTEMPT={} CANBAN_RUN_DIR={}",
+                canban_context::shell_quote(&req.id),
+                req.attempt,
+                canban_context::shell_quote(
+                    &canban_context::run_dir(&runtime_home, req, req.attempt).to_string_lossy()
+                )
+            ),
+            prompt
+        );
+        if let Err(e) = client.call("terminal.send", json!({"terminal":terminal,"text":text})) {
+            self.store.lock().unwrap().write(|db| {
+                let mut run: Attempt = db.get(&run.id)?;
+                run.state = "unknown".into();
+                run.error = Some(format!("Assignment delivery uncertain: {e:#}"));
+                db.save(&run)?;
+                let mut r: Request = db.get(&req.id)?;
+                r.state = "unknown".into();
+                db.save(&r)
+            })?;
+            return Err(e);
+        }
+        self.emit("runtime", Some(card.id.clone()));
+        Ok(())
+    }
     pub(super) fn control_agent(&self, p: Value, end: bool) -> Result<Value> {
         let run: Attempt = self
             .store

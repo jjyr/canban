@@ -25,11 +25,11 @@ pub fn settings(ui: Ui) -> impl IntoElement {
     let value = signal(ui.max_agents.get_untracked().to_string());
     let error = signal(String::new());
     let idle = signal(ui.idle_minutes.get_untracked().to_string());
-    settings_section("Agent scheduling", "Shared limits and idle behavior across all Projects.")
+    settings_section("Agent scheduling", "Shared execution limits and idle timeout across all Projects.")
         .child(summary(ui))
         .child(settings_field("Maximum executing Agents", "Lowering the limit leaves running Agents alone. Later workflow stages run first; human review gates stay paused.",
             field(value, "8").label("Maximum executing Agents").max_w(px(160.))))
-        .child(settings_field("Idle timeout (minutes)", "Use 0 to disable. Resumable idle Agents close after this interval; viewed terminals and unresolved work remain open.",
+        .child(settings_field("Idle timeout (minutes)", "Idle Agents remain interactive during this interval; human input restarts the timer. Closed sessions leave Terminals and can be resumed from their Card. Use 0 to disable.",
             field(idle, "15").label("Idle timeout (minutes)").max_w(px(160.))))
         .child(view().items_start()
         .child(action("Save scheduling settings", Variant::Primary, move |_| {

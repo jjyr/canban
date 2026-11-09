@@ -76,3 +76,11 @@ run = "/usr/bin/python3 scripts/acceptance-terminals.py"
 [tasks.acceptance-terminal-context]
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance-terminal-context.py"
+
+[tasks.acceptance-retained]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-retained.py"
+
+[tasks.acceptance-events]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-events.py"

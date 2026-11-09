@@ -47,13 +47,17 @@ pub fn init(ui: Ui) {
     });
     effect(move || {
         let v = ui.utility.get();
-        let appearance = v["preferences"]["appearance"].as_str().unwrap_or("system");
-        set_color_scheme(match appearance {
-            "light" => Appearance::Light,
-            "dark" => Appearance::Dark,
-            _ => Appearance::System,
-        });
-        set_palette(v["preferences"]["palette"].as_str().unwrap_or("canban"));
+        let saved = v["preferences"]["theme"]
+            .as_str()
+            .unwrap_or(canban_themes::DEFAULT);
+        if ui.utility_popup.get() == "theme" {
+            let preview = ui.theme_preview.get();
+            set_theme(preview.as_deref().unwrap_or(saved));
+        } else {
+            // Every dismissal/navigation path discards temporary preview state.
+            ui.theme_preview.set(None);
+            set_theme(saved);
+        }
     });
 }
 fn refresh(ui: Ui) {
@@ -78,21 +82,23 @@ fn refresh(ui: Ui) {
         }
     });
 }
-pub fn configure(ui: Ui, appearance: String, palette: String) {
+pub fn configure(ui: Ui, theme: String) {
     if crate::APP.get().is_none() {
         ui.utility
-            .update(|v| v["preferences"] = json!({"appearance":appearance,"palette":palette}));
+            .update(|v| v["preferences"] = json!({"theme":theme}));
         return;
     }
     ui.utility_epoch.update(|n| *n += 1);
     dispatch_complete(
         ui,
         "utilities.configure",
-        json!({"appearance":appearance,"palette":palette}),
+        json!({"theme":theme}),
         move |r| {
             if let Ok(v) = r {
                 ui.utility_epoch.update(|n| *n += 1);
                 ui.utility.set(v);
+            } else {
+                ui.theme_preview.set(None);
             }
         },
     );
@@ -206,6 +212,16 @@ pub fn bar(ui: Ui) -> impl IntoElement {
                     || false,
                     || false,
                     move |_| report::open(ui),
+                ))
+                .child(utility_button(
+                    Icon::Settings,
+                    "Settings",
+                    move || ui.page.get() == "settings",
+                    || false,
+                    move |_| {
+                        close(ui);
+                        ui.navigate("settings");
+                    },
                 )),
         )
 }
@@ -317,7 +333,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
 }
 pub fn settings(ui: Ui) -> impl IntoElement {
     settings_section(
-        "Appearance and support",
+        "Theme and support",
         "Theme and power controls are also available from the bottom bar.",
     )
     .child(action("Choose theme…", Variant::Secondary, move |_| {
@@ -336,37 +352,12 @@ pub fn settings(ui: Ui) -> impl IntoElement {
     }))
 }
 
-/// The native VT defaults follow the same semantic palette and OS appearance.
+/// Use the exact Terminal palette; App chrome derives separate semantic colors.
 pub fn terminal_theme() -> Value {
-    let rgb = |token: ThemeColor| {
-        let c = color(token).to_rgb();
-        json!([
-            (c.r * 255.).round() as u8,
-            (c.g * 255.).round() as u8,
-            (c.b * 255.).round() as u8
-        ])
-    };
-    let mut ansi = vec![
-        json!([27, 37, 51]),
-        json!([190, 64, 64]),
-        json!([55, 138, 91]),
-        json!([181, 139, 35]),
-        json!([64, 112, 194]),
-        json!([151, 91, 180]),
-        json!([45, 140, 151]),
-        json!([219, 225, 233]),
-        json!([106, 118, 137]),
-        json!([241, 126, 126]),
-        json!([130, 207, 161]),
-        json!([235, 204, 119]),
-        json!([136, 177, 241]),
-        json!([200, 160, 231]),
-        json!([131, 205, 212]),
-        json!([244, 246, 249]),
-    ];
-    ansi[4] = rgb(ACCENT);
-    ansi[12] = rgb(ACCENT);
-    json!({"foreground":rgb(TEXT),"background":rgb(SURFACE),"cursor":rgb(ACCENT),"ansi":ansi})
+    let theme = current_theme();
+    let rgb = |value: u32| [(value >> 16) as u8, (value >> 8) as u8, value as u8];
+    json!({"foreground":rgb(theme.foreground),"background":rgb(theme.background),
+        "cursor":rgb(theme.cursor),"ansi":theme.ansi.map(rgb)})
 }
 
 #[cfg(test)]

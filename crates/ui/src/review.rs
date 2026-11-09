@@ -138,7 +138,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .child(muted("Review the diff, then deliver through a local merge or a GitHub PR. Archive is separate."))
         .child(crate::github::pr_panel(ui))
         .child(view().flex_row().flex_wrap().gap_2()
-            .child(action(if ui.return_overview.get_untracked() {"← Overview"} else {"← Board"},Variant::Quiet,move |_|ui.back_board()))
+            .child(action("← Back",Variant::Quiet,move |_|ui.back()))
             .child(action("Return to Develop",Variant::Secondary,move |_|{if let Some(c)=ui.current_card(){let source=ui.location();dispatch_then(ui,"card.move",json!({"card_id":c.id,"revision":c.revision,"stage":"develop"}),move |_|{if ui.location()==source{ui.review.set(None);ui.page.set("card".into());}});}})))
         .child(panel().child(label("Delivery")).child(crate::github::choice(ui,mode,vec![("local","Local merge"),("github_pr","GitHub PR")])).child(label("Target branch")).child(field(target,"Existing local branch"))
             .child(action("Refresh diff",Variant::Secondary,move |_|refresh_diff(ui,target)))

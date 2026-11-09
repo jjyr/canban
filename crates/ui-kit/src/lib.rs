@@ -2,6 +2,7 @@
 pub mod button;
 pub mod checkbox;
 pub mod input;
+mod scrollbar;
 pub mod surface;
 pub mod tokens;
 pub use button::{Variant, action};
@@ -32,3 +33,6 @@ pub use chrome::{chrome_button, chrome_button_disabled, utility_button};
 
 pub mod segmented;
 pub use segmented::{segment, segmented};
+
+pub mod theme_choice;
+pub use theme_choice::theme_choice;

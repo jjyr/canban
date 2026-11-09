@@ -13,10 +13,48 @@ fn select(ui: Ui, row: OverviewRow) {
     ui.clear_output();
     ui.overview_history.set(false);
     ui.overview_selection.set(row.id.clone());
-    ui.overview_selected.set(Some(row));
+}
+/// Card attention must select the real conversation/gate row, not invent a Card row ID.
+pub fn show_card_attention(ui: Ui, card: &str) {
+    if let Some(row) = overview(&ui.snapshot.get_untracked())
+        .into_iter()
+        .find(|r| r.card.id == card && r.actionable())
+    {
+        select(ui, row);
+    } else {
+        ui.clear_output();
+        ui.overview_selection.set(String::new());
+    }
+    ui.navigate("overview");
+}
+fn runtime_summary(row: &OverviewRow) -> String {
+    let Some(run) = &row.attempt else {
+        return "No Terminal started".into();
+    };
+    if run.connection_state == "missing" {
+        return "Original Terminal record is unavailable".into();
+    }
+    if run.terminal.is_none() && run.state == "failed" {
+        return "Agent failed to start".into();
+    }
+    if run.finished() {
+        return run
+            .observed
+            .as_ref()
+            .and_then(|v| v["exit_code"].as_i64())
+            .map(|code| format!("Agent exited · exit code {code}"))
+            .unwrap_or_else(|| "Agent exited".into());
+    }
+    match run.runtime_status() {
+        "blocked" => "Agent needs Terminal input".into(),
+        "unknown" => "Connection needs checking".into(),
+        "idle" | "done" => "Agent idle".into(),
+        "working" => "Agent working".into(),
+        "error" => "Agent runtime error".into(),
+        _ => "Agent starting".into(),
+    }
 }
 fn destination(ui: Ui, row: &OverviewRow, page: &str) {
-    ui.return_overview.set(true);
     ui.open_card(row.card.id.clone());
     if let Some(req) = &row.request {
         ui.request.set(req.id.clone());
@@ -179,8 +217,11 @@ pub fn agent_row(ui: Ui, row: OverviewRow, selected: bool) -> impl IntoElement {
                 .child(muted(crate::components::activity::age(since))),
         )
         .child(muted(format!(
-            "{} / {} · {}",
-            row.project_name, row.card.stage, reason
+            "{} / {} · {} · {}",
+            row.project_name,
+            row.card.stage,
+            runtime_summary(&row),
+            reason
         )))
         .child(muted(format!(
             "Branch · {}",
@@ -212,11 +253,10 @@ fn inspector(ui: Ui) -> impl IntoElement {
             let rows = overview(&snapshot);
             let row = rows
                 .into_iter()
-                .find(|r| r.id == id)
-                .or_else(|| ui.overview_selected.get());
+                .find(|r| r.id == id);
             let Some(row) = row else {
                 return view()
-                    .child(muted("Select an Agent to inspect its context"))
+                    .child(muted("This item is no longer pending. Select another item from Overview."))
                     .into_element();
             };
             let mut body = panel()
@@ -282,7 +322,19 @@ fn inspector(ui: Ui) -> impl IntoElement {
                     }));
                 }
                 if let Some(a) = &row.attempt {
-                    body = body.child(label("Herdr runtime context"));
+                    body = body.child(label(runtime_summary(&row)));
+                    if a.finished() {
+                        let explanation=if a.connection_state=="missing" {
+                            "The original Core no longer retains this Terminal. No exit code is available."
+                        } else if a.state=="failed" {
+                            "This execution failed. The Card remains in its current stage; inspect the saved output before retrying."
+                        } else if row.actionable() {
+                            "This Terminal is closed. The Card still has a separate decision to handle."
+                        } else {"This Terminal is closed. Its execution history is retained on the Card."};
+                        body=body.child(muted(explanation));
+                    } else {
+                        body = body.child(label("Herdr runtime context"));
+                    }
                     body = body.child(muted(format!(
                         "{} · {}",
                         crate::machines::name(
@@ -294,7 +346,7 @@ fn inspector(ui: Ui) -> impl IntoElement {
                         ),
                         a.cwd
                     )));
-                    if let Some(v) = &a.observed {
+                    if !a.finished() && let Some(v) = &a.observed {
                         body = body.child(read_text(format!(
                             "{}\n{}",
                             v["status"]["title"]
@@ -305,7 +357,7 @@ fn inspector(ui: Ui) -> impl IntoElement {
                     }
                     body = body.child(muted(format!(
                         "{} · {} · last observed {}",
-                        a.connection_state,
+                        if a.finished() { "Closed" } else { &a.connection_state },
                         a.terminal.as_deref().unwrap_or("Unbound"),
                         a.lifecycle
                             .observed_at
@@ -314,13 +366,17 @@ fn inspector(ui: Ui) -> impl IntoElement {
                     )));
                     let row_id = row.id.clone();
                     let attempt_id = a.id.clone();
-                    body = body.child(action("Read terminal preview", Variant::Quiet, move |_| {
+                    let finished = a.finished();
+                    body = body.child(action(if finished { "Read saved output" } else { "Read terminal preview" }, Variant::Quiet, move |_| {
                         load_text(
                             ui,
                             "overview.preview",
                             json!({"row_id":row_id,"attempt_id":attempt_id}),
                         )
-                    }));
+                    }).disabled(finished && a.output_path.is_none()));
+                    if finished && a.output_path.is_none() {
+                        body = body.child(muted("No output was retained. Open the Card for recovery."));
+                    }
                 }
                 let history = row
                     .history
@@ -393,8 +449,7 @@ fn row_actions(ui: Ui) -> impl IntoElement {
     let id = ui.overview_selection.get();
     let row = overview(&ui.snapshot.get())
         .into_iter()
-        .find(|r| r.id == id)
-        .or_else(|| ui.overview_selected.get());
+        .find(|r| r.id == id);
     let mut actions = view().flex_row().flex_wrap().gap_2();
     let Some(row) = row else {
         return actions;

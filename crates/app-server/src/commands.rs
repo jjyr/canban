@@ -12,6 +12,8 @@ impl AppServer {
         match method {
             "app.shutdown" => {
                 self.stop.store(true, Ordering::SeqCst);
+                self.wake_runtime();
+                self.context_signal.notify_all();
                 Ok(json!({"stopping":true}))
             }
             "app.state" => {
@@ -40,6 +42,21 @@ impl AppServer {
             "terminal.end" => self.control_terminal(p, true),
             "terminal.close" => self.close_terminal(p),
             "terminal.context" => self.terminal_context(p),
+            "runtime.observation" => {
+                let (core, generation, connected, terminals) = {
+                    let inv = self.inventory.lock().unwrap();
+                    (
+                        inv.core.clone(),
+                        inv.generation,
+                        inv.error.is_none() && inv.last_at > 0,
+                        inv.records.len(),
+                    )
+                };
+                let q = self.contexts.lock().unwrap();
+                Ok(
+                    json!({"core_id":core,"generation":generation,"connected":connected,"terminal_count":terminals,"context_probes":q.probes(),"pending_contexts":q.pending_count(),"check_limit":4,"checks_running":self.check_slots.lock().unwrap().len()}),
+                )
+            }
             "app.ping" => Ok(
                 json!({"version":env!("CARGO_PKG_VERSION"),"api_version":API_VERSION,"pid":std::process::id(),"home":self.home}),
             ),
@@ -379,6 +396,7 @@ impl AppServer {
                 for agent in mentions {
                     let profile = canban_scheduler::select(&config, &[], Some(&agent))?;
                     let _context = crate::sessions::conversation(db, &c, &profile)?;
+                    let attempts = db.list::<Attempt>()?;
                     let active = db.list::<Request>()?.into_iter().rev().find(|r| {
                         r.card_id == c.id
                             && !(c.human_gate.is_some()
@@ -389,6 +407,16 @@ impl AppServer {
                                 r.state.as_str(),
                                 "queued" | "starting" | "running" | "working" | "blocked"
                             )
+                            || r.card_id == c.id
+                                && r.profile.id == agent
+                                && r.state == "completed"
+                                && r.profile == profile
+                                && attempts.iter().any(|a| {
+                                    a.request_id == r.id
+                                        && a.number == r.attempt
+                                        && a.terminal.is_some()
+                                        && !a.finished()
+                                })
                     });
                     let req = if let Some(req) = active {
                         req

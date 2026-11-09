@@ -75,10 +75,26 @@ pub const CATALOG: &[Command] = &[
     },
     CREATE_CARD,
     SEND_COMMENT,
+    Command {
+        id: "back",
+        title: "Back",
+        key: "mod+[",
+        display: "⌘[",
+        context: "Global",
+    },
+    Command {
+        id: "forward",
+        title: "Forward",
+        key: "mod+]",
+        display: "⌘]",
+        context: "Global",
+    },
 ];
 pub fn execute(ui: Ui, id: &str) {
     crate::utilities::close(ui);
     match id {
+        "back" => crate::navigation::go(ui, false),
+        "forward" => crate::navigation::go(ui, true),
         "new-card" => ui.new_card(String::new()),
         "create-card" if ui.page.get_untracked() == "new-card" => {
             ui.card_submit.update(|n| *n += 1)
@@ -99,6 +115,8 @@ pub fn execute(ui: Ui, id: &str) {
     }
 }
 pub fn bindings(ui: Ui) {
+    crate::navigation::watch(ui);
+    crate::terminals::watch(ui);
     effect(move || {
         if ui.page.get() == "new-card" && !ui.quick_open.get() && ui.utility_popup.get().is_empty()
         {

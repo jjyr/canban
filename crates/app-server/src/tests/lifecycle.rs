@@ -105,7 +105,7 @@ fn runtime_wait_episodes_are_durable_deduplicated_and_never_approve_task_gates()
     );
 }
 #[test]
-fn idle_reclamation_requires_exact_resume_timeout_no_viewer_no_unfinished_work() {
+fn idle_reclamation_uses_actual_interaction_even_when_the_terminal_is_open() {
     let (_d, app, _p, c) = setup();
     app.call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
         .unwrap();
@@ -121,7 +121,7 @@ fn idle_reclamation_requires_exact_resume_timeout_no_viewer_no_unfinished_work()
     });
     assert!(idle_candidate(&s, &run, 15, now(), false));
     assert!(!idle_candidate(&s, &run, 0, now(), false));
-    assert!(!idle_candidate(&s, &run, 15, now(), true));
+    assert!(idle_candidate(&s, &run, 15, now(), true));
     run.lifecycle.last_interaction_at = Some(now());
     assert!(!idle_candidate(&s, &run, 15, now(), false));
     run.lifecycle.last_interaction_at = None;
@@ -261,4 +261,218 @@ fn terminal_exit_resolves_runtime_wait_even_when_root_status_is_unchanged() {
     assert!(s.attempts[0].lifecycle.waiting.is_none());
     assert!(s.notices[0].read);
     assert!(s.cards[0].human_gate.is_none());
+}
+
+#[test]
+fn a_closing_idle_terminal_cannot_receive_a_new_assignment_and_reserves_its_slot() {
+    let (_d, app, _p, c) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let request = app.snapshot().unwrap().requests[0].clone();
+    let mut run = admit(&app, &request);
+    let mut s = app.snapshot().unwrap();
+    s.requests[0].state = "completed".into();
+    run.state = "completed".into();
+    run.location = Some(s.projects[0].work_location());
+    observed(&mut run, "idle");
+    s.attempts = vec![run];
+    let mut next = request;
+    next.id = "next-assignment".into();
+    next.state = "queued".into();
+    assert!(canban_scheduler::retained(&s, &next).is_some());
+    s.attempts[0].close_state = "closing".into();
+    assert!(canban_scheduler::retained(&s, &next).is_none());
+    assert!(!canban_scheduler::eligible(&s, &next));
+    assert_eq!(canban_scheduler::active_count(&s), 1);
+}
+
+#[test]
+fn exited_agent_keeps_task_recovery_but_reads_saved_output_without_a_core() {
+    let (_dir, app, _project, card) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let request = app.snapshot().unwrap().requests[0].clone();
+    let mut run = admit(&app, &request);
+    run.state = "needs_report".into();
+    run.close_state = "closed".into();
+    // The last runtime status may still say blocked; a confirmed exit wins.
+    run.observed = Some(json!({"state":"finished","exit_code":1,"status":{"state":"blocked"}}));
+    let output = format!(
+        "{}\nSaved failure context: authentication required",
+        "中".repeat(12_000)
+    );
+    let path = canban_context::run_dir(&app.home, &request, run.number).join("output.txt");
+    canban_context::atomic(&path, output.as_bytes()).unwrap();
+    run.output_path = Some(canban_context::relative(&app.home, &path).unwrap());
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut req: Request = db.get(&request.id)?;
+            req.state = "needs_report".into();
+            let mut card: Card = db.get(&card.id)?;
+            card.attention = Some("Agent exited without an explicit outcome".into());
+            card.human_gate = Some(HumanGate {
+                reason: card.attention.clone().unwrap(),
+                request_id: Some(req.id.clone()),
+                next_stage: None,
+            });
+            db.save(&card)?;
+            db.save(&req)?;
+            db.save(&run)
+        })
+        .unwrap();
+    app.config.write().unwrap().hc = "/nonexistent/canban-overview-test-core".into();
+    let rows = canban_notifications::overview(&app.snapshot().unwrap());
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.group, "Needs attention");
+    assert!(row.attempt.as_ref().unwrap().finished());
+    assert_eq!(
+        row.reasons
+            .iter()
+            .map(|r| r.source.as_str())
+            .collect::<Vec<_>>(),
+        vec!["task"]
+    );
+    let preview = app
+        .call(
+            "overview.preview",
+            json!({"row_id":row.id,"attempt_id":run.id}),
+        )
+        .unwrap();
+    assert!(preview["text"].as_str().unwrap().len() <= 32_768);
+    assert!(
+        preview["text"]
+            .as_str()
+            .unwrap()
+            .ends_with("authentication required")
+    );
+    assert_eq!(preview["source"], "Saved execution output (read-only)");
+    assert!(preview["observed_at"].is_null());
+    assert!(
+        app.call(
+            "overview.preview",
+            json!({"row_id":row.id,"attempt_id":"obsolete:1"})
+        )
+        .is_err()
+    );
+    assert_eq!(
+        app.call("execution.output", json!({"attempt_id":run.id}))
+            .unwrap()["body"],
+        output
+    );
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&card.id)?;
+            card.attention = None;
+            card.human_gate = None;
+            db.save(&card)
+        })
+        .unwrap();
+    let rows = canban_notifications::overview(&app.snapshot().unwrap());
+    assert_eq!(rows[0].group, "Closed");
+    assert!(!rows[0].actionable());
+}
+
+#[test]
+fn migration_only_clears_the_automatic_exit_gate_and_keeps_explicit_task_gates() {
+    let (_dir, app, _project, card) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let request = app.snapshot().unwrap().requests[0].clone();
+    let mut run = admit(&app, &request);
+    run.state = "needs_report".into();
+    run.observed = Some(json!({"state":"finished","exit_code":1}));
+    app.store.lock().unwrap().write(|db|{
+        db.save(&run)?;let mut r:Request=db.get(&request.id)?;r.state="needs_report".into();db.save(&r)?;
+        let mut c:Card=db.get(&card.id)?;attention(db,&mut c,"Agent exited without an explicit outcome. Inspect the retained output before resuming.")?;
+        c.human_gate.as_mut().unwrap().request_id=Some(r.id);db.save(&c)
+    }).unwrap();
+    app.migrate_exit_failures().unwrap();
+    let s = app.snapshot().unwrap();
+    assert_eq!(s.attempts[0].state, "failed");
+    assert!(s.cards[0].human_gate.is_none());
+    assert!(s.cards[0].attention.is_none());
+    assert_eq!(canban_notifications::overview(&s)[0].group, "Closed");
+    let mut run = s.attempts[0].clone();
+    run.state = "needs_report".into();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.save(&run)?;
+            let mut c: Card = db.get(&card.id)?;
+            attention(db, &mut c, "Need a product decision")?;
+            c.human_gate.as_mut().unwrap().request_id = Some(request.id.clone());
+            db.save(&c)
+        })
+        .unwrap();
+    app.migrate_exit_failures().unwrap();
+    assert_eq!(
+        app.snapshot().unwrap().cards[0]
+            .human_gate
+            .as_ref()
+            .unwrap()
+            .reason,
+        "Need a product decision"
+    );
+}
+
+#[test]
+fn authoritative_missing_resolves_terminal_input_but_keeps_task_decisions_and_known_exit_codes() {
+    let (_dir, app, _project, card) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let request = app.snapshot().unwrap().requests[0].clone();
+    let run = admit(&app, &request);
+    app.observe_lifecycle(
+        &run,
+        &json!({"state":"live","status":{"state":"blocked","kind":"permission","title":"Allow?"}}),
+    )
+    .unwrap();
+    app.call("execution.report",json!({"execution":{"request_id":request.id,"attempt_number":run.number},"state":"blocked","message":"Choose the target environment","request_key":"explicit-task-gate"})).unwrap();
+    let run = app.snapshot().unwrap().attempts[0].clone();
+    app.runtime_missing(&run).unwrap();
+    let s = app.snapshot().unwrap();
+    assert!(s.attempts[0].finished());
+    assert_eq!(s.attempts[0].connection_state, "missing");
+    assert!(s.attempts[0].lifecycle.waiting.is_none());
+    assert!(s.attempts[0].observed.as_ref().unwrap()["exit_code"].is_null());
+    assert_eq!(
+        s.cards[0].human_gate.as_ref().unwrap().reason,
+        "Choose the target environment"
+    );
+    let reasons = &canban_notifications::overview(&s)[0].reasons;
+    assert_eq!(reasons.len(), 1);
+    assert_eq!(reasons[0].source, "task");
+    let mut finished = s.attempts[0].clone();
+    finished.observed = Some(json!({"state":"finished","exit_code":7}));
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&finished))
+        .unwrap();
+    app.runtime_missing(&finished).unwrap();
+    assert_eq!(
+        app.snapshot().unwrap().attempts[0]
+            .observed
+            .as_ref()
+            .unwrap()["exit_code"],
+        7
+    );
 }

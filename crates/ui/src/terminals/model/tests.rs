@@ -282,3 +282,27 @@ fn input_gating_has_a_specific_lifecycle_label_and_keeps_binding_identity() {
         assert_eq!(b["terminal"], s.attempts[0].terminal.as_deref().unwrap());
     }
 }
+
+#[test]
+fn inactive_is_a_live_unattended_conversation_and_closed_entries_leave_inventory() {
+    let mut s = fixture();
+    s.requests[0].state = "completed".into();
+    s.attempts[0].observed = Some(json!({"state":"live","status":{"state":"done"}}));
+    s.attempts[0].connection_state = "connected".into();
+    s.attempts[0].lifecycle.observed_at = Some(now());
+    let entry = |s: &Snapshot| {
+        super::super::entries(s)
+            .into_iter()
+            .find(|e| e.card.as_ref().is_some_and(|c| c.id == "c1"))
+            .unwrap()
+    };
+    assert!(entry(&s).listed());
+    assert!(entry(&s).inactive());
+    s.attempts[0].lifecycle.last_interaction_at = Some(now());
+    assert!(!entry(&s).inactive());
+    s.attempts[0].observed = Some(json!({"state":"finished"}));
+    assert!(!entry(&s).listed());
+    s.attempts[0].observed = Some(json!({"state":"live"}));
+    s.cards[0].archived_at = Some(now());
+    assert!(!entry(&s).listed());
+}

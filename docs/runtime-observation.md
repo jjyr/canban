@@ -1,0 +1,81 @@
+# Event-driven runtime observation
+
+Implemented 2026-11-09. This supersedes the proposed periodic reconciliation in [the cost assessment](runtime-observation-cost.md). Canban no longer runs a half-second Terminal inventory scan or individual Agent status loop. GitHub synchronization and the remote Agent reporting bridge are separate responsibilities.
+
+```text
+Herdr Core (local terminals + remote mirrors)
+       |
+       | one subscription: initial snapshot, events, missed, heartbeat
+       v
+canban-herdr::events
+       |
+       v
+AppServer runtime inventory --------> state transitions / durable history
+       |                                      |
+       +--> directory context queue           +--> UI / Scheduler wake
+                  |
+             global maximum 4 checks
+             one check per machine
+                  |
+             shared directory caches
+
+Card / report / question / configuration changes --> Scheduler wake
+idle deadline / close timeout / queued retry ------> Scheduler wake
+```
+
+## Subscription and recovery
+
+`canban-herdr` owns a dedicated plain JSON-RPC event connection, independent of PTY output, rendering and viewer leases. Setup reads Core identity and machine routes, then subscribes and consumes the returned sequence/snapshot. No per-Terminal attachment is created for status observation.
+
+AppServer applies `created`, `restarted`, `status`, `turn`, `foreground`, `finished`, `lost`, `removed` and relevant label changes to its shared inventory. Routes are normalized to immutable machine-owner IDs. Duplicate/older sequence numbers are ignored; sequence gaps alone do not imply loss because filtered events can skip sequence numbers.
+
+`missed` replaces the inventory with its supplied snapshot. Disconnect, subscriber overflow, configuration changes and 45 seconds of silence invalidate the connection and cause a reconnect with exponential backoff (1–30 seconds). A new subscription supplies a fresh snapshot and resets directory discovery. No periodic Terminal list/get scan is used to recover. Transport loss and an unavailable remote mirror are not confirmed process exits. A locally authoritative absent record is Missing, with no invented exit code; previously confirmed exit information remains intact.
+
+Heartbeats update connection freshness in memory. Snapshot projections expose this freshness without rewriting every Attempt or generating Timeline events on every heartbeat. Ordinary lifecycle changes still produce durable history, and the DB is never held during Git/network discovery.
+
+### Remote connection health
+
+Core 0.1.18 does not emit a distinct remote-machine-disconnected event. Its local heartbeat does not establish remote liveness. When Canban has live remote bindings, remote events/heartbeats therefore request a bounded `machine.list` connection-health check. This checks machine connections, not a list of Terminals or Agent screens. Idle local-only operation does not issue this query. A fresh machine catalog also normalizes changed route aliases. Failed machine health checks remain unavailable/unknown rather than fabricating exits.
+
+The pre-existing remote CLI uses a file spool over Core's authenticated exec/file transport. That bridge still checks for incoming Agent operations while a remote Agent remains live; workers now stop when no remote invocation needs the bridge. It is not a runtime-status or Git scan. GitHub polling is unchanged.
+
+## Scheduling and deadlines
+
+Runtime observation, request creation, reports, immediate questions, human approval and configuration changes wake a coalesced service worker. Admission preserves the configurable Agent limit, workflow depth priority and human gates. A launch receipt wakes admission again so multiple available slots fill without a half-second delay between launches.
+
+Idle reclamation and close timeouts use the nearest outstanding deadline. Human terminal activity wakes the worker and updates the effective idle deadline. A retained Agent can become active again and later idle again; merely viewing it does not protect it indefinitely. Eligible queued admission that cannot proceed retries with bounded exponential backoff. With no eligible queue or outstanding deadline, the worker blocks waiting for an event.
+
+Queries immediately before a real action (for example, conditional idle close) still confirm its original binding and current state. Those safety checks are not background scans. AppServer startup, remote reconnect and execution Resume retain the original Core/machine/directory boundaries.
+
+## Directory and Git cache
+
+AppServer coalesces discovery by machine + observed cwd. Multiple Terminals in that directory share a result. Targets retain their own Core/Terminal identity, current cwd and mapping generation; an old result cannot overwrite a new binding or cwd. Discovery is limited to four simultaneous checks globally and one per machine. The machine-health check shares the same budget. These limits do not consume the eight-Agent scheduling budget.
+
+`canban-workspaces::context::ContextCache` separates canonical repository/worktree metadata from current-branch information. Matching Project/Card uses the current Project locations and Card workspaces rather than cached product ownership. A mapping-only edit reuses filesystem facts; title/comment edits do not invalidate associations. Known non-repository results are cached too. Failed remote probes are not cached as successful empty associations.
+
+Local filesystem notifications watch shallow discovered directory/Git metadata roots; only HEAD/HEAD.lock/.git changes invalidate branch results. Code-file writes do not trigger repository discovery. Native file-event acceptance must run outside a restrictive process sandbox; watcher registration errors are logged. Explicit `terminal.context {refresh:true}` resets discovery and works when a watcher is unavailable.
+
+Remote repositories have no local filesystem watcher. Selecting a Terminal requests `terminal.context`; the server reuses a fresh result and, after 30 seconds, invalidates the remote branch cache and enqueues a refresh. This age is checked on demand, not by a timer. Explicit refresh also works. Ordinary runtime status changes and heartbeat health checks do not refresh Git.
+
+`runtime.observation` exposes non-sensitive diagnostic counters (connection generation, inventory size, cumulative per-cache probe batches, pending context work and check budget) for acceptance. It does not query Core or filesystem state.
+
+## Exit and attention policy
+
+A confirmed exit without a reported outcome marks the running assignment Failed, saves available output and clears the runtime input wait/notification. The Card stays in its stage without an automatic retry or workflow advance. The Board keeps a failed-profile status visible; this is not a Needs you decision. It does not gain a synthetic task-human gate. Completed reports remain completed after exit. Explicit task `blocked` and human Review gates remain independent.
+
+On startup, legacy finished `needs_report` assignments become Failed. Only the exact historical automatically generated missing-outcome gate, bound to that request, is cleared; independent task/review gates remain. Confirmed preparation/launch failures are Failed; unknown launch effects still require recovery. A known undelivered-work handoff still requires a human decision before changing environments.
+
+## Verification
+
+Use `mise run test`, `mise run build`, workspace Clippy and `mise run acceptance-events`. The latter uses an isolated Core and disposable home, two real Shell PTYs and a deterministic interactive Agent. It records RPC method names, verifies no list/get/status scan or extra Git probe across an idle heartbeat, shared-cwd discovery, HEAD changes, cwd changes, a simulated `missed` snapshot, permission-wait exit, saved output, connection loss and reconnect. It does not run a paid provider or inspect credentials.
+
+The existing Overview, scheduling and retained-interaction acceptance checks cover runtime slot release, human gates, cross-Board admission, one-minute idle deadlines, human-input reset, exact Resume and Archive. Provider authentication/model quality and system-wide CPU savings are not established by these fixture checks.
+
+Acceptance evidence from this change (temporary artifacts):
+
+- Local event/cache run: `/private/tmp/cb-events-n7o93wza/evidence.json`; no idle inventory/status/Git query across a heartbeat, HEAD and newly created `.git` invalidation, missed/reconnect, failure and output checks passed.
+- Overview: `/private/tmp/cb-overview-iobgsdo3`; scheduling: `/private/tmp/cb-scheduling-xppd2htk`; retained interaction: `/private/tmp/cb-retained-5_w2hro5`. These isolated real-PTY fixtures passed their full checks.
+- Native production App: `/private/tmp/cb-events-native-dcvrsdrk/evidence.json`. CUA opened the permission wait, entered `/exit` in libghostty, observed the badge/count clear and the tab disappear, then restarted the UI and opened Failed history and saved `NORMAL_EXIT` output.
+- devpc remote event acceptance: `/private/tmp/cb-events-remote-hmz5wsfd/evidence.json`. Remote cwd/branch discovery and explicit refresh, runtime permission/exit, immutable-owner route rename, removal without a false exit and re-add/reconnect passed. Machine-specific isolation/cleanup details are kept in `~/Workspace/Machines/machines/devpc/runtime-events-20261109.md`.
+
+No live user Core or Canban database was changed. Native FSEvents acceptance required an unsandboxed process; the first sandboxed attempt did not deliver filesystem notifications and was not counted as a pass.

@@ -31,7 +31,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     px(nsh_core::element::desktop::title_bar().left.0.max(78.)
                                         + 12.)
                                 })
-                                .child(canban_ui_kit::muted("Canban")),
+                                .child(crate::navigation::controls(ui)),
                         )
                         .child(
                             view()

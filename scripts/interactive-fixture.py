@@ -59,6 +59,12 @@ try:
    match=re.search(r'Canban question ([^\s]+)',line)
    if match:
     qid=match.group(1);q=next(q for q in call('app.snapshot',{})['questions'] if q['id']==qid);reply(q);state('working')
+   elif line.startswith('Canban assignment '):
+    binding,_=json.JSONDecoder().raw_decode(line[len('Canban assignment '):])
+    request=binding['request_id'];attempt=binding['attempt'];manifest=Path(binding['manifest']);context=json.loads(manifest.read_text())
+    os.environ.update(CANBAN_REQUEST_ID=request,CANBAN_ATTEMPT=str(attempt),CANBAN_RUN_DIR=binding['run_dir'])
+    print('ASSIGNMENT_READY '+request,flush=True)
+    if context['request']['stage']=='review':finish()
    elif line.startswith('note-write '):
     _,note_id,body=line.split(' ',2)
     note=call('note.get',{'note_id':note_id})

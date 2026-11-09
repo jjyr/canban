@@ -584,7 +584,7 @@ fn live_replies_preserve_task_callback_and_require_current_invocation() {
     app.call("execution.report",json!({"execution":{"request_id":run.request_id,"attempt_number":run.number},"state":"completed","body":"Done","request_key":"finish-live"})).unwrap();
     let snap = app.snapshot().unwrap();
     assert_eq!(snap.cards[0].stage, "review");
-    assert_eq!(snap.attempts[0].close_state, "waiting");
+    assert!(snap.attempts[0].close_state.is_empty());
     assert!(
         snap.attempts[0].turn_ended_at.is_none(),
         "Earlier ready turn must not close a later task"
@@ -639,48 +639,40 @@ fn restarting_does_not_blindly_redeliver_uncertain_question() {
 }
 
 #[test]
-fn herdr_close_requires_later_root_done_not_interrupt_permission_or_callback() {
+fn completion_retains_interactive_terminal_until_idle_timeout_or_explicit_close() {
     let (_dir, app, _project, card) = setup();
     app.call(
         "card.move",
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let mut run = admit(&app, &app.snapshot().unwrap().requests[0]);
-    run.completed_at = Some(1000);
-    run.completion_turn = Some(4);
-    for state in ["idle", "blocked", "error", "working"] {
-        assert!(!runtime::completion_ready(
+    let run = admit(&app, &app.snapshot().unwrap().requests[0]);
+    app.call("execution.report",json!({"execution":{"request_id":run.request_id,"attempt_number":run.number},"state":"completed","message":"Done","request_key":"retained-completion"})).unwrap();
+    for state in ["done", "idle", "blocked", "working"] {
+        app.observe_lifecycle(
             &run,
-            &json!({"state":"live","status":{"state":state},"turn":5,"status_ms":1100})
-        ));
+            &json!({"state":"live","status":{"state":state},"turn":8,"status_ms":now()}),
+        )
+        .unwrap();
+        let current = app.snapshot().unwrap().attempts[0].clone();
+        assert!(current.close_state.is_empty());
+        assert!(!current.finished());
+        assert_eq!(current.terminal, run.terminal);
     }
-    assert!(!runtime::completion_ready(
-        &run,
-        &json!({"state":"live","status":{"state":"done"},"turn":4,"status_ms":1100})
-    ));
-    assert!(!runtime::completion_ready(
-        &run,
-        &json!({"state":"live","status":{"state":"done"},"turn":5,"status_ms":999})
-    ));
-    assert!(!runtime::completion_ready(
-        &run,
-        &json!({"state":"finished","status":{"state":"done"},"turn":5,"status_ms":1100})
-    ));
-    assert!(runtime::completion_ready(
-        &run,
-        &json!({"state":"live","status":{"state":"done"},"turn":5,"status_ms":1100})
-    ));
+    assert_eq!(app.snapshot().unwrap().cards[0].stage, "review");
     app.call(
-        "agent.turn_ended",
-        json!({"request_id":run.request_id,"attempt":run.number,"session_id":"obsolete-hook"}),
+        "comment.add",
+        json!({"card_id":card.id,"body":"Follow up", "mentions":["developer"]}),
     )
     .unwrap();
-    assert!(app.snapshot().unwrap().attempts[0].turn_ended_at.is_none());
-    assert!(
-        app.snapshot().unwrap().conversations[0]
-            .provider_session_id
-            .is_none()
+    let s = app.snapshot().unwrap();
+    assert_eq!(s.questions[0].request_id, run.request_id);
+    assert_eq!(
+        s.requests
+            .iter()
+            .filter(|r| r.profile.id == "developer")
+            .count(),
+        1
     );
 }
 
@@ -1436,4 +1428,36 @@ fn local_card_removal_cannot_orphan_a_live_agent() {
     assert!(s.cards[0].active());
     assert_eq!(s.attempts[0].id, run.id);
     assert!(!s.events.iter().any(|e| e.kind == "card.removed"));
+}
+
+#[test]
+fn continued_assignment_rejects_new_stale_reports_but_preserves_completion_receipts() {
+    let (_d, app, _p, c) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let run = admit(&app, &app.snapshot().unwrap().requests[0]);
+    let report = json!({"request_key":"completed-before-continuation","execution":{"request_id":run.request_id,"attempt_number":run.number},"state":"completed","message":"Done"});
+    app.call("execution.report", report.clone()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut a: Attempt = db.get(&run.id)?;
+            a.state = "continued".into();
+            db.save(&a)
+        })
+        .unwrap();
+    assert_eq!(
+        app.call("execution.report", report).unwrap()["duplicate"],
+        true
+    );
+    let before = app.snapshot().unwrap();
+    let result=app.call("execution.report",json!({"request_key":"obsolete-progress","execution":{"request_id":run.request_id,"attempt_number":run.number},"state":"working","body":"Stale"}));
+    assert!(result.is_err());
+    let after = app.snapshot().unwrap();
+    assert_eq!(before.reports, after.reports);
+    assert_eq!(after.attempts[0].state, "continued");
 }

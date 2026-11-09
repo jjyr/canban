@@ -22,6 +22,7 @@ env = {k:v for k,v in os.environ.items() if not k.startswith("CANBAN_")}
 env["CANBAN_HOME"] = str(home)
 core_env = {"HC_SESSION": "canban-acceptance", "HC_SOCKET": str(base / "hc.sock"), "XDG_STATE_HOME": str(base / "hc-state"), "XDG_CONFIG_HOME": str(base / "hc-config")}
 log = open(base / "server.log", "a")
+env.update(core_env)
 server = subprocess.Popen([str(cli), "serve"], env=env, stdout=log, stderr=log)
 
 def call(method, params=None):

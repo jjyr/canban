@@ -11,7 +11,9 @@ pub struct Location {
     pub card: String,
     pub request: String,
     pub note: String,
-    pub return_overview: bool,
+    pub terminal: String,
+    pub standalone: bool,
+    pub terminal_card: String,
 }
 
 #[derive(Clone, Copy)]
@@ -24,6 +26,7 @@ pub struct Ui {
     pub utility: Signal<Value>,
     pub utility_popup: Signal<String>,
     pub utility_query: Signal<String>,
+    pub theme_preview: Signal<Option<String>>,
     pub utility_loading: Signal<bool>,
     pub utility_epoch: Signal<u64>,
     pub usage: Signal<Value>,
@@ -36,10 +39,11 @@ pub struct Ui {
     pub terminal_focus: Signal<u64>,
     pub terminal_rename: Signal<Option<String>>,
     pub operation_error: Signal<String>,
-    pub terminal_origin: Signal<Option<Location>>,
-    pub terminal_card_return: Signal<bool>,
+    pub history: Signal<crate::navigation::History>,
+    pub card_standalone: Signal<bool>,
+    pub terminal_card_context: Signal<String>,
     pub terminal_sidebar: Signal<bool>,
-    pub terminal_closed: Signal<bool>,
+    pub terminal_inactive: Signal<bool>,
     pub terminal_folds: Signal<BTreeSet<String>>,
     pub terminal_width: Signal<f32>,
     pub quick_open: Signal<bool>,
@@ -53,10 +57,8 @@ pub struct Ui {
     pub max_agents: Signal<usize>,
     pub idle_minutes: Signal<u64>,
     pub overview_selection: Signal<String>,
-    pub overview_selected: Signal<Option<canban_notifications::OverviewRow>>,
     pub overview_closed: Signal<bool>,
     pub overview_width: Signal<f32>,
-    pub return_overview: Signal<bool>,
     pub project: Signal<String>,
     pub card: Signal<String>,
     pub request: Signal<String>,
@@ -109,16 +111,15 @@ impl Ui {
         self.navigate("new-card");
     }
     pub fn navigate(self, page: &str) {
-        self.terminal_card_return.set(false);
+        self.card_standalone.set(false);
         if page == "terminals" {
             self.terminal_focus.update(|v| *v += 1);
-            self.terminal_origin.set(None);
+            self.terminal_card_context.set(String::new());
             crate::terminals::restore_selection(self);
             if self.narrow.get_untracked() && !self.terminal_selection.get_untracked().is_empty() {
                 self.terminal_sidebar.set(false);
             }
         }
-        self.return_overview.set(false);
         self.clear_output();
         self.review_request
             .set(self.review_request.get_untracked() + 1);
@@ -130,11 +131,10 @@ impl Ui {
             card_target: signal(String::new()),
             card_submit: signal(0),
             comment_submit: signal(0),
-            utility: signal(
-                json!({"preferences":{"appearance":"system","palette":"canban"},"awake":false}),
-            ),
+            utility: signal(json!({"preferences":{"theme":"canban"},"awake":false})),
             utility_popup: signal(String::new()),
             utility_query: signal(String::new()),
+            theme_preview: signal(None),
             utility_loading: signal(false),
             utility_epoch: signal(0),
             usage: signal(json!({"readings":[]})),
@@ -149,10 +149,11 @@ impl Ui {
             terminal_focus: signal(0),
             terminal_rename: signal(None),
             operation_error: signal(String::new()),
-            terminal_origin: signal(None),
-            terminal_card_return: signal(false),
+            history: signal(crate::navigation::History::default()),
+            card_standalone: signal(false),
+            terminal_card_context: signal(String::new()),
             terminal_sidebar: signal(true),
-            terminal_closed: signal(false),
+            terminal_inactive: signal(false),
             terminal_folds: signal(BTreeSet::new()),
             terminal_width: signal(260.),
             snapshot: signal(Snapshot::default()),
@@ -167,10 +168,8 @@ impl Ui {
                     .unwrap_or(15),
             ),
             overview_selection: signal(String::new()),
-            overview_selected: signal(None),
             overview_closed: signal(false),
             overview_width: signal(700.0),
-            return_overview: signal(false),
             max_agents: signal(
                 crate::APP
                     .get()
@@ -215,14 +214,31 @@ impl Ui {
             card: self.card.get_untracked(),
             request: self.request.get_untracked(),
             note: self.note.get_untracked(),
-            return_overview: self.return_overview.get_untracked(),
+            terminal: if self.page.get_untracked() == "terminals" {
+                self.terminal_selection.get_untracked()
+            } else {
+                String::new()
+            },
+            standalone: self.card_standalone.get_untracked(),
+            terminal_card: if self.page.get_untracked() == "terminals" {
+                self.terminal_card_context.get_untracked()
+            } else {
+                String::new()
+            },
         }
     }
     pub fn open_terminal(self, conversation: String) {
-        if self.page.get_untracked() != "terminals" && !self.terminal_card_return.get_untracked() {
-            self.terminal_origin.set(Some(self.location()));
+        if let Some(entry) = crate::terminals::entries(&self.snapshot.get_untracked())
+            .into_iter()
+            .find(|e| e.saved.id == conversation)
+            && !entry.listed()
+        {
+            if let Some(c) = entry.card {
+                self.open_card(c.id);
+            }
+            return;
         }
-        self.terminal_card_return.set(false);
+        self.card_standalone.set(false);
         self.clear_output();
         self.review_request
             .set(self.review_request.get_untracked() + 1);
@@ -237,32 +253,9 @@ impl Ui {
         crate::terminals::reveal(self, &conversation);
         self.page.set("terminals".into());
     }
-    pub fn terminal_source(self) {
-        if let Some(source) = self.terminal_origin.get_untracked() {
-            self.clear_output();
-            self.review_request
-                .set(self.review_request.get_untracked() + 1);
-            self.project.set(source.project);
-            self.card.set(source.card);
-            self.request.set(source.request);
-            self.note.set(source.note);
-            self.return_overview.set(source.return_overview);
-            self.page.set(source.page);
-            self.terminal_origin.set(None);
-        }
-    }
     pub fn terminal_card(self, card: String) {
-        self.return_overview.set(false);
         self.open_card(card);
-        self.terminal_card_return.set(true);
-    }
-    pub fn return_terminal(self) {
-        self.terminal_card_return.set(false);
-        self.clear_output();
-        self.review_request
-            .set(self.review_request.get_untracked() + 1);
-        self.terminal_focus.update(|v| *v += 1);
-        self.page.set("terminals".into());
+        self.card_standalone.set(true);
     }
     pub fn show_search(self, projects: bool) {
         self.utility_popup.set(String::new());
@@ -293,7 +286,10 @@ impl Ui {
         })
     }
     pub fn open_card(self, id: String) {
-        self.terminal_card_return.set(false);
+        self.card_standalone.set(matches!(
+            self.page.get_untracked().as_str(),
+            "terminals" | "overview"
+        ));
         self.review.set(None);
         self.review_request
             .set(self.review_request.get_untracked() + 1);
@@ -314,32 +310,11 @@ impl Ui {
             .set(self.output_request.get_untracked() + 1);
         self.page.set("card".into());
     }
-    pub fn back_board(self) {
-        if self.terminal_card_return.get_untracked() {
-            self.return_terminal();
-            return;
-        }
-        if self.return_overview.get_untracked() {
-            self.clear_output();
-            self.page.set("overview".into());
-            self.expanded.set(false);
-            self.focused_card.set(false);
-            return;
-        }
-        self.review_request
-            .set(self.review_request.get_untracked() + 1);
-        self.page.set(
-            if self.card.get_untracked().is_empty() || self.narrow.get_untracked() {
-                "board".into()
-            } else {
-                "card".into()
-            },
-        );
-        self.expanded.set(false);
-        self.focused_card.set(false);
+    pub fn back(self) {
+        crate::navigation::go(self, false);
     }
     pub fn open_note(self, id: String) {
-        self.terminal_card_return.set(false);
+        self.card_standalone.set(false);
         if let Some(project) = self.snapshot.with_untracked(|s| {
             s.notes
                 .iter()
@@ -557,7 +532,8 @@ pub fn load_text(ui: Ui, method: &'static str, params: Value) {
         });
         ui.output.set(match result {
             Ok(Ok(v)) if method == "overview.preview" => format!(
-                "Herdr screen · {}\n\n{}",
+                "{} · {}\n\n{}",
+                v["source"].as_str().unwrap_or("Execution context"),
                 v["terminal"].as_str().unwrap_or(""),
                 v["text"].as_str().unwrap_or("")
             ),

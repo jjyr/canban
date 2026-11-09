@@ -48,7 +48,7 @@ The Card content has one scroll owner and saves its offset per Card. First open 
 
 ## Terminal boundary
 
-Clicking an existing Agent status or Timeline **Open terminal** navigates to its conversation. It does not resume or start an Agent. **Open Card Terminals** selects an existing Card conversation if available; otherwise it opens a Card-context empty Terminal view without selecting an unrelated tab or starting a process.
+Clicking an existing live Agent status or Timeline **Open terminal** navigates to its conversation. An exited Agent status is labeled Resume and explicitly restores its exact session; it does not open an ended-session page. Live navigation does not resume or start an Agent. **Open Card Terminals** selects an existing Card conversation if available; otherwise it opens a Card-context empty Terminal view without selecting an unrelated tab or starting a process.
 
 The Terminal chrome offers **Choose Card Agent** for an active associated Card. The empty Card view offers **Choose Agent**. This explicit action invokes the existing `agent.open` Start/Resume boundary. Ended sessions retain Resume/Start fresh; interrupt, close and history remain Terminal controls. **Back to source** returns to the Card and its draft. Closing a Terminal continues to use the existing unified lifecycle close operation.
 
@@ -71,3 +71,5 @@ Local Cards offer **Delete Card**; GitHub Issue Cards offer **Remove from Board*
 **Archived Cards** provides inline Restore for archived records and a **Deleted Cards** recovery section loaded through `card.list(include_removed: true)` for the selected Project. `card.restore` clears local removal/archive state without scheduling work. Archive remains the completed-work/compression lifecycle; Delete is local removal and preserves recoverable data. There is no additional Close workflow stage.
 
 Native isolated checks covered header Archive → archived list → Restore, Board right-click Delete → Deleted Cards → Restore with the same Card number, and X dismissing only the detail pane. Backend tests cover queue cancellation/history preservation and rejection of removal with a live Agent. Gallery includes an **Archived / deleted** scene using production controls.
+
+[Terminal interaction and navigation](terminal-interaction.md) records the current delayed-exit/inactive contract and unified Back/Forward behavior.

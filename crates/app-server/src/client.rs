@@ -106,11 +106,13 @@ fn check_api(ping: &Value) -> Result<()> {
 
 impl AppServer {
     pub(super) fn relay(&self, mut stream: UnixStream, params: &Value) -> Result<()> {
+        let mut target = None;
         let _viewer = if let Some(terminal) = params["terminal"].as_str() {
             let core = canban_herdr::Client {
                 config: self.config(),
             }
             .status()?;
+            target = Some((strp(&core["core"], "id")?.to_owned(), terminal.to_owned()));
             Some(canban_herdr::activity::Viewer::new(
                 strp(&core["core"], "id")?,
                 terminal,
@@ -123,7 +125,15 @@ impl AppServer {
         stream.set_read_timeout(None)?;
         stream.set_write_timeout(None)?;
         let mut source = stream.try_clone()?;
-        let reverse = std::thread::spawn(move || std::io::copy(&mut source, &mut input));
+        let reverse = std::thread::spawn(move || {
+            if target.is_some() {
+                canban_herdr::stream::relay_input(&mut source, &mut input, target)
+            } else {
+                std::io::copy(&mut source, &mut input)
+                    .map(|_| ())
+                    .map_err(Into::into)
+            }
+        });
         let _ = std::io::copy(&mut output, &mut stream);
         let _ = stream.shutdown(std::net::Shutdown::Both);
         let _ = child.kill();

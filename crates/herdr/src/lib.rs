@@ -179,3 +179,5 @@ pub mod activity;
 
 pub mod host;
 pub mod transport;
+
+pub mod events;

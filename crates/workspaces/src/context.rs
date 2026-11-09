@@ -2,6 +2,30 @@
 use super::*;
 use canban_types::Snapshot;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
+#[derive(Default)]
+pub struct ContextCache {
+    paths: BTreeMap<String, Value>,
+    branches: BTreeMap<String, Option<String>>,
+    pub probes: u64,
+}
+impl ContextCache {
+    pub fn invalidate_branches(&mut self) {
+        self.branches.clear();
+    }
+    pub fn watch_paths(&self) -> Vec<PathBuf> {
+        self.paths
+            .values()
+            .flat_map(|v| {
+                [v["git_dir"].as_str(), v["path"].as_str()]
+                    .into_iter()
+                    .flatten()
+                    .map(PathBuf::from)
+            })
+            .collect()
+    }
+}
+
 impl Ops {
     pub fn c_contains(&self, root: &str, cwd: &str) -> bool {
         self.host
@@ -17,6 +41,15 @@ impl Ops {
         s: &Snapshot,
         cwd: &str,
     ) -> (Option<String>, Option<String>, Option<String>) {
+        self.directory_context_cached(s, cwd, &mut ContextCache::default())
+            .unwrap_or_default()
+    }
+    pub fn directory_context_cached(
+        &self,
+        s: &Snapshot,
+        cwd: &str,
+        cache: &mut ContextCache,
+    ) -> Result<(Option<String>, Option<String>, Option<String>)> {
         let machine = &self.host.machine;
         let mut roots: Vec<(String, String)> = s
             .projects
@@ -72,42 +105,74 @@ impl Ops {
             .collect::<Vec<_>>();
         paths.sort();
         paths.dedup();
-        let probe = if self.host.remote() {
-            self.host.python(r#"import os,sys,json,subprocess
+        let missing = paths
+            .iter()
+            .filter(|p| !cache.paths.contains_key(*p))
+            .cloned()
+            .collect::<Vec<_>>();
+        let branch_missing = !cache.branches.contains_key(cwd);
+        if !missing.is_empty() || branch_missing {
+            cache.probes += 1;
+            let probe = if self.host.remote() {
+                self.host.python(r#"import os,sys,json,subprocess
 rows={}
 for p in json.loads(sys.argv[1]):
- if not os.path.exists(p):continue
- canonical=os.path.realpath(p)
+ if not os.path.exists(p):rows[p]=None;continue
  def git(args):
   r=subprocess.run(['git','-C',p]+args,capture_output=True,text=True)
   return r.stdout.strip() if r.returncode==0 else None
- common=git(['rev-parse','--path-format=absolute','--git-common-dir'])
- rows[p]={'path':canonical,'repo':os.path.realpath(common) if common else None}
-branch=subprocess.run(['git','-C',sys.argv[2],'symbolic-ref','--quiet','--short','HEAD'],capture_output=True,text=True)
-print(json.dumps({'paths':rows,'branch':branch.stdout.strip() if branch.returncode==0 else None}))"#,&[&serde_json::to_string(&paths).unwrap_or_default(),cwd]).ok()
-        } else {
-            let mut rows = serde_json::Map::new();
-            for p in paths {
-                if let Ok(path) = self.host.canonical(Path::new(&p)) {
-                    let repo = self
-                        .checked(
-                            Path::new(&p),
-                            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-                        )
-                        .ok()
-                        .and_then(|p| self.host.canonical(Path::new(&p)).ok());
-                    rows.insert(p, json!({"path":path,"repo":repo}));
+ dirs=git(['rev-parse','--path-format=absolute','--git-common-dir','--git-dir'])
+ parts=dirs.splitlines() if dirs else []
+ rows[p]={'path':os.path.realpath(p),'repo':os.path.realpath(parts[0]) if parts else None,'git_dir':parts[1] if len(parts)>1 else None}
+branch=None
+if sys.argv[3]=='true':
+ r=subprocess.run(['git','-C',sys.argv[2],'symbolic-ref','--quiet','--short','HEAD'],capture_output=True,text=True)
+ branch=r.stdout.strip() if r.returncode==0 else None
+print(json.dumps({'paths':rows,'branch':branch}))"#,&[&serde_json::to_string(&missing)?,cwd,if branch_missing {"true"} else {"false"}])?
+            } else {
+                let mut rows = serde_json::Map::new();
+                for p in &missing {
+                    let row = if let Ok(path) = self.host.canonical(Path::new(p)) {
+                        let dirs = self
+                            .checked(
+                                Path::new(p),
+                                &[
+                                    "rev-parse",
+                                    "--path-format=absolute",
+                                    "--git-common-dir",
+                                    "--git-dir",
+                                ],
+                            )
+                            .ok();
+                        let parts = dirs
+                            .as_deref()
+                            .map(|d| d.lines().collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        json!({"path":path,"repo":parts.first().and_then(|p| self.host.canonical(Path::new(p)).ok()),"git_dir":parts.get(1)})
+                    } else {
+                        Value::Null
+                    };
+                    rows.insert(p.clone(), row);
                 }
+                json!({"paths":rows,"branch":if branch_missing {self.current_branch(cwd)} else {None}})
+            };
+            for p in missing {
+                cache.paths.insert(p.clone(), probe["paths"][&p].clone());
             }
-            Some(json!({"paths":rows,"branch":self.current_branch(cwd)}))
-        };
-        let probe = probe.unwrap_or(Value::Null);
+            if branch_missing {
+                cache
+                    .branches
+                    .insert(cwd.into(), probe["branch"].as_str().map(str::to_owned));
+            }
+        }
+        let probe =
+            json!({"paths":cache.paths,"branch":cache.branches.get(cwd).cloned().flatten()});
         let rows = &probe["paths"];
         let canonical = |p: &str| rows[p]["path"].as_str().map(PathBuf::from);
         let repo = |p: &str| rows[p]["repo"].as_str().map(str::to_owned);
         let branch = probe["branch"].as_str().map(str::to_owned);
         let Some(path) = canonical(cwd) else {
-            return (None, None, branch);
+            return Ok((None, None, branch));
         };
         let mut direct = roots
             .iter()
@@ -136,7 +201,7 @@ print(json.dumps({'paths':rows,'branch':branch.stdout.strip() if branch.returnco
                 (matches.len() == 1).then(|| matches[0].clone())
             });
         let Some(project) = project else {
-            return (None, None, branch);
+            return Ok((None, None, branch));
         };
         let mut exact = checkouts
             .iter()
@@ -164,7 +229,7 @@ print(json.dumps({'paths':rows,'branch':branch.stdout.strip() if branch.returnco
         } else {
             None
         };
-        (Some(project), card, branch)
+        Ok((Some(project), card, branch))
     }
 }
 pub fn contains(root: &str, cwd: &str) -> bool {
@@ -263,5 +328,65 @@ mod tests {
         s.cards[0].archived_at = Some(2);
         s.cards.pop();
         assert!(resolve(&s, child.to_str().unwrap()).1.is_none());
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    #[test]
+    fn unchanged_directory_reuses_metadata_but_head_and_mapping_changes_are_independent() {
+        let dir = tempfile::tempdir().unwrap();
+        checked(dir.path(), &["init", "-b", "main"]).unwrap();
+        let cwd = dir.path().to_str().unwrap();
+        let ops = Ops::local();
+        let mut cache = ContextCache::default();
+        let mut s = Snapshot::default();
+        assert_eq!(
+            ops.directory_context_cached(&s, cwd, &mut cache).unwrap().2,
+            Some("main".into())
+        );
+        let probes = cache.probes;
+        ops.directory_context_cached(&s, cwd, &mut cache).unwrap();
+        assert_eq!(cache.probes, probes);
+        s.projects.push(Project {
+            github: None,
+            delivery_mode: Default::default(),
+            location: None,
+            id: "p".into(),
+            name: "p".into(),
+            directory: cwd.into(),
+            workflow: Default::default(),
+            target_branch: None,
+            created_at: 0,
+        });
+        assert_eq!(
+            ops.directory_context_cached(&s, cwd, &mut cache).unwrap().0,
+            Some("p".into())
+        );
+        assert_eq!(
+            cache.probes, probes,
+            "mapping edits reuse known filesystem metadata"
+        );
+        checked(dir.path(), &["symbolic-ref", "HEAD", "refs/heads/other"]).unwrap();
+        let known_paths = cache.paths.clone();
+        cache.invalidate_branches();
+        assert_eq!(
+            ops.directory_context_cached(&s, cwd, &mut cache).unwrap().2,
+            Some("other".into())
+        );
+        assert_eq!(
+            cache.paths, known_paths,
+            "HEAD refresh preserves repository discovery"
+        );
+        assert_eq!(cache.probes, probes + 1);
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path();
+        ops.directory_context_cached(&s, outside.to_str().unwrap(), &mut cache)
+            .unwrap();
+        let probes = cache.probes;
+        ops.directory_context_cached(&s, outside.to_str().unwrap(), &mut cache)
+            .unwrap();
+        assert_eq!(cache.probes, probes);
     }
 }

@@ -13,7 +13,7 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
     let selected = ui.terminal_selection.get() == id;
     let color = if e.needs_attention() {
         ATTENTION
-    } else if e.ended() {
+    } else if e.ended() || e.inactive() {
         MUTED
     } else {
         SUCCESS
@@ -92,9 +92,13 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
                         .gap_2()
                         .child(label(e.title()).flex_1().min_w(px(0.)).truncate())
                         .child(
-                            muted(crate::machines::name(ui, e.machine()))
-                                .max_w(px(82.))
-                                .truncate(),
+                            muted(if e.machine() == "local" {
+                                String::new()
+                            } else {
+                                crate::machines::name(ui, e.machine())
+                            })
+                            .max_w(px(82.))
+                            .truncate(),
                         )
                         .child(
                             view()
@@ -129,6 +133,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                         e.project_id.clone(),
                         e.hint(),
                         e.ended(),
+                        e.inactive(),
                         e.needs_attention(),
                     )
                 })
@@ -143,6 +148,35 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         .px_2()
         .py_2()
         .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .px_2()
+                .pb_2()
+                .child(label("Terminals").font_weight(FontWeight::SEMIBOLD))
+                .child(
+                    action(
+                        move || {
+                            if ui.terminal_inactive.get() {
+                                "Hide inactive"
+                            } else {
+                                "Show inactive"
+                            }
+                        },
+                        Variant::Quiet,
+                        move |_| ui.terminal_inactive.update(|v| *v = !*v),
+                    )
+                    .bg(move || {
+                        if ui.terminal_inactive.get() {
+                            SELECTED
+                        } else {
+                            CLEAR
+                        }
+                    }),
+                ),
+        )
+        .child(
             scroll()
                 .flex_1()
                 .min_h(px(0.))
@@ -151,9 +185,12 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                 .child(dynamic(move || {
                     let _ = inventory.get();
                     let snapshot = ui.snapshot.get_untracked();
-                    let rows = entries(&snapshot);
+                    let rows: Vec<_> = entries(&snapshot)
+                        .into_iter()
+                        .filter(Entry::listed)
+                        .collect();
                     let folds = ui.terminal_folds.get();
-                    let show_ended = ui.terminal_closed.get();
+                    let show_inactive = ui.terminal_inactive.get();
                     let mut body = view().gap_2();
                     let mut groups: Vec<_> = snapshot
                         .projects
@@ -166,7 +203,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                     for (project, name) in groups {
                         let key = format!("project:{}", project.clone().unwrap_or_default());
                         let collapsed = folds.contains(&key);
-                        let mut group = view().gap_1();
+                        let mut group = view().gap_1().pt_2();
                         let mut heading = view().flex_row().items_center().min_w(px(0.)).child(
                             nsh_base::button()
                                 .flex_1()
@@ -176,13 +213,16 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                 .items_start()
                                 .bg(CLEAR)
                                 .hover(|s| s.bg(INSET))
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(muted(if collapsed { "▸" } else { "▾" }))
+                                .child(icon(Icon::Folder).w(px(14.)).h(px(14.)))
                                 .child(
-                                    label(format!(
-                                        "{} {}",
-                                        if collapsed { "▸" } else { "▾" },
-                                        name
-                                    ))
-                                    .truncate(),
+                                    label(name.clone())
+                                        .text_color(MUTED)
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .truncate(),
                                 )
                                 .on_press(move |_: &()| toggle(ui, key.clone())),
                         );
@@ -196,25 +236,26 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                         }
                         group = group.child(heading);
                         if !collapsed {
-                            for e in rows
-                                .iter()
-                                .filter(|e| e.project_id == project && (show_ended || !e.ended()))
-                            {
-                                group = group.child(view().pl_2().child(row(ui, e.clone())));
+                            for e in rows.iter().filter(|e| {
+                                e.project_id == project
+                                    && (show_inactive
+                                        || !e.inactive()
+                                        || e.saved.id == ui.terminal_selection.get_untracked()
+                                        || ui
+                                            .terminal_tabs
+                                            .with_untracked(|tabs| tabs.contains(&e.saved.id)))
+                            }) {
+                                group = group.child(
+                                    view()
+                                        .ml_3()
+                                        .pl_2()
+                                        .border_l_1()
+                                        .border_color(BORDER)
+                                        .child(row(ui, e.clone())),
+                                );
                             }
                         }
                         body = body.child(group);
-                    }
-                    if rows.iter().any(|e| e.ended()) {
-                        body = body.child(action(
-                            if show_ended {
-                                "Hide ended"
-                            } else {
-                                "Show ended"
-                            },
-                            Variant::Quiet,
-                            move |_| ui.terminal_closed.set(!ui.terminal_closed.get_untracked()),
-                        ));
                     }
                     if rows.is_empty() {
                         body = body.child(

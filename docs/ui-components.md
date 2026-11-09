@@ -5,6 +5,7 @@ Status: implementation inventory, updated 2026-11-08. These modules are used by 
 | Component/layer | Module | NSH reuse and contract | Verification |
 | --- | --- | --- | --- |
 | Semantic tokens | crates/ui-kit/src/tokens.rs | Shared adaptive surfaces/text/accent/borders and sizing | Native light/dark Gallery and Board inspected |
+| Scroll indicators | crates/ui-kit/src/scrollbar.rs | App-wide NSH overlay scrollbars: 6-point rounded muted thumb, transparent 12-point track, reveal on scroll/track hover, fade after idle; colors follow theme preview and selection. NSH owns metrics, dragging, track clicks and reduced motion. No layout width is reserved. Native Terminal rendering remains separate. | Three overflowing production Board columns in Gallery; isolated actual App scroll, theme switch and Card navigation |
 | Button | crates/ui-kit/src/button.rs | nsh-base Button; typed variants, centralized hover/pressed/focus/disabled styles | Native mouse, Tab/Space and disabled-skip checks |
 | Text field | crates/ui-kit/src/input.rs | Controlled NSH Input; common geometry/focus/text | Multiline Unicode paste/edit/save, live Markdown preview and retained draft through state refresh |
 | Checkbox | crates/ui-kit/src/checkbox.rs | Controlled nsh-base Checkbox; common checked/focus presentation | Used by per-Card Note selection; snapshot semantics have Rust regression coverage |
@@ -132,3 +133,11 @@ Gallery workspace scenes now use the exact production frame, including utilities
 `card/` separates fixed header, scrolling task/context/details, Timeline projection and fixed composer. `components/timeline_item.rs` owns inline file-backed Markdown replies/reports; `profiles.rs` owns the shared explicit-recipient menu/projection; `terminals.rs` owns Card-context navigation and explicit Agent selection. See [contracts and native evidence](card-conversation.md). Gallery **Card conversation** and **Append reply** cover long histories, narrow layouts and reading-position behavior through production components.
 
 `card_actions.rs` shares lifecycle intents between the Card header, Board right-click menu and Archive recovery rows. Direct Archive/Restore, reversible local Delete/Remove, archive failures and recovery use existing UI Kit chrome/buttons/panels. Gallery **Archived / deleted** covers both recovery groups. The compact bottom bar omits the redundant Usage/machine prefix.
+
+## Terminal interaction and navigation (2026-11-09)
+
+The shared icon set includes Folder for grouping. Terminal rows use indented guides and a top selected Show/Hide inactive control; finished entries leave both tree and tabs. navigation.rs owns the reusable global chrome controls/history and keys across the regular and split Terminal frames. Native terminal input buffering, independent send/receive and dirty-row drawing live in crates/terminal; framed input activity belongs to Herdr transport/AppServer relay. [Contracts and verification](terminal-interaction.md) cover production/Gallery states.
+
+## Named theme choice
+
+`ui-kit/theme_choice.rs` composes an NSH button with a name, fixed source swatches, reactive selected border/check, hover and keyboard focus. It takes a static `canban-themes::Theme`, saved-selection and disabled readers, a hover-preview intent and a press handler; it owns no persistence or product state. A wrapper receives native mouse-enter/leave events while the inner NSH button retains click/keyboard/disabled behavior. `ui/utilities/panel.rs` composes two columns in the existing scrollable popup. The presenter holds ephemeral preview separately from saved preferences; only confirmation saves through AppServer. All screens use fixed-dark reactive semantic tokens; Terminal ANSI colors come directly from the shared catalog. Gallery exercises this production picker through the bottom Theme button. Settings is a selected utility button in the bottom bar, not a rail item.

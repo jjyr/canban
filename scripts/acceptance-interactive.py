@@ -4,6 +4,7 @@ from pathlib import Path
 import json,os,subprocess,tempfile,time
 repo=Path(__file__).resolve().parents[1];base=Path(tempfile.mkdtemp(prefix='cb-interactive-',dir='/private/tmp'));home=base/'home';cli=repo/'target/debug/canban'
 env={**{k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')},'CANBAN_HOME':str(home)};core_env={'HC_SESSION':'interactive-acceptance','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'hc-state'),'XDG_CONFIG_HOME':str(base/'hc-config')}
+env.update(core_env)
 log=open(base/'server.log','w');server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
 def call(method,p=None):
  r=subprocess.run([str(cli),'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=90)
@@ -76,13 +77,20 @@ try:
  assert len([e for e in call('app.snapshot')['events'] if e['kind']=='execution.control_requested'])==1
  wait(lambda s:s['attempts'][0]['observed'].get('status',{}).get('state')=='idle','interrupt observation')
  send(terminal,'continue');send(terminal,'finish')
- s=wait(lambda s:len(s['reports'])==2 and all(a['close_state']=='closed' for a in s['attempts']),'Develop/Review normal exit')
+ s=wait(lambda s:len(s['reports'])==2 and all(((a.get('observed') or {}).get('status') or {}).get('state')=='done' for a in s['attempts']),'Develop/Review retained terminals')
  assert s['cards'][0]['stage']=='review';assert len(s['conversations'])==2
  assert len({c['provider_session_id'] for c in s['conversations']})==2
  call('comment.add',{'card_id':card['id'],'body':'@developer recall earlier context'})
- s=wait(lambda s:len(s['reports'])==3 and len(s['attempts'])==3 and s['attempts'][-1]['close_state']=='closed','exact session resume')
+ s=wait(lambda s:all(q['state']=='replied' for q in s['questions']) and len(s['questions'])==2,'live completed-session followup')
+ assert len(s['attempts'])==2 and len(s['reports'])==2
+ call('terminal.close',{'terminal_id':card['id']+':developer'})
+ wait(lambda s:s['attempts'][0]['observed']['state']=='finished','explicit close before Resume')
+ call('comment.add',{'card_id':card['id'],'body':'@developer resume and recall'})
+ s=wait(lambda s:len(s['attempts'])==3 and len(s['reports'])==3 and all(q['state']=='replied' for q in s['questions']),'exact session Resume')
  resumed=s['attempts'][-1];assert resumed['provider_session_id']==sid and resumed['terminal']!=terminal
- assert all(q['state']=='replied' for q in s['questions']);assert s['cards'][0]['stage']=='review'
+ assert s['cards'][0]['stage']=='review'
+ call('terminal.close',{'terminal_id':card['id']+':developer'})
+ wait(lambda s:s['attempts'][-1]['observed']['state']=='finished','close resumed terminal')
  server.terminate();server.wait(timeout=10);server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
  s=wait(lambda s:len(s['conversations'])==2,'restart bindings')
  # A provider must reject a missing saved conversation, never silently create
@@ -94,7 +102,7 @@ try:
  call('agent.open',{'card_id':card['id'],'profile_id':'developer','fresh':True})
  s=wait(lambda s:len(s['attempts'])==5 and s['attempts'][-1]['provider_session_id'] not in (None,sid),'explicit fresh context')
  send(s['attempts'][-1]['terminal'],'finish')
- s=wait(lambda s:s['attempts'][-1]['close_state']=='closed','fresh context completion')
+ s=wait(lambda s:s['attempts'][-1]['state']=='completed','fresh context completion retained')
  current=s['cards'][0];call('card.archive',{'card_id':card['id'],'revision':current['revision']})
  for question in s['questions']:
   assert 'Answer for' in call('resource.read',{'card_id':card['id'],'path':question['reply_path']})['body']

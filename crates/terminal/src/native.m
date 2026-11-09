@@ -86,13 +86,25 @@ typedef void (*InputFn)(void *, const char *);
       self.frameFn(self.host, MAX(2, (self.bounds.size.width - 12) / 8),
                    MAX(1, (self.bounds.size.height - 12) / 18));
   if (data) {
-    self.frameData = [NSJSONSerialization
-        JSONObjectWithData:[[NSString stringWithUTF8String:data]
-                               dataUsingEncoding:NSUTF8StringEncoding]
-                   options:0
-                     error:nil];
+    NSDictionary *next = [NSJSONSerialization JSONObjectWithData:[[NSString stringWithUTF8String:data] dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+    NSDictionary *previous = self.frameData;
+    self.frameData = next;
     self.accessibilityDirty = YES;
-    [self setNeedsDisplay:YES];
+    NSArray *oldRows = previous[@"rows"], *newRows = next[@"rows"];
+    if (!previous || oldRows.count != newRows.count || ![previous[@"background"] isEqual:next[@"background"]]) {
+      [self setNeedsDisplay:YES];
+    } else {
+      for (NSUInteger row = 0; row < newRows.count; row++) {
+        if (![oldRows[row] isEqual:newRows[row]])
+          [self setNeedsDisplayInRect:NSMakeRect(0, 6 + row * 18, self.bounds.size.width, 18)];
+      }
+      for (id cursor in @[previous[@"cursor"] ?: NSNull.null, next[@"cursor"] ?: NSNull.null]) {
+        if ([cursor isKindOfClass:NSArray.class] && [cursor count] == 2)
+          [self setNeedsDisplayInRect:NSMakeRect(0, 6 + [cursor[1] integerValue] * 18, self.bounds.size.width, 18)];
+      }
+      if (![previous[@"status"] isEqual:next[@"status"]])
+        [self setNeedsDisplayInRect:NSMakeRect(0, MAX(0, self.bounds.size.height - 24), self.bounds.size.width, 24)];
+    }
   }
   NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
   if (self.accessibilityDirty && now - self.accessibilityUpdatedAt >= 0.25) {
@@ -129,6 +141,7 @@ typedef void (*InputFn)(void *, const char *);
   NSArray *rows = f[@"rows"];
   NSInteger y = 0;
   for (NSArray *row in rows) {
+    if (!NSIntersectsRect(NSMakeRect(0, 6 + y * 18, self.bounds.size.width, 18), dirty)) { y++; continue; }
     NSInteger x = 0;
     for (NSDictionary *cell in row) {
       NSRect r = NSMakeRect(6 + x * 8, 6 + y * 18, 8, 18);
@@ -416,7 +429,7 @@ void *cb_terminal_new(void *host, FrameFn frame, InputFn input) {
           terminal.inputSuspended = YES;
         return event;
       }];
-  view.timer = [NSTimer timerWithTimeInterval:0.033
+  view.timer = [NSTimer timerWithTimeInterval:(1.0 / 60.0)
                                       repeats:YES
                                         block:^(NSTimer *timer) {
                                           (void)timer;

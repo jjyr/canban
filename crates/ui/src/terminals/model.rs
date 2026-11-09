@@ -65,7 +65,7 @@ pub fn binding(row: &OverviewRow) -> Option<Value> {
         ""
     };
     Some(
-        json!({"id":a.id,"terminal":a.terminal.as_ref()?,"core_id":a.core_id.as_ref()?,"read_only":!input_status.is_empty(),"input_status":input_status}),
+        json!({"id":format!("{}:{}",a.core_id.as_deref().unwrap_or_default(),a.terminal.as_deref().unwrap_or_default()),"terminal":a.terminal.as_ref()?,"core_id":a.core_id.as_ref()?,"read_only":!input_status.is_empty(),"input_status":input_status}),
     )
 }
 pub fn groups(snapshot: &Snapshot, history: bool) -> Vec<ProjectGroup> {

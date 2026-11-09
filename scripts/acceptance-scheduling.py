@@ -9,6 +9,7 @@ cli = repo / 'target/debug/canban'
 env = {**{k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')}, 'CANBAN_HOME':str(home)}
 core_env = {'HC_SESSION':'scheduling-acceptance','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'hc-state'),'XDG_CONFIG_HOME':str(base/'hc-config')}
 log = open(base/'server.log','w')
+env.update(core_env)
 server = subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
 def call(method, params=None):
     result = subprocess.run([str(cli),'call',method,json.dumps(params or {})],env=env,capture_output=True,text=True,timeout=90)

@@ -139,10 +139,7 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                     message: "Agent reported an error; inspect terminal".into(),
                 });
             }
-        } else if matches!(
-            req.state.as_str(),
-            "unknown" | "failed" | "needs_report" | "blocked"
-        ) {
+        } else if matches!(req.state.as_str(), "unknown" | "needs_report" | "blocked") {
             reasons.push(OverviewReason {
                 source: "recovery".into(),
                 message: format!("Execution {} · inspect before retrying", req.state),

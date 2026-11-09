@@ -579,3 +579,7 @@ Approved and implemented: a two-row Card header; task/context and conversation s
 ## 2026-11-09 — Accessible Card lifecycle and minimal Usage
 
 Card Archive/Restore is a direct header action. Board right-click and the Card action menu share Archive/Restore and local Delete (GitHub: Remove from Board). Removal is reversible, retains history, cancels queued work and requires live/uncertain executions to be resolved first. Archived Cards includes Deleted Cards recovery. X closes only the detail pane. The Usage bar shows provider data directly without a machine-prefix caption.
+
+## 2026-11-09 — Live Inactive grace, delayed exit and global navigation
+
+The final user direction supersedes the interim suggestion to keep every process until Archive: completion retains an interactive Terminal, actual user operations renew Active, idle/done returns to Inactive, and the configurable idle timeout requests normal exit. Exited entries and tabs disappear even with Show inactive enabled; Card history/exact Resume remains. Show/Hide inactive is a selected state button at the top. Terminal grouping and input rendering were refined, and all pages now share window-local Back/Forward. See [implementation/acceptance](../terminal-interaction.md).

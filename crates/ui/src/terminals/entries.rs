@@ -48,12 +48,14 @@ impl Entry {
         if self.needs_attention() {
             return "Needs you".into();
         }
+        if self.inactive() {
+            return "Inactive".into();
+        }
         match self.status().as_str() {
             "running" | "working" => "Working",
             "queued" => "Queued",
             "starting" => "Starting",
-            "idle" => "Idle",
-            "done" => "Done",
+            "idle" | "done" => "Active",
             _ => "Unknown",
         }
         .into()
@@ -73,6 +75,29 @@ impl Entry {
                 .as_ref()
                 .is_some_and(|r| r.state == "finished")
         })
+    }
+    /// Inactive is a live, available conversation; exited entries belong to Card history.
+    pub fn inactive(&self) -> bool {
+        if self.agent.is_none() || self.needs_attention() {
+            return false;
+        }
+        let row = self.agent.as_ref().unwrap();
+        let waiting = row
+            .card
+            .human_gate
+            .as_ref()
+            .and_then(|g| g.request_id.as_ref())
+            .is_some_and(|r| Some(r.as_str()) == row.request.as_ref().map(|r| r.id.as_str()));
+        !waiting
+            && row.attempt.as_ref().is_none_or(|a| {
+                a.lifecycle
+                    .last_interaction_at
+                    .is_none_or(|t| canban_types::now().saturating_sub(t) > 30_000)
+            })
+            && matches!(self.status().as_str(), "idle" | "done")
+    }
+    pub fn listed(&self) -> bool {
+        !self.ended() && self.card.as_ref().is_none_or(|c| c.active())
     }
     pub fn status(&self) -> String {
         if let Some(row) = &self.agent {

@@ -10,6 +10,7 @@ pub mod drafts;
 pub mod frame;
 pub mod github;
 pub mod machines;
+pub mod navigation;
 pub mod notes;
 pub mod overview;
 pub mod presenter;

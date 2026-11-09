@@ -93,11 +93,11 @@ try:
     terminal = call('terminal.create', {'cwd': str(base)})
     binding = terminal['runtime']
     before = hc('get', binding['terminal'], '--json')
-    call('utilities.configure', {'appearance': 'dark', 'palette': 'forest'})
+    call('utilities.configure', {'theme': 'dracula'})
     run_dev()
     current = ready()
     assert current['pid'] != original['pid']
-    assert call('utilities.state')['preferences'] == {'appearance': 'dark', 'palette': 'forest'}
+    assert call('utilities.state')['preferences'] == {'theme': 'dracula'}
     after = hc('get', binding['terminal'], '--json')
     assert before['pid'] == after['pid'] and after['state'] == 'live'
     saved = next(t for t in call('app.snapshot')['terminals'] if t['id'] == terminal['id'])
@@ -114,8 +114,8 @@ try:
     worker.join(timeout=5)
     assert not worker.is_alive() and not legacy_error
     upgraded = ready()
-    assert upgraded['api_version'] == 1
-    assert call('utilities.state')['preferences']['palette'] == 'forest'
+    assert upgraded['api_version'] == 2
+    assert call('utilities.state')['preferences']['theme'] == 'dracula'
     assert hc('get', binding['terminal'], '--json')['pid'] == before['pid']
     assert run_dev({'CANBAN_ENDPOINT': str(home / 'app.sock')}, check=False).returncode != 0
     assert call('app.ping')['pid'] == upgraded['pid']

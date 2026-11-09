@@ -20,3 +20,7 @@ the asset. The path fill uses `currentColor` to follow native theme tokens.
 ## Desktop utilities
 
 Subscription provider contracts and selected host/power-management patterns reference herdr-gpui `a6db99b4edab37b2038ac1016bd0af82ed0a5ebc` (Apache-2.0), whose provider ports credit CodexBar (MIT). The Python probe is a Canban implementation of these contracts, not a linked GPUI or CodexBar library. See `third_party/Herdr-LICENSE.txt`. The utility glyphs under `crates/ui-kit/assets/utility` are Canban vector drawings using the shared 24-unit/2-unit-stroke design grid.
+
+## Built-in Terminal themes
+
+The 16 classic palettes in `crates/themes/src/lib.rs` are adapted from the Ghostty-format themes in [iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) at `5fad1bde2d00c4eb9cb9264599ebb3d981eca4f0`. Collection Copyright (c) 2011 to Present Mark Badolato, MIT; each individual theme remains attributed to its respective author. The complete collection license is in `third_party/iTerm2-Color-Schemes-LICENSE.txt`; pinned per-theme sources are listed in `crates/themes/README.md`. Canban's own default palette and derived App chrome are separate from those source ANSI palettes.

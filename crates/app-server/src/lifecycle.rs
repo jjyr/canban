@@ -6,10 +6,9 @@ pub(super) fn idle_candidate(
     run: &Attempt,
     minutes: u64,
     at: u64,
-    viewed: bool,
+    _viewed: bool,
 ) -> bool {
     if minutes == 0
-        || viewed
         || !matches!(run.runtime_status(), "idle" | "done")
         || !run.close_state.is_empty()
     {
@@ -32,11 +31,11 @@ pub(super) fn idle_candidate(
     if !matches!(req.state.as_str(), "running" | "working" | "completed") {
         return false;
     }
-    if snapshot
-        .cards
-        .iter()
-        .any(|c| c.id == run.card_id && (c.attention.is_some() || c.human_gate.is_some()))
-    {
+    if snapshot.cards.iter().any(|c| {
+        c.id == run.card_id
+            && req.state != "completed"
+            && (c.attention.is_some() || c.human_gate.is_some())
+    }) {
         return false;
     }
     if snapshot

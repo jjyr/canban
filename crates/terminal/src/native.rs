@@ -108,6 +108,7 @@ impl Host {
         let state = self.state.clone();
         let stop = self.stop.clone();
         let (tx, rx) = mpsc::channel();
+        let rx = Arc::new(Mutex::new(rx));
         self.input = Some(tx);
         std::thread::spawn(move || {
             let client = Client { config };
@@ -119,6 +120,7 @@ impl Host {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
+            let mut first_attach = true;
             while !stop.load(Ordering::SeqCst) {
                 let attempt = (|| -> anyhow::Result<Attachment> {
                     anyhow::ensure!(
@@ -142,7 +144,7 @@ impl Host {
                             s.connected = false;
                             s.status = format!("Disconnected · {e:#} · reconnecting");
                         }
-                        for _ in rx.try_iter() {} // Never replay input across a lost connection.
+                        for _ in rx.lock().unwrap().try_iter() {} // Never replay input across a lost connection.
                         for _ in 0..10 {
                             if stop.load(Ordering::SeqCst) {
                                 return;
@@ -152,7 +154,10 @@ impl Host {
                         continue;
                     }
                 };
-                for _ in rx.try_iter() {}
+                if !first_attach {
+                    for _ in rx.lock().unwrap().try_iter() {}
+                }
+                first_attach = false;
                 {
                     let mut s = state.lock().unwrap();
                     let size = (s.model.cols, s.model.height);
@@ -173,23 +178,35 @@ impl Host {
                     }
                     s.connected = true;
                 }
-                let mut reconnect = false;
-                while !stop.load(Ordering::SeqCst) {
-                    for input in rx.try_iter() {
-                        let result = match input {
-                            Input::Bytes(data) => attach.input(&data, false),
-                            Input::Resize(c, r) => attach.resize(c, r),
-                            Input::Focus(on) => attach.focus(on),
-                        };
-                        if let Err(e) = result {
-                            state.lock().unwrap().status = e.to_string();
-                            reconnect = true;
-                            break;
+                let input_stop = Arc::new(AtomicBool::new(false));
+                let failed = Arc::new(AtomicBool::new(false));
+                let input_worker = {
+                    let writer = attach.input_writer();
+                    let rx = rx.clone();
+                    let stopped = input_stop.clone();
+                    let failed = failed.clone();
+                    let state = state.clone();
+                    std::thread::spawn(move || {
+                        while !stopped.load(Ordering::SeqCst) {
+                            let message =
+                                rx.lock().unwrap().recv_timeout(Duration::from_millis(20));
+                            let result = match message {
+                                Ok(Input::Bytes(bytes)) => writer.input(&bytes),
+                                Ok(Input::Resize(c, r)) => writer.resize(c, r),
+                                Ok(Input::Focus(on)) => writer.focus(on),
+                                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                                Err(_) => break,
+                            };
+                            if let Err(e) = result {
+                                state.lock().unwrap().status = format!("Input disconnected: {e:#}");
+                                failed.store(true, Ordering::SeqCst);
+                                break;
+                            }
                         }
-                    }
-                    if reconnect {
-                        break;
-                    }
+                    })
+                };
+                let mut reconnect = false;
+                while !stop.load(Ordering::SeqCst) && !failed.load(Ordering::SeqCst) {
                     match attach.recv(Duration::from_millis(15)) {
                         Ok(Some(Event::Data(data))) => {
                             let mut s = state.lock().unwrap();
@@ -218,6 +235,9 @@ impl Host {
                                 "Terminal exited · {}",
                                 reason["reason"].as_str().unwrap_or("closed")
                             );
+                            drop(s);
+                            input_stop.store(true, Ordering::SeqCst);
+                            let _ = input_worker.join();
                             return;
                         }
                         Ok(Some(Event::Lost(error))) => {
@@ -234,6 +254,9 @@ impl Host {
                         _ => {}
                     }
                 }
+                input_stop.store(true, Ordering::SeqCst);
+                let _ = input_worker.join();
+                reconnect |= failed.load(Ordering::SeqCst);
                 state.lock().unwrap().connected = false;
                 drop(attach);
                 if !reconnect {
@@ -288,6 +311,7 @@ extern "C" fn frame(host: *mut c_void, cols: u16, rows: u16) -> *const i8 {
     host.seen = state.model.revision;
     host.seen_status = status.clone();
     let f = state.model.frame();
+    drop(state);
     let rows:Vec<_>=f.rows.iter().map(|row|row.iter().map(|c|json!({"text":c.text,"fg":c.fg,"bg":c.bg,"bold":c.bold,"underline":c.underline,"tail":c.tail})).collect::<Vec<_>>()).collect();
     host.json=CString::new(json!({"rows":rows,"cursor":f.cursor.map(|(x,y)|vec![x,y]),"background":f.background,"cursor_color":f.cursor_color,"status":status}).to_string()).unwrap();
     host.json.as_ptr()
@@ -337,7 +361,10 @@ extern "C" fn input(host: *mut c_void, data: *const i8) {
         return;
     }
     let mut state = host.state.lock().unwrap();
-    if !state.connected && matches!(v["kind"].as_str(), Some("text" | "key" | "paste")) {
+    if !state.connected
+        && !state.status.starts_with("Connecting")
+        && matches!(v["kind"].as_str(), Some("text" | "key" | "paste"))
+    {
         return;
     }
     let text = v["text"].as_str().unwrap_or("");
@@ -468,6 +495,20 @@ pub fn register(components: &Components) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn first_connection_preserves_early_input_and_reconnection_discards_it() {
+        let mut host = Host::new();
+        host.state.lock().unwrap().status = "Connecting…".into();
+        let (tx, rx) = mpsc::channel();
+        host.input = Some(tx);
+        let ptr = &mut host as *mut _ as *mut c_void;
+        let text = CString::new(json!({"kind":"text","text":"early"}).to_string()).unwrap();
+        input(ptr, text.as_ptr());
+        assert!(matches!(rx.try_recv(),Ok(Input::Bytes(bytes)) if bytes==b"early"));
+        host.state.lock().unwrap().status = "Disconnected".into();
+        input(ptr, text.as_ptr());
+        assert!(rx.try_recv().is_err());
+    }
     #[test]
     fn read_only_observation_disables_input_and_updates_status_without_rebinding() {
         let mut host = Host::new();

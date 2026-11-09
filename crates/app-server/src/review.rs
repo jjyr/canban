@@ -106,6 +106,7 @@ impl AppServer {
             db.conn.execute("UPDATE operations SET result=?2 WHERE id=?1",params![key,serde_json::to_string(&value)?])?;
             Ok(value)
         })?;
+        self.git_changed(&project.work_location().machine);
         self.emit("review", Some(card.id));
         Ok(value)
     }

@@ -16,7 +16,7 @@ use std::{
 };
 
 /// Increment when desktop clients need operations unavailable in older services.
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;
 
 pub struct AppServer {
     utilities: utilities::Utilities,
@@ -32,6 +32,14 @@ pub struct AppServer {
     review_gate: Mutex<()>,
     terminal_gate: Mutex<()>,
     terminal_contexts: Mutex<Vec<TerminalContext>>,
+    inventory: Mutex<observation::Inventory>,
+    observer_running: AtomicBool,
+    remote_health_due: AtomicBool,
+    check_slots: Mutex<std::collections::BTreeSet<String>>,
+    check_signal: std::sync::Condvar,
+    runtime_wake: Mutex<Option<mpsc::SyncSender<()>>>,
+    contexts: Mutex<directory::ContextQueue>,
+    context_signal: std::sync::Condvar,
     remote_workers: Mutex<std::collections::HashSet<String>>,
 }
 pub struct Running {
@@ -40,6 +48,8 @@ pub struct Running {
 impl Drop for Running {
     fn drop(&mut self) {
         self.server.stop.store(true, Ordering::SeqCst);
+        self.server.wake_runtime();
+        self.server.context_signal.notify_all();
     }
 }
 fn strp<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
@@ -317,6 +327,14 @@ impl AppServer {
             review_gate: Mutex::new(()),
             terminal_gate: Mutex::new(()),
             terminal_contexts: Mutex::new(Vec::new()),
+            inventory: Mutex::new(Default::default()),
+            observer_running: AtomicBool::new(false),
+            remote_health_due: AtomicBool::new(false),
+            check_slots: Mutex::new(Default::default()),
+            check_signal: std::sync::Condvar::new(),
+            runtime_wake: Mutex::new(None),
+            contexts: Mutex::new(Default::default()),
+            context_signal: std::sync::Condvar::new(),
             remote_workers: Mutex::new(Default::default()),
         }))
     }
@@ -410,6 +428,7 @@ impl AppServer {
         rx
     }
     fn emit(&self, topic: &'static str, card: Option<String>) {
+        self.wake_runtime();
         let event = AppEvent::Changed {
             topic,
             card_id: card,
@@ -437,6 +456,14 @@ impl AppServer {
             })
             .cloned()
             .collect();
+        let inv = self.inventory.lock().unwrap();
+        if inv.error.is_none() && inv.last_at > 0 {
+            for a in &mut snapshot.attempts {
+                if a.connection_state == "connected" && a.core_id.as_deref() == Some(&inv.core) {
+                    a.lifecycle.observed_at = Some(inv.last_at);
+                }
+            }
+        }
         Ok(snapshot)
     }
     pub fn config(&self) -> Config {
@@ -489,8 +516,10 @@ mod machines;
 mod remote;
 mod workflow;
 
+mod directory;
 mod lifecycle;
 mod notes;
+mod observation;
 mod overview;
 mod reports;
 mod resources;

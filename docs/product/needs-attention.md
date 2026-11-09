@@ -128,3 +128,7 @@ UI components should include the shared Overview navigation indicator/grouped ro
 Acceptance scenarios must demonstrate a permission/auth/question wait from one Project while viewing another; repeated root observations producing one item; runtime resumption leaving a separate Canban gate untouched; task reply/completion not silently approving a gate; missing runtime metadata falling back to bounded context; obsolete invocation/Core identity never receiving input; loss/reconnect not appearing handled; and list/selection state surviving cross-Project navigation.
 
 Status-based slot release and idle Terminal reclamation share these runtime facts but remain separate policies. Resolving an attention item does not itself kill a terminal, start a duplicate Agent, mark a task completed or merge code.
+
+## Implemented closed-runtime handling
+
+A confirmed unreported exit becomes Failed history, with saved output and an explicit Resume action when available. It clears the runtime input wait and does not create an automatic task decision. Explicit task blocking and human Review remain pending. Disconnect is unconfirmed; a locally authoritative missing record preserves its reason without inventing an exit code. See [event-driven observation](../runtime-observation.md).

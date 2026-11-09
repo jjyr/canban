@@ -27,37 +27,21 @@ impl AppServer {
             let card: Card = db.get(&req.card_id)?;
             (req, attempt, card)
         };
-        // Remote Core clocks need not agree with AppServer. Capture the current
-        // root turn before acknowledging completion; the Agent cannot emit its
-        // post-report done until that acknowledgment reaches its CLI.
-        let remote_completion_turn = if state == "completed"
-            && attempt
-                .location
-                .as_ref()
-                .is_some_and(|l| l.machine != "local")
-        {
-            if let Some(terminal) = &attempt.terminal {
-                let client = canban_herdr::Client {
-                    config: self.config(),
-                };
-                Some(
-                    (|| -> Result<u64> {
-                        ensure!(
-                            client.status()?["core"]["id"].as_str() == attempt.core_id.as_deref(),
-                            "Original Core unavailable"
-                        );
-                        client.get(terminal)?["turn"]
-                            .as_u64()
-                            .context("No runtime turn")
-                    })()
-                    .unwrap_or(u64::MAX),
-                )
-            } else {
-                Some(0)
+        if attempt.state == "continued" {
+            if let Some(old) = self
+                .store
+                .lock()
+                .unwrap()
+                .db()
+                .list::<Report>()?
+                .into_iter()
+                .find(|r| r.request_key == key)
+            {
+                ensure!(old.fingerprint == fingerprint, "request_key_conflict");
+                return Ok(json!({"accepted":true,"duplicate":true}));
             }
-        } else {
-            None
-        };
+            bail!("This assignment was superseded; use the current request and attempt binding");
+        }
         let report_id = id();
         let path = if let Some(body) = p["body"].as_str() {
             let path = canban_context::run_dir(&self.home, &req, number)
@@ -71,7 +55,7 @@ impl AppServer {
         let config = self.config();
         self.mutate("execution.report",&p,|db|{
             if let Some(old)=db.list::<Report>()?.into_iter().find(|r|r.request_key==key){ensure!(old.fingerprint==fingerprint,"request_key_conflict");return Ok(json!({"accepted":true,"duplicate":true}));}
-            let mut req:Request=db.get(&req.id)?;let mut run:Attempt=db.get(&attempt.id)?;let mut card:Card=db.get(&card.id)?;
+            let mut req:Request=db.get(&req.id)?;let mut run:Attempt=db.get(&attempt.id)?;ensure!(run.state!="continued","This assignment was superseded; use the current request and attempt binding");let mut card:Card=db.get(&card.id)?;
             let report=Report{id:report_id,request_id:req.id.clone(),project_id:req.project_id.clone(),card_id:req.card_id.clone(),attempt:number,state:state.into(),message:p["message"].as_str().unwrap_or("").into(),path,request_key:key.into(),fingerprint,created_at:now()};db.save(&report)?;
             log(db,&card,"execution.reported",&format!("agent:{}",req.profile.id),&format!("{state}: {}",report.message),Some(req.id.clone()),json!({"report_id":report.id,"path":report.path,"attempt":number,"state":state}))?;
             if state=="completed" && req.trigger.starts_with("comment:") {
@@ -84,8 +68,8 @@ impl AppServer {
             if run.state!="completed" {
                 run.state=state.into();
                 if state=="completed" {
-                    run.close_state=if matches!(req.profile.exit,Some(ExitAction::Input{..})){"waiting"}else{"manual"}.into();
-                    run.completed_at=Some(now());run.completion_turn=Some(remote_completion_turn.unwrap_or_else(||run.observed.as_ref().and_then(|v|v["turn"].as_u64()).unwrap_or(0)));run.turn_ended_at=None;
+                    run.close_state=String::new();
+                    run.completed_at=Some(now());run.completion_turn=Some(run.observed.as_ref().and_then(|v|v["turn"].as_u64()).unwrap_or(0));run.turn_ended_at=None;
                 }
                 db.save(&run)?;
             }
