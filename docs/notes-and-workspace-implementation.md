@@ -2,7 +2,7 @@ Update 2026-11-08: the Terminal portion of the focused-work layout below has bee
 
 # Notes and workspace implementation
 
-Status: implemented and checked on macOS, 2026-11-07. This records the approved Kanban-centered composition and database Note model. It does not turn the older UI audit into current runtime evidence.
+Status: historical implementation/acceptance on macOS, 2026-11-07. Notes were withdrawn from current product scope on 2026-11-10 pending further product design; see [Notes deferred](notes-deferred.md). The earlier results below remain historical evidence. The database/compatibility model does not imply that a Note UI or automatic context injection is still available.
 
 ## Ownership and data path
 

@@ -341,7 +341,7 @@ mod tests {
                 target_branch: Some("main".into()),
                 created_at: 0,
             };
-            let mut card: Card = serde_json::from_value(serde_json::json!({"id":"c","project_id":"p","number":1,"title":"Task","body":"","tags":[],"stage":"review","revision":1,"created_at":0})).unwrap();
+            let mut card: Card = serde_json::from_value(serde_json::json!({"id":"c","project_id":"p","number":1,"title":"Task","body":"","stage":"review","revision":1,"created_at":0})).unwrap();
             card.worktree = Some(
                 super::super::prepare(&dir.path().join("home"), &project, &card)
                     .unwrap()

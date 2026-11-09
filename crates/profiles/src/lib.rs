@@ -240,7 +240,7 @@ mod tests {
     }
     #[test]
     fn migration_preserves_options_and_rejects_opaque_templates() {
-        let mut v = json!({"profiles":[{"id":"dev","provider":"codex","argv":["/bin/codex","exec","--sandbox","workspace-write","{prompt}"],"resume_argv":[],"tags":[]}]});
+        let mut v = json!({"profiles":[{"id":"dev","provider":"codex","argv":["/bin/codex","exec","--sandbox","workspace-write","{prompt}"],"resume_argv":[]}]});
         assert!(migrate(&mut v).unwrap());
         assert_eq!(v["profiles"][0]["preset"], "codex");
         assert_eq!(

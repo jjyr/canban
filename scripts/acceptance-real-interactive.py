@@ -42,13 +42,12 @@ try:
  workflow_path.write_text(json.dumps(local_workflow))
  project=call('project.create',{'name':'Real interactive','directory':str(source)})
  marker='MARKER_'+base.name.replace('-','_')
- call('note.save',{'project_id':project['id'],'title':'Remember this exact marker','body':marker})
- card=call('card.create',{'project_id':project['id'],'title':'Implement Unicode greeting','body':'Implement greet(name) to return exactly "Hello, {name}!" including Unicode. Keep tests unchanged; run /usr/bin/python3 -m unittest -v. For the Develop stage ONLY: bind your session first and report working; read the context, then wait for a Canban question before implementing/reporting completed. Do not use a blocking shell wait; the UI will deliver a follow-up shortly. In Review, inspect changes/tests and report immediately. Use current reporting instructions and do not commit.'})
+ card=call('card.create',{'project_id':project['id'],'title':'Implement Unicode greeting','body':'Isolation marker: '+marker+'. Implement greet(name) to return exactly "Hello, {name}!" including Unicode. Keep tests unchanged; run /usr/bin/python3 -m unittest -v. For the Develop stage ONLY: bind your session first and report working; read the context, then wait for a Canban question before implementing/reporting completed. Do not use a blocking shell wait; the UI will deliver a follow-up shortly. In Review, inspect changes/tests and report immediately. Use current reporting instructions and do not commit.'})
  print('REAL_INTERACTIVE_HOME='+str(home),flush=True)
  call('card.move',{'card_id':card['id'],'revision':1,'stage':'develop'})
  s=wait(lambda s:bool(s['attempts']) and s['attempts'][0]['provider_session_id'] and s['attempts'][0]['terminal'],'provider session binding')
  first=s['attempts'][0];sid=first['provider_session_id'];print('BOUND '+sid+' '+first['terminal'],flush=True)
- call('comment.add',{'card_id':card['id'],'body':'@developer Reply to this question via the supplied Canban reply command: confirm the exact isolation marker from the Note. After publishing that reply, implement the original greeting task, run its tests, and report the original task completed. You may proceed now.'})
+ call('comment.add',{'card_id':card['id'],'body':'@developer Reply to this question via the supplied Canban reply command: confirm the exact isolation marker from the Card context. After publishing that reply, implement the original greeting task, run its tests, and report the original task completed. You may proceed now.'})
  s=wait(lambda s:len(s['reports'])>=2 and all(a['close_state']=='closed' for a in s['attempts']),'real Develop/Review and normal exits')
  assert len(s['requests'])==2 and len(s['questions'])==1 and s['questions'][0]['state']=='replied'
  q=s['questions'][0];assert marker in call('resource.read',{'card_id':card['id'],'path':q['reply_path']})['body']

@@ -40,7 +40,7 @@ pub fn workspace() -> canban_types::Snapshot {
         ),
         (3, "Explore a smaller navigation layout", "backlog", None),
     ] {
-        s.cards.push(Card{content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,title:title.into(),body:"## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.".into(),tags:vec!["developer".into()],context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery:None,created_at:now()});
+        s.cards.push(Card{content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:"## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.".into(),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery:None,created_at:now()});
     }
     s.notes.push(Note{id:"note-1".into(),project_id:"gallery-project".into(),title:"Search ideas.md".into(),body:"# Search experience\n\nFind a Card without remembering its number.\n\nSee [Architecture](note:note-2).".into(),revision:1,created_at:now(),updated_at:now(),links:vec!["note-2".into()],card_ids:vec!["card-1".into()]});
     s.notes.push(Note {
@@ -91,6 +91,90 @@ pub fn overflowing_board() -> canban_types::Snapshot {
             s.cards.push(card);
         }
     }
+    s
+}
+
+/// Board-only project switching: human gates, unbadged work and quiet projects,
+/// long Unicode names and overflow. Uses the production Overview classification.
+pub fn project_activity() -> canban_types::Snapshot {
+    use canban_types::*;
+    let mut s = workspace();
+    for (i, name) in [
+        "Fiber",
+        "Pot",
+        "Shear",
+        "Tools",
+        "Research · 项目上下文与非常长的名字",
+        "Empty project",
+        "Docs",
+        "Web",
+        "Sandbox",
+        "API",
+        "Design",
+        "Lab",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let mut project = s.projects[0].clone();
+        project.id = format!("activity-{i}");
+        project.name = (*name).into();
+        project.created_at = i as u64 + 1;
+        let mut card = s.cards[2].clone();
+        card.id = format!("activity-card-{i}");
+        card.project_id = project.id.clone();
+        card.title = format!("{name} task");
+        card.human_gate = None;
+        card.attention = None;
+        if i < 4 {
+            let state = ["completed", "blocked", "starting", "queued"][i];
+            let mut request = canban_scheduler::request(
+                &project.id,
+                &card.id,
+                "develop",
+                "stage_entry",
+                Config::default().profiles[0].clone(),
+                "Fixture".into(),
+                None,
+            );
+            request.state = state.into();
+            if i < 2 {
+                card.human_gate = Some(HumanGate {
+                    reason: if i == 0 {
+                        "Review the result"
+                    } else {
+                        "Answer the Agent"
+                    }
+                    .into(),
+                    request_id: Some(request.id.clone()),
+                    next_stage: None,
+                });
+            }
+            s.requests.push(request);
+        }
+        if i < 5 {
+            let mut event = timeline();
+            event.id = format!("activity-event-{i}");
+            event.project_id = project.id.clone();
+            event.card_id = card.id.clone();
+            event.created_at = now() - i as u64 * 1000;
+            s.events.push(event);
+            s.cards.push(card);
+        }
+        s.projects.push(project);
+    }
+    let mut another = s
+        .cards
+        .iter()
+        .find(|c| c.project_id == "activity-1")
+        .unwrap()
+        .clone();
+    another.id = "activity-second-input".into();
+    another.number = 4;
+    another.title = "A separate human decision".into();
+    another.human_gate = None;
+    another.attention = Some("Choose the next step".into());
+    s.cards.push(another);
     s
 }
 
@@ -184,10 +268,10 @@ pub fn overview() -> canban_types::Snapshot {
         s.cards.push(card);
     }
     let mut recovery = base;
-    recovery.id = "routing-recovery".into();
-    recovery.title = "Select an available Agent profile".into();
+    recovery.id = "workspace-recovery".into();
+    recovery.title = "Reconnect the execution machine".into();
     recovery.human_gate = None;
-    recovery.attention = Some("No Agent matches the Card tags".into());
+    recovery.attention = Some("Execution machine unavailable; reconnect before retrying".into());
     s.cards.push(recovery);
     s
 }
@@ -231,7 +315,7 @@ pub fn search() -> canban_types::Snapshot {
 /// Terminal navigation adds two profiles on one Card and closed archived history.
 pub fn terminal_workspace() -> canban_types::Snapshot {
     let mut s = overview();
-    s.projects[0].name="Canban workspace with a long Project name".into();
+    s.projects[0].name = "Canban workspace with a long Project name".into();
     let mut reviewer = s
         .requests
         .iter()
@@ -347,7 +431,6 @@ pub fn board_cards() -> canban_types::Snapshot {
     use canban_types::*;
     let mut s = workspace();
     for c in &mut s.cards {
-        c.tags.clear();
         c.branch = None;
         c.worktree = None;
     }

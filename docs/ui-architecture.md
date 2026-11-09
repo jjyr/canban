@@ -8,7 +8,7 @@ Current contract, reconciled 2026-11-10: the native UI, shared UI Kit and produc
 
 ```text
 canban-ui
-  Screens: Board / Card conversation / Notes / Overview / Terminals / Review
+  Screens: Board / Card conversation / Overview / Terminals / Review
        |
   Product components: CardTile / StageColumn / TimelineItem
                       AgentRunPanel / MentionComposer / ReportViewer
@@ -44,8 +44,6 @@ Overview (all Projects)
 Terminals (direct interaction)
   +-- managed Card/profile Agents + independent manual Shells
 
-Notes (Project context)
-  +-- editable database-backed documents, links and related history
 ```
 
 Board is the management center. Overview gathers cross-Project execution and human actions; Terminals owns direct PTY interaction and Agent lifecycle controls. Card conversation keeps task/context and history in one scroll region, with compact fixed controls and a reachable composer. Project creation/selection belongs in Board; the rail stays compact. See [Card composition](card-conversation.md) and [Terminal workspace](terminal-workspace.md) for the exact layouts.
@@ -67,7 +65,7 @@ For each needed component, record one of: reuse NSH directly; compose/style NSH 
 | Buttons, input, selection, tabs | NSH controls + UI Kit styling | Variants, sizes, labels, focus and disabled/loading behavior |
 | Menus, popovers, dialogs, tooltips | NSH overlay/control facilities | Consistent composition, dismissal, focus return and placement |
 | Split panels, long lists | NSH resizable/list facilities | Desktop sizing, scrolling, virtualization and focus acceptance |
-| Notes/comments editing and reading | Evaluate Editor, RichEditor and TextView | Actual Rust API fit, Markdown/content model, IME, mentions, paste and selection |
+| Card/comments editing and reading | Evaluate Editor, RichEditor and TextView | Actual Rust API fit, Markdown/content model, IME, mentions, paste and selection |
 | Board drag and drop | Reuse suitable NSH input/gesture primitives | Card movement, cancellation, nested scrolling, autoscroll, keyboard equivalent |
 | Run output and reports | Shared product panels using reading primitives | Bounded loading, follow-output policy, file-backed content and archive loading |
 
@@ -115,7 +113,7 @@ The component inventory should name its owner module, reuse route, consumers, an
 
 ## Build order
 
-Start with a small shell and core token/typography/control set. Build a native vertical slice: Board CardTile -> Card detail -> comment/mention composer -> Timeline feedback, including keyboard and async states. Use this to prove overlay, input, scrolling and state-update composition. Extend the same system for Notes, Overview, Terminals and Review rather than introducing parallel control implementations.
+Start with a small shell and core token/typography/control set. Build a native vertical slice: Board CardTile -> Card detail -> comment/mention composer -> Timeline feedback, including keyboard and async states. Use this to prove overlay, input, scrolling and state-update composition. Extend the same system for Overview, Terminals and Review rather than introducing parallel control implementations. Notes are [deferred](notes-deferred.md) pending a separate product design.
 
 Do not build an exhaustive speculative widget library before the first useful flow. Extract reusable units with explicit contracts as real needs appear; one-off layout can stay local. The desired outcome is one maintained implementation of each shared behavior, with defects fixed once and retained as regressions. No architecture can guarantee zero UI defects; this structure limits duplicated causes and makes fixes propagate.
 

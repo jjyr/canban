@@ -84,7 +84,7 @@ Names below are proposals. Finalize payload schemas before implementation rather
 
 | Family | Example events | Required association/evidence |
 | --- | --- | --- |
-| Card content | card.created, card.description_changed, card.title_changed, card.tags_changed | Before/after or immutable content/configuration revisions |
+| Card content | card.created, card.description_changed, card.title_changed | Before/after or immutable content/configuration revisions |
 | Workflow | card.stage_changed, card.order_changed, card.template_mapped | Stable stage IDs, entry identity, template/migration operation |
 | Comments | comment.created, comment.revised, comment.removed | Stable comment ID and revision; original event remains |
 | Resources | resource.added, resource.removed | Typed resource ID, durable attachment reference or URI |

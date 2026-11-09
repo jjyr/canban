@@ -48,8 +48,8 @@ The following is a proposed command boundary for the core loop. Operation schema
 | Operation | Essential input | Observable result/effect |
 | --- | --- | --- |
 | project.create | Name, directory, selected JSON template | Project/Board identity; create directory if missing |
-| card.create | Project, title/body, tags/context references | Internal card identity, project-local number, initial history |
-| card.update | Card, expected revision, changed content/tags/references | New revision and recorded update |
+| card.create | Project, title/body, context references | Internal card identity, project-local number, initial history |
+| card.update | Card, expected revision, changed content/references | New revision and recorded update |
 | card.move | Card, expected revision, target stage | Recorded stage event; configured automatic request, except no-op Backlog |
 | comment.add | Card, body/resources, structured mentions | Comment identity; new request identities for actionable mentions |
 | execution.report | Execution reference, state, request key, optional message/body | Recorded receipt and callback/event processing described below |

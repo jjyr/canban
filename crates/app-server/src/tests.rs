@@ -159,28 +159,39 @@ fn blocked_produces_attention_and_durable_notice() {
     assert_eq!(s.cards[0].stage, "develop");
 }
 #[test]
-fn unmatched_tags_never_fall_back_to_unrelated_agent() {
-    let (_d, app, mut project, c) = setup();
-    // Legacy stages without a profile reference retain tag/default routing.
+fn legacy_tags_are_ignored_and_unassigned_stages_use_the_global_default() {
+    let (_d, app, mut project, card) = setup();
     project.workflow.stages[1].profile = None;
+    let mut old_card = serde_json::to_value(&card).unwrap();
+    old_card["tags"] = json!(["claude", "unknown-agent"]);
+    let loaded: Card = serde_json::from_value(old_card).unwrap();
+    assert!(serde_json::to_value(&loaded).unwrap().get("tags").is_none());
+    let mut old_profile = serde_json::to_value(&app.config().profiles[0]).unwrap();
+    old_profile["tags"] = json!(["unknown-agent"]);
+    let profile: Profile = serde_json::from_value(old_profile).unwrap();
+    assert!(
+        serde_json::to_value(&profile)
+            .unwrap()
+            .get("tags")
+            .is_none()
+    );
     app.store
         .lock()
         .unwrap()
-        .write(|db| db.save(&project))
+        .write(|db| {
+            db.save(&project)?;
+            db.save(&loaded)
+        })
         .unwrap();
     app.call(
-        "card.update",
-        json!({"card_id":c.id,"revision":1,"tags":["unknown-agent"]}),
-    )
-    .unwrap();
-    app.call(
         "card.move",
-        json!({"card_id":c.id,"revision":2,"stage":"develop"}),
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let s = app.snapshot().unwrap();
-    assert!(s.requests.is_empty());
-    assert!(s.cards[0].attention.is_some());
+    let snapshot = app.snapshot().unwrap();
+    assert!(snapshot.cards[0].human_gate.is_none());
+    assert_eq!(snapshot.requests.len(), 1);
+    assert_eq!(snapshot.requests[0].profile.id, app.config().default_agent);
 }
 #[test]
 fn archive_compresses_owned_files_and_remains_readable_after_restore() {
@@ -292,7 +303,7 @@ fn ipc_preserves_large_context_and_report_frames() {
 }
 
 #[test]
-fn selected_note_context_is_captured_without_following_later_edits() {
+fn deferred_notes_preserve_legacy_data_without_injecting_it_into_new_executions() {
     let (_dir, app, project, card) = setup();
     let first: Note = serde_json::from_value(
         app.call(
@@ -331,11 +342,17 @@ fn selected_note_context_is_captured_without_following_later_edits() {
         Path::new("/bin/echo"),
     )
     .unwrap();
-    let manifest = app.home.join(path).with_file_name("context.json");
+    let manifest = app.home.join(&path).with_file_name("context.json");
     let original = std::fs::read(&manifest).unwrap();
     let value: Value = serde_json::from_slice(&original).unwrap();
-    assert_eq!(value["notes"].as_array().unwrap().len(), 1);
-    assert_eq!(value["notes"][0]["body"], "Original decision");
+    assert!(value["notes"].as_array().unwrap().is_empty());
+    let prompt = std::fs::read_to_string(app.home.join(path)).unwrap();
+    assert!(!prompt.contains("canban note"));
+    assert!(!prompt.contains("Original decision"));
+    assert_eq!(
+        app.call("note.read", json!({"note_id":first.id})).unwrap()["body"],
+        "Original decision"
+    );
     app.call("note.save",json!({"project_id":project.id,"note_id":first.id,"revision":1,"title":"Selected","body":"Later revision"})).unwrap();
     assert_eq!(std::fs::read(manifest).unwrap(), original);
 }
@@ -382,13 +399,8 @@ fn legacy_capacity_fields_do_not_survive_config_or_request_loading() {
 fn template_profiles_and_mentions_select_independent_roles_and_callbacks() {
     let (_dir, app, _project, card) = setup();
     app.call(
-        "card.update",
-        json!({"card_id":card.id,"revision":1,"tags":["claude"]}),
-    )
-    .unwrap();
-    app.call(
         "card.move",
-        json!({"card_id":card.id,"revision":2,"stage":"develop"}),
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let developer = app.snapshot().unwrap().requests[0].clone();
@@ -420,7 +432,12 @@ fn template_profiles_and_mentions_select_independent_roles_and_callbacks() {
         review.profile.role_instruction,
         developer.profile.role_instruction
     );
-    assert_eq!(snapshot.cards[0].tags, ["claude"]);
+    assert!(
+        serde_json::to_value(&snapshot.cards[0])
+            .unwrap()
+            .get("tags")
+            .is_none()
+    );
 }
 
 #[test]
@@ -1298,41 +1315,36 @@ fn recovery_gate_retains_completion_callback_until_human_approval() {
 }
 
 #[test]
-fn human_continue_can_retry_routing_after_tags_are_fixed() {
-    let (_dir, app, mut project, card) = setup();
-    project.workflow.stages[1].profile = None;
-    app.store
-        .lock()
-        .unwrap()
-        .write(|db| db.save(&project))
-        .unwrap();
-    app.call(
-        "card.update",
-        json!({"card_id":card.id,"revision":1,"tags":["unknown-profile"]}),
-    )
-    .unwrap();
-    app.call(
-        "card.move",
-        json!({"card_id":card.id,"revision":2,"stage":"develop"}),
-    )
-    .unwrap();
-    let current = app.snapshot().unwrap().cards[0].clone();
-    assert!(current.human_gate.is_some());
-    assert!(app.snapshot().unwrap().requests.is_empty());
-    app.call(
-        "card.update",
-        json!({"card_id":card.id,"revision":current.revision,"tags":[]}),
-    )
-    .unwrap();
-    let current = app.snapshot().unwrap().cards[0].clone();
-    app.call(
-        "card.continue",
-        json!({"card_id":card.id,"revision":current.revision}),
-    )
-    .unwrap();
+fn removed_routing_fields_are_rejected_without_mutating_cards() {
+    let (_dir, app, project, card) = setup();
+    for tags in [json!([]), json!(["claude"])] {
+        let error = app
+            .call(
+                "card.create",
+                json!({"project_id":project.id,"title":"Old client","tags":tags}),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Routing tags are no longer supported")
+        );
+        let error = app
+            .call(
+                "card.update",
+                json!({"card_id":card.id,"revision":1,"title":"Changed","tags":tags}),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Routing tags are no longer supported")
+        );
+    }
     let snapshot = app.snapshot().unwrap();
-    assert!(snapshot.cards[0].human_gate.is_none());
-    assert_eq!(snapshot.requests.len(), 1);
+    assert_eq!(snapshot.cards.len(), 1);
+    assert_eq!(snapshot.cards[0], card);
+    assert!(snapshot.requests.is_empty());
 }
 
 #[path = "tests/lifecycle.rs"]
@@ -1461,3 +1473,6 @@ fn continued_assignment_rejects_new_stale_reports_but_preserves_completion_recei
     assert_eq!(before.reports, after.reports);
     assert_eq!(after.attempts[0].state, "continued");
 }
+
+#[path = "tests/board.rs"]
+mod board_cases;

@@ -1,5 +1,17 @@
 # Product discussion and decisions
 
+## 2026-11-10 — Project switcher with numeric attention badges
+
+Supersede the earlier recent-event summary strip. Show every other Project as a subtly filled button, including Projects without events; fill available width and fold the remainder without a three-entry limit. Order by recent Project switching, then name, keeping targets stable during background changes. Show only a positive amber count of unique Cards needing permissions/input/recovery or human Review; no working/queued/event text or zero badge. The shared searchable Project picker uses matching badges. The Board-only scope, navigation/history and Terminal boundary remain unchanged. See [current navigation contract](../quick-open-and-navigation.md#board-title-bar-project-activity-2026-11-10).
+
+## 2026-11-10 — Defer Notes pending product design
+
+Remove the Note product surfaces for now: navigation/editor, Note-to-Card creation, Card Note selection, search destinations, Note links/actions and Note-derived Project summaries. New executions no longer automatically receive saved Notes. Keep existing records, associations, immutable captures and legacy Agent/client compatibility paths; do not delete user data or introduce a replacement feature. See [current scope](../notes-deferred.md). Earlier Note specifications and acceptance remain historical evidence.
+
+## 2026-11-10 — Board title-bar Project activity
+
+Use the Kanban window's existing title bar for other Projects' recent activity summaries. Clicking a summary switches directly to that Project's Board; responsive overflow opens the shared searchable Project picker with the same summaries. Preserve stable targets during background events and reuse Overview attention/review/runtime semantics. This is scoped to the Board workspace; Terminal chrome remains unchanged. See [current navigation contract](../quick-open-and-navigation.md#board-title-bar-project-activity-2026-11-10).
+
 This living record preserves the Canban product discussion in English. Distinguish user directions, working proposals, and open questions. Discussion does not imply implementation authorization. Update the relevant [vision](vision.md), [workflow](kanban-workflow.md), or [dispatch rules](scheduler.md) when a discussion changes the design; identify superseded proposals so developers can find the current direction.
 
 ## 2026-11-05: initial direction
@@ -583,3 +595,13 @@ Card Archive/Restore is a direct header action. Board right-click and the Card a
 ## 2026-11-09 — Live Inactive grace, delayed exit and global navigation
 
 The final user direction supersedes the interim suggestion to keep every process until Archive: completion retains an interactive Terminal, actual user operations renew Active, idle/done returns to Inactive, and the configurable idle timeout requests normal exit. Exited entries and tabs disappear even with Show inactive enabled; Card history/exact Resume remains. Show/Hide inactive is a selected state button at the top. Terminal grouping and input rendering were refined, and all pages now share window-local Back/Forward. See [implementation/acceptance](../terminal-interaction.md).
+
+
+## 2026-11-10 — Remove Routing tags
+
+The user rejected Routing tags after reviewing their precedence against workflow Profiles. Remove the field from Card creation/editing, Board presentation/search, Card/Profile types and selection. The only selection order is explicit @profile, stage.profile, then global default_agent. Stages without a Profile reference use the default directly; no tag aliases or matching errors remain. Existing queued/running Requests keep their captured Profile. Old JSON fields decode as unknown fields without a separate migration or a new ordinary-label feature. New Card mutations reject the removed tags field instead of silently ignoring caller intent. Earlier tag-based decisions in this log and research are historical; [Profiles](agent-profiles.md) and [Scheduler](scheduler.md) describe the current contract.
+
+
+## 2026-11-10 — Whole-Card dragging and insertion motion
+
+The user removed the redundant Board caption and selected Card-body dragging, a decorative Grip, background-only hover lightening, and a visible pre-drop placeholder that pushes peers aside. Same-column ordering and cross-column insertion persist the previewed position. The lifted Card follows the pointer immediately; native damped springs animate displaced peers and landing/cancellation, with interruptible retargeting. Preview is local and background refresh cannot break capture. Release submits one atomic placement; same-column order never dispatches workflow. See [Board interaction](../board-interaction.md) for current ownership and verification.

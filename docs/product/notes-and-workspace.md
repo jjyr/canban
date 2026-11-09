@@ -1,6 +1,6 @@
 # Notes and the Kanban workspace
 
-Status: implemented 2026-11-07. Kanban remains central, using the calm native workspace direction (A). A Note behaves like an editable document but its content is stored in SQLite. Related events, Card/Agent associations and bidirectional links share the application operation boundary. This supersedes both the earlier Note discussion/composer proposal and the physical-file interpretation. See [implementation and acceptance](../notes-and-workspace-implementation.md) for contracts and validation limits.
+Status: historical design, withdrawn from current product scope on 2026-11-10 pending further design. See [Notes deferred](../notes-deferred.md) for the current behavior and data/compatibility boundary. The sections below record the 2026-11-07 implementation direction and are not a commitment to a future Note design. Kanban workspace composition continues through the current [UI architecture](../ui-architecture.md), [Card conversation](../card-conversation.md) and [Terminal workspace](../terminal-workspace.md).
 
 ## Storage and ownership
 

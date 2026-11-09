@@ -77,7 +77,7 @@ impl AppServer {
         self.mutate("agent.open",&p,|db| {
             let mut card:Card=db.get(strp(&p,"card_id")?)?;
             ensure!(card.archived_at.is_none(),"Restore this Card before opening its Agent");
-            let profile=canban_scheduler::select(&config,&[],Some(strp(&p,"profile_id")?))?;
+            let profile=canban_scheduler::select(&config,Some(strp(&p,"profile_id")?))?;
             let mut context=conversation(db,&card,&profile)?;
             if let Some(expected)=p["expected_attempt_id"].as_str() {
                 let snapshot=db.snapshot()?;

@@ -1,12 +1,12 @@
 # Canban: Human Context
 
-Status: current product direction from the user's 2026-11-05 clarification. Implementation details marked as proposals remain open. No application behavior is implemented yet.
+Status: product direction, updated 2026-11-10 for Profile-only selection. See [implementation](../implementation.md) for actual behavior and acceptance; explicitly marked proposals remain open.
 
 ## Product thesis
 
 Canban is a Kanban-centered workbench that preserves human intent and coordinates agent work. Human Context is the proposed name for the approach. A person describes work, moves it into an actionable stage, and follows its execution, discussion, and outcome in one card.
 
-The automation model has two distinct questions: **the stage determines what workflow to execute; tags determine which agent may execute it**. Scheduler manages when eligible work actually starts under configured limits.
+The automation model has two distinct questions: **the stage determines what workflow to execute; its Profile selects the Agent, falling back to the global default**. Scheduler manages when eligible work actually starts under configured limits.
 
 ## Confirmed product directions
 
@@ -16,14 +16,13 @@ The automation model has two distinct questions: **the stage determines what wor
 - Backlog is required and does not start a workflow on entry. Other stages can be customized.
 - Entering Develop makes the card eligible for the development workflow; entering Review makes it eligible for the review workflow.
 - Outcome transitions are template-configurable. The agent itself reports whether it has completed; in the default template that completed report moves the card into Review and triggers its ordinary report workflow. No independent quality/check/process-exit gate is required.
-- Eligible cards are dispatched automatically. An untagged card uses the default agent; a routing-tagged card is handled only by a matching agent.
-- Users can define tags and which agents handle them. MVP tags can simply be agent names, such as claude or codex.
+- Eligible Cards are scheduled automatically. Selection is explicit @profile, workflow stage.profile, then global default_agent. Routing tags and Profile aliases are removed; users choose automatic roles through workflow JSON and direct questions through explicit mentions.
 - Each Project has project-local card numbers, comparable to issue numbers, for easy reference.
 - Every card has a unified timeline of comments, state changes, agent executions, and other relevant updates. Users and agents can comment; users can mention agents.
-- A submitted @agent request starts a fresh conversation; entering an executable stage independently assigns an agent and starts a fresh conversation for its task.
+- A submitted @profile request reuses its Card/profile conversation, delivering immediately when live or starting/resuming when absent/exited. Stage assignments keep independent Request/Attempt and callback bindings; different profiles retain separate histories.
 - Use one Session model for all executions. The difference is the scheduling trigger/input, not a question/stage session type. Canban makes the scheduling decisions and controls the actual runtime through herdr-core.
 - Cards can reference resources and accept pasted images. Local cards are the first backend; GitHub issue cards are a later extension with the same outward card experience.
-- Notes are file-like documents stored in SQLite with strong editing/preview, a Timeline of related events (including Card and Agent associations/changes), and bidirectional Note links. Agents interact by reading/writing through the Canban CLI; a dedicated Note discussion/composer is outside the current simplified direction. Notes retain ideas and project context and can inform explicit Card creation; Card creation can also begin directly on the Board. See [Notes and workspace](notes-and-workspace.md).
+- Notes are deferred pending further product design. They have no current UI/search/creation flow, and saved Notes are not automatically injected into new Agent executions. Preserve existing data and historical captures. Card content, comments, reports and attachments supply current Human Context. See [Notes deferred](../notes-deferred.md).
 - Projects choose a Kanban template at creation. JSON-style configuration is the initial customization surface; template UI and deeper migration features follow later. Incompatible stage mappings must be made visible rather than silently applied.
 - Custom workflows can be created by people or with agent assistance.
 - Canban must expose an interface that agents can call directly.
@@ -48,18 +47,17 @@ Canban
   |     |     +-- custom stages and trigger bindings
   |     |     +-- Cards #1, #2, ...
   |     |           +-- description + resource references
-  |     |           +-- tags
   |     |           +-- unified timeline
   |     |           +-- dispatch requests -> run attempts
   |     |           +-- changes / artifacts / human outcomes
   |     +-- Archive
-  |     +-- Notes / context references
+  |     +-- Card content / comments / reports / attachments
   |     +-- workflow template + agent routing defaults
   +-- Agents index
   +-- Scheduler / schedules
 ```
 
-Project is now the chosen product term. Notes are Project-owned SQLite documents with saved revisions, related-event history, stable links and explicit Card associations; they do not own a separate Agent chat lifecycle.
+Project is the chosen product term. Legacy Note records remain stored for compatibility; a future Note model requires a separate product decision.
 
 ## Human Context contract
 
@@ -67,7 +65,7 @@ From a card, a person should be able to answer:
 
 | Question | Evidence |
 | --- | --- |
-| Why does this work exist? | Description, notes, discussions, decisions, and resource references |
+| Why does this work exist? | Description, discussions, decisions, and resource references |
 | Why did an agent start? | Stage-entry or mention event, workflow revision, routing decision, dispatch request |
 | What did it receive? | Captured card/context revisions and effective workflow/profile configuration |
 | What happened? | Each run, questions, comments, updates, artifacts, and check evidence in the timeline |
@@ -82,7 +80,7 @@ The user has now resolved the main scope questions with explicit MVP simplificat
 
 The first useful loop is **Project -> local card in Backlog -> Develop -> automatic dispatch -> visible result and discussion -> human disposition -> archive**.
 
-Include directory-backed Projects and Boards, basic Notes editing/preview and captured context, the default workflow template, local cards and project-local numbers, rich descriptions/resource references/image paste, unified timeline/comments, agent mentions, tag/default routing, run history, independent concurrent Sessions and recovery, and an agent-callable application interface. Rich conversational UI remains a separate scope choice.
+Include directory-backed Projects and Boards, captured Card context, the default workflow template, local cards and project-local numbers, rich descriptions/resource references/image paste, unified timeline/comments, agent mentions, stage-profile/default selection, run history, independent concurrent Sessions and recovery, and an agent-callable application interface. Notes require further design and are outside this scope.
 
 Review produces an ordinary report through the existing generic Scheduler path; integrate the Shear interface later. The default next-stage callback trusts the agent's completion declaration. JSON templates provide customization without a template-editing GUI.
 
@@ -92,6 +90,6 @@ Defer the GitHub issue backend, GitHub write synchronization, advanced Shear-der
 
 The main MVP policy decisions are settled: self-reported completion, no old-process coordination, worktree handling at Archive, ordinary Review reports, JSON templates, existing Herdr agent setup, internal attention notifications, and a minimal event-driven direction.
 
-Refine small interface details as needed: completion/blockage encoding, deterministic routing defaults, attachment limits, Note ownership/selection, notification display, archive handling of modified managed worktrees, and the actual coordinator lifetime. Do not turn these into an expanded first-release architecture program.
+Refine small interface details as needed: completion/blockage encoding, deterministic routing defaults, attachment limits, notification display, archive handling of modified managed worktrees, and the actual coordinator lifetime. Do not turn these into an expanded first-release architecture program.
 
 See [product log](product-log.md), [Projects/templates](projects-and-workflows.md), [Scheduler](scheduler.md), [timeline draft](timeline.md), [Session model](sessions.md), [agent interface](agent-interface.md), and [event direction](events-and-notifications.md).

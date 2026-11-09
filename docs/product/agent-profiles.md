@@ -36,7 +36,6 @@ config/agents.json                 workflow JSON
 | `resume_argv` | Exact-history command array; absent inherits, `[]` explicitly disables Resume |
 | `exit` | `{"type":"manual"}` or `{"type":"input","text":"/exit"}`; no preset defaults to manual |
 | `session_instruction` | Optional prompt recipe for binding history; `""` explicitly disables inherited text |
-| `tags` | Routing aliases; empty by default |
 
 `argv` and `resume_argv` replace the corresponding preset array in full. They are individual arguments, with no implicit shell evaluation/appending. Supported placeholders are `{prompt}`, `{home}`, `{cli}` and `{session_id}`. A fresh launch referencing `{session_id}` gets a preallocated UUID; otherwise the Agent binds its actual ID. Saved IDs are opaque; Canban never substitutes a Herdr terminal address or a latest-history search.
 
@@ -51,13 +50,11 @@ Presets are embedded JSON in `crates/profiles/presets`. `config/presets/<name>.j
   "profiles": [
     {
       "id": "developer", "preset": "codex",
-      "role_instruction": "Implement the agreed Card task and explain validation.",
-      "tags": ["developer"]
+      "role_instruction": "Implement the agreed Card task and explain validation."
     },
     {
       "id": "reviewer", "preset": "codex",
-      "role_instruction": "Review actual code and tests; publish an ordinary report.",
-      "tags": ["reviewer"]
+      "role_instruction": "Review actual code and tests; publish an ordinary report."
     },
     {
       "id": "my-agent", "preset": null,
@@ -65,8 +62,7 @@ Presets are embedded JSON in `crates/profiles/presets`. `config/presets/<name>.j
       "argv": ["/absolute/path/to/wrapper", "start", "{prompt}"],
       "resume_argv": ["/absolute/path/to/wrapper", "resume", "{session_id}", "{prompt}"],
       "session_instruction": "Bind your actual history using canban bind-session.",
-      "exit": {"type":"manual"},
-      "tags": ["custom"]
+      "exit": {"type":"manual"}
     }
   ]
 }
@@ -84,7 +80,7 @@ The `exit` recipe supplies a normal provider exit command; it is not a completio
 
 The default JSON workflow has non-executing Backlog, Develop using `developer` with `on_completed: "review"`, and Review using `reviewer` with no automatic next stage. Review means an ordinary report, followed by human disposition.
 
-Selection order is explicit `@profile`, stage `profile`, Card tags, then `default_agent`. Unmatched/ambiguous tags request attention. Automatic named stage profiles are not overridden by Card tags. Direct mentions do not retag the Card or change its workflow callback. Startup, Project creation and reload validate profile references before activating the new registry.
+Selection order is explicit `@profile`, stage `profile`, then global `default_agent`. Routing tags were removed on 2026-11-10: neither Cards nor Profiles expose a `tags` field. Old JSON fields are ignored on decode without a dedicated migration; raw configuration files and historical records are not proactively rewritten. New `card.create`/`card.update` calls reject `tags`, including empty arrays. Desktop API level 3 rejects an older AppServer that could still apply tag-based routing; `mise run run` starts a matched UI/service build. Explicit unknown Profile IDs fail instead of falling back. Direct mentions do not change the workflow callback. Startup, Project creation and reload validate profile references before activating the new registry.
 
 ## Migration
 
@@ -93,3 +89,11 @@ Recognized legacy provider/batch configuration is converted once. Canban first s
 ## UI
 
 Settings shows resolved profiles and reload controls; Board headers show stage names/counts with automatic roles in their tooltip; Card comments offer the same configured mentions. Clicking a live Card Agent attaches to its terminal. Clicking an exited Agent resumes its exact conversation in a new terminal. Missing history is visible, with a separate **Start with retained Card context** action. Leaving the page/hiding the viewer only detaches it. X, Command+W and Close terminal instead invoke the unified AppServer close-and-terminate lifecycle. Exited entries leave the Terminal list/tabs; Card and Overview retain history and explicit Resume.
+
+## Profile-only selection acceptance (2026-11-10)
+
+Routing-tag fields, aliases, matching, Board badges and search terms are removed. Regression coverage checks explicit → stage → default selection, unknown explicit references failing without fallback, old Card/Profile JSON loading without the removed field, and rejected tag-bearing Card mutations leaving saved state unchanged. Existing template-role/callback tests still cover independent Developer/Reviewer assignments. Final workspace tests passed (137), including the API-level regression; strict workspace/all-target Clippy and App/Gallery packaging passed. Isolated `mise run acceptance` and `mise run acceptance-dev` passed. The latter verified API level 3, older-service replacement and retained PTY identity at `/private/tmp/cb-dev-start-v08xq969`. The general fixture run is `/private/tmp/cb-mffu3frp/home`.
+
+Native production App checks used disposable data and real Herdr PTYs with deterministic provider commands. Command+Enter created one Card without tags; Task Edit saved the complete title/body. An unassigned Develop stage selected global `codex`, Review selected stage `reviewer`, and an explicit `@claude` selected that Profile with no stage callback, preserving the pending human Review gate. These names identify fixture Profiles, not live model/provider-authentication acceptance. Initial creation evidence is `/private/tmp/cb-routing-native-45x6k312/native-checks.json`; final keyboard-edit/workflow evidence is `/private/tmp/cb-routing-native-0t9ic0ku/native-checks.json`.
+
+Acceptance reproduced a pre-existing Task Edit focus failure: subscribing the structural editor directly to the entire Draft rebuilt inputs during typing and saved only a prefix. `ui/card/task.rs` now selects only editing/expansion mode for that structural owner; text changes update mounted inputs. Final App and 850-point Gallery checks retained full continuous keyboard input and focus. Gallery also verified tag-free creation/editing and Local/GitHub type switching with title/body retained. Test apps and their isolated Cores were stopped; no user data/Core or provider credentials were changed. Chinese IME was excluded.

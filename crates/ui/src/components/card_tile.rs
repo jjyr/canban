@@ -1,45 +1,22 @@
 use super::*;
-pub fn card_tile(
-    ui: Ui,
-    card: Card,
-    column: usize,
-    width: Signal<f32>,
-    stages: Vec<String>,
-) -> impl IntoElement {
-    let id = card.id.clone();
-    let open_id = id.clone();
-    let open_id_for_style = id.clone();
-    let x = animated_value(0.0);
-    let y = animated_value(0.0);
-    let dragged = signal(false);
+/// Card content/surface. Board owns pointer capture, drag geometry and activation.
+pub fn card_tile(ui: Ui, card: Card) -> View {
+    let selected_id = card.id.clone();
     let snapshot = ui.snapshot.get_untracked();
-    let context_card = card.clone();
     let mut tile = panel()
         .p_3()
         .min_w(px(0.))
-        .key(id.clone())
         .gap_2()
-        .label(format!("Card #{} {}", card.number, card.title))
-        .focusable(true)
-        .opacity(move || if dragged.get() { 0.65_f32 } else { 1.0_f32 })
         .border_1()
-        .border_color(move || {
-            if ui.card.get() == open_id_for_style {
-                ACCENT
+        .border_color(BORDER)
+        .bg(move || {
+            if ui.card.get() == selected_id {
+                SELECTED.resolve()
             } else {
-                BORDER
+                SURFACE.resolve()
             }
         })
-        .hover(|s| s.border_color(ACCENT))
-        .focus(|s| s.border_color(ACCENT))
-        .on_context_menu(move |e: &nsh_core::ContextMenuEvent| {
-            crate::card_actions::menu(ui, context_card.clone(), e.page_position)
-        })
-        .on_press(move || {
-            if !dragged.get_untracked() {
-                ui.open_card(open_id.clone());
-            }
-        })
+        .hover(|s| s.bg(CARD_HOVER))
         .child(
             view()
                 .flex_row()
@@ -54,11 +31,7 @@ pub fn card_tile(
                             "Card #{} · {}#{}",
                             card.number, source.repository, source.number
                         ))))
-                        .child(
-                            canban_ui_kit::icon(canban_ui_kit::Icon::GitHub)
-                                .w(px(14.))
-                                .h(px(14.)),
-                        )
+                        .child(icon(Icon::GitHub).w(px(14.)).h(px(14.)))
                         .child(muted(format!(
                             "#{} · Issue #{}",
                             card.number, source.number
@@ -68,35 +41,10 @@ pub fn card_tile(
                     muted(format!("#{}", card.number)).into_element()
                 })
                 .child(
-                    view()
-                        .w(px(24.))
-                        .h(px(24.))
-                        .flex_shrink_0()
-                        .items_center()
-                        .rounded(px(4.))
-                        .hover(|s| s.bg(INSET))
-                        .justify_center()
-                        .label("Drag Card to another stage")
-                        .pan_values(Some(&x), Some(&y))
-                        .on_pan_start(move |_: &PanEvent| dragged.set(true))
-                        .on_pan_end(move |e: &PanEvent| {
-                            if !e.cancelled {
-                                let target = (column as i32
-                                    + (e.translation.x.0 / width.get_untracked().max(1.0)).round()
-                                        as i32)
-                                    .clamp(0, stages.len() as i32 - 1)
-                                    as usize;
-                                if target != column {
-                                    move_card(ui, &id, &stages[target]);
-                                }
-                            }
-                            x.set(0.0);
-                            y.set(0.0);
-                            set_timeout(std::time::Duration::from_millis(100), move || {
-                                dragged.set(false)
-                            });
-                        })
-                        .child(icon(Icon::Grip).w(px(14.)).h(px(14.))),
+                    icon(Icon::Grip)
+                        .w(px(14.))
+                        .h(px(14.))
+                        .pointer_events(PointerEvents::None),
                 ),
         )
         .child(
@@ -130,16 +78,6 @@ pub fn card_tile(
                         .truncate()
                         .min_w(px(0.)),
                 ),
-        );
-    }
-    if !card.tags.is_empty() {
-        tile = tile.child(
-            view().flex_row().flex_wrap().gap_1().children(
-                card.tags
-                    .iter()
-                    .map(|tag| badge(format!("@{tag}")).into_element())
-                    .collect::<Vec<_>>(),
-            ),
         );
     }
     tile

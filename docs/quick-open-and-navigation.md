@@ -4,16 +4,60 @@ Implemented 2026-11-07; navigation refined 2026-11-08. This follows the user-sel
 
 ## Interaction contract
 
-The sidebar is a 56-point rail with 40-point icon targets. Its top-to-bottom order is Quick Open, Board, global Overview, Terminals, Notes and Archive, with Settings pinned to the bottom. There is no brand letter, separate Project picker, New Project or connection-check action in the rail. Herdr connection diagnostics remain in Settings. Selected state, keyboard focus, accessible names and hover tooltips accompany the icons. Overview retains its global actionable-row badge.
+The sidebar is a 56-point rail with 40-point icon targets. Its top-to-bottom order is Quick Open, Board, global Overview, Terminals and Archive, with Settings pinned to the bottom. There is no brand letter, separate Project picker, New Project or connection-check action in the rail. Herdr connection diagnostics remain in Settings. Selected state, keyboard focus, accessible names and hover tooltips accompany the icons. Overview retains its global actionable-row badge.
 
-The Board header owns a Project-name button with a chevron. It opens the same search popup restricted to Projects, with a Project-specific placeholder, a checkmark/current label for the active Project and a persistent **New Project** footer action even when no matches remain. New Project closes the popup and opens the existing creation form. Command+O switches an open Project picker into global Quick Open, removing that footer action and current marker. Picking a Project opens its Board, clears the previous Card/Note selection and updates the visible Project name. Empty Boards provide one fully clickable **Create a Project** card; **New Card** stays hidden until a valid Project is selected. Board has no scheduler summary or task filter toolbar. Long Project names truncate while preserving the chevron and Card action. Notes and Archive identify their current Project; Overview remains global.
+The Board header owns a Project-name button with a chevron. It opens the same search popup restricted to Projects, with a Project-specific placeholder, a checkmark/current label for the active Project and a persistent **New Project** footer action even when no matches remain. New Project closes the popup and opens the existing creation form. Command+O switches an open Project picker into global Quick Open, removing that footer action and current marker. Picking a Project opens its Board, clears the previous Card selection and updates the visible Project name. Empty Boards provide one fully clickable **Create a Project** card; **New Card** stays hidden until a valid Project is selected. Board has no scheduler summary or task filter toolbar. Long Project names truncate while preserving the chevron and Card action. Archive identifies its current Project; Overview remains global.
+
+### Board title-bar Project activity (2026-11-10)
+
+The Kanban workspace uses the existing 42-point window title bar after Back/Forward as a compact Project switcher. It is visible on Board and the wide Board with attached Card details; it is absent from standalone/narrow Card details, Review, Overview, Settings and Terminals. The Terminal split chrome/tabs remain unchanged.
+
+```text
+Window title bar
+[traffic lights]  < >  [Fiber  (2)] [Pot  (1)] [Shear] [Tools] [Docs] [+4 v]
+------------------------------------------------------------------------
+Rail | Canban v                                             [+ Add Card]
+     | Backlog                 Develop                 Review
+```
+
+All other Projects are eligible, including empty Projects and Projects without events. Each has a subtly filled, borderless button with a medium-weight name and an optional small amber numeric badge. Hover slightly lightens the button background. Long names truncate. The current Project remains in the Board header and is excluded from the switcher.
+
+The badge counts **unique active Cards requiring human action**, using Overview's actionable-state projection: permission/input requests, business questions/recovery and results awaiting human Review. A Card with several reasons or Profiles is counted once across these categories. A Card merely in the Review column without an outstanding human decision is not counted. Archived/removed Cards are excluded. Zero renders no badge; working/queued states, event summaries and unread-notice counts are not displayed.
+
+On entry, recently selected Projects come first, then names (case-insensitive, stable ID ties). Recency is window-local and shares the existing Quick Open choice history. Selecting a Project records the departed and selected Project so two-Project switching remains quick. Background events only update badges; they do not reorder existing targets. Newly discovered Projects append until deliberate page/Project navigation creates a fresh order. Badge space is reserved even at zero, so a new permission request does not shift neighboring buttons.
+
+The number of visible Projects is determined entirely by available width, bounded name widths, gaps and room for window dragging. There is no three-Project cap and no event-based eligibility rule. All Projects are shown when they fit; overflow space is reserved only when needed. **+N** counts undisplayed other Projects. When no Project fits, **Projects · N** remains as the compact entry. Both open the existing searchable Project picker. The picker shows the same numeric badges, a current marker and New Project action; only duplicate names need a directory subtitle. No blank status subtitle or zero badge is rendered. Fuzzy search still takes precedence over visit order when a query is entered. Global Command+O retains its existing metadata search.
+
+Clicking either the name or badge invokes the same fresh-target Project navigation as the picker. Back restores source context, retained drafts and keyed scroll positions. Navigation does not launch an Agent, change workflow stages, read notices or accept human gates. Badges disappear when the underlying reasons are resolved, not on navigation. The switcher uses existing snapshots and adds no timer, remote/Git query or event-history scan.
+
+Ownership: `ui/board/activity/model.rs` computes unique attention counts, visit/name ordering and responsive width budgets. `ui/board/activity.rs` owns stable keyed Project buttons and switching intents. `ui/frame.rs` mounts the strip only when Board is visible. `ui/quick_open.rs` shares fresh selection, choice history, search and dismissal. `ui-kit/status.rs::attention_count` supplies the domain-free numeric badge; `ui-kit/search_dialog.rs` shares it with Project search rows while NSH owns Button/Command/Dialog behavior.
+
+#### Numeric Project switcher acceptance
+
+Executed 2026-11-10 on the combined working tree: application/Gallery builds, all 146 workspace Rust tests, strict workspace/all-target Clippy, `mise run acceptance` and `mise run acceptance-dev` passed. Layout/count regressions cover all-Project eligibility independent of events, visit/name ordering, unified Review/input counting across multiple Profiles/reasons, archived/removed exclusion, more-than-three capacity, overflow-only-when-needed and stable widths across badge changes.
+
+Native production-component Gallery checks at 1200 / 720 / 440 logical points displayed 7 / 3 / 1 other Projects respectively, folding the remainder into searchable overflow. Empty Projects were directly switchable. Pot showed 2 for two separate actionable Cards, while unblocked working/queued Projects had no badge or status text. The Project picker showed matching badges without empty subtitles/zero counts, and search/Enter, current-Project exclusion and MRU return switching worked. The shared Shortcuts dialog retained its existing labels and Escape dismissal.
+
+The isolated production app at 1360 logical points displayed 9 other Projects. Real Herdr PTYs ran deterministic fixture Agents. Shear's runtime permission changed its badge 0 → 1 → 0 without shifting/reordering its button; Pot's business blockage plus runtime permission on one Card remained 1. Clicking the badge itself navigated to its Project. Overflow search/Enter, direct empty-Project switching, recently departed Project placement and Back restoring a scrolled Board were verified. Requests remained 3 and reports remained 2; Card records/human gates, legacy Notes and existing notice read states were unchanged by navigation. Permission events generated the expected runtime notices.
+
+Local temporary evidence: `/private/tmp/cb-switcher-8hazlgfp/` (`before.json`, `after-permissions.json`, `after-resolution.json`, `after-native.json`, `checks.json`, `evidence.json`). General acceptance used `/private/tmp/cb-shzrzq8q/home`; development startup acceptance used `/private/tmp/cb-dev-start-y0ghdahc`. This is deterministic native/runtime acceptance, not a new live Codex/Claude run or frame-rate benchmark. Test apps/Core were stopped; Chinese IME remains excluded.
+
+#### Earlier summary-strip acceptance (superseded presentation)
+
+The following evidence covers the earlier event-summary/three-entry presentation, before the compact numeric Project switcher superseded it. It remains historical evidence, not acceptance of the current appearance/count/order rules.
+
+Executed checks: production-component Gallery at 1200, 720 and 440 logical points verified direct switching, fewer visible summaries, complete collapse to **Projects · N**, long Unicode Project selection, shared searchable overflow/Enter activation and Escape dismissal. The existing Terminal split chrome was checked without Project summaries. Unit regressions cover Card-count deduplication, human gates and archived exclusion through Overview, meaningful event recency versus deferred Note/runtime/idle/reorder noise, stable ordering and reserved widths across status changes.
+
+An isolated production app with six Projects and deterministic Agents over real Herdr PTYs verified runtime permission events updating **Working → Needs you** without reordering the existing entries. It also verified direct navigation, overflow search to a quiet Project, Back restoring Board scroll, and Back restoring Card details with an unsent comment draft. Navigation retained all three original requests, both reports, all Card records/human gates and existing notice read states. The permission event generated one expected new notice; opening a Project did not resolve it. Local temporary evidence: `/private/tmp/cb-project-activity-m529xvm9/` (`before.json`, `after-runtime-event.json`, `after-navigation.json`, `checks.json`, `evidence.json`). The test app/Core were stopped afterward; this is deterministic navigation/runtime acceptance, not a new real-model acceptance.
+
+The combined working tree passed application/Gallery builds, all 146 workspace Rust tests, strict all-target Clippy and general isolated acceptance. Chinese IME remains excluded. These checks do not establish a frame-rate benchmark or persistent navigation history across application restarts.
 
 ```text
 Rail                 Board header
 Quick Open           [Current Project v]                 [+ New Card]
 Board                   |
 Overview [attention]    +--> Project search popup
-Notes                       existing Projects; current marker
+                        existing Projects; current marker
 Archive                     + New Project (persistent footer)
    ...
 Settings
@@ -26,11 +70,10 @@ Quick Open searches local metadata across the current Canban home's Projects:
 | Result | Searchable metadata | Activation |
 | --- | --- | --- |
 | Project | Name and directory | Open its Board |
-| Card | Number/title, Project, tags and branch | Open Card detail in its owning Project |
-| Note | Title and owning Project | Open that Note's editor |
+| Card | Number/title, Project and branch | Open Card detail in its owning Project |
 | Agent | Existing Card/profile conversation, profile command name, Card/Project and state | Open its conversation in Terminals; attach its live PTY or show retained context for explicit Resume/recovery |
 
-Result types are also searchable words. A candidate has an icon, primary title and concise ownership/status labels. Duplicate names and Project-local Card numbers remain distinguishable. Search does not index full Note bodies, reports or terminal output.
+Result types are also searchable words. A candidate has an icon, primary title and concise ownership/status labels. Duplicate names and Project-local Card numbers remain distinguishable. Search does not include deferred Notes, full reports or terminal output.
 
 Typing performs case-insensitive Unicode-aware fuzzy matching: every query term must match a field; exact, prefix and contiguous primary-title matches lead subsequences and secondary metadata matches. Ties use recent choices, visible title/ownership and stable identity. Empty search can show recently chosen destinations first. The last 32 Quick Open choices are remembered within the current UI session.
 
@@ -50,7 +93,7 @@ App snapshot + session-local recent choices
        input + NSH Command list + NSH Dialog
                 |
        fresh destination resolution
-       existing Project/Card/Note/Agent navigation
+       existing Project/Card/Agent navigation
 ```
 
 - `ui-kit/icons.rs`: shared Lucide SVG icons and shared accessible icon action, with selected/focus/hover/badge styling.

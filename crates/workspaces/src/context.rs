@@ -286,7 +286,7 @@ mod tests {
         .unwrap();
         let child = worktree.join("subdir");
         std::fs::create_dir(&child).unwrap();
-        let card:Card=serde_json::from_value(serde_json::json!({"id":"c","project_id":"p","number":1,"title":"Task","body":"","tags":[],"stage":"develop","revision":1,"created_at":0,"worktree":worktree,"branch":"task"})).unwrap();
+        let card:Card=serde_json::from_value(serde_json::json!({"id":"c","project_id":"p","number":1,"title":"Task","body":"","stage":"develop","revision":1,"created_at":0,"worktree":worktree,"branch":"task"})).unwrap();
         let mut s = Snapshot {
             projects: vec![project],
             cards: vec![card.clone()],

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in real Claude Note/reply/normal-exit/Resume acceptance in isolated Core."""
+"""Opt-in real Claude context/reply/normal-exit/Resume acceptance in isolated Core."""
 from pathlib import Path
 import json, os, shutil, subprocess, tempfile, time
 repo=Path(__file__).resolve().parents[1]
@@ -37,15 +37,13 @@ try:
  flow=json.loads((home/'config/workflows/default.json').read_text());flow['workspace'].update(create_worktree=False,sync_base=False)
  p=call('project.create',{'name':'Real Claude acceptance','directory':str(base/'source'),'workflow':flow})
  marker='CLAUDE_CONTEXT_'+base.name.replace('-','_')
- note=call('note.save',{'project_id':p['id'],'title':'Claude context.md','body':marker})
- card=call('card.create',{'project_id':p['id'],'title':'Claude Note and reply smoke','body':'Only exercise Canban Notes and replies. Do not change source files. Read the context Note, preserve its marker, append Claude provider verified through the Note CLI with its current revision. Follow current Question reply and outcome reporting instructions.'})
- call('comment.add',{'card_id':card['id'],'body':'@claude Read Claude context.md, update it as requested, then reply to this Question with its exact context marker and explicitly report completion. No source edits are needed.'})
+ card=call('card.create',{'project_id':p['id'],'title':'Claude context and reply smoke','body':'Only exercise Canban replies. Do not change source files. Card context marker: '+marker+'. Follow current Question reply and outcome reporting instructions.'})
+ call('comment.add',{'card_id':card['id'],'body':'@claude Read the Card context, then reply to this Question with its exact context marker and explicitly report completion. No source edits are needed.'})
  print('REAL_CLAUDE_HOME='+str(home),flush=True)
  s=wait(lambda s:s['attempts'] and s['attempts'][0]['close_state']=='closed' and s['questions'] and all(q['state']=='replied' for q in s['questions']),'real Claude task and normal exit')
  first=s['attempts'][0];sid=first['provider_session_id']
- current=call('note.read',{'note_id':note['id']});assert marker in current['body'] and 'Claude provider verified' in current['body'] and current['revision']>note['revision']
  q=s['questions'][0];assert marker in call('resource.read',{'card_id':card['id'],'path':q['reply_path']})['body']
- call('comment.add',{'card_id':card['id'],'body':'@claude Follow-up only: recall the exact context marker from our existing conversation. Do not change files or Notes. Reply using this Question ID and report completion.'})
+ call('comment.add',{'card_id':card['id'],'body':'@claude Follow-up only: recall the exact context marker from our existing conversation. Do not change files. Reply using this Question ID and report completion.'})
  s=wait(lambda s:len(s['attempts'])==2 and all(a['close_state']=='closed' for a in s['attempts']) and all(q['state']=='replied' for q in s['questions']),'Claude exact Resume')
  assert s['attempts'][-1]['provider_session_id']==sid and s['attempts'][-1]['terminal']!=first['terminal']
  q=s['questions'][-1];assert marker in call('resource.read',{'card_id':card['id'],'path':q['reply_path']})['body']

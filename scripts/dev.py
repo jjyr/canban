@@ -95,7 +95,7 @@ def restart_server(home, cli):
         if server.poll() is not None:
             raise RuntimeError('New AppServer exited; inspect ' + str(home / 'server.log'))
         current = ping(endpoint)
-        if current is not None and current.get('pid') == server.pid and current.get('api_version', 0) >= 2:
+        if current is not None and current.get('pid') == server.pid and current.get('api_version', 0) >= 4:
             # Desktop utilities were the original stale-service failure.
             rpc(endpoint, 'utilities.state')
             print(f"AppServer ready: PID {server.pid}, API {current['api_version']}, home {home}", flush=True)

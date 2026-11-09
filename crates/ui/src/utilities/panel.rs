@@ -16,6 +16,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                     .iter()
                                     .filter(|p| p.name.to_lowercase().contains(&query))
                                     .map(|p| SearchChoice {
+                                        attention: 0,
                                         id: p.id.clone(),
                                         title: p.name.clone(),
                                         detail: p.work_location().directory,
@@ -33,6 +34,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                     .contains(&query)
                             })
                             .map(|c| SearchChoice {
+                                attention: 0,
                                 id: c.id.into(),
                                 title: c.title.into(),
                                 detail: format!("{} · {}", c.display, c.context),

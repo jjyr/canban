@@ -161,7 +161,6 @@ pub fn upsert(
             project,
             &i.title,
             instructions,
-            Vec::new(),
             if manual { "user" } else { "github" },
         )?;
         c.content = CardContent::GitHubIssue {

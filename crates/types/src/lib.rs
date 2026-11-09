@@ -124,8 +124,6 @@ pub struct Profile {
     pub exit: Option<ExitAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_instruction: Option<String>,
-    #[serde(default)]
-    pub tags: Vec<String>,
 }
 impl Profile {
     pub fn command(&self) -> &[String] {
@@ -190,7 +188,6 @@ impl Default for Config {
             id: id.into(),
             preset: Some(preset.into()),
             role_instruction: role.into(),
-            tags: vec![id.into()],
             ..Default::default()
         };
         Self {
@@ -282,7 +279,9 @@ pub struct Card {
     pub number: u64,
     pub title: String,
     pub body: String,
-    pub tags: Vec<String>,
+    /// Sparse presentation rank within the current stage; old Cards use number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_order: Option<i64>,
     #[serde(default)]
     pub context_notes: Option<Vec<String>>,
     pub stage: String,
@@ -712,6 +711,19 @@ pub enum CardContent {
     GitHubIssue { source: GitHubIssueRef },
 }
 impl Card {
+    pub fn board_rank(&self) -> i64 {
+        self.board_order.unwrap_or_else(|| {
+            i64::try_from(self.number)
+                .unwrap_or(i64::MAX / 1024)
+                .saturating_mul(1024)
+        })
+    }
+    pub fn board_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.board_rank()
+            .cmp(&other.board_rank())
+            .then_with(|| self.number.cmp(&other.number))
+            .then_with(|| self.id.cmp(&other.id))
+    }
     pub fn github_issue(&self) -> Option<&GitHubIssueRef> {
         match &self.content {
             CardContent::GitHubIssue { source } => Some(source),

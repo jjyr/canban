@@ -84,7 +84,7 @@ try:
     call('github.sync',{'project_id':args.project_id})
     snapshot=call('app.snapshot')
     card=next(c for c in snapshot['cards'] if c['project_id']==args.project_id and c['content']['kind']=='github_issue' and c['content']['source']['number']==args.issue_number)
-    assert card['stage']=='backlog' and not card['tags']
+    assert card['stage']=='backlog' and 'tags' not in card
     assert not any(r['card_id']==card['id'] for r in snapshot['requests'])
     check('Automatic Open Issue intake is Backlog-only')
     instructions='Keep the change minimal. Preserve this local instruction through synchronization.'

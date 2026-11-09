@@ -1,6 +1,6 @@
 # Canban product design and runtime research
 
-Canban is the product; Human Context names the proposed approach. Current user directions center on native Rust/NSH UI, directory-backed Projects, local Boards/cards, stage-triggered workflows, tag/default automatic scheduling, and a unified card timeline. AppServer is an independent service shared by UI clients and local/remote executions; WebView is embedded only as needed. Documentation is English; proposals and unresolved decisions are identified.
+Canban is the product; Human Context names the proposed approach. Current user directions center on native Rust/NSH UI, directory-backed Projects, local Boards/cards, stage-triggered workflows, stage-profile/default automatic scheduling, and a unified card timeline. AppServer is an independent service shared by UI clients and local/remote executions; WebView is embedded only as needed. Documentation is English; proposals and unresolved decisions are identified.
 
 The repository now has a runnable macOS MVP. [Real Agent acceptance, 2026-11-09](real-agent-acceptance-20261109.md) covers the current Codex workflow, native post-Archive Resume repair and Claude provider-authentication boundary. [Latest acceptance](mvp-acceptance.md) covers the command-defined profile update, real Codex human-input/rework tasks, explicit Review commit/merge, and Terminal recovery checks. Start with [implementation, development and acceptance](implementation.md) for actual behavior, commands and validation limits. Dated pre-implementation statements in the design/research documents describe their original scope; they are not the current implementation status.
 
@@ -25,14 +25,14 @@ The latest explicit user decision takes precedence over earlier discussion. Befo
 | [Multi-machine acceptance](multi-machine-acceptance.md) | Isolated local/remote verification, limits and reproduction |
 | [Product discussion and decisions](product/product-log.md) | Rationale, superseded proposals, and open questions |
 | [Projects and workflow templates](product/projects-and-workflows.md) | Directory/Board ownership, required Backlog, callbacks, customization, and template migration |
+| [Board dragging and placement](board-interaction.md) | Whole-Card dragging, animated placeholders/peers, durable ordering and workflow boundary |
 | [Kanban card workflow](product/kanban-workflow.md) | Numbers, resources, stages/run/outcome separation, comments, mentions, and archive |
 | [GitHub integration implementation](github-integration.md) | Registered App, provider/Kanban boundaries, Issue intake, native creation, PR delivery, API and explicit live-acceptance limits |
 | [GitHub Cards and unified creation](product/github-cards.md) | Product decisions, automatic Issue intake, local removal and collaborator API research |
 | [GitHub App and device authorization](product/github-authentication.md) | Canban-owned App, Device Flow, installation access and secret-free token refresh |
-| [Notes and the Kanban workspace](product/notes-and-workspace.md) | SQLite-backed file-like Notes, related-event Timeline, bidirectional links, Agent read/write and ASCII workspace layouts |
-| [Notes/workspace implementation](notes-and-workspace-implementation.md) | Implemented document operations, Agent CLI, UI composition and acceptance limits |
+| [Notes deferred](notes-deferred.md) | Notes removed from current product scope; retained data, historical evidence and compatibility boundaries |
 | [Workspace and scheduling implementation](workspace-and-scheduling.md) | Named branches, remote/base synchronization, global Agent limit, priority and human approval gates |
-| [Scheduler](product/scheduler.md) | Stage determines work; tags select agents; admission determines timing |
+| [Scheduler](product/scheduler.md) | Stage determines work; profiles select agents; admission determines timing |
 | [Agent profile configuration](product/agent-profiles.md) | Implemented registry, role instructions, stage references, routing and JSON examples |
 | [Agent CLI and extensibility](product/agent-extensibility.md) | CLI capabilities and integration boundaries; use Agent profile configuration for the current command/preset schema |
 | [Agent interaction](product/agent-interaction.md) | Interactive terminal execution, completion/exit, resume and acceptance limits |

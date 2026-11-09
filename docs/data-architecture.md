@@ -41,12 +41,12 @@ The live database may have canban.sqlite-wal and canban.sqlite-shm sidecars. Let
 | Data | Durable owner | Suggested representation |
 | --- | --- | --- |
 | Project, directory binding, Board | Kanban | Relational records; stable IDs independent of directory paths |
-| Cards, stage, tags, attention, archive marker, timing attributes | Kanban | Current-state rows, project-local card number, revision |
+| Cards, stage, attention, archive marker, timing attributes | Kanban | Current-state rows, project-local card number, revision |
 | Workflow templates and routing configuration | Workflow Engine / Scheduler | User-editable JSON inputs and saved validated revisions |
 | Agent profile definitions and overrides | Profiles / AppServer | Editable command/preset configuration; Requests retain resolved snapshots for Scheduler execution |
 | Scheduling requests and execution attempts | Scheduler | Persistent queue/intent and attempt records |
 | Core/terminal association and last observation | Herdr adapter via Scheduler | Optional runtime binding and observed status/time |
-| Notes, descriptions, comments, resource references | Context / Timeline, according to content ownership | Stable content IDs and immutable revisions; current-revision pointers |
+| Descriptions, comments, resource references; retained legacy Notes | Context / Timeline, according to content ownership | Stable content IDs and immutable revisions; current-revision pointers |
 | Captured execution input | Context | Managed prompt/context files and snapshot manifest; database stores identity, revisions, and file references |
 | Card history, execution milestones, report links | Timeline | Append-only typed entries with per-card ordering |
 | Result declaration and report | Scheduler / Timeline | Structured declaration and report reference in the database; report body in a managed file |
@@ -67,7 +67,7 @@ Project ---- directory binding
    +---- Board ---- workflow revision ---- stage definitions
    |        |
    |        +---- Card #42
-   |                +---- current stage / tags / attention / archived_at
+   |                +---- current stage / attention / archived_at
    |                +---- description revisions
    |                +---- comments ---- comment revisions
    |                +---- Timeline entries ---- actors / content / resources
@@ -185,7 +185,7 @@ Managed files have stable IDs and database metadata such as media type, byte siz
 
 SQLite and filesystem writes cannot share one transaction. For an input or report, write a temporary file, finish the durable write, and atomically publish it at a new managed path before committing its database reference. Commit the report's structured result, artifact reference, Timeline entry, and configured progression together; acknowledge acceptance after that commit. A failed file save must not produce an accepted report or advance the card. Unreferenced published files are recoverable orphans, not accepted results. Repeated report submissions use the existing request-key deduplication and must not overwrite a previously accepted file.
 
-Timeline entries keep concise structured details and references. Card descriptions, ordinary comments and Note bodies remain in SQLite. Schema v3 adds immutable `note_revisions` and ordered `note_events`; current Notes include parsed outgoing IDs and Card associations. Backlinks derive from current outgoing IDs. Content/revision/link/event changes commit atomically. Existing Notes seed their saved revision without synthesizing old events. Only captured execution context becomes immutable managed files; this does not move the live Note into the filesystem. See [Notes and workspace](product/notes-and-workspace.md) and [implemented contracts](notes-and-workspace-implementation.md). Load full report/context content on demand rather than for every Board or Timeline query. Full-text search, attachment limits and very large report rendering remain refinements.
+Timeline entries keep concise structured details and references. Card descriptions and ordinary comments remain in SQLite. Notes are [deferred](notes-deferred.md); their legacy bodies, immutable `note_revisions`, ordered `note_events`, links and Card associations remain stored without a product editor or automatic injection into new captures. Existing captured files remain historical input. The earlier [Note model](product/notes-and-workspace.md) and [implementation evidence](notes-and-workspace-implementation.md) describe that retained compatibility schema, not current product scope. Load full report/context content on demand rather than for every Board or Timeline query. Full-text search, attachment limits and very large report rendering remain refinements.
 
 ## Compressed Card archives
 
@@ -206,7 +206,7 @@ Active Card
   Archive: detailed Card history + related execution content
 ```
 
-Include Card content/revisions, comments, Timeline, request/attempt records, captured effective configuration/context, report outcomes/bodies, and required resource bytes/revisions. Include only Agent runtime observations/output that Canban actually retained; this does not promise a backup of Herdr's internal state, live processes, or a provider's complete conversation. Project-wide Notes/config remain shared active data; include the revisions captured or needed by this Card. Shared attachments can be copied into the package while keeping originals required elsewhere. A live external link stays a link unless its content was captured.
+Include Card content/revisions, comments, Timeline, request/attempt records, captured effective configuration/context, report outcomes/bodies, and required resource bytes/revisions. Include only Agent runtime observations/output that Canban actually retained; this does not promise a backup of Herdr's internal state, live processes, or a provider's complete conversation. Project config and legacy Note records remain shared retained data; preserve any Note content already captured for historical executions, while new captures do not add Notes. Shared attachments can be copied into the package while keeping originals required elsewhere. A live external link stays a link unless its content was captured.
 
 The Card-owned filesystem subtree supplies its execution/resource files directly. Also export that Card's database records from the consistent archive snapshot and include referenced shared resource bytes/revisions. Compressing only the directory would omit database-backed Timeline/comments and shared references, so it is not by itself a complete Card archive.
 

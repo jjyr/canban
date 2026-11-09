@@ -54,7 +54,7 @@ try:
     config["hc_env"] = core_env
     config["default_agent"] = "fixture"
     config["capacity"] = 1  # Legacy keys must no longer restrict concurrency.
-    config["profiles"].append({"id": "fixture", "argv": ["/usr/bin/python3", str(repo / "scripts/fixture-agent.py")], "tags": ["fixture"], "capacity": 1})
+    config["profiles"].append({"id": "fixture", "argv": ["/usr/bin/python3", str(repo / "scripts/fixture-agent.py")], "capacity": 1})
     for profile in config["profiles"]:
         if profile["id"] in ("developer", "reviewer"):
             profile["preset"] = None
@@ -84,9 +84,14 @@ try:
     assert {r["stage"]: r["profile"]["id"] for r in state["requests"]} == {"develop": "developer", "review": "reviewer"}
     for attempt in state["attempts"]:
         prompt = (home / attempt["input_path"]).read_text()
+        context = json.loads((home / attempt["input_path"]).with_name("context.json").read_text())
+        assert context["notes"] == [] and "canban note" not in prompt
         request = next(r for r in state["requests"] if r["id"] == attempt["request_id"])
         assert request["profile"]["role_instruction"] in prompt
         assert "ACCEPTANCE_ROLE_" + request["profile"]["id"].upper() in prompt
+    assert call("note.read", {"note_id": note["id"]})["body"] == note["body"]  # Legacy data remains intact.
+    help_text = subprocess.run([str(cli), "--help"], capture_output=True, text=True, check=True).stdout
+    assert not any(line.strip().startswith("note ") for line in help_text.splitlines())
     current = next(c for c in state["cards"] if c["id"] == card["id"])
     assert current["stage"] == "review"
     assert (source / "canban-acceptance.txt").exists()

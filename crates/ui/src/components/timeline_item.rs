@@ -62,9 +62,7 @@ pub fn timeline_item(ui: Ui, event: Event) -> impl IntoElement {
                         })
                     })
                     .on_link_press(move |e: &nsh_base::TextViewLinkPressEvent| {
-                        if let Some(id) = e.url.strip_prefix("note:") {
-                            ui.open_note(id.into());
-                        } else if let Some(id) = e.url.strip_prefix("attachment:")
+                        if let Some(id) = e.url.strip_prefix("attachment:")
                             && let Some(a) = ui.snapshot.with_untracked(|s| {
                                 s.artifacts.iter().find(|a| a.id == id).cloned()
                             })
@@ -96,12 +94,6 @@ pub fn timeline_item(ui: Ui, event: Event) -> impl IntoElement {
         move || !error.get().is_empty(),
         move || notice(error.get(), Tone::Attention),
     ));
-    if let Some(id) = event.data["note_id"].as_str() {
-        let id = id.to_owned();
-        row = row.child(action("Open Note", Variant::Quiet, move |_| {
-            ui.open_note(id.clone())
-        }));
-    }
     if let Some(request) = event.request_id {
         row = row.child(action("Open terminal", Variant::Quiet, move |_| {
             crate::terminals::open_request(ui, &request)

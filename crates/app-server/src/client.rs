@@ -150,6 +150,7 @@ mod tests {
     fn old_service_is_rejected_even_when_package_versions_match() {
         assert!(check_api(&json!({"version":env!("CARGO_PKG_VERSION")})).is_err());
         assert!(check_api(&json!({"api_version":0})).is_err());
+        assert!(check_api(&json!({"api_version":API_VERSION-1})).is_err());
         check_api(&json!({"api_version":API_VERSION})).unwrap();
     }
 }

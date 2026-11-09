@@ -10,7 +10,6 @@ pub struct Location {
     pub project: String,
     pub card: String,
     pub request: String,
-    pub note: String,
     pub terminal: String,
     pub standalone: bool,
     pub terminal_card: String,
@@ -20,6 +19,8 @@ pub struct Location {
 pub struct Ui {
     /// Commands outlive transient buttons/lists, but end with the window.
     pub owner: Owner,
+    /// Optional host adapter for the reusable Board drop intent (Gallery uses local fixtures).
+    pub board_move: Stored<Option<crate::board::DropHandler>>,
     pub card_target: Signal<String>,
     pub card_submit: Signal<u64>,
     pub comment_submit: Signal<u64>,
@@ -73,8 +74,6 @@ pub struct Ui {
     pub output_request: Signal<u64>,
     pub review: Signal<Option<ReviewPreview>>,
     pub review_request: Signal<u64>,
-    pub note: Signal<String>,
-    pub source_note: Signal<String>,
     pub drafts: Stored<BTreeMap<String, Draft>>,
     pub scrolls: Stored<BTreeMap<String, Point<Points>>>,
     pub narrow: Signal<bool>,
@@ -100,14 +99,13 @@ impl Ui {
         self.output.set(String::new());
         self.output_observed_at.set(None);
     }
-    pub fn new_card(self, source_note: String) {
+    pub fn new_card(self) {
         if self.page.get_untracked() == "new-card" {
             return;
         }
         self.utility_popup.set(String::new());
         self.quick_open.set(false);
         self.card_target.set(self.project.get_untracked());
-        self.source_note.set(source_note);
         self.navigate("new-card");
     }
     pub fn navigate(self, page: &str) {
@@ -128,6 +126,7 @@ impl Ui {
     pub fn new() -> Self {
         Self {
             owner: Owner::current(),
+            board_move: stored(None),
             card_target: signal(String::new()),
             card_submit: signal(0),
             comment_submit: signal(0),
@@ -196,8 +195,6 @@ impl Ui {
             output_request: signal(0),
             review: signal(None),
             review_request: signal(0),
-            note: signal(String::new()),
-            source_note: signal(String::new()),
             drafts: stored(BTreeMap::new()),
             scrolls: stored(BTreeMap::new()),
             narrow: signal(false),
@@ -213,7 +210,6 @@ impl Ui {
             project: self.project.get_untracked(),
             card: self.card.get_untracked(),
             request: self.request.get_untracked(),
-            note: self.note.get_untracked(),
             terminal: if self.page.get_untracked() == "terminals" {
                 self.terminal_selection.get_untracked()
             } else {
@@ -264,9 +260,19 @@ impl Ui {
         self.quick_open.set(true);
     }
     pub fn select_project(self, id: String) {
+        let previous = self.project.get_untracked();
+        self.recent_destinations.with(|ids| {
+            for project in [previous, id.clone()] {
+                if !project.is_empty() {
+                    let key = format!("project:{project}");
+                    ids.retain(|id| id != &key);
+                    ids.insert(0, key);
+                }
+            }
+            ids.truncate(32);
+        });
         self.project.set(id);
         self.card.set(String::new());
-        self.note.set(String::new());
         self.navigate("board");
     }
     pub fn current_card(self) -> Option<Card> {
@@ -312,23 +318,6 @@ impl Ui {
     }
     pub fn back(self) {
         crate::navigation::go(self, false);
-    }
-    pub fn open_note(self, id: String) {
-        self.card_standalone.set(false);
-        if let Some(project) = self.snapshot.with_untracked(|s| {
-            s.notes
-                .iter()
-                .find(|n| n.id == id)
-                .map(|n| n.project_id.clone())
-        }) {
-            self.project.set(project);
-        }
-        self.output_request
-            .set(self.output_request.get_untracked() + 1);
-        self.output.set(String::new());
-        self.output_observed_at.set(None);
-        self.note.set(id);
-        self.page.set("notes".into());
     }
 }
 pub fn refresh(ui: Ui) {
@@ -461,7 +450,6 @@ pub fn dispatch_complete(
                     "card.create" | "github.issue.add" if active => {
                         if let Some(id) = value["id"].as_str() {
                             ui.open_card(id.into());
-                            ui.source_note.set(String::new());
                         }
                     }
                     "card.archive" if active => ui.page.set("archive".into()),

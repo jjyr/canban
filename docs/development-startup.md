@@ -31,7 +31,7 @@ Existing Core/terminal/provider bindings are recovered by the normal AppServer r
 
 ## API compatibility
 
-Desktop API level 2 includes the named-theme preference contract. `app.ping` now reports `api_version`, process `pid`, package `version` and `home`. UI startup requires the desktop API level before opening a workspace. An older service, even one with the same `0.1.0` package version, produces a clear startup error pointing to the development launch command. It cannot silently drop unsupported Theme reads.
+Desktop API level 4 includes durable Board insertion/reordering, Profile-only selection and the removal of Card/Profile Routing tags (level 3), plus the named-theme contract from level 2. `app.ping` now reports `api_version`, process `pid`, package `version` and `home`. UI startup requires the desktop API level before opening a workspace. An older service, even one with the same `0.1.0` package version, produces a clear startup error pointing to the development launch command. It cannot silently keep the removed tag-routing behavior or drop unsupported Theme reads.
 
 The development runner always replaces the service, even when its API/package version matches. PID verification establishes that it reached the process it just launched from the newly packaged executable. API level is a compatibility contract, not a source/build fingerprint; increase it when new desktop operations become required.
 

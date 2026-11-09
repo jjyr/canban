@@ -95,7 +95,7 @@ pub fn execute(ui: Ui, id: &str) {
     match id {
         "back" => crate::navigation::go(ui, false),
         "forward" => crate::navigation::go(ui, true),
-        "new-card" => ui.new_card(String::new()),
+        "new-card" => ui.new_card(),
         "create-card" if ui.page.get_untracked() == "new-card" => {
             ui.card_submit.update(|n| *n += 1)
         }

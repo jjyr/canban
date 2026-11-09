@@ -4,7 +4,7 @@ Status: implemented; current contract reconciled 2026-11-10. One provider conver
 
 ## Product model
 
-A profile is the configured Agent identity/role, such as developer or reviewer. It is distinct from the provider binary/model, routing tag, Request and terminal process. Different Cards have separate conversations; different profiles on one Card also retain separate provider histories. Two stages referencing the same profile deliberately share context on that Card.
+A profile is the configured Agent identity/role, such as developer or reviewer. It is distinct from the provider binary/model, Request and terminal process. Different Cards have separate conversations; different profiles on one Card also retain separate provider histories. Two stages referencing the same profile deliberately share context on that Card.
 
 ```text
 Card #42
@@ -25,7 +25,7 @@ One execution model; trigger and callback differ, not the Session class.
 
 Profiles live in the application-wide `~/.canban/config/agents.json` registry. They own launch/resume commands, role instructions, aliases and normal-exit configuration. Embedded presets provide editable defaults; users can replace complete command arrays or supply custom presets/profiles. Runtime invocation uses the same command interface for Codex, Claude and custom programs; Herdr owns PTY input, attachment, status and interruption. Canban installs no provider Stop/notify hooks. See the [profile schema](agent-profiles.md).
 
-Workflow templates own stages, task instructions, completion transitions and profile references. Explicit @profile selects that identity; automatic routing uses stage.profile, then Card tags/default. Mentions do not retag a Card or replace a stage callback. Profile reload affects subsequently captured execution configuration without hot-changing running or queued snapshots or resetting conversation identity.
+Workflow templates own stages, task instructions, completion transitions and profile references. Explicit @profile selects that identity; automatic routing uses stage.profile, then global default_agent. Cards have no routing-tag field or alias mapping. Mentions do not replace a stage callback. Profile reload affects subsequently captured execution configuration without hot-changing running or queued snapshots or resetting conversation identity.
 
 New execution uses the Project's current work location at admission. Retained questions/Resume return to the original execution machine, directory and provider history. Review/delivery retain the saved Card workspace. Changing Project location does not move existing work. See [multi-machine execution](../multi-machine.md).
 

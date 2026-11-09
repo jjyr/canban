@@ -31,7 +31,16 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     px(nsh_core::element::desktop::title_bar().left.0.max(78.)
                                         + 12.)
                                 })
-                                .child(crate::navigation::controls(ui)),
+                                .child(crate::navigation::controls(ui))
+                                .child(when(
+                                    move || {
+                                        ui.page.get() == "board"
+                                            || ui.page.get() == "card"
+                                                && !ui.card_standalone.get()
+                                                && !ui.narrow.get()
+                                    },
+                                    move || crate::board::activity::strip(ui),
+                                )),
                         )
                         .child(
                             view()

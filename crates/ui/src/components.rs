@@ -1,8 +1,6 @@
-mod context_picker;
+pub mod activity;
 pub mod git_workspace;
 pub mod scheduling;
-pub use context_picker::context_picker;
-pub mod activity;
 pub use activity::{activity_header, empty};
 mod card_tile;
 mod timeline_item;
@@ -78,13 +76,7 @@ pub fn output_panel(ui: Ui) -> impl IntoElement {
             view()
                 .flex_row()
                 .justify_between()
-                .child(label(move || {
-                    if ui.page.get() == "notes" {
-                        "Saved revision"
-                    } else {
-                        "Output / report"
-                    }
-                }))
+                .child(label("Output / report"))
                 .child(action("Clear", Variant::Quiet, move |_| {
                     ui.output_request.set(ui.output_request.get_untracked() + 1);
                     ui.output.set(String::new());

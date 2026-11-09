@@ -159,7 +159,6 @@ impl AppServer {
                     .map(|mut c| {
                         c.body = String::new();
                         c.title = String::new();
-                        c.tags = Vec::new();
                         c.context_notes = None;
                         c.content = Default::default();
                         c

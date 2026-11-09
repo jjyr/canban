@@ -30,9 +30,9 @@ The stage workflow and its completion callback decide progression. Agent self-re
 
 ## Included
 
-- Directory-backed Projects, one Board each, local cards, project-local numbers, descriptions/tags/resources/image paste, basic Notes edit/preview and selected context.
+- Directory-backed Projects, one Board each, local cards, project-local numbers, descriptions/resources/image paste and captured Card context. Notes are [deferred](notes-deferred.md) pending design.
 - Backlog/Develop/Review default, required no-op Backlog, automatic stage Scheduler and fresh @mention conversations through one Session model.
-- Tag/default routing and independent concurrent Sessions without application concurrency caps.
+- Stage-profile/default selection and independent concurrent conversations under the configurable global budget (default eight). Routing tags are removed.
 - Agent completion/progress/blocking reports, unified card timeline, comments/results, and a minimal agent-callable application interface.
 - Herdr's existing runnable agent setup through core; no new provider-integration program or Canban-only agent family restriction.
 - Development checkout/worktree preparation where applicable, reuse through review/rework, and worktree handling at Archive.
@@ -80,9 +80,9 @@ The in-memory channel transports events; persisted card history remains the time
 ## Build sequence
 
 1. **Runtime/UI seam:** connect to a scratch core, launch a harmless fixture through an existing launch path, read output/status, and verify native Rust/NSH command/state updates against the co-hosted AppServer, with WebView only for a specific optional surface. Do not touch the user's live core.
-2. **Project and card:** directory/Board/card numbers, description/resources, basic Notes, comments, archive, and recoverable timeline data.
+2. **Project and card:** directory/Board/card numbers, description/resources, comments, archive, and recoverable timeline data.
 3. **Minimum events and interface:** route application actions through the small shared event direction and expose core card/comment/report operations to agents. Do not implement the deferred event framework.
-4. **Automatic Scheduler:** JSON workflow bindings, default/tag selection, persisted launch queue without concurrency caps, generic Session launch, and self-reported completion callbacks.
+4. **Automatic Scheduler:** JSON workflow bindings, stage-profile/default selection, persisted launch queue with global admission, generic Session launch, and self-reported completion callbacks.
 5. **Complete the loop:** ordinary Review report, needs-attention/internal notification, fresh mentions, worktree reuse and archive handling, human disposition, and restart/reconnect behavior.
 
 The [architecture](architecture.md) defines the co-hosted logical service and future daemon seam. [Agent interface research](research/agent-interface-options.md) recommends thin CLI plus local RPC and shared typed handlers; MCP can be a later adapter. These transport recommendations are not a second application authority.
@@ -93,7 +93,7 @@ The [identifier research](research/herdr-identifiers.md) recommends reusing core
 
 - Create a Project in an existing or new directory without requiring Git initialization.
 - Create a numbered local card, selected context, comment, and pasted image; retain them after restart.
-- Move an untagged card into Develop and automatically use the default agent; tagged work uses its matching configuration.
+- Move a Card into Develop and use its stage Profile, or the global default when the stage has no Profile reference.
 - Record the agent's completed report and execute the default Review transition once without waiting for its terminal to exit or independently judging its work.
 - Produce an ordinary Review report through the existing generic execution path.
 - Submit an @mention, start a fresh conversation, and attach its response to the initiating comment.

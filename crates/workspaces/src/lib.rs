@@ -428,9 +428,9 @@ mod tests {
             id: "card".into(),
             project_id: project.id.clone(),
             number: 1,
+            board_order: None,
             title: "Task".into(),
             body: String::new(),
-            tags: vec![],
             context_notes: None,
             stage: "develop".into(),
             revision: 1,
@@ -560,7 +560,7 @@ mod sync_tests {
                 target_branch: Some("main".into()),
                 created_at: 0,
             };
-            let card:Card=serde_json::from_value(serde_json::json!({"id":"c","project_id":"p","number":42,"title":"Task","body":"","tags":[],"stage":"develop","revision":1,"created_at":0})).unwrap();
+            let card:Card=serde_json::from_value(serde_json::json!({"id":"c","project_id":"p","number":42,"title":"Task","body":"","stage":"develop","revision":1,"created_at":0})).unwrap();
             Self {
                 dir,
                 source,

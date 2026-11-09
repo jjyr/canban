@@ -44,24 +44,19 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             },
             move |_| ui.navigate("overview"),
         ));
-    let mut rail = rail.child(icon_action(
+    let rail = rail.child(icon_action(
         Icon::Terminal,
         "Terminals".into(),
         move || ui.page.get() == "terminals",
         || 0,
         move |_| ui.navigate("terminals"),
     ));
-    for (kind, title, page) in [
-        (Icon::Note, "Notes", "notes"),
-        (Icon::Archive, "Archived Cards", "archive"),
-    ] {
-        rail = rail.child(icon_action(
-            kind,
-            title.into(),
-            move || ui.page.get() == page,
-            || 0,
-            move |_| ui.navigate(page),
-        ));
-    }
-    rail.child(view().flex_1())
+    rail.child(icon_action(
+        Icon::Archive,
+        "Archived Cards".into(),
+        move || ui.page.get() == "archive",
+        || 0,
+        move |_| ui.navigate("archive"),
+    ))
+    .child(view().flex_1())
 }

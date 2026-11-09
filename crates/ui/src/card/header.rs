@@ -21,7 +21,7 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
         let mut items = Vec::new();
         for (title, kind) in [
             ("Edit task…", 0),
-            ("Context and attachments…", 1),
+            ("Attachments…", 1),
             ("Workspace details…", 2),
         ] {
             items.push(MenuItem::new(title).on_select(move || {

@@ -231,23 +231,8 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
     if target.get_untracked().is_empty() {
         target.set(project.clone());
     }
-    let note_id = ui.source_note.get_untracked();
-    let note = ui
-        .snapshot
-        .with_untracked(|s| s.notes.iter().find(|n| n.id == note_id).cloned());
-    let key = format!("new-card:{project}:{note_id}");
-    let draft = drafts::document(
-        ui,
-        key.clone(),
-        note.as_ref()
-            .map(|n| Draft {
-                title: n.title.clone(),
-                body: n.body.clone(),
-                instructions: n.body.clone(),
-                ..Default::default()
-            })
-            .unwrap_or_default(),
-    );
+    let key = format!("new-card:{project}");
+    let draft = drafts::document(ui, key.clone(), Draft::default());
     let kind = signal(
         if draft.get_untracked().card_kind == "github" {
             "github"
@@ -332,9 +317,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
             });
         });
     });
-    let source_project = note.as_ref().map(|n| n.project_id.clone());
     let submit_key = key.clone();
-    let submit_note = note_id.clone();
     let can_create = computed(move || {
         !ui.pending.get()
             && !target.get().is_empty()
@@ -359,14 +342,11 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
         let d = draft.get_untracked();
         let is_github = kind.get_untracked() == "github";
         let submit_project = target.get_untracked();
-        let mut params = if is_github {
+        let params = if is_github {
             json!({"project_id":submit_project,"number":d.selected_issue.as_ref().map(|r|&r["issue"]["number"]),"source_generation":d.selected_issue.as_ref().map(|r|&r["source_generation"]),"instructions":d.instructions})
         } else {
-            json!({"project_id":submit_project,"title":d.title,"body":d.body,"tags":d.tags.split(',').map(str::trim).filter(|s|!s.is_empty()).collect::<Vec<_>>()})
+            json!({"project_id":submit_project,"title":d.title,"body":d.body})
         };
-        if !submit_note.is_empty() && source_project.as_deref() == Some(submit_project.as_str()) {
-            params["source_note_id"] = json!(submit_note);
-        }
         let key = submit_key.clone();
         dispatch_complete(
             ui,
@@ -385,7 +365,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
             },
         );
     });
-    let mut form = view()
+    let form = view()
         .flex_1()
         .min_h(px(0.))
         .p_5()
@@ -439,19 +419,6 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                     move |_| kind.set("github".into()),
                 )),
         );
-    if let Some(n) = note {
-        form = form.child(dynamic(move || {
-            let text = if target.get() == n.project_id {
-                format!("Source Note: {} · included in this Card's context", n.title)
-            } else {
-                format!(
-                    "Copied from {} · Note link stays in the original Project",
-                    n.title
-                )
-            };
-            notice(text, Tone::Info)
-        }));
-    }
     form.child(
         scroll()
             .flex_1()
@@ -478,14 +445,6 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                             .key("local-card-body")
                             .multiline(true)
                             .h(px(220.)),
-                        )
-                        .child(
-                            bound_field(
-                                move || draft.get().tags,
-                                move |v| draft.update(|d| d.tags = v.into()),
-                                "Routing tags",
-                            )
-                            .key("local-card-tags"),
                         )
                         .into_element();
                 }

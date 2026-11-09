@@ -22,12 +22,55 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
     when(
         move || ui.quick_open.get(),
         move || {
-            let all = computed(move || candidates(&ui.snapshot.get()));
+            let projects = computed(move || {
+                crate::board::activity::model::projects(
+                    &ui.snapshot.get(),
+                    &ui.recent_destinations.get(),
+                )
+            });
+            let all = computed(move || {
+                let snapshot = ui.snapshot.get();
+                let mut rows = candidates(&snapshot);
+                if ui.project_picker.get() {
+                    for row in &mut rows {
+                        if let Target::Project(id) = &row.target
+                            && let Some(project) =
+                                projects.with(|ps| ps.iter().find(|p| &p.id == id).cloned())
+                        {
+                            row.detail = if snapshot
+                                .projects
+                                .iter()
+                                .filter(|p| p.name == project.name)
+                                .count()
+                                > 1
+                            {
+                                // Duplicate names still need their directory to distinguish them.
+                                row.detail
+                                    .strip_prefix("Project · ")
+                                    .unwrap_or(&row.detail)
+                                    .into()
+                            } else {
+                                String::new()
+                            };
+                        }
+                    }
+                }
+                rows
+            });
             let rows = computed(move || {
+                let mut recent = ui.recent_destinations.with(|v| v.clone());
+                if ui.project_picker.get() && ui.search_query.get().trim().is_empty() {
+                    for p in projects.get() {
+                        let id = format!("project:{}", p.id);
+                        if !recent.contains(&id) {
+                            recent.push(id);
+                        }
+                    }
+                }
                 ranked(
                     &all.get(),
                     &ui.search_query.get(),
-                    &ui.recent_destinations.with(|v| v.clone()),
+                    &recent,
                     ui.project_picker.get(),
                 )
             });
@@ -35,6 +78,20 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                 rows.get()
                     .into_iter()
                     .map(|r| SearchChoice {
+                        attention: if ui.project_picker.get() {
+                            if let Target::Project(id) = &r.target {
+                                projects.with(|ps| {
+                                    ps.iter()
+                                        .find(|p| &p.id == id)
+                                        .map(|p| p.attention)
+                                        .unwrap_or(0)
+                                })
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        },
                         selected: ui.project_picker.get()
                             && matches!(&r.target, Target::Project(id) if *id == ui.project.get()),
                         id: r.id,
@@ -43,7 +100,6 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                         icon: match r.kind {
                             "Project" => Icon::Projects,
                             "Card" => Icon::Board,
-                            "Note" => Icon::Note,
                             "Terminal" => Icon::Terminal,
                             _ => Icon::Agent,
                         },
@@ -78,7 +134,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                     if ui.project_picker.get() {
                         "Search projects…".into()
                     } else {
-                        "Search projects, cards, notes, agents, terminals…".into()
+                        "Search projects, cards, agents, terminals…".into()
                     }
                 },
                 view()
@@ -102,6 +158,15 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
         },
     )
 }
+/// Header summaries and picker selections share fresh-target resolution/history.
+pub fn switch_project(ui: Ui, id: &str) {
+    if let Some(row) = candidates(&ui.snapshot.get_untracked())
+        .into_iter()
+        .find(|r| matches!(&r.target, Target::Project(project) if project == id))
+    {
+        activate(ui, row);
+    }
+}
 pub fn activate(ui: Ui, row: Candidate) {
     ui.quick_open.set(false);
     ui.recent_destinations.with(|ids| {
@@ -113,9 +178,6 @@ pub fn activate(ui: Ui, row: Candidate) {
         Target::Project(id) => ui.select_project(id),
         Target::Card(id) => {
             ui.open_card(id);
-        }
-        Target::Note(id) => {
-            ui.open_note(id);
         }
         Target::Agent(id) | Target::Terminal(id) => ui.open_terminal(id),
     }

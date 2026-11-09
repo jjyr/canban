@@ -48,7 +48,6 @@ pub fn watch(ui: Ui) {
             ui.page.get(),
             ui.project.get(),
             ui.card.get(),
-            ui.note.get(),
             ui.request.get(),
             ui.terminal_selection.get(),
             ui.card_standalone.get(),
@@ -115,7 +114,6 @@ pub fn go(ui: Ui, forward: bool) {
         ui.focused_card.set(false);
         ui.project.set(target.project);
         ui.card.set(target.card);
-        ui.note.set(target.note);
         ui.request.set(target.request);
         ui.card_standalone.set(target.standalone);
         ui.terminal_card_context.set(target.terminal_card);
@@ -160,7 +158,6 @@ mod tests {
             project: String::new(),
             card: String::new(),
             request: String::new(),
-            note: String::new(),
             terminal: String::new(),
             standalone: false,
             terminal_card: String::new(),
@@ -177,7 +174,7 @@ mod tests {
         assert_eq!(h.entries.len(), 3);
         assert_eq!(h.step(true).unwrap().page, "terminals");
         h.step(false);
-        h.visit(route("notes"));
+        h.visit(route("archive"));
         assert!(h.step(true).is_none());
         assert_eq!(h.entries.len(), 3);
     }

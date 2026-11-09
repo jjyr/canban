@@ -37,9 +37,7 @@ try:
  local_workflow['workspace']['sync_base'] = False  # Fixture repositories have no remote.
  workflow_path.write_text(json.dumps(local_workflow))
  project=call('project.create',{'name':'Native acceptance','directory':str(source)})
- note=call('note.save',{'project_id':project['id'],'title':'Architecture.md','body':'# Project decisions\n\nOriginal shared context.'})
- ideas=call('note.save',{'project_id':project['id'],'title':'Working ideas.md','body':'# Ideas\n\nSee [Architecture](note:'+note['id']+').'})
- card=call('card.create',{'project_id':project['id'],'title':'Terminal · 中文与 recovery','body':'Disposable native terminal acceptance. Type text; finish advances into Review.','source_note_id':note['id']})
+ card=call('card.create',{'project_id':project['id'],'title':'Terminal · 中文与 recovery','body':'Disposable native terminal acceptance. Type text; finish advances into Review.'})
  for i in range(12):call('card.create',{'project_id':project['id'],'title':'Planned work '+str(i+1),'body':'Board scroll retention fixture.'})
  call('card.move',{'card_id':card['id'],'revision':card['revision'],'stage':'develop'})
  for _ in range(100):
@@ -47,7 +45,7 @@ try:
   if s['attempts'] and s['attempts'][0].get('provider_session_id'):break
   time.sleep(.1)
  server.terminate();server.wait(timeout=10)
- metadata={'base':str(base),'home':str(home),'core_env':core_env,'app_id':app_id,'bundle':str(bundle),'card_id':card['id'],'project_id':project['id'],'first':s['attempts'][0],'note_id':note['id'],'ideas_note_id':ideas['id']}
+ metadata={'base':str(base),'home':str(home),'core_env':core_env,'app_id':app_id,'bundle':str(bundle),'card_id':card['id'],'project_id':project['id'],'first':s['attempts'][0]}
  (base/'native.json').write_text(json.dumps(metadata,indent=2));(repo/'.local/native-acceptance.json').write_text(json.dumps(metadata,indent=2))
  print('NATIVE_ACCEPTANCE_BASE='+str(base),flush=True)
  while True:

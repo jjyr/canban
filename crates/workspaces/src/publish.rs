@@ -149,7 +149,7 @@ mod tests {
             target_branch: Some("main".into()),
             created_at: 0,
         };
-        let mut card:Card=serde_json::from_value(serde_json::json!({"id":"card","project_id":"project","number":1,"title":"Greeting","body":"","tags":[],"stage":"review","revision":1,"attention":null,"archived_at":null,"archive":null,"archive_error":null,"worktree":null,"created_at":0})).unwrap();
+        let mut card:Card=serde_json::from_value(serde_json::json!({"id":"card","project_id":"project","number":1,"title":"Greeting","body":"","stage":"review","revision":1,"attention":null,"archived_at":null,"archive":null,"archive_error":null,"worktree":null,"created_at":0})).unwrap();
         let ops = Ops::local();
         card.branch = Some(card_branch(&project, &card));
         let path = ops.prepare(temp.path(), &project, &card).unwrap();

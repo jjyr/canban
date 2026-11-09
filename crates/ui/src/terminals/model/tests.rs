@@ -3,7 +3,7 @@ fn fixture() -> Snapshot {
     let mut s = Snapshot::default();
     for (project, card) in [("p1", "c1"), ("p2", "c2")] {
         s.projects.push(serde_json::from_value(json!({"id":project,"name":project,"directory":"/tmp/project","workflow":Workflow::default(),"created_at":1})).unwrap());
-        s.cards.push(serde_json::from_value(json!({"id":card,"project_id":project,"number":1,"title":"Same title","body":"","tags":[],"stage":"develop","revision":1,"created_at":1})).unwrap());
+        s.cards.push(serde_json::from_value(json!({"id":card,"project_id":project,"number":1,"title":"Same title","body":"","stage":"develop","revision":1,"created_at":1})).unwrap());
         let mut r = canban_scheduler::request(
             project,
             card,

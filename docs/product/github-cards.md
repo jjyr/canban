@@ -16,7 +16,7 @@ Card
         +-- remote title and description
         +-- editable local instructions
 
-Both share workflow, routing tags, Notes, Timeline, Agent interactions,
+Both share workflow, Card context, Timeline, Agent interactions,
 workspaces, Review and delivery.
 ```
 
@@ -97,7 +97,7 @@ Open GitHub Issues
   Backlog: no Agent/session/worktree launch
 ```
 
-Manual addition is not restricted by the automatic author rule. Automatic intake does not interpret GitHub Labels as Scheduler routing tags or bypass human gates. It creates only the lightweight local task record; ordinary workflow entry determines execution.
+Manual addition is not restricted by the automatic author rule. Automatic intake does not use GitHub Labels for Agent selection or bypass human gates. It creates only the lightweight local task record; ordinary workflow entry determines execution.
 
 ## Local removal and re-addition
 
@@ -113,7 +113,7 @@ Recommended design: persist Canban work state plus source identity, cache remote
 
 | Data | Ownership and retention |
 | --- | --- |
-| Card ID/number, Project, stage, routing tags, local instructions and human gates | Durable Canban state |
+| Card ID/number, Project, stage, local instructions and human gates | Durable Canban state |
 | Source host/repository/Issue identity | Durable binding, independent of the display number/URL |
 | Timeline, local comments, sessions, attempts, workspaces and delivery | Existing durable Card-owned history |
 | Current remote title/body/state/labels and sync metadata | Refreshable GitHub cache |
@@ -136,7 +136,7 @@ GitHub sync --> source cache + source Timeline events
                (does not run interactive comment or stage-entry commands)
 ```
 
-The existing `card.create` command in `crates/app-server/src/commands.rs` combines creation and event recording. Extract its shared operation for the type-specific entry points, preserving Note association, numbering and correct event actors. Source binding, deduplication and restore must be atomic so manual Add and synchronization cannot create two Cards for the same source Issue in a Project.
+The existing `card.create` command in `crates/app-server/src/commands.rs` combines creation and event recording. Shared type-specific entry points preserve numbering and correct event actors. Source binding, deduplication and restore must be atomic so manual Add and synchronization cannot create two Cards for the same source Issue in a Project. Note associations remain legacy compatibility; Notes are outside the current product scope.
 
 Do not feed imported remote comments into the existing interactive `comment.add` command: it recognizes @profile mentions and may launch or contact an Agent. Remote comments need source events and external-ID deduplication, not local user-command semantics.
 

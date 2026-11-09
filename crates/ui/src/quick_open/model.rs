@@ -4,7 +4,6 @@ use canban_types::*;
 pub enum Target {
     Project(String),
     Card(String),
-    Note(String),
     Agent(String),
     Terminal(String),
 }
@@ -53,23 +52,7 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
             ),
             kind: "Card",
             target: Target::Card(c.id.clone()),
-            fields: vec![
-                title,
-                owner,
-                c.tags.join(" "),
-                c.branch.clone().unwrap_or_default(),
-            ],
-        });
-    }
-    for n in &s.notes {
-        let owner = project(&n.project_id);
-        rows.push(Candidate {
-            id: format!("note:{}", n.id),
-            title: n.title.clone(),
-            detail: format!("Note · {owner}"),
-            kind: "Note",
-            target: Target::Note(n.id.clone()),
-            fields: vec![n.title.clone(), owner],
+            fields: vec![title, owner, c.branch.clone().unwrap_or_default()],
         });
     }
     for row in canban_notifications::overview(s) {

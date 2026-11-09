@@ -29,7 +29,8 @@ enum Cmd {
     },
     Snapshot,
     Status,
-    /// Read and edit database Notes using file-like input/output.
+    /// Legacy Note compatibility for already captured executions.
+    #[command(hide = true)]
     Note {
         #[command(subcommand)]
         command: NoteCmd,

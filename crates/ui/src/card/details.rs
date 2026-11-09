@@ -1,5 +1,4 @@
 use super::*;
-use crate::components::context_picker;
 use serde_json::json;
 pub fn render(ui: Ui, draft: Signal<Draft>) -> impl IntoElement {
     when(
@@ -12,12 +11,11 @@ pub fn render(ui: Ui, draft: Signal<Draft>) -> impl IntoElement {
                     view()
                         .flex_row()
                         .justify_between()
-                        .child(label("Context and attachments"))
+                        .child(label("Attachments"))
                         .child(action("Hide", Variant::Quiet, move |_| {
                             draft.update(|d| d.details = false)
                         })),
                 )
-                .child(context_picker(ui))
                 .child(
                     view()
                         .flex_row()

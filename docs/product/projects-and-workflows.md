@@ -22,7 +22,7 @@ Project
         +-- custom stages from JSON configuration
 ```
 
-A card's stage is a property; stage entry produces an event and can trigger a configured workflow. The workflow defines the task and callbacks. Tags/defaults choose the agent. Scheduler starts a generic fresh Session through herdr-core.
+A card's stage is a property; stage entry produces an event and can trigger a configured workflow. The workflow defines the task and callbacks. The stage profile or global default selects the Agent; an explicit @profile selects the mentioned Profile. Routing tags are removed. Scheduler starts/resumes or reuses the Card/profile conversation through herdr-core.
 
 All Sessions have the same structure. An @mention and a stage entry differ in their scheduling input/callback, not in session type. See [Sessions](sessions.md).
 

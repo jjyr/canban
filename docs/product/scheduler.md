@@ -4,7 +4,7 @@ Status: implemented 2026-11-07. The default global limit is eight Agents. This s
 
 ## One path and one global budget
 
-Stage entry, explicit mentions and opening/resuming a conversation use the same persistent request queue. Profile routing remains unchanged: explicit mention, stage profile, then Card tags/default. Different Boards share one Scheduler and budget; there are no additional Project or profile caps.
+Stage entry, explicit mentions and opening/resuming a conversation use the same persistent request queue. Profile selection is explicit mention, stage profile, then global default_agent. Routing tags and alias matching were removed on 2026-11-10; old stored tags cannot select or block an Agent. Queued/running Requests keep their captured Profile. Different Boards share one Scheduler and budget; there are no additional Project or profile caps.
 
 ```text
 Queue -> reject archived/stale-stage automatic work

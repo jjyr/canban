@@ -23,16 +23,16 @@ Do not retain earlier implementation recommendations as extra release gates when
 | Are native notifications required? | No; macOS delivery is a later subscriber/integration |
 | What is the event direction? | Rust enum + in-memory channel, with interested components subscribing by topic; discuss detailed architecture after MVP |
 
-These decisions preserve the earlier requirements for local cards, project-local numbers, comments/resources/image paste, basic Notes/context, automatic routing, fresh conversations, timeline, and agent-callable operations.
+These decisions preserve the requirements for local cards, project-local numbers, comments/resources/image paste, captured Card context, automatic routing, fresh conversations, timeline, and agent-callable operations. Notes were subsequently [deferred](../notes-deferred.md) pending product design.
 
 ## First-release depth
 
 | Area | MVP | Later |
 | --- | --- | --- |
 | Kanban | Local Project/Board/card, default stages, archive, visible task/execution/attention status | GitHub issue backend |
-| Scheduler | Automatic triggers, tag/default selection, configurable global concurrency (default eight), later-stage priority, human gates and generic Session execution via core | Complex orchestration and residual-process management |
+| Scheduler | Automatic triggers, stage-profile/default selection, configurable global concurrency (default eight), later-stage priority, human gates and generic Session execution via core | Complex orchestration and residual-process management |
 | Completion | Agent's own completed declaration and workflow callback | Independent verification/quality gates |
-| Context and discussion | Basic Notes/preview, captured references, comments, attachments, fresh @mentions | Full collaborative knowledge-base/chat product |
+| Context and discussion | Captured Card content/references, comments, reports, attachments, fresh @mentions | Notes pending design; full collaborative knowledge-base/chat product |
 | Worktree | Prepare when applicable, reuse across stages, retain until Archive | Sophisticated lifetime/migration/cleanup automation |
 | Review | Ordinary report and human outcome | Shear editor and advanced code-review UI |
 | Template | JSON configuration | Visual editor and complex live migration |
@@ -48,7 +48,7 @@ Herdr core itself has no agent-brand registry. Reusing its existing runnable set
 ## Remaining details, not new scope blockers
 
 - Choose the simplest encoding/callback by which an agent explicitly reports completion or blockage.
-- Keep default/tag resolution deterministic; show unavailable or ambiguous configurations rather than invent a successful launch.
+- Keep Profile/default resolution deterministic; show unavailable configurations rather than invent a successful launch.
 - Decide the precise cleanup action for Canban-managed worktrees at Archive. Before Archive, retain them. Card/archive history and the Project directory are separate from disposable execution resources.
 - Define needs-attention presentation and its internal notification body. The notification is an application event; native delivery is deferred.
 - Pick small JSON configuration fields. Do not build a rich workflow editor or full live-migration system first.

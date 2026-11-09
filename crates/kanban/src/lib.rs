@@ -2,6 +2,7 @@ use anyhow::{Result, ensure};
 use canban_types::{Card, Project, Workflow, id, now};
 pub mod github;
 mod lifecycle;
+pub mod order;
 pub use lifecycle::remove;
 /// One transactional insertion path for local creation and external intake.
 pub fn create(
@@ -9,11 +10,11 @@ pub fn create(
     project: &Project,
     title: &str,
     body: &str,
-    tags: Vec<String>,
     actor: &str,
 ) -> Result<Card> {
     let number = db.counter(&format!("cards:{}", project.id))?;
-    let c = card(project, number, title, body, tags)?;
+    let mut c = card(project, number, title, body)?;
+    order::place(db, &mut c, None)?;
     db.save(&c)?;
     db.append(canban_timeline::event(
         &c.project_id,
@@ -47,13 +48,7 @@ pub fn project(name: &str, directory: &str, workflow: Workflow) -> Result<Projec
         created_at: now(),
     })
 }
-pub fn card(
-    project: &Project,
-    number: u64,
-    title: &str,
-    body: &str,
-    tags: Vec<String>,
-) -> Result<Card> {
+pub fn card(project: &Project, number: u64, title: &str, body: &str) -> Result<Card> {
     ensure!(!title.trim().is_empty(), "Card title is required");
     Ok(Card {
         content: Default::default(),
@@ -66,9 +61,9 @@ pub fn card(
         id: id(),
         project_id: project.id.clone(),
         number,
+        board_order: None,
         title: title.trim().into(),
         body: body.into(),
-        tags,
         context_notes: None,
         stage: "backlog".into(),
         revision: 1,

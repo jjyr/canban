@@ -29,7 +29,7 @@ This Canban API is separate from core's terminal API. Agents should not edit Can
 | Discovery | Get API/schema version, available methods, capabilities, and connection identity |
 | Projects | List/get/create Projects, inspect directory availability |
 | Board/template | Read stages/configuration and validate JSON bindings; no template-customization GUI or complex live migration required |
-| Cards | List/filter/get/create, update title/description/tags/resources, move/reorder, archive/restore |
+| Cards | List/filter/get/create, update title/description/resources, move/reorder, archive/restore |
 | Timeline/comments | Paginate history, add/revise comments, submit structured mentions |
 | Resources | Add references and upload/register durable attachments |
 | Execution | Inspect requests and generic Sessions/Runs, submit scoped progress/results/artifacts/check evidence, request cancellation or retry |

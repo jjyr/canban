@@ -16,7 +16,7 @@ use std::{
 };
 
 /// Increment when desktop clients need operations unavailable in older services.
-pub const API_VERSION: u32 = 2;
+pub const API_VERSION: u32 = 4;
 
 pub struct AppServer {
     utilities: utilities::Utilities,
@@ -133,27 +133,23 @@ fn enqueue(
     if !stage.execute && explicit.is_none() {
         return Ok(None);
     }
-    let profile = match canban_scheduler::select_for_stage(
-        config,
-        &card.tags,
-        stage.profile.as_deref(),
-        explicit,
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            attention(db, card, &e.to_string())?;
-            log(
-                db,
-                card,
-                "scheduler.blocked",
-                "system",
-                &e.to_string(),
-                None,
-                json!({}),
-            )?;
-            return Ok(None);
-        }
-    };
+    let profile =
+        match canban_scheduler::select_for_stage(config, stage.profile.as_deref(), explicit) {
+            Ok(p) => p,
+            Err(e) => {
+                attention(db, card, &e.to_string())?;
+                log(
+                    db,
+                    card,
+                    "scheduler.blocked",
+                    "system",
+                    &e.to_string(),
+                    None,
+                    json!({}),
+                )?;
+                return Ok(None);
+            }
+        };
     let mut req = canban_scheduler::request(
         &project.id,
         &card.id,
@@ -295,7 +291,7 @@ impl AppServer {
         if !flow.exists() {
             let mut initial = Workflow::default();
             // An older/custom registry may not define the new starter roles.
-            // Preserve its tag/default routing instead of modifying user profiles.
+            // Use the global default instead of modifying user profiles.
             for stage in &mut initial.stages {
                 if stage
                     .profile

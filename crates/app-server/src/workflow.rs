@@ -15,6 +15,8 @@ pub(super) fn advance(
         let stage = canban_workflow_engine::stage(&project.workflow, next)?;
         let from = card.stage.clone();
         card.stage = next.clone();
+        card.board_order = None;
+        canban_kanban::order::place(db, card, None)?;
         log(
             db,
             card,

@@ -9,6 +9,34 @@ pub enum Tone {
     Attention,
     Danger,
 }
+/// Compact numeric attention badge, with no zero/empty state label.
+pub fn attention_count(count: impl Fn() -> usize + Copy + 'static) -> impl IntoElement {
+    when(
+        move || count() > 0,
+        move || {
+            view()
+                .min_w(px(20.))
+                .h(px(18.))
+                .px_1()
+                .rounded(px(6.))
+                .bg(ATTENTION_SURFACE)
+                .items_center()
+                .justify_center()
+                .child(
+                    text(move || {
+                        if count() > 99 {
+                            "99+".into()
+                        } else {
+                            count().to_string()
+                        }
+                    })
+                    .text_size(px(10.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(ATTENTION),
+                )
+        },
+    )
+}
 pub fn status(value: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoElement {
     let (bg, fg) = match tone {
         Tone::Neutral => (INSET, MUTED),

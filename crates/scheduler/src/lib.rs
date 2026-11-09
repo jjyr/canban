@@ -1,38 +1,22 @@
-use anyhow::{Result, bail, ensure};
+use anyhow::Result;
 use canban_types::{Config, Profile, Request, id, now};
-pub fn select(config: &Config, tags: &[String], explicit: Option<&str>) -> Result<Profile> {
-    if let Some(id) = explicit {
-        return config
-            .profiles
-            .iter()
-            .find(|p| p.id == id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Unknown agent @{id}"));
-    }
-    let matches: Vec<_> = config
+/// Resolve an explicit profile ID, otherwise the global default.
+pub fn select(config: &Config, explicit: Option<&str>) -> Result<Profile> {
+    let id = explicit.unwrap_or(&config.default_agent);
+    config
         .profiles
         .iter()
-        .filter(|p| tags.iter().any(|t| t == &p.id || p.tags.contains(t)))
-        .collect();
-    if matches.len() > 1 {
-        bail!("Multiple agents match the card tags; choose one routing tag");
-    }
-    if let Some(p) = matches.first() {
-        return Ok((*p).clone());
-    }
-    ensure!(tags.is_empty(), "No agent matches the card tags");
-    select(config, &[], Some(&config.default_agent))
+        .find(|p| p.id == id)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Unknown agent @{id}"))
 }
-/// Explicit mentions select a profile directly. Automatic stages with a profile
-/// reference keep that role even when the Card has routing tags. Legacy stages
-/// without a reference retain tag/default routing.
+/// Mentions select their profile; automatic stages use their reference or default.
 pub fn select_for_stage(
     config: &Config,
-    tags: &[String],
     stage_profile: Option<&str>,
     explicit: Option<&str>,
 ) -> Result<Profile> {
-    select(config, tags, explicit.or(stage_profile))
+    select(config, explicit.or(stage_profile))
 }
 pub fn request(
     project: &str,
@@ -172,4 +156,31 @@ pub fn next(snapshot: &canban_types::Snapshot, max_agents: usize) -> Option<Requ
             (std::cmp::Reverse(depth), r.created_at)
         })
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn profile_selection_uses_explicit_then_stage_then_global_default() {
+        let config = Config::default();
+        assert_eq!(
+            select_for_stage(&config, Some("reviewer"), Some("claude"))
+                .unwrap()
+                .id,
+            "claude"
+        );
+        assert_eq!(
+            select_for_stage(&config, Some("reviewer"), None)
+                .unwrap()
+                .id,
+            "reviewer"
+        );
+        assert_eq!(
+            select_for_stage(&config, None, None).unwrap().id,
+            config.default_agent
+        );
+        assert!(select_for_stage(&config, Some("missing"), None).is_err());
+        assert!(select_for_stage(&config, Some("reviewer"), Some("missing")).is_err());
+    }
 }

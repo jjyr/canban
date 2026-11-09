@@ -74,17 +74,6 @@ pub fn capture_for(
         .iter()
         .filter(|r| r.card_id == card.id)
         .collect();
-    let notes: Vec<_> = snapshot
-        .notes
-        .iter()
-        .filter(|n| {
-            n.project_id == project.id
-                && card
-                    .context_notes
-                    .as_ref()
-                    .is_none_or(|ids| ids.contains(&n.id))
-        })
-        .collect();
     let artifacts: Vec<_> = snapshot
         .artifacts
         .iter()
@@ -101,11 +90,13 @@ pub fn capture_for(
                 r.issue_id == i.source.issue_id && r.repository_id == i.source.repository_id
             })
     });
-    let manifest = serde_json::json!({"schema_version":1,"github_issue":github_issue,"project":project,"card":card,"request":req,"attempt":attempt,"timeline":timeline,"notes":notes,"reports":reports,"artifacts":artifacts,"questions":questions});
+    // Notes are deferred. Keep the manifest field empty for old readers, without
+    // injecting saved legacy documents or changing already captured executions.
+    let manifest = serde_json::json!({"schema_version":1,"github_issue":github_issue,"project":project,"card":card,"request":req,"attempt":attempt,"timeline":timeline,"notes":[],"reports":reports,"artifacts":artifacts,"questions":questions});
     let manifest_path = dir.join("context.json");
     atomic(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
     let prompt = format!(
-        "# Canban Card #{}: {}\n\n{}\n\n## Agent role: @{}\n{}\n\n## Assignment\n{}\n\n## Captured Human Context\nRead the exact context manifest at {}. It contains notes, comments, earlier report references, and attachment paths (relative to {}). Read relevant earlier reports. Notes are database documents. Use `canban note read NOTE_ID --json` to read current content/revision, and `canban note write NOTE_ID --revision N --file /path/to/content.md` (or stdin) to update them. The CLI uses the injected execution binding to record your changes on the Note and Card Timelines. Markdown links use [label](note:NOTE_ID); keep IDs intact when renaming. Never edit canban.sqlite directly. Captured Notes remain historical snapshots.\n\n## Outcome reporting\nYou must explicitly report your own outcome by running the provided CLI. Do not move or archive the card.\nCANBAN_ENDPOINT={} CANBAN_REQUEST_ID={} CANBAN_ATTEMPT={} {} report --state completed --message 'Summary' --file /absolute/path/to/your-report.md\nUse --state blocked when you need human input; working for progress, failed on failure. --file is optional. CANBAN_CLI, CANBAN_ENDPOINT, CANBAN_REQUEST_ID and CANBAN_ATTEMPT are also in your environment. CLI success means the outcome was recorded; Canban applies the workflow.\n",
+        "# Canban Card #{}: {}\n\n{}\n\n## Agent role: @{}\n{}\n\n## Assignment\n{}\n\n## Captured Human Context\nRead the exact context manifest at {}. It contains the Card, comments, earlier report references, and attachment paths (relative to {}). Read relevant earlier reports. Never edit canban.sqlite directly.\n\n## Outcome reporting\nYou must explicitly report your own outcome by running the provided CLI. Do not move or archive the card.\nCANBAN_ENDPOINT={} CANBAN_REQUEST_ID={} CANBAN_ATTEMPT={} {} report --state completed --message 'Summary' --file /absolute/path/to/your-report.md\nUse --state blocked when you need human input; working for progress, failed on failure. --file is optional. CANBAN_CLI, CANBAN_ENDPOINT, CANBAN_REQUEST_ID and CANBAN_ATTEMPT are also in your environment. CLI success means the outcome was recorded; Canban applies the workflow.\n",
         card.number,
         card.title,
         card.body,
@@ -123,7 +114,7 @@ pub fn capture_for(
     );
     let mut prompt = prompt;
     if let Some(issue) = github_issue {
-        prompt.push_str(&format!("\n## GitHub source: {}#{}\n{}\n\n{}\n\nThe Card description above is local Additional instructions. GitHub Labels are not Agent routing tags.\n",issue.source.repository,issue.source.number,issue.title,issue.body));
+        prompt.push_str(&format!("\n## GitHub source: {}#{}\n{}\n\n{}\n\nThe Card description above is local Additional instructions. GitHub Labels do not select an Agent.\n",issue.source.repository,issue.source.number,issue.title,issue.body));
     }
     prompt.push_str("\nSave reports and question replies under $CANBAN_RUN_DIR, outside the source checkout. Keep only deliverable source/tests/docs in the Card worktree. Canban review acceptance commits all reviewed checkout changes.\n");
     prompt.push_str("\n## Conversation binding and follow-up questions\nThis invocation's Canban request/attempt binding supersedes older commands in conversation history.\n");

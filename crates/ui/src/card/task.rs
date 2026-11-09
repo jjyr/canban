@@ -1,6 +1,8 @@
 use super::*;
 pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElement {
     let body = proxy(draft, false);
+    // Text edits must update the mounted inputs, not rebuild their editing owner.
+    let mode = computed(move || draft.with(|d| (d.editing, d.task_expanded)));
     let github = ui
         .current_card()
         .is_some_and(|c| c.github_issue().is_some());
@@ -39,7 +41,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 })),
         )
         .child(dynamic(move || {
-            if draft.with(|d| d.editing) {
+            if mode.get().0 {
                 let paste = paste.clone();
                 let save_id = id.clone();
                 return view()
@@ -60,11 +62,6 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                                 paste_resources(ui, paste.clone(), e, body, false)
                             }),
                     )
-                    .child(bound_field(
-                        move || draft.get().tags,
-                        move |v| draft.update(|d| d.tags = v.into()),
-                        "Routing tags",
-                    ))
                     .child(
                         action("Save", Variant::Primary, move |_| {
                             save_card(ui, save_id.clone(), draft)
@@ -73,19 +70,11 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     )
                     .into_element();
             }
-            if draft.with(|d| d.task_expanded) {
+            if mode.get().1 {
                 return view()
                     .gap_2()
                     .child(crate::github::card_source(ui))
-                    .child(
-                        nsh_base::text_view()
-                            .markdown(move || Some(draft.get().body.into()))
-                            .on_link_press(move |e: &nsh_base::TextViewLinkPressEvent| {
-                                if let Some(id) = e.url.strip_prefix("note:") {
-                                    ui.open_note(id.into());
-                                }
-                            }),
-                    )
+                    .child(nsh_base::text_view().markdown(move || Some(draft.get().body.into())))
                     .into_element();
             }
             let text = draft.with(|d| {

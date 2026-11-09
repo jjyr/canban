@@ -198,13 +198,16 @@ impl AppServer {
                 })
             }
             "card.create" => self.mutate(method, &p, |db| {
+                ensure!(
+                    p.get("tags").is_none(),
+                    "Routing tags are no longer supported; use a workflow Profile or @profile"
+                );
                 let project: Project = db.get(strp(&p, "project_id")?)?;
                 let mut c = canban_kanban::create(
                     db,
                     &project,
                     strp(&p, "title")?,
                     p["body"].as_str().unwrap_or(""),
-                    strings(&p, "tags"),
                     "user",
                 )?;
                 if let Some(note_id) = p["source_note_id"].as_str() {
@@ -222,6 +225,10 @@ impl AppServer {
                 Ok(serde_json::to_value(c)?)
             }),
             "card.update" => self.mutate(method, &p, |db| {
+                ensure!(
+                    p.get("tags").is_none(),
+                    "Routing tags are no longer supported; use a workflow Profile or @profile"
+                );
                 let mut c: Card = db.get(strp(&p, "card_id")?)?;
                 revise(&c, &p)?;
                 ensure!(c.archived_at.is_none(), "Restore the Card before editing");
@@ -240,9 +247,6 @@ impl AppServer {
                 if let Some(b) = p["body"].as_str() {
                     c.body = b.into();
                 }
-                if p.get("tags").is_some() {
-                    c.tags = strings(&p, "tags");
-                }
                 if let Some(mode) = p.get("delivery_mode") {
                     c.delivery_mode = serde_json::from_value(mode.clone())?;
                 }
@@ -254,7 +258,7 @@ impl AppServer {
                     "user",
                     "Card updated",
                     None,
-                    json!({"title":c.title,"body":c.body,"tags":c.tags}),
+                    json!({"title":c.title,"body":c.body}),
                 )?;
                 db.save(&c)?;
                 Ok(serde_json::to_value(c)?)
@@ -268,12 +272,32 @@ impl AppServer {
                     "Human review must be approved by the user before moving this Card"
                 );
                 let target = strp(&p, "stage")?;
-                if c.stage == target {
-                    return Ok(serde_json::to_value(c)?);
-                }
                 let project: Project = db.get(&c.project_id)?;
                 let stage = canban_workflow_engine::stage(&project.workflow, target)?;
                 let from = c.stage.clone();
+                let placement = p.get("before_card_id");
+                ensure!(
+                    placement.is_none_or(|v| v.is_null() || v.is_string()),
+                    "before_card_id must be a Card ID or null"
+                );
+                if c.stage == target {
+                    if placement.is_some()
+                        && canban_kanban::order::place(db, &mut c, p["before_card_id"].as_str())?
+                    {
+                        c.revision += 1;
+                        log(
+                            db,
+                            &c,
+                            "card.order_changed",
+                            "user",
+                            "Card reordered",
+                            None,
+                            json!({"stage":target,"before_card_id":p["before_card_id"]}),
+                        )?;
+                        db.save(&c)?;
+                    }
+                    return Ok(serde_json::to_value(c)?);
+                }
                 // Ordinary queued work from a stage the user has left must not
                 // start later. Already-running executions are deliberately not drained.
                 for mut request in db.list::<Request>()?.into_iter().filter(|r| {
@@ -283,6 +307,8 @@ impl AppServer {
                     db.save(&request)?;
                 }
                 c.stage = target.into();
+                c.board_order = None;
+                canban_kanban::order::place(db, &mut c, p["before_card_id"].as_str())?;
                 c.revision += 1;
                 c.attention = None;
                 c.human_gate = None;
@@ -293,7 +319,7 @@ impl AppServer {
                     "user",
                     &format!("{from} → {target}"),
                     None,
-                    json!({"from":from,"to":target}),
+                    json!({"from":from,"to":target,"before_card_id":p["before_card_id"]}),
                 )?;
                 enqueue(
                     db,
@@ -394,7 +420,7 @@ impl AppServer {
                 mentions.sort();
                 mentions.dedup();
                 for agent in mentions {
-                    let profile = canban_scheduler::select(&config, &[], Some(&agent))?;
+                    let profile = canban_scheduler::select(&config, Some(&agent))?;
                     let _context = crate::sessions::conversation(db, &c, &profile)?;
                     let attempts = db.list::<Attempt>()?;
                     let active = db.list::<Request>()?.into_iter().rev().find(|r| {

@@ -30,7 +30,7 @@ fn controls() -> impl IntoElement {
                     panel()
                         .child(label("Shared Lucide icons · muted / selected / attention"))
                         .child(view().flex_row().flex_wrap().gap_2().children(
-                            [Icon::Search, Icon::Terminal, Icon::Board, Icon::Overview, Icon::Note,
+                            [Icon::Search, Icon::Terminal, Icon::Board, Icon::Overview,
                              Icon::Archive, Icon::Settings, Icon::Projects, Icon::Agent, Icon::GitHub,
                              Icon::ChevronDown, Icon::Plus, Icon::Check]
                             .into_iter().enumerate().map(|(i, kind)|
@@ -114,6 +114,39 @@ pub fn Gallery() -> impl IntoElement {
     let scene = signal("workspace".to_string());
     let constrained = signal(false);
     let ui = Ui::new();
+    ui.board_move.replace(Some(std::rc::Rc::new(move |drop| {
+        ui.snapshot.update(|s| {
+            let Some(index) = s.cards.iter().position(|c| c.id == drop.card_id) else {
+                return;
+            };
+            let mut peers = s
+                .cards
+                .iter()
+                .filter(|c| {
+                    c.project_id == s.cards[index].project_id
+                        && c.stage == drop.stage
+                        && c.id != drop.card_id
+                        && c.active()
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            peers.sort_by(canban_types::Card::board_cmp);
+            let position = drop
+                .before_card_id
+                .as_ref()
+                .and_then(|id| peers.iter().position(|c| &c.id == id))
+                .unwrap_or(peers.len());
+            let mut ids = peers.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+            ids.insert(position, drop.card_id.clone());
+            s.cards[index].stage = drop.stage;
+            s.cards[index].revision += 1;
+            for (i, id) in ids.iter().enumerate() {
+                if let Some(c) = s.cards.iter_mut().find(|c| &c.id == id) {
+                    c.board_order = Some(i as i64 * 1024);
+                }
+            }
+        });
+    })));
     canban_ui::commands::bindings(ui);
     canban_ui::utilities::init(ui);
     canban_ui::terminals::bindings(ui);
@@ -130,9 +163,17 @@ pub fn Gallery() -> impl IntoElement {
     ui.project.set("gallery-project".into());
     ui.card.set("card-1".into());
     ui.page.set("card".into());
-    ui.note.set("note-1".into());
     ui.profiles.set(canban_types::Config::default().profiles);
     ui.machines.set(json!({"machines":[{"id":"gallery-remote","name":"Build machine","state":"connected","target":"ssh-host"},{"id":"gallery-offline","name":"Offline machine","state":"unreachable","target":"another-host"}]}));
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("project-activity") {
+        nsh_core::element::desktop::set_title_bar(
+            nsh_core::desktop::TitleBarStyle::Hidden,
+            Some(px(42.)),
+        );
+        ui.snapshot.set(fixtures::project_activity());
+        ui.page.set("board".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("board-overflow") {
         ui.snapshot.set(fixtures::overflowing_board());
         ui.page.set("board".into());
@@ -174,6 +215,11 @@ pub fn Gallery() -> impl IntoElement {
                     ui.select_project("gallery-project".into());
                     ui.page.set("board".into());
                 }))
+                .child(action("Project activity", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::project_activity());
+                    ui.select_project("gallery-project".into());
+                }))
                 .child(action("Card conversation", Variant::Secondary, move |_| {
                     scene.set("workspace".into()); ui.snapshot.set(fixtures::conversation());
                     ui.card.set("card-1".into()); ui.page.set("card".into());
@@ -187,13 +233,6 @@ pub fn Gallery() -> impl IntoElement {
                         event.message="New reply arrived while you were reading.\n\nContinue from your current position, or jump to latest.".into();
                         s.events.push(event);
                     });
-                }))
-                .child(action("Notes workspace", Variant::Secondary, move |_| {
-                    scene.set("workspace".into());
-                    ui.snapshot.set(fixtures::workspace());
-                    ui.select_project("gallery-project".into());
-                    ui.note.set("note-1".into());
-                    ui.page.set("notes".into());
                 }))
                 .child(action("Overview", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
@@ -262,7 +301,7 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("New Card", Variant::Quiet, move |_| {
                     let mut snapshot=fixtures::workspace();
                     snapshot.projects[0].github=Some(canban_types::GitHubSource { repository:"jjyr/canban".into(),repository_id:1,generation:"gallery".into(),intake:canban_types::GitHubIntake::All,synced_at:None,error:None });
-                    scene.set("workspace".into());ui.snapshot.set(snapshot);ui.source_note.set(String::new());ui.page.set("new-card".into());
+                    scene.set("workspace".into());ui.snapshot.set(snapshot);ui.page.set("new-card".into());
                 }))
                 .child(action("GitHub Card",Variant::Quiet,move |_|{
                     let mut snapshot=fixtures::workspace();

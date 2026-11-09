@@ -1,4 +1,4 @@
-//! Shared human-readable metadata for Card and Note activity.
+//! Shared Card activity labels, including retained historical Note events.
 use canban_ui_kit::tokens::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;

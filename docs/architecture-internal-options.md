@@ -11,8 +11,8 @@ All alternatives can use the same product modules and storage. The question is h
 | Component | Responsibility |
 | --- | --- |
 | AppServer | Shared command/query/report entry, composition, and typed access for UI/adapters |
-| Kanban | Projects, Boards/stages, cards/numbers/tags, and authoritative card transitions/attention |
-| Context | Notes, resource references, attachments, and captured input |
+| Kanban | Projects, Boards/stages, cards/numbers, and authoritative card transitions/attention |
+| Context | Card resource references, attachments, and captured input; legacy Note data retained |
 | Workflow Engine | Interpret JSON templates and turn stage/report events into configured actions |
 | Scheduler | Routing/default selection, request/attempt lifecycle, and generic Session execution |
 | Workspaces | Prepare/reuse execution directory/worktree; handle managed worktree at Archive |
@@ -138,7 +138,7 @@ The recommendation is B, keeping A's useful local clarity inside each module. C 
 - Kanban is the writer of card stage/attention state. Workflow Engine asks it to move/mark a card; a notification subscriber does not secretly update the same row.
 - Scheduler owns request/attempt/Session state and the core binding. UI views and Timeline do not independently start agents.
 - Workflow Engine reads the stored JSON binding and chooses the next action. It does not introduce a second Session implementation.
-- Context owns saved Notes/references/input capture; UI owns transient focus/selection/draft presentation.
+- Context owns references/input capture; UI owns transient focus/selection/draft presentation. Notes are [deferred](notes-deferred.md); saved legacy data remains compatible without a Note product surface.
 - Timeline owns the history view/recording boundary; it does not decide workflow progression.
 - Notifications owns internal notices/delivery, with macOS delivery later. It can request an owner operation for card attention when appropriate.
 - Storage is not another independent source of business decisions. Modules use one shared persistence boundary; separate modules do not imply separate databases.

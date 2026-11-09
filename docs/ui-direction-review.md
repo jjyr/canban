@@ -2,7 +2,7 @@
 
 Date: 2026-11-07. This document preserves the pre-redesign audit and alternatives. Direction A and the workspace hierarchy were subsequently approved and implemented. The audit below describes the earlier UI, not the current component inventory.
 
-Current implementation: Board plus optional Card pane; focused Card/Terminal or Review; shared semantic navigation, status and split controls; SQLite-backed Notes with editing/preview, Timeline and bidirectional links. See [current product layouts](product/notes-and-workspace.md), [component inventory](ui-components.md) and [implementation/acceptance](notes-and-workspace-implementation.md). The user clarified that file-like Notes remain in the database; no physical-file migration is involved.
+Current implementation: Board plus optional Card pane, focused Review and dedicated Terminal workspace, with shared semantic navigation/status/split controls. Notes were [deferred](notes-deferred.md) on 2026-11-10; their former editing/linking UI in this dated audit is historical. See the current [UI architecture](ui-architecture.md) and [component inventory](ui-components.md).
 
 ## Evidence and current structure
 
@@ -43,7 +43,7 @@ The existing UI Kit/product/NSH boundary is suitable. The next step is to extend
 
 The Board should answer: what is running, what is waiting for me, and what is ready for review? Today a Card has a text execution summary and an attention label, while unread notices are only a count in the sidebar. There is no actionable notification list in the current screen implementation.
 
-Give each Card a consistent hierarchy: number/title, short optional summary, current Agent/activity, attention or next action, then secondary tags. Reserve strong emphasis for attention and the relevant action. The default local backend does not need a persistent prominent Local badge. Display secondary paths and request/attempt IDs in inspectable details rather than primary product text.
+Give each Card a consistent hierarchy: number/title, short optional summary, current Agent/activity, attention or next action. Routing tags have since been removed. Reserve strong emphasis for attention and the relevant action. The default local backend does not need a persistent prominent Local badge. Display secondary paths and request/attempt IDs in inspectable details rather than primary product text.
 
 Keep three independent meanings: workflow stage (Backlog/Develop/Review), runtime (running/idle/offline/closed), and human attention (answer needed/failure/review ready). Use text plus an icon/shape; color alone must not carry meaning. A Review Card can still have a running follow-up Agent.
 

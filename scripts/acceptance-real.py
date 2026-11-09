@@ -108,10 +108,10 @@ try:
         workflow_path.write_text(json.dumps(local_workflow))
         project = call("project.create", {"name": "Real Board " + fixture["name"], "directory": str(source)})
         marker = "CANBAN_" + fixture["name"].upper() + "_" + base.name
-        note = call("note.save", {"project_id": project["id"], "title": "Board isolation marker", "body": f"This is the {fixture['name']} Board. Isolation marker: {marker}. Include this marker in every development/review report. Only work in the assigned task worktree."})
         body = fixture["task"] + "\nRun /usr/bin/python3 -m unittest -v. Keep test_task.py unchanged. Do not modify any other Project or the source repository. No need to commit. Write a meaningful Markdown report inside the Canban run directory, including the Board isolation marker, task result and validation, then explicitly call the supplied CLI to report your outcome."
+        body += f"\nBoard isolation marker: {marker}. Include this exact marker in every report."
         card = call("card.create", {"project_id": project["id"], "title": "Real " + fixture["name"] + " development and review", "body": body})
-        fixture.update(source=str(source), project_id=project["id"], card_id=card["id"], marker=marker, note_id=note["id"])
+        fixture.update(source=str(source), project_id=project["id"], card_id=card["id"], marker=marker)
 
     # Both Boards are made executable before either model is expected to finish.
     for fixture in fixtures:
@@ -137,7 +137,7 @@ try:
             context = json.loads((home / attempt["input_path"]).with_name("context.json").read_text())
             assert context["project"]["id"] == fixture["project_id"]
             assert context["card"]["id"] == fixture["card_id"]
-            assert len(context["notes"]) == 1 and context["notes"][0]["id"] == fixture["note_id"]
+            assert context["notes"] == [] and fixture["marker"] in context["card"]["body"]
         reports = [r for r in state["reports"] if r["card_id"] == card["id"] and r["state"] == "completed"]
         assert len(reports) == 2 and all(r["path"] for r in reports)
         bodies = []

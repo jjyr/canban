@@ -20,7 +20,7 @@ fn fixture() -> Snapshot {
         ("c2", "p2", "Terminal integration"),
         ("c3", "p1", "中文搜索与 café"),
     ] {
-        s.cards.push(serde_json::from_value(json!({"id":id,"project_id":project,"number":42,"title":title,"body":"","tags":[],"stage":"backlog","revision":1,"attention":null,"archived_at":null,"archive":null,"archive_error":null,"worktree":null,"created_at":1})).unwrap());
+        s.cards.push(serde_json::from_value(json!({"id":id,"project_id":project,"number":42,"title":title,"body":"","stage":"backlog","revision":1,"attention":null,"archived_at":null,"archive":null,"archive_error":null,"worktree":null,"created_at":1})).unwrap());
     }
     s.notes.push(Note {
         id: "n1".into(),
@@ -57,10 +57,9 @@ fn fuzzy_search_matches_subsequences_multiple_terms_and_unicode() {
         ranked(&rows, "中文 café", &[], false)[0].target,
         Target::Card("c3".into())
     );
-    assert_eq!(
-        ranked(&rows, "Note arcdcs", &[], false)[0].target,
-        Target::Note("n1".into())
-    );
+    // Legacy records remain in the snapshot, but deferred Notes are not destinations.
+    assert!(ranked(&rows, "Architecture decision", &[], false).is_empty());
+    assert!(rows.iter().all(|r| r.kind != "Note"));
     assert!(ranked(&rows, "not-present-123", &[], false).is_empty());
     assert!(ranked(&rows, "Private text", &[], false).is_empty());
 }
@@ -102,23 +101,23 @@ fn project_picker_filters_types_and_recency_does_not_overrule_a_better_match() {
     let rows = vec![
         Candidate {
             id: "exact".into(),
-            title: "Note".into(),
+            title: "Card".into(),
             detail: String::new(),
-            kind: "Note",
-            target: Target::Note("exact".into()),
-            fields: vec!["Note".into()],
+            kind: "Card",
+            target: Target::Card("exact".into()),
+            fields: vec!["Card".into()],
         },
         Candidate {
             id: "prefix".into(),
-            title: "Notebook".into(),
+            title: "Cards".into(),
             detail: String::new(),
-            kind: "Note",
-            target: Target::Note("prefix".into()),
-            fields: vec!["Notebook".into()],
+            kind: "Card",
+            target: Target::Card("prefix".into()),
+            fields: vec!["Cards".into()],
         },
     ];
     assert_eq!(
-        ranked(&rows, "note", &["prefix".into()], false)[0].id,
+        ranked(&rows, "card", &["prefix".into()], false)[0].id,
         "exact"
     );
 }
@@ -128,13 +127,13 @@ fn duplicate_titles_sort_by_visible_owner_before_internal_identity() {
     let a = Candidate {
         id: "z".into(),
         title: "Architecture.md".into(),
-        detail: "Note · Canban".into(),
-        kind: "Note",
-        target: Target::Note("z".into()),
+        detail: "Card · Canban".into(),
+        kind: "Card",
+        target: Target::Card("z".into()),
         fields: vec!["Architecture.md".into()],
     };
     let mut b = a.clone();
     b.id = "a".into();
-    b.detail = "Note · Tools".into();
+    b.detail = "Card · Tools".into();
     assert_eq!(ranked(&[b, a], "Architecture", &[], false)[0].id, "z");
 }

@@ -10,7 +10,7 @@ Project: directory + default agent + template
         +-- Backlog
         +-- Develop
         |     +-- Card #42
-        |           +-- description / tags / resources
+        |           +-- description / resources
         |           +-- timeline: comments + events
         |           +-- development request -> run R1 -> terminal t7
         |           +-- revision request    -> run R2 -> terminal t9
@@ -38,9 +38,9 @@ These are proposed field categories, not finalized enums. A Develop card can be 
 
 1. Create or select a Project, backed by its directory and Board template.
 2. Create a local card in Backlog, receiving its project-local number.
-3. Write the description, reference notes/files/URLs/other cards, and paste images where useful. Add optional routing tags.
+3. Write the description, reference files/URLs/other cards, and paste images where useful.
 4. Move the card into Develop. This commits a stage-entry event and makes the development workflow automatically eligible for Scheduler; no second routine Start/Scheduler click is required.
-5. Scheduler selects a matching agent, or the default for an untagged card, and queues it for launch without a concurrency limit. The card remains in Develop with a Queued reason until execution begins.
+5. Scheduler selects the stage Profile or global default and queues it under the configurable global budget (default eight). The card remains in Develop with a Queued reason until execution begins.
 6. The workflow runs preparation callbacks, such as creating a worktree where applicable, then starts the agent. Its attempt and runtime observations appear in the same card timeline.
 7. Users and agents comment; users can mention agents. Questions, comments, results, checks, and relevant code changes remain linked to the card and attempt.
 8. In the default template, the agent declaring development completed automatically moves the card into Review. No independent quality/check/process-exit gate is added. Review produces an ordinary report; the Shear interface follows later. Other JSON templates can configure different outcome transitions.
@@ -50,9 +50,9 @@ Backlog entry never automatically starts a stage workflow. Stage preparation and
 
 ## Routing and mentions
 
-Tags select which agent may execute a stage's workflow. They do not by themselves define development versus review. No-tag routing uses the configured default; a tagged request must not silently run on a different agent.
+A workflow stage selects its configured Profile; without one, it uses global default_agent. An explicit @profile selects that Profile for the question. Routing tags and alias matching are removed. Unknown explicit/stage Profile IDs fail rather than silently falling back.
 
-A submitted @profile comment resolves the Card/profile conversation. If live, it is immediately appended to the current invocation; otherwise Scheduler starts/resumes it. It does not automatically interrupt, change routing tags or replace the original task/callback.
+A submitted @profile comment resolves the Card/profile conversation. If live, it is immediately appended to the current invocation; otherwise Scheduler starts/resumes it. It does not automatically interrupt or replace the original task/callback.
 
 Develop/Review independently select their configured profile and queue a task with the stage callback. Distinct profiles retain separate histories; repeated work for the same Card/profile resumes the same provider ID. All invocations use one request/attempt model. See [Sessions](sessions.md).
 
@@ -98,15 +98,15 @@ A remote source binding stores provider/repository/issue identity independently 
 
 ## Custom card blocks
 
-Keep the earlier direction of declarative layouts: title, tags, stage/status, resource previews, attention, change summary, and timeline excerpts. Research and implementation cards may show different blocks without changing card identity or automation semantics. Render unknown block kinds with preserved data and a fallback. Arbitrary executable widget plugins are outside MVP.
+Keep the earlier direction of declarative layouts: title, stage/status, resource previews, attention, change summary, and timeline excerpts. Research and implementation cards may show different blocks without changing card identity or automation semantics. Render unknown block kinds with preserved data and a fallback. Arbitrary executable widget plugins are outside MVP.
 
 ## Acceptance scenarios
 
 1. Create a Project with a nonexistent directory and obtain its Board without requiring Git initialization.
 2. Create cards in two Projects; each has independent numbering and unambiguous scoped references.
-3. Move an untagged card to Develop: automatic default routing, preparation, and one execution are visible without another launch click.
-4. Move a claude-tagged card to Develop: only the configured matching profile may run it.
-5. Run multiple Boards with the same profile: each request launches independently without a concurrency cap.
+3. Move a Card to a Develop stage without a Profile reference: automatic default selection, preparation, and one execution are visible without another launch click.
+4. Move a Card to Develop with an explicit stage Profile: that configured role runs, while a direct @profile question uses its own Profile.
+5. Run multiple Boards with the same profile: independent Card conversations share the global budget without a separate Board/profile cap.
 6. Replay a move or reconnect after an uncertain launch: no blind duplicate, and ambiguity remains visible.
 7. Submit user and agent comments, a structured mention, and a pasted image: all persist in the unified timeline. The mention appends or starts/resumes its Card/profile conversation; its reply cannot be mistaken for completion of the active development task.
 8. The development agent reports completed: the default template enters Review and schedules an ordinary report without independent checks or waiting for process exit. Normal repeated report handling does not create another transition.

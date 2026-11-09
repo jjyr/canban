@@ -37,7 +37,11 @@ impl ThemeColor {
         if self.0 == 16 {
             return AdaptiveColor::TRANSPARENT;
         }
-        let color = rgb(current_theme().chrome()[self.0]).to_hsla();
+        let color = if self.0 == 17 {
+            rgb(current_theme().chrome()[1]).to_hsla().lighten(0.025)
+        } else {
+            rgb(current_theme().chrome()[self.0]).to_hsla()
+        };
         AdaptiveColor {
             light: color,
             dark: color,
@@ -71,6 +75,8 @@ pub const ATTENTION_SURFACE: ThemeColor = ThemeColor(13);
 pub const SUCCESS_SURFACE: ThemeColor = ThemeColor(14);
 pub const DANGER_SURFACE: ThemeColor = ThemeColor(15);
 pub const CLEAR: ThemeColor = ThemeColor(16);
+/// Quiet hover for card-like surfaces across every named theme.
+pub const CARD_HOVER: ThemeColor = ThemeColor(17);
 pub const RADIUS: f32 = 8.0;
 pub const CONTROL_HEIGHT: f32 = 34.0;
 pub const BODY_SIZE: f32 = 13.0;

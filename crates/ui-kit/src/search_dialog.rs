@@ -16,6 +16,7 @@ pub struct SearchChoice {
     pub detail: String,
     pub icon: Icon,
     pub selected: bool,
+    pub attention: usize,
 }
 pub fn search_dialog(
     title: impl Fn() -> String + Copy + 'static,
@@ -165,9 +166,18 @@ pub fn search_dialog(
                                             nsh_base::CommandItem::new(
                                                 c.id.clone(),
                                                 format!(
-                                                    "{} · {}{}",
+                                                    "{}{}{}{}",
                                                     c.title,
-                                                    c.detail,
+                                                    if c.detail.is_empty() {
+                                                        String::new()
+                                                    } else {
+                                                        format!(" · {}", c.detail)
+                                                    },
+                                                    if c.attention == 0 {
+                                                        String::new()
+                                                    } else {
+                                                        format!(" · {} need attention", c.attention)
+                                                    },
                                                     if c.selected { " · Current" } else { "" }
                                                 ),
                                             )
@@ -185,6 +195,14 @@ pub fn search_dialog(
                                     });
                                     c.map(|c| {
                                         let id = c.id.clone();
+                                        let mut body = view()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .gap_1()
+                                            .child(label(c.title));
+                                        if !c.detail.is_empty() {
+                                            body = body.child(muted(c.detail));
+                                        }
                                         view()
                                             .rounded(px(RADIUS))
                                             .px_3()
@@ -200,14 +218,8 @@ pub fn search_dialog(
                                             .items_center()
                                             .gap_3()
                                             .child(icon(c.icon))
-                                            .child(
-                                                view()
-                                                    .flex_1()
-                                                    .min_w(px(0.))
-                                                    .gap_1()
-                                                    .child(label(c.title))
-                                                    .child(muted(c.detail)),
-                                            )
+                                            .child(body)
+                                            .child(super::attention_count(move || c.attention))
                                             .child(when(move || c.selected, || icon(Icon::Check)))
                                             .into_element()
                                     })

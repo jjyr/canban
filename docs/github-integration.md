@@ -47,7 +47,7 @@ Automatic intake offers all Open Issues or Open Issues authored by current repos
 
 Collaborator-only mode validates access before saving. Failed or incomplete listings do not become an empty membership set or partial successful synchronization. Membership compares stable author IDs. The current version refreshes the collaborator list per sync rather than persisting a separate membership cache.
 
-Remote Issue comments, PR conversation comments and submitted reviews become source Timeline events with external revision deduplication. They never invoke interactive `comment.add` and cannot dispatch an Agent through @mentions. GitHub Labels remain separate from routing tags. The existing stage/human-gate/admission rules own execution.
+Remote Issue comments, PR conversation comments and submitted reviews become source Timeline events with external revision deduplication. They never invoke interactive `comment.add` and cannot dispatch an Agent through @mentions. GitHub Labels do not select Agents; workflow stage Profiles/global default and explicit mentions own selection. The existing stage/human-gate/admission rules own execution.
 
 ## Authentication
 
@@ -71,7 +71,7 @@ All are available through `canban call METHOD JSON` and the same UI adapter. Acc
 | `project.github` | Validate/save repository, intake mode and default delivery mode |
 | `github.source.disconnect` | Stop the Project source without deleting Cards |
 | `github.issue.search` | Search current repository by number or title; include existing/removed identity and source generation |
-| `github.issue.add` | Add/restore selected source, optional local instructions and Note context |
+| `github.issue.add` | Add/restore selected source and optional local instructions; Note context is legacy compatibility only |
 | `github.sync` | Explicit source synchronization |
 | `card.remove` | Reversible local removal; no remote mutation |
 | `github.pr.publish` | Accept a current diff, commit/push and create/reuse its branch PR |

@@ -54,7 +54,7 @@ fn intake_uses_local_numbering_without_dispatch_or_routing_labels() {
     let (_dir, mut store, p) = fixture();
     store
         .write(|db| {
-            crate::create(db, &p, "Local", "local body", vec![], "user")?;
+            crate::create(db, &p, "Local", "local body", "user")?;
             apply(
                 db,
                 &p,
@@ -74,7 +74,6 @@ fn intake_uses_local_numbering_without_dispatch_or_routing_labels() {
     assert_eq!(c.number, 2);
     assert_eq!(c.github_issue().unwrap().number, 80);
     assert_eq!(c.stage, "backlog");
-    assert!(c.tags.is_empty());
     assert!(snapshot.requests.is_empty());
     assert!(snapshot.conversations.is_empty());
     assert!(snapshot.events.iter().any(|e| e.kind == "github.comment"));

@@ -24,7 +24,6 @@ pub fn screen(ui: Ui, page: &str) -> AnyElement {
         "project-location" => crate::machines::project_location(ui).into_element(),
         "new-project" => crate::projects::new_project(ui).into_element(),
         "new-card" => new_card(ui).into_element(),
-        "notes" => crate::notes::screen(ui).into_element(),
         "terminals" | "terminal" => crate::terminals::screen(ui).into_element(),
         "overview" | "agents" => crate::overview::screen(ui).into_element(),
         "board" | "card" | "review" => crate::workspace::screen(ui).into_element(),

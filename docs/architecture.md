@@ -23,7 +23,7 @@ Rust / NSH UI       Agent CLI        other UI clients
         |                |                  |
         +----------------+------------------+
                          |
-       Context / Notes / Timeline / Notifications
+       Context / Timeline / Notifications
        Workspaces / Review / Profiles / Storage
                          |
                  Herdr protocol adapter
