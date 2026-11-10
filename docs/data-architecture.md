@@ -250,3 +250,14 @@ Archive retains the Card Git ref independently of the Project's current HEAD. Re
 ## Named Card workspaces and approval state (2026-11-07)
 
 Card records now retain branch/worktree identity, the initial base commit and an optional human gate with related request/pending transition. Workflow snapshots include simple workspace settings; Requests snapshot whether completion requires human review. These use backward-compatible JSON fields in the existing SQLite records. Existing attention seeds a human gate on open. No file content or Git history is discarded during adoption; detached Card checkouts become named branches at their current HEAD on next use. See [implementation contract](workspace-and-scheduling.md).
+
+## Card reading state (2026-11-10)
+
+SQLite schema 8 adds `card_reads`, associating each Card with its monotonic
+Timeline read-through sequence. This is independent of Card content/revision,
+human gates and legacy Notice read flags. Existing history is baselined quietly
+on upgrade; unread Agent updates and pending actions form a shared projection
+rather than duplicating every Timeline event into another notification table.
+Archive exports include the Card read record. The existing desktop preferences
+file stores the notification sound setting. See [unified reminders](reminders.md)
+for ownership, indexed read updates, UI behavior and acceptance evidence.

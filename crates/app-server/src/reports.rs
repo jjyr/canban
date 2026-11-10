@@ -61,7 +61,7 @@ impl AppServer {
             if state=="completed" && req.trigger.starts_with("comment:") {
                 for mut q in db.list::<Question>()?.into_iter().filter(|q|q.request_id==req.id && q.state!="replied") {
                     q.state="replied".into();q.reply_path=report.path.clone();db.save(&q)?;
-                    log(db,&card,"comment.replied",&format!("agent:{}",req.profile.id),&report.message,Some(req.id.clone()),json!({"reply_to":q.comment_id,"question_id":q.id,"path":report.path}))?;
+                    log(db,&card,"comment.replied",&format!("agent:{}",req.profile.id),&report.message,Some(req.id.clone()),json!({"reply_to":q.comment_id,"question_id":q.id,"path":report.path,"report_id":report.id}))?;
                 }
             }
             let current=req.attempt==number;

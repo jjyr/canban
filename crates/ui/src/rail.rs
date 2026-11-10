@@ -36,12 +36,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             Icon::Overview,
             "Overview".into(),
             move || ui.page.get() == "overview",
-            move || {
-                canban_notifications::overview(&ui.snapshot.get())
-                    .iter()
-                    .filter(|r| r.actionable())
-                    .count()
-            },
+            move || ui.reminder_counts.get().len(),
             move |_| ui.navigate("overview"),
         ));
     let rail = rail.child(icon_action(

@@ -155,6 +155,7 @@ pub fn controls(
         requested.set(false);
         let card = picker_card.clone();
         ui.spawn(async move {
+            ui.native_modal.set(true);
             // Let the native host apply the cleared editor keymap before
             // entering the system sheet's nested event loop.
             next_frame().await;
@@ -165,6 +166,7 @@ pub fn controls(
                     .button_label("Attach"),
             )
             .await;
+            ui.native_modal.set(false);
             if !editor.held.try_set(false) {
                 return;
             }

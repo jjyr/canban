@@ -549,6 +549,14 @@ pub struct Notice {
     pub read: bool,
     pub created_at: u64,
 }
+/// A user's read-through position, independent of Card revisions and gates.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct CardRead {
+    pub id: String,
+    pub project_id: String,
+    pub card_id: String,
+    pub sequence: u64,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Artifact {
     pub id: String,
@@ -562,6 +570,8 @@ pub struct Artifact {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub card_reads: Vec<CardRead>,
     #[serde(default)]
     pub github: GitHubAccount,
     #[serde(default)]

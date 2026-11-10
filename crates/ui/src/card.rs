@@ -17,6 +17,7 @@ pub(super) struct Reading {
     composer: ElementRef,
     composer_height: Signal<f32>,
     editor: Stored<Option<canban_ui_kit::markdown::MarkdownInput>>,
+    reader: crate::reminders::Reader,
 }
 impl Reading {
     fn latest(self) {
@@ -56,9 +57,24 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         composer: element_ref(),
         composer_height: signal(180.),
         editor: stored(None),
+        reader: crate::reminders::Reader::new(saved.y.0),
     };
     let draft = document(ui, key, Draft::card(&card));
+    effect(move || {
+        let _ = ui.reminders.get();
+        let _ = crate::reminders::foreground();
+        let _ = ui.page.get();
+        let _ = ui.quick_open.get();
+        let _ = ui.utility_popup.get();
+        let _ = ui.native_modal.get();
+        reading.reader.check(ui);
+    });
     let viewport_height = stored(0f32);
+    let reminder_card = card.id.clone();
+    let unread_updates = computed(move || {
+        ui.reminder_counts
+            .with(|all| all.get(&reminder_card).map(|n| n.unread).unwrap_or(0))
+    });
     effect(move || {
         if let Some(card) = ui.current_card() {
             let mut value = draft.get_untracked();
@@ -121,7 +137,9 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .min_h(px(0.))
                 .element_ref(&reading.scroll)
                 .content_offset(saved)
+                .on_layout(move |b: &Bounds<Points>| reading.reader.height(ui, b.size.height.0))
                 .on_scroll(move |e: &ScrollEvent| {
+                    reading.reader.viewport(ui, e.offset.y.0, e.size.height.0);
                     capture_scroll(ui, scroll_key.clone(), e);
                     let before = viewport_height.replace(e.size.height.0);
                     if before > 0.
@@ -161,14 +179,20 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     .child(crate::components::git_workspace::panel(ui))
                             },
                         ))
-                        .child(timeline::render(ui)),
+                        .child(timeline::render(ui, reading)),
                 ),
         )
         .child(when(
-            move || reading.unread.get() > 0,
+            move || reading.unread.get() > 0 || unread_updates.get() > 0,
             move || {
                 action(
-                    move || format!("New activity ({}) ↓", reading.unread.get()),
+                    move || {
+                        if unread_updates.get() > 0 {
+                            format!("Unread updates ({}) ↓", unread_updates.get())
+                        } else {
+                            format!("New activity ({}) ↓", reading.unread.get())
+                        }
+                    },
                     Variant::Quiet,
                     move |_| reading.latest(),
                 )

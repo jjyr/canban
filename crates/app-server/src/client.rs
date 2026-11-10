@@ -71,20 +71,25 @@ impl AppClient {
         let weak = Arc::downgrade(self);
         std::thread::spawn(move || {
             let mut last = Value::Null;
+            let mut connected = false;
             while let Some(app) = weak.upgrade() {
-                if let Ok(state) = app.call("app.state", json!({}))
-                    && state != last
-                {
-                    last = state;
-                    if tx
-                        .send(AppEvent::Changed {
-                            topic: "application",
-                            card_id: None,
-                        })
-                        .is_err()
-                    {
-                        break;
+                match app.call("app.state", json!({})) {
+                    Ok(state) => {
+                        if !connected || state != last {
+                            if tx
+                                .send(AppEvent::Changed {
+                                    topic: if connected { "application" } else { "resync" },
+                                    card_id: None,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                            last = state;
+                        }
+                        connected = true;
                     }
+                    Err(_) => connected = false,
                 }
                 drop(app);
                 std::thread::sleep(Duration::from_millis(750));

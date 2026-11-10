@@ -85,7 +85,7 @@ fn refresh(ui: Ui) {
 pub fn configure(ui: Ui, theme: String) {
     if crate::APP.get().is_none() {
         ui.utility
-            .update(|v| v["preferences"] = json!({"theme":theme}));
+            .update(|v| v["preferences"]["theme"] = json!(theme));
         return;
     }
     ui.utility_epoch.update(|n| *n += 1);
@@ -332,9 +332,33 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
     panel::overlay(ui)
 }
 pub fn settings(ui: Ui) -> impl IntoElement {
+    let sounds = signal(crate::reminders::sound_enabled(ui));
+    effect(move || sounds.set(crate::reminders::sound_enabled(ui)));
     settings_section(
         "Theme and support",
         "Theme and power controls are also available from the bottom bar.",
+    )
+    .child(
+        checkbox("Notification sounds".into(), sounds, move |enabled| {
+            let enabled = *enabled;
+            if crate::APP.get().is_none() {
+                ui.utility
+                    .update(|v| v["preferences"]["notification_sound"] = json!(enabled));
+                return;
+            }
+            dispatch_complete(
+                ui,
+                "utilities.configure",
+                json!({"notification_sound":enabled}),
+                move |result| {
+                    if let Ok(state) = result {
+                        ui.utility_epoch.update(|v| *v += 1);
+                        ui.utility.set(state);
+                    }
+                },
+            );
+        })
+        .disabled(move || ui.pending.get()),
     )
     .child(action("Choose theme…", Variant::Secondary, move |_| {
         open(ui, "theme")

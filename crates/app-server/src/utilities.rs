@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[serde(from = "SavedPreferences")]
 struct Preferences {
     theme: String,
+    #[serde(skip_serializing_if = "enabled")]
+    notification_sound: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_project: Option<String>,
 }
@@ -15,6 +17,10 @@ struct SavedPreferences {
     last_project: Option<String>,
     // Retire appearance/palette modes while preserving the optional Project ID.
     palette: Option<String>,
+    notification_sound: Option<bool>,
+}
+fn enabled(value: &bool) -> bool {
+    *value
 }
 impl From<SavedPreferences> for Preferences {
     fn from(saved: SavedPreferences) -> Self {
@@ -22,6 +28,7 @@ impl From<SavedPreferences> for Preferences {
         Self {
             theme: canban_themes::resolve(&requested).id.into(),
             last_project: saved.last_project,
+            notification_sound: saved.notification_sound.unwrap_or(true),
         }
     }
 }
@@ -30,6 +37,7 @@ impl Default for Preferences {
         Self {
             theme: canban_themes::DEFAULT.into(),
             last_project: None,
+            notification_sound: true,
         }
     }
 }
@@ -113,9 +121,14 @@ impl AppServer {
             "utilities.state" => Ok(self.utilities.state()),
             "utilities.configure" => {
                 ensure!(
-                    p.get("theme").is_some() || p.get("last_project").is_some(),
-                    "theme or last_project required"
+                    p.get("theme").is_some()
+                        || p.get("last_project").is_some()
+                        || p.get("notification_sound").is_some(),
+                    "theme, last_project or notification_sound required"
                 );
+                if let Some(sound) = p.get("notification_sound") {
+                    ensure!(sound.is_boolean(), "notification_sound must be a boolean");
+                }
                 if let Some(theme) = p.get("theme") {
                     ensure!(
                         theme
@@ -135,6 +148,9 @@ impl AppServer {
                 }
                 let mut prefs = self.utilities.preferences.lock().unwrap();
                 let mut next = prefs.clone();
+                if let Some(sound) = p["notification_sound"].as_bool() {
+                    next.notification_sound = sound;
+                }
                 if let Some(theme) = p["theme"].as_str() {
                     next.theme = theme.into();
                 }
@@ -184,6 +200,28 @@ impl AppServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn notification_sound_is_local_persistent_and_independent_of_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+        app.call("utilities.configure", json!({"notification_sound":false}))
+            .unwrap();
+        app.call("utilities.configure", json!({"theme":"nord"}))
+            .unwrap();
+        assert!(
+            app.call("utilities.configure", json!({"notification_sound":"yes"}))
+                .is_err()
+        );
+        let reopened = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+        let state = reopened.call("utilities.state", json!({})).unwrap();
+        assert_eq!(state["preferences"]["notification_sound"], false);
+        assert_eq!(state["preferences"]["theme"], "nord");
+        reopened
+            .call("utilities.configure", json!({"notification_sound":true}))
+            .unwrap();
+        assert!(reopened.call("utilities.state",json!({})).unwrap()["preferences"]["notification_sound"].is_null());
+    }
     #[test]
     fn last_project_and_theme_are_independent_validated_preferences_across_restart() {
         let dir = tempfile::tempdir().unwrap();

@@ -105,13 +105,19 @@ fn list(ui: Ui) -> impl IntoElement {
             let selected = ui.overview_selection.get();
             let closed = ui.overview_closed.get();
             let mut content = view().gap_4();
-            if rows.is_empty() {
+            let mut unread = unread_updates(ui);
+            if rows.is_empty() && unread.is_none() {
                 return content.child(crate::components::activity::empty(
                     "No Agents here",
                     "Move a Card into an automated stage or @ an Agent on a Card.",
                 ));
             }
             for group in GROUPS {
+                if group == "Working"
+                    && let Some(section) = unread.take()
+                {
+                    content = content.child(section);
+                }
                 let members = rows.iter().filter(|r| r.group == group).collect::<Vec<_>>();
                 if members.is_empty() {
                     continue;
@@ -161,6 +167,11 @@ fn list(ui: Ui) -> impl IntoElement {
 }
 /// Reused by Gallery; uses production semantic tokens and NSH button semantics.
 pub fn agent_row(ui: Ui, row: OverviewRow, selected: bool) -> impl IntoElement {
+    let reminder_card = row.card.id.clone();
+    let unread = computed(move || {
+        ui.reminder_counts
+            .with(|all| all.get(&reminder_card).map(|c| c.unread).unwrap_or(0))
+    });
     let profile = row
         .request
         .as_ref()
@@ -227,7 +238,96 @@ pub fn agent_row(ui: Ui, row: OverviewRow, selected: bool) -> impl IntoElement {
             "Branch · {}",
             row.card.branch.as_deref().unwrap_or("Not created")
         )))
+        .child(when(
+            move || unread.get() > 0,
+            move || {
+                muted(move || {
+                    format!(
+                        "{} unread update{}",
+                        unread.get(),
+                        if unread.get() == 1 { "" } else { "s" }
+                    )
+                })
+            },
+        ))
         .on_press(move |_: &()| select(ui, row.clone()))
+}
+fn unread_updates(ui: Ui) -> Option<View> {
+    let counts = ui.reminder_counts.get();
+    let snapshot = ui.snapshot.get();
+    let items = ui.reminders.get();
+    let mut cards = snapshot
+        .cards
+        .iter()
+        .filter(|c| {
+            counts
+                .get(&c.id)
+                .is_some_and(|n| n.unread > 0 && n.pending == 0)
+        })
+        .collect::<Vec<_>>();
+    cards.sort_by_key(|c| {
+        std::cmp::Reverse(
+            items
+                .iter()
+                .filter(|i| i.card_id == c.id)
+                .map(|i| i.created_at)
+                .max()
+                .unwrap_or(0),
+        )
+    });
+    if cards.is_empty() {
+        return None;
+    }
+    let mut section = view().gap_2().child(status(
+        format!("Unread updates · {}", cards.len()),
+        Tone::Neutral,
+    ));
+    for card in cards {
+        let id = card.id.clone();
+        let n = counts[&id].total;
+        let project = snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == card.project_id)
+            .map(|p| p.name.as_str())
+            .unwrap_or("");
+        let message = items
+            .iter()
+            .filter(|i| i.card_id == id && i.unread)
+            .max_by_key(|i| i.sequence)
+            .map(|i| i.message.chars().take(180).collect::<String>())
+            .unwrap_or_default();
+        section = section.child(
+            nsh_base::button()
+                .w_full()
+                .items_start()
+                .p_3()
+                .gap_1()
+                .rounded(px(RADIUS))
+                .bg(SURFACE)
+                .hover(|s| s.bg(CARD_HOVER))
+                .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
+                .accessibility_label(format!(
+                    "Unread Card #{} {} · {project} · {n} updates",
+                    card.number, card.title
+                ))
+                .child(
+                    view()
+                        .flex_row()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            label(format!("{project} · #{} {}", card.number, card.title))
+                                .flex_1()
+                                .min_w(px(0.)),
+                        )
+                        .child(reminder_count(move || n, || false)),
+                )
+                .child(muted(message).truncate().min_w(px(0.)))
+                .on_press(move |_: &()| ui.open_card(id.clone())),
+        );
+    }
+    Some(section)
 }
 fn inspector(ui: Ui) -> impl IntoElement {
     view()

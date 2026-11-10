@@ -32,7 +32,7 @@ Archive
 Bottom utility bar: Usage / Caffeine / Theme / Shortcuts / Report issue / Settings
 ```
 
-The entry is always visible. Its highlight/count persists until the authoritative user actions are resolved; visiting the page is not resolution. Include rows needing task decisions, execution input, recovery and human Review in the Canban attention count. This differs deliberately from the reference code's blocked/failed-only activity count. A separate summary shows execution usage, queue and idle counts.
+The entry is always visible. Its badge now counts unique active Cards with unread Agent updates or unresolved actions, using [unified reminders](../reminders.md). Reading clears only unread information; authoritative action state persists until resolved. Visiting Overview is neither reading a reply nor approving a gate. The runtime groups and execution summary retain their action/Agent semantics.
 
 Changing Project does not scope Overview. Background updates do not steal focus. No macOS notification integration is required.
 
@@ -125,7 +125,7 @@ Pinned/Snoozed/Settled shelves, notification mutes, presets and forgetting provi
 Use Gallery fixtures and an isolated real-Herdr application to check:
 
 1. Multiple Projects and profiles appear in one list; current Project selection never hides others.
-2. Global attention count remains distinct from running/idle/closed counts and counts a multi-reason row once.
+2. The global reminder badge counts Cards once across unread and pending items, independently of running/idle/closed Agent row counts.
 3. Runtime blocked, Card blocked and Review gates group correctly; Herdr done/unknown does not fabricate review readiness/idle.
 4. Queued requests do not start from row selection, and Terminal attach does not create a duplicate Agent.
 5. Closed conversations resume their exact provider history; unavailable/missing history remains explicit.

@@ -7,18 +7,18 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct Summary {
     pub id: String,
     pub name: String,
-    /// Unique active Cards needing input, recovery or a human Review decision.
+    /// Unique active Cards with unread updates or unresolved user actions.
     pub attention: usize,
+    pub pending: bool,
 }
 pub fn projects(snapshot: &Snapshot, recent: &[String]) -> Vec<Summary> {
     let mut cards = BTreeMap::<String, BTreeSet<String>>::new();
-    for row in canban_notifications::overview(snapshot) {
-        if row.card.active() && row.actionable() {
-            cards
-                .entry(row.card.project_id)
-                .or_default()
-                .insert(row.card.id);
-        }
+    let reminders = canban_notifications::reminders(snapshot);
+    for item in &reminders {
+        cards
+            .entry(item.project_id.clone())
+            .or_default()
+            .insert(item.card_id.clone());
     }
     let mut result = snapshot
         .projects
@@ -27,6 +27,7 @@ pub fn projects(snapshot: &Snapshot, recent: &[String]) -> Vec<Summary> {
             id: p.id.clone(),
             name: p.name.clone(),
             attention: cards.get(&p.id).map(BTreeSet::len).unwrap_or(0),
+            pending: reminders.iter().any(|i| i.project_id == p.id && i.pending),
         })
         .collect::<Vec<_>>();
     let visit = |id: &str| {

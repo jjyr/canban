@@ -105,6 +105,20 @@ pub fn screen(ui: Ui) -> impl IntoElement {
 /// Board owns Project selection/creation; the rail only navigates surfaces.
 fn project_picker(ui: Ui) -> impl IntoElement {
     use canban_ui_kit::tokens::*;
+    let updates = computed(move || {
+        let project = ui.project.get();
+        let items = ui.reminders.get();
+        let cards = items
+            .iter()
+            .filter(|i| i.project_id == project)
+            .map(|i| &i.card_id)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        (
+            cards,
+            items.iter().any(|i| i.project_id == project && i.pending),
+        )
+    });
     view().flex_1().min_w(px(0.)).child(
         nsh_base::button()
             .min_h(px(40.))
@@ -143,6 +157,10 @@ fn project_picker(ui: Ui) -> impl IntoElement {
                 .truncate()
                 .min_w(px(0.)),
             )
+            .child(canban_ui_kit::reminder_count(
+                move || updates.get().0,
+                move || updates.get().1,
+            ))
             .child(icon(Icon::ChevronDown))
             .on_press(move |_: &()| ui.show_search(true)),
     )

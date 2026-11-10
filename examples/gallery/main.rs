@@ -154,6 +154,98 @@ pub fn Gallery() -> impl IntoElement {
     ui.page.set("card".into());
     ui.profiles.set(canban_types::Config::default().profiles);
     ui.machines.set(json!({"machines":[{"id":"gallery-remote","name":"Build machine","state":"connected","target":"ssh-host"},{"id":"gallery-offline","name":"Offline machine","state":"unreachable","target":"another-host"}]}));
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("reminders") {
+        let mut snapshot = fixtures::workspace();
+        snapshot.cards[2].body = (0..30)
+            .map(|i| {
+                format!(
+                    "### Context {}\n\nLong context keeps the unread reply below the fold.\n\n",
+                    i + 1
+                )
+            })
+            .collect();
+        let mut project = snapshot.projects[0].clone();
+        project.id = "gallery-other".into();
+        project.name = "Another Project".into();
+        snapshot.projects.push(project);
+        let mut card = snapshot.cards[2].clone();
+        card.id = "card-other".into();
+        card.project_id = "gallery-other".into();
+        card.body = "Another Project reply".into();
+        snapshot.cards.push(card);
+        for (id, project) in [
+            ("card-3", "gallery-project"),
+            ("card-other", "gallery-other"),
+        ] {
+            let mut event = fixtures::timeline();
+            event.id = format!("unread-{id}");
+            event.kind = "comment.replied".into();
+            event.actor = "agent:developer".into();
+            event.card_id = id.into();
+            event.project_id = project.into();
+            event.sequence = 2;
+            event.message = "**Agent reply:** ready for you to read.".into();
+            snapshot.events.push(event);
+        }
+        ui.snapshot.set(snapshot);
+        ui.page.set("board".into());
+        ui.card.set(String::new());
+        canban_ui::reminders::init(ui);
+        let append = move |card: &str, count: usize| {
+            ui.snapshot.update(|s| {
+                for _ in 0..count {
+                    let seq = s
+                        .events
+                        .iter()
+                        .filter(|e| e.card_id == card)
+                        .map(|e| e.sequence)
+                        .max()
+                        .unwrap_or(0)
+                        + 1;
+                    let mut e = fixtures::timeline();
+                    e.id = format!("reply-{card}-{seq}");
+                    e.card_id = card.into();
+                    e.sequence = seq;
+                    e.actor = "agent:developer".into();
+                    e.kind = "comment.replied".into();
+                    e.message = format!("Agent reply **{seq}**: notification acceptance.");
+                    s.events.push(e);
+                }
+            });
+        };
+        return view()
+            .flex_1()
+            .min_h(px(0.))
+            .child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .p_2()
+                    .gap_2()
+                    .child(action("Reply to #1", Variant::Quiet, move |_| {
+                        append("card-1", 1)
+                    }))
+                    .child(action("Burst replies to #3", Variant::Quiet, move |_| {
+                        append("card-3", 2)
+                    }))
+                    .child(action("Reply in 3s", Variant::Quiet, move |_| {
+                        set_timeout(std::time::Duration::from_secs(3), move || {
+                            append("card-1", 1)
+                        });
+                    }))
+                    .child(action("Board", Variant::Quiet, move |_| {
+                        ui.navigate("board")
+                    }))
+                    .child(action("Overview", Variant::Quiet, move |_| {
+                        ui.navigate("overview")
+                    }))
+                    .child(action("Focus window", Variant::Quiet, move |_| {
+                        nsh_core::element::desktop::order_front()
+                    })),
+            )
+            .child(canban_ui::frame::screen(ui))
+            .into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("project-activity") {
         nsh_core::element::desktop::set_title_bar(
             nsh_core::desktop::TitleBarStyle::Hidden,

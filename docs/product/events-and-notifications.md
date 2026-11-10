@@ -43,7 +43,7 @@ The completion of a mention-triggered request and a stage request use the same e
 
 ## Needs attention and internal notification
 
-The user now requests a global highlighted [Agent Overview](overview.md), following the Herdr UI reference, with all running/waiting/queued/idle/closed conversations across Projects. [Attention handling](needs-attention.md) defines distinct task-decision/runtime-wait labels, context/navigation and independent resolution within that Overview. The existing Project-scoped unread counter is not that workspace. Native macOS notifications remain deferred.
+The global [Agent Overview](overview.md) contains all running/waiting/queued/idle/closed conversations across Projects. [Attention handling](needs-attention.md) defines distinct task-decision/runtime-wait labels, context/navigation and independent resolution. [Unified reminders](../reminders.md) now combines pending actions with durable unread Agent updates for Card/Project/navigation counts and local sound delivery. Reading does not resolve an action. Native macOS notifications remain deferred.
 
 
 When an agent reports blockage or needs a human response:

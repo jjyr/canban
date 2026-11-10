@@ -142,6 +142,12 @@ impl AppServer {
             .unwrap()
             .clone();
         let filtered = Snapshot {
+            card_reads: snapshot
+                .card_reads
+                .iter()
+                .filter(|r| r.card_id == card_id)
+                .cloned()
+                .collect(),
             github: Default::default(),
             github_issues: snapshot
                 .github_issues

@@ -22,6 +22,7 @@ pub mod utilities;
 pub use rail::sidebar;
 pub use screens::screen;
 pub mod quick_open;
+pub mod reminders;
 mod sessions;
 pub mod terminals;
 pub mod workspace;
@@ -36,6 +37,7 @@ pub fn Canban() -> impl IntoElement {
     canban_ui_kit::tokens::install_theme();
     commands::bindings(ui);
     utilities::init(ui);
+    reminders::init(ui);
     projects::selection::remember(ui);
     terminals::bindings(ui);
     effect(move || {
@@ -55,7 +57,19 @@ pub fn Canban() -> impl IntoElement {
     let events = stored(crate::APP.get().unwrap().subscribe());
     let dirty = signal(false);
     set_interval(std::time::Duration::from_millis(250), move || {
-        if events.with(|rx| rx.try_iter().count() > 0) {
+        let changed = events.with(|rx| rx.try_iter().collect::<Vec<_>>());
+        if changed.iter().any(|e| {
+            matches!(
+                e,
+                canban_types::AppEvent::Changed {
+                    topic: "resync",
+                    ..
+                }
+            )
+        }) {
+            ui.notification_resync.replace(true);
+        }
+        if !changed.is_empty() {
             dirty.set(true);
         }
         if dirty.get_untracked() && !ui.refreshing.get_untracked() {

@@ -57,6 +57,7 @@ The latest explicit user decision takes precedence over earlier discussion. Befo
 | [Herdr UI layout and product references](research/herdr-ui-product-and-layout.md) | Source-backed recommendations for workspace chrome, navigation, Quick Open, contextual feedback and Review |
 | [Global Agent Overview](product/overview.md) | Herdr UI reference, all-Agent grouped overview, attention highlight, queued/idle/closed states and context inspector |
 | [Attention handling](product/needs-attention.md) | Task/runtime naming, contextual handling inside Overview, Card/Terminal navigation and resolution rules |
+| [Unified Card reminders](reminders.md) | Per-Card unread/pending items, Project counts, durable visible-read positions and local sound delivery |
 | [Events and notifications](product/events-and-notifications.md) | Rust enum/channel/topic direction, needs-attention state, internal notifications; detailed architecture deferred |
 
 Current default template: Backlog / Develop / Review. Only Backlog is mandatory. Archive retains completed work outside the active Board. Plan/Process are earlier generic planning/execution terms, not additional required columns. Earlier Space-based organization and Ready/In Progress/Done column recommendations have been superseded.

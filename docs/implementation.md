@@ -4,6 +4,12 @@ Current runtime update (2026-11-09): [Event-driven runtime observation](runtime-
 
 # MVP implementation and development
 
+[Unified Card reminders](reminders.md) (2026-11-10) defines the current unread /
+pending counts, persistent visible-read positions, Overview updates and local
+notification sounds. It uses SQLite schema 8 and desktop API version 6. Upgrade
+the running AppServer together with the UI; `mise run run` performs the normal
+development handoff. Existing history is baselined quietly during migration.
+
 [Compact navigation and Quick Open](quick-open-and-navigation.md) covers the implemented icon rail, Command+O fuzzy destination picker and native interaction checks.
 
 [Agent Overview and lifecycle](agent-overview-and-lifecycle.md) documents the implemented status-aware execution budget, configurable resumable idle exit and global attention/Agent workspace.

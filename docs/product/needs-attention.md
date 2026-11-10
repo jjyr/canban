@@ -4,11 +4,11 @@ Status: implemented inside the global [Overview](overview.md); current contract 
 
 ## Current implementation
 
-Canban blocked/failed reports persist task attention and a human gate. Herdr root blocked states persist independent execution-wait episodes and deduplicated Notices/Timeline events. Overview combines both sources with review/recovery context across Projects; its badge counts actionable rows, independently of unread notices and retained terminal count. Runtime recovery never approves a task gate. Status-aware capacity and resumable idle closure use the same original Core/terminal bindings.
+Canban blocked/failed reports persist task attention and a human gate. Herdr root blocked states persist independent execution-wait episodes and deduplicated Notices/Timeline events. Overview combines both sources with review/recovery context across Projects. Its navigation badge now counts Cards with pending actions **or unread Agent updates**, using [unified reminders](../reminders.md); runtime groups still describe actual execution/action state. Runtime recovery and reading never approve a task gate. Status-aware capacity and resumable idle closure use the same original Core/terminal bindings.
 
 ## Terminology
 
-The UI labels the highlighted Overview group **Needs you**; its projection/API group key remains `Needs attention`. Overview displays groups directly, without filter buttons. It contains current user actions rather than every application event or an unread-message feed. Overview also includes Ready for review, Working, Queued, Idle and Closed.
+The UI labels the highlighted Overview group **Needs you**; its projection/API group key remains `Needs attention`. Overview displays groups directly, without filter buttons. It includes current user actions and a separate **Unread updates** section, followed by actual runtime groups. Reading and action resolution remain independent. Overview also includes Ready for review, Working, Queued, Idle and Closed.
 
 | User-facing name | Meaning | Source | Primary action |
 | --- | --- | --- | --- |
@@ -23,7 +23,7 @@ Task and execution waits remain independent. User input can resume the current A
 
 ## Global entry, list and context
 
-The compact rail places **Overview** immediately below **Board**, with a persistent count of actionable rows across Projects (including human Review). Project selection/creation lives in Board rather than a rail Project list. Overview replaces the earlier Agent activity/separate Needs attention destinations. Visiting it does not approve a gate. Board remains the normal startup/workflow destination and displays all active Cards in their stages without the retired attention/execution filter toolbar. Card attention actions open the actual actionable Overview row.
+The compact rail places **Overview** immediately below **Board**, with a count of Cards containing unread or pending reminders across Projects. Project selection/creation lives in Board rather than a rail Project list. Overview replaces the earlier Agent activity/separate Needs attention destinations. Visiting it does not approve a gate or mark replies read. Board remains the normal startup/workflow destination and displays all active Cards in their stages without the retired attention/execution filter toolbar. Card attention actions open the actual actionable Overview row.
 
 Use the grouped full-Agent list and collapsible context inspector in [Overview](overview.md). The attention group leads, followed by actual Review requests, Working, Queued and Idle; Closed is collapsed. No selection opens/resumes an Agent until the user invokes the appropriate action. Narrow context has a clear Back to Overview control, with selection/scroll retained.
 

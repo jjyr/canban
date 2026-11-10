@@ -61,6 +61,7 @@ record!(Note, "notes", project);
 record!(NoteRevision, "note_revisions", project);
 record!(NoteEvent, "note_events", project);
 record!(Notice, "notifications", card);
+record!(CardRead, "card_reads", card);
 record!(Artifact, "artifacts", card);
 record!(Report, "reports", card);
 record!(Conversation, "conversations", card);
@@ -160,7 +161,7 @@ impl Store {
         anyhow::ensure!(mode == "wal", "SQLite WAL could not be enabled");
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 7,
+            version <= 8,
             "Database schema is newer than this application"
         );
         if version == 0 {
@@ -245,6 +246,29 @@ impl Store {
         if version < 7 {
             conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE github_issues (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id), card_id TEXT, state TEXT NOT NULL, number INTEGER NOT NULL,data TEXT NOT NULL); CREATE UNIQUE INDEX github_card_source ON cards(project_id,json_extract(data,'$.content.source.repository_id'),json_extract(data,'$.content.source.issue_id')) WHERE json_extract(data,'$.content.kind')='github_issue'; PRAGMA user_version=7; COMMIT;")?;
         }
+        if version < 8 {
+            conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE card_reads (id TEXT PRIMARY KEY,project_id TEXT REFERENCES projects(id),card_id TEXT REFERENCES cards(id),state TEXT NOT NULL,number INTEGER NOT NULL,data TEXT NOT NULL); PRAGMA user_version=8;")?;
+            // Existing history is a quiet baseline; upgrading must not turn every
+            // historical Agent result into an unread notification.
+            let db = Db { conn: &conn };
+            let events = db.list::<Event>()?;
+            let mut latest = std::collections::BTreeMap::<&str, u64>::new();
+            for e in &events {
+                latest
+                    .entry(&e.card_id)
+                    .and_modify(|seq| *seq = (*seq).max(e.sequence))
+                    .or_insert(e.sequence);
+            }
+            for c in db.list::<Card>()? {
+                db.save(&CardRead {
+                    id: c.id.clone(),
+                    project_id: c.project_id,
+                    card_id: c.id.clone(),
+                    sequence: latest.get(c.id.as_str()).copied().unwrap_or(0),
+                })?;
+            }
+            conn.execute_batch("COMMIT;")?;
+        }
         Ok(Self {
             conn,
             home: home.to_owned(),
@@ -321,6 +345,7 @@ impl Db<'_> {
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
         Ok(Snapshot {
+            card_reads: self.list()?,
             github: Default::default(),
             github_issues: self.list()?,
             terminals: self.list()?,

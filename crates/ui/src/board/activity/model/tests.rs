@@ -120,12 +120,48 @@ fn every_project_is_switchable_and_visits_win_over_events_or_attention() {
 }
 
 #[test]
+fn project_badges_count_cards_once_across_unread_replies_and_pending_actions() {
+    let mut s = fixture();
+    for sequence in [100, 101] {
+        event(&mut s, "quiet", "comment.replied", sequence);
+        s.events.last_mut().unwrap().actor = "agent:developer".into();
+    }
+    s.cards
+        .iter_mut()
+        .find(|c| c.id == "quiet")
+        .unwrap()
+        .attention = Some("Review this outcome".into());
+    let quiet = |s: &Snapshot| {
+        projects(s, &[])
+            .into_iter()
+            .find(|p| p.id == "quiet")
+            .unwrap()
+    };
+    assert_eq!(quiet(&s).attention, 1);
+    assert!(quiet(&s).pending);
+    s.card_reads.push(CardRead {
+        id: "quiet".into(),
+        card_id: "quiet".into(),
+        project_id: "quiet".into(),
+        sequence: 101,
+    });
+    assert_eq!(quiet(&s).attention, 1); // Reading cannot settle the action.
+    s.cards
+        .iter_mut()
+        .find(|c| c.id == "quiet")
+        .unwrap()
+        .attention = None;
+    assert_eq!(quiet(&s).attention, 0);
+}
+
+#[test]
 fn responsive_capacity_has_no_three_project_limit_and_badges_do_not_move_targets() {
     let mut rows = (0..12)
         .map(|i| Summary {
             id: i.to_string(),
             name: format!("App {i}"),
             attention: 0,
+            pending: false,
         })
         .collect::<Vec<_>>();
     let before = visible_count(&rows, 1100.);

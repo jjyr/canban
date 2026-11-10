@@ -123,7 +123,7 @@ pub fn icon_action(
                 .accessibility_label(move || {
                     let n = count.get();
                     Some(if n > 0 {
-                        format!("{title} · {n} need you").into()
+                        format!("{title} · {n} updates").into()
                     } else {
                         title.clone().into()
                     })

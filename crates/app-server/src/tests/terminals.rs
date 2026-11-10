@@ -240,7 +240,7 @@ fn upgrading_conversations_allocates_stable_numbers_without_runtime_changes() {
     app.call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
         .unwrap();
     let before = app.snapshot().unwrap();
-    app.store.lock().unwrap().db().conn.execute_batch("DROP TABLE terminals; DELETE FROM counters WHERE id='terminal-number'; DROP TABLE github_issues; DROP INDEX github_card_source; PRAGMA user_version=3;").unwrap();
+    app.store.lock().unwrap().db().conn.execute_batch("DROP TABLE terminals; DELETE FROM counters WHERE id='terminal-number'; DROP TABLE card_reads; DROP TABLE github_issues; DROP INDEX github_card_source; PRAGMA user_version=3;").unwrap();
     drop(app);
     let upgraded = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
     let s = upgraded.snapshot().unwrap();
@@ -378,7 +378,7 @@ fn v4_terminal_migration_keeps_identity_and_runtime_but_drops_shell_ownership() 
         .db()
         .conn
         .execute_batch(
-            "DROP TABLE github_issues; DROP INDEX github_card_source; PRAGMA user_version=4;",
+            "DROP TABLE card_reads; DROP TABLE github_issues; DROP INDEX github_card_source; PRAGMA user_version=4;",
         )
         .unwrap();
     drop(store);
@@ -472,7 +472,7 @@ fn manual_labels_have_their_own_durable_sequence_and_v5_migration_keeps_runtime_
     {
         let store = app.store.lock().unwrap();
         // Reproduce the exact v5 representation: only the new display sequence is absent.
-        store.db().conn.execute_batch("UPDATE terminals SET data=json_remove(data,'$.manual_number'); DELETE FROM counters WHERE id='terminal-manual-number'; DROP TABLE github_issues; DROP INDEX github_card_source; PRAGMA user_version=5;").unwrap();
+        store.db().conn.execute_batch("UPDATE terminals SET data=json_remove(data,'$.manual_number'); DELETE FROM counters WHERE id='terminal-manual-number'; DROP TABLE card_reads; DROP TABLE github_issues; DROP INDEX github_card_source; PRAGMA user_version=5;").unwrap();
     }
     drop(app);
     let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();

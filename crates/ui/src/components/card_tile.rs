@@ -1,6 +1,11 @@
 use super::*;
 /// Card content/surface. Board owns pointer capture, drag geometry and activation.
 pub fn card_tile(ui: Ui, card: Card) -> View {
+    let reminder_id = card.id.clone();
+    let count = computed(move || {
+        ui.reminder_counts
+            .with(|all| all.get(&reminder_id).copied().unwrap_or_default())
+    });
     let selected_id = card.id.clone();
     let snapshot = ui.snapshot.get_untracked();
     let mut tile = panel()
@@ -41,10 +46,20 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
                     muted(format!("#{}", card.number)).into_element()
                 })
                 .child(
-                    icon(Icon::Grip)
-                        .w(px(14.))
-                        .h(px(14.))
-                        .pointer_events(PointerEvents::None),
+                    view()
+                        .flex_row()
+                        .gap_2()
+                        .items_center()
+                        .child(reminder_count(
+                            move || count.get().total,
+                            move || count.get().pending > 0,
+                        ))
+                        .child(
+                            icon(Icon::Grip)
+                                .w(px(14.))
+                                .h(px(14.))
+                                .pointer_events(PointerEvents::None),
+                        ),
                 ),
         )
         .child(

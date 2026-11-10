@@ -13,8 +13,10 @@ pub fn entries(events: &[Event]) -> Vec<(Event, bool)> {
                     other.kind == "comment.replied"
                         && other.request_id == event.request_id
                         && event.request_id.is_some()
-                        && event.data["path"].as_str().is_some()
-                        && other.data["path"] == event.data["path"]
+                        && ((event.data["report_id"].as_str().is_some()
+                            && other.data["report_id"] == event.data["report_id"])
+                            || (event.data["path"].as_str().is_some()
+                                && other.data["path"] == event.data["path"]))
                 });
             let narrative = matches!(event.kind.as_str(), "comment.created" | "comment.replied")
                 || event.kind == "execution.reported" && !echoed_report;
@@ -22,7 +24,7 @@ pub fn entries(events: &[Event]) -> Vec<(Event, bool)> {
         })
         .collect()
 }
-pub fn render(ui: Ui) -> impl IntoElement {
+pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
     let events = computed(move || {
         let card = ui.card_id();
         ui.snapshot.with(|s| {
@@ -41,7 +43,12 @@ pub fn render(ui: Ui) -> impl IntoElement {
             dynamic(move || {
                 let narrative = narrative.get();
                 let event = item.get_untracked().0;
-                crate::components::timeline_item::render(ui, event, narrative)
+                let sequence = event.sequence;
+                view()
+                    .on_layout(move |b: &Bounds<Points>| reading.reader.row(ui, sequence, *b))
+                    .child(crate::components::timeline_item::render(
+                        ui, event, narrative,
+                    ))
             })
         },
     )
@@ -50,6 +57,31 @@ pub fn render(ui: Ui) -> impl IntoElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_report_identity_hides_the_body_echo_without_a_file() {
+        let report = Event {
+            id: "report".into(),
+            sequence: 1,
+            project_id: "p".into(),
+            card_id: "c".into(),
+            kind: "execution.reported".into(),
+            actor: "agent:developer".into(),
+            message: "completed: Answer".into(),
+            request_id: Some("r".into()),
+            data: serde_json::json!({"report_id":"result","path":null}),
+            created_at: 1,
+        };
+        let reply = Event {
+            id: "reply".into(),
+            sequence: 2,
+            kind: "comment.replied".into(),
+            message: "Answer".into(),
+            ..report.clone()
+        };
+        let rows = entries(&[report, reply]);
+        assert!(!rows[0].1);
+        assert!(rows[1].1);
+    }
     #[test]
     fn reports_without_a_resource_path_are_never_hidden_as_reply_echoes() {
         let event = Event {

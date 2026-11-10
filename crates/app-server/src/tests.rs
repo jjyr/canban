@@ -1049,7 +1049,7 @@ fn upgrading_existing_notes_retains_current_revision_without_inventing_history()
     )
     .unwrap();
     let db = rusqlite::Connection::open(d.path().join("home/canban.sqlite")).unwrap();
-    db.execute_batch("DROP TABLE note_events; DROP TABLE note_revisions; DROP TABLE terminals; DROP TABLE github_issues; DROP INDEX github_card_source; PRAGMA user_version=2;")
+    db.execute_batch("DROP TABLE note_events; DROP TABLE note_revisions; DROP TABLE terminals; DROP TABLE card_reads; DROP TABLE github_issues; DROP INDEX github_card_source; PRAGMA user_version=2;")
         .unwrap();
     drop(db);
     drop(app);
@@ -1476,3 +1476,102 @@ fn continued_assignment_rejects_new_stale_reports_but_preserves_completion_recei
 
 #[path = "tests/board.rs"]
 mod board_cases;
+
+#[test]
+fn read_positions_are_monotonic_durable_and_never_approve_a_gate() {
+    let (_dir, app, _, card) = setup();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut c: Card = db.get(&card.id)?;
+            c.human_gate = Some(HumanGate {
+                reason: "Review required".into(),
+                request_id: None,
+                next_stage: None,
+            });
+            db.save(&c)?;
+            for n in 0..3 {
+                db.append(canban_timeline::event(
+                    &c.project_id,
+                    &c.id,
+                    "comment.replied",
+                    "agent:developer",
+                    &format!("Reply {n}"),
+                    None,
+                    json!({}),
+                ))?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let before = app.snapshot().unwrap();
+    let last = before.events.iter().map(|e| e.sequence).max().unwrap();
+    app.call(
+        "notifications.read",
+        json!({"card_id":card.id,"sequence":last-1}),
+    )
+    .unwrap();
+    app.call(
+        "notifications.read",
+        json!({"card_id":card.id,"sequence":1}),
+    )
+    .unwrap();
+    assert_eq!(
+        canban_notifications::read_sequence(&app.snapshot().unwrap(), &card.id),
+        last - 1
+    );
+    app.call(
+        "notifications.read",
+        json!({"card_id":card.id,"sequence":u64::MAX}),
+    )
+    .unwrap();
+    let after = app.snapshot().unwrap();
+    assert_eq!(canban_notifications::read_sequence(&after, &card.id), last);
+    assert_eq!(before.cards, after.cards);
+    assert_eq!(before.events, after.events);
+    assert_eq!(before.requests, after.requests);
+    assert!(
+        app.call(
+            "notifications.read",
+            json!({"card_id":card.id,"sequence":last,"execution":{}})
+        )
+        .is_err()
+    );
+    let reopened = AppServer::open(app.home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    assert_eq!(after.card_reads, reopened.snapshot().unwrap().card_reads);
+}
+
+#[test]
+fn reminder_upgrade_baselines_existing_history_without_changing_cards() {
+    let (_dir, app, _, card) = setup();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.append(canban_timeline::event(
+                &card.project_id,
+                &card.id,
+                "comment.replied",
+                "agent:developer",
+                "Historical reply",
+                None,
+                json!({}),
+            ))?;
+            Ok(())
+        })
+        .unwrap();
+    let before = app.snapshot().unwrap();
+    let home = app.home.clone();
+    drop(app);
+    let conn = rusqlite::Connection::open(home.join("canban.sqlite")).unwrap();
+    conn.execute_batch("DROP TABLE card_reads; PRAGMA user_version=7;")
+        .unwrap();
+    drop(conn);
+    let upgraded = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+    let after = upgraded.snapshot().unwrap();
+    assert_eq!(before.cards, after.cards);
+    assert_eq!(before.events, after.events);
+    assert!(canban_notifications::reminders(&after).is_empty());
+    assert!(canban_notifications::read_sequence(&after, &card.id) > 0);
+}

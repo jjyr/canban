@@ -155,6 +155,12 @@ Task Edit's structural owner depends on a computed editing/expansion projection 
 
 ## Markdown conversation components (2026-11-10)
 
+`ui-kit::reminder_count` renders one compact numeric badge with a supplied
+pending-action tone; zero is absent. `canban-notifications` owns Card reminder
+identity/count projections. Board tiles, Project switching and Overview share
+those counts, while the Card reader owns event-triggered visible-read reporting
+and a persisted-unread jump affordance. See [unified reminders](reminders.md).
+
 Shared motion now lives in `ui-kit/src/motion.rs`, with a retained native
 `reveal_split` in `split.rs`. `ui/workspace.rs` keeps Board mounted across Card
 open/close and scopes the outgoing Card identity through animation completion.

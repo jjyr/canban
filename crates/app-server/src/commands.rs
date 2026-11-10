@@ -10,6 +10,10 @@ impl AppServer {
         }
         let config = self.config();
         match method {
+            "notifications.read" => self.read_card(p),
+            "notifications.list" => Ok(serde_json::to_value(canban_notifications::reminders(
+                &self.snapshot()?,
+            ))?),
             "app.shutdown" => {
                 self.stop.store(true, Ordering::SeqCst);
                 self.wake_runtime();

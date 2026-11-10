@@ -26,6 +26,7 @@ pub struct Ui {
     pub comment_submit: Signal<u64>,
     pub utility: Signal<Value>,
     pub utility_popup: Signal<String>,
+    pub native_modal: Signal<bool>,
     pub utility_query: Signal<String>,
     pub theme_preview: Signal<Option<String>>,
     pub utility_loading: Signal<bool>,
@@ -52,6 +53,10 @@ pub struct Ui {
     pub search_query: Signal<String>,
     pub recent_destinations: Stored<Vec<String>>,
     pub snapshot: Signal<Snapshot>,
+    pub reminders: Memo<Vec<canban_notifications::Reminder>>,
+    pub reminder_counts: Memo<BTreeMap<String, canban_notifications::ReminderCount>>,
+    pub notification_delivery: Stored<canban_notifications::DeliveryTracker>,
+    pub notification_resync: Stored<bool>,
     pub profiles: Signal<Vec<Profile>>,
     pub machines: Signal<Value>,
     pub machines_loading: Signal<bool>,
@@ -126,6 +131,9 @@ impl Ui {
         self.page.set(page.into());
     }
     pub fn new() -> Self {
+        let snapshot = signal(Snapshot::default());
+        let reminders = computed(move || canban_notifications::reminders(&snapshot.get()));
+        let reminder_counts = computed(move || canban_notifications::counts(&reminders.get()));
         Self {
             owner: Owner::current(),
             board_move: stored(None),
@@ -134,6 +142,7 @@ impl Ui {
             comment_submit: signal(0),
             utility: signal(json!({"preferences":{"theme":"canban"},"awake":false})),
             utility_popup: signal(String::new()),
+            native_modal: signal(false),
             utility_query: signal(String::new()),
             theme_preview: signal(None),
             utility_loading: signal(false),
@@ -157,7 +166,11 @@ impl Ui {
             terminal_inactive: signal(false),
             terminal_folds: signal(BTreeSet::new()),
             terminal_width: signal(260.),
-            snapshot: signal(Snapshot::default()),
+            snapshot,
+            reminders,
+            reminder_counts,
+            notification_delivery: stored(Default::default()),
+            notification_resync: stored(true),
             quick_open: signal(false),
             project_picker: signal(false),
             search_query: signal(String::new()),
@@ -365,6 +378,10 @@ pub fn refresh(ui: Ui) {
         }
         match result {
             Ok(Ok((snapshot, profiles, max_agents, idle_minutes, saved_project))) => {
+                if ui.notification_resync.replace(false) {
+                    ui.notification_delivery
+                        .with(|t| t.baseline(&canban_notifications::reminders(&snapshot)));
+                }
                 ui.profiles.set(profiles);
                 ui.max_agents.set(max_agents);
                 ui.idle_minutes.set(idle_minutes);

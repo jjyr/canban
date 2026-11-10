@@ -450,6 +450,7 @@ version = "0.1.0"
 dependencies = [
  "canban-types",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -521,6 +522,7 @@ name = "canban-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "canban-app-server",
  "canban-notifications",
  "canban-scheduler",

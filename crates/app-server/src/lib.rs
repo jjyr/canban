@@ -16,7 +16,7 @@ use std::{
 };
 
 /// Increment when desktop clients need operations unavailable in older services.
-pub const API_VERSION: u32 = 5;
+pub const API_VERSION: u32 = 6;
 
 pub struct AppServer {
     utilities: utilities::Utilities,
@@ -517,6 +517,7 @@ mod lifecycle;
 mod notes;
 mod observation;
 mod overview;
+mod reminders;
 mod reports;
 mod resources;
 mod runtime;

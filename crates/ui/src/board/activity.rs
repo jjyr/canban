@@ -117,7 +117,7 @@ fn chip(ui: Ui, row: ReadSignal<Summary>) -> impl IntoElement {
                         format!("Switch Project · {}", row.name)
                     } else {
                         format!(
-                            "Switch Project · {} · Needs you: {}",
+                            "Switch Project · {} · Cards with updates: {}",
                             row.name, row.attention
                         )
                     }
@@ -137,7 +137,10 @@ fn chip(ui: Ui, row: ReadSignal<Summary>) -> impl IntoElement {
                     .w(px(22.))
                     .flex_shrink_0()
                     .items_center()
-                    .child(attention_count(move || row.get().attention)),
+                    .child(reminder_count(
+                        move || row.get().attention,
+                        move || row.get().pending,
+                    )),
             )
             .on_press(move |_: &()| quick_open::switch_project(ui, &row.get_untracked().id)),
     )

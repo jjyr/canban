@@ -33,6 +33,10 @@ run = ".local/CanbanGallery.app/Contents/MacOS/gallery"
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance-dev.py"
 
+[tasks.acceptance-notifications]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-notifications.py"
+
 [tasks.acceptance]
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance.py"

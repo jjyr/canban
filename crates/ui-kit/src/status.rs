@@ -11,6 +11,13 @@ pub enum Tone {
 }
 /// Compact numeric attention badge, with no zero/empty state label.
 pub fn attention_count(count: impl Fn() -> usize + Copy + 'static) -> impl IntoElement {
+    reminder_count(count, || true)
+}
+/// One count with urgency supplied by its owner; no icon or empty-state label.
+pub fn reminder_count(
+    count: impl Fn() -> usize + Copy + 'static,
+    pending: impl Fn() -> bool + Copy + 'static,
+) -> impl IntoElement {
     when(
         move || count() > 0,
         move || {
@@ -19,7 +26,13 @@ pub fn attention_count(count: impl Fn() -> usize + Copy + 'static) -> impl IntoE
                 .h(px(18.))
                 .px_1()
                 .rounded(px(6.))
-                .bg(ATTENTION_SURFACE)
+                .bg(move || {
+                    if pending() {
+                        ATTENTION_SURFACE.resolve()
+                    } else {
+                        INSET.resolve()
+                    }
+                })
                 .items_center()
                 .justify_center()
                 .child(
@@ -32,7 +45,13 @@ pub fn attention_count(count: impl Fn() -> usize + Copy + 'static) -> impl IntoE
                     })
                     .text_size(px(10.))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(ATTENTION),
+                    .text_color(move || {
+                        if pending() {
+                            ATTENTION.resolve()
+                        } else {
+                            MUTED.resolve()
+                        }
+                    }),
                 )
         },
     )
