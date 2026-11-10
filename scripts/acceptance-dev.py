@@ -114,7 +114,7 @@ try:
     worker.join(timeout=5)
     assert not worker.is_alive() and not legacy_error
     upgraded = ready()
-    assert upgraded['api_version'] == 4
+    assert upgraded['api_version'] == 5
     assert call('utilities.state')['preferences']['theme'] == 'dracula'
     assert hc('get', binding['terminal'], '--json')['pid'] == before['pid']
     assert run_dev({'CANBAN_ENDPOINT': str(home / 'app.sock')}, check=False).returncode != 0

@@ -1,16 +1,19 @@
 //! Desktop preferences, host power assertion and public subscription readings.
 use super::*;
 use serde::{Deserialize, Serialize};
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(from = "SavedPreferences")]
 struct Preferences {
     theme: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_project: Option<String>,
 }
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct SavedPreferences {
     theme: Option<String>,
-    // Accept the previous schema on disk, but persist only the named theme.
+    last_project: Option<String>,
+    // Retire appearance/palette modes while preserving the optional Project ID.
     palette: Option<String>,
 }
 impl From<SavedPreferences> for Preferences {
@@ -18,6 +21,7 @@ impl From<SavedPreferences> for Preferences {
         let requested = saved.theme.or(saved.palette).unwrap_or_default();
         Self {
             theme: canban_themes::resolve(&requested).id.into(),
+            last_project: saved.last_project,
         }
     }
 }
@@ -25,6 +29,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             theme: canban_themes::DEFAULT.into(),
+            last_project: None,
         }
     }
 }
@@ -107,19 +112,47 @@ impl AppServer {
         match method {
             "utilities.state" => Ok(self.utilities.state()),
             "utilities.configure" => {
-                let theme = p["theme"].as_str().context("theme required")?;
-                ensure!(canban_themes::find(theme).is_some(), "Unknown theme");
-                let next = Preferences {
-                    theme: theme.into(),
-                };
+                ensure!(
+                    p.get("theme").is_some() || p.get("last_project").is_some(),
+                    "theme or last_project required"
+                );
+                if let Some(theme) = p.get("theme") {
+                    ensure!(
+                        theme
+                            .as_str()
+                            .is_some_and(|t| canban_themes::find(t).is_some()),
+                        "Unknown theme"
+                    );
+                }
+                if let Some(project) = p.get("last_project") {
+                    ensure!(
+                        project.is_null() || project.is_string(),
+                        "last_project must be a Project ID or null"
+                    );
+                    if let Some(id) = project.as_str() {
+                        let _: Project = self.store.lock().unwrap().db().get(id)?;
+                    }
+                }
                 let mut prefs = self.utilities.preferences.lock().unwrap();
-                canban_context::atomic(
-                    &self.home.join("config/desktop.json"),
-                    &serde_json::to_vec_pretty(&next)?,
-                )?;
-                *prefs = next;
+                let mut next = prefs.clone();
+                if let Some(theme) = p["theme"].as_str() {
+                    next.theme = theme.into();
+                }
+                if let Some(project) = p.get("last_project") {
+                    next.last_project = project.as_str().map(str::to_owned);
+                }
+                let changed = next != *prefs;
+                if changed {
+                    canban_context::atomic(
+                        &self.home.join("config/desktop.json"),
+                        &serde_json::to_vec_pretty(&next)?,
+                    )?;
+                    *prefs = next;
+                }
                 drop(prefs);
-                self.emit("desktop", None);
+                if changed {
+                    self.emit("desktop", None);
+                }
                 Ok(self.utilities.state())
             }
             "utilities.awake" => {
@@ -151,6 +184,52 @@ impl AppServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn last_project_and_theme_are_independent_validated_preferences_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+        let project = app
+            .call(
+                "project.create",
+                json!({"name":"Recent","directory":dir.path().join("recent")}),
+            )
+            .unwrap();
+        app.call("utilities.configure", json!({"theme":"nord"}))
+            .unwrap();
+        app.call("utilities.configure", json!({"last_project":project["id"]}))
+            .unwrap();
+        app.call("utilities.configure", json!({"theme":"dracula"}))
+            .unwrap();
+        let path = home.join("config/desktop.json");
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(
+            app.call(
+                "utilities.configure",
+                json!({"theme":"nord","last_project":"missing"})
+            )
+            .is_err()
+        );
+        assert!(
+            app.call("utilities.configure", json!({"last_project":42}))
+                .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        drop(app);
+        let reopened = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+        assert_eq!(
+            reopened.call("utilities.state", json!({})).unwrap()["preferences"],
+            json!({"theme":"dracula","last_project":project["id"]})
+        );
+        assert!(reopened.snapshot().unwrap().requests.is_empty());
+        reopened
+            .call("utilities.configure", json!({"last_project":null}))
+            .unwrap();
+        assert_eq!(
+            reopened.call("utilities.state", json!({})).unwrap()["preferences"],
+            json!({"theme":"dracula"})
+        );
+    }
     #[test]
     fn preferences_validate_before_atomic_save_and_survive_restart_without_power_state() {
         let dir = tempfile::tempdir().unwrap();

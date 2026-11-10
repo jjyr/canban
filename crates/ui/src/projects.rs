@@ -1,4 +1,5 @@
 //! Project creation: directory first, automatic name until explicitly edited.
+pub(crate) mod selection;
 use crate::{machines, presenter::*};
 use canban_ui_kit::*;
 use nsh_core::prelude::*;

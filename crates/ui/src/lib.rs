@@ -36,6 +36,7 @@ pub fn Canban() -> impl IntoElement {
     canban_ui_kit::tokens::install_theme();
     commands::bindings(ui);
     utilities::init(ui);
+    projects::selection::remember(ui);
     terminals::bindings(ui);
     effect(move || {
         if ui.page.get() != "terminals" {

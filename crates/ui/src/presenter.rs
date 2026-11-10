@@ -331,16 +331,24 @@ pub fn refresh(ui: Ui) {
         return;
     };
     let epoch = ui.snapshot_epoch.get_untracked();
+    let restore_project = ui.project.get_untracked().is_empty();
     ui.spawn(async move {
         let result = blocking(move || {
-            app.snapshot().map(|snapshot| {
-                (
-                    snapshot,
-                    app.config().profiles,
-                    app.config().scheduler.max_agents,
-                    app.config().scheduler.idle_minutes,
-                )
-            })
+            let snapshot = app.snapshot()?;
+            let saved_project = if restore_project {
+                app.call("utilities.state", json!({}))?["preferences"]["last_project"]
+                    .as_str()
+                    .map(str::to_owned)
+            } else {
+                None
+            };
+            Ok::<_, anyhow::Error>((
+                snapshot,
+                app.config().profiles,
+                app.config().scheduler.max_agents,
+                app.config().scheduler.idle_minutes,
+                saved_project,
+            ))
         })
         .await;
         if ui.snapshot_epoch.get_untracked() != epoch {
@@ -348,14 +356,17 @@ pub fn refresh(ui: Ui) {
             return;
         }
         match result {
-            Ok(Ok((snapshot, profiles, max_agents, idle_minutes))) => {
+            Ok(Ok((snapshot, profiles, max_agents, idle_minutes, saved_project))) => {
                 ui.profiles.set(profiles);
                 ui.max_agents.set(max_agents);
                 ui.idle_minutes.set(idle_minutes);
                 if ui.project.get_untracked().is_empty()
-                    && let Some(p) = snapshot.projects.first()
+                    && let Some(id) = crate::projects::selection::restore(
+                        &snapshot.projects,
+                        saved_project.as_deref(),
+                    )
                 {
-                    ui.project.set(p.id.clone());
+                    ui.project.set(id);
                 }
                 let different = ui.snapshot.with_untracked(|old| {
                     serde_json::to_value(old).ok() != serde_json::to_value(&snapshot).ok()

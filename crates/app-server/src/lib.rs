@@ -16,7 +16,7 @@ use std::{
 };
 
 /// Increment when desktop clients need operations unavailable in older services.
-pub const API_VERSION: u32 = 4;
+pub const API_VERSION: u32 = 5;
 
 pub struct AppServer {
     utilities: utilities::Utilities,
