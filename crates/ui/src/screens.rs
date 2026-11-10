@@ -23,19 +23,16 @@ pub fn screen(ui: Ui, page: &str) -> AnyElement {
             .into_element(),
         "project-location" => crate::machines::project_location(ui).into_element(),
         "new-project" => crate::projects::new_project(ui).into_element(),
-        "new-card" => new_card(ui).into_element(),
         "terminals" | "terminal" => crate::terminals::screen(ui).into_element(),
         "overview" | "agents" => crate::overview::screen(ui).into_element(),
-        "board" | "card" | "review" => crate::workspace::screen(ui).into_element(),
+        "board" | "card" | "review" | "new-card" => crate::workspace::screen(ui).into_element(),
+        "drafts" => crate::drafts::screen(ui).into_element(),
         "archive" => crate::archive::screen(ui).into_element(),
         "settings" => settings(ui).into_element(),
         _ => crate::workspace::screen(ui).into_element(),
     }
 }
 
-fn new_card(ui: Ui) -> impl IntoElement {
-    crate::github::new_card(ui)
-}
 fn settings(ui: Ui) -> impl IntoElement {
     let home = crate::APP
         .get()

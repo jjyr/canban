@@ -178,3 +178,33 @@ The Gallery's **Card conversation**, **Append reply** and **Reply in 5s** scenes
 `ui/archive.rs` composes the global archived-conversation browser; `archive/model.rs` owns grouping, metadata matching and ordering. The controlled UI Kit `tree_group` accepts title/count readers, expansion state, a toggle intent and children. It uses NSH disclosure/reveal behavior, keyboard activation, expanded accessibility state, indentation and a guide; hidden descendants do not accept pointer input or appear in accessibility navigation. Generic shared `search::score` preserves Quick Open matching, while `input::debounced` owns a trailing-edge, scope-cancelled timeout without replacing the native text field. Product-specific state and RPC remain outside UI Kit.
 
 Gallery **Archived / deleted**, or `CANBAN_GALLERY_SCENE=archive mise run gallery`, covers multiple Projects, an active-only Project, Unicode/long titles, Agent metadata and separate deleted recovery. See [Archive contract and verification](archive.md).
+
+## Unified Card editing and durable drafts (2026-11-10)
+
+`ui/src/editor.rs` shares Markdown source, preview, reference completion and draft
+feedback between New Card and task editing. `ui/src/references.rs` supplies local
+Card/Profile candidates and bounded GitHub Issue/PR lookups. UI Kit owns the
+Enter/Shift+Enter newline policy, including open completion menus, and scoped
+Command+Enter submission. The right-pane split retains its editor while expanded.
+
+`ui/src/drafts.rs` owns window projections, `drafts/list.rs` the searchable Drafts
+screen, and `drafts/persistence.rs` one coalescing background writer. AppServer
+`drafts.rs` owns revision-checked SQLite persistence outside Card/Timeline state.
+The Gallery's `CANBAN_GALLERY_SCENE=editor` imports the production New Card flow.
+See [Card editor](card-editor.md) for native verification and limits.
+
+## Markdown reference links (2026-11-10)
+
+`ui-kit/src/reference_link.rs` owns the generic inline link's style, focus,
+350 ms rich tooltip and navigation callback. It receives preview content and
+callbacks without product or network dependencies. `ui/src/links.rs` owns
+Card/Profile/attachment/web routing, local previews and bounded GitHub detail
+lookup; `links/document.rs` decorates the parsed Markdown AST outside code.
+The root-installed NSH Markdown plugin returns inline Text spans, retaining the
+paragraph baseline and hit targets. It is installed in both App and Gallery roots.
+
+Task, editor Preview and Timeline narrative readers use this common component.
+`CANBAN_GALLERY_SCENE=references mise run gallery` supplies 65 Cards, body/comment
+Markdown and local/Profile/web/GitHub links. Native App acceptance additionally
+verifies exact saved completion text and real default-browser navigation; see
+[Card editor](card-editor.md#reference-follow-up-acceptance-2026-11-10).

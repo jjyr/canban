@@ -1,5 +1,4 @@
 use super::*;
-use canban_ui_kit::markdown::MarkdownInput;
 
 pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElement {
     let body = proxy(draft, false);
@@ -8,6 +7,41 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         .current_card()
         .is_some_and(|c| c.github_issue().is_some());
     let id = untracked(|| ui.card_id());
+    let seen = stored(ui.task_submit.get_untracked());
+    effect({
+        let id = id.clone();
+        move || {
+            let ticket = ui.task_submit.get();
+            if seen.replace(ticket) != ticket
+                && editing.get_untracked()
+                && matches!(ui.page.get_untracked().as_str(), "card" | "review")
+                && ui.card_id() == ui.card.get_untracked()
+                && ui.utility_popup.get_untracked().is_empty()
+                && !ui.quick_open.get_untracked()
+                && !ui.native_modal.get_untracked()
+            {
+                save_card(ui, id.clone(), draft);
+            }
+        }
+    });
+    effect(move || {
+        if editing.get()
+            && matches!(ui.page.get().as_str(), "card" | "review")
+            && ui.card_id() == ui.card.get()
+            && ui.utility_popup.get().is_empty()
+            && !ui.quick_open.get()
+            && !ui.native_modal.get()
+        {
+            on_key_with(
+                "mod+enter",
+                KeyOptions {
+                    when: nsh_core::keymap::When::Always,
+                    ..Default::default()
+                },
+                move |_| ui.task_submit.update(|n| *n += 1),
+            );
+        }
+    });
     view()
         .gap_2()
         .child(
@@ -29,15 +63,21 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         )
         .child(dynamic(move || {
             if editing.get() {
-                let editor = MarkdownInput::new();
-                editor.restore_after(
-                    computed(move || ui.quick_open.get() || !ui.utility_popup.get().is_empty()),
-                    computed(move || {
-                        matches!(ui.page.get().as_str(), "card" | "review")
-                            && ui.card_id() == ui.card.get()
-                    }),
-                );
                 let paste = id.clone();
+                let height = signal(280.);
+                effect(move || height.set(if ui.card_standalone.get() { 520. } else { 280. }));
+                let current = computed(move || {
+                    matches!(ui.page.get().as_str(), "card" | "review")
+                        && ui.card_id() == ui.card.get()
+                });
+                let (editor, body_view) = crate::editor::body(
+                    ui,
+                    body,
+                    computed(move || draft.with(|d| d.project_id.clone())),
+                    current,
+                    height,
+                    move || ui.task_submit.update(|n| *n += 1),
+                );
                 editor.on_paste_files({
                     let card = id.clone();
                     move |files, uris| {
@@ -48,28 +88,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             files,
                             super::attachments::paths(&uris),
                             false,
-                        );
+                        )
                     }
                 });
-                let save_id = id.clone();
-                editor.on_submit(
-                    move || {
-                        matches!(ui.page.get().as_str(), "card" | "review")
-                            && ui.card_id() == ui.card.get()
-                            && !ui.quick_open.get()
-                            && ui.utility_popup.get().is_empty()
-                    },
-                    {
-                        let save_id = id.clone();
-                        move || {
-                            if !ui.pending.get_untracked()
-                                && !super::attachments::busy(draft, false)
-                            {
-                                save_card(ui, save_id.clone(), draft);
-                            }
-                        }
-                    },
-                );
                 let focused_once = stored(false);
                 return view()
                     .on_layout(move |_: &Bounds<Points>| {
@@ -87,39 +108,38 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         )
                         .disabled(github),
                     )
-                    .child(editor.render_with_preview(
-                        body,
-                        editor.source(body, "Task description", "Describe the task in Markdown…"),
-                        false,
-                        signal(220.),
-                        move || super::markdown(ui, move || body.get()).into_element(),
-                    ))
+                    .child(body_view)
                     .child(super::attachments::controls(
                         ui, draft, editor, false, paste,
+                    ))
+                    .child(crate::editor::draft_status(
+                        ui,
+                        format!("card:{}", id),
+                        draft,
                     ))
                     .child(
                         view()
                             .flex_row()
+                            .flex_wrap()
                             .gap_2()
                             .child(
-                                action("Save", Variant::Primary, move |_| {
-                                    save_card(ui, save_id.clone(), draft)
+                                action("Save changes · ⌘Enter", Variant::Primary, move |_| {
+                                    ui.task_submit.update(|n| *n += 1)
                                 })
                                 .disabled(move || {
-                                    ui.pending.get() || super::attachments::busy(draft, false)
+                                    ui.pending.get()
+                                        || draft.with(|d| d.title.trim().is_empty())
+                                        || super::attachments::busy(draft, false)
                                 }),
                             )
                             .child(
-                                action("Cancel", Variant::Quiet, move |_| {
-                                    draft.update(|d| {
-                                        d.title = d.base_title.clone();
-                                        d.body = d.base_body.clone();
-                                        d.editing = false;
-                                        d.uploads.retain(|a| a.is_comment());
-                                    });
+                                action("Close editor", Variant::Quiet, move |_| {
+                                    draft.update(|d| d.editing = false)
                                 })
                                 .disabled(move || {
-                                    ui.pending.get() || super::attachments::busy(draft, false)
+                                    ui.pending.get()
+                                        || draft.with(|d| d.title.trim().is_empty())
+                                        || super::attachments::busy(draft, false)
                                 }),
                             ),
                     )
@@ -128,7 +148,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             view()
                 .gap_2()
                 .child(crate::github::card_source(ui))
-                .child(super::markdown(ui, move || draft.get().body))
+                .child(super::markdown(ui, move || {
+                    ui.current_card().map(|c| c.body).unwrap_or_default()
+                }))
                 .into_element()
         }))
         .child(when(
@@ -137,19 +159,49 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 view()
                     .gap_2()
                     .child(notice(move || draft.get().error, Tone::Danger))
-                    .child(action("Reload saved task", Variant::Secondary, move |_| {
-                        if let Some(c) = ui.current_card() {
-                            draft.update(|d| {
-                                let saved = Draft::card(&c);
-                                d.title = saved.title;
-                                d.body = saved.body;
-                                d.base_title = saved.base_title;
-                                d.base_body = saved.base_body;
-                                d.revision = saved.revision;
-                                d.error.clear();
-                            });
-                        }
-                    }))
+                    .child(muted(
+                        "Latest saved description · your draft is retained above",
+                    ))
+                    .child(
+                        crate::editor::reader(ui, move || {
+                            ui.current_card().map(|c| c.body).unwrap_or_default()
+                        })
+                        .max_h(px(220.)),
+                    )
+                    .child(action(
+                        "Keep draft and use latest revision",
+                        Variant::Secondary,
+                        move |_| {
+                            if let Some(c) = ui.current_card() {
+                                draft.update(|d| {
+                                    if github {
+                                        d.title = c.title.clone();
+                                    }
+                                    d.base_title = c.title;
+                                    d.base_body = c.body;
+                                    d.revision = c.revision;
+                                    d.error.clear();
+                                });
+                            }
+                        },
+                    ))
+                    .child(action(
+                        "Discard changes and reload",
+                        Variant::Secondary,
+                        move |_| {
+                            if let Some(c) = ui.current_card() {
+                                draft.update(|d| {
+                                    let saved = Draft::card(&c);
+                                    d.title = saved.title;
+                                    d.body = saved.body;
+                                    d.base_title = saved.base_title;
+                                    d.base_body = saved.base_body;
+                                    d.revision = saved.revision;
+                                    d.error.clear();
+                                });
+                            }
+                        },
+                    ))
             },
         ))
 }

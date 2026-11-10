@@ -88,3 +88,7 @@ run = "/usr/bin/python3 scripts/acceptance-retained.py"
 [tasks.acceptance-events]
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance-events.py"
+
+[tasks.acceptance-editor]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-editor.py"

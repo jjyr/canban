@@ -11,11 +11,13 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 anyhow.workspace = true
 url = "2"
 serde_json.workspace = true
+serde.workspace = true
 base64.workspace = true
 nsh-core.workspace = true
 nsh-base.workspace = true
 nsh-platform-macos.workspace = true
 canban-types.workspace = true
+canban-context.workspace = true
 canban-scheduler.workspace = true
 canban-notifications.workspace = true
 canban-terminal.workspace = true

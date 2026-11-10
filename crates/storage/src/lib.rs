@@ -161,7 +161,7 @@ impl Store {
         anyhow::ensure!(mode == "wal", "SQLite WAL could not be enabled");
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 8,
+            version <= 9,
             "Database schema is newer than this application"
         );
         if version == 0 {
@@ -268,6 +268,9 @@ impl Store {
                 })?;
             }
             conn.execute_batch("COMMIT;")?;
+        }
+        if version < 9 {
+            conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE editor_drafts (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, updated_at INTEGER NOT NULL, data TEXT NOT NULL); PRAGMA user_version=9; COMMIT;")?;
         }
         Ok(Self {
             conn,

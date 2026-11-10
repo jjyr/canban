@@ -203,7 +203,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .into_element()
 }
 
-pub(super) fn proxy(draft: Signal<Draft>, comment: bool) -> Signal<String> {
+pub(crate) fn proxy(draft: Signal<Draft>, comment: bool) -> Signal<String> {
     let text = signal(if comment {
         draft.get_untracked().comment
     } else {
@@ -232,17 +232,7 @@ pub(super) fn proxy(draft: Signal<Draft>, comment: bool) -> Signal<String> {
     text
 }
 
-/// Product attachment links share the same Markdown reader as editor previews.
+/// Task previews, comments and references share one product reader.
 pub(super) fn markdown(ui: Ui, body: impl Fn() -> String + 'static) -> nsh_base::TextViewElement {
-    canban_ui_kit::markdown::reader(body).on_link_press(
-        move |e: &nsh_base::TextViewLinkPressEvent| {
-            if let Some(id) = e.url.strip_prefix("attachment:")
-                && let Some(a) = ui
-                    .snapshot
-                    .with_untracked(|s| s.artifacts.iter().find(|a| a.id == id).cloned())
-            {
-                open_resource(ui, a.card_id, a.path);
-            }
-        },
-    )
+    crate::editor::reader(ui, body)
 }

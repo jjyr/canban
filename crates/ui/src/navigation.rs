@@ -46,6 +46,7 @@ pub fn watch(ui: Ui) {
     effect(move || {
         let _ = (
             ui.page.get(),
+            ui.new_draft.get(),
             ui.project.get(),
             ui.card.get(),
             ui.request.get(),
@@ -103,6 +104,10 @@ pub fn go(ui: Ui, forward: bool) {
         target.request.clear();
         target.standalone = false;
     }
+    if target.page == "new-card" && !ui.drafts.with(|all| all.contains_key(&target.new_draft)) {
+        target.page = "board".into();
+        target.new_draft.clear();
+    }
     history.entries[history.index] = target.clone();
     ui.history.set(history);
     batch(move || {
@@ -112,6 +117,15 @@ pub fn go(ui: Ui, forward: bool) {
         ui.review_request.update(|n| *n += 1);
         ui.expanded.set(false);
         ui.focused_card.set(false);
+        if target.page == "new-card" {
+            if let Some(project) = ui
+                .drafts
+                .with(|all| all.get(&target.new_draft).map(|d| d.project_id.clone()))
+            {
+                ui.card_target.set(project);
+            }
+            ui.new_draft.set(target.new_draft);
+        }
         ui.project.set(target.project);
         ui.card.set(target.card);
         ui.request.set(target.request);
@@ -154,6 +168,7 @@ mod tests {
     use super::*;
     fn route(page: &str) -> Location {
         Location {
+            new_draft: String::new(),
             page: page.into(),
             project: String::new(),
             card: String::new(),
@@ -162,6 +177,18 @@ mod tests {
             standalone: false,
             terminal_card: String::new(),
         }
+    }
+    #[test]
+    fn distinct_new_drafts_have_distinct_history_and_submission_locations() {
+        let mut first = route("new-card");
+        first.new_draft = "new-card:first".into();
+        let mut second = first.clone();
+        second.new_draft = "new-card:second".into();
+        assert_ne!(first, second);
+        let mut history = History::default();
+        history.visit(first.clone());
+        history.visit(second);
+        assert_eq!(history.step(false), Some(first));
     }
     #[test]
     fn traversal_does_not_duplicate_and_new_navigation_discards_forward_only() {

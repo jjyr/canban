@@ -88,6 +88,39 @@ impl AppServer {
                 db.save(&project)?;
                 Ok(serde_json::to_value(project)?)
             }),
+            "github.reference.search" => {
+                let project: Project = self
+                    .store
+                    .lock()
+                    .unwrap()
+                    .db()
+                    .get(strp(&p, "project_id")?)?;
+                let source = project
+                    .github
+                    .context("Connect this Project to a GitHub repository first")?;
+                ensure!(
+                    strp(&p, "source_generation")? == source.generation,
+                    "Project source changed; search again"
+                );
+                let generation = self.github.generation();
+                let issues = self
+                    .github
+                    .client()?
+                    .references(&source.repository, strp(&p, "query")?)?;
+                ensure!(
+                    generation == self.github.generation(),
+                    "GitHub account changed; search again"
+                );
+                let current: Project = self.store.lock().unwrap().db().get(&project.id)?;
+                ensure!(
+                    current
+                        .github
+                        .as_ref()
+                        .is_some_and(|s| s.generation == source.generation),
+                    "Project source changed; search again"
+                );
+                Ok(json!(issues))
+            }
             "github.issue.search" => {
                 let project: Project = self
                     .store

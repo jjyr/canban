@@ -8,6 +8,9 @@ impl AppServer {
         if method.starts_with("utilities.") || method.starts_with("usage.") {
             return self.utility_call(method, p);
         }
+        if method.starts_with("draft.") {
+            return self.draft_call(method, p);
+        }
         let config = self.config();
         match method {
             "notifications.read" => self.read_card(p),

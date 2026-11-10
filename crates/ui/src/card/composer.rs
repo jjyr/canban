@@ -1,9 +1,6 @@
 use super::*;
 use canban_ui_kit::markdown::MarkdownInput;
-use nsh_base::EditorApi;
-use nsh_base::editor::{
-    EditorCompletionAcceptEvent, EditorCompletionItem, EditorCompletionRequest,
-};
+use nsh_base::editor::EditorCompletionAcceptEvent;
 use serde_json::json;
 
 pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElement {
@@ -78,9 +75,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     }
                     Err(error) => value.comment_error = error,
                 }
-                ui.drafts.with(|m| {
-                    m.insert(key, value.clone());
-                });
+                crate::drafts::put(ui, key, value.clone());
                 draft.try_set(value);
             },
         );
@@ -98,39 +93,30 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             );
         }
     });
-    let source = editor
-        .source(comment, "Card comment", "Comment or @Agent…")
-        .completion(true)
-        .completion_trigger_characters(vec!["@".into()])
-        .on_completion_request(move |request: &EditorCompletionRequest| {
-            let mut items = Vec::new();
-            if crate::profiles::mention_context(&comment.get_untracked(), request.offset) {
-                items = ui
-                    .profiles
-                    .get_untracked()
-                    .iter()
-                    .map(|p| {
-                        let mut item = EditorCompletionItem::new(p.id.clone());
-                        item.insert_text = Some(format!("{} ", p.id).into());
-                        item.detail = Some(crate::profiles::provider(p).1.into());
-                        item
-                    })
-                    .collect();
-            }
-            if let Some(api) = editor.editor.api::<EditorApi>() {
-                api.present_completions(request.id, items, None);
-            }
-        })
-        .on_completion_accept(move |event: &EditorCompletionAcceptEvent| {
-            let id = event.item.label.to_string();
-            if ui.profiles.with_untracked(|p| p.iter().any(|p| p.id == id)) {
-                draft.update(|d| {
-                    if !d.recipients.contains(&id) {
-                        d.recipients.push(id);
-                    }
-                });
-            }
-        });
+    let (source, reference_error) = crate::references::source(
+        ui,
+        editor,
+        comment,
+        computed(move || ui.current_card().map(|c| c.project_id).unwrap_or_default()),
+        "Card comment",
+        "Comment or @Agent, #Card…",
+    );
+    let source = source.on_completion_accept(move |event: &EditorCompletionAcceptEvent| {
+        let id = event.item.label.to_string();
+        if event
+            .item
+            .insert_text
+            .as_ref()
+            .is_some_and(|text| text.as_ref() == format!("@{id} "))
+            && ui.profiles.with_untracked(|p| p.iter().any(|p| p.id == id))
+        {
+            draft.update(|d| {
+                if !d.recipients.contains(&id) {
+                    d.recipients.push(id);
+                }
+            });
+        }
+    });
     view()
         .element_ref(&reading.composer)
         .on_touch(|_: &TouchEvent| {})
@@ -158,6 +144,10 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             true,
             reading.composer_height,
             move || super::markdown(ui, move || comment.get()).into_element(),
+        ))
+        .child(when(
+            move || !reference_error.get().is_empty(),
+            move || notice(move || reference_error.get(), Tone::Attention),
         ))
         .child(dynamic(move || {
             let mut recipients = crate::profiles::addressed(&comment.get(), &ui.profiles.get());

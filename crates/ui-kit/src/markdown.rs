@@ -20,6 +20,7 @@ pub struct MarkdownInput {
     pub held: Signal<bool>,
     pub focus_epoch: Signal<u64>,
     preview: Signal<bool>,
+    keys_epoch: Signal<u64>,
 }
 impl Default for MarkdownInput {
     fn default() -> Self {
@@ -35,6 +36,13 @@ impl MarkdownInput {
             held: signal(false),
             focus_epoch: signal(0),
             preview: signal(false),
+            keys_epoch: signal(0),
+        }
+    }
+    /// Expansion changes space without switching the user's Write/Preview mode.
+    pub fn restore_focus(self) {
+        if !self.preview.get_untracked() {
+            self.focus();
         }
     }
     pub fn focus(self) {
@@ -74,21 +82,58 @@ impl MarkdownInput {
         let submit = std::rc::Rc::new(submit);
         effect(move || {
             let _ = self.focus_epoch.get();
+            let _ = self.keys_epoch.get();
             if !self.active.get() || self.held.get() || !allowed() {
                 return;
             }
             let submit = submit.clone();
             set_timeout(std::time::Duration::ZERO, move || {
+                for key in ["enter", "shift+enter"] {
+                    on_key_with(
+                        key,
+                        KeyOptions {
+                            when: nsh_core::keymap::When::Always,
+                            repeat: true,
+                            ..Default::default()
+                        },
+                        move |_| {
+                            if !self.preview.get_untracked()
+                                && let Some(api) = self.editor.api::<EditorApi>()
+                            {
+                                api.hide_completions();
+                                api.run(EditorCommand::Newline);
+                            }
+                        },
+                    );
+                }
                 on_key_with(
                     "mod+enter",
                     KeyOptions {
                         when: nsh_core::keymap::When::Always,
                         ..Default::default()
                     },
-                    move |_| submit(),
+                    move |_| {
+                        if let Some(api) = self.editor.api::<EditorApi>() {
+                            api.hide_completions();
+                        }
+                        submit();
+                    },
                 );
             });
         });
+    }
+    /// Answers retain NSH's caret filtering, Tab/click and stale-request checks.
+    /// Reclaim Enter after NSH installs its completion-menu bindings.
+    pub fn completions(
+        self,
+        id: u32,
+        items: Vec<nsh_base::editor::EditorCompletionItem>,
+        incomplete: bool,
+    ) {
+        if let Some(api) = self.editor.api::<EditorApi>() {
+            api.present_completions(id, items, Some(incomplete));
+            self.keys_epoch.update(|n| *n += 1);
+        }
     }
     /// NSH Editor's native sink currently consumes text only. Read file/image
     /// payloads on the explicit Paste shortcut through NSH's clipboard service;
@@ -213,6 +258,9 @@ impl MarkdownInput {
         let height = computed(move || {
             if !expanded.get() {
                 return 48.;
+            }
+            if !compact {
+                return max_height.get().max(120.);
             }
             let lines = value.with(|v| v.lines().count());
             (100. + lines.saturating_sub(3) as f32 * 20.).min(max_height.get().max(64.))

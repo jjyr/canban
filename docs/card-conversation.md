@@ -36,9 +36,9 @@ shared dialogs use the same reduced-motion policy; see [native motion](ui-motion
 
 ## Description and composer
 
-Description is fully visible in the common reader by default. **Edit** opens title/source editing with **Write / Preview**, formatting actions, **Save** and **Cancel**. Edit takes native source focus after its first mounted layout. Save uses the existing optimistic revision boundary; Cancel restores the last saved description without changing the comment draft. Command+Enter saves while this editor is active. GitHub-owned title restrictions continue to apply.
+Description is fully visible in the common reader by default. **Edit** opens title/source editing with **Write / Preview**, formatting actions, **Save changes** and **Close editor**. Edit takes native source focus after its first mounted layout. Save uses the existing optimistic revision boundary; Closing retains unsubmitted changes in Drafts; the reader continues to show published content. New Cards and task editing share the right-pane/expanded source component; see [Card editor](card-editor.md). Command+Enter saves while this editor is active. GitHub-owned title restrictions continue to apply.
 
-The comment composer uses the same UI Kit Markdown source editor and reader. NSH owns its rope, selection, caret completion and undo/redo history. Write/Preview and height changes keep the source editor mounted. Ordinary snapshot updates reconcile retained drafts and keyed Timeline rows without rebuilding the editing owner. Navigation retains draft text, explicit recipients and attachment state for the window lifetime; editor undo history is retained within the mounted editor, not across route destruction or application restart.
+The comment composer uses the same UI Kit Markdown source editor and reader. NSH owns its rope, selection, caret completion and undo/redo history. Write/Preview and height changes keep the source editor mounted. Ordinary snapshot updates reconcile retained drafts and keyed Timeline rows without rebuilding the editing owner. Draft text, explicit recipients and saved resource references now survive application restart through AppServer draft storage. Pending attachment bytes remain window-local. Editor undo history is retained within the mounted editor, including expansion/collapse, and does not survive route destruction or application restart.
 
 Focus expands the composer, with additional lines growing toward approximately one-third of the Card pane. Blur collapses it while keeping the draft. Toolbar operations, caret completion and a native attachment picker belong to the editing interaction. Clicking the Card reading area ends composing focus; scrolling does not itself discard the draft. Preview prevents edits to the hidden source. Clipboard reads occur only in response to the explicit Paste shortcut, with a value/selection check that rejects a stale asynchronous insertion.
 
@@ -46,7 +46,14 @@ Enter inserts a newline. Command+Enter sends through the same intent as **Send**
 
 ## Recipients and attachments
 
-Typing a standalone `@` opens configured Profile candidates at the caret. Typing filters them; Up/Down, Enter/Tab and Escape use NSH's completion behavior. Completion is suppressed in email-like text, quoted lines and code. Selecting a candidate adds an explicit, removable recipient chip, including when the mention occurs within a question. Editing/undoing source text does not silently remove an explicitly selected recipient; the chip controls that address. Recognized consecutive leading `@profile` tokens retain their existing addressing behavior. Ordinary prose/email/code references do not become recipients merely by appearing in text.
+Typing a standalone `@` opens configured Profile candidates at the caret. Typing filters them; Up/Down select, Tab/click accepts and Escape dismisses. Enter and Shift+Enter insert newlines even while candidates are visible. Completion is suppressed in email-like text, quoted lines and code. Selecting a candidate adds an explicit, removable recipient chip, including when the mention occurs within a question. Editing/undoing source text does not silently remove an explicitly selected recipient; the chip controls that address. Recognized consecutive leading `@profile` tokens retain their existing addressing behavior. Ordinary prose/email/code references do not become recipients merely by appearing in text.
+
+Hash completion uses the same local Card and connected GitHub Issue/PR source as
+the task editor. Candidates are recomputed across the full inventory as the query
+changes. Description, comment, reply and report readers share hover previews and
+navigation: Cards open locally, Profiles open Settings, and HTTP(S) destinations
+open in the browser. Code literals remain literal. See [reference behavior and
+native acceptance](card-editor.md#readers-previews-and-navigation).
 
 Desktop comments always send an explicit `mentions` array (including `[]`); legacy clients omitting the field keep the server's existing parser. An asynchronous send clears only the submitted draft, preserving newer text/recipients and failed submissions. No CLI interface change is required.
 

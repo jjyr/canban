@@ -8,8 +8,10 @@ mod card_actions;
 pub mod commands;
 pub mod components;
 pub mod drafts;
+pub mod editor;
 pub mod frame;
 pub mod github;
+pub mod links;
 pub mod machines;
 pub mod navigation;
 pub mod overview;
@@ -17,6 +19,7 @@ pub mod presenter;
 pub mod profiles;
 pub mod projects;
 pub mod rail;
+mod references;
 pub mod review;
 mod screens;
 pub mod utilities;
@@ -35,6 +38,10 @@ fn native(_: &mut Registry) {}
 #[component]
 pub fn Canban() -> impl IntoElement {
     let ui = Ui::new();
+    links::install(ui);
+    set_interval(std::time::Duration::from_millis(250), move || {
+        ui.draft_status.update(|n| *n += 1)
+    });
     canban_ui_kit::tokens::install_theme();
     commands::bindings(ui);
     utilities::init(ui);
@@ -89,6 +96,7 @@ pub fn run() -> Result<()> {
         "Build the Agent CLI first: mise exec -- cargo build -p canban-cli"
     );
     let app = canban_app_server::AppClient::connect_or_start(home, &cli)?;
+    drafts::persistence::start(app.clone())?;
     APP.set(app).ok();
     nsh_platform_macos::set_components(canban_terminal::native::register);
     nsh_platform_macos::set_ui_sets(vec![nsh_base::registry(), registry()]);
@@ -104,6 +112,7 @@ pub fn run() -> Result<()> {
             ..Default::default()
         },
     );
+    drafts::persistence::flush();
     if result != std::process::ExitCode::SUCCESS {
         anyhow::bail!("Native application exited with an error");
     }
