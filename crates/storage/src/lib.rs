@@ -303,6 +303,7 @@ impl Store {
             }
             conn.execute_batch("COMMIT;")?;
         }
+        migrations::prepare(home, &conn, migrations::CURRENT)?;
         migrations::apply(&mut conn, migrations::CURRENT)?;
         Ok(Self {
             conn,

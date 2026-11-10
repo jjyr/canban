@@ -24,7 +24,7 @@ Existing `github.auth.*`, `project.github`, `github.source.disconnect`, Issue se
 | `github.notification.read` / `.done` | Explicit notification handling |
 | `github.cache.status` / `.clear` | Inspect or clear disposable responses |
 
-Schema 9 retains local work and bindings; source bodies/comments live in cache. See the current contract for migration, query bounds, authority and acceptance commands. Desktop API level 7 requires these operations.
+Schema 9 retains local work and bindings; source bodies/comments live in cache. See the current contract for migration, query bounds, authority and acceptance commands. The integrated desktop API is level 8 (including durable editor drafts and updates); the current schema is 10.
 
 ## Historical validation and reproducibility: 2026-11-09
 

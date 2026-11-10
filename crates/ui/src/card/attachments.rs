@@ -41,9 +41,7 @@ fn update(ui: Ui, draft: Signal<Draft>, card: &str, change: impl FnOnce(&mut Dra
         .try_get()
         .unwrap_or_else(|| ui.drafts.with(|m| m.get(&key).cloned().unwrap_or_default()));
     change(&mut value);
-    ui.drafts.with(|m| {
-        m.insert(key, value.clone());
-    });
+    crate::drafts::put(ui, key, value.clone());
     draft.try_set(value);
 }
 fn upload(ui: Ui, draft: Signal<Draft>, card: String, item: Upload) {

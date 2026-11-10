@@ -528,6 +528,7 @@ impl AppServer {
 
 mod client;
 mod commands;
+mod drafts;
 mod github;
 pub use client::AppClient;
 mod machines;

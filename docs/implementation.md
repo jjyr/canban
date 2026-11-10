@@ -6,7 +6,7 @@ Current runtime update (2026-11-09): [Event-driven runtime observation](runtime-
 
 [Unified Card reminders](reminders.md) (2026-11-10) defines the current unread /
 pending counts, persistent visible-read positions, Overview updates and local
-notification sounds. Current builds use SQLite schema 8 and desktop API version 7 (reminders introduced level 6; updates introduce level 7). Upgrade
+notification sounds. Current builds use SQLite schema 10 and desktop API version 8 (reminders introduced level 6; the merged GitHub/editor/updater contract uses level 8). Upgrade
 the running AppServer together with the UI; `mise run run` performs the normal
 development handoff. Existing history is baselined quietly during migration.
 
@@ -20,7 +20,7 @@ Status: native macOS MVP with multi-machine execution; current contracts reconci
 
 ## GitHub workspace update
 
-The [GitHub workspace and cache](github-workspace.md) extends the integration with a dedicated rail page, paginated notifications/Issues/PRs, PR source Cards, local GitHub references, Board source filters, repository rules and explicit remote comments/Review. Account controls moved out of Settings. Remote data uses disposable event-refreshed file caches instead of permanent business-table mirrors; schema 9 preserves bindings and local work. The current branch's acceptance scope and commands are recorded in that contract.
+The [GitHub workspace and cache](github-workspace.md) extends the integration with a dedicated rail page, paginated notifications/Issues/PRs, PR source Cards, local GitHub references, Board source filters, repository rules and explicit remote comments/Review. Account controls moved out of Settings. Remote data uses disposable event-refreshed file caches instead of permanent business-table mirrors; schema 9 preserves bindings and local work. The integrated schema is 10 and API is 8; [combined acceptance](merge-integration-20261111.md) records migration and native verification.
 
 ## Build and launch
 
@@ -74,6 +74,7 @@ See [Card conversation workspace](card-conversation.md) for the current compact 
 - Create/edit Cards, move with stage buttons or the Board's dedicated drag handle, and inspect current execution/attention status.
 - Notes are deferred pending product design. Their UI/editor/search/Card-selection flows are removed; new executions use Card content, Timeline, reports and attachments without automatically injecting legacy Notes. Existing Note records, associations and capture files remain intact. See [current scope and compatibility](notes-deferred.md).
 - Comment and mention configured Agents. Reports and state changes join the same ordered Timeline. Pasted images in Card/comment editors save bytes as Card resources and insert an attachment reference into the draft; save/post the draft to retain that text reference. Resources also support file-path import and native opening.
+- Card creation and task editing share a native Markdown editor in the Board right pane with retained expanded mode. Drafts persist independently in schema v9 and are restored through Drafts. `@` offers Profile references; `#` offers local Cards and connected GitHub Issues/PRs. Enter/Shift+Enter always insert newlines; Tab selects candidates and Command+Enter confirms. See [Card editor](card-editor.md) for current behavior and acceptance limits.
 - AppServer returns structured errors for stale Card revisions. A failed save remains visible in the status area. In-flight UI operations do not block render/input paths; stale resource-load results cannot replace a newly selected Card's output. Incoming state updates do not rebuild active Card editor drafts.
 - Card Agent links and Overview open the dedicated Terminal workspace. Users type/paste, interrupt, explicitly close or resume exact provider history; leaving the view only detaches it. X, Command+W and Close terminal share AppServer termination and receipt handling. Exited entries leave the list/tabs while Card/Overview retain saved history. libghostty-vt owns VT state/input encoding; AppKit renders through an NSH native component; Herdr owns the PTY. Runtime state never implies business completion.
 - The Agent's explicit working/completed/blocked/failed declaration is recorded through the CLI. Completed invokes only its originating request's callback. Blocked/failed creates a durable attention notice. Completion receipts and commands with request keys have duplicate/conflict handling.
@@ -189,4 +190,4 @@ Schema v6 adds a separate durable manual Terminal sequence. Agent inventory entr
 
 [Internal releases and updates](updates.md) defines the implementation, migration authoring rules and acceptance. The main-triggered release workflow reserves `YYYYMMDD-N`, builds one UI/CLI/updater App, and publishes only complete prereleases. Startup/hourly/manual checks feed the global bottom-rail Update action. Installation immediately replaces the initiating UI/AppServer without draining Herdr Agents; durable idempotent reports/replies survive the handoff. Paired database-only up/down batches are transactional, with no automatic database backup. Failed candidate startup rolls back schema/bundle and verifies the restored version; failed down stops with a standalone database-free Recovery window.
 
-The current schema remains 8; desktop API is 7. The service lock is acquired before opening SQLite. Six isolated update/failure cases and a real packaged native sidebar upgrade passed, including unsent-draft restoration and exact Agent terminal/Core/worktree preservation. See the linked evidence for the simulated future-schema boundary and unverified GitHub publication.
+After integration with GitHub workspace and editor drafts, current schema is 10 and desktop API is 8. The service lock is acquired before opening SQLite. Six isolated update/failure cases and a real packaged native sidebar upgrade passed, including unsent-draft restoration and exact Agent terminal/Core/worktree preservation. See the linked evidence for the simulated future-schema boundary and unverified GitHub publication.

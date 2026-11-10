@@ -117,6 +117,9 @@ pub fn discover(
     current: &Build,
     client: Option<&canban_github::Client>,
 ) -> Result<Option<Available>> {
+    // Explicit/hourly release checks must revalidate GitHub's disposable cache.
+    let fresh = client.cloned().map(canban_github::Client::refreshing);
+    let client = fresh.as_ref();
     let api = api()?;
     let repo = std::env::var("CANBAN_UPDATE_REPOSITORY").unwrap_or_else(|_| "jjyr/canban".into());
     ensure!(

@@ -87,6 +87,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             .truncate(),
                         ),
                 )
+                .child(crate::editor::expand(ui))
                 .child(chrome_button(
                     Icon::Terminal,
                     "Open Card Terminals",

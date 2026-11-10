@@ -78,25 +78,14 @@ pub fn render(ui: Ui, event: Event, narrative: bool) -> impl IntoElement {
         );
     if narrative {
         row = row
-            .child(
-                canban_ui_kit::markdown::reader(move || {
-                    let value = body.get();
-                    if expanded.get() {
-                        value
-                    } else {
-                        value.chars().take(12000).collect::<String>()
-                    }
-                })
-                .on_link_press(move |e: &nsh_base::TextViewLinkPressEvent| {
-                    if let Some(id) = e.url.strip_prefix("attachment:")
-                        && let Some(a) = ui
-                            .snapshot
-                            .with_untracked(|s| s.artifacts.iter().find(|a| a.id == id).cloned())
-                    {
-                        open_resource(ui, a.card_id, a.path);
-                    }
-                }),
-            )
+            .child(crate::links::reader(ui, move || {
+                let value = body.get();
+                if expanded.get() {
+                    value
+                } else {
+                    value.chars().take(12000).collect::<String>()
+                }
+            }))
             .child(when(
                 move || body.with(|s| s.chars().count() > 12000),
                 move || {

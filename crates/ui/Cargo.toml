@@ -18,6 +18,7 @@ nsh-core.workspace = true
 nsh-base.workspace = true
 nsh-platform-macos.workspace = true
 canban-types.workspace = true
+canban-context.workspace = true
 canban-scheduler.workspace = true
 canban-notifications.workspace = true
 canban-terminal.workspace = true

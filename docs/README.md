@@ -16,6 +16,8 @@ Documentation has three roles:
 
 The latest explicit user decision takes precedence over earlier discussion. Before changing an existing feature, check its current contract and any later superseding decision. If code and documents disagree, record the discrepancy rather than declaring a proposal implemented. Use the current code/shared types for exact RPC payloads. Documentation-only reconciliation does not constitute new runtime acceptance.
 
+[Combined GitHub/editor/updater acceptance (2026-11-11)](merge-integration-20261111.md) records local branch integration, paired schema 9/10 migrations, desktop API 8 and native schema-8 upgrades.
+
 ## Current product documents
 
 | Document | Purpose |
@@ -52,6 +54,7 @@ The latest explicit user decision takes precedence over earlier discussion. Befo
 | [Project entry, grouped Overview and Settings](workspace-entry-and-settings.md) | Clickable empty Board, native directory chooser, filter-free Overview and unified Settings groups |
 | [Compact navigation and Quick Open](quick-open-and-navigation.md) | Implemented icon rail, Command+O fuzzy search, candidate navigation and native acceptance |
 | [Archive browser](archive.md) | Global Project/conversation hierarchy, debounced fuzzy search and recovery |
+| [Card creation and editing](card-editor.md) | Shared right-pane/expanded Markdown editor, durable drafts, references and keyboard acceptance |
 | [Card conversation workspace](card-conversation.md) | Compact Card header, scrolling task/Timeline, explicit recipients, comment shortcuts and Terminal boundary |
 | [Native UI motion](ui-motion.md) | Shared motion policy, retained Card reveal, editor resizing, native modal fades and regression scenes |
 | [Desktop utilities](desktop-utilities.md) | Implemented Usage/reset countdown, Caffeine, Theme, Shortcuts, target-Project creation and acceptance |

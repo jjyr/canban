@@ -76,6 +76,13 @@ pub const CATALOG: &[Command] = &[
     CREATE_CARD,
     SEND_COMMENT,
     Command {
+        id: "save-card",
+        title: "Save Card changes",
+        key: "mod+enter",
+        display: "⌘Enter",
+        context: "Card editor",
+    },
+    Command {
         id: "back",
         title: "Back",
         key: "mod+[",
@@ -99,6 +106,7 @@ pub fn execute(ui: Ui, id: &str) {
         "create-card" if ui.page.get_untracked() == "new-card" => {
             ui.card_submit.update(|n| *n += 1)
         }
+        "save-card" => ui.task_submit.update(|n| *n += 1),
         "send-comment" if ui.current_card().is_some() => ui.comment_submit.update(|n| *n += 1),
         "quick-open" => ui.show_search(false),
         "shortcuts" => crate::utilities::open(ui, "shortcuts"),

@@ -34,13 +34,14 @@ def run_case(name):
     if not args.native:
         fake_ui(target/'Contents/MacOS/canban-ui');fake_ui(candidate/'Contents/MacOS/canban-ui',fail=name in ['boot-failure','down-failure'])
     if name in ['up-failure','down-failure','schema-rollback']:
+        future_schema=candidate_info['schema']+1
         binary=candidate/'Contents/MacOS/canban';binary.rename(binary.with_name('canban-real'))
         binary.write_text('''#!/usr/bin/python3
 import os,sys,json,sqlite3,subprocess
 from pathlib import Path
 args=sys.argv[1:]
 if CASE in ['down-failure','schema-rollback'] and args==['build-info']:
- info=json.loads(subprocess.check_output([str(Path(__file__).with_name('canban-real')),'build-info']));info['schema']=9;print(json.dumps(info));sys.exit(0)
+ info=json.loads(subprocess.check_output([str(Path(__file__).with_name('canban-real')),'build-info']));info['schema']=FUTURE_SCHEMA;print(json.dumps(info));sys.exit(0)
 if 'database' in args:
  home=Path(args[args.index('--home')+1]);marker=home/'updates/migration-probe'
  number=int(marker.read_text())+1 if marker.exists() else 1;marker.write_text(str(number))
@@ -48,12 +49,12 @@ if 'database' in args:
   print('Injected migration failure',file=sys.stderr);sys.exit(31)
  if CASE in ['schema-rollback','down-failure']:
   target=int(args[args.index('--target')+1]);db=sqlite3.connect(home/'canban.sqlite');db.execute('BEGIN IMMEDIATE')
-  db.execute('CREATE TABLE future_schema_fixture(id INTEGER)' if target==9 else 'DROP TABLE future_schema_fixture');db.execute('PRAGMA user_version='+str(target));db.commit();db.close();print(json.dumps({'schema':target}));sys.exit(0)
+  db.execute('CREATE TABLE future_schema_fixture(id INTEGER)' if target==FUTURE_SCHEMA else 'DROP TABLE future_schema_fixture');db.execute('PRAGMA user_version='+str(target));db.commit();db.close();print(json.dumps({'schema':target}));sys.exit(0)
 os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_name('canban-real')),*args])
-'''.replace('CASE',repr(name)));binary.chmod(0o755)
+'''.replace('CASE',repr(name)).replace('FUTURE_SCHEMA',str(future_schema)));binary.chmod(0o755)
     artifact=root/('Canban-'+candidate_info['platform']+'.tar.zst')
     subprocess.run([str(args.candidate/'Contents/MacOS/canban-updater'),'pack',str(candidate),str(artifact)],check=True)
-    case_info={**candidate_info,'schema':9} if name in ['schema-rollback','down-failure'] else candidate_info
+    case_info={**candidate_info,'schema':candidate_info['schema']+1} if name in ['schema-rollback','down-failure'] else candidate_info
     manifest={**case_info,'rollback_floor':8,'asset':artifact.name,'size':artifact.stat().st_size,'sha256':hashlib.sha256(artifact.read_bytes()).hexdigest()}
     if name=='corrupt':manifest['sha256']='0'*64
     class Handler(http.server.BaseHTTPRequestHandler):

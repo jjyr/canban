@@ -15,6 +15,7 @@ impl AppServer {
                     | "usage.status"
                     | "config.get"
                     | "profile.presets"
+                    | "draft.list"
             )
         {
             bail!("Canban is upgrading; retry after the service handoff");
@@ -28,6 +29,9 @@ impl AppServer {
         }
         if method.starts_with("utilities.") || method.starts_with("usage.") {
             return self.utility_call(method, p);
+        }
+        if method.starts_with("draft.") {
+            return self.draft_call(method, p);
         }
         let config = self.config();
         match method {

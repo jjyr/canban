@@ -1,9 +1,14 @@
 //! Drafts and scroll positions outlive individual route/component owners.
+mod list;
+pub(crate) mod persistence;
 use crate::presenter::*;
 use canban_types::Card;
+pub use list::screen;
 use nsh_core::prelude::*;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-#[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Draft {
     pub github_head: String,
     pub github_compose: String,
@@ -14,6 +19,8 @@ pub struct Draft {
     pub github_file: String,
     pub github_line: String,
     pub github_reply: u64,
+    pub project_id: String,
+    pub updated_at: u64,
     pub card_kind: String,
     pub issue_query: String,
     pub selected_issue: Option<Value>,
@@ -21,8 +28,10 @@ pub struct Draft {
     pub title: String,
     pub body: String,
     pub comment: String,
+    #[serde(skip)]
     pub comment_error: String,
     pub recipients: Vec<String>,
+    #[serde(skip)]
     pub uploads: Vec<crate::card::attachments::Upload>,
     pub base_title: String,
     pub base_body: String,
@@ -30,17 +39,30 @@ pub struct Draft {
     pub editing: bool,
     pub details: bool,
     pub workspace_details: bool,
+    #[serde(skip)]
     pub error: String,
 }
 impl Draft {
     pub fn card(c: &Card) -> Self {
         Self {
+            project_id: c.project_id.clone(),
             title: c.title.clone(),
             body: c.body.clone(),
             base_title: c.title.clone(),
             base_body: c.body.clone(),
             revision: c.revision,
             ..Self::default()
+        }
+    }
+    pub fn has_content(&self, key: &str) -> bool {
+        if key.starts_with("new-card:") {
+            !self.title.is_empty()
+                || !self.body.is_empty()
+                || !self.instructions.is_empty()
+                || self.selected_issue.is_some()
+        } else {
+            key.starts_with("card:")
+                && (self.dirty() || !self.comment.is_empty() || !self.recipients.is_empty())
         }
     }
     pub fn dirty(&self) -> bool {
@@ -65,9 +87,7 @@ pub fn document(ui: Ui, key: String, initial: Draft) -> Signal<Draft> {
     let draft = signal(value);
     effect(move || {
         let value = draft.get();
-        ui.drafts.with(|m| {
-            m.insert(key.clone(), value);
-        });
+        put(ui, key.clone(), value);
     });
     draft
 }
@@ -99,11 +119,33 @@ pub fn save(ui: Ui, key: String, draft: Signal<Draft>, method: &'static str, par
             }
             Err(error) => value.error = error,
         }
-        ui.drafts.with(|m| {
-            m.insert(saved_key, value.clone());
-        });
+        put(ui, saved_key, value.clone());
         draft.try_set(value);
     });
+}
+/// Keep every route's in-memory projection and the persistent writer in sync.
+pub fn put(ui: Ui, key: String, mut draft: Draft) {
+    if key.starts_with("card:") || key.starts_with("new-card:") {
+        let changed = ui.drafts.with(|all| all.get(&key) != Some(&draft));
+        if changed {
+            draft.updated_at = canban_types::now();
+        }
+        let meaningful = draft.has_content(&key);
+        if let Ok(value) = serde_json::to_value(&draft) {
+            persistence::queue(&key, if meaningful { value } else { Value::Null });
+        }
+    }
+    ui.drafts.with(|all| {
+        all.insert(key, draft);
+    });
+    ui.draft_epoch.update(|n| *n += 1);
+}
+pub fn remove(ui: Ui, key: &str) {
+    ui.drafts.with(|all| {
+        all.remove(key);
+    });
+    persistence::queue(key, Value::Null);
+    ui.draft_epoch.update(|n| *n += 1);
 }
 pub fn scroll_position(ui: Ui, key: &str) -> Point<Points> {
     ui.scrolls.with(|m| m.get(key).copied().unwrap_or_default())
@@ -115,6 +157,12 @@ pub fn capture_scroll(ui: Ui, key: String, e: &ScrollEvent) {
 }
 pub fn save_card(ui: Ui, id: String, draft: Signal<Draft>) {
     let value = draft.get_untracked();
+    if ui.pending.get_untracked()
+        || value.title.trim().is_empty()
+        || crate::card::attachments::busy(draft, false)
+    {
+        return;
+    }
     save(
         ui,
         format!("card:{id}"),

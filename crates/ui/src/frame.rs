@@ -5,7 +5,7 @@ use nsh_core::prelude::*;
 pub fn screen(ui: Ui) -> impl IntoElement {
     let route = computed(move || {
         let page = ui.page.get();
-        if matches!(page.as_str(), "board" | "card") {
+        if matches!(page.as_str(), "board" | "card" | "new-card") {
             ("workspace".to_owned(), String::new(), ui.project.get())
         } else {
             (page, ui.card.get(), ui.project.get())

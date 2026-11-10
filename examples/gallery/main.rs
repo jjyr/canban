@@ -101,6 +101,7 @@ pub fn Gallery() -> impl IntoElement {
     let scene = signal("workspace".to_string());
     let constrained = signal(false);
     let ui = Ui::new();
+    canban_ui::links::install(ui);
     let reduced_motion = signal(false);
     provide_context(canban_ui_kit::motion::ReducedMotion(reduced_motion));
     ui.board_move.replace(Some(std::rc::Rc::new(move |drop| {
@@ -165,6 +166,60 @@ pub fn Gallery() -> impl IntoElement {
         ui.card.set(String::new());
         ui.page.set("board".into());
         ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"available","available":{"manifest":{"version":"20261110-3"}}}}));
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("references") {
+        let mut snapshot = fixtures::workspace();
+        for number in 4..=65 {
+            let mut card = snapshot.cards[2].clone();
+            card.id = format!("reference-card-{number}");
+            card.number = number;
+            card.title = if number == 65 {
+                "Beyond fifty unique needle".into()
+            } else {
+                format!("Completion fixture {number}")
+            };
+            card.stage = "backlog".into();
+            snapshot.cards.push(card);
+        }
+        snapshot.cards[0].body = "## Body Markdown\n\n**Bold body** and *italic body*.\n\nLocal: [Related Card](card:card-2)\n\nProfile: @developer\n\n[Example website](https://example.com/) and [GitHub Issue](https://github.com/jjyr/canban/issues/1)\n\nLiteral: `@developer #2`".into();
+        let mut comment = fixtures::timeline();
+        comment.id = "reference-comment".into();
+        comment.card_id = "card-1".into();
+        comment.kind = "comment.created".into();
+        comment.actor = "user".into();
+        comment.request_id = None;
+        comment.message = "### Comment Markdown\n\n**Bold comment** and *italic comment*.\n\n[Comment local](card:card-2) · @developer · [Comment website](https://example.com/)".into();
+        comment.data = json!({"body":comment.message});
+        snapshot.events.retain(|e| e.card_id != "card-1");
+        snapshot.events.push(comment);
+        ui.snapshot.set(snapshot);
+        ui.card.set("card-1".into());
+        ui.page.set("card".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("editor") {
+        let mut snapshot = fixtures::workspace();
+        snapshot.projects[0].github = Some(canban_types::GitHubSource {
+            pr_intake: Default::default(),
+            authors: vec![],
+            labels: vec![],
+            include_drafts: false,
+            paused: false,
+            repository: "jjyr/canban".into(),
+            repository_id: 1,
+            generation: "gallery".into(),
+            intake: canban_types::GitHubIntake::All,
+            synced_at: None,
+            error: None,
+        });
+        ui.snapshot.set(snapshot);
+        ui.new_card();
+        let key = ui.new_draft.get_untracked();
+        canban_ui::drafts::put(ui,key,canban_ui::drafts::Draft {
+            project_id:"gallery-project".into(), title:"Markdown editor regression".into(),
+            body:"## Editing\n\n- [ ] Keep selection and undo while expanding\n- [ ] Enter and Shift+Enter insert newlines\n\n```rust\nlet value = 42;\n```\n\nType @ or # for references.\n".into(), ..Default::default()
+        });
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("archive") {
@@ -462,7 +517,7 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("New Card", Variant::Quiet, move |_| {
                     let mut snapshot=fixtures::workspace();
                     snapshot.projects[0].github=Some(canban_types::GitHubSource { pr_intake:Default::default(),authors:vec![],labels:vec![],include_drafts:false,paused:false,repository:"jjyr/canban".into(),repository_id:1,generation:"gallery".into(),intake:canban_types::GitHubIntake::All,synced_at:None,error:None });
-                    scene.set("workspace".into());ui.snapshot.set(snapshot);ui.page.set("new-card".into());
+                    scene.set("workspace".into());ui.snapshot.set(snapshot);ui.new_card();
                 }))
                 .child(action("GitHub inbox",Variant::Quiet,move |_|{scene.set("workspace".into());fixtures::github_browser(ui,false);}))
                 .child(action("GitHub PR diff",Variant::Quiet,move |_|{scene.set("workspace".into());fixtures::github_browser(ui,true);}))

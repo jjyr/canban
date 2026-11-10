@@ -184,8 +184,38 @@ Gallery **Archived / deleted**, or `CANBAN_GALLERY_SCENE=archive mise run galler
 
 `ui/updates.rs` owns the bottom-rail highlighted Update action, reactive progress/retry state, Settings check/version feedback and upgrade-session capture/restore. It composes UI Kit chrome/actions/notices and the shared update SVG; release discovery and install logic stay in `canban-updater`/AppServer. The update action is global across routes, disables duplicate submission and sends the exact offered version with the initiating packaged UI identity.
 
-The UI saves root-owned Card drafts, pasted attachment bytes, current location, Terminal tabs and Archive query before acknowledging handoff. Restoration waits for the first applied snapshot so Card/Terminal identities resolve correctly; incomplete uploads become explicit retry states. This is planned-update persistence, not general crash autosave. Candidate readiness is acknowledged only after snapshot application and a rendered frame.
+The UI saves root-owned Card drafts, pasted attachment bytes, current location, Terminal tabs and Archive query before acknowledging handoff. Restoration waits for the first applied snapshot so Card/Terminal identities resolve correctly; incomplete uploads become explicit retry states. This planned-update capture complements the durable editor draft writer described below; transient upload bytes stay out of SQLite and are carried separately in the upgrade session. Candidate readiness is acknowledged only after snapshot application and a rendered frame.
 
 The production `Recovery` screen is a standalone host selected before AppClient startup when the install journal requires manual repair. Its inputs are home/error text; it displays the log location and Open update folder/Quit without opening SQLite. The Gallery reuses this exact screen with `CANBAN_GALLERY_SCENE=update-recovery`; Gallery Quit returns to its fixture shell. `CANBAN_GALLERY_SCENE=updates` opens pending-update fixtures; the full Gallery also exposes Update available/Update failed controls.
 
 Native checks covered pending/progress presentation, recovery layout, real packaged Recovery exit with invalid SQLite bytes unchanged, and a packaged sidebar upgrade to `20261110-4` restoring an open Card/unsent comment. See [evidence and limitations](updates.md#executed-acceptance-2026-11-10).
+
+## Unified Card editing and durable drafts (2026-11-10)
+
+`ui/src/editor.rs` shares Markdown source, preview, reference completion and draft
+feedback between New Card and task editing. `ui/src/references.rs` supplies local
+Card/Profile candidates and bounded GitHub Issue/PR lookups. UI Kit owns the
+Enter/Shift+Enter newline policy, including open completion menus, and scoped
+Command+Enter submission. The right-pane split retains its editor while expanded.
+
+`ui/src/drafts.rs` owns window projections, `drafts/list.rs` the searchable Drafts
+screen, and `drafts/persistence.rs` one coalescing background writer. AppServer
+`drafts.rs` owns revision-checked SQLite persistence outside Card/Timeline state.
+The Gallery's `CANBAN_GALLERY_SCENE=editor` imports the production New Card flow.
+See [Card editor](card-editor.md) for native verification and limits.
+
+## Markdown reference links (2026-11-10)
+
+`ui-kit/src/reference_link.rs` owns the generic inline link's style, focus,
+350 ms rich tooltip and navigation callback. It receives preview content and
+callbacks without product or network dependencies. `ui/src/links.rs` owns
+Card/Profile/attachment/web routing, local previews and bounded GitHub detail
+lookup; `links/document.rs` decorates the parsed Markdown AST outside code.
+The root-installed NSH Markdown plugin returns inline Text spans, retaining the
+paragraph baseline and hit targets. It is installed in both App and Gallery roots.
+
+Task, editor Preview and Timeline narrative readers use this common component.
+`CANBAN_GALLERY_SCENE=references mise run gallery` supplies 65 Cards, body/comment
+Markdown and local/Profile/web/GitHub links. Native App acceptance additionally
+verifies exact saved completion text and real default-browser navigation; see
+[Card editor](card-editor.md#reference-follow-up-acceptance-2026-11-10).

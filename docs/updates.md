@@ -45,7 +45,7 @@ Migration code is database-only, deterministic and transactional. Do not perform
 
 Add meaningful tests for up/down round trips with representative records, failure midway through a multi-step up, failure during down, and rejection of unsupported/newer schemas. A new release's rollback implementation must retain every down step required to reach the supported old baseline. Existing schema 0–8 initialization remains compatible; automatic down never crosses that baseline.
 
-The implementation lives in `crates/storage/src/migrations.rs`. Append a `Migration { version, up, down }` to `STEPS` and advance `CURRENT` together; versions must be consecutive after 8. The registry rejects a mismatched ceiling. Each function receives the framework's `rusqlite::Transaction`; do not open another connection or transaction. `Store::open` applies pending up steps. The candidate CLI exposes `database --target N` for the installer, with the same startup fence and exclusive service ownership. It does not start product or Herdr services. There are no new production schema changes in this release: `CURRENT` remains 8.
+The implementation lives in `crates/storage/src/migrations.rs`. Append a `Migration { version, up, down }` to `STEPS` and advance `CURRENT` together; versions must be consecutive after 8. The registry rejects a mismatched ceiling. Each function receives the framework's `rusqlite::Transaction`; do not open another connection or transaction. `Store::open` applies pending up steps. The candidate CLI exposes `database --target N` for the installer, with the same startup fence and exclusive service ownership. It does not start product or Herdr services. The merged registry is `CURRENT = 10`: schema 9 moves legacy GitHub mirrors to disposable cache storage and adds PR source uniqueness; schema 10 adds durable editor drafts. A separate cache-export preflight runs before the SQL-only migration transaction, from both Store startup and the installer CLI. Export failure prevents cleanup; migration failure leaves the export available. The user explicitly approved export-before-cleanup. Downgrade reverses schema changes but cannot recreate scrubbed remote prose. The schema-10 compatibility marker records whether a legacy schema-9 database already had editor drafts and/or the GitHub source index, preserving its original shape on rollback.
 
 ## Implemented ownership and interfaces
 
@@ -72,7 +72,7 @@ UI rail / Settings         |                         |
 - `update.state {}` returns build, discovery/progress/error state and the current install token/phase.
 - `update.check {}` starts a background check. Concurrent check/install operations share an operation lock.
 - `update.install { version, ui_pid, app_id }` requires the exact currently offered version and the owning packaged UI process. Agent-bound requests cannot install. The manifest/candidate API is allowed to advance; the new App's matching UI and CLI are verified together.
-- `canban build-info` returns `{ version, commit, schema, api, platform }`. The current desktop API is 7 and schema is 8. Local unversioned builds identify themselves as `development` / `unknown`.
+- `canban build-info` returns `{ version, commit, schema, api, platform }`. The current desktop API is 8 and schema is 10. Local unversioned builds identify themselves as `development` / `unknown`.
 
 Update state is under `~/.canban/updates/`: `state.json`, `install.json`, `updater.log`, `operation.lock`, `upgrade.lock`, `jobs/<token>/canban-updater`, `outbox/` and temporary staging/session files. Successful replacement retains the previous whole App bundle beside the installed App. There is no automatic cleanup of previous bundles in this first version.
 
@@ -98,6 +98,8 @@ Use isolated homes, bundle copies, HTTP release fixtures and Herdr Cores. Cover 
 
 ### Executed acceptance (2026-11-10)
 
+Historical pre-merge evidence: these fixtures used schema 8/API 7. See [combined integration acceptance](merge-integration-20261111.md) for the current schema-10/API-8 release.
+
 All application/Core/bundle fixtures were disposable; the user's live home/Core were not used. Fixture versions (including `20261110-4`) were compiled from the uncommitted working tree based on `2827f8a254617e86b172444e41afe288c8d0a425`; their commit field identifies that base, not a published source revision. No real release tag was reserved.
 
 | Check | Result and evidence |
@@ -105,7 +107,7 @@ All application/Core/bundle fixtures were disposable; the user's live home/Core 
 | Workspace | 181 Rust tests passed; workspace/all-target Clippy with warnings denied, formatting and diff checks passed. Includes migration roundtrip/failure, journal/startup fencing, queue idempotency, remote report deferral/replay and authenticated asset redirect credential stripping. |
 | Release logic/package | Three offline release tests passed (Shanghai sequence/retry identity, atomic collision and published immutability). Optimized `20261110-4` fixture packaged with version/commit/API/schema, manifest size/SHA-256 and ad-hoc signature. No GitHub upload/publication was performed. |
 | Six-case matrix | `mise run acceptance-updates -- --baseline BASELINE_APP --candidate CANDIDATE_APP`; `/private/tmp/cb-updates-rsi9cf6e`, log `/private/tmp/canban-updates-acceptance-complete.log`: normal, corrupt, failed up, failed candidate boot, schema rollback and failed down all passed. Rejects Agent-triggered install, stale target and double install; checks report delivered once and exact live terminal/Core/worktree identity. |
-| Migration evidence boundary | Synthetic unit steps exercise actual paired transactional schema 8→9→10→8. The installer matrix wraps the candidate CLI to simulate a future schema 9 and down failure against real scratch SQLite. This release itself remains schema 8. |
+| Migration evidence boundary | Synthetic unit steps exercise actual paired transactional schema 8→9→10→8. The installer matrix wraps the candidate CLI to simulate a future schema 9 and down failure against real scratch SQLite. That pre-merge fixture itself remained schema 8. |
 | Native packaged App | `/private/tmp/cb-updates-7s057ul3/normal`, `native-ui-evidence.json` and `result.json`: clicked the bottom Update action while the fixture Agent was Working; installed `20261110-4`, automatically restored the Card and unsent comment, showed the version/Up to date in Settings, and preserved the Agent/report identity through restart. |
 | Recovery UI | `/private/tmp/cb-update-recovery-czt3inge`: actual packaged Recovery window opened and quit with a deliberately invalid SQLite-file payload unchanged. Production Gallery pending/progress and `CANBAN_GALLERY_SCENE=update-recovery` layout were inspected natively. Gallery recovery Quit returns to its fixture shell; packaged recovery Quit exits. |
 | Development handoff | `/private/tmp/cb-dev-start-npf7kzjq/results.json`: replaced current/legacy services, retained preferences and live PTY identity, rejected explicit endpoint replacement; script expectations now derive API from the packaged build instead of hardcoding a historical level. |

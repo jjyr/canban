@@ -8,15 +8,65 @@ use serde_json::{Value, json};
 struct Session {
     location: Location,
     drafts: std::collections::BTreeMap<String, crate::drafts::Draft>,
+    #[serde(default)]
+    uploads: std::collections::BTreeMap<String, Vec<crate::card::attachments::Upload>>,
     tabs: Vec<String>,
     archive_query: String,
 }
 fn capture(ui: Ui) -> Session {
+    let drafts = ui.drafts.get();
     Session {
         location: ui.location(),
-        drafts: ui.drafts.get(),
+        uploads: drafts
+            .iter()
+            .filter(|(_, d)| !d.uploads.is_empty())
+            .map(|(k, d)| (k.clone(), d.uploads.clone()))
+            .collect(),
+        drafts,
         tabs: ui.terminal_tabs.get_untracked(),
         archive_query: ui.archive_query.get_untracked(),
+    }
+}
+fn decode_session(bytes: &[u8]) -> anyhow::Result<Session> {
+    let value: Value = serde_json::from_slice(bytes)?;
+    let mut saved: Session = serde_json::from_value(value.clone())?;
+    // Earlier updater builds stored transient uploads inside Draft. Durable
+    // editor drafts intentionally omit them from SQLite; retain upgrade bytes.
+    if let Some(drafts) = value["drafts"].as_object() {
+        for (key, draft) in drafts {
+            if !saved.uploads.contains_key(key) && draft["uploads"].is_array() {
+                saved.uploads.insert(
+                    key.clone(),
+                    serde_json::from_value(draft["uploads"].clone())?,
+                );
+            }
+        }
+    }
+    Ok(saved)
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    #[test]
+    fn legacy_and_durable_editor_sessions_keep_transient_uploads_out_of_sql_drafts() {
+        let legacy = json!({
+            "location":{"page":"card","project":"project","card":"card","request":"","terminal":"","standalone":false,"terminal_card":""},
+            "drafts":{"card:card":{"comment":"unsent","uploads":[{"key":"upload-key","name":"paste.txt","file":["paste.txt","text/plain",[1,2,3]],"path":null,"comment":true,"state":"Uploading"}]}},
+            "tabs":[],"archive_query":""
+        });
+        let saved = decode_session(&serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert!(saved.location.new_draft.is_empty());
+        assert_eq!(saved.uploads["card:card"].len(), 1);
+        assert!(saved.drafts["card:card"].uploads.is_empty());
+        let encoded = serde_json::to_value(&saved).unwrap();
+        assert!(encoded["drafts"]["card:card"].get("uploads").is_none());
+        let restored = decode_session(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&restored.uploads).unwrap(),
+            serde_json::to_value(&saved.uploads).unwrap()
+        );
+        assert_eq!(restored.drafts["card:card"].comment, "unsent");
     }
 }
 pub fn restore(ui: Ui) {
@@ -27,10 +77,13 @@ pub fn restore(ui: Ui) {
     let Ok(bytes) = std::fs::read(&path) else {
         return;
     };
-    let Ok(mut saved) = serde_json::from_slice::<Session>(&bytes) else {
+    let Ok(mut saved) = decode_session(&bytes) else {
         return;
     };
-    for draft in saved.drafts.values_mut() {
+    for (key, draft) in &mut saved.drafts {
+        if let Some(uploads) = saved.uploads.remove(key) {
+            draft.uploads = uploads;
+        }
         crate::card::attachments::pause_after_upgrade(draft);
     }
     ui.drafts.replace(saved.drafts);
@@ -47,6 +100,7 @@ pub fn restore(ui: Ui) {
         };
         batch(move || {
             ui.project.set(saved.project);
+            ui.new_draft.set(saved.new_draft);
             ui.card.set(saved.card);
             ui.request.set(saved.request);
             ui.page.set(saved.page);

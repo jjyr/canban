@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Location {
+    #[serde(default)]
+    pub new_draft: String,
     pub page: String,
     pub project: String,
     pub card: String,
@@ -22,12 +24,17 @@ pub struct Ui {
     pub github: crate::github::Browser,
     /// Optional host adapter for the reusable Board drop intent (Gallery uses local fixtures).
     pub board_move: Stored<Option<crate::board::DropHandler>>,
+    pub new_draft: Signal<String>,
+    pub draft_epoch: Signal<u64>,
+    pub draft_status: Signal<u64>,
     pub card_target: Signal<String>,
     pub card_submit: Signal<u64>,
     pub comment_submit: Signal<u64>,
     pub update: Signal<Value>,
     pub update_loading: Signal<bool>,
     pub update_busy: Signal<bool>,
+    pub task_submit: Signal<u64>,
+    pub editor_focus: Signal<u64>,
     pub utility: Signal<Value>,
     pub utility_popup: Signal<String>,
     pub native_modal: Signal<bool>,
@@ -56,6 +63,7 @@ pub struct Ui {
     pub project_picker: Signal<bool>,
     pub search_query: Signal<String>,
     pub recent_destinations: Stored<Vec<String>>,
+    pub link_previews: Stored<BTreeMap<String, crate::links::CachedPreview>>,
     pub snapshot: Signal<Snapshot>,
     pub snapshot_ready: Signal<bool>,
     pub reminders: Memo<Vec<canban_notifications::Reminder>>,
@@ -120,6 +128,7 @@ impl Ui {
         }
         self.utility_popup.set(String::new());
         self.quick_open.set(false);
+        self.new_draft.set(format!("new-card:{}", id()));
         self.card_target.set(self.project.get_untracked());
         self.navigate("new-card");
     }
@@ -146,12 +155,17 @@ impl Ui {
             owner: Owner::current(),
             github: crate::github::Browser::new(),
             board_move: stored(None),
+            new_draft: signal(String::new()),
+            draft_epoch: signal(0),
+            draft_status: signal(0),
             card_target: signal(String::new()),
             card_submit: signal(0),
             comment_submit: signal(0),
             update: signal(json!({"build":canban_updater::Build::current(),"state":{}})),
             update_loading: signal(false),
             update_busy: signal(false),
+            task_submit: signal(0),
+            editor_focus: signal(0),
             utility: signal(json!({"preferences":{"theme":"canban"},"awake":false})),
             utility_popup: signal(String::new()),
             native_modal: signal(false),
@@ -188,6 +202,7 @@ impl Ui {
             project_picker: signal(false),
             search_query: signal(String::new()),
             recent_destinations: stored(Vec::new()),
+            link_previews: stored(BTreeMap::new()),
             idle_minutes: signal(
                 crate::APP
                     .get()
@@ -227,7 +242,7 @@ impl Ui {
             output_request: signal(0),
             review: signal(None),
             review_request: signal(0),
-            drafts: stored(BTreeMap::new()),
+            drafts: stored(crate::drafts::persistence::initial()),
             scrolls: stored(BTreeMap::new()),
             narrow: signal(false),
             expanded: signal(false),
@@ -238,6 +253,11 @@ impl Ui {
     }
     pub fn location(self) -> Location {
         Location {
+            new_draft: if self.page.get_untracked() == "new-card" {
+                self.new_draft.get_untracked()
+            } else {
+                String::new()
+            },
             page: self.page.get_untracked(),
             project: self.project.get_untracked(),
             card: self.card.get_untracked(),

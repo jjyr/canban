@@ -423,6 +423,25 @@ impl Client {
         ))?;
         Ok(serde_json::from_value(value["items"].clone())?)
     }
+    /// Bounded context search, including Issues and PRs; never mutates GitHub.
+    pub fn references(&self, repo: &str, text: &str) -> Result<Vec<Issue>> {
+        let repo = repository(repo)?;
+        let text = text.trim();
+        if let Ok(number) = text.trim_start_matches('#').parse::<u64>() {
+            return Ok(vec![self.get(&format!("/repos/{repo}/issues/{number}"))?]);
+        }
+        let terms = text
+            .split_whitespace()
+            .take(12)
+            .map(|w| format!("\"{}\"", w.replace(['"', '\\'], "")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let value: Value = self.get(&format!(
+            "/search/issues?q={}&sort=updated&order=desc&per_page=20",
+            segment(&format!("repo:{repo} in:title {terms}"))
+        ))?;
+        Ok(serde_json::from_value(value["items"].clone())?)
+    }
     pub fn comments(&self, repo: &str, number: u64) -> Result<Vec<Comment>> {
         self.pages(&format!(
             "/repos/{}/issues/{number}/comments",
@@ -530,6 +549,28 @@ mod tests {
         assert!(error.contains("429"));
         assert!(!error.contains("sensitive"));
         assert!(!error.contains("fixture-token"));
+        worker.join().unwrap();
+    }
+    #[test]
+    fn reference_search_includes_prs_and_exact_numbers_without_importing_them_as_issues() {
+        let issue = json!({"id":1,"node_id":"I1","number":12,"title":"Context issue","body":"Markdown","state":"closed","html_url":"https://github.com/owner/repo/issues/12","user":{"id":1,"login":"fixture"},"updated_at":"2026-11-10"});
+        let mut pr = issue.clone();
+        pr["id"] = json!(2);
+        pr["number"] = json!(13);
+        pr["pull_request"] = json!({});
+        pr["html_url"] = json!("https://github.com/owner/repo/pull/13");
+        let (client, worker) = mock(vec![
+            (200, json!({"items":[issue,pr.clone()]}).to_string()),
+            (200, pr.to_string()),
+        ]);
+        let rows = client.references("owner/repo", "context").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].pull_request.is_none());
+        assert!(rows[1].pull_request.is_some());
+        assert_eq!(
+            client.references("owner/repo", "#13").unwrap()[0].number,
+            13
+        );
         worker.join().unwrap();
     }
     #[test]

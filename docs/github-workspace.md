@@ -1,6 +1,6 @@
 # GitHub workspace and disposable cache
 
-Status: implemented in the GitHub workspace branch, 2026-11-10. This is the current contract for GitHub navigation, source Cards, browsing and caching. It supersedes the earlier Issue-only intake, Settings entry and permanent remote-comment Timeline imports. Dated live acceptance in [GitHub integration](github-integration.md) remains historical evidence, not acceptance of the new UI.
+Status: integrated with the editor/updater on main, 2026-11-10. This is the current contract for GitHub navigation, source Cards, browsing and caching. It supersedes the earlier Issue-only intake, Settings entry and permanent remote-comment Timeline imports. Dated live acceptance in [GitHub integration](github-integration.md) remains historical evidence, not acceptance of the new UI.
 
 ## Navigation and account access
 
@@ -71,7 +71,7 @@ Clear GitHub cache preserves Cards, associations, rules, local comments and deli
 
 ## Persistence and migration
 
-Schema 9 extends source uniqueness to PR Cards. New source snapshots and remote discussion bodies cannot be written through the business storage API. Source titles are persisted as a repository/number placeholder; the current title is projected at read time. Delivery repository/PR/workspace bindings and locally accepted publication checkpoints remain durable; current Checks/Review summaries and remote delivery state come from cache. A confirmed merge is retained as a local delivery receipt.
+Schema 9 extends source uniqueness to PR Cards. The combined release uses schema 10 for durable editor drafts and desktop API 8. Paired migrations also accept the editor branch's previous schema-9 shape; rollback preserves preexisting draft tables. New source snapshots and remote discussion bodies cannot be written through the business storage API. Source titles are persisted as a repository/number placeholder; the current title is projected at read time. Delivery repository/PR/workspace bindings and locally accepted publication checkpoints remain durable; current Checks/Review summaries and remote delivery state come from cache. A confirmed merge is retained as a local delivery receipt.
 
 Upgrade exports old `github_issues` snapshots and imported remote discussion/sync events to `cache/github/legacy/v8.json` before removing their business-table copies. Mirrored source titles in old creation/edit events and Card-shaped operation receipts are also exported and replaced with source placeholders. Local comments, Card identity/stage, reports, execution history and historical archive/input files are retained. Existing captured historical files are not silently rewritten. The migration export is retained separately for inspection and does not masquerade as an account-scoped current response.
 
