@@ -24,7 +24,7 @@ pub fn entries(events: &[Event]) -> Vec<(Event, bool)> {
 }
 pub fn render(ui: Ui) -> impl IntoElement {
     let events = computed(move || {
-        let card = ui.card.get();
+        let card = ui.card_id();
         ui.snapshot.with(|s| {
             s.events
                 .iter()

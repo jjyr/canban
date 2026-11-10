@@ -15,7 +15,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>) -> impl IntoElement {
                         })),
                 )
                 .child(dynamic(move || {
-                    let card = ui.card.get();
+                    let card = ui.card_id();
                     view().gap_1().children(ui.snapshot.with(|s| {
                         s.artifacts
                             .iter()

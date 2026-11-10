@@ -9,11 +9,22 @@ use serde_json::json;
 pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElement {
     let comment = proxy(draft, true);
     let editor = MarkdownInput::new();
+    editor.restore_after(
+        computed(move || ui.quick_open.get() || !ui.utility_popup.get().is_empty()),
+        computed(move || {
+            matches!(ui.page.get().as_str(), "card" | "review") && ui.card_id() == ui.card.get()
+        }),
+    );
     reading.editor.replace(Some(editor));
-    let card = ui.card.get_untracked();
+    let card = untracked(|| ui.card_id());
     let key = format!("card:{card}");
     editor.on_submit(
-        move || !ui.quick_open.get() && ui.utility_popup.get().is_empty(),
+        move || {
+            matches!(ui.page.get().as_str(), "card" | "review")
+                && ui.card_id() == ui.card.get()
+                && !ui.quick_open.get()
+                && ui.utility_popup.get().is_empty()
+        },
         move || ui.comment_submit.update(|n| *n += 1),
     );
     let enabled = computed(move || {
@@ -75,7 +86,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         );
     });
     editor.on_paste_files({
-        let card = ui.card.get_untracked();
+        let card = untracked(|| ui.card_id());
         move |files, uris| {
             super::attachments::add(
                 ui,
@@ -124,7 +135,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         .element_ref(&reading.composer)
         .on_touch(|_: &TouchEvent| {})
         .on_file_drop({
-            let card = ui.card.get_untracked();
+            let card = untracked(|| ui.card_id());
             move |e: &nsh_core::element::FileDropEvent| {
                 super::attachments::add(
                     ui,
@@ -191,7 +202,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             draft,
                             editor,
                             true,
-                            ui.card.get_untracked(),
+                            untracked(|| ui.card_id()),
                         )),
                 )
                 .child(

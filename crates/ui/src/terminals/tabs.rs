@@ -531,7 +531,7 @@ pub fn rename_dialog(ui: Ui) -> impl IntoElement {
             };
             let enter = save.clone();
             nsh_base::dialog()
-                .animation(ModalAnimation::None)
+                .animation(canban_ui_kit::motion::modal)
                 .close_on_escape(true)
                 .close_on_backdrop_press(true)
                 .on_cancel(move || ui.terminal_rename.set(None))

@@ -3,15 +3,21 @@ use crate::{presenter::*, quick_open, screens, sidebar, terminals};
 use canban_ui_kit::tokens::*;
 use nsh_core::prelude::*;
 pub fn screen(ui: Ui) -> impl IntoElement {
+    let route = computed(move || {
+        let page = ui.page.get();
+        if matches!(page.as_str(), "board" | "card") {
+            ("workspace".to_owned(), String::new(), ui.project.get())
+        } else {
+            (page, ui.card.get(), ui.project.get())
+        }
+    });
     view()
         .flex_1()
         .min_h(px(0.))
         .bg(BACKGROUND)
         .on_layout(move |b: &Bounds<Points>| ui.narrow.set(b.size.width.0 < 950.))
         .child(dynamic(move || {
-            let page = ui.page.get();
-            let _ = ui.card.get();
-            let _ = ui.project.get();
+            let (page, _, _) = route.get();
             untracked(|| {
                 if page == "terminals" {
                     terminals::screen(ui).into_element()

@@ -62,6 +62,8 @@ pub struct Ui {
     pub overview_width: Signal<f32>,
     pub project: Signal<String>,
     pub card: Signal<String>,
+    /// Read-only identity of a mounted Card, retained during its exit animation.
+    pub card_view: Option<Signal<String>>,
     pub request: Signal<String>,
     pub page: Signal<String>,
     pub status: Signal<String>,
@@ -183,6 +185,7 @@ impl Ui {
             ),
             project: signal(String::new()),
             card: signal(String::new()),
+            card_view: None,
             request: signal(String::new()),
             page: signal("board".into()),
             status: signal(String::new()),
@@ -275,11 +278,16 @@ impl Ui {
         self.card.set(String::new());
         self.navigate("board");
     }
+    pub fn card_id(self) -> String {
+        self.card_view
+            .and_then(|id| id.try_get())
+            .unwrap_or_else(|| self.card.get())
+    }
     pub fn current_card(self) -> Option<Card> {
         self.snapshot.with(|s| {
             s.cards
                 .iter()
-                .find(|c| c.id == self.card.get_untracked())
+                .find(|c| c.id == untracked(|| self.card_id()))
                 .cloned()
         })
     }

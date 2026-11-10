@@ -155,6 +155,14 @@ Task Edit's structural owner depends on a computed editing/expansion projection 
 
 ## Markdown conversation components (2026-11-10)
 
+Shared motion now lives in `ui-kit/src/motion.rs`, with a retained native
+`reveal_split` in `split.rs`. `ui/workspace.rs` keeps Board mounted across Card
+open/close and scopes the outgoing Card identity through animation completion.
+Markdown input resizing and the shared modal adapters reuse this policy. The
+Gallery's `CANBAN_GALLERY_SCENE=motion` covers interruption, switching, resizing,
+reduced motion and Quick Open. See [native motion](ui-motion.md) for contracts
+and dated verification.
+
 `ui-kit/src/markdown.rs` owns the common Markdown reader and `MarkdownInput`: an NSH rope editor, stable source/preview lifetime, formatting/undo actions, group focus/hold state, clipboard bridge and scoped submission shortcut. It accepts text/signals and callbacks without product, storage or runtime dependencies. `ui/src/card/{task,composer,attachments,timeline}.rs` owns revision-aware editing, explicit Profile recipients, Card-managed resource uploads and the chronological event projection. Timeline rows retain their owners by event ID; an echoed report can change from narrative to a compact event without repeating its body.
 
 The Gallery's **Card conversation**, **Append reply** and **Reply in 5s** scenes exercise the production Card/editor composition, including rich Markdown and long conversation history. Native application acceptance additionally checks persisted operations against an isolated AppServer/Core. See [Card conversation](card-conversation.md) for the complete interaction contract and dated evidence.

@@ -7,7 +7,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
     let github = ui
         .current_card()
         .is_some_and(|c| c.github_issue().is_some());
-    let id = ui.card.get_untracked();
+    let id = untracked(|| ui.card_id());
     view()
         .gap_2()
         .child(
@@ -30,6 +30,13 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         .child(dynamic(move || {
             if editing.get() {
                 let editor = MarkdownInput::new();
+                editor.restore_after(
+                    computed(move || ui.quick_open.get() || !ui.utility_popup.get().is_empty()),
+                    computed(move || {
+                        matches!(ui.page.get().as_str(), "card" | "review")
+                            && ui.card_id() == ui.card.get()
+                    }),
+                );
                 let paste = id.clone();
                 editor.on_paste_files({
                     let card = id.clone();
@@ -46,7 +53,12 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 });
                 let save_id = id.clone();
                 editor.on_submit(
-                    move || !ui.quick_open.get() && ui.utility_popup.get().is_empty(),
+                    move || {
+                        matches!(ui.page.get().as_str(), "card" | "review")
+                            && ui.card_id() == ui.card.get()
+                            && !ui.quick_open.get()
+                            && ui.utility_popup.get().is_empty()
+                    },
                     {
                         let save_id = id.clone();
                         move || {

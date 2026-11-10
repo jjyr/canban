@@ -44,6 +44,28 @@ impl MarkdownInput {
             api.focus();
         }
     }
+    /// Restore a focused editor after a host overlay closes. NSH's editor sink
+    /// rejects pointer targeting, so native modal restoration can skip it.
+    /// Navigating away or selecting another document must never reclaim focus.
+    pub fn restore_after(self, covered: Memo<bool>, current: Memo<bool>) {
+        let was_covered = stored(false);
+        let restore = stored(false);
+        effect(move || {
+            let covered_now = covered.get();
+            if covered_now {
+                if !was_covered.replace(true) {
+                    restore.replace(self.focused.get_untracked());
+                }
+            } else if was_covered.replace(false) && restore.replace(false) {
+                spawn(async move {
+                    next_frame().await;
+                    if covered.try_get() == Some(false) && current.try_get() == Some(true) {
+                        self.focus();
+                    }
+                });
+            }
+        });
+    }
     /// Bind after the native editor has installed its code-editing keys.
     /// Every native focus acquisition (including returning from a system sheet)
     /// reclaims Cmd+Enter for the host's single submit intent. The timer and
@@ -194,6 +216,15 @@ impl MarkdownInput {
             }
             let lines = value.with(|v| v.lines().count());
             (100. + lines.saturating_sub(3) as f32 * 20.).min(max_height.get().max(64.))
+        });
+        let previous_size = stored(None::<(bool, f32)>);
+        effect(move || {
+            let next = (expanded.get(), height.get());
+            if let Some(before) = previous_size.replace(Some(next))
+                && (before.0 != next.0 || (before.1 - next.1).abs() > 0.5)
+            {
+                super::motion::layout(root, super::motion::COMPOSER);
+            }
         });
         view()
             .element_ref(&root)

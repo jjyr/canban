@@ -28,6 +28,10 @@ Status: Card reading/editing redesign implemented 2026-11-10. See the dated veri
 
 The Board keeps its ordinary columns and Cards, without execution-slot summary or filter buttons. Wide layouts retain the Board beside the Card; narrow layouts use the Card pane with a Back action. Branch text is compact, copyable and has a full-value tooltip. Host, path, base commit and manual workspace refresh are available under **... → Workspace details**, rather than consuming permanent conversation space. **Archive/Restore** has a dedicated header icon. **...** also owns stage moves, Archive/Restore, Delete/Remove and context/attachment controls. Board Cards expose the same lifecycle actions in their right-click menu. The X action is labeled **Close Card details** and only dismisses the pane. Review and human Continue remain directly reachable when applicable.
 
+Opening/closing the pane now uses a shared native reveal/fade while retaining
+the Board. Switching Cards does not replay the reveal. Composer resizing and
+shared dialogs use the same reduced-motion policy; see [native motion](ui-motion.md).
+
 `card.rs` composes independently owned `card/header.rs`, `task.rs`, `details.rs`, `timeline.rs` and `composer.rs`. These use shared UI Kit controls, NSH scroll/input/Markdown/menu behavior and existing product components. The standalone Gallery imports the same screen through the production frame.
 
 ## Description and composer

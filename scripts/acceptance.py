@@ -64,7 +64,15 @@ try:
             profile["argv"] = ["/usr/bin/python3", str(repo / "scripts/fixture-agent.py")]
             profile["role_instruction"] = "ACCEPTANCE_ROLE_" + profile["id"].upper()
     config_path.write_text(json.dumps(config, indent=2))
-    call("config.reload")
+    # Bootstrap creates the default registry before the isolated runtime settings
+    # exist. Stop that observer/Core before starting the configured session;
+    # otherwise both sessions race to own this fixture's one HC_SOCKET.
+    server.terminate()
+    server.wait(timeout=10)
+    subprocess.run(["hc", "server", "stop"], env={**env, "HC_SESSION": "default"},
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=15)
+    server = subprocess.Popen([str(cli), "serve"], env=env, stdout=log, stderr=log)
+    wait_for(lambda _: True, "Configured AppServer starts")
     core = call("herdr.status")
     assert core["core"]["id"]
     print(f"HERDR_CONNECTED {core['version']} core={core['core']['id']}", flush=True)

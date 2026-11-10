@@ -106,7 +106,7 @@ pub fn search_dialog(
         }
     });
     nsh_base::dialog()
-        .animation(ModalAnimation::None)
+        .animation(super::motion::modal)
         .close_on_escape(true)
         .close_on_backdrop_press(true)
         .on_cancel(close)

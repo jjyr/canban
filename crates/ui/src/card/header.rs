@@ -276,7 +276,10 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         .tooltip(nsh_base::tooltip().child(label(reason)))
                         .child(
                             action("Needs attention", Variant::Quiet, move |_| {
-                                crate::overview::show_card_attention(ui, &ui.card.get_untracked());
+                                crate::overview::show_card_attention(
+                                    ui,
+                                    &untracked(|| ui.card_id()),
+                                );
                             })
                             .text_color(ATTENTION),
                         ),

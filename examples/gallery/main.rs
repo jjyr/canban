@@ -101,6 +101,8 @@ pub fn Gallery() -> impl IntoElement {
     let scene = signal("workspace".to_string());
     let constrained = signal(false);
     let ui = Ui::new();
+    let reduced_motion = signal(false);
+    provide_context(canban_ui_kit::motion::ReducedMotion(reduced_motion));
     ui.board_move.replace(Some(std::rc::Rc::new(move |drop| {
         ui.snapshot.update(|s| {
             let Some(index) = s.cards.iter().position(|c| c.id == drop.card_id) else {
@@ -174,6 +176,54 @@ pub fn Gallery() -> impl IntoElement {
         ui.snapshot.set(fixtures::terminal_workspace());
         ui.open_terminal("gallery-manual".into());
         return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("motion") {
+        ui.page.set("board".into());
+        return view()
+            .flex_1()
+            .min_h(px(0.))
+            .child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_2()
+                    .p_2()
+                    .child(action("Open first", Variant::Quiet, move |_| {
+                        ui.open_card("card-1".into())
+                    }))
+                    .child(action("Open second", Variant::Quiet, move |_| {
+                        ui.open_card("card-2".into())
+                    }))
+                    .child(action("Close Card", Variant::Quiet, move |_| {
+                        ui.card.set(String::new());
+                        ui.page.set("board".into());
+                    }))
+                    .child(action("Reverse in 80ms", Variant::Quiet, move |_| {
+                        let was_open = ui.page.get_untracked() == "card";
+                        ui.page.set(if was_open { "board" } else { "card" }.into());
+                        ui.card.set("card-1".into());
+                        set_timeout(std::time::Duration::from_millis(80), move || {
+                            ui.page.set(if was_open { "card" } else { "board" }.into());
+                        });
+                    }))
+                    .child(action("Reduce motion", Variant::Quiet, move |_| {
+                        reduced_motion.set(!reduced_motion.get_untracked())
+                    }))
+                    .child(action("Quick Open", Variant::Quiet, move |_| {
+                        ui.quick_open.set(true)
+                    }))
+                    .child(action("Narrow / wide", Variant::Quiet, move |_| {
+                        constrained.set(!constrained.get_untracked())
+                    })),
+            )
+            .child(
+                view()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .max_w(move || px(if constrained.get() { 720. } else { 10000. }))
+                    .child(canban_ui::frame::screen(ui)),
+            )
+            .into_element();
     }
 
     view()

@@ -32,6 +32,15 @@ impl Reading {
         self.scroll.scroll_to(Point::default(), false);
     }
 }
+pub fn at(ui: Ui, id: String) -> impl IntoElement {
+    if std::env::var_os("CANBAN_MOTION_TRACE").is_some() {
+        eprintln!("motion card mounted id={id}");
+    }
+    screen(Ui {
+        card_view: Some(signal(id)),
+        ..ui
+    })
+}
 pub fn screen(ui: Ui) -> impl IntoElement {
     let Some(card) = ui.current_card() else {
         return view().child(muted("Select a Card")).into_element();
@@ -49,6 +58,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         editor: stored(None),
     };
     let draft = document(ui, key, Draft::card(&card));
+    let viewport_height = stored(0f32);
     effect(move || {
         if let Some(card) = ui.current_card() {
             let mut value = draft.get_untracked();
@@ -113,6 +123,14 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .content_offset(saved)
                 .on_scroll(move |e: &ScrollEvent| {
                     capture_scroll(ui, scroll_key.clone(), e);
+                    let before = viewport_height.replace(e.size.height.0);
+                    if before > 0.
+                        && (before - e.size.height.0).abs() > 0.5
+                        && reading.follow.get_untracked()
+                    {
+                        reading.latest();
+                        return;
+                    }
                     let bottom = e.content_size.height.0 - e.offset.y.0 - e.size.height.0 <= 48.;
                     reading.follow.set(bottom);
                     if bottom {
