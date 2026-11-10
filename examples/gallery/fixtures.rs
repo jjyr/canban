@@ -484,7 +484,7 @@ pub fn board_cards() -> canban_types::Snapshot {
 /// The production Card reader under long conversational history and background activity.
 pub fn conversation() -> canban_types::Snapshot {
     let mut s = workspace();
-    s.cards[0].body = "## Goal\nKeep the Card conversation readable while task context stays available.\n\nAcceptance: a compact header, collapsed task, inline reports, preserved draft and reading position.\n".repeat(12);
+    s.cards[0].body = "## Goal\nKeep the Card conversation readable while task context stays available.\n\n- [x] Full Markdown description\n- [ ] Keep selection and undo through background updates\n\n> Description, comments and events share one scroll owner.\n\n| Surface | Behavior |\n| --- | --- |\n| Editor | Write / Preview |\n| Agent | Type @ to choose |\n\n```rust\nlet context = card.history();\n```\n\n[Canban](https://github.com/jjyr/canban) · **Readable** and _editable_.\n".into();
     for i in 1..=32 {
         s.events.push(Event {
             id: format!("conversation-{i}"),

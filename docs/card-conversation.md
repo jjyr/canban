@@ -1,27 +1,28 @@
 # Card conversation workspace
 
-Status: implemented and natively checked, 2026-11-09. This replaces the earlier Card layout with permanently visible workspace details and Agent management.
+Status: Card reading/editing redesign implemented 2026-11-10. See the dated verification sections for exercised builds and remaining limits.
 
 ## Layout and ownership
 
 ```text
 +---------------------------------------------------------------+
-| #42 Card title (truncated; full title on hover) Term Archive ... X | fixed
-| Develop   branch   Agent/status             Review / Continue | fixed
+| #42 Card title                        Terminal Archive ...  X | fixed
+| Develop   branch                         Review / Continue    | fixed
 +---------------------------------------------------------------+
-| > Task                                  Edit                  | scroll
-|   One-line task summary; expand to read or edit                |
-|   Context/attachments and workspace details open on demand     |
+| Description                                             Edit  | scroll
+| Full Markdown description; no default disclosure or summary    |
 |                                                               |
-| > Activity (creation, scheduling and runtime history)          |
-| user                                               timestamp |
-|   Comment                                                     |
-| @developer                                         timestamp |
-|   Reply / full Markdown report                                |
+| · Card created                                     timestamp  |
+| user                                               timestamp  |
+|   Markdown comment                                            |
+| · Agent started                                    timestamp  |
+| @developer                                         timestamp  |
+|   Markdown reply / report                                     |
 |                                                               |
-+-------------------- New activity (N) -------------------------+
-| Comment or @Agent...                                          | fixed
-| @  [explicit recipients]  +                         Send       |
++-------------------- New activity (N) --------------------------+
+| Write  Preview                       B I Code Link Undo Redo  | focused
+| Markdown source editor; grows on focus, shrinks on blur         | fixed
+| @developer ×     +  [attachment chips]              Send ⌘Enter |
 +---------------------------------------------------------------+
 ```
 
@@ -29,32 +30,41 @@ The Board keeps its ordinary columns and Cards, without execution-slot summary o
 
 `card.rs` composes independently owned `card/header.rs`, `task.rs`, `details.rs`, `timeline.rs` and `composer.rs`. These use shared UI Kit controls, NSH scroll/input/Markdown/menu behavior and existing product components. The standalone Gallery imports the same screen through the production frame.
 
-## Comments, recipients and shortcuts
+## Description and composer
 
-- Enter inserts a newline. Command+Enter sends from the focused comment editor.
-- Send, the shortcut and the Shortcuts catalog action use one submission intent and the same empty/pending/archived/popup checks. New Card uses the same Command+Enter convention for **Create**.
-- One **@** menu adds/removes configured profile names. Selected recipients also appear as removable compact buttons.
-- Consecutive recognized leading `@profile` tokens address Agents. Profile names mentioned in ordinary prose or quoted text are not recipients. Removing one recipient retains the remaining question text.
-- The desktop passes an explicit `mentions` array to `comment.add`, including `[]` for an ordinary comment. Legacy clients omitting the field retain the existing body-scanning behavior. No CLI interface change is required.
-- Drafts survive Card/Terminal navigation and snapshot refresh. An asynchronous send only clears the submitted text if the draft still matches it; newer text remains.
+Description is fully visible in the common reader by default. **Edit** opens title/source editing with **Write / Preview**, formatting actions, **Save** and **Cancel**. Edit takes native source focus after its first mounted layout. Save uses the existing optimistic revision boundary; Cancel restores the last saved description without changing the comment draft. Command+Enter saves while this editor is active. GitHub-owned title restrictions continue to apply.
+
+The comment composer uses the same UI Kit Markdown source editor and reader. NSH owns its rope, selection, caret completion and undo/redo history. Write/Preview and height changes keep the source editor mounted. Ordinary snapshot updates reconcile retained drafts and keyed Timeline rows without rebuilding the editing owner. Navigation retains draft text, explicit recipients and attachment state for the window lifetime; editor undo history is retained within the mounted editor, not across route destruction or application restart.
+
+Focus expands the composer, with additional lines growing toward approximately one-third of the Card pane. Blur collapses it while keeping the draft. Toolbar operations, caret completion and a native attachment picker belong to the editing interaction. Clicking the Card reading area ends composing focus; scrolling does not itself discard the draft. Preview prevents edits to the hidden source. Clipboard reads occur only in response to the explicit Paste shortcut, with a value/selection check that rejects a stale asynchronous insertion.
+
+Enter inserts a newline. Command+Enter sends through the same intent as **Send**, with empty/pending/archived/attachment/modal checks. The UI Kit reclaims Command+Enter after each native editor focus event: NSH otherwise uses that key for a code-editor newline command. Attach suspends editor shortcuts, releases the real input focus before presenting the system sheet, and restores editing on selection or cancellation. Chinese IME acceptance remains excluded.
+
+## Recipients and attachments
+
+Typing a standalone `@` opens configured Profile candidates at the caret. Typing filters them; Up/Down, Enter/Tab and Escape use NSH's completion behavior. Completion is suppressed in email-like text, quoted lines and code. Selecting a candidate adds an explicit, removable recipient chip, including when the mention occurs within a question. Editing/undoing source text does not silently remove an explicitly selected recipient; the chip controls that address. Recognized consecutive leading `@profile` tokens retain their existing addressing behavior. Ordinary prose/email/code references do not become recipients merely by appearing in text.
+
+Desktop comments always send an explicit `mentions` array (including `[]`); legacy clients omitting the field keep the server's existing parser. An asynchronous send clears only the submitted draft, preserving newer text/recipients and failed submissions. No CLI interface change is required.
+
+**Attach files** opens the native multiple-file chooser directly. Client-local paths are read off the render thread and sent as bytes, so they do not assume an AppServer on the same machine. Command+V supports ordinary text and clipboard images/files through the NSH clipboard service; file drops use the same upload boundary. Per-file chips expose uploading, success, removal and failure/retry. Pending/failed uploads block submission until finished, retried or removed. Uploaded bytes are shared in memory while pending rather than copied on every keystroke. Removing a chip removes its draft reference; the already saved attachment and its Timeline event remain Card history. Uploads are not a filesystem deletion operation.
+
+Attachment references are readable links to Card-managed resources. Images referenced by normal Markdown image URLs use NSH's Markdown renderer; uploaded images currently appear as attachment links/chips rather than inline image thumbnails. Existing saved attachments remain reachable under **... → Attachments**. There is no path-entry panel in the attachment flow.
 
 ## Timeline and reading behavior
 
-Comments, Agent replies and reports render as Markdown in the conversation. File-backed reply/report contents load through `resource.read`, including archived Card resources. Long bodies have an inline expansion control. A load error is shown inline while retaining the saved summary.
+Description, events, comments, replies and reports share one vertical scroll owner. First open starts at the description. Routine events are compact rows in sequence order, without a separate Activity disclosure. Narrative bodies share the UI Kit Markdown reader (headings, lists, quotes, code, tables, links and images). File-backed reports load once per keyed row, including archived resources. A report echoed as a reply remains a compact history event when the request and non-null resource path match; a report without a path remains a visible message. Late echoes update that row's presentation without duplicating the report body.
 
-Consecutive routine events collapse into an expandable activity row. This is a presentation projection: every durable event remains recorded and accessible. A report echoed as a reply stays in activity history when the request and non-null resource path match; reports without paths remain visible. The redundant Latest result panel is removed.
-
-The Card content has one scroll owner and saves its offset per Card. First open follows the latest activity. Scrolling away stops following; new activity adds an explicit jump-to-latest affordance. At the bottom, new replies and loaded report growth stay visible. Task/context editing remains inside this scrolling region. Draft/offset restoration is in-memory for the lifetime of the window, not persistent across application restarts.
+The Card saves its reading offset per route. Scrolling away stops following; new activity exposes an explicit jump-to-latest action. At the bottom, new replies and loaded report growth stay visible. Composer growth leaves a reader's offset intact. Draft/offset retention is in-memory for the window lifetime. Agent/Terminal operations and human approval boundaries remain separate from reading and commenting.
 
 ## Terminal boundary
 
-Clicking an existing live Agent status or Timeline **Open terminal** navigates to its conversation. An exited Agent status is labeled Resume and explicitly restores its exact session; it does not open an ended-session page. Live navigation does not resume or start an Agent. **Open Card Terminals** selects an existing Card conversation if available; otherwise it opens a Card-context empty Terminal view without selecting an unrelated tab or starting a process.
+Clicking an existing live Agent status or Timeline Agent name navigates to its conversation. An exited Agent status is labeled Resume and explicitly restores its exact session; it does not open an ended-session page. Live navigation does not resume or start an Agent. **Open Card Terminals** selects an existing Card conversation if available; otherwise it opens a Card-context empty Terminal view without selecting an unrelated tab or starting a process.
 
 The Terminal chrome offers **Choose Card Agent** for an active associated Card. The empty Card view offers **Choose Agent**. This explicit action invokes the existing `agent.open` Start/Resume boundary. Ended sessions retain Resume/Start fresh; interrupt, close and history remain Terminal controls. **Back to source** returns to the Card and its draft. Closing a Terminal continues to use the existing unified lifecycle close operation.
 
-## Verification
+## Earlier verification (2026-11-09)
 
-The following were checked against this implementation:
+These checks covered the earlier compact Card implementation. Its default disclosure and Activity grouping are superseded by the reading/editor contract above:
 
 - Workspace Rust tests and strict all-target Clippy; AppServer regressions for explicit empty/single recipients, parser tests for quoted/inline names, duplicate prefixes and whitespace, and Timeline report-echo projection tests.
 - `mise run acceptance`: isolated real Herdr connection, Develop → Review, mentions/attention, archive/report restoration, service restart and cross-Board global scheduling.
@@ -73,3 +83,16 @@ Local Cards offer **Delete Card**; GitHub Issue Cards offer **Remove from Board*
 Native isolated checks covered header Archive → archived list → Restore, Board right-click Delete → Deleted Cards → Restore with the same Card number, and X dismissing only the detail pane. Backend tests cover queue cancellation/history preservation and rejection of removal with a live Agent. Gallery includes an **Archived / deleted** scene using production controls.
 
 [Terminal interaction and navigation](terminal-interaction.md) records the current delayed-exit/inactive contract and unified Back/Forward behavior.
+
+## Redesign verification (2026-11-10)
+
+- `mise run build`, `mise run test` (149 passing Rust tests), strict workspace/all-target Clippy, and `git diff --check` passed. Regressions cover UTF-16 mention context, prose/email/quote/code exclusions, sequence ordering and report/reply echo projection.
+- `mise run acceptance` passed against an isolated Herdr 0.1.18 Core: Develop/Review, mentions/attention, archive/report restoration, service restart and cross-Board admission. This is deterministic runtime integration, not a new authenticated Codex/Claude run.
+- The standalone production-component Gallery was checked at full and constrained widths: full description, Markdown headings/lists/quotes/tables/code, caret Profile candidates, formatting a selection, Preview/Write with undo retained, delayed reply while typing, and attachment failure/retry/removal. A failed attachment kept the draft and blocked Send; removing it enabled Send again.
+- The packaged `.local/Canban.app` was copied into a task-owned acceptance bundle with its own Canban home, source repository and Core socket/state/config. Native checks covered expansion/collapse with draft retention, the common scrolling region, description Cancel and Command+Enter Save, exact multiline comment submission once, Card switching/Back with a retained draft, and typing/undo through a background `comment.add` refresh without focus loss.
+- Selecting `@developer` inside a sentence created exactly one configured-profile request over a real Herdr PTY; the deterministic provider replied and completed. A subsequent ordinary `@claude` reference and email created no additional request. Snapshot assertions checked those counts and persisted bodies.
+- The native chooser selected three disposable files together; removal omitted the selected draft reference from the submitted comment. Return accepted a selected file. Selection/cancellation restored editing, including Command+Enter after the chooser. Copying pixels from the disposable PNG in macOS Preview and pasting with Command+V created an `image/png` attachment and persisted its reference in a comment. Uploaded file/image bytes were checked against the managed files; the final smoke check matched the acceptance bundle binary to the packaged build and saved an exact description/comment. The last focus-entry adjustment was followed by targeted UI tests and all-target UI Clippy.
+
+The original ordinary-Input focus loss was not reproduced with basic multiline typing during baseline inspection; its historical cause is not established. The redesign's mounted editor and update/selection/undo behavior were checked directly. A separate, confirmed integration defect was NSH Editor's default Command+Enter newline binding taking precedence over Send; the scoped post-focus submission binding fixes that behavior, including focus restored after a native sheet.
+
+Limits: Chinese IME was excluded as requested. Native file drag/drop and Finder file-copy paste were not exercised in this run; they use the same client-byte upload path. The system chooser's Command+A did not select all during automation; multi-selection through Shift-click and acceptance with Return were verified, and the Command+A cause is not established. Uploaded images remain attachment links/chips, without inline attachment thumbnails. No live user's Canban home or Herdr Core was used.

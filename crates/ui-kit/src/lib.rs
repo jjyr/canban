@@ -36,3 +36,5 @@ pub use segmented::{segment, segmented};
 
 pub mod theme_choice;
 pub use theme_choice::theme_choice;
+
+pub mod markdown;

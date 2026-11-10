@@ -8,10 +8,10 @@ use serde_json::json;
 fn controls() -> impl IntoElement {
     let ui = Ui::new();
     let input = signal("中文与 English · long text fixture".into());
-    let profile_draft = signal(String::new());
     let profile_fixture = signal(canban_types::Config::default().profiles);
     let count = signal(0_u32);
     let directory = signal(String::new());
+    let markdown = canban_ui_kit::markdown::MarkdownInput::new();
     view().flex_1().min_h(px(0.0)).p_5().gap_4().bg(BACKGROUND)
     .child(heading("Component Gallery"))
     .child(muted("Production components · local fixtures · no AppServer or Agent required"))
@@ -71,27 +71,14 @@ fn controls() -> impl IntoElement {
                 )
                 .child(
                     panel()
-                        .child(label("Controlled input / IME / Markdown preview"))
-                        .child(field(input, "Type here").multiline(true).h(px(110.0)))
-                        .child(nsh_base::text_view().markdown(move || Some(input.get().into()))),
+                        .child(label("Markdown editor / shared reading styles"))
+                        .child(markdown.render(input, markdown.source(input, "Gallery Markdown", "Write Markdown…"), false, signal(220.)))
+                        .child(canban_ui_kit::markdown::reader(move || input.get())),
                 )
                 .child(
                     panel()
                         .child(label("Shared product Timeline item"))
                         .child(timeline_item(ui, fixtures::timeline())),
-                )
-                .child(
-                    panel()
-                        .child(label("Agent profile mention picker"))
-                        .child(profiles::mention_picker(
-                            profile_fixture,
-                            profile_draft,
-                        ))
-                        .child(
-                            field(profile_draft, "Question with @profile")
-                                .multiline(true)
-                                .h(px(80.0)),
-                        ),
                 )
                 .child(canban_ui::components::scheduling::settings(ui))
                 .child(profiles::registry(profile_fixture))
@@ -232,6 +219,19 @@ pub fn Gallery() -> impl IntoElement {
                         event.kind="comment.replied".into(); event.actor="agent:developer".into();
                         event.message="New reply arrived while you were reading.\n\nContinue from your current position, or jump to latest.".into();
                         s.events.push(event);
+                    });
+                }))
+                .child(action("Reply in 5s", Variant::Quiet, move |_| {
+                    set_timeout(std::time::Duration::from_secs(5), move || {
+                        ui.snapshot.update(|s| {
+                            let mut event = fixtures::timeline();
+                            event.sequence = s.events.iter().map(|e| e.sequence).max().unwrap_or(0) + 1;
+                            event.id = format!("delayed-{}", event.sequence);
+                            event.card_id = "card-1".into();
+                            event.kind = "comment.replied".into();
+                            event.message = "**Background reply**: editor focus, selection and undo should survive.".into();
+                            s.events.push(event);
+                        });
                     });
                 }))
                 .child(action("Overview", Variant::Secondary, move |_| {

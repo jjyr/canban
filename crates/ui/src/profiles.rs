@@ -20,7 +20,7 @@ pub fn addressed(body: &str, profiles: &[Profile]) -> Vec<String> {
     }
     ids
 }
-fn remove_address(body: &str, id: &str, profiles: &[Profile]) -> String {
+pub fn remove_address(body: &str, id: &str, profiles: &[Profile]) -> String {
     let prefix = addressed(body, profiles);
     let mut rest = body;
     // Consume actual leading tokens, including duplicates and arbitrary whitespace.
@@ -41,62 +41,6 @@ fn remove_address(body: &str, id: &str, profiles: &[Profile]) -> String {
         next.push(rest.trim_start().into());
     }
     next.join(" ")
-}
-pub fn mention_picker(profiles: Signal<Vec<Profile>>, draft: Signal<String>) -> impl IntoElement {
-    use nsh_core::element::desktop::{MenuItem, popup_menu};
-    view()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .min_w(px(0.))
-        .child(
-            action("@", Variant::Quiet, move |_| {
-                spawn(async move {
-                    let selected = addressed(&draft.get_untracked(), &profiles.get_untracked());
-                    let items = profiles
-                        .get_untracked()
-                        .into_iter()
-                        .map(|p| {
-                            let id = p.id;
-                            let checked = selected.contains(&id);
-                            MenuItem::new(format!("@{id}"))
-                                .checked(checked)
-                                .on_select(move || {
-                                    if let Some(body) = draft.try_get() {
-                                        let next = if checked {
-                                            remove_address(&body, &id, &profiles.get_untracked())
-                                        } else {
-                                            format!("@{id} {body}")
-                                        };
-                                        draft.try_set(next);
-                                    }
-                                })
-                        })
-                        .collect();
-                    popup_menu(items).await;
-                });
-            })
-            .accessibility_label(|| Some("Mention Agent".into()))
-            .disabled(move || profiles.get().is_empty()),
-        )
-        .child(dynamic(move || {
-            view().flex_row().flex_wrap().gap_1().children(
-                addressed(&draft.get(), &profiles.get())
-                    .into_iter()
-                    .map(|id| {
-                        let title = format!("@{id} ×");
-                        action(title, Variant::Quiet, move |_| {
-                            draft.set(remove_address(
-                                &draft.get_untracked(),
-                                &id,
-                                &profiles.get_untracked(),
-                            ));
-                        })
-                        .into_element()
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        }))
 }
 
 pub fn registry(profiles: Signal<Vec<Profile>>) -> View {
@@ -172,5 +116,93 @@ mod mention_tests {
             remove_address("@codex @claude explain this", "claude", &profiles),
             "@codex explain this"
         );
+    }
+}
+
+/// Offer a recipient only at a standalone @word outside quotations/code/email.
+/// Editor offsets use UTF-16, not UTF-8 bytes.
+pub fn mention_context(body: &str, offset: u32) -> bool {
+    let prefix = body
+        .chars()
+        .scan(0u32, |n, c| {
+            *n += c.len_utf16() as u32;
+            Some((*n, c))
+        })
+        .take_while(|(n, _)| *n <= offset)
+        .map(|(_, c)| c)
+        .collect::<String>();
+    let Some(at) = prefix.rfind('@') else {
+        return false;
+    };
+    if prefix[at + 1..]
+        .chars()
+        .any(|c| !c.is_alphanumeric() && c != '-' && c != '_')
+    {
+        return false;
+    }
+    let before = &prefix[..at];
+    if before
+        .chars()
+        .next_back()
+        .is_some_and(|c| !c.is_whitespace())
+    {
+        return false;
+    }
+    let line = before.rsplit('\n').next().unwrap_or_default();
+    if line.trim_start().starts_with('>') {
+        return false;
+    }
+    let mut fence = None;
+    for line in before.lines() {
+        let line = line.trim_start();
+        let mark = if line.starts_with("```") {
+            Some('`')
+        } else if line.starts_with("~~~") {
+            Some('~')
+        } else {
+            None
+        };
+        if let Some(mark) = mark {
+            if fence == Some(mark) {
+                fence = None;
+            } else if fence.is_none() {
+                fence = Some(mark);
+            }
+        }
+    }
+    fence.is_none() && line.matches('`').count() % 2 == 0
+}
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    #[test]
+    fn completion_respects_markdown_context_and_utf16_positions() {
+        for body in ["@", "Please ask @dev", "😀 help @cod", "done\n@claude"] {
+            assert!(
+                mention_context(body, body.encode_utf16().count() as u32),
+                "{body}"
+            );
+        }
+        for body in [
+            "hello@example",
+            "`@cod",
+            "Use `hello @cod",
+            "> @cod",
+            "```rust\n@cod",
+            "~~~\n@dev",
+            "\\@cod",
+            "@cod hello",
+            "prefix@cod",
+        ] {
+            assert!(
+                !mention_context(body, body.encode_utf16().count() as u32),
+                "{body}"
+            );
+        }
+        let body = "😀 @cod trailing";
+        assert!(mention_context(
+            body,
+            "😀 @cod".encode_utf16().count() as u32
+        ));
     }
 }

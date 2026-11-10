@@ -1,4 +1,5 @@
 //! Compact Card reader: two-row header, scrolling context/conversation, fixed composer.
+pub(crate) mod attachments;
 mod composer;
 mod details;
 mod header;
@@ -6,13 +7,16 @@ mod task;
 mod timeline;
 use crate::{drafts::*, presenter::*};
 use canban_ui_kit::{tokens::*, *};
-use nsh_core::prelude::*;
+use nsh_core::{TouchEvent, TouchPhase, prelude::*};
 
 #[derive(Clone, Copy)]
 pub(super) struct Reading {
     scroll: ElementRef,
     follow: Signal<bool>,
     unread: Signal<usize>,
+    composer: ElementRef,
+    composer_height: Signal<f32>,
+    editor: Stored<Option<canban_ui_kit::markdown::MarkdownInput>>,
 }
 impl Reading {
     fn latest(self) {
@@ -38,8 +42,11 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     let saved = scroll_position(ui, &scroll_key);
     let reading = Reading {
         scroll: element_ref(),
-        follow: signal(!ui.scrolls.with(|m| m.contains_key(&scroll_key))),
+        follow: signal(false),
         unread: signal(0),
+        composer: element_ref(),
+        composer_height: signal(180.),
+        editor: stored(None),
     };
     let draft = document(ui, key, Draft::card(&card));
     effect(move || {
@@ -75,6 +82,24 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         }
     });
     view()
+        .on_layout(move |b: &Bounds<Points>| {
+            reading
+                .composer_height
+                .set((b.size.height.0 / 3. - 72.).clamp(72., 200.))
+        })
+        .on_touch(move |event: &TouchEvent| {
+            if event.phase == TouchPhase::Start
+                && let Some(root) = reading.composer.node()
+                && event
+                    .points
+                    .iter()
+                    .any(|p| p.changed && !p.path.contains(&root))
+                && let Some(editor) = reading.editor.get()
+                && !editor.held.get_untracked()
+            {
+                editor.blur();
+            }
+        })
         .flex_1()
         .min_w(px(0.))
         .min_h(px(0.))
@@ -118,7 +143,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     .child(crate::components::git_workspace::panel(ui))
                             },
                         ))
-                        .child(timeline::render(ui, reading)),
+                        .child(timeline::render(ui)),
                 ),
         )
         .child(when(
@@ -163,4 +188,19 @@ pub(super) fn proxy(draft: Signal<Draft>, comment: bool) -> Signal<String> {
         }
     });
     text
+}
+
+/// Product attachment links share the same Markdown reader as editor previews.
+pub(super) fn markdown(ui: Ui, body: impl Fn() -> String + 'static) -> nsh_base::TextViewElement {
+    canban_ui_kit::markdown::reader(body).on_link_press(
+        move |e: &nsh_base::TextViewLinkPressEvent| {
+            if let Some(id) = e.url.strip_prefix("attachment:")
+                && let Some(a) = ui
+                    .snapshot
+                    .with_untracked(|s| s.artifacts.iter().find(|a| a.id == id).cloned())
+            {
+                open_resource(ui, a.card_id, a.path);
+            }
+        },
+    )
 }

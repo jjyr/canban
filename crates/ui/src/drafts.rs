@@ -12,12 +12,14 @@ pub struct Draft {
     pub title: String,
     pub body: String,
     pub comment: String,
+    pub comment_error: String,
+    pub recipients: Vec<String>,
+    pub uploads: Vec<crate::card::attachments::Upload>,
     pub base_title: String,
     pub base_body: String,
     pub revision: u64,
     pub editing: bool,
     pub details: bool,
-    pub task_expanded: bool,
     pub workspace_details: bool,
     pub error: String,
 }
@@ -76,6 +78,7 @@ pub fn save(ui: Ui, key: String, draft: Signal<Draft>, method: &'static str, par
                 value.error.clear();
                 if !value.dirty() && method == "card.update" {
                     value.editing = false;
+                    value.uploads.retain(|a| a.is_comment());
                 }
             }
             Err(error) => value.error = error,

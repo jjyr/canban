@@ -29,7 +29,6 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
                     match kind {
                         0 => {
                             d.editing = true;
-                            d.task_expanded = true;
                         }
                         1 => d.details = true,
                         _ => d.workspace_details = true,

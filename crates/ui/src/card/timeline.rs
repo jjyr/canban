@@ -1,34 +1,28 @@
 use super::*;
 use canban_types::Event;
-#[derive(Clone, Debug, PartialEq)]
-pub enum Group {
-    Message(Event),
-    Activity(Vec<Event>),
+/// A durable event is either a Markdown message or a compact history row.
+/// The sequence is authoritative even if a snapshot arrives out of order.
+pub fn entries(events: &[Event]) -> Vec<(Event, bool)> {
+    let mut ordered = events.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|e| e.sequence);
+    ordered
+        .into_iter()
+        .map(|event| {
+            let echoed_report = event.kind == "execution.reported"
+                && events.iter().any(|other| {
+                    other.kind == "comment.replied"
+                        && other.request_id == event.request_id
+                        && event.request_id.is_some()
+                        && event.data["path"].as_str().is_some()
+                        && other.data["path"] == event.data["path"]
+                });
+            let narrative = matches!(event.kind.as_str(), "comment.created" | "comment.replied")
+                || event.kind == "execution.reported" && !echoed_report;
+            (event.clone(), narrative)
+        })
+        .collect()
 }
-pub fn groups(events: &[Event]) -> Vec<Group> {
-    let mut groups = Vec::new();
-    for event in events {
-        let echoed_report = event.kind == "execution.reported"
-            && events.iter().any(|other| {
-                other.kind == "comment.replied"
-                    && other.request_id == event.request_id
-                    && event.request_id.is_some()
-                    && event.data["path"].as_str().is_some()
-                    && other.data["path"] == event.data["path"]
-            });
-        if matches!(event.kind.as_str(), "comment.created" | "comment.replied")
-            || event.kind == "execution.reported" && !echoed_report
-        {
-            groups.push(Group::Message(event.clone()));
-        } else if let Some(Group::Activity(items)) = groups.last_mut() {
-            items.push(event.clone());
-        } else {
-            groups.push(Group::Activity(vec![event.clone()]));
-        }
-    }
-    groups
-}
-pub fn render(ui: Ui, reading: Reading) -> impl IntoElement {
+pub fn render(ui: Ui) -> impl IntoElement {
     let events = computed(move || {
         let card = ui.card.get();
         ui.snapshot.with(|s| {
@@ -39,66 +33,20 @@ pub fn render(ui: Ui, reading: Reading) -> impl IntoElement {
                 .collect::<Vec<_>>()
         })
     });
-    dynamic(move || {
-        let mut content = view().gap_2();
-        for group in groups(&events.get()) {
-            match group {
-                Group::Message(event) => {
-                    let key = event.id.clone();
-                    content = content.child(
-                        view()
-                            .key(key)
-                            .child(crate::components::timeline_item(ui, event)),
-                    );
-                }
-                Group::Activity(items) => {
-                    let open = signal(false);
-                    let first = items.first().unwrap();
-                    let title = if items.len() == 1 {
-                        first.message.clone()
-                    } else {
-                        format!("Activity · {} events", items.len())
-                    };
-                    let age = crate::components::activity::age(items.last().unwrap().created_at);
-                    content = content.child(
-                        view()
-                            .key(first.id.clone())
-                            .gap_1()
-                            .child(action(
-                                move || {
-                                    format!(
-                                        "{} {title} · {age}",
-                                        if open.get() { "▾" } else { "▸" }
-                                    )
-                                },
-                                Variant::Quiet,
-                                move |_| {
-                                    reading.follow.set(false);
-                                    open.update(|v| *v = !*v);
-                                },
-                            ))
-                            .child(when(
-                                move || open.get(),
-                                move || {
-                                    view().pl_3().children(
-                                        items
-                                            .iter()
-                                            .cloned()
-                                            .map(|e| {
-                                                crate::components::timeline_item(ui, e)
-                                                    .into_element()
-                                            })
-                                            .collect::<Vec<_>>(),
-                                    )
-                                },
-                            )),
-                    );
-                }
-            }
-        }
-        content
-    })
+    each(
+        move || entries(&events.get()),
+        |(e, _)| e.id.clone(),
+        move |item, _| {
+            let narrative = computed(move || item.get().1);
+            dynamic(move || {
+                let narrative = narrative.get();
+                let event = item.get_untracked().0;
+                crate::components::timeline_item::render(ui, event, narrative)
+            })
+        },
+    )
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,9 +71,9 @@ mod tests {
             ..event.clone()
         };
         assert!(
-            groups(&[event, reply])
+            entries(&[event, reply])
                 .iter()
-                .all(|g| matches!(g, Group::Message(_)))
+                .all(|(_, narrative)| *narrative)
         );
     }
     #[test]
@@ -142,25 +90,29 @@ mod tests {
             created_at: 1,
             data: serde_json::json!({"path":"report.md"}),
         };
-        let events = vec![
+        let mut events = vec![
             make("comment.created", 1),
             make("execution.queued", 2),
             make("execution.started", 3),
             make("execution.reported", 4),
             make("comment.replied", 5),
         ];
-        let projected = groups(&events);
-        assert_eq!(projected.len(), 3);
-        assert!(matches!(&projected[1],Group::Activity(v) if v.len()==3));
+        events.reverse();
+        let projected = entries(&events);
+        assert_eq!(projected.len(), events.len());
         assert_eq!(
             projected
                 .iter()
-                .map(|g| match g {
-                    Group::Message(_) => 1,
-                    Group::Activity(v) => v.len(),
-                })
-                .sum::<usize>(),
-            events.len()
+                .map(|(e, _)| e.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            projected
+                .iter()
+                .map(|(_, narrative)| *narrative)
+                .collect::<Vec<_>>(),
+            vec![true, false, false, false, true]
         );
     }
 }

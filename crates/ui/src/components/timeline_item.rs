@@ -4,6 +4,25 @@ pub fn timeline_item(ui: Ui, event: Event) -> impl IntoElement {
         event.kind.as_str(),
         "comment.created" | "comment.replied" | "execution.reported"
     );
+    render(ui, event, narrative)
+}
+pub fn render(ui: Ui, event: Event, narrative: bool) -> impl IntoElement {
+    if !narrative {
+        let mut row = view()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .py_1()
+            .child(muted("·"))
+            .child(muted(event.message).flex_1().min_w(px(0.)))
+            .child(muted(crate::components::activity::age(event.created_at)));
+        if let Some(request) = event.request_id {
+            row = row.child(action("Agent ↗", Variant::Quiet, move |_| {
+                crate::terminals::open_request(ui, &request)
+            }));
+        }
+        return row.into_element();
+    }
     let body = signal(event.message.clone());
     let error = signal(String::new());
     let expanded = signal(false);
@@ -36,6 +55,14 @@ pub fn timeline_item(ui: Ui, event: Event) -> impl IntoElement {
         .strip_prefix("agent:")
         .map(|a| format!("@{a}"))
         .unwrap_or(event.actor.clone());
+    let actor = if let Some(request) = event.request_id.clone() {
+        action(format!("{actor} ↗"), Variant::Quiet, move |_| {
+            crate::terminals::open_request(ui, &request)
+        })
+        .into_element()
+    } else {
+        label(actor).font_weight(FontWeight::MEDIUM).into_element()
+    };
     let mut row = view()
         .gap_2()
         .py_2()
@@ -46,30 +73,29 @@ pub fn timeline_item(ui: Ui, event: Event) -> impl IntoElement {
                 .flex_row()
                 .justify_between()
                 .gap_2()
-                .child(label(actor).font_weight(FontWeight::MEDIUM))
+                .child(actor)
                 .child(muted(crate::components::activity::age(event.created_at))),
         );
     if narrative {
         row = row
             .child(
-                nsh_base::text_view()
-                    .markdown(move || {
-                        let value = body.get();
-                        Some(if expanded.get() {
-                            value.into()
-                        } else {
-                            value.chars().take(12000).collect::<String>().into()
-                        })
-                    })
-                    .on_link_press(move |e: &nsh_base::TextViewLinkPressEvent| {
-                        if let Some(id) = e.url.strip_prefix("attachment:")
-                            && let Some(a) = ui.snapshot.with_untracked(|s| {
-                                s.artifacts.iter().find(|a| a.id == id).cloned()
-                            })
-                        {
-                            open_resource(ui, a.card_id, a.path);
-                        }
-                    }),
+                canban_ui_kit::markdown::reader(move || {
+                    let value = body.get();
+                    if expanded.get() {
+                        value
+                    } else {
+                        value.chars().take(12000).collect::<String>()
+                    }
+                })
+                .on_link_press(move |e: &nsh_base::TextViewLinkPressEvent| {
+                    if let Some(id) = e.url.strip_prefix("attachment:")
+                        && let Some(a) = ui
+                            .snapshot
+                            .with_untracked(|s| s.artifacts.iter().find(|a| a.id == id).cloned())
+                    {
+                        open_resource(ui, a.card_id, a.path);
+                    }
+                }),
             )
             .child(when(
                 move || body.with(|s| s.chars().count() > 12000),
@@ -94,10 +120,5 @@ pub fn timeline_item(ui: Ui, event: Event) -> impl IntoElement {
         move || !error.get().is_empty(),
         move || notice(error.get(), Tone::Attention),
     ));
-    if let Some(request) = event.request_id {
-        row = row.child(action("Open terminal", Variant::Quiet, move |_| {
-            crate::terminals::open_request(ui, &request)
-        }));
-    }
-    row
+    row.into_element()
 }

@@ -547,49 +547,6 @@ pub fn load_text(ui: Ui, method: &'static str, params: Value) {
     });
 }
 
-pub fn paste_resources(
-    ui: Ui,
-    card_id: String,
-    event: &nsh_core::PasteEvent,
-    draft: Signal<String>,
-    comment: bool,
-) {
-    if event.files.is_empty() {
-        return;
-    }
-    let files = event.files.clone();
-    let Some(app) = crate::APP.get().cloned() else {
-        return;
-    };
-    let owner = format!("card:{card_id}");
-    ui.spawn(async move {
-        let result=blocking(move||{let mut refs=Vec::new();for file in files{let value=app.call("attachment.add",json!({"card_id":card_id,"name":file.name,"media_type":file.mime,"bytes":file.data,"request_key":id()}))?;refs.push(format!("[{}](attachment:{})",value["name"].as_str().unwrap_or("Attachment"),value["id"].as_str().unwrap_or("")));}Ok::<_,anyhow::Error>(refs)}).await;
-        match result {
-            Ok(Ok(refs)) => {
-                let addition = format!("\n\n{}", refs.join("\n"));
-                if let Some(mut body) = draft.try_get() {
-                    body.push_str(&addition);
-                    draft.try_set(body);
-                } else {
-                    ui.drafts.with(|m| {
-                        if let Some(value) = m.get_mut(&owner) {
-                            if comment {
-                                value.comment.push_str(&addition);
-                            } else {
-                                value.body.push_str(&addition);
-                            }
-                        }
-                    });
-                }
-                ui.status.set("Pasted attachments saved".into());
-                refresh(ui);
-            }
-            Ok(Err(e)) => ui.operation_error.set(format!("Attachment save failed: {e:#}")),
-            Err(e) => ui.status.set(e.to_string()),
-        }
-    });
-}
-
 pub fn open_resource(ui: Ui, card_id: String, path: String) {
     let Some(app) = crate::APP.get().cloned() else {
         ui.status
