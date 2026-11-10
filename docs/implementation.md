@@ -18,6 +18,10 @@ Status: native macOS MVP with multi-machine execution; current contracts reconci
 
 [Desktop utilities](desktop-utilities.md) covers the shared bottom bar, subscription Usage, Caffeine, persisted appearance, command catalog and cross-Project Card creation.
 
+## GitHub workspace update
+
+The [GitHub workspace and cache](github-workspace.md) extends the integration with a dedicated rail page, paginated notifications/Issues/PRs, PR source Cards, local GitHub references, Board source filters, repository rules and explicit remote comments/Review. Account controls moved out of Settings. Remote data uses disposable event-refreshed file caches instead of permanent business-table mirrors; schema 9 preserves bindings and local work. The current branch's acceptance scope and commands are recorded in that contract.
+
 ## Build and launch
 
 Use the pinned mise Rust toolchain. NSH 0.4.0 is pinned to aca7b8f92a33af9d83c3693a516f649f7ea5c5e5 in Cargo.toml and Cargo.lock. Install macOS Xcode command-line tools and a compatible hc separately. This implementation was verified with hc 0.1.18 and Codex CLI 0.166.0.

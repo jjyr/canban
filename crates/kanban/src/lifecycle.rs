@@ -33,7 +33,7 @@ pub fn remove(db: Db<'_>, card: &mut Card) -> Result<()> {
         "card.removed",
         "user",
         if card.github_issue().is_some() {
-            "Removed from Board; GitHub Issue unchanged"
+            "Removed from Board; GitHub source unchanged"
         } else {
             "Card deleted; history retained for restoration"
         },

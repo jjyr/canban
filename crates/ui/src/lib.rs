@@ -38,6 +38,7 @@ pub fn Canban() -> impl IntoElement {
     canban_ui_kit::tokens::install_theme();
     commands::bindings(ui);
     utilities::init(ui);
+    github::init(ui);
     reminders::init(ui);
     projects::selection::remember(ui);
     terminals::bindings(ui);
@@ -69,6 +70,17 @@ pub fn Canban() -> impl IntoElement {
             )
         }) {
             ui.notification_resync.replace(true);
+        }
+        if changed.iter().any(|e| {
+            matches!(
+                e,
+                canban_types::AppEvent::Changed {
+                    topic: "github" | "resync",
+                    ..
+                }
+            )
+        }) {
+            ui.github.epoch.update(|v| *v += 1);
         }
         if !changed.is_empty() {
             dirty.set(true);

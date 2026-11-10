@@ -88,3 +88,11 @@ run = "/usr/bin/python3 scripts/acceptance-retained.py"
 [tasks.acceptance-events]
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance-events.py"
+
+[tasks.acceptance-github-workspace]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-github-workspace.py"
+
+[tasks.acceptance-github-native]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-github-workspace.py --native"

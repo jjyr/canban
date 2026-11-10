@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 
 pub trait Record: Serialize + DeserializeOwned {
     const TABLE: &'static str;
+    fn data(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
     fn id(&self) -> &str;
     fn project(&self) -> Option<&str> {
         None
@@ -77,6 +80,26 @@ impl Record for TerminalEntry {
 }
 impl Record for Card {
     const TABLE: &'static str = "cards";
+    fn data(&self) -> Result<String> {
+        let mut saved = self.clone();
+        if let Some(source) = saved.github_issue() {
+            saved.title = format!("{}#{}", source.repository, source.number);
+        }
+        // Delivery binding/checkpoint stays durable. Checks and review summaries are remote views.
+        for pr in saved
+            .pull_request
+            .iter_mut()
+            .chain(saved.pull_request_history.iter_mut())
+        {
+            pr.checks.clear();
+            pr.review_summary.clear();
+            if matches!(pr.state.as_str(), "open" | "closed") {
+                pr.state = "published".into();
+            }
+            pr.merged = false;
+        }
+        Ok(serde_json::to_string(&saved)?)
+    }
     fn id(&self) -> &str {
         &self.id
     }
@@ -92,6 +115,16 @@ impl Record for Card {
 }
 impl Record for Event {
     const TABLE: &'static str = "events";
+    fn data(&self) -> Result<String> {
+        anyhow::ensure!(
+            !matches!(
+                self.kind.as_str(),
+                "github.comment" | "github.pr_comment" | "github.pr_review"
+            ),
+            "Remote discussions belong in the GitHub cache"
+        );
+        Ok(serde_json::to_string(self)?)
+    }
     fn id(&self) -> &str {
         &self.id
     }
@@ -161,7 +194,7 @@ impl Store {
         anyhow::ensure!(mode == "wal", "SQLite WAL could not be enabled");
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 8,
+            version <= 9,
             "Database schema is newer than this application"
         );
         if version == 0 {
@@ -269,6 +302,68 @@ impl Store {
             }
             conn.execute_batch("COMMIT;")?;
         }
+        if version < 9 {
+            // Preserve old mirrored bodies in a disposable export before changing the DB.
+            // Existing execution artifacts/archives are historical local records and stay intact.
+            let old: Vec<serde_json::Value> = {
+                let mut q=conn.prepare("SELECT data FROM github_issues UNION ALL SELECT data FROM events WHERE json_extract(data,'$.kind') IN ('github.comment','github.pr_comment','github.pr_review','github.issue_synced','github.pr_synced') OR (json_extract(data,'$.kind') IN ('card.created','card.updated') AND card_id IN (SELECT id FROM cards WHERE json_extract(data,'$.content.kind') IN ('github_issue','github_pr'))) UNION ALL SELECT result FROM operations WHERE json_extract(result,'$.content.kind') IN ('github_issue','github_pr') OR json_extract(result,'$.pull_request') IS NOT NULL")?;
+                q.query_map([], |r| r.get::<_, String>(0))?
+                    .map(|r| Ok(serde_json::from_str(&r?)?))
+                    .collect::<Result<_>>()?
+            };
+            if !old.is_empty() {
+                let root = home.join("cache/github/legacy");
+                std::fs::create_dir_all(&root)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))?;
+                }
+                let mut f = tempfile::NamedTempFile::new_in(&root)?;
+                std::io::Write::write_all(&mut f, &serde_json::to_vec(&old)?)?;
+                f.as_file().sync_all()?;
+                f.persist(root.join("v8.json"))?;
+                std::fs::File::open(&root)?.sync_all()?;
+            }
+            conn.execute_batch("BEGIN IMMEDIATE; DELETE FROM github_issues; DELETE FROM events WHERE json_extract(data,'$.kind') IN ('github.comment','github.pr_comment','github.pr_review','github.issue_synced','github.pr_synced'); CREATE UNIQUE INDEX IF NOT EXISTS github_source_card ON cards(project_id,json_extract(data,'$.content.source.repository_id'),json_extract(data,'$.content.source.issue_id')) WHERE json_extract(data,'$.content.kind') IN ('github_issue','github_pr');")?;
+            let db = Db { conn: &conn };
+            let mut source_titles = std::collections::HashMap::new();
+            for c in db.list::<Card>()? {
+                db.save(&c)?;
+                if let Some(source) = c.github_issue() {
+                    source_titles.insert(
+                        c.id.clone(),
+                        format!("{}#{}", source.repository, source.number),
+                    );
+                }
+            }
+            for mut event in db
+                .list::<Event>()?
+                .into_iter()
+                .filter(|e| matches!(e.kind.as_str(), "card.created" | "card.updated"))
+            {
+                if let Some(title) = source_titles.get(&event.card_id)
+                    && event.data.get("title").is_some()
+                {
+                    event.data["title"] = serde_json::Value::String(title.clone());
+                    db.save(&event)?;
+                }
+            }
+            let receipts: Vec<(String, String)> = {
+                let mut q = conn.prepare("SELECT id,result FROM operations")?;
+                q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<std::result::Result<_, _>>()?
+            };
+            for (id, result) in receipts {
+                if let Ok(card) = serde_json::from_str::<Card>(&result) {
+                    conn.execute(
+                        "UPDATE operations SET result=?2 WHERE id=?1",
+                        params![id, card.data()?],
+                    )?;
+                }
+            }
+            conn.execute_batch("PRAGMA user_version=9; COMMIT;")?;
+        }
         Ok(Self {
             conn,
             home: home.to_owned(),
@@ -309,7 +404,11 @@ impl Db<'_> {
         Ok(())
     }
     pub fn save<T: Record>(&self, record: &T) -> Result<()> {
-        self.conn.execute(&format!("INSERT INTO {}(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,card_id=excluded.card_id,state=excluded.state,number=excluded.number,data=excluded.data",T::TABLE),params![record.id(),record.project(),record.card(),record.state(),record.number(),serde_json::to_string(record)?])?;
+        anyhow::ensure!(
+            T::TABLE != "github_issues",
+            "GitHub source bodies belong in the disposable cache"
+        );
+        self.conn.execute(&format!("INSERT INTO {}(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,card_id=excluded.card_id,state=excluded.state,number=excluded.number,data=excluded.data",T::TABLE),params![record.id(),record.project(),record.card(),record.state(),record.number(),record.data()?])?;
         Ok(())
     }
     pub fn get<T: Record>(&self, id: &str) -> Result<T> {

@@ -1,96 +1,32 @@
 # GitHub integration implementation and acceptance
 
-Status: implemented on 2026-11-09, with the acceptance boundaries below. Product contracts are in [GitHub Cards](product/github-cards.md) and [authentication](product/github-authentication.md).
+The current implementation contract is [GitHub workspace and disposable cache](github-workspace.md). It covers the GitHub rail page, repository configuration, Local/Issue/PR Cards, pagination, explicit remote actions and file-backed event-refreshed caches. The dated acceptance below records the earlier App integration; it is not fresh acceptance of the new workspace.
 
-## Registered application
+## Provider and product boundaries
 
-- Owner: `jjyr`.
-- GitHub App: <https://github.com/apps/canban-app>.
-- App ID: `5671006`.
-- Public Client ID: `Iv23li1ImpryrkMbQjKF`.
-- Installation availability: any account, explicitly selected by the user.
-- Device Flow enabled; expiring user tokens retained; no webhooks.
-- Public App API verification confirmed Metadata/Issues/Checks/Statuses read and Contents/Pull requests write permissions. No App private key or Client Secret is distributed.
+`canban-github` owns API/gh transport, protocol models, App Device Flow, credentials and disposable responses. `canban-kanban::github` owns source bindings, intake, source uniqueness, exclusions/restoration and delivery policy. AppServer wires their lifetimes and operations to storage, workspaces and the existing scheduler. UI consumes AppServer data and never owns API credentials or polling.
 
-The user completed installation and Device Flow authorization for the private acceptance repository `jjyr/canban-github-acceptance-20261109` (installation `180044896`). Live collaborator lookup and the full Issue → developer → reviewer → PR publication → GitHub merge → Card Archive path passed. [PR #3](https://github.com/jjyr/canban-github-acceptance-20261109/pull/3) is the merged delivery. Authorization is scoped to the selected repository; other accounts install the public App separately.
+The registered `canban-app` identity remains App ID `5671006`, Client ID `Iv23li1ImpryrkMbQjKF`, with Device Flow, any-account installation and no webhook. App authorization and Git push credentials remain independent. GitHub CLI supplies notifications and repository operations when no App account is connected. The App's original Issues permission is read-only; publishing Issue comments with that authorization requires a permission upgrade. No new permission grant was performed for this branch.
 
-## Crates and operation flow
+## Current operations
 
-```text
-UI / CLI --> AppServer
-                |
-                +--> canban-kanban
-                |       +-- common transactional Card creation
-                |       +-- github: source intake / reconciliation
-                |                  exclusions / event mapping / delivery policy
-                |
-                +--> canban-github: HTTP, Device Flow, local credentials, API
-                +--> canban-storage: schema, constraints, transactions
-                +--> canban-workspaces: commit / push / clean-head validation
-                +--> existing Workflow Engine / Scheduler / Herdr
-```
-
-There is no `canban-integrations` crate. The GitHub provider has no dependency on Card, database, UI or runtime crates. Source-specific product rules live under `crates/kanban/src/github`. AppServer exposes operations, owns service lifetime and composes Git/network effects.
-
-## Data and compatibility
-
-- Schema version 7 adds `github_issues` and a unique source identity index on Cards within each Project.
-- `Card.content` is `local` or `github_issue { source }`. A source records repository ID, Issue ID, repository name, number and URL independently of the local Card ID/number.
-- Existing `title` and `body` fields remain compatible with current UI/CLI/execution consumers. For GitHub Cards, title is a read-only last-known projection of the source title, while body is editable local Additional instructions. The remote description lives in the source snapshot, not in that editable body.
-- Agent context manifests include the selected remote Issue snapshot; prompts include its description and local instructions. Later synchronization does not rewrite historical execution inputs.
-- Removal is reversible: mark the Card removed, retain its source exclusion and history, cancel queued work, and exclude it from normal snapshots/listing/admission. Refuse removal while a live or uncertain execution still needs handling. Explicit re-add restores the original identity/history; it does not modify GitHub.
-- Sources and account authorization have generation fences. Manual Add carries the search result's source generation; late results cannot silently bind a different repository's same-numbered Issue.
-
-## Source synchronization
-
-Automatic intake offers all Open Issues or Open Issues authored by current repository collaborators. Full paginated Open-Issue listings run on a dedicated worker approximately every 120 seconds and after source configuration. Tracked Issues absent from the Open listing are fetched individually, so closure updates source state without deleting the local task. Explicit Sync now is available.
-
-Collaborator-only mode validates access before saving. Failed or incomplete listings do not become an empty membership set or partial successful synchronization. Membership compares stable author IDs. The current version refreshes the collaborator list per sync rather than persisting a separate membership cache.
-
-Remote Issue comments, PR conversation comments and submitted reviews become source Timeline events with external revision deduplication. They never invoke interactive `comment.add` and cannot dispatch an Agent through @mentions. GitHub Labels do not select Agents; workflow stage Profiles/global default and explicit mentions own selection. The existing stage/human-gate/admission rules own execution.
-
-## Authentication
-
-`canban-github::auth::Service` owns one account per AppServer home, Device Flow polling and serialized refresh. At the user's explicit request, credentials are stored locally in `<CANBAN_HOME>/credentials/github.json` (normally `~/.canban/credentials/github.json`), separately from SQLite, configuration, snapshots and Agent context. On Unix the directory is `0700` and file `0600`; refresh replaces the file atomically and syncs it before publishing rotated credentials. This is a plaintext local credential store protected by filesystem permissions, without Keychain access prompts. The path is ignored by Git and outside Card archives. Disconnect removes the local file. Access/refresh tokens are not returned to UI/CLI. Expiry metadata is honored and rotated credentials are saved before use.
-
-`CANBAN_GITHUB_CLIENT_ID` and matching `CANBAN_GITHUB_INSTALL_URL` can select a separately registered app at service startup. The default identity is Canban's registered app. Sign-in and installation/repository access are separate; Settings links to the installation page and source validation reports missing permissions.
-
-Runtime authentication no longer reads or writes Keychain. Credentials from the initial Keychain-backed test are not silently migrated: reconnect once to populate the local store. The native app is accepted on macOS; Windows filesystem ACL behavior is not accepted. API authentication does not configure Git push credentials on execution machines.
-
-## Public operations
-
-All are available through `canban call METHOD JSON` and the same UI adapter. Account/source/delivery operations reject an injected Agent execution context.
+Existing `github.auth.*`, `project.github`, `github.source.disconnect`, Issue search/add, `github.sync` and delivery publish/refresh/merge remain. New operations are:
 
 | Method | Purpose |
 | --- | --- |
-| `github.auth.status` | UI-safe account/device state |
-| `github.auth.begin` / `github.auth.cancel` | Start/cancel Device Flow |
-| `github.auth.refresh` | Refresh an existing expiring authorization without exposing tokens |
-| `github.auth.disconnect` | Forget local credentials, preserving Cards/history |
-| `github.installations` | Inspect accessible installations |
-| `project.github` | Validate/save repository, intake mode and default delivery mode |
-| `github.source.disconnect` | Stop the Project source without deleting Cards |
-| `github.issue.search` | Search current repository by number or title; include existing/removed identity and source generation |
-| `github.issue.add` | Add/restore selected source and optional local instructions; Note context is legacy compatibility only |
-| `github.sync` | Explicit source synchronization |
-| `card.remove` | Reversible local removal; no remote mutation |
-| `github.pr.publish` | Accept a current diff, commit/push and create/reuse its branch PR |
-| `github.pr.refresh` | Reconcile PR state/head/checks/reviews and remote delivery |
-| `github.pr.merge` | Explicit GitHub merge guarded by the displayed head and clean local checkout |
+| `github.cli.status` | Verify the gh account without extracting credentials |
+| `github.browse` | One remote notification/Issue/PR page |
+| `github.detail` | One detail/discussion/file/Review/check page |
+| `github.item.add` | Add or restore an Issue/PR source Card in a connected Project |
+| `github.reference.add` / `.remove` | Edit local typed GitHub references |
+| `github.context` | Read the source context of a bound Card |
+| `github.remote.comment` / `.reply` / `.review` | Explicit receipt-backed publication |
+| `github.notification.read` / `.done` | Explicit notification handling |
+| `github.cache.status` / `.clear` | Inspect or clear disposable responses |
 
-Source configuration uses `intake: all | collaborators` and `delivery_mode: local | github_pr`. Manual Add requires `project_id`, `number` and `source_generation` from search. Card mutations retain the existing revision checks. Publication/merge require a durable `request_key`; duplicate keys return receipts instead of replaying effects.
+Schema 9 retains local work and bindings; source bodies/comments live in cache. See the current contract for migration, query bounds, authority and acceptance commands. Desktop API level 7 requires these operations.
 
-## Native interactions and delivery
-
-Add Card opens the existing-route form immediately. Local is the default; switching to GitHub within the form enables debounced title/number search, source selection/preview and local instructions before final Add. Drafts survive switching. Existing Issue results open their Card; locally removed results permit explicit restoration.
-
-The shared Card tile shows a small theme-aware GitHub mark and separate local/Issue numbers, with a full source tooltip. Remote source content is inside the Card's main scroll region. Source title/body are read-only, with local instructions edited through the shared editor. Settings provides account authorization and Project repository/intake/delivery configuration. Gallery contains the production GitHub Card scene.
-
-Review selects Local merge or GitHub PR. Publication verifies the reviewed checkout, validates that the push repository is the target or its fork, saves an intent, commits/pushes without updating the local target, then creates/reuses the matching PR. Commit hooks changing the reviewed tree require another review. Existing delivery repository/workspace bindings stay pinned.
-
-PR state, head, check runs, combined commit statuses, conversation comments and reviews refresh on demand and on the background worker. GitHub merge uses the displayed expected SHA; unpublished local changes or a different local head block it. A merged PR records delivery without a second local merge; Archive remains a separate action. An unmerged closed PR is not delivery. Uncertain writes retain receipts and require remote reconciliation before replay.
-
-## Validation and reproducibility
+## Historical validation and reproducibility: 2026-11-09
 
 Completed so far:
 
@@ -117,4 +53,4 @@ Native regression checks confirmed that externally changing intake/delivery upda
 
 The user's live Canban/Core was not used for acceptance. Task-owned native windows, isolated AppServer and isolated Core were stopped after verification; test data and authorization remain in the isolated home for reproduction.
 
-Deferred: remote Issue editing/closing/comment publication, broad bidirectional synchronization, a repository picker beyond `owner/repo` input, Enterprise hosts and general provider/plugin abstraction.
+Deferred at the time of this acceptance: remote Issue editing/closing/comment publication, broad bidirectional synchronization, repository picking, Enterprise hosts and general provider/plugin abstraction. The new workspace supports explicit comment publication and PR Review; see its current contract.

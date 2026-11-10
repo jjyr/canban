@@ -62,6 +62,7 @@ struct State {
 }
 pub struct Service {
     generation: AtomicU64,
+    pub cache: std::sync::Arc<crate::cache::Cache>,
     installation_url: Option<String>,
     home: std::path::PathBuf,
     client_id: String,
@@ -85,6 +86,7 @@ impl Service {
             .or_else(|| (client_id == CLIENT_ID).then(|| INSTALL_URL.into()));
         Self {
             generation: AtomicU64::new(0),
+            cache: crate::cache::Cache::new(home.join("cache/github/app")),
             installation_url,
             home,
             client_id,
@@ -212,7 +214,7 @@ impl Service {
         let c = s
             .credential
             .as_ref()
-            .context("Connect GitHub in Settings first")?;
+            .context("Connect GitHub on the GitHub page first")?;
         if c.expires_at.is_some_and(|t| t <= seconds() + 300) {
             let refresh = c
                 .refresh_token
@@ -235,8 +237,20 @@ impl Service {
             self.save(&c)?;
             s.credential = Some(c);
         }
-        Ok(Client::new(
-            s.credential.as_ref().unwrap().access_token.clone(),
+        let c = s.credential.as_ref().unwrap();
+        Ok(Client::new(c.access_token.clone()).with_cache(
+            self.cache.clone(),
+            format!("github.com:{}:{}", c.client_id, c.login),
+        ))
+    }
+    /// Cache-only projection: never refreshes credentials or performs IO on the network.
+    pub fn cached_client(&self) -> Result<Client> {
+        let mut s = self.state.lock().unwrap();
+        self.load(&mut s)?;
+        let c = s.credential.as_ref().context("GitHub is disconnected")?;
+        Ok(Client::new(c.access_token.clone()).with_cache(
+            self.cache.clone(),
+            format!("github.com:{}:{}", c.client_id, c.login),
         ))
     }
     pub fn refresh(&self) -> Result<()> {
@@ -256,6 +270,7 @@ impl Service {
     pub fn disconnect(&self) -> Result<()> {
         let mut s = self.state.lock().unwrap();
         crate::credentials::store(&self.home, None)?;
+        self.cache.clear()?;
         self.generation.fetch_add(1, Ordering::SeqCst);
         *s = State {
             loaded: true,

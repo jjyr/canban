@@ -413,9 +413,11 @@ name = "canban-github"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "canban-types",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "ureq",
 ]
@@ -480,6 +482,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -534,6 +537,7 @@ dependencies = [
  "nsh-base",
  "nsh-core",
  "nsh-platform-macos",
+ "serde",
  "serde_json",
  "url",
 ]

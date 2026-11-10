@@ -19,6 +19,7 @@ pub struct Location {
 pub struct Ui {
     /// Commands outlive transient buttons/lists, but end with the window.
     pub owner: Owner,
+    pub github: crate::github::Browser,
     /// Optional host adapter for the reusable Board drop intent (Gallery uses local fixtures).
     pub board_move: Stored<Option<crate::board::DropHandler>>,
     pub card_target: Signal<String>,
@@ -139,6 +140,7 @@ impl Ui {
         let reminder_counts = computed(move || canban_notifications::counts(&reminders.get()));
         Self {
             owner: Owner::current(),
+            github: crate::github::Browser::new(),
             board_move: stored(None),
             card_target: signal(String::new()),
             card_submit: signal(0),
@@ -321,7 +323,7 @@ impl Ui {
     pub fn open_card(self, id: String) {
         self.card_standalone.set(matches!(
             self.page.get_untracked().as_str(),
-            "terminals" | "overview"
+            "terminals" | "overview" | "github"
         ));
         self.review.set(None);
         self.review_request
@@ -489,7 +491,7 @@ pub fn dispatch_complete(
                             ui.page.set("board".into());
                         }
                     }
-                    "card.create" | "github.issue.add" if active => {
+                    "card.create" | "github.issue.add" | "github.item.add" if active => {
                         if let Some(id) = value["id"].as_str() {
                             ui.open_card(id.into());
                         }

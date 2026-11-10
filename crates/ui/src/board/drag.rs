@@ -112,7 +112,7 @@ impl BoardDrag {
             ghost: signal(None),
         };
         effect(move || {
-            let _ = ui.snapshot.get();
+            let _ = (ui.snapshot.get(), ui.github.filters.get());
             if this.phase.get_untracked() == 0 {
                 this.sync();
             } else if this.trace {
@@ -143,7 +143,11 @@ impl BoardDrag {
         self.cards.set(self.ui.snapshot.with_untracked(|s| {
             s.cards
                 .iter()
-                .filter(|c| c.project_id == project && c.active())
+                .filter(|c| {
+                    c.project_id == project
+                        && c.active()
+                        && crate::github::filters::matches(self.ui, c, s)
+                })
                 .cloned()
                 .collect()
         }));

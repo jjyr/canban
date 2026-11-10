@@ -78,7 +78,7 @@ impl AppClient {
                         if !connected || state != last {
                             if tx
                                 .send(AppEvent::Changed {
-                                    topic: if connected { "application" } else { "resync" },
+                                    topic: change_topic(connected, &last, &state),
                                     card_id: None,
                                 })
                                 .is_err()
@@ -96,6 +96,16 @@ impl AppClient {
             }
         });
         rx
+    }
+}
+
+fn change_topic(connected: bool, previous: &Value, next: &Value) -> &'static str {
+    if !connected {
+        "resync"
+    } else if previous["github_revision"] != next["github_revision"] {
+        "github"
+    } else {
+        "application"
     }
 }
 
@@ -151,6 +161,14 @@ impl AppServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn github_cache_updates_keep_their_topic_across_the_existing_state_channel() {
+        let old = json!({"github_revision":3,"snapshot":{"cards":[]}});
+        let new = json!({"github_revision":4,"snapshot":{"cards":[]}});
+        assert_eq!(change_topic(true, &old, &new), "github");
+        assert_eq!(change_topic(false, &old, &new), "resync");
+        assert_eq!(change_topic(true, &old, &old), "application");
+    }
     #[test]
     fn old_service_is_rejected_even_when_package_versions_match() {
         assert!(check_api(&json!({"version":env!("CARGO_PKG_VERSION")})).is_err());

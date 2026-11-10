@@ -1577,3 +1577,5 @@ fn reminder_upgrade_baselines_existing_history_without_changing_cards() {
     assert!(canban_notifications::reminders(&after).is_empty());
     assert!(canban_notifications::read_sequence(&after, &card.id) > 0);
 }
+
+mod github;

@@ -1,6 +1,16 @@
 use super::*;
 use canban_kanban::github::delivery as policy;
 impl AppServer {
+    fn snapshot_card_for_delivery(&self, db: Db<'_>, id: &str) -> Result<Card> {
+        let c: Card = db.get(id)?;
+        let mut snapshot = Snapshot {
+            cards: vec![c],
+            ..Default::default()
+        };
+        self.project_github(&mut snapshot);
+        Ok(snapshot.cards.remove(0))
+    }
+
     pub(super) fn github_publish(&self, p: Value) -> Result<Value> {
         let _guard = self
             .review_gate
@@ -13,7 +23,7 @@ impl AppServer {
         let (card, project) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
-            let c: Card = db.get(strp(&p, "card_id")?)?;
+            let c = self.snapshot_card_for_delivery(db, strp(&p, "card_id")?)?;
             let project: Project = db.get(&c.project_id)?;
             (c.clone(), self.bound_project(&project, &c))
         };
@@ -27,7 +37,7 @@ impl AppServer {
                         && (pr.state == "open" || pr.state == "closed" || pr.merged))),
             "Reconcile the uncertain PR publication before publishing again"
         );
-        let client = self.github.client()?;
+        let client = self.github_client()?.refreshing();
         let (repository, repository_id) =
             if let Some(pr) = card.pull_request.as_ref().filter(|p| !p.merged) {
                 (pr.repository.clone(), pr.repository_id)
@@ -104,7 +114,7 @@ impl AppServer {
         let receipt=self.mutate("github.pr.publish",&p,|db|{
             let mut c:Card=db.get(&card.id)?;revise(&c,&p)?;
             if let Some(reason)=crate::review::blocker(db,&c)?{bail!("{reason}")}
-            if let Some(previous)=c.pull_request.take() && (previous.merged || previous.state=="closed") {c.pull_request_history.push(previous);}
+            if let Some(previous)=c.pull_request.take() && card.pull_request.as_ref().is_some_and(|p|p.merged||p.state=="closed") {c.pull_request_history.push(previous);}
             c.delivery_mode=Some(DeliveryMode::GitHubPr);c.pull_request=Some(pending.clone());c.revision+=1;db.save(&c)?;
             log(db,&c,"github.pr_publish_started","user","Accepted reviewed changes for PR publication",None,json!({"request_key":key,"head":plan.card_head,"target":plan.target_branch}))?;
             execute=true;Ok(json!({"state":"unknown","message":"Publication intent saved; refresh PR state before retrying","request_key":key}))
@@ -144,6 +154,7 @@ impl AppServer {
                 )?
             };
             let pr = policy::project(&remote, &pending)?;
+            client.seed(&format!("/repos/{repository}/pulls/{}", pr.number), remote);
             ensure!(
                 pr.head == head,
                 "Published PR head changed; refresh and review"
@@ -195,6 +206,7 @@ impl AppServer {
             )?;
             Ok(value)
         })?;
+        self.github_sync_due.store(true, Ordering::SeqCst);
         self.emit("github", Some(card.id));
         Ok(value)
     }
@@ -205,7 +217,7 @@ impl AppServer {
             .as_ref()
             .context("Card has no delivery PR")?;
         let account_generation = self.github.generation();
-        let client = self.github.client()?;
+        let client = self.github_client()?.refreshing();
         ensure!(
             client.repo(&old.repository)?.id == old.repository_id,
             "Delivery repository identity changed"
@@ -316,7 +328,7 @@ impl AppServer {
         .into();
         let reviews: Vec<Value> =
             client.pages(&format!("/repos/{}/pulls/{number}/reviews", old.repository))?;
-        let comments = client.comments(&old.repository, number)?;
+
         let mut latest = std::collections::HashMap::new();
         for r in &reviews {
             if matches!(
@@ -337,26 +349,28 @@ impl AppServer {
                 .filter(|s| **s == "CHANGES_REQUESTED")
                 .count()
         );
+        client.seed(
+            &format!(
+                "/repos/{}/pulls/{}/canban-summary",
+                next.repository, next.number
+            ),
+            json!({"checks":next.checks,"reviews":next.review_summary}),
+        );
         self.store.lock().unwrap().write(|db|{
             ensure!(self.github.generation()==account_generation,"GitHub account changed; discarded stale PR refresh");
             let mut current:Card=db.get(&card.id)?;
-            ensure!(current.pull_request.as_ref()==Some(old),"PR changed during refresh; refresh again");
-            policy::record_activity(db,&current,&comments,&reviews)?;
-            if current.pull_request.as_ref()!=Some(&next){
-                if next.merged && current.delivery.as_ref().is_none_or(|d|d.request_key!=format!("github:{}:{}",next.repository_id,next.number)){
-                    current.delivery=Some(Delivery{target_branch:next.base_branch.clone(),commit:remote["merge_commit_sha"].as_str().unwrap_or(&next.head).into(),request_key:format!("github:{}:{}",next.repository_id,next.number),merged_at:now()});
-                    current.attention=None;
-                    if let Some(gate)=current.human_gate.clone() && let Some(id)=gate.request_id {
-                        let request:Request=db.get(&id)?;
-                        if request.state=="completed" {current.human_gate=None;crate::workflow::advance(db,&self.config(),&mut current,&request)?;}
-                    }
-                }else if next.state=="closed" && !next.merged {current.attention=Some("Delivery PR was closed without merging".into());}
-                else if next.head!=old.head && old.number>0 {current.attention=Some("GitHub PR head changed; review the latest commits".into());}
-                else if next.checks=="failure" {current.attention=Some("GitHub checks failed; inspect the delivery PR".into());}
-                current.pull_request=Some(next.clone());current.revision+=1;
-                log(db,&current,"github.pr_synced","github",if next.merged{"Delivery PR merged"}else{"Delivery PR updated"},None,json!({"number":next.number,"state":next.state,"head":next.head,"checks":next.checks}))?;
-                db.save(&current)?;
-            }
+            ensure!(current.pull_request.as_ref()==Some(old),"PR binding changed during refresh; refresh again");
+            let before=current.clone();
+            if old.number==0 {let mut binding=old.clone();binding.number=next.number;binding.url=next.url.clone();binding.state="published".into();current.pull_request=Some(binding);}
+            if next.merged && current.delivery.as_ref().is_none_or(|d|d.request_key!=format!("github:{}:{}",next.repository_id,next.number)){
+                current.delivery=Some(Delivery{target_branch:next.base_branch.clone(),commit:remote["merge_commit_sha"].as_str().unwrap_or(&next.head).into(),request_key:format!("github:{}:{}",next.repository_id,next.number),merged_at:now()});
+                current.attention=None;
+                if let Some(gate)=current.human_gate.clone() && let Some(id)=gate.request_id {let request:Request=db.get(&id)?;if request.state=="completed" {current.human_gate=None;crate::workflow::advance(db,&self.config(),&mut current,&request)?;}}
+                log(db,&current,"github.pr_delivered","github","Delivery PR merged",None,json!({"number":next.number,"commit":current.delivery.as_ref().map(|d|&d.commit)}))?;
+            }else if next.state=="closed" && !next.merged {current.attention=Some("Delivery PR was closed without merging".into());}
+            else if next.head!=old.head && old.number>0 {current.attention=Some("GitHub PR head changed; review the latest commits".into());}
+            else if next.checks=="failure" {current.attention=Some("GitHub checks failed; inspect the delivery PR".into());}
+            if current!=before{current.revision+=1;db.save(&current)?;}
             Ok(())
         })?;
         self.emit("github", Some(card.id));
@@ -371,7 +385,12 @@ impl AppServer {
         if let Some(receipt) = self.github_receipt("github.pr.merge", &p)? {
             return Ok(receipt);
         }
-        let card: Card = self.store.lock().unwrap().db().get(strp(&p, "card_id")?)?;
+        let card = self
+            .snapshot()?
+            .cards
+            .into_iter()
+            .find(|c| Some(c.id.as_str()) == p["card_id"].as_str())
+            .context("Card not found")?;
         let pr = policy::validate_merge(&card, strp(&p, "head")?)?;
         self.ops(&pr.workspace.location.machine)
             .verify_clean_head(&pr.workspace.path, &pr.head)?;
@@ -380,7 +399,7 @@ impl AppServer {
         let receipt=self.mutate("github.pr.merge",&p,|db|{
             let c:Card=db.get(strp(&p,"card_id")?)?;revise(&c,&p)?;
             if let Some(reason)=crate::review::blocker(db,&c)?{bail!("{reason}")}
-            let pr=policy::validate_merge(&c,strp(&p,"head")?)?;saved_pr=Some(pr.clone());execute=true;
+            ensure!(c.pull_request.as_ref().is_some_and(|binding|binding.repository_id==pr.repository_id && binding.number==pr.number),"PR binding changed; refresh before merging");saved_pr=Some(pr.clone());execute=true;
             log(db,&c,"github.pr_merge_started","user","Accepted delivery PR for GitHub merge",None,json!({"head":pr.head,"request_key":key}))?;
             Ok(json!({"state":"unknown","message":"Merge intent saved; refresh remote PR before retrying","request_key":key}))
         })?;
@@ -389,7 +408,7 @@ impl AppServer {
         }
         let pr = saved_pr.unwrap();
         let result = (|| -> Result<Value> {
-            let client = self.github.client()?;
+            let client = self.github_client()?.refreshing();
             ensure!(
                 client.repo(&pr.repository)?.id == pr.repository_id,
                 "Delivery repository identity changed"
@@ -475,6 +494,7 @@ impl AppServer {
             )?;
             Ok(())
         })?;
+        self.github_sync_due.store(true, Ordering::SeqCst);
         self.emit("github", Some(strp(&p, "card_id")?.into()));
         Ok(value)
     }

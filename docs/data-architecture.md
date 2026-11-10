@@ -36,6 +36,8 @@ Enable and verify PRAGMA journal_mode=WAL when initializing/opening the database
 
 The live database may have canban.sqlite-wal and canban.sqlite-shm sidecars. Let SQLite manage them; never delete them as disposable application cache. Use a supported consistent backup procedure as described below.
 
+GitHub remote data follows the [disposable-cache contract](github-workspace.md): its bodies and discussions are not business records or automatically retained execution snapshots. Source/related/delivery bindings and local work remain durable.
+
 ## What belongs where
 
 | Data | Durable owner | Suggested representation |

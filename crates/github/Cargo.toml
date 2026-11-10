@@ -13,3 +13,6 @@ ureq = { version = "3", features = ["json"] }
 secrecy = { version = "0.10", features = ["serde"] }
 
 tempfile.workspace = true
+
+sha2.workspace = true
+canban-types.workspace = true

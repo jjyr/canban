@@ -32,7 +32,27 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .justify_between()
                 .items_center()
                 .gap_2()
-                .child(project_picker(ui))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .child(project_picker(ui))
+                        .child(when(
+                            move || project.get().is_some(),
+                            move || {
+                                icon_action(
+                                    Icon::GitHub,
+                                    "GitHub repository & synchronization".into(),
+                                    move || project.get().is_some_and(|p| p.github.is_some()),
+                                    || 0,
+                                    move |_| ui.navigate("github-repository"),
+                                )
+                            },
+                        )),
+                )
                 .child(when(
                     move || project.get().is_some(),
                     move || {
@@ -49,6 +69,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     },
                 )),
         )
+        .child(when(
+            move || project.get().is_some(),
+            move || crate::github::filters::toolbar(ui),
+        ))
         .child(dynamic(move || {
             let Some(project) = project.get() else {
                 return entry_card(

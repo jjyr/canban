@@ -16,13 +16,16 @@ use std::{
 };
 
 /// Increment when desktop clients need operations unavailable in older services.
-pub const API_VERSION: u32 = 6;
+pub const API_VERSION: u32 = 7;
 
 pub struct AppServer {
     utilities: utilities::Utilities,
     pub home: PathBuf,
     github: canban_github::auth::Service,
     github_sync_due: AtomicBool,
+    github_revision: std::sync::atomic::AtomicU64,
+    github_cli: Arc<canban_github::cli::Service>,
+    github_queries: Mutex<std::collections::BTreeMap<String, Value>>,
     identity: String,
     store: Mutex<Store>,
     config: RwLock<Config>,
@@ -311,7 +314,17 @@ impl AppServer {
         Self::publish_migration(&home, migration)?;
         Ok(Arc::new(Self {
             utilities: utilities::Utilities::new(&home),
-            github_sync_due: AtomicBool::new(false),
+            github_sync_due: AtomicBool::new(true),
+            github_revision: std::sync::atomic::AtomicU64::new(0),
+            github_queries: Mutex::new(
+                std::fs::read(home.join("cache/github/queries.json"))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default(),
+            ),
+            github_cli: Arc::new(canban_github::cli::Service::new(
+                home.join("cache/github/gh"),
+            )),
             github: canban_github::auth::Service::new(home.clone()),
             identity,
             home,
@@ -424,6 +437,9 @@ impl AppServer {
         rx
     }
     fn emit(&self, topic: &'static str, card: Option<String>) {
+        if topic == "github" {
+            self.github_revision.fetch_add(1, Ordering::SeqCst);
+        }
         self.wake_runtime();
         let event = AppEvent::Changed {
             topic,
@@ -437,6 +453,7 @@ impl AppServer {
     pub fn snapshot(&self) -> Result<Snapshot> {
         let mut snapshot = self.store.lock().unwrap().snapshot()?;
         snapshot.github = serde_json::from_value(serde_json::to_value(self.github.status())?)?;
+        self.project_github(&mut snapshot);
         snapshot.terminal_contexts = self
             .terminal_contexts
             .lock()

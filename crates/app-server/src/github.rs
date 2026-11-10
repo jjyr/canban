@@ -1,8 +1,25 @@
 //! Thin operation/lifecycle adapter; intake and reconciliation live in Kanban.
 use super::*;
+mod browse;
 mod delivery;
+mod projection;
 use canban_kanban::github::{self as integration, Change};
 impl AppServer {
+    fn github_client(&self) -> Result<canban_github::Client> {
+        if self.github.status().state == "connected" {
+            self.github.client()
+        } else {
+            canban_github::Client::from_cli(self.github_cli.clone(), true)
+        }
+    }
+    fn github_cached_client(&self) -> Result<canban_github::Client> {
+        if self.github.status().state == "connected" {
+            self.github.cached_client()
+        } else {
+            canban_github::Client::from_cli(self.github_cli.clone(), false)
+        }
+    }
+
     fn github_receipt(&self, method: &str, p: &Value) -> Result<Option<Value>> {
         let Some(key) = p["request_key"].as_str() else {
             return Ok(None);
@@ -27,10 +44,50 @@ impl AppServer {
         Ok(None)
     }
     pub(super) fn github_call(&self, method: &str, p: Value) -> Result<Value> {
+        if method == "github.context" {
+            let snapshot = self.snapshot()?;
+            let card = snapshot
+                .cards
+                .iter()
+                .find(|c| Some(c.id.as_str()) == p["card_id"].as_str())
+                .context("Card not found")?;
+            if let Some(execution) = p["execution"].as_object() {
+                let request: Request = self.store.lock().unwrap().db().get(
+                    execution
+                        .get("request_id")
+                        .and_then(Value::as_str)
+                        .context("Missing request identity")?,
+                )?;
+                ensure!(
+                    request.card_id == card.id,
+                    "Execution belongs to another Card"
+                );
+            }
+            let content = if let Some(source) = card.github_issue() {
+                let path = format!("/repos/{}/issues/{}", source.repository, source.number);
+                if let Some(value) = self
+                    .github_cached_client()
+                    .ok()
+                    .and_then(|c| c.cached::<Value>(&path))
+                {
+                    value
+                } else {
+                    self.github_client()?.get::<Value>(&path)?
+                }
+            } else {
+                Value::Null
+            };
+            return Ok(
+                json!({"source":card.github_issue(),"content":content,"references":card.github_links}),
+            );
+        }
         ensure!(
             p["execution"].is_null(),
             "GitHub account/source and delivery operations require a user action"
         );
+        if let Some(result) = self.github_browser_call(method, &p) {
+            return result;
+        }
         match method {
             "github.auth.status" => Ok(serde_json::to_value(self.github.status())?),
             "github.auth.begin" => Ok(serde_json::to_value(self.github.begin()?)?),
@@ -47,16 +104,16 @@ impl AppServer {
                 self.emit("github", None);
                 Ok(json!({"disconnected":true}))
             }
-            "github.installations" => self.github.client()?.get("/user/installations"),
+            "github.installations" => self.github_client()?.get("/user/installations"),
             "project.github" => {
                 let project_id = strp(&p, "project_id")?;
                 let repo = canban_github::repository(strp(&p, "repository")?)?;
                 let intake: GitHubIntake =
                     serde_json::from_value(p.get("intake").cloned().unwrap_or(json!("all")))?;
                 let account_generation = self.github.generation();
-                let client = self.github.client()?;
+                let client = self.github_client()?.refreshing();
                 let info = client.repo(&repo)?;
-                if intake == GitHubIntake::Collaborators {
+                if intake == GitHubIntake::Collaborators || p["pr_intake"] == "collaborators" {
                     client.collaborators(&repo).context("Cannot enable collaborator intake: could not verify repository collaborators")?;
                 }
                 let result = self.mutate(method, &p, |db| {
@@ -66,6 +123,13 @@ impl AppServer {
                     );
                     let mut project: Project = db.get(project_id)?;
                     project.github = Some(GitHubSource {
+                        pr_intake: serde_json::from_value(
+                            p.get("pr_intake").cloned().unwrap_or(json!("off")),
+                        )?,
+                        authors: strings(&p, "authors"),
+                        labels: strings(&p, "labels"),
+                        include_drafts: p["include_drafts"].as_bool().unwrap_or(false),
+                        paused: p["paused"].as_bool().unwrap_or(false),
                         repository: info.full_name,
                         repository_id: info.id,
                         generation: id(),
@@ -98,10 +162,26 @@ impl AppServer {
                 let source = project
                     .github
                     .context("Connect this Project to a GitHub repository first")?;
-                let issues = self
-                    .github
-                    .client()?
-                    .search(&source.repository, strp(&p, "query")?)?;
+                let client = self.github_client()?;
+                let issues = if p["kind"] == "pr" {
+                    let q = strp(&p, "query")?;
+                    if let Ok(number) = q.trim().trim_start_matches('#').parse::<u64>() {
+                        let item = client.item(&source.repository, number)?;
+                        ensure!(item.pull_request.is_some(), "This number is an Issue");
+                        vec![item]
+                    } else {
+                        let value: Value = client.get(&format!(
+                            "/search/issues?q={}&per_page=30",
+                            canban_github::segment(&format!(
+                                "repo:{} is:pr in:title {}",
+                                source.repository, q
+                            ))
+                        ))?;
+                        serde_json::from_value(value["items"].clone())?
+                    }
+                } else {
+                    client.search(&source.repository, strp(&p, "query")?)?
+                };
                 let cards = self.store.lock().unwrap().db().list::<Card>()?;
                 Ok(json!(issues.into_iter().map(|issue|{
                     let existing=cards.iter().find(|c|c.project_id==project.id && c.github_issue().is_some_and(|s|s.repository_id==source.repository_id && s.issue_id==issue.id));
@@ -125,14 +205,20 @@ impl AppServer {
                 );
                 let account_generation = self.github.generation();
                 let number = p["number"].as_u64().context("Issue number is required")?;
-                let client = self.github.client()?;
+                let client = self.github_client()?.refreshing();
                 let info = client.repo(&source.repository)?;
                 ensure!(
                     info.id == source.repository_id,
                     "GitHub repository identity changed; reconnect the source"
                 );
-                let issue = client.issue(&source.repository, number)?;
-                let comments = client.comments(&source.repository, number)?;
+                let issue = if p["kind"] == "pr" {
+                    let item = client.item(&source.repository, number)?;
+                    ensure!(item.pull_request.is_some(), "Select a PR");
+                    item
+                } else {
+                    client.issue(&source.repository, number)?
+                };
+                let comments = Vec::new();
                 self.mutate(method, &p, |db| {
                     ensure!(
                         self.github.generation() == account_generation,
@@ -193,14 +279,20 @@ impl AppServer {
             .github
             .as_ref()
             .context("Project has no GitHub source")?;
+        if source.paused {
+            return Ok(());
+        }
         let account_generation = self.github.generation();
-        let fetched = self.github.client().and_then(|client| {
-            ensure!(
-                client.repo(&source.repository)?.id == source.repository_id,
-                "Repository identity changed; reconnect source"
-            );
-            integration::fetch(&client, &project, &cards, &cache)
-        });
+        let fetched = self
+            .github_client()
+            .map(|c| c.refreshing())
+            .and_then(|client| {
+                ensure!(
+                    client.repo(&source.repository)?.id == source.repository_id,
+                    "Repository identity changed; reconnect source"
+                );
+                integration::fetch(&client, &project, &cards, &cache)
+            });
         let error = fetched.as_ref().err().map(|e| format!("{e:#}"));
         let result = self.store.lock().unwrap().write(|db| match fetched {
             Ok(sync) => {
@@ -226,6 +318,7 @@ impl AppServer {
         if let Some(error) = error {
             bail!("{error}")
         }
+        self.github_pr_intake(&project)?;
         Ok(())
     }
 }

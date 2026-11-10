@@ -50,12 +50,24 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
                 .tooltip(nsh_base::tooltip().child(label(explanation)))
                 .child(label(stage.name).font_weight(FontWeight::SEMIBOLD))
                 .child(badge(move || {
-                    state.cards.with(|all| {
-                        all.iter()
-                            .filter(|c| c.stage == count_stage)
+                    let visible = state
+                        .cards
+                        .with(|all| all.iter().filter(|c| c.stage == count_stage).count());
+                    let total = ui.snapshot.with(|s| {
+                        s.cards
+                            .iter()
+                            .filter(|c| {
+                                c.project_id == ui.project.get_untracked()
+                                    && c.active()
+                                    && c.stage == count_stage
+                            })
                             .count()
-                            .to_string()
-                    })
+                    });
+                    if visible == total {
+                        visible.to_string()
+                    } else {
+                        format!("{visible} / {total}")
+                    }
                 })),
         )
         .child(
