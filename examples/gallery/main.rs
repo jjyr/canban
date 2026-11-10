@@ -154,6 +154,13 @@ pub fn Gallery() -> impl IntoElement {
     ui.page.set("card".into());
     ui.profiles.set(canban_types::Config::default().profiles);
     ui.machines.set(json!({"machines":[{"id":"gallery-remote","name":"Build machine","state":"connected","target":"ssh-host"},{"id":"gallery-offline","name":"Offline machine","state":"unreachable","target":"another-host"}]}));
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("archive") {
+        ui.snapshot.set(fixtures::archive());
+        ui.project.set("archive-empty".into());
+        ui.card.set(String::new());
+        ui.page.set("archive".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("reminders") {
         let mut snapshot = fixtures::workspace();
         snapshot.cards[2].body = (0..30)
@@ -424,10 +431,7 @@ pub fn Gallery() -> impl IntoElement {
                     scene.set("scheduling".into());
                 }))
                 .child(action("Archived / deleted", Variant::Quiet, move |_| {
-                    let mut snapshot=fixtures::workspace();
-                    snapshot.cards[0].archived_at=Some(canban_types::now());
-                    snapshot.cards[1].removed_at=Some(canban_types::now());
-                    ui.snapshot.set(snapshot);ui.card.set(String::new());ui.page.set("archive".into());scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::archive());ui.card.set(String::new());ui.page.set("archive".into());scene.set("workspace".into());
                 }))
                 .child(action("Card states", Variant::Quiet, move |_| {
                     scene.set("workspace".into());ui.snapshot.set(fixtures::board_cards());ui.card.set(String::new());ui.page.set("board".into());

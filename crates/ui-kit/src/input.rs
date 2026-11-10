@@ -1,6 +1,21 @@
 //! Controlled field; NSH Input preserves selection and IME composition.
 use super::tokens::*;
 use nsh_core::{element::Input, prelude::*};
+/// A trailing-edge debounce owned by the input's reactive scope. Each keystroke
+/// disposes the previous timeout; native input identity and selection stay put.
+pub fn debounced<T: Clone + PartialEq + 'static>(
+    value: Signal<T>,
+    delay: std::time::Duration,
+) -> Memo<T> {
+    let settled = signal(value.get_untracked());
+    effect(move || {
+        let next = value.get();
+        if next != settled.get_untracked() {
+            set_timeout(delay, move || settled.set(next));
+        }
+    });
+    computed(move || settled.get())
+}
 pub fn field(value: Signal<String>, placeholder: &str) -> Input {
     nsh_base::input()
         .value(move || value.get())

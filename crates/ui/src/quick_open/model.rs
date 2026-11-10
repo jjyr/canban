@@ -102,66 +102,17 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
     }
     rows
 }
-/// Multi-term, Unicode-safe subsequence matching. Exact/prefix/contiguous title
-/// matches lead, then close subsequences; secondary fields keep a lower weight.
-fn score_field(field: &str, term: &str) -> Option<usize> {
-    if field == term {
-        return Some(0);
-    }
-    if field.starts_with(term) {
-        return Some(
-            5 + field
-                .chars()
-                .count()
-                .saturating_sub(term.chars().count())
-                .min(20),
-        );
-    }
-    if let Some(at) = field.find(term) {
-        return Some(30 + field[..at].chars().count().min(50));
-    }
-    let mut needle = term.chars();
-    let mut wanted = needle.next()?;
-    let mut first = None;
-    for (i, ch) in field.chars().enumerate() {
-        if ch == wanted {
-            first.get_or_insert(i);
-            if let Some(next) = needle.next() {
-                wanted = next;
-            } else {
-                return Some(
-                    90 + first.unwrap_or(0).min(50)
-                        + (i - first.unwrap_or(0) + 1 - term.chars().count()).min(200),
-                );
-            }
-        }
-    }
-    None
-}
 pub fn ranked(
     rows: &[Candidate],
     query: &str,
     recent: &[String],
     projects_only: bool,
 ) -> Vec<Candidate> {
-    let terms: Vec<_> = query.split_whitespace().map(str::to_lowercase).collect();
     let mut scored = rows
         .iter()
         .filter(|r| !projects_only || r.kind == "Project")
         .filter_map(|row| {
-            let mut total = 0;
-            for term in &terms {
-                let score = row
-                    .fields
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, f)| {
-                        score_field(&f.to_lowercase(), term)
-                            .map(|v| v + if i == 0 { 0 } else { 60 })
-                    })
-                    .min()?;
-                total += score;
-            }
+            let total = canban_ui_kit::search::score(&row.fields, query)?;
             let visit = recent
                 .iter()
                 .position(|id| id == &row.id)

@@ -5,6 +5,66 @@ pub fn timeline() -> Event {
     Event {id:"gallery-event".into(),project_id:"gallery-project".into(),card_id:"gallery-card".into(),sequence:1,kind:"comment.created".into(),actor:"user".into(),message:"A **shared component**, rendered from deterministic fixture data.\n\n中文输入、选择、复制与长文本。".into(),request_id:None,data:json!({}),created_at:canban_types::now()}
 }
 
+pub fn archive() -> canban_types::Snapshot {
+    use canban_types::*;
+    let mut s = workspace();
+    s.cards[0].archived_at = Some(now().saturating_sub(86_400_000));
+    s.cards[1].archived_at = Some(now().saturating_sub(3_600_000));
+    s.cards[1].title = "原生终端恢复 · preserve session history".into();
+    s.cards[1].attention = None;
+    s.cards[1].human_gate = None;
+    for (id, name) in [
+        ("archive-tools", "Tools"),
+        ("archive-empty", "No archived Cards"),
+        ("archive-deleted", "Deleted only"),
+    ] {
+        let mut project = s.projects[0].clone();
+        project.id = id.into();
+        project.name = name.into();
+        s.projects.push(project);
+    }
+    let mut card = s.cards[0].clone();
+    card.id = "archive-tools-card".into();
+    card.project_id = "archive-tools".into();
+    card.title = "Fix archive search and keyboard focus".into();
+    card.number = 42;
+    s.cards.push(card);
+    let mut card = s.cards[2].clone();
+    card.id = "archive-active-card".into();
+    card.project_id = "archive-empty".into();
+    s.cards.push(card);
+    let mut card = s.cards[2].clone();
+    card.id = "archive-deleted-card".into();
+    card.project_id = "archive-deleted".into();
+    card.removed_at = Some(now());
+    card.title = "Recover deleted work".into();
+    s.cards.push(card);
+    for (card, profile, provider) in [
+        ("card-1", "developer", "codex"),
+        ("card-2", "reviewer", "claude"),
+        ("archive-tools-card", "developer", "codex"),
+    ] {
+        let project = s
+            .cards
+            .iter()
+            .find(|c| c.id == card)
+            .unwrap()
+            .project_id
+            .clone();
+        s.conversations.push(Conversation {
+            id: Conversation::key(card, profile),
+            project_id: project,
+            card_id: card.into(),
+            profile_id: profile.into(),
+            provider: provider.into(),
+            provider_session_id: None,
+            last_request_id: None,
+            created_at: now(),
+        });
+    }
+    s
+}
+
 pub fn review() -> ReviewPreview {
     ReviewPreview {card_id:"gallery".into(),revision:1,target_branch:"main".into(),target_head:"0123456789".into(),card_head:"abcdef0123".into(),source_branch:"main".into(),worktree:"/example/Card".into(),files:vec!["src/example.rs".into()],patch:"diff --git a/src/example.rs b/src/example.rs\n--- a/src/example.rs\n+++ b/src/example.rs\n@@ -1 +1 @@\n-// old\n+// Reviewed · 中文".into(),truncated:false,dirty:true,conflicts:vec![],token:String::new(),merge_allowed:true,reason:None}
 }

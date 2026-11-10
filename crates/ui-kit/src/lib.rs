@@ -40,3 +40,6 @@ pub use theme_choice::theme_choice;
 pub mod markdown;
 
 pub mod motion;
+pub mod search;
+pub mod tree_group;
+pub use tree_group::tree_group;
