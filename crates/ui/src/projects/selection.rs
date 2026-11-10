@@ -19,6 +19,13 @@ pub fn remember(ui: Ui) {
     let saving = signal(false);
     let queued = stored(String::new());
     effect(move || {
+        let _ = ui.update.get();
+        if crate::APP
+            .get()
+            .is_some_and(|a| canban_updater::handoff::active(&a.home))
+        {
+            return;
+        }
         let id = ui.project.get();
         if !id.is_empty()
             && ui.snapshot.with(|s| s.projects.iter().any(|p| p.id == id))

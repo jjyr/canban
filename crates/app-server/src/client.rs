@@ -12,6 +12,24 @@ impl AppClient {
             .clone()
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join("app.sock"));
+        if explicit.is_none()
+            && !canban_updater::handoff::authorized(&home)
+            && canban_updater::handoff::active(&home)
+        {
+            canban_updater::handoff::resume(&home)?;
+            let until = std::time::Instant::now() + Duration::from_secs(100);
+            while canban_updater::handoff::active(&home) {
+                ensure!(
+                    canban_updater::handoff::journal(&home)?.phase != "manual_recovery",
+                    "Upgrade recovery failed; inspect updates/updater.log"
+                );
+                ensure!(
+                    std::time::Instant::now() < until,
+                    "Upgrade/recovery is still in progress"
+                );
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
         if rpc(&endpoint, "app.ping", json!({})).is_err() && explicit.is_none() {
             std::fs::create_dir_all(&home)?;
             let log = std::fs::OpenOptions::new()

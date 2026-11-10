@@ -76,17 +76,11 @@ print(json.dumps(rows))"#,
                     row["error"]
                 );
                 let method = strp(call, "method")?;
-                ensure!(
-                    !matches!(
-                        method,
-                        "app.shutdown" | "herdr.connect" | "machine.add" | "machine.remove"
-                    ),
-                    "Operation is not available through the Agent reporting bridge"
-                );
-                self.call(method, call["params"].clone())
+                self.remote_call(method, call["params"].clone())
             })();
             let reply = match result {
-                Ok(v) => json!({"result":v}),
+                Ok(None) => continue,
+                Ok(Some(v)) => json!({"result":v}),
                 Err(e) => json!({"error":format!("{e:#}")}),
             };
             // Publish complete replies atomically. Lost publication retries reuse operation keys.
@@ -101,6 +95,31 @@ print(json.dumps(rows))"#,
             )?;
         }
         Ok(())
+    }
+    pub(super) fn remote_call(&self, method: &str, params: Value) -> Result<Option<Value>> {
+        ensure!(
+            !matches!(
+                method,
+                "app.shutdown"
+                    | "herdr.connect"
+                    | "machine.add"
+                    | "machine.remove"
+                    | "update.install"
+            ),
+            "Operation is not available through the Agent reporting bridge"
+        );
+        let result = self.call(method, params);
+        if matches!(method, "execution.report" | "agent.reply")
+            && (canban_updater::handoff::active(&self.home)
+                || result
+                    .as_ref()
+                    .is_err_and(|e| e.to_string().starts_with("Canban is upgrading;")))
+        {
+            // Leave the original remote .req unanswered for the replacement
+            // service; publishing a handoff error would consume a durable report.
+            return Ok(None);
+        }
+        result.map(Some)
     }
     pub(super) fn stage_remote(&self, host: &Host, home: &Path, card: &Card) -> Result<PathBuf> {
         let cli = home.join("bin/canban");

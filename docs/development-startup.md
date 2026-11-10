@@ -8,7 +8,7 @@ Implemented and verified on macOS, 2026-11-09.
 mise run run
 ```
 
-The user selected the existing `~/.canban` home for development. Override it with an absolute `CANBAN_HOME` for disposable data. This command builds UI/CLI, packages `.local/CanbanDev.app` (`com.canban.dev`), gracefully stops the selected home's AppServer through `app.shutdown`, waits for its service lock, starts the newly packaged CLI as AppServer, checks readiness/API/desktop utilities, then opens the development UI.
+The user selected the existing `~/.canban` home for development. Override it with an absolute `CANBAN_HOME` for disposable data. This command builds UI/CLI/updater, packages `.local/CanbanDev.app` (`com.canban.dev`), gracefully stops the selected home's AppServer through `app.shutdown`, waits for its service lock, starts the newly packaged CLI as AppServer, checks readiness/API/desktop utilities, then opens the development UI.
 
 ```text
 mise run run
@@ -31,7 +31,7 @@ Existing Core/terminal/provider bindings are recovered by the normal AppServer r
 
 ## API compatibility
 
-Desktop API level 5 adds the saved last-Project preference and partial desktop preference updates. It includes durable Board insertion/reordering (level 4), Profile-only selection and removal of Card/Profile Routing tags (level 3), plus the named-theme contract from level 2. `app.ping` reports `api_version`, process `pid`, package `version` and `home`. UI startup requires the desktop API level before opening a workspace. An older service, even one with the same `0.1.0` package version, produces a clear startup error pointing to the development launch command. It cannot silently discard the last-Project selection or keep superseded behavior.
+Desktop API level 7 adds internal release discovery/install and build identity for the updater. It includes durable reminders (level 6), saved last-Project/partial preferences (level 5), Board ordering (level 4), Profile-only selection (level 3) and named themes (level 2). `app.ping` reports `api_version`, process `pid`, package `version`, `home` and release `build` identity. UI startup requires its desktop API before opening a workspace. An older service, even with the same `0.1.0` package version, produces a startup error pointing to the development launch command. The runner derives its required API from the just-packaged CLI's `build-info`, avoiding a second hardcoded API constant.
 
 The development runner always replaces the service, even when its API/package version matches. PID verification establishes that it reached the process it just launched from the newly packaged executable. API level is a compatibility contract, not a source/build fingerprint; increase it when new desktop operations become required.
 
@@ -50,3 +50,8 @@ After the user selected reuse of existing data, `mise run run` was also executed
 ## Readable workspaces
 
 New Card #42 in directory `canban`, with Project ID beginning `4e5r`, uses branch `canban-4e5r/42` and `~/.canban/worktrees/canban-4e5r/42`. The Project display name and Card title do not affect these names. Normalization supports multilingual directory names. Conflicting branch/path names choose matching suffixes such as `42-2`; namespace conflicts choose `canban-4e5r-2/42`. Existing saved branches and UUID/numeric/readable directories remain unchanged, including Archive/Resume restoration. See [workspace naming and lifecycle](workspace-and-scheduling.md#readable-workspace-names).
+
+
+## Update-aware startup verification (2026-11-10)
+
+`mise run acceptance-dev` passed with desktop API 7: `/private/tmp/cb-dev-start-npf7kzjq/results.json`. It preserved Theme and the exact live PTY through current/legacy service replacement and rejected explicit endpoint takeover. Service shutdown is established by release of `server.lock`; a process can exit before its accept thread removes the stale socket path. New startup holds the service lock before opening SQLite. Internal upgrade fencing/recovery additionally runs before database access; see [updates](updates.md). This verification used an isolated home/Core, not the user's existing data.

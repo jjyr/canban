@@ -6,7 +6,7 @@
 mise run gallery
 ```
 
-This builds the `gallery` Cargo example at `examples/gallery/main.rs`, packages it as `.local/CanbanGallery.app`, and opens its own native window. Build without launching with `mise run build-gallery`. The ordinary `mise run build` packages only the production application and CLI.
+This builds the `gallery` Cargo example at `examples/gallery/main.rs`, packages it as `.local/CanbanGallery.app`, and opens its own native window. Build without launching with `mise run build-gallery`. The ordinary `mise run build` packages the production UI, CLI and updater, without the Gallery.
 
 Gallery imports UI Kit and the production components from the `canban-ui` library. Its fixtures live in `examples/gallery/fixtures.rs`; it does not call the desktop host, open a Canban home/database, start an AppServer, schedule Agents or connect to Herdr. It needs no configured Agent or CLI beside its executable. The production app has no Gallery route, sidebar entry or `--gallery` mode.
 
@@ -68,3 +68,5 @@ The Terminal scene also checks **inline session metadata**: Agent rows show titl
 **Notes deferred** (2026-11-10): no Notes workspace, editor, Note-to-Card action, search result or Card context selector is available. Legacy fixture records intentionally remain in some snapshots to verify that they do not create destinations or project activity. Attachments, Card editing and Timeline remain production components.
 
 For Card reading/editing regressions, use **Card conversation** for rich Markdown and a long shared history. **Reply in 5s** adds a real fixture event while you continue typing; check focus, selection, undo and reading position. **Append reply** checks explicit jump-to-latest behavior while reading earlier content. The production composer provides Write/Preview, caret @ completion, native multi-file picking and upload error/retry (Gallery has no AppServer, so saving an attachment intentionally exposes the failure state). Verify persisted submissions/uploads separately in the packaged App with an isolated home/Core.
+
+**Update available** / **Update failed**, or `CANBAN_GALLERY_SCENE=updates mise run gallery`, exercise the production bottom-rail update indicator and progress/retry composition. `CANBAN_GALLERY_SCENE=update-recovery mise run gallery` renders the production standalone Recovery screen without AppServer/SQLite; its Quit action returns to the Gallery shell. These are fixtures, not an installation. Verify actual bundle replacement, session restoration and migration recovery through the isolated packaged-App acceptance described in [updates](../docs/updates.md).

@@ -16,12 +16,14 @@ use std::{
 };
 
 /// Increment when desktop clients need operations unavailable in older services.
-pub const API_VERSION: u32 = 6;
+pub const API_VERSION: u32 = canban_updater::DESKTOP_API;
+mod updates;
 
 pub struct AppServer {
+    _service_lock: std::fs::File,
     utilities: utilities::Utilities,
     pub home: PathBuf,
-    github: canban_github::auth::Service,
+    github: Arc<canban_github::auth::Service>,
     github_sync_due: AtomicBool,
     identity: String,
     store: Mutex<Store>,
@@ -195,6 +197,8 @@ fn enqueue(
 }
 impl AppServer {
     pub fn open(home: PathBuf, cli: PathBuf) -> Result<Arc<Self>> {
+        let _startup = canban_updater::handoff::startup_guard(&home)?;
+        let service_lock = canban_updater::service_lock(&home)?;
         let mut store = Store::open(&home)?;
         let identity_path = home.join("server-id");
         let mut identity_file = std::fs::OpenOptions::new()
@@ -310,9 +314,10 @@ impl AppServer {
         }
         Self::publish_migration(&home, migration)?;
         Ok(Arc::new(Self {
+            _service_lock: service_lock,
             utilities: utilities::Utilities::new(&home),
             github_sync_due: AtomicBool::new(false),
-            github: canban_github::auth::Service::new(home.clone()),
+            github: Arc::new(canban_github::auth::Service::new(home.clone())),
             identity,
             home,
             store: Mutex::new(store),

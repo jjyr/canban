@@ -3,7 +3,7 @@ use crate::presenter::*;
 use canban_types::Card;
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
-#[derive(Clone, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Draft {
     pub card_kind: String,
     pub issue_query: String,

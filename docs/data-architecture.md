@@ -261,3 +261,8 @@ rather than duplicating every Timeline event into another notification table.
 Archive exports include the Card read record. The existing desktop preferences
 file stores the notification sound setting. See [unified reminders](reminders.md)
 for ownership, indexed read updates, UI behavior and acceptance evidence.
+
+
+## Internal upgrade migration policy (2026-11-10)
+
+Automatic desktop updates deliberately make no database backup. The generic backup guidance above describes an optional backup procedure, not an updater prerequisite. New production migrations after the schema-8 baseline require paired transactional up/down steps; failed up rolls back its transaction, failed candidate startup invokes reverse down, and failed down stops for manual repair. Schema reversal cannot restore discarded values. See [migration rules and updater ownership](updates.md#migration-authoring-rules).

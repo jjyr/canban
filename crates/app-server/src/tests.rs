@@ -1540,7 +1540,9 @@ fn read_positions_are_monotonic_durable_and_never_approve_a_gate() {
         )
         .is_err()
     );
-    let reopened = AppServer::open(app.home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let home = app.home.clone();
+    drop(app);
+    let reopened = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
     assert_eq!(after.card_reads, reopened.snapshot().unwrap().card_reads);
 }
 
@@ -1576,4 +1578,17 @@ fn reminder_upgrade_baselines_existing_history_without_changing_cards() {
     assert_eq!(before.events, after.events);
     assert!(canban_notifications::reminders(&after).is_empty());
     assert!(canban_notifications::read_sequence(&after, &card.id) > 0);
+}
+
+#[test]
+fn agent_callbacks_cannot_install_desktop_updates() {
+    let (_dir, app, _, _) = setup();
+    let error = app
+        .call(
+            "update.install",
+            json!({"execution":{"request_id":"agent","attempt_number":1}}),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("explicit user action"));
+    assert!(!app.home.join("updates/install.json").exists());
 }

@@ -307,3 +307,107 @@ mod tests {
         assert_eq!(segment("repo:a/b x&y"), "repo%3Aa%2Fb%20x%26y");
     }
 }
+
+impl Client {
+    /// Private release assets use the API octet-stream route. Never forward the
+    /// GitHub credential when following its signed storage redirect.
+    pub fn release_response(&self, url: &str) -> Result<ureq::http::Response<ureq::Body>> {
+        ensure!(
+            url.starts_with(&format!("{}/repos/", self.api)) && url.contains("/releases/assets/"),
+            "Invalid GitHub release asset URL"
+        );
+        let response = agent()
+            .get(url)
+            .header("User-Agent", "Canban updater")
+            .header("Accept", "application/octet-stream")
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.token.expose_secret()),
+            )
+            .call()?;
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get("Location")
+                .context("Release redirect is missing")?
+                .to_str()?
+                .to_owned();
+            ensure!(
+                location.starts_with("https://") || (cfg!(test) && location.starts_with(&self.api)),
+                "Release download redirect requires HTTPS"
+            );
+            let public: ureq::Agent = ureq::Agent::config_builder()
+                .timeout_global(Some(std::time::Duration::from_secs(120)))
+                .max_redirects(5)
+                .build()
+                .into();
+            return public
+                .get(location)
+                .header("User-Agent", "Canban updater")
+                .call()
+                .map_err(|_| anyhow::anyhow!("Release asset download failed"));
+        }
+        ensure!(
+            response.status().is_success(),
+            "Release asset HTTP {}; check repository installation access",
+            response.status()
+        );
+        Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+    };
+    #[test]
+    fn private_asset_auth_does_not_follow_storage_redirect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let redirect = base.clone();
+        let thread = std::thread::spawn(move || {
+            for i in 0..2 {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut input = BufReader::new(socket.try_clone().unwrap());
+                let mut headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    input.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    headers.push_str(&line);
+                }
+                let authenticated = headers.to_lowercase().contains("authorization:");
+                assert_eq!(authenticated, i == 0);
+                let reply = if i == 0 {
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {redirect}/signed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nfixture"
+                        .into()
+                };
+                socket.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        let client = Client {
+            api: base.clone(),
+            token: SecretString::from("fixture-only"),
+        };
+        let mut response = client
+            .release_response(&format!("{base}/repos/test/app/releases/assets/1"))
+            .unwrap();
+        let mut bytes = String::new();
+        response
+            .body_mut()
+            .as_reader()
+            .read_to_string(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, "fixture");
+        thread.join().unwrap();
+    }
+}

@@ -89,3 +89,7 @@ Retain existing licenses, copyright notices, and applicable third-party notices 
 ## Architecture references
 
 The [crate plan](architecture-crates-and-timers.md) defines proposed responsibility/dependency boundaries, and the [overall architecture](architecture.md) defines the co-hosted AppServer/native UI/runtime relationship. The workspace now implements the core boundaries; timer placement and other deferred capabilities remain design proposals.
+
+## Database migrations and release updates
+
+Follow [the update/migration contract](updates.md). Schema 8 is the legacy baseline; new migrations require paired up/down steps. Run each complete upgrade or downgrade batch in one transaction, update the schema version in that transaction, and keep migrations database-only. Prefer additive changes; down cannot recover discarded values. Test representative round trips and mid-batch failures. Installation does not back up the database: a failed up uses transaction rollback, and a failed candidate boot uses reverse-order down. If down fails, stop for manual repair rather than starting an incompatible old version.

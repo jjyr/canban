@@ -178,3 +178,14 @@ The Gallery's **Card conversation**, **Append reply** and **Reply in 5s** scenes
 `ui/archive.rs` composes the global archived-conversation browser; `archive/model.rs` owns grouping, metadata matching and ordering. The controlled UI Kit `tree_group` accepts title/count readers, expansion state, a toggle intent and children. It uses NSH disclosure/reveal behavior, keyboard activation, expanded accessibility state, indentation and a guide; hidden descendants do not accept pointer input or appear in accessibility navigation. Generic shared `search::score` preserves Quick Open matching, while `input::debounced` owns a trailing-edge, scope-cancelled timeout without replacing the native text field. Product-specific state and RPC remain outside UI Kit.
 
 Gallery **Archived / deleted**, or `CANBAN_GALLERY_SCENE=archive mise run gallery`, covers multiple Projects, an active-only Project, Unicode/long titles, Agent metadata and separate deleted recovery. See [Archive contract and verification](archive.md).
+
+
+## Global update and recovery components (2026-11-10)
+
+`ui/updates.rs` owns the bottom-rail highlighted Update action, reactive progress/retry state, Settings check/version feedback and upgrade-session capture/restore. It composes UI Kit chrome/actions/notices and the shared update SVG; release discovery and install logic stay in `canban-updater`/AppServer. The update action is global across routes, disables duplicate submission and sends the exact offered version with the initiating packaged UI identity.
+
+The UI saves root-owned Card drafts, pasted attachment bytes, current location, Terminal tabs and Archive query before acknowledging handoff. Restoration waits for the first applied snapshot so Card/Terminal identities resolve correctly; incomplete uploads become explicit retry states. This is planned-update persistence, not general crash autosave. Candidate readiness is acknowledged only after snapshot application and a rendered frame.
+
+The production `Recovery` screen is a standalone host selected before AppClient startup when the install journal requires manual repair. Its inputs are home/error text; it displays the log location and Open update folder/Quit without opening SQLite. The Gallery reuses this exact screen with `CANBAN_GALLERY_SCENE=update-recovery`; Gallery Quit returns to its fixture shell. `CANBAN_GALLERY_SCENE=updates` opens pending-update fixtures; the full Gallery also exposes Update available/Update failed controls.
+
+Native checks covered pending/progress presentation, recovery layout, real packaged Recovery exit with invalid SQLite bytes unchanged, and a packaged sidebar upgrade to `20261110-4` restoring an open Card/unsent comment. See [evidence and limitations](updates.md#executed-acceptance-2026-11-10).

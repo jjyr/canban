@@ -5,3 +5,5 @@
 
 # AppServer-owned local credentials, including custom homes inside a checkout.
 **/credentials/
+
+/dist/

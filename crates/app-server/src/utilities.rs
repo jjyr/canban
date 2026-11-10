@@ -213,6 +213,7 @@ mod tests {
             app.call("utilities.configure", json!({"notification_sound":"yes"}))
                 .is_err()
         );
+        drop(app);
         let reopened = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
         let state = reopened.call("utilities.state", json!({})).unwrap();
         assert_eq!(state["preferences"]["notification_sound"], false);
@@ -292,12 +293,15 @@ mod tests {
             .is_err()
         );
         assert_eq!(std::fs::read(&path).unwrap(), saved);
-        let reopened = AppServer::open(app.home.clone(), PathBuf::from("/bin/echo")).unwrap();
+        let home = app.home.clone();
+        drop(app);
+        let reopened = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
         let s = reopened.call("utilities.state", json!({})).unwrap();
         assert_eq!(s["preferences"], json!({"theme":"dracula"}));
         assert_eq!(s["awake"], false);
         assert!(
-            app.call("utilities.awake", json!({"execution":{},"enabled":true}))
+            reopened
+                .call("utilities.awake", json!({"execution":{},"enabled":true}))
                 .is_err()
         );
     }

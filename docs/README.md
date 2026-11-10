@@ -54,6 +54,7 @@ The latest explicit user decision takes precedence over earlier discussion. Befo
 | [Card conversation workspace](card-conversation.md) | Compact Card header, scrolling task/Timeline, explicit recipients, comment shortcuts and Terminal boundary |
 | [Native UI motion](ui-motion.md) | Shared motion policy, retained Card reveal, editor resizing, native modal fades and regression scenes |
 | [Desktop utilities](desktop-utilities.md) | Implemented Usage/reset countdown, Caffeine, Theme, Shortcuts, target-Project creation and acceptance |
+| [Internal releases and updates](updates.md) | Main-triggered prereleases, bottom-rail upgrades, paired migrations and recovery |
 | [Development startup](development-startup.md) | Matched UI/AppServer development launches, API compatibility checks, existing-data reuse and live-PTY acceptance |
 | [Herdr UI layout and product references](research/herdr-ui-product-and-layout.md) | Source-backed recommendations for workspace chrome, navigation, Quick Open, contextual feedback and Review |
 | [Global Agent Overview](product/overview.md) | Herdr UI reference, all-Agent grouped overview, attention highlight, queued/idle/closed states and context inspector |

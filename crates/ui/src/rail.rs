@@ -54,4 +54,5 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         move |_| ui.navigate("archive"),
     ))
     .child(view().flex_1())
+    .child(crate::updates::rail(ui))
 }

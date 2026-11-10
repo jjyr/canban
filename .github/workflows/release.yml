@@ -1,0 +1,43 @@
+name: Internal release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+jobs:
+  release:
+    runs-on: macos-15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CANBAN_RELEASE_COMMIT: ${{ github.sha }}
+      CANBAN_UPDATES_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: jdx/mise-action@v2
+      - name: Reserve immutable release identity
+        id: identity
+        run: python3 scripts/release.py reserve
+      - name: Test
+        run: |
+          mise run test
+          mise run test-release
+      - name: Build release bundle
+        env:
+          CANBAN_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+        run: mise run build-release
+      - name: Package verified artifact
+        env:
+          CANBAN_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+        run: python3 scripts/release.py package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: canban-${{ steps.identity.outputs.version }}
+          path: dist/
+      - name: Publish complete internal release
+        env:
+          CANBAN_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+        run: python3 scripts/release.py publish

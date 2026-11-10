@@ -236,20 +236,36 @@ fn manual_directory_validation_and_unknown_receipts_never_replay_a_launch() {
 }
 #[test]
 fn upgrading_conversations_allocates_stable_numbers_without_runtime_changes() {
+    fn reopen(home: PathBuf) -> Arc<AppServer> {
+        // Restart follows ownership release, rather than assuming drop makes
+        // the OS lock immediately available amid concurrent child launches.
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Ok(lock) = canban_updater::service_lock(&home) {
+                drop(lock);
+                return AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "Old service still owns home"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
     let (dir, app, _p, c) = setup();
     app.call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
         .unwrap();
     let before = app.snapshot().unwrap();
     app.store.lock().unwrap().db().conn.execute_batch("DROP TABLE terminals; DELETE FROM counters WHERE id='terminal-number'; DROP TABLE card_reads; DROP TABLE github_issues; DROP INDEX github_card_source; PRAGMA user_version=3;").unwrap();
     drop(app);
-    let upgraded = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let upgraded = reopen(dir.path().join("home"));
     let s = upgraded.snapshot().unwrap();
     assert_eq!(s.requests, before.requests);
     assert_eq!(s.conversations, before.conversations);
     assert_eq!(s.terminals[0].id, s.conversations[0].id);
     assert_eq!(s.terminals[0].title(), "1");
     drop(upgraded);
-    let reopened = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let reopened = reopen(dir.path().join("home"));
     assert_eq!(reopened.snapshot().unwrap().terminals, s.terminals);
 }
 

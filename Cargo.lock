@@ -373,6 +373,7 @@ dependencies = [
  "canban-themes",
  "canban-timeline",
  "canban-types",
+ "canban-updater",
  "canban-usage",
  "canban-workflow-engine",
  "canban-workspaces",
@@ -391,7 +392,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "canban-app-server",
+ "canban-storage",
  "canban-types",
+ "canban-updater",
  "clap",
  "serde_json",
 ]
@@ -530,10 +533,12 @@ dependencies = [
  "canban-themes",
  "canban-types",
  "canban-ui-kit",
+ "canban-updater",
  "chrono",
  "nsh-base",
  "nsh-core",
  "nsh-platform-macos",
+ "serde",
  "serde_json",
  "url",
 ]
@@ -545,6 +550,24 @@ dependencies = [
  "canban-themes",
  "nsh-base",
  "nsh-core",
+]
+
+[[package]]
+name = "canban-updater"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "canban-github",
+ "canban-storage",
+ "canban-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "ureq",
+ "xattr",
+ "zstd",
 ]
 
 [[package]]

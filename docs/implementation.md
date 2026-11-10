@@ -6,7 +6,7 @@ Current runtime update (2026-11-09): [Event-driven runtime observation](runtime-
 
 [Unified Card reminders](reminders.md) (2026-11-10) defines the current unread /
 pending counts, persistent visible-read positions, Overview updates and local
-notification sounds. It uses SQLite schema 8 and desktop API version 6. Upgrade
+notification sounds. Current builds use SQLite schema 8 and desktop API version 7 (reminders introduced level 6; updates introduce level 7). Upgrade
 the running AppServer together with the UI; `mise run run` performs the normal
 development handoff. Existing history is baselined quietly during migration.
 
@@ -14,7 +14,7 @@ development handoff. Existing history is baselined quietly during migration.
 
 [Agent Overview and lifecycle](agent-overview-and-lifecycle.md) documents the implemented status-aware execution budget, configurable resumable idle exit and global attention/Agent workspace.
 
-Status: native macOS MVP with multi-machine execution; current contracts reconciled 2026-11-10. This documentation-only reconciliation adds no runtime acceptance. This is the current implementation reference; earlier design documents contain broader proposals and dated pre-implementation statements.
+Status: native macOS MVP with multi-machine execution; current contracts reconciled 2026-11-10. The internal updater has isolated/native acceptance recorded in [updates](updates.md); older documentation-only reconciliation added no acceptance. This is the current implementation reference; earlier design documents contain broader proposals and dated pre-implementation statements.
 
 [Desktop utilities](desktop-utilities.md) covers the shared bottom bar, subscription Usage, Caffeine, persisted appearance, command catalog and cross-Project Card creation.
 
@@ -27,7 +27,7 @@ mise run build
 mise run run
 ```
 
-Build creates target/debug/canban, target/debug/canban-ui and a local .local/Canban.app containing both executables. `mise run run` then packages `.local/CanbanDev.app`, restarts the selected home's AppServer with that build and opens the separate development UI. It defaults to the existing `~/.canban` data, preserving Herdr terminals; see [development startup](development-startup.md). The local packages are unsigned and have not been notarized or released. The Gallery is a separate development example: `mise run gallery` builds/opens `.local/CanbanGallery.app`. It is not part of the production window or its startup modes; it uses local fixtures without starting AppServer or reading application data. See [examples](../examples/README.md). Several UI clients can share an application home; a second AppServer is rejected while the first owns its service lock.
+Build creates target/debug/canban, target/debug/canban-ui, target/debug/canban-updater and a local .local/Canban.app containing all three executables. `mise run run` then packages `.local/CanbanDev.app`, restarts the selected home's AppServer with that build and opens the separate development UI. It defaults to the existing `~/.canban` data, preserving Herdr terminals; see [development startup](development-startup.md). Development packages are unsigned. Release packages use ad-hoc signing; Developer ID signing/notarization and actual GitHub publication are not yet verified. The Gallery is a separate development example: `mise run gallery` builds/opens `.local/CanbanGallery.app`. It is not part of the production window or its startup modes; it uses local fixtures without starting AppServer or reading application data. See [examples](../examples/README.md). Several UI clients can share an application home; a second AppServer is rejected while the first owns its service lock.
 
 CANBAN_HOME selects an alternate absolute application-data directory. Its default is ~/.canban/. Native UI connects through AppClient RPC to a separate, persistent AppServer. A same-user, mode-0600 Unix socket exposes JSON-RPC to the CLI. The home directory is mode 0700.
 
@@ -93,7 +93,7 @@ target/debug/canban call card.move '{"card_id":"CARD_ID","revision":1,"stage":"d
 
 See [Agent profile configuration](product/agent-profiles.md) for loadable JSON examples, schema, routing precedence and backward compatibility. Settings displays the shared registry and roles, Board header tooltips display stage profile references, and the Card composer offers Ask @profile actions.
 
-Public operations include app.ping/snapshot, project.create/list, card.create/get/list/update/move/archive/restore/attention.clear/continue/workspace, comment.add, timeline.list, execution.get/report/retry/output, attachment.add, resource.read/materialize, config.get/reload, scheduler.status/configure, herdr.status/templates, profile.presets, review.preview/merge and agent.open/bind/reply/interrupt/end. Note RPCs, card.context.update and the hidden canban note command remain legacy compatibility paths, outside the current product scope. agent.turn_ended is a deprecated ignored compatibility endpoint. For timeline.list supply card_id, optional after_sequence and limit; next_cursor provides pagination. Current code and shared types are authoritative for exact payloads; the [interface design](interfaces/mvp-contract.md) remains a broader contract reference.
+Public operations include update.state/check/install, app.ping/snapshot, project.create/list, card.create/get/list/update/move/archive/restore/attention.clear/continue/workspace, comment.add, timeline.list, execution.get/report/retry/output, attachment.add, resource.read/materialize, config.get/reload, scheduler.status/configure, herdr.status/templates, profile.presets, review.preview/merge and agent.open/bind/reply/interrupt/end. Note RPCs, card.context.update and the hidden canban note command remain legacy compatibility paths, outside the current product scope. agent.turn_ended is a deprecated ignored compatibility endpoint. For timeline.list supply card_id, optional after_sequence and limit; next_cursor provides pagination. Current code and shared types are authoritative for exact payloads; the [interface design](interfaces/mvp-contract.md) remains a broader contract reference.
 
 The launcher injects CANBAN_CLI, CANBAN_HOME, CANBAN_ENDPOINT, CANBAN_REQUEST_ID, CANBAN_ATTEMPT, CANBAN_SESSION_ID, CANBAN_PROFILE_ID and CANBAN_RUN_DIR and supplies reporting instructions in the actual prompt.
 
@@ -131,7 +131,7 @@ Rust regression coverage includes state/history/request consistency and duplicat
 
 ## Remaining boundaries
 
-This is the macOS MVP with interactive Card/profile conversations, multi-machine execution and the [implemented GitHub Issue/PR integration](github-integration.md). Shear review, native notifications, template designer/migration UI, advanced timers, multi-authority data sync and release distribution remain deferred. Claude's preset is implemented and configuration-tested, but live Claude acceptance has not been established. Provider startup/trust dialogs remain interactive; Canban does not automatically authorize them. Notes are deferred; legacy data remains stored without an editor or automatic capture injection. Terminal presentation does not yet implement mouse-reporting, clickable links or kitty graphics; Chinese IME/candidate positioning (skipped at the user's request), every provider startup dialog and long-duration recovery matrices are not exhaustively accepted. Bounded 12,000-line output, native scroll/zoom, Core outage and live-host restart have acceptance in the latest update. Saved output is bounded terminal observation; explicit reports are authoritative outcomes.
+This is the macOS MVP with interactive Card/profile conversations, multi-machine execution and the [implemented GitHub Issue/PR integration](github-integration.md). Shear review, native notifications, template designer/migration UI, advanced timers and multi-authority data sync remain deferred. Internal prerelease automation and desktop install/recovery are implemented with local fixture/native acceptance; actual GitHub publication and public signed distribution remain unverified. Claude's preset is implemented and configuration-tested, but live Claude acceptance has not been established. Provider startup/trust dialogs remain interactive; Canban does not automatically authorize them. Notes are deferred; legacy data remains stored without an editor or automatic capture injection. Terminal presentation does not yet implement mouse-reporting, clickable links or kitty graphics; Chinese IME/candidate positioning (skipped at the user's request), every provider startup dialog and long-duration recovery matrices are not exhaustively accepted. Bounded 12,000-line output, native scroll/zoom, Core outage and live-host restart have acceptance in the latest update. Saved output is bounded terminal observation; explicit reports are authoritative outcomes.
 
 ## Earlier interactive acceptance (before the profile refactor)
 
@@ -179,3 +179,10 @@ Terminal creation no longer requires Project: `terminal.create {}` starts at hom
 ### Agent labels and independent Terminal sequence
 
 Schema v6 adds a separate durable manual Terminal sequence. Agent inventory entries show two lines (Card/title + execution stage; provider/Profile + status), with one-line bounded tabs. Independent entries display Terminal N without a type icon. Custom names override the title portion and clearing them restores the generated title. Codex/Claude vector marks are shared UI Kit assets with preserved Herdr notices. Branch/directory labels shorten visually while full values remain in hover/actions. See [Terminal workspace](terminal-workspace.md) for contracts and current validation.
+
+
+## Internal updater (2026-11-10)
+
+[Internal releases and updates](updates.md) defines the implementation, migration authoring rules and acceptance. The main-triggered release workflow reserves `YYYYMMDD-N`, builds one UI/CLI/updater App, and publishes only complete prereleases. Startup/hourly/manual checks feed the global bottom-rail Update action. Installation immediately replaces the initiating UI/AppServer without draining Herdr Agents; durable idempotent reports/replies survive the handoff. Paired database-only up/down batches are transactional, with no automatic database backup. Failed candidate startup rolls back schema/bundle and verifies the restored version; failed down stops with a standalone database-free Recovery window.
+
+The current schema remains 8; desktop API is 7. The service lock is acquired before opening SQLite. Six isolated update/failure cases and a real packaged native sidebar upgrade passed, including unsent-draft restoration and exact Agent terminal/Core/worktree preservation. See the linked evidence for the simulated future-schema boundary and unverified GitHub publication.

@@ -7,16 +7,17 @@ use nsh_core::{PastedFile, file_dialog::OpenDialog};
 use serde_json::json;
 use std::path::PathBuf;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum State {
     Uploading,
     Ready(String),
     Failed(String),
 }
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Upload {
     key: String,
     name: String,
+    #[serde(with = "pasted")]
     file: Option<std::sync::Arc<PastedFile>>,
     path: Option<PathBuf>,
     comment: bool,
@@ -289,4 +290,67 @@ pub fn controls(
                     },
                 ))),
         )
+}
+
+// Upgrade-session persistence retains pasted bytes as well as OS file paths.
+mod pasted {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    pub fn serialize<S: serde::Serializer>(
+        file: &Option<std::sync::Arc<PastedFile>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        file.as_ref()
+            .map(|f| (&f.name, &f.mime, f.data.to_vec()))
+            .serialize(serializer)
+    }
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<std::sync::Arc<PastedFile>>, D::Error> {
+        Ok(
+            Option::<(String, String, Vec<u8>)>::deserialize(deserializer)?
+                .map(|(name, mime, data)| std::sync::Arc::new(PastedFile::new(name, mime, data))),
+        )
+    }
+}
+pub fn pause_after_upgrade(draft: &mut Draft) {
+    for item in &mut draft.uploads {
+        if matches!(item.state, State::Uploading) {
+            item.state = State::Failed(
+                "Upload interrupted by update. Retry to finish attaching the file.".into(),
+            );
+        }
+    }
+}
+#[cfg(test)]
+mod upgrade_tests {
+    use super::*;
+    #[test]
+    fn pending_paste_bytes_survive_upgrade_and_keep_the_upload_identity() {
+        let upload = Upload {
+            key: "stable-upload-key".into(),
+            name: "paste.txt".into(),
+            file: Some(std::sync::Arc::new(PastedFile::new(
+                "paste.txt",
+                "text/plain",
+                b"retain bytes".to_vec(),
+            ))),
+            path: None,
+            comment: true,
+            state: State::Uploading,
+        };
+        let bytes = serde_json::to_vec(&upload).unwrap();
+        let restored: Upload = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored.key, upload.key);
+        assert_eq!(
+            restored.file.as_ref().unwrap().data.as_slice(),
+            b"retain bytes"
+        );
+        let mut draft = Draft {
+            uploads: vec![restored],
+            ..Default::default()
+        };
+        pause_after_upgrade(&mut draft);
+        assert!(matches!(draft.uploads[0].state, State::Failed(_)));
+    }
 }

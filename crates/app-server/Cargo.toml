@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+canban-updater.workspace = true
 notify = "8.2.1"
 canban-themes.workspace = true
 anyhow.workspace = true

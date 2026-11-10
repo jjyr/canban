@@ -64,6 +64,7 @@ def stop_ui(state):
 
 
 def restart_server(home, cli):
+    build = json.loads(subprocess.check_output([str(cli), 'build-info'], text=True))
     endpoint = home / 'app.sock'
     previous = ping(endpoint)
     if previous is not None:
@@ -95,7 +96,7 @@ def restart_server(home, cli):
         if server.poll() is not None:
             raise RuntimeError('New AppServer exited; inspect ' + str(home / 'server.log'))
         current = ping(endpoint)
-        if current is not None and current.get('pid') == server.pid and current.get('api_version', 0) >= 5:
+        if current is not None and current.get('pid') == server.pid and current.get('api_version') == build['api']:
             # Desktop utilities were the original stale-service failure.
             rpc(endpoint, 'utilities.state')
             print(f"AppServer ready: PID {server.pid}, API {current['api_version']}, home {home}", flush=True)

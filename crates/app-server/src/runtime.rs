@@ -14,14 +14,7 @@ fn uuid_session_id() -> String {
 impl AppServer {
     pub fn start(self: &Arc<Self>) -> Result<Running> {
         // The lock is held by the accept loop, including socket removal.
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(self.home.join("server.lock"))?;
-        lock.try_lock()
-            .context("Another Canban AppServer owns this home")?;
+        let lock = self._service_lock.try_clone()?;
         let socket = self.endpoint();
         if socket.exists() {
             ensure!(
@@ -100,12 +93,18 @@ impl AppServer {
         });
         self.migrate_exit_failures()?;
         self.start_runtime();
+        self.start_update_checks();
         let weak = Arc::downgrade(self);
         std::thread::spawn(move || {
             let mut next_sync = std::time::Instant::now();
             while let Some(server) = weak.upgrade() {
                 if server.stopped() {
                     break;
+                }
+                if canban_updater::handoff::active(&server.home) {
+                    drop(server);
+                    std::thread::sleep(Duration::from_millis(250));
+                    continue;
                 }
                 if let Err(e) = server.github.poll() {
                     eprintln!("Canban GitHub sign-in: {e}");
@@ -171,6 +170,10 @@ impl AppServer {
         Ok(())
     }
     pub(super) fn tick(&self) -> Result<()> {
+        if canban_updater::handoff::active(&self.home) {
+            return Ok(());
+        }
+
         if self.remote_health_due.swap(false, Ordering::SeqCst)
             && let Err(e) = self.machines()
         {

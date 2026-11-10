@@ -19,6 +19,13 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Cmd {
+    /// Show immutable release identity without opening application data.
+    BuildInfo,
+    /// Apply a supported schema up/down batch without starting product services.
+    Database {
+        #[arg(long)]
+        target: u32,
+    },
     /// Run the shared AppServer without a UI (also useful for acceptance).
     Serve,
     /// Call a public operation with JSON parameters. See docs/interfaces.
@@ -139,6 +146,20 @@ fn run() -> Result<()> {
     let args = Args::parse();
     let home = args.home.unwrap_or(canban_app_server::default_home()?);
     let endpoint = args.endpoint.unwrap_or_else(|| home.join("app.sock"));
+    if matches!(args.command, Cmd::BuildInfo) {
+        println!(
+            "{}",
+            serde_json::to_string(&canban_updater::Build::current())?
+        );
+        return Ok(());
+    }
+    if let Cmd::Database { target } = args.command {
+        let _startup = canban_updater::handoff::startup_guard(&home)?;
+        let _service = canban_updater::service_lock(&home)?;
+        let version = canban_storage::migrations::migrate(&home, target)?;
+        println!("{}", json!({"schema":version}));
+        return Ok(());
+    }
     if matches!(args.command, Cmd::Serve) {
         let app = canban_app_server::AppServer::open(home, std::env::current_exe()?)?;
         let _runtime = app.start()?;
@@ -237,7 +258,7 @@ fn run() -> Result<()> {
                 json!({"request_key":key,"execution":{"request_id":request_id,"attempt_number":attempt},"state":state,"message":message,"body":body}),
             )
         }
-        Cmd::Serve => unreachable!(),
+        Cmd::Serve | Cmd::BuildInfo | Cmd::Database { .. } => unreachable!(),
     };
     anyhow::ensure!(p.is_object(), "Parameters must be an object");
     if !matches!(
@@ -265,6 +286,7 @@ fn run() -> Result<()> {
             | "execution.retry"
             | "review.merge"
             | "card.archive"
+            | "update.install"
     ) && p.get("execution").is_none()
     {
         let request = std::env::var("CANBAN_REQUEST_ID").ok();
@@ -273,7 +295,35 @@ fn run() -> Result<()> {
             p["execution"] = json!({"request_id":request.context("CANBAN_REQUEST_ID missing")?,"attempt_number":attempt.context("CANBAN_ATTEMPT missing")?.parse::<u32>()?});
         }
     }
-    let result = canban_app_server::rpc(&endpoint, &method, p)?;
+    let retryable = matches!(method.as_str(), "execution.report" | "agent.reply")
+        && endpoint == home.join("app.sock");
+    let queued = if retryable {
+        Some(canban_updater::handoff::enqueue(&home, &method, &p)?)
+    } else {
+        None
+    };
+    if retryable && canban_updater::handoff::active(&home) {
+        println!("{}", json!({"queued":true,"request_key":p["request_key"]}));
+        return Ok(());
+    }
+    let result = match canban_app_server::rpc(&endpoint, &method, p.clone()) {
+        Ok(result) => {
+            if let Some(path) = queued {
+                std::fs::remove_file(path)?;
+            }
+            result
+        }
+        Err(error) => {
+            if retryable && canban_updater::handoff::active(&home) {
+                println!("{}", json!({"queued":true,"request_key":p["request_key"]}));
+                return Ok(());
+            }
+            if let Some(path) = queued {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(error);
+        }
+    };
     if raw_note {
         print!("{}", result["body"].as_str().context("Note body missing")?);
         return Ok(());

@@ -154,6 +154,19 @@ pub fn Gallery() -> impl IntoElement {
     ui.page.set("card".into());
     ui.profiles.set(canban_types::Config::default().profiles);
     ui.machines.set(json!({"machines":[{"id":"gallery-remote","name":"Build machine","state":"connected","target":"ssh-host"},{"id":"gallery-offline","name":"Offline machine","state":"unreachable","target":"another-host"}]}));
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("update-recovery") {
+        return canban_ui::updates::recovery_screen(
+            "/preview/.canban".into(),
+            "Down migration 10 → 9 failed. Current schema remains 10.".into(),
+        )
+        .into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("updates") {
+        ui.card.set(String::new());
+        ui.page.set("board".into());
+        ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"available","available":{"manifest":{"version":"20261110-3"}}}}));
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("archive") {
         ui.snapshot.set(fixtures::archive());
         ui.project.set("archive-empty".into());
@@ -430,6 +443,8 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Scheduling", Variant::Quiet, move |_| {
                     scene.set("scheduling".into());
                 }))
+                .child(action("Update available",Variant::Quiet,move |_|{scene.set("workspace".into());ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"available","available":{"manifest":{"version":"20261110-3"}}}}));}))
+                .child(action("Update failed",Variant::Quiet,move |_|{scene.set("workspace".into());ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"error","error":"Download interrupted. Retry the update.","available":{"manifest":{"version":"20261110-3"}}}}));}))
                 .child(action("Archived / deleted", Variant::Quiet, move |_| {
                     ui.snapshot.set(fixtures::archive());ui.card.set(String::new());ui.page.set("archive".into());scene.set("workspace".into());
                 }))

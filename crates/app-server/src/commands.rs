@@ -2,6 +2,27 @@ use super::*;
 
 impl AppServer {
     pub fn call(&self, method: &str, p: Value) -> Result<Value> {
+        if canban_updater::handoff::active(&self.home)
+            && !matches!(
+                method,
+                "app.ping"
+                    | "app.shutdown"
+                    | "app.state"
+                    | "app.snapshot"
+                    | "update.state"
+                    | "utilities.state"
+                    | "machine.list"
+                    | "usage.status"
+                    | "config.get"
+                    | "profile.presets"
+            )
+        {
+            bail!("Canban is upgrading; retry after the service handoff");
+        }
+        if method.starts_with("update.") {
+            return self.update_call(method, p);
+        }
+
         if method.starts_with("github.") || method == "project.github" {
             return self.github_call(method, p);
         }
@@ -62,7 +83,7 @@ impl AppServer {
                 )
             }
             "app.ping" => Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"api_version":API_VERSION,"pid":std::process::id(),"home":self.home}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"api_version":API_VERSION,"pid":std::process::id(),"home":self.home,"build":canban_updater::Build::current()}),
             ),
             "app.snapshot" => Ok(serde_json::to_value(self.snapshot()?)?),
             "project.list" => Ok(serde_json::to_value(

@@ -1,3 +1,4 @@
+pub mod migrations;
 use anyhow::{Context, Result};
 use canban_types::*;
 use rusqlite::{Connection, params};
@@ -152,7 +153,7 @@ impl Store {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700))?;
         }
-        let conn = Connection::open(home.join("canban.sqlite"))?;
+        let mut conn = Connection::open(home.join("canban.sqlite"))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;",
@@ -161,7 +162,7 @@ impl Store {
         anyhow::ensure!(mode == "wal", "SQLite WAL could not be enabled");
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         anyhow::ensure!(
-            version <= 8,
+            version <= migrations::CURRENT as i64,
             "Database schema is newer than this application"
         );
         if version == 0 {
@@ -269,6 +270,7 @@ impl Store {
             }
             conn.execute_batch("COMMIT;")?;
         }
+        migrations::apply(&mut conn, migrations::CURRENT)?;
         Ok(Self {
             conn,
             home: home.to_owned(),

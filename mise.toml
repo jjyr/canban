@@ -19,7 +19,7 @@ run = "/usr/bin/python3 scripts/dev.py"
 
 [tasks.build]
 depends = ["terminal-deps"]
-run = ["cargo build -p canban-ui -p canban-cli", "/usr/bin/python3 scripts/package.py"]
+run = ["cargo build -p canban-ui -p canban-cli -p canban-updater", "/usr/bin/python3 scripts/package.py"]
 
 [tasks.build-gallery]
 depends = ["terminal-deps"]
@@ -88,3 +88,13 @@ run = "/usr/bin/python3 scripts/acceptance-retained.py"
 [tasks.acceptance-events]
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance-events.py"
+
+[tasks.build-release]
+depends = ["terminal-deps"]
+run = ["cargo build --release --locked -p canban-ui -p canban-cli -p canban-updater", "/usr/bin/python3 scripts/package.py --release"]
+
+[tasks.acceptance-updates]
+run = "/usr/bin/python3 scripts/acceptance-updates.py"
+
+[tasks.test-release]
+run = "/usr/bin/python3 scripts/test-release.py"

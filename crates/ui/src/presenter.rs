@@ -4,7 +4,7 @@ use nsh_core::prelude::*;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Location {
     pub page: String,
     pub project: String,
@@ -24,6 +24,9 @@ pub struct Ui {
     pub card_target: Signal<String>,
     pub card_submit: Signal<u64>,
     pub comment_submit: Signal<u64>,
+    pub update: Signal<Value>,
+    pub update_loading: Signal<bool>,
+    pub update_busy: Signal<bool>,
     pub utility: Signal<Value>,
     pub utility_popup: Signal<String>,
     pub native_modal: Signal<bool>,
@@ -53,6 +56,7 @@ pub struct Ui {
     pub search_query: Signal<String>,
     pub recent_destinations: Stored<Vec<String>>,
     pub snapshot: Signal<Snapshot>,
+    pub snapshot_ready: Signal<bool>,
     pub reminders: Memo<Vec<canban_notifications::Reminder>>,
     pub reminder_counts: Memo<BTreeMap<String, canban_notifications::ReminderCount>>,
     pub notification_delivery: Stored<canban_notifications::DeliveryTracker>,
@@ -143,6 +147,9 @@ impl Ui {
             card_target: signal(String::new()),
             card_submit: signal(0),
             comment_submit: signal(0),
+            update: signal(json!({"build":canban_updater::Build::current(),"state":{}})),
+            update_loading: signal(false),
+            update_busy: signal(false),
             utility: signal(json!({"preferences":{"theme":"canban"},"awake":false})),
             utility_popup: signal(String::new()),
             native_modal: signal(false),
@@ -170,6 +177,7 @@ impl Ui {
             terminal_folds: signal(BTreeSet::new()),
             terminal_width: signal(260.),
             snapshot,
+            snapshot_ready: signal(false),
             reminders,
             reminder_counts,
             notification_delivery: stored(Default::default()),
@@ -405,6 +413,7 @@ pub fn refresh(ui: Ui) {
                 if different {
                     ui.snapshot.set(snapshot);
                 }
+                ui.snapshot_ready.set(true);
             }
             Ok(Err(e)) => ui.operation_error.set(format!("Could not refresh: {e:#}")),
             Err(e) => ui.operation_error.set(format!("Refresh worker: {e}")),

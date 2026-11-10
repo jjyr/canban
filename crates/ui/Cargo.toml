@@ -6,11 +6,13 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+canban-updater.workspace = true
 canban-themes.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 anyhow.workspace = true
 url = "2"
 serde_json.workspace = true
+serde.workspace = true
 base64.workspace = true
 nsh-core.workspace = true
 nsh-base.workspace = true

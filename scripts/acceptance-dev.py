@@ -42,10 +42,18 @@ def ready():
 def stopped():
     call('app.shutdown')
     deadline = time.monotonic() + 15
-    while (home / 'app.sock').exists():
-        if time.monotonic() > deadline:
-            raise RuntimeError('AppServer shutdown timeout')
-        time.sleep(.1)
+    # Process exit may precede the accept thread's socket cleanup. The service
+    # lock, also used by production startup, identifies the database owner.
+    with (home / 'server.lock').open('a') as lock:
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                (home / 'app.sock').unlink(missing_ok=True)
+                return
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError('AppServer shutdown timeout')
+                time.sleep(.1)
 
 
 def run_dev(extra_env=None, check=True):
@@ -114,7 +122,8 @@ try:
     worker.join(timeout=5)
     assert not worker.is_alive() and not legacy_error
     upgraded = ready()
-    assert upgraded['api_version'] == 5
+    build = json.loads(subprocess.check_output([str(cli), 'build-info'], env=env, text=True))
+    assert upgraded['api_version'] == build['api']
     assert call('utilities.state')['preferences']['theme'] == 'dracula'
     assert hc('get', binding['terminal'], '--json')['pid'] == before['pid']
     assert run_dev({'CANBAN_ENDPOINT': str(home / 'app.sock')}, check=False).returncode != 0

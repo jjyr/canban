@@ -28,6 +28,7 @@ canban-types = { path = "crates/types" }
 canban-usage = { path = "crates/usage" }
 canban-github = { path = "crates/github" }
 canban-profiles = { path = "crates/profiles" }
+canban-updater = { path = "crates/updater" }
 canban-storage = { path = "crates/storage" }
 canban-kanban = { path = "crates/kanban" }
 canban-context = { path = "crates/context" }

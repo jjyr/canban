@@ -1,5 +1,41 @@
 use super::*;
 #[test]
+fn remote_reports_wait_through_handoff_without_consuming_or_duplicating_completion() {
+    let (_dir, app, p, c) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":c.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let run = admit(&app, &app.snapshot().unwrap().requests[0]);
+    let report = json!({"request_key":"remote-upgrade-report","execution":{"request_id":run.request_id,"attempt_number":run.number},"state":"completed","message":"done"});
+    std::fs::write(app.home.join("updates/install.json"), b"interrupted").unwrap();
+    assert!(
+        app.remote_call("execution.report", report.clone())
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        app.remote_call(
+            "card.create",
+            json!({"project_id":p.id,"title":"do not replay"})
+        )
+        .is_err()
+    );
+    assert!(app.snapshot().unwrap().reports.is_empty());
+    std::fs::remove_file(app.home.join("updates/install.json")).unwrap();
+    app.remote_call("execution.report", report.clone())
+        .unwrap()
+        .unwrap();
+    app.remote_call("execution.report", report)
+        .unwrap()
+        .unwrap();
+    let snapshot = app.snapshot().unwrap();
+    assert_eq!(snapshot.reports.len(), 1);
+    assert_eq!(snapshot.cards[0].stage, "review");
+    assert!(app.remote_call("update.install", json!({})).is_err());
+}
+#[test]
 fn location_edits_retarget_queued_work_but_not_existing_attempts_or_resumes() {
     let (dir, app, p, c) = setup();
     super::terminal_cases::core(&app, dir.path());
@@ -120,8 +156,8 @@ fn changed_environment_never_reviews_an_unrelated_checkout() {
 fn appserver_rejects_a_second_owner_and_supports_explicit_shutdown() {
     let (dir, app, _, _) = setup();
     let running = app.start().unwrap();
-    let second = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
-    assert!(second.start().is_err());
+    // Ownership is rejected before opening/migrating the database.
+    assert!(AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).is_err());
     assert_eq!(
         rpc(&app.endpoint(), "app.state", json!({})).unwrap()["home"],
         json!(app.home)

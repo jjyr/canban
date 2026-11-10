@@ -19,6 +19,7 @@ pub mod projects;
 pub mod rail;
 pub mod review;
 mod screens;
+pub mod updates;
 pub mod utilities;
 pub use rail::sidebar;
 pub use screens::screen;
@@ -35,9 +36,11 @@ fn native(_: &mut Registry) {}
 #[component]
 pub fn Canban() -> impl IntoElement {
     let ui = Ui::new();
+    updates::restore(ui);
     canban_ui_kit::tokens::install_theme();
     commands::bindings(ui);
     utilities::init(ui);
+    updates::init(ui);
     reminders::init(ui);
     projects::selection::remember(ui);
     terminals::bindings(ui);
@@ -88,15 +91,25 @@ pub fn run() -> Result<()> {
         cli.exists(),
         "Build the Agent CLI first: mise exec -- cargo build -p canban-cli"
     );
-    let app = canban_app_server::AppClient::connect_or_start(home, &cli)?;
-    APP.set(app).ok();
     nsh_platform_macos::set_components(canban_terminal::native::register);
     nsh_platform_macos::set_ui_sets(vec![nsh_base::registry(), registry()]);
     let app_id = std::env::var("CANBAN_APP_ID").unwrap_or_else(|_| "com.canban.desktop".into());
-    let result = nsh_platform_macos::run_app(
+    let source = if canban_updater::handoff::journal(&home).map_or_else(
+        |_| home.join("updates/install.json").exists(),
+        |j| j.phase == "manual_recovery",
+    ) {
+        nsh_platform_macos::AppSource::Rust(
+            nsh_platform_macos::Root::of::<updates::Recovery>().app_id(app_id.clone()),
+        )
+    } else {
+        let app = canban_app_server::AppClient::connect_or_start(home, &cli)?;
+        APP.set(app).ok();
         nsh_platform_macos::AppSource::Rust(
             nsh_platform_macos::Root::of::<Canban>().app_id(app_id.clone()),
-        ),
+        )
+    };
+    let result = nsh_platform_macos::run_app(
+        source,
         nsh_platform_macos::AppOptions {
             title: "Canban — Human Context".into(),
             app_id,

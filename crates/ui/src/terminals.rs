@@ -36,6 +36,9 @@ pub fn watch(ui: Ui) {
             .collect::<Vec<_>>()
     });
     effect(move || {
+        if crate::APP.get().is_some() && !ui.snapshot_ready.get() {
+            return;
+        }
         let ids = listed.get();
         let tabs = ui.terminal_tabs.get();
         let kept: Vec<_> = tabs.iter().filter(|id| ids.contains(id)).cloned().collect();
