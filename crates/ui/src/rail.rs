@@ -47,6 +47,13 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         move |_| ui.navigate("terminals"),
     ));
     rail.child(icon_action(
+        Icon::GitHub,
+        "GitHub".into(),
+        move || ui.page.get().starts_with("github"),
+        || 0,
+        move |_| ui.navigate("github"),
+    ))
+    .child(icon_action(
         Icon::Archive,
         "Archived Cards".into(),
         move || ui.page.get() == "archive",

@@ -1592,3 +1592,5 @@ fn agent_callbacks_cannot_install_desktop_updates() {
     assert!(error.to_string().contains("explicit user action"));
     assert!(!app.home.join("updates/install.json").exists());
 }
+
+mod github;

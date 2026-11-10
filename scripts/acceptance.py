@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import shutil
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -21,6 +22,14 @@ source.mkdir(parents=True, exist_ok=True)
 env = {k:v for k,v in os.environ.items() if not k.startswith("CANBAN_")}
 env["CANBAN_HOME"] = str(home)
 core_env = {"HC_SESSION": "canban-acceptance", "HC_SOCKET": str(base / "hc.sock"), "XDG_STATE_HOME": str(base / "hc-state"), "XDG_CONFIG_HOME": str(base / "hc-config")}
+# Configure the isolated Core before the first service starts. Bootstrapping with
+# the default session and then changing sessions shares HC_SOCKET between two
+# Core identities and can leave the observer attached to the bootstrap Core.
+config_dir=home/"config"
+config_dir.mkdir(parents=True,exist_ok=True)
+initial_config=config_dir/"agents.json"
+if not initial_config.exists():
+    initial_config.write_text(json.dumps({"hc":shutil.which("hc"),"hc_session":core_env["HC_SESSION"],"hc_env":core_env,"default_agent":"developer","profiles":[{"id":"codex","preset":"codex"},{"id":"claude","preset":"claude"},{"id":"developer","preset":"codex"},{"id":"reviewer","preset":"codex"}]}))
 log = open(base / "server.log", "a")
 env.update(core_env)
 server = subprocess.Popen([str(cli), "serve"], env=env, stdout=log, stderr=log)
@@ -64,13 +73,9 @@ try:
             profile["argv"] = ["/usr/bin/python3", str(repo / "scripts/fixture-agent.py")]
             profile["role_instruction"] = "ACCEPTANCE_ROLE_" + profile["id"].upper()
     config_path.write_text(json.dumps(config, indent=2))
-    # Bootstrap creates the default registry before the isolated runtime settings
-    # exist. Stop that observer/Core before starting the configured session;
-    # otherwise both sessions race to own this fixture's one HC_SOCKET.
+    # Restart AppServer for the fixture profiles while retaining the same isolated Core.
     server.terminate()
     server.wait(timeout=10)
-    subprocess.run(["hc", "server", "stop"], env={**env, "HC_SESSION": "default"},
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=15)
     server = subprocess.Popen([str(cli), "serve"], env=env, stdout=log, stderr=log)
     wait_for(lambda _: True, "Configured AppServer starts")
     core = call("herdr.status")

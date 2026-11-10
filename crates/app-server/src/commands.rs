@@ -41,9 +41,9 @@ impl AppServer {
                 self.context_signal.notify_all();
                 Ok(json!({"stopping":true}))
             }
-            "app.state" => {
-                Ok(json!({"snapshot":self.snapshot()?,"config":self.config(),"home":self.home}))
-            }
+            "app.state" => Ok(
+                json!({"snapshot":self.snapshot()?,"config":self.config(),"home":self.home,"github_revision":self.github_revision.load(Ordering::SeqCst)}),
+            ),
             "machine.list" => self.machines(),
             "machine.default" => {
                 let machine = self.resolve_machine(strp(&p, "machine")?, false)?;
@@ -235,6 +235,13 @@ impl AppServer {
                     p["body"].as_str().unwrap_or(""),
                     "user",
                 )?;
+                c.created_by = self
+                    .github
+                    .status()
+                    .login
+                    .or_else(|| self.github_cli.login())
+                    .unwrap_or_else(|| "Local".into());
+                db.save(&c)?;
                 if let Some(note_id) = p["source_note_id"].as_str() {
                     let note: Note = db.get(note_id)?;
                     ensure!(
@@ -261,11 +268,9 @@ impl AppServer {
                     c.removed_at.is_none(),
                     "Restore the removed Card before editing"
                 );
-                if let Some(t) = p["title"].as_str() {
-                    ensure!(
-                        c.github_issue().is_none() || t == c.title,
-                        "GitHub Issue titles are source content; edit local instructions instead"
-                    );
+                if let Some(t) = p["title"].as_str()
+                    && c.github_issue().is_none()
+                {
                     ensure!(!t.trim().is_empty(), "Title is required");
                     c.title = t.trim().into();
                 }

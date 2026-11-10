@@ -38,8 +38,10 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
                         ))))
                         .child(icon(Icon::GitHub).w(px(14.)).h(px(14.)))
                         .child(muted(format!(
-                            "#{} · Issue #{}",
-                            card.number, source.number
+                            "#{} · {} #{}",
+                            card.number,
+                            if card.is_github_pr() { "PR" } else { "Issue" },
+                            source.number
                         )))
                         .into_element()
                 } else {
@@ -67,6 +69,21 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
                 .font_weight(FontWeight::SEMIBOLD)
                 .min_w(px(0.)),
         );
+    if let Some(source) = card.github_issue()
+        && let Some(cached) = snapshot.github_issues.iter().find(|v| {
+            v.project_id == card.project_id
+                && v.source.repository_id == source.repository_id
+                && v.source.issue_id == source.issue_id
+        })
+    {
+        tile = tile.child(
+            view()
+                .flex_row()
+                .gap_1()
+                .child(badge(cached.state.clone()))
+                .child(muted(format!("by {}", cached.author_login))),
+        );
+    }
     let excerpt = card
         .body
         .lines()

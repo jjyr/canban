@@ -29,6 +29,9 @@ pub fn screen(ui: Ui, page: &str) -> AnyElement {
         "board" | "card" | "review" => crate::workspace::screen(ui).into_element(),
         "archive" => crate::archive::screen(ui).into_element(),
         "settings" => settings(ui).into_element(),
+        "github" => crate::github::screen(ui).into_element(),
+        "github-account" => crate::github::account(ui).into_element(),
+        "github-repository" => crate::github::repository_screen(ui).into_element(),
         _ => crate::workspace::screen(ui).into_element(),
     }
 }
@@ -48,7 +51,6 @@ fn settings(ui: Ui) -> impl IntoElement {
             .child(crate::updates::settings(ui))
             .child(crate::components::scheduling::settings(ui))
             .child(crate::machines::settings(ui))
-            .child(crate::github::settings(ui))
             .child(settings_section("Project work location","Change where future work runs for the selected Project.").child(action("Edit work location…",Variant::Secondary,move |_|ui.navigate("project-location"))))
             .child(settings_section("Agent profiles", "Define Agents once; workflow stages and @mentions reference these profiles.")
                 .child(settings_field("Configuration", "Command and profile changes apply after reloading, to newly queued work.",

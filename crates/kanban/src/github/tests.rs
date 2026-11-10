@@ -7,6 +7,11 @@ fn fixture() -> (tempfile::TempDir, Store, Project) {
     let mut project =
         crate::project("test", dir.path().to_str().unwrap(), Workflow::default()).unwrap();
     project.github = Some(GitHubSource {
+        pr_intake: Default::default(),
+        authors: Vec::new(),
+        labels: Vec::new(),
+        include_drafts: false,
+        paused: false,
         repository: "owner/repo".into(),
         repository_id: 1,
         generation: "generation-a".into(),
@@ -76,7 +81,8 @@ fn intake_uses_local_numbering_without_dispatch_or_routing_labels() {
     assert_eq!(c.stage, "backlog");
     assert!(snapshot.requests.is_empty());
     assert!(snapshot.conversations.is_empty());
-    assert!(snapshot.events.iter().any(|e| e.kind == "github.comment"));
+    assert!(!snapshot.events.iter().any(|e| e.kind == "github.comment"));
+    assert!(snapshot.github_issues.is_empty());
 }
 #[test]
 fn repeated_sync_and_manual_add_preserve_identity_and_deduplicate_events() {
@@ -106,7 +112,7 @@ fn repeated_sync_and_manual_add_preserve_identity_and_deduplicate_events() {
             .iter()
             .filter(|e| e.kind == "github.comment")
             .count(),
-        1
+        0
     );
     let mut duplicate = second.clone();
     duplicate.id = id();
@@ -184,16 +190,18 @@ fn remote_closure_keeps_local_stage_instructions_and_history() {
     let updated = store.write(|db| upsert(db, &p, update, false, "")).unwrap();
     assert_eq!(updated.stage, "review");
     assert_eq!(updated.body, "Local requirements");
-    assert_eq!(updated.title, "Updated remotely");
+    assert_eq!(updated.title, "owner/repo#1");
     assert!(updated.archived_at.is_none());
 }
 #[test]
-fn rejects_pull_request_as_source() {
+fn accepts_pull_request_as_source_without_copying_remote_content() {
     let (_dir, mut store, p) = fixture();
     let mut c = change(1);
     c.issue.pull_request = Some(json!({"url":"https://api.github.com/"}));
-    assert!(store.write(|db| upsert(db, &p, c, true, "")).is_err());
-    assert!(store.snapshot().unwrap().cards.is_empty());
+    let card = store.write(|db| upsert(db, &p, c, true, "")).unwrap();
+    assert!(card.is_github_pr());
+    assert_eq!(card.title, "owner/repo#1");
+    assert!(store.snapshot().unwrap().github_issues.is_empty());
 }
 #[test]
 fn older_overlapping_sync_cannot_overwrite_newer_issue_content() {
@@ -205,14 +213,7 @@ fn older_overlapping_sync_cannot_overwrite_newer_issue_content() {
     let retained = store
         .write(|db| upsert(db, &p, change(1), false, ""))
         .unwrap();
-    assert_eq!(retained.title, "Newer content");
+    assert_eq!(retained.title, "owner/repo#1");
     assert_eq!(retained.revision, card.revision);
-    assert_eq!(
-        store
-            .db()
-            .get::<GitHubIssueSnapshot>(&cache_id(&p.id, 101))
-            .unwrap()
-            .title,
-        "Newer content"
-    );
+    assert!(store.snapshot().unwrap().github_issues.is_empty());
 }

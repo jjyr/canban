@@ -1,5 +1,6 @@
 //! GitHub-to-Card rules and transactional reconciliation; provider IO is separate.
 pub mod delivery;
+pub mod pull_requests;
 use anyhow::{Result, ensure};
 use canban_github::{
     Client,
@@ -40,7 +41,11 @@ pub fn fetch(
     } else {
         None
     };
-    let mut issues = client.issues(&source.repository)?;
+    let mut issues = if source.intake == GitHubIntake::Off {
+        Vec::new()
+    } else {
+        client.issues(&source.repository)?
+    };
     for card in cards
         .iter()
         .filter(|c| c.project_id == project.id && c.removed_at.is_none())
@@ -49,7 +54,7 @@ pub fn fetch(
             && r.repository_id == source.repository_id
             && !issues.iter().any(|i| i.id == r.issue_id)
         {
-            issues.push(client.issue(&source.repository, r.number)?);
+            issues.push(client.item(&source.repository, r.number)?);
         }
     }
     let mut changes = Vec::new();
@@ -65,6 +70,16 @@ pub fn fetch(
         }
         if existing.is_none()
             && (issue.state != "open"
+                || (!source.authors.is_empty()
+                    && !source
+                        .authors
+                        .iter()
+                        .any(|a| a.eq_ignore_ascii_case(&issue.user.login)))
+                || (!source.labels.is_empty()
+                    && !source
+                        .labels
+                        .iter()
+                        .any(|l| issue.labels.iter().any(|v| &v.name == l)))
                 || authors
                     .as_ref()
                     .is_some_and(|a| !a.contains(&issue.user.id)))
@@ -78,8 +93,10 @@ pub fn fetch(
         }) {
             continue;
         }
-        let comments = client.comments(&source.repository, issue.number)?;
-        changes.push(Change { issue, comments });
+        changes.push(Change {
+            issue,
+            comments: Vec::new(),
+        });
     }
     Ok(Sync { changes })
 }
@@ -123,11 +140,8 @@ pub fn upsert(
         .github
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Connect this Project to GitHub first"))?;
-    ensure!(
-        change.issue.pull_request.is_none(),
-        "Select an Issue, not a pull request"
-    );
     let i = change.issue;
+    let is_pr = i.pull_request.is_some();
     let source = GitHubIssueRef {
         repository: config.repository.clone(),
         repository_id: config.repository_id,
@@ -140,7 +154,18 @@ pub fn upsert(
             && c.github_issue()
                 .is_some_and(|s| s.issue_id == i.id && s.repository_id == source.repository_id)
     });
-    let mut card = if let Some(mut c) = existing {
+    if existing.is_none()
+        && is_pr
+        && let Some(card) = db.list::<Card>()?.into_iter().find(|c| {
+            c.project_id == project.id
+                && c.pull_request.as_ref().is_some_and(|pr| {
+                    pr.repository_id == source.repository_id && pr.number == source.number
+                })
+        })
+    {
+        return Ok(card);
+    }
+    let card = if let Some(mut c) = existing {
         if c.removed_at.is_some() {
             ensure!(manual, "Issue was removed locally");
             c.removed_at = None;
@@ -159,71 +184,23 @@ pub fn upsert(
         let mut c = crate::create(
             db,
             project,
-            &i.title,
+            &format!("{}#{}", source.repository, source.number),
             instructions,
             if manual { "user" } else { "github" },
         )?;
-        c.content = CardContent::GitHubIssue {
-            source: source.clone(),
+        c.content = if is_pr {
+            CardContent::GitHubPr {
+                source: source.clone(),
+            }
+        } else {
+            CardContent::GitHubIssue {
+                source: source.clone(),
+            }
         };
         c
     };
-    let snapshot = GitHubIssueSnapshot {
-        id: cache_id(&project.id, i.id),
-        project_id: project.id.clone(),
-        source,
-        title: i.title.clone(),
-        body: i.body.unwrap_or_default(),
-        state: i.state,
-        author_id: i.user.id,
-        author_login: i.user.login,
-        labels: i.labels.into_iter().map(|l| l.name).collect(),
-        updated_at: i.updated_at,
-        synced_at: now(),
-    };
-    let old = db.get::<GitHubIssueSnapshot>(&snapshot.id).ok();
-    if old
-        .as_ref()
-        .is_some_and(|old| old.updated_at > snapshot.updated_at)
-    {
-        // A slower overlapping sync must not replace a newer source snapshot.
-        db.save(&card)?;
-        return Ok(card);
-    }
-    if old
-        .as_ref()
-        .is_none_or(|o| o.updated_at != snapshot.updated_at)
-    {
-        card.title = i.title;
-        card.revision += 1;
-        event(
-            db,
-            &card,
-            "github.issue_synced",
-            "github",
-            &format!("Issue #{} · {}", i.number, snapshot.state),
-            json!({"source":snapshot.source,"state":snapshot.state,"updated_at":snapshot.updated_at}),
-        )?;
-    }
-    db.save(&snapshot)?;
+    // Source data belongs to the disposable provider cache. Persist only workflow ownership.
     db.save(&card)?;
-    let known = db.list::<Event>()?;
-    for comment in change.comments {
-        let key = format!("{}:{}", comment.id, comment.updated_at);
-        if known.iter().any(|e| {
-            e.card_id == card.id && e.kind == "github.comment" && e.data["external_revision"] == key
-        }) {
-            continue;
-        }
-        event(
-            db,
-            &card,
-            "github.comment",
-            &format!("github:{}", comment.user.login),
-            &comment.body,
-            json!({"external_revision":key,"comment_id":comment.id,"url":comment.html_url}),
-        )?;
-    }
     Ok(card)
 }
 fn event(

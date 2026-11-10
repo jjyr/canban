@@ -108,8 +108,10 @@ try:
     call('github.sync',{'project_id':args.project_id})
     snapshot=call('app.snapshot')
     assert not any(r['card_id']==card['id'] for r in snapshot['requests'])
-    assert any(e['card_id']==card['id'] and e['kind']=='github.comment' and '@codex' in e['message'] for e in snapshot['events'])
-    check('Remote comment is Timeline context without dispatch')
+    assert not any(e['card_id']==card['id'] and e['kind']=='github.comment' for e in snapshot['events'])
+    discussion=call('github.detail',{'reference':{'repository':args.repository,'kind':'issue','number':args.issue_number,'sha':None,'url':f'https://github.com/{args.repository}/issues/{args.issue_number}'},'section':'discussion','refresh':True})
+    assert any('@codex' in c.get('body','') for c in discussion['data'])
+    check('Remote comment is cache-backed discussion without durable Timeline import or dispatch')
     if args.real_agent:
         card=current(card)
         mutate('card.move',{'card_id':card['id'],'revision':card['revision'],'stage':'develop'})

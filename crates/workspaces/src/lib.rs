@@ -413,6 +413,8 @@ mod tests {
             created_at: 0,
         };
         let mut card = Card {
+            github_links: Vec::new(),
+            created_by: String::new(),
             content: Default::default(),
             removed_at: None,
             pull_request: None,

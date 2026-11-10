@@ -109,9 +109,8 @@ impl AppServer {
                 if let Err(e) = server.github.poll() {
                     eprintln!("Canban GitHub sign-in: {e}");
                 }
-                if (std::time::Instant::now() >= next_sync
-                    || server.github_sync_due.swap(false, Ordering::SeqCst))
-                    && server.github.status().state == "connected"
+                if std::time::Instant::now() >= next_sync
+                    || server.github_sync_due.swap(false, Ordering::SeqCst)
                 {
                     next_sync = std::time::Instant::now() + Duration::from_secs(120);
                     let projects = server
@@ -121,6 +120,7 @@ impl AppServer {
                         .db()
                         .list::<Project>()
                         .unwrap_or_default();
+                    server.github_refresh_queries();
                     for project in projects.into_iter().filter(|p| p.github.is_some()) {
                         let _ = server.github_sync(&project.id);
                     }

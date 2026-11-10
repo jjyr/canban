@@ -63,6 +63,11 @@ pub fn capture_for(
     cli: &Path,
     execution_home: &Path,
 ) -> Result<String> {
+    let mut context_card = card.clone();
+    if let Some(source) = context_card.github_issue() {
+        context_card.title = format!("{}#{}", source.repository, source.number);
+    }
+    let card = &context_card;
     let dir = run_dir(home, req, attempt);
     let timeline: Vec<_> = snapshot
         .events
@@ -84,15 +89,10 @@ pub fn capture_for(
         .iter()
         .filter(|q| q.request_id == req.id && q.state != "replied")
         .collect();
-    let github_issue = snapshot.github_issues.iter().find(|i| {
-        i.project_id == card.project_id
-            && card.github_issue().is_some_and(|r| {
-                r.issue_id == i.source.issue_id && r.repository_id == i.source.repository_id
-            })
-    });
+    let github_source = card.github_issue();
     // Notes are deferred. Keep the manifest field empty for old readers, without
     // injecting saved legacy documents or changing already captured executions.
-    let manifest = serde_json::json!({"schema_version":1,"github_issue":github_issue,"project":project,"card":card,"request":req,"attempt":attempt,"timeline":timeline,"notes":[],"reports":reports,"artifacts":artifacts,"questions":questions});
+    let manifest = serde_json::json!({"schema_version":1,"github_source":github_source,"project":project,"card":card,"request":req,"attempt":attempt,"timeline":timeline,"notes":[],"reports":reports,"artifacts":artifacts,"questions":questions});
     let manifest_path = dir.join("context.json");
     atomic(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
     let prompt = format!(
@@ -113,8 +113,8 @@ pub fn capture_for(
         shell_quote(&cli.to_string_lossy())
     );
     let mut prompt = prompt;
-    if let Some(issue) = github_issue {
-        prompt.push_str(&format!("\n## GitHub source: {}#{}\n{}\n\n{}\n\nThe Card description above is local Additional instructions. GitHub Labels do not select an Agent.\n",issue.source.repository,issue.source.number,issue.title,issue.body));
+    if let Some(source) = github_source {
+        prompt.push_str(&format!("\n## GitHub source: {}#{}\n{}\nRemote content is read on demand, not archived in this context. Use the provided CLI: call github.context with card_id {}. Local instructions remain above.\n",source.repository,source.number,source.url,card.id));
     }
     prompt.push_str("\nSave reports and question replies under $CANBAN_RUN_DIR, outside the source checkout. Keep only deliverable source/tests/docs in the Card worktree. Canban review acceptance commits all reviewed checkout changes.\n");
     prompt.push_str("\n## Conversation binding and follow-up questions\nThis invocation's Canban request/attempt binding supersedes older commands in conversation history.\n");

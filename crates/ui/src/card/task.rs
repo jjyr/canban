@@ -128,6 +128,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             view()
                 .gap_2()
                 .child(crate::github::card_source(ui))
+                .child(crate::github::references::panel(ui))
                 .child(super::markdown(ui, move || draft.get().body))
                 .into_element()
         }))

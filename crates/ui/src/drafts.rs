@@ -5,6 +5,15 @@ use nsh_core::prelude::*;
 use serde_json::{Value, json};
 #[derive(Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Draft {
+    pub github_head: String,
+    pub github_compose: String,
+    pub github_action_key: String,
+    pub github_action_payload: String,
+    pub github_unknown: bool,
+    pub github_comments: Vec<Value>,
+    pub github_file: String,
+    pub github_line: String,
+    pub github_reply: u64,
     pub card_kind: String,
     pub issue_query: String,
     pub selected_issue: Option<Value>,
@@ -72,7 +81,14 @@ pub fn save(ui: Ui, key: String, draft: Signal<Draft>, method: &'static str, par
         });
         match result {
             Ok(card) => {
-                value.base_title = card["title"].as_str().unwrap_or(&submitted.title).into();
+                value.base_title = if ui
+                    .current_card()
+                    .is_some_and(|c| c.github_issue().is_some())
+                {
+                    submitted.title.clone()
+                } else {
+                    card["title"].as_str().unwrap_or(&submitted.title).into()
+                };
                 value.base_body = card["body"].as_str().unwrap_or(&submitted.body).into();
                 value.revision = card["revision"].as_u64().unwrap_or(value.revision);
                 value.error.clear();

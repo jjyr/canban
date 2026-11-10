@@ -25,6 +25,9 @@ pub struct AppServer {
     pub home: PathBuf,
     github: Arc<canban_github::auth::Service>,
     github_sync_due: AtomicBool,
+    github_revision: std::sync::atomic::AtomicU64,
+    github_cli: Arc<canban_github::cli::Service>,
+    github_queries: Mutex<std::collections::BTreeMap<String, Value>>,
     identity: String,
     store: Mutex<Store>,
     config: RwLock<Config>,
@@ -316,7 +319,17 @@ impl AppServer {
         Ok(Arc::new(Self {
             _service_lock: service_lock,
             utilities: utilities::Utilities::new(&home),
-            github_sync_due: AtomicBool::new(false),
+            github_sync_due: AtomicBool::new(true),
+            github_revision: std::sync::atomic::AtomicU64::new(0),
+            github_queries: Mutex::new(
+                std::fs::read(home.join("cache/github/queries.json"))
+                    .ok()
+                    .and_then(|b| serde_json::from_slice(&b).ok())
+                    .unwrap_or_default(),
+            ),
+            github_cli: Arc::new(canban_github::cli::Service::new(
+                home.join("cache/github/gh"),
+            )),
             github: Arc::new(canban_github::auth::Service::new(home.clone())),
             identity,
             home,
@@ -429,6 +442,9 @@ impl AppServer {
         rx
     }
     fn emit(&self, topic: &'static str, card: Option<String>) {
+        if topic == "github" {
+            self.github_revision.fetch_add(1, Ordering::SeqCst);
+        }
         self.wake_runtime();
         let event = AppEvent::Changed {
             topic,
@@ -442,6 +458,7 @@ impl AppServer {
     pub fn snapshot(&self) -> Result<Snapshot> {
         let mut snapshot = self.store.lock().unwrap().snapshot()?;
         snapshot.github = serde_json::from_value(serde_json::to_value(self.github.status())?)?;
+        self.project_github(&mut snapshot);
         snapshot.terminal_contexts = self
             .terminal_contexts
             .lock()

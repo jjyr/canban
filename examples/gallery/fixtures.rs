@@ -100,7 +100,7 @@ pub fn workspace() -> canban_types::Snapshot {
         ),
         (3, "Explore a smaller navigation layout", "backlog", None),
     ] {
-        s.cards.push(Card{content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:"## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.".into(),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery:None,created_at:now()});
+        s.cards.push(Card{github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:"## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.".into(),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery:None,created_at:now()});
     }
     s.notes.push(Note{id:"note-1".into(),project_id:"gallery-project".into(),title:"Search ideas.md".into(),body:"# Search experience\n\nFind a Card without remembering its number.\n\nSee [Architecture](note:note-2).".into(),revision:1,created_at:now(),updated_at:now(),links:vec!["note-2".into()],card_ids:vec!["card-1".into()]});
     s.notes.push(Note {
@@ -577,4 +577,60 @@ pub fn conversation() -> canban_types::Snapshot {
         });
     }
     s
+}
+
+/// Production GitHub surfaces with deterministic paginated and versioned fixtures.
+pub fn github_browser(ui: canban_ui::presenter::Ui, pr: bool) {
+    use canban_types::*;
+    let mut snapshot = workspace();
+    snapshot.projects[0].github = Some(GitHubSource {
+        repository: "fixture/repo".into(),
+        repository_id: 1,
+        generation: "gallery".into(),
+        intake: GitHubIntake::All,
+        pr_intake: GitHubPrIntake::All,
+        authors: vec![],
+        labels: vec![],
+        include_drafts: false,
+        paused: false,
+        synced_at: Some(now()),
+        error: None,
+    });
+    snapshot.cards[0].content = CardContent::GitHubPr {
+        source: GitHubIssueRef {
+            repository: "fixture/repo".into(),
+            repository_id: 1,
+            issue_id: 102,
+            number: 2,
+            url: "https://github.com/fixture/repo/pull/2".into(),
+        },
+    };
+    snapshot.cards[0].title = "Review the native diff".into();
+    let r = GitHubReference {
+        repository: "fixture/repo".into(),
+        kind: "pr".into(),
+        number: Some(2),
+        sha: None,
+        url: "https://github.com/fixture/repo/pull/2".into(),
+    };
+    ui.snapshot.set(snapshot);
+    ui.github
+        .tab
+        .set(if pr { "prs" } else { "notifications" }.into());
+    ui.github
+        .state
+        .set(if pr { "open" } else { "inbox" }.into());
+    ui.github
+        .relation
+        .set(if pr { "review_requested" } else { "all" }.into());
+    ui.github.list.set(json!({"items":[{"reference":r,"item":{"id":"9","unread":!pr,"title":"Review the native diff","state":"open","html_url":"https://github.com/fixture/repo/pull/2","user":{"login":"fixture"},"updated_at":"2026-11-10T00:00:00Z","labels":[{"name":"bug"}]}}],"page":1,"has_next":true,"validated_at":now()}));
+    if pr {
+        ui.github.reference.set(Some(r));
+        ui.github.section.set("files".into());
+        ui.github.overview.set(json!({"number":2,"title":"Review the native diff","state":"open","head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ref":"feature/cache"},"base":{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","ref":"main"}}));
+        ui.github.detail.set(json!({"data":[{"filename":"src/lib.rs","status":"modified","additions":1,"deletions":1,"patch":"@@ -1 +1 @@\n-old_value\n+new_value"}],"page":1,"has_next":false}));
+    } else {
+        ui.github.reference.set(None);
+    }
+    ui.navigate("github");
 }

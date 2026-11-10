@@ -27,6 +27,7 @@ The latest explicit user decision takes precedence over earlier discussion. Befo
 | [Projects and workflow templates](product/projects-and-workflows.md) | Directory/Board ownership, required Backlog, callbacks, customization, and template migration |
 | [Board dragging and placement](board-interaction.md) | Whole-Card dragging, animated placeholders/peers, durable ordering and workflow boundary |
 | [Kanban card workflow](product/kanban-workflow.md) | Numbers, resources, stages/run/outcome separation, comments, mentions, and archive |
+| [GitHub workspace and cache](github-workspace.md) | GitHub page, Issue/PR sources, Board filters, remote Review, pagination and event-refreshed disposable cache |
 | [GitHub integration implementation](github-integration.md) | Registered App, provider/Kanban boundaries, Issue intake, native creation, PR delivery, API and explicit live-acceptance limits |
 | [GitHub Cards and unified creation](product/github-cards.md) | Product decisions, automatic Issue intake, local removal and collaborator API research |
 | [GitHub App and device authorization](product/github-authentication.md) | Canban-owned App, Device Flow, installation access and secret-free token refresh |

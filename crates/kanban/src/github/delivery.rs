@@ -38,58 +38,12 @@ pub fn validate_merge<'a>(card: &'a Card, head: &str) -> Result<&'a GitHubPr> {
     );
     Ok(pr)
 }
+// Remote discussion is read from cache; it is never copied into the durable Timeline.
 pub fn record_activity(
-    db: canban_storage::Db<'_>,
-    card: &Card,
-    comments: &[canban_github::models::Comment],
-    reviews: &[Value],
+    _db: canban_storage::Db<'_>,
+    _card: &Card,
+    _comments: &[canban_github::models::Comment],
+    _reviews: &[Value],
 ) -> Result<()> {
-    let events = db.list::<Event>()?;
-    for comment in comments {
-        let key = format!("pr-comment:{}:{}", comment.id, comment.updated_at);
-        if events
-            .iter()
-            .any(|e| e.card_id == card.id && e.data["external_revision"] == key)
-        {
-            continue;
-        }
-        db.append(canban_timeline::event(
-            &card.project_id,
-            &card.id,
-            "github.pr_comment",
-            &format!("github:{}", comment.user.login),
-            &comment.body,
-            None,
-            serde_json::json!({"external_revision":key,"url":comment.html_url}),
-        ))?;
-    }
-    for review in reviews {
-        let key = format!(
-            "pr-review:{}:{}:{}",
-            review["id"], review["submitted_at"], review["state"]
-        );
-        if events
-            .iter()
-            .any(|e| e.card_id == card.id && e.data["external_revision"] == key)
-        {
-            continue;
-        }
-        db.append(canban_timeline::event(
-            &card.project_id,
-            &card.id,
-            "github.pr_review",
-            &format!(
-                "github:{}",
-                review["user"]["login"].as_str().unwrap_or("unknown")
-            ),
-            &format!(
-                "{}\n{}",
-                review["state"].as_str().unwrap_or("Review"),
-                review["body"].as_str().unwrap_or("")
-            ),
-            None,
-            serde_json::json!({"external_revision":key,"url":review["html_url"]}),
-        ))?;
-    }
     Ok(())
 }

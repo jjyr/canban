@@ -8,6 +8,10 @@ use std::{io::Read, sync::OnceLock, time::Duration};
 pub struct Client {
     pub(crate) token: SecretString,
     api: String,
+    cache: Option<(std::sync::Arc<crate::cache::Cache>, String)>,
+    refresh: bool,
+    cache_generation: u64,
+    cli: Option<(std::sync::Arc<crate::cli::Service>, u64, u64)>,
 }
 pub fn repository(value: &str) -> Result<String> {
     let parts: Vec<_> = value.trim().split('/').collect();
@@ -60,10 +64,9 @@ pub(crate) fn decode<T: DeserializeOwned>(
     mut response: ureq::http::Response<ureq::Body>,
 ) -> Result<T> {
     let status = response.status().as_u16();
-    ensure!(
-        (200..300).contains(&status),
-        "GitHub HTTP {status}; check sign-in, repository installation, permissions or rate limits"
-    );
+    if !(200..300).contains(&status) {
+        return Err(crate::HttpError(status).into());
+    }
     let mut bytes = Vec::new();
     response
         .body_mut()
@@ -84,33 +87,241 @@ impl Client {
         Self {
             token,
             api: "https://api.github.com".into(),
+            cache: None,
+            refresh: false,
+            cache_generation: 0,
+            cli: None,
         }
     }
+    pub fn from_cli(service: std::sync::Arc<crate::cli::Service>, validate: bool) -> Result<Self> {
+        let user = if validate {
+            service.identify()?
+        } else {
+            service
+                .identity()
+                .context("Check the gh connection on the GitHub page")?
+        };
+        let generation = service.cache.generation();
+        let mut client = Self::new(SecretString::from("gh-owned-credential"));
+        client.cli = Some((service, user.id, generation));
+        Ok(client)
+    }
+    pub fn with_cache(mut self, cache: std::sync::Arc<crate::cache::Cache>, scope: String) -> Self {
+        self.cache_generation = cache.generation();
+        self.cache = Some((cache, scope));
+        self
+    }
+    pub fn seed(&self, path: &str, data: Value) {
+        if let Some((cli, user, generation)) = &self.cli {
+            if cli.identity().is_some_and(|u| u.id == *user) {
+                let value = crate::cache::Response {
+                    data,
+                    link: None,
+                    etag: None,
+                    modified: None,
+                    poll_interval: None,
+                    validated_at: crate::cache::now(),
+                    cached: false,
+                };
+                let _ = cli
+                    .cache
+                    .put(&format!("github.com:gh:{user}:{path}"), &value, *generation);
+            }
+            return;
+        }
+        if let Some((cache, scope)) = &self.cache {
+            let path_key = format!("{scope}:{path}");
+            let gate = cache.gate(&path_key);
+            let _guard = gate.lock().unwrap();
+            if cache.get(&path_key).is_some_and(|old| {
+                old.data["updated_at"]
+                    .as_str()
+                    .zip(data["updated_at"].as_str())
+                    .is_some_and(|(old, new)| old > new)
+            }) {
+                return;
+            }
+            let value = crate::cache::Response {
+                data,
+                link: None,
+                etag: None,
+                modified: None,
+                poll_interval: None,
+                validated_at: crate::cache::now(),
+                cached: false,
+            };
+            let _ = cache.put(&format!("{scope}:{path}"), &value, self.cache_generation);
+        }
+    }
+    pub fn cached_response(&self, path: &str) -> Option<crate::cache::Response> {
+        if let Some((cli, user, _)) = &self.cli {
+            return cli.cache.get(&format!("github.com:gh:{user}:{path}"));
+        }
+        let (cache, scope) = self.cache.as_ref()?;
+        cache.get(&format!("{scope}:{path}"))
+    }
+    pub fn seed_response(&self, path: &str, value: &crate::cache::Response) {
+        if let Some((cli, user, generation)) = &self.cli {
+            if cli.identity().is_some_and(|u| u.id == *user) {
+                let _ = cli
+                    .cache
+                    .put(&format!("github.com:gh:{user}:{path}"), value, *generation);
+            }
+            return;
+        }
+        if let Some((cache, scope)) = &self.cache {
+            let _ = cache.put(&format!("{scope}:{path}"), value, self.cache_generation);
+        }
+    }
+    pub fn refreshing(mut self) -> Self {
+        self.refresh = true;
+        self
+    }
+    pub fn cached<T: DeserializeOwned>(&self, path: &str) -> Option<T> {
+        serde_json::from_value(self.cached_response(path)?.data).ok()
+    }
     pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        Ok(serde_json::from_value(self.response(path)?.data)?)
+    }
+    pub fn response(&self, path: &str) -> Result<crate::cache::Response> {
+        if let Some((cli, user, _)) = &self.cli {
+            ensure!(
+                cli.identity().is_some_and(|u| u.id == *user),
+                "GitHub CLI account changed"
+            );
+            let response = cli.response(path, self.refresh)?;
+            ensure!(
+                cli.identity().is_some_and(|u| u.id == *user),
+                "GitHub CLI account changed"
+            );
+            return Ok(response);
+        }
         ensure!(
             path.starts_with('/')
                 && !path.starts_with("//")
-                && path
+                && !path
                     .split('?')
                     .next()
                     .unwrap_or("")
                     .split('/')
-                    .all(|s| s != ".." && s != "."),
+                    .any(|part| matches!(part, "." | ".."))
+                && !path.contains('\\'),
             "Invalid GitHub API path"
         );
-        decode(
-            agent()
-                .get(format!("{}{path}", self.api))
-                .header(
-                    "Authorization",
-                    format!("Bearer {}", self.token.expose_secret()),
-                )
-                .header("User-Agent", "Canban")
-                .header("Accept", "application/vnd.github+json")
-                .call()?,
-        )
+        let key = self
+            .cache
+            .as_ref()
+            .map(|(_, scope)| format!("{scope}:{path}"));
+        let gate = self
+            .cache
+            .as_ref()
+            .map(|(cache, _)| cache.gate(key.as_deref().unwrap()));
+        let started = crate::cache::now();
+        let _guard = gate.as_ref().map(|gate| gate.lock().unwrap());
+        let old = self
+            .cache
+            .as_ref()
+            .and_then(|(cache, _)| cache.get(key.as_deref().unwrap()));
+        if let Some(old) = &old
+            && (!self.refresh || old.validated_at > started)
+        {
+            return Ok(old.clone());
+        }
+        let generation = self
+            .cache
+            .as_ref()
+            .map(|_| self.cache_generation)
+            .unwrap_or(0);
+        let page_epoch = self
+            .cache
+            .as_ref()
+            .map(|(cache, _)| cache.page_epoch(key.as_deref().unwrap()))
+            .unwrap_or(0);
+        let mut request = agent()
+            .get(format!("{}{path}", self.api))
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.token.expose_secret()),
+            )
+            .header("User-Agent", "Canban")
+            .header("Accept", "application/vnd.github+json");
+        if let Some(etag) = old.as_ref().and_then(|v| v.etag.as_deref()) {
+            request = request.header("If-None-Match", etag);
+        } else if let Some(modified) = old.as_ref().and_then(|v| v.modified.as_deref()) {
+            request = request.header("If-Modified-Since", modified);
+        }
+        let mut response = request.call()?;
+        let status = response.status().as_u16();
+        if (status == 401
+            || (status == 403
+                && response
+                    .headers()
+                    .get("x-ratelimit-remaining")
+                    .and_then(|v| v.to_str().ok())
+                    != Some("0")))
+            && let Some((cache, _)) = &self.cache
+        {
+            let _ = cache.clear();
+        }
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        };
+        let value = if status == 304 {
+            let mut old = old.context("GitHub returned 304 without a cached response")?;
+            old.validated_at = crate::cache::now();
+            old.cached = false;
+            old
+        } else {
+            if !(200..300).contains(&status) {
+                return Err(crate::HttpError(status).into());
+            }
+            let link = header("link");
+            let etag = header("etag");
+            let modified = header("last-modified");
+            let poll_interval = header("x-poll-interval").and_then(|v| v.parse().ok());
+            let mut bytes = Vec::new();
+            response
+                .body_mut()
+                .as_reader()
+                .take(4 * 1024 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            ensure!(
+                bytes.len() <= 4 * 1024 * 1024,
+                "GitHub response exceeds 4 MiB"
+            );
+            crate::cache::Response {
+                data: serde_json::from_slice(&bytes)?,
+                link,
+                etag,
+                modified,
+                poll_interval,
+                validated_at: crate::cache::now(),
+                cached: false,
+            }
+        };
+        if let Some((cache, _)) = &self.cache {
+            let key = key.as_deref().unwrap();
+            let epoch = if self.refresh {
+                cache.refresh_pages(key, generation, page_epoch)
+            } else {
+                page_epoch
+            };
+            let _ = cache.put_request(key, &value, generation, epoch);
+        }
+        Ok(value)
     }
     pub fn write(&self, method: &str, path: &str, body: &Value) -> Result<Value> {
+        if let Some((cli, user, _)) = &self.cli {
+            ensure!(
+                cli.identify()?.id == *user,
+                "GitHub CLI account changed; review the action again"
+            );
+            return cli.write(method, path, body);
+        }
         ensure!(
             path.starts_with('/')
                 && !path.starts_with("//")
@@ -167,8 +378,11 @@ impl Client {
             repository(repo)?
         ))
     }
+    pub fn item(&self, repo: &str, number: u64) -> Result<Issue> {
+        self.get(&format!("/repos/{}/issues/{number}", repository(repo)?))
+    }
     pub fn issue(&self, repo: &str, number: u64) -> Result<Issue> {
-        let value: Issue = self.get(&format!("/repos/{}/issues/{number}", repository(repo)?))?;
+        let value = self.item(repo, number)?;
         ensure!(
             value.pull_request.is_none(),
             "This number is a pull request, not an Issue"
@@ -176,11 +390,17 @@ impl Client {
         Ok(value)
     }
     pub fn issues(&self, repo: &str) -> Result<Vec<Issue>> {
-        Ok(self
-            .pages::<Issue>(&format!(
-                "/repos/{}/issues?state=open&sort=updated&direction=desc",
-                repository(repo)?
-            ))?
+        let values = self.pages::<Issue>(&format!(
+            "/repos/{}/issues?state=open&sort=updated&direction=desc",
+            repository(repo)?
+        ))?;
+        for issue in &values {
+            self.seed(
+                &format!("/repos/{repo}/issues/{}", issue.number),
+                serde_json::to_value(issue)?,
+            );
+        }
+        Ok(values
             .into_iter()
             .filter(|i| i.pull_request.is_none())
             .collect())
@@ -262,9 +482,26 @@ mod tests {
             Client {
                 token: SecretString::from("fixture-token"),
                 api: endpoint,
+                cache: None,
+                refresh: false,
+                cache_generation: 0,
+                cli: None,
             },
             worker,
         )
+    }
+    #[test]
+    fn dot_sequences_in_repository_names_or_queries_are_not_path_traversal() {
+        let (client, worker) = mock(vec![(200, "{}".into())]);
+        client.get::<Value>("/repos/owner/a..b?q=../").unwrap();
+        worker.join().unwrap();
+        assert!(
+            client
+                .get::<Value>("/repos/../private")
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid GitHub API path")
+        );
     }
     #[test]
     fn incomplete_pagination_never_returns_partial_membership() {
@@ -394,10 +631,8 @@ mod release_tests {
                 socket.write_all(reply.as_bytes()).unwrap();
             }
         });
-        let client = Client {
-            api: base.clone(),
-            token: SecretString::from("fixture-only"),
-        };
+        let mut client = Client::new(SecretString::from("fixture-only"));
+        client.api = base.clone();
         let mut response = client
             .release_response(&format!("{base}/repos/test/app/releases/assets/1"))
             .unwrap();
@@ -409,5 +644,147 @@ mod release_tests {
             .unwrap();
         assert_eq!(bytes, "fixture");
         thread.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+    #[test]
+    fn explicit_refresh_uses_etag_and_cached_reads_do_not_issue_http() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            for status in [200, 304] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    request.push_str(&line);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                tx.send(request).unwrap();
+                let body = if status == 200 {
+                    "{\"title\":\"initial\"}"
+                } else {
+                    ""
+                };
+                write!(stream,"HTTP/1.1 {status} OK\r\nETag: \"v1\"\r\nLink: <https://api.github.com/items?page=2>; rel=\"next\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let cache = crate::cache::Cache::new(dir.path().into());
+        let client = Client {
+            token: SecretString::from("fixture"),
+            api,
+            cache: None,
+            refresh: false,
+            cache_generation: 0,
+            cli: None,
+        }
+        .with_cache(cache.clone(), "account-a".into());
+        assert_eq!(
+            client.get::<Value>("/items?page=1").unwrap()["title"],
+            "initial"
+        );
+        rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        for _ in 0..10 {
+            assert!(client.response("/items?page=1").unwrap().cached);
+        }
+        assert!(rx.try_recv().is_err());
+        let refreshed = client
+            .clone()
+            .refreshing()
+            .response("/items?page=1")
+            .unwrap();
+        assert_eq!(refreshed.data["title"], "initial");
+        assert!(refreshed.link.unwrap().contains("next"));
+        assert!(
+            rx.recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .to_lowercase()
+                .contains("if-none-match: \"v1\"")
+        );
+        worker.join().unwrap();
+        let restarted = Client {
+            token: SecretString::from("fixture"),
+            api: "http://127.0.0.1:1".into(),
+            cache: None,
+            refresh: false,
+            cache_generation: 0,
+            cli: None,
+        }
+        .with_cache(
+            crate::cache::Cache::new(dir.path().into()),
+            "account-a".into(),
+        );
+        assert_eq!(
+            restarted.get::<Value>("/items?page=1").unwrap()["title"],
+            "initial"
+        );
+        assert!(restarted.cached::<Value>("/items?page=2").is_none());
+    }
+    #[test]
+    fn simultaneous_cache_misses_share_one_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = calls.clone();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            count.fetch_add(1, Ordering::SeqCst);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]"
+            )
+            .unwrap();
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client {
+            token: SecretString::from("fixture"),
+            api,
+            cache: None,
+            refresh: false,
+            cache_generation: 0,
+            cli: None,
+        }
+        .with_cache(crate::cache::Cache::new(dir.path().into()), "a".into());
+        let barrier = Arc::new(Barrier::new(8));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let c = client.clone();
+                let b = barrier.clone();
+                std::thread::spawn(move || {
+                    b.wait();
+                    c.get::<Value>("/items").unwrap()
+                })
+            })
+            .collect();
+        for t in threads {
+            assert_eq!(t.join().unwrap(), json!([]));
+        }
+        worker.join().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 
 pub trait Record: Serialize + DeserializeOwned {
     const TABLE: &'static str;
+    fn data(&self) -> Result<String> {
+        Ok(serde_json::to_string(self)?)
+    }
     fn id(&self) -> &str;
     fn project(&self) -> Option<&str> {
         None
@@ -78,6 +81,26 @@ impl Record for TerminalEntry {
 }
 impl Record for Card {
     const TABLE: &'static str = "cards";
+    fn data(&self) -> Result<String> {
+        let mut saved = self.clone();
+        if let Some(source) = saved.github_issue() {
+            saved.title = format!("{}#{}", source.repository, source.number);
+        }
+        // Delivery binding/checkpoint stays durable. Checks and review summaries are remote views.
+        for pr in saved
+            .pull_request
+            .iter_mut()
+            .chain(saved.pull_request_history.iter_mut())
+        {
+            pr.checks.clear();
+            pr.review_summary.clear();
+            if matches!(pr.state.as_str(), "open" | "closed") {
+                pr.state = "published".into();
+            }
+            pr.merged = false;
+        }
+        Ok(serde_json::to_string(&saved)?)
+    }
     fn id(&self) -> &str {
         &self.id
     }
@@ -93,6 +116,16 @@ impl Record for Card {
 }
 impl Record for Event {
     const TABLE: &'static str = "events";
+    fn data(&self) -> Result<String> {
+        anyhow::ensure!(
+            !matches!(
+                self.kind.as_str(),
+                "github.comment" | "github.pr_comment" | "github.pr_review"
+            ),
+            "Remote discussions belong in the GitHub cache"
+        );
+        Ok(serde_json::to_string(self)?)
+    }
     fn id(&self) -> &str {
         &self.id
     }
@@ -311,7 +344,11 @@ impl Db<'_> {
         Ok(())
     }
     pub fn save<T: Record>(&self, record: &T) -> Result<()> {
-        self.conn.execute(&format!("INSERT INTO {}(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,card_id=excluded.card_id,state=excluded.state,number=excluded.number,data=excluded.data",T::TABLE),params![record.id(),record.project(),record.card(),record.state(),record.number(),serde_json::to_string(record)?])?;
+        anyhow::ensure!(
+            T::TABLE != "github_issues",
+            "GitHub source bodies belong in the disposable cache"
+        );
+        self.conn.execute(&format!("INSERT INTO {}(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,card_id=excluded.card_id,state=excluded.state,number=excluded.number,data=excluded.data",T::TABLE),params![record.id(),record.project(),record.card(),record.state(),record.number(),record.data()?])?;
         Ok(())
     }
     pub fn get<T: Record>(&self, id: &str) -> Result<T> {

@@ -261,6 +261,10 @@ pub struct WorkspaceBinding {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Card {
     #[serde(default)]
+    pub github_links: Vec<GitHubReference>,
+    #[serde(default)]
+    pub created_by: String,
+    #[serde(default)]
     pub content: CardContent,
     #[serde(default)]
     pub removed_at: Option<u64>,
@@ -694,15 +698,46 @@ pub enum GitHubIntake {
     #[default]
     All,
     Collaborators,
+    Off,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct GitHubSource {
+    #[serde(default)]
+    pub pr_intake: GitHubPrIntake,
+    #[serde(default)]
+    pub authors: Vec<String>,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    #[serde(default)]
+    pub include_drafts: bool,
+    #[serde(default)]
+    pub paused: bool,
+
     pub repository: String,
     pub repository_id: u64,
     pub generation: String,
     pub intake: GitHubIntake,
     pub synced_at: Option<u64>,
     pub error: Option<String>,
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHubPrIntake {
+    #[default]
+    Off,
+    All,
+    Collaborators,
+    ReviewRequested,
+    Assigned,
+    Authored,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitHubReference {
+    pub repository: String,
+    pub kind: String,
+    pub number: Option<u64>,
+    pub sha: Option<String>,
+    pub url: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct GitHubIssueRef {
@@ -719,6 +754,8 @@ pub enum CardContent {
     Local,
     #[serde(rename = "github_issue")]
     GitHubIssue { source: GitHubIssueRef },
+    #[serde(rename = "github_pr")]
+    GitHubPr { source: GitHubIssueRef },
 }
 impl Card {
     pub fn board_rank(&self) -> i64 {
@@ -736,9 +773,15 @@ impl Card {
     }
     pub fn github_issue(&self) -> Option<&GitHubIssueRef> {
         match &self.content {
-            CardContent::GitHubIssue { source } => Some(source),
+            CardContent::GitHubIssue { source } | CardContent::GitHubPr { source } => Some(source),
             CardContent::Local => None,
         }
+    }
+    pub fn is_github_pr(&self) -> bool {
+        matches!(self.content, CardContent::GitHubPr { .. })
+    }
+    pub fn source_kind(&self) -> &'static str {
+        if self.is_github_pr() { "pr" } else { "issue" }
     }
     pub fn active(&self) -> bool {
         self.removed_at.is_none() && self.archived_at.is_none()
@@ -746,6 +789,8 @@ impl Card {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct GitHubIssueSnapshot {
+    #[serde(default)]
+    pub assignees: Vec<String>,
     pub id: String,
     pub project_id: String,
     pub source: GitHubIssueRef,

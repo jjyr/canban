@@ -2,6 +2,10 @@
 
 Status: device authorization and a Canban-owned app identity were requested on 2026-11-09. `jjyr/canban-app` is registered with App ID `5671006`, public Client ID `Iv23li1ImpryrkMbQjKF`, Device Flow and any-account installation availability. The user completed installation and Device Flow authorization on the private acceptance repository; real Issue/Agent/PR/merge acceptance passed. The subsequent user-selected credential store is a local file, replacing Keychain to avoid repeated access prompts; fresh sign-in, real token rotation and account restoration across AppServer restart passed with Unix `0700`/`0600` permissions. See [implementation and acceptance](../github-integration.md).
 
+## GitHub CLI access
+
+The [GitHub workspace](../github-workspace.md) also supports the existing gh authorization. Notifications use gh because App user tokens do not support that endpoint. Repository reads/actions use the Canban App when connected, otherwise gh. Canban does not extract or copy gh credentials. Account/access controls have moved from Settings to the GitHub page.
+
 ## Application identity
 
 Canban uses its own **GitHub App**, `canban-app`. Do not use Herdr's application registration, default Client ID or installation URL. A GitHub App provides repository-scoped installation and fine-grained permissions for the Issue/PR product model in [GitHub Cards](github-cards.md).
@@ -41,7 +45,7 @@ The first user-token integration does not need to distribute an App private key 
 ## Sign-in and repository access are separate
 
 ```text
-Canban Settings / GitHub connection entry
+Canban GitHub page / Account & access
                    |
               Connect GitHub
                    |

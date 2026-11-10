@@ -1,4 +1,9 @@
-//! GitHub-specific form sections; shared native controls and one Card composer.
+//! GitHub-specific surfaces, shared with the native Gallery.
+mod detail;
+pub mod filters;
+pub mod references;
+mod repository;
+pub mod workspace;
 use crate::{
     drafts::{self, Draft},
     presenter::*,
@@ -6,7 +11,10 @@ use crate::{
 use canban_types::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
+pub use repository::screen as repository_screen;
 use serde_json::{Value, json};
+pub use workspace::account;
+pub use workspace::{Browser, init, open, screen};
 pub fn open_url(ui: Ui, url: String) {
     if !url.starts_with("https://github.com/") {
         ui.operation_error.set("Invalid GitHub URL".into());
@@ -58,7 +66,6 @@ pub fn choice(
 }
 pub fn settings(ui: Ui) -> impl IntoElement {
     let account = computed(move || ui.snapshot.with(|s| s.github.clone()));
-    let selected_project = computed(move || ui.current_project().map(|p| (p.id, p.name)));
     settings_section(
         "GitHub",
         "Connect your account, then choose a repository for the selected Project.",
@@ -129,101 +136,11 @@ pub fn settings(ui: Ui) -> impl IntoElement {
         }
         area.into_element()
     }))
-    .child(dynamic(move || {
-        let Some((id, name)) = selected_project.get() else {
-            return muted("Select a Project to connect its repository.").into_element();
-        };
-        project_settings(ui, id, name).into_element()
-    }))
-}
-fn project_settings(ui: Ui, id: String, name: String) -> impl IntoElement {
-    // Sync timestamps/errors must not rebuild editable native controls.
-    let config_id = id.clone();
-    let saved = computed(move || {
-        ui.snapshot.with(|s| {
-            s.projects
-                .iter()
-                .find(|p| p.id == config_id)
-                .map(|p| {
-                    (
-                        p.github
-                            .as_ref()
-                            .map(|g| g.repository.clone())
-                            .unwrap_or_default(),
-                        if p.github
-                            .as_ref()
-                            .is_some_and(|g| g.intake == GitHubIntake::Collaborators)
-                        {
-                            "collaborators"
-                        } else {
-                            "all"
-                        }
-                        .to_owned(),
-                        if p.delivery_mode == DeliveryMode::GitHubPr {
-                            "github_pr"
-                        } else {
-                            "local"
-                        }
-                        .to_owned(),
-                    )
-                })
-                .unwrap_or_default()
-        })
-    });
-    let initial = saved.get_untracked();
-    let d = drafts::document(
-        ui,
-        format!("github-settings:{id}"),
-        Draft {
-            title: initial.0.clone(),
-            base_title: initial.0,
-            ..Default::default()
-        },
-    );
-    let intake = signal(initial.1.clone());
-    let mode = signal(initial.2.clone());
-    let baseline = signal((initial.1, initial.2));
-    effect(move || {
-        let (repository, saved_intake, saved_mode) = saved.get();
-        let mut next = d.get_untracked();
-        if next.title == repository {
-            next.base_title = repository.clone();
-        }
-        next.reconcile(Draft {
-            title: repository,
-            ..Default::default()
-        });
-        if next != d.get_untracked() {
-            d.set(next);
-        }
-        let previous = baseline.get_untracked();
-        if intake.get_untracked() == previous.0 {
-            intake.set(saved_intake.clone());
-        }
-        if mode.get_untracked() == previous.1 {
-            mode.set(saved_mode.clone());
-        }
-        baseline.set((saved_intake, saved_mode));
-    });
-    let save = id.clone();
-    view().gap_3().key(format!("github-project:{id}"))
-        .child(label(format!("Project: {name}")))
-        .child(bound_field(move||d.get().title,move|v|d.update(|d|d.title=v.into()),"owner/repository").key("github-repository"))
-        .child(label("Automatically add Open Issues"))
-        .child(choice(ui,intake,vec![("all","All authors"),("collaborators","Repository collaborators only")]))
-        .child(label("Default code delivery"))
-        .child(choice(ui,mode,vec![("local","Local merge"),("github_pr","GitHub PR")]))
-        .child(action("Save repository connection",Variant::Primary,move |_|dispatch(ui,"project.github",json!({"project_id":save,"repository":d.get_untracked().title.trim(),"intake":intake.get_untracked(),"delivery_mode":mode.get_untracked()}))).disabled(move||ui.pending.get() || d.get().title.trim().is_empty()))
-        .child(dynamic(move || {
-            let source = ui.snapshot.with(|s| s.projects.iter().find(|p|p.id == id).and_then(|p|p.github.clone()));
-            let Some(source) = source else { return view().into_element(); };
-            let sync = id.clone(); let disconnect = id.clone();
-            let mut area = view().gap_2()
-                .child(muted(format!("{} · {}",source.repository,source.synced_at.map(|_|"Synced").unwrap_or("Not synced yet"))))
-                .child(view().flex_row().flex_wrap().gap_2().child(action("Sync now",Variant::Secondary,move |_|dispatch(ui,"github.sync",json!({"project_id":sync})))).child(action("Disconnect repository",Variant::Quiet,move |_|dispatch(ui,"github.source.disconnect",json!({"project_id":disconnect})))));
-            if let Some(e)=source.error { area=area.child(notice(e,Tone::Attention)); }
-            area.into_element()
-        }))
+    .child(action(
+        "Configure current Project repository",
+        Variant::Secondary,
+        move |_| ui.navigate("github-repository"),
+    ))
 }
 pub fn new_card(ui: Ui) -> impl IntoElement {
     let project = ui.project.get_untracked();
@@ -234,10 +151,10 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
     let key = format!("new-card:{project}");
     let draft = drafts::document(ui, key.clone(), Draft::default());
     let kind = signal(
-        if draft.get_untracked().card_kind == "github" {
-            "github"
-        } else {
-            "local"
+        match draft.get_untracked().card_kind.as_str() {
+            "github" => "github",
+            "pr" => "pr",
+            _ => "local",
         }
         .to_owned(),
     );
@@ -272,7 +189,8 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
         let query = query_text.get();
         let project = target.get();
         let _source_generation = current_source.get().map(|s| s.generation);
-        let enabled = kind.get() == "github";
+        let enabled = kind.get() != "local";
+        let search_kind = kind.get();
         epoch.update(|n| *n += 1);
         let generation = epoch.get_untracked();
         rows.set(Vec::new());
@@ -295,7 +213,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                 let result = blocking(move || {
                     app.call(
                         "github.issue.search",
-                        json!({"project_id":project,"query":query}),
+                        json!({"project_id":project,"query":query,"kind":search_kind}),
                     )
                 })
                 .await;
@@ -321,7 +239,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
     let can_create = computed(move || {
         !ui.pending.get()
             && !target.get().is_empty()
-            && if kind.get() == "github" {
+            && if kind.get() != "local" {
                 draft.get().selected_issue.is_some()
             } else {
                 !draft.get().title.trim().is_empty()
@@ -340,10 +258,10 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
             return;
         }
         let d = draft.get_untracked();
-        let is_github = kind.get_untracked() == "github";
+        let is_github = kind.get_untracked() != "local";
         let submit_project = target.get_untracked();
         let params = if is_github {
-            json!({"project_id":submit_project,"number":d.selected_issue.as_ref().map(|r|&r["issue"]["number"]),"source_generation":d.selected_issue.as_ref().map(|r|&r["source_generation"]),"instructions":d.instructions})
+            json!({"project_id":submit_project,"number":d.selected_issue.as_ref().map(|r|&r["issue"]["number"]),"source_generation":d.selected_issue.as_ref().map(|r|&r["source_generation"]),"instructions":d.instructions,"kind":kind.get_untracked()})
         } else {
             json!({"project_id":submit_project,"title":d.title,"body":d.body})
         };
@@ -416,7 +334,19 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                     "GitHub Issue",
                     Some(Icon::GitHub),
                     move || kind.get() == "github",
-                    move |_| kind.set("github".into()),
+                    move |_| {
+                        kind.set("github".into());
+                        draft.update(|d| d.selected_issue = None);
+                    },
+                ))
+                .child(segment(
+                    "GitHub PR",
+                    Some(Icon::GitHub),
+                    move || kind.get() == "pr",
+                    move |_| {
+                        kind.set("pr".into());
+                        draft.update(|d| d.selected_issue = None);
+                    },
                 )),
         );
     form.child(
@@ -455,7 +385,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                         .child(action(
                             "Open GitHub settings",
                             Variant::Secondary,
-                            move |_| ui.navigate("settings"),
+                            move |_| ui.navigate("github-account"),
                         ))
                         .into_element();
                 }
@@ -497,7 +427,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                             "Search by title or #number",
                         )
                         .key("github-issue-search")
-                        .label("Search GitHub Issues"),
+                        .label("Search GitHub Issues or PRs"),
                     );
                     area = area.child(dynamic(move || {
                         let mut results = view().gap_2();
@@ -596,6 +526,7 @@ pub fn card_source(ui: Ui) -> impl IntoElement {
                 })
                 .cloned()
         });
+        let source_kind = c.source_kind();
         let mut area = panel().child(
             view()
                 .flex_row()
@@ -605,7 +536,18 @@ pub fn card_source(ui: Ui) -> impl IntoElement {
                 .child(action(
                     format!("{}#{}", source.repository, source.number),
                     Variant::Quiet,
-                    move |_| open_url(ui, source.url.clone()),
+                    move |_| {
+                        open(
+                            ui,
+                            GitHubReference {
+                                repository: source.repository.clone(),
+                                kind: source_kind.into(),
+                                number: Some(source.number),
+                                sha: None,
+                                url: source.url.clone(),
+                            },
+                        )
+                    },
                 )),
         );
         if let Some(i) = cached {
@@ -614,7 +556,7 @@ pub fn card_source(ui: Ui) -> impl IntoElement {
                 .child(nsh_base::text_view().markdown(i.body));
         }
         area.child(action(
-            "Remove from Board · keep GitHub Issue",
+            "Remove from Board · keep GitHub source",
             Variant::Quiet,
             move |_| {
                 dispatch(

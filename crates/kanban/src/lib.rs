@@ -51,6 +51,8 @@ pub fn project(name: &str, directory: &str, workflow: Workflow) -> Result<Projec
 pub fn card(project: &Project, number: u64, title: &str, body: &str) -> Result<Card> {
     ensure!(!title.trim().is_empty(), "Card title is required");
     Ok(Card {
+        github_links: Vec::new(),
+        created_by: String::new(),
         content: Default::default(),
         removed_at: None,
         pull_request: None,
