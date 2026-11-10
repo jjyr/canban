@@ -47,6 +47,6 @@ Executed evidence: `/private/tmp/cb-dev-start-b9m0ezgg/results.json` and `accept
 
 After the user selected reuse of existing data, `mise run run` was also executed twice against `~/.canban`. The second run closed the tracked development UI and started a new AppServer PID. Native Theme changed to Dark/Forest and remained selected after that repeated launch; System/Canban was restored afterward. Existing execution Core/terminal identities matched the pre-restart snapshot. Evidence: `/private/tmp/canban-before-dev-run.json` and `/private/tmp/canban-live-dev-results.json`. The development UI/service remain available for use.
 
-## Numeric workspaces
+## Readable workspaces
 
-New Card #42 uses `canban/42` and `~/.canban/worktrees/<project-id>/42`. The internal Project directory keeps numbering isolated across Projects. An unrelated existing branch selects `canban/42-2` or the next numeric suffix; saved branches are never silently adopted or overwritten. Titles do not affect these names. Existing UUID directories and saved branches are retained, including Archive/Resume restoration. See [workspace lifecycle](workspace-and-scheduling.md).
+New Card #42 in directory `canban`, with Project ID beginning `4e5r`, uses branch `canban-4e5r/42` and `~/.canban/worktrees/canban-4e5r/42`. The Project display name and Card title do not affect these names. Normalization supports multilingual directory names. Conflicting branch/path names choose matching suffixes such as `42-2`; namespace conflicts choose `canban-4e5r-2/42`. Existing saved branches and UUID/numeric/readable directories remain unchanged, including Archive/Resume restoration. See [workspace naming and lifecycle](workspace-and-scheduling.md#readable-workspace-names).

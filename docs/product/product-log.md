@@ -605,3 +605,8 @@ The user rejected Routing tags after reviewing their precedence against workflow
 ## 2026-11-10 — Whole-Card dragging and insertion motion
 
 The user removed the redundant Board caption and selected Card-body dragging, a decorative Grip, background-only hover lightening, and a visible pre-drop placeholder that pushes peers aside. Same-column ordering and cross-column insertion persist the previewed position. The lifted Card follows the pointer immediately; native damped springs animate displaced peers and landing/cancellation, with interruptible retargeting. Preview is local and background refresh cannot break capture. Release submits one atomic placement; same-column order never dispatches workflow. See [Board interaction](../board-interaction.md) for current ownership and verification.
+
+
+## 2026-11-10 — Directory-based workspace namespaces
+
+Supersedes the earlier numeric-only default `canban/<card-number>` naming decision for new workspaces. The user selected `<project-directory-basename>-<project-id-first-4>/<card-number>`, for example `canban-4e5r/42`, for both branch names and managed paths beneath `worktrees/`. Project display names may be in any language and do not participate. Normalize the directory component into a legal Git ref, preserve valid multilingual letters/numbers, and add matching numeric suffixes for collisions; the short ID is not assumed globally unique. Existing branch/path bindings remain authoritative across later stages and Resume. See the implemented [naming contract and acceptance](../workspace-and-scheduling.md#readable-workspace-names).

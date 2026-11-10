@@ -7,7 +7,7 @@ base = Path(tempfile.mkdtemp(prefix='cb-scheduling-', dir='/private/tmp'))
 home = base / 'home'
 cli = repo / 'target/debug/canban'
 env = {**{k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')}, 'CANBAN_HOME':str(home)}
-core_env = {'HC_SESSION':'scheduling-acceptance','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'hc-state'),'XDG_CONFIG_HOME':str(base/'hc-config')}
+core_env = {'HC_SESSION':'default','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'hc-state'),'XDG_CONFIG_HOME':str(base/'hc-config')}
 log = open(base/'server.log','w')
 env.update(core_env)
 server = subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
@@ -48,8 +48,15 @@ try:
     (writer/'latest').write_text('remote context');git(writer,'add','.');git(writer,'commit','-m','remote update');git(writer,'push','origin','main');latest=git(writer,'rev-parse','HEAD')
     projects=[call('project.create',{'name':'Board '+str(i),'directory':str(source)}) for i in range(2)]
     cards=[]
+    occupied_file=None
     for i in range(9):
         c=call('card.create',{'project_id':projects[i%2]['id'],'title':'Concurrent '+str(i)})
+        if i==0:
+            initial='source-'+projects[0]['id'][:4]+'/'+str(c['number'])
+            git(source,'branch',initial)
+            occupied_file=home/'worktrees'/(initial+'-2')
+            occupied_file.parent.mkdir(parents=True,exist_ok=True)
+            occupied_file.write_text('Unrelated workspace data')
         cards.append(c['id']);call('card.move',{'card_id':c['id'],'revision':1,'stage':'develop'})
     snapshot=wait(lambda s:len(s['attempts'])==8 and all(a.get('provider_session_id') for a in s['attempts']),'eight running Agents')
     assert call('scheduler.status')['active']==8 and call('scheduler.status')['max_agents']==8
@@ -58,6 +65,15 @@ try:
         if c['worktree']:
             assert c['branch'] and c['base_commit']==latest and Path(c['worktree'],'latest').exists()
             assert git(c['worktree'],'branch','--show-current')==c['branch']
+    for c in snapshot['cards']:
+        if c['worktree']:
+            p=next(p for p in projects if p['id']==c['project_id'])
+            assert c['branch'].startswith('source-'+p['id'][:4]+'/')
+            assert Path(c['worktree'])==home/'worktrees'/c['branch']
+    first=card(snapshot,cards[0])
+    assert first['branch']==initial+'-3'
+    assert occupied_file.read_text()=='Unrelated workspace data'
+    print('READABLE_NAMES_AND_BRANCH_PATH_COLLISIONS_OK',flush=True)
     assert not any(a['card_id']==cards[8] for a in snapshot['attempts'])
     print('GLOBAL_EIGHT_AND_REMOTE_SYNC_OK',flush=True)
     send(run_for(snapshot,cards[0]),'finish')

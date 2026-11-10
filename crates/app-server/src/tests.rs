@@ -772,6 +772,8 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
             .to_string_lossy()
             .into_owned(),
     );
+    // Mirror launch's persisted binding, including an allocated suffix.
+    card.branch = canban_workspaces::Ops::local().current_branch(card.worktree.as_ref().unwrap());
     app.store
         .lock()
         .unwrap()

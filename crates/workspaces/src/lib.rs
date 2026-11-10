@@ -26,14 +26,18 @@ impl Ops {
         Ok(String::from_utf8(out.stdout)?.trim_end_matches('\n').into())
     }
 }
-pub fn card_branch(_project: &Project, card: &Card) -> String {
+mod names;
+
+pub fn card_branch(project: &Project, card: &Card) -> String {
     card.branch
         .clone()
-        .unwrap_or_else(|| format!("canban/{}", card.number))
+        .unwrap_or_else(|| format!("{}/{}", names::namespace(project), card.number))
 }
 fn managed_card_path(home: &Path, project: &Project, card: &Card, path: &Path) -> bool {
     let root = home.join("worktrees").join(&project.id);
-    path == root.join(card.number.to_string()) || path == root.join(&card.id)
+    path == root.join(card.number.to_string())
+        || path == root.join(&card.id)
+        || names::managed_path(home, card, path)
 }
 impl Ops {
     fn sync_base(&self, source: &Path, base: &str, remote: &str) -> Result<()> {
@@ -148,7 +152,7 @@ impl Ops {
     }
     pub fn prepare(&self, home: &Path, project: &Project, card: &Card) -> Result<PathBuf> {
         let source = Path::new(&project.directory);
-        let mut branch = card_branch(project, card);
+        let branch = card_branch(project, card);
         if let Some(path) = &card.worktree {
             let p = PathBuf::from(path);
             if self.host.is_dir(&p) {
@@ -180,6 +184,17 @@ impl Ops {
             );
             return Ok(source.into());
         }
+        let keep = format!("refs/canban/cards/{}", card.id);
+        if card.branch.is_none()
+            && card.worktree.is_none()
+            && !self
+                .git(source, &["rev-parse", "--verify", &keep])?
+                .status
+                .success()
+        {
+            let start = self.workspace_start(source, project, &keep)?;
+            return self.create_named(home, project, card, &start);
+        }
         let target = card
             .worktree
             .as_ref()
@@ -190,30 +205,6 @@ impl Ops {
                     .join(card.number.to_string())
             });
         self.host.mkdir(target.parent().unwrap())?;
-        let keep = format!("refs/canban/cards/{}", card.id);
-        // Two Projects may share a repository and their own Card numbering.
-        // Do not adopt an unrelated branch; choose a short numeric suffix.
-        if card.branch.is_none()
-            && card.worktree.is_none()
-            && !self
-                .git(source, &["rev-parse", "--verify", &keep])?
-                .status
-                .success()
-        {
-            let base = branch.clone();
-            let mut suffix = 2;
-            while self
-                .git(
-                    source,
-                    &["show-ref", "--verify", &format!("refs/heads/{branch}")],
-                )?
-                .status
-                .success()
-            {
-                branch = format!("{base}-{suffix}");
-                suffix += 1;
-            }
-        }
         let branch_ref = format!("refs/heads/{branch}");
         if self
             .git(source, &["rev-parse", "--verify", &branch_ref])?
@@ -233,27 +224,7 @@ impl Ops {
                 &["worktree", "add", target.to_str().unwrap(), &branch],
             )?;
         } else {
-            let start = if self
-                .git(source, &["rev-parse", "--verify", &keep])?
-                .status
-                .success()
-            {
-                keep
-            } else {
-                let base = project
-                    .workflow
-                    .workspace
-                    .base_branch
-                    .clone()
-                    .or_else(|| project.target_branch.clone())
-                    .or_else(|| self.current_branch(&project.directory))
-                    .context("Choose a base_branch for the workspace")?;
-                self.checked(source, &["check-ref-format", "--branch", &base])?;
-                if project.workflow.workspace.sync_base {
-                    self.sync_base(source, &base, &project.workflow.workspace.remote)?;
-                }
-                format!("refs/heads/{base}")
-            };
+            let start = self.workspace_start(source, project, &keep)?;
             self.checked(
                 source,
                 &[
@@ -267,6 +238,28 @@ impl Ops {
             )?;
         }
         Ok(target)
+    }
+    fn workspace_start(&self, source: &Path, project: &Project, keep: &str) -> Result<String> {
+        if self
+            .git(source, &["rev-parse", "--verify", keep])?
+            .status
+            .success()
+        {
+            return Ok(keep.into());
+        }
+        let base = project
+            .workflow
+            .workspace
+            .base_branch
+            .clone()
+            .or_else(|| project.target_branch.clone())
+            .or_else(|| self.current_branch(&project.directory))
+            .context("Choose a base_branch for the workspace")?;
+        self.checked(source, &["check-ref-format", "--branch", &base])?;
+        if project.workflow.workspace.sync_base {
+            self.sync_base(source, &base, &project.workflow.workspace.remote)?;
+        }
+        Ok(format!("refs/heads/{base}"))
     }
     /// Read-only projection for the Card's workspace panel.
     pub fn info(&self, project: &Project, card: &Card) -> Result<WorkspaceInfo> {
@@ -450,6 +443,7 @@ mod tests {
         let home = dir.path().join("home");
         let path = prepare(&home, &project, &card).unwrap();
         card.worktree = Some(path.to_string_lossy().into_owned());
+        card.branch = review::current_branch(path.to_str().unwrap());
         assert_eq!(prepare(&home, &project, &card).unwrap(), path);
         std::fs::write(path.join("change.txt"), "keep me").unwrap();
         assert!(archive(&home, &project, &card).unwrap().is_some());
@@ -581,32 +575,193 @@ mod sync_tests {
         }
     }
     #[test]
-    fn numeric_workspace_names_ignore_titles_and_do_not_adopt_another_projects_branch() {
+    fn directory_and_short_project_id_names_survive_short_id_collisions_and_renames() {
         let mut f = Fixture::new();
+        f.project.id = "4e5r-first".into();
+        f.card.project_id = f.project.id.clone();
+        f.project.name = "项目显示名与目录无关".into();
         f.card.title = "设置 / 调整 .. @{invalid}".into();
         let cwd = f.prepare().unwrap();
-        assert_eq!(cwd, f.dir.path().join("home/worktrees/p/42"));
+        assert_eq!(cwd, f.dir.path().join("home/worktrees/source-4e5r/42"));
         assert_eq!(
             review::current_branch(cwd.to_str().unwrap()).as_deref(),
-            Some("canban/42")
+            Some("source-4e5r/42")
         );
         let mut other = f.project.clone();
-        other.id = "second-project".into();
+        other.id = "4e5r-second".into();
         let mut card = f.card.clone();
         card.id = "second-card".into();
         card.project_id = other.id.clone();
-        let second = prepare(&f.dir.path().join("home"), &other, &card).unwrap();
-        assert_ne!(cwd, second);
-        assert_eq!(
-            review::current_branch(second.to_str().unwrap()).as_deref(),
-            Some("canban/42-2")
-        );
-        card.worktree = Some(second.to_string_lossy().into());
-        card.branch = Some("canban/42-2".into());
-        card.title = "A changed title".into();
         let home = f.dir.path().join("home");
+        let second = prepare(&home, &other, &card).unwrap();
+        assert_eq!(second, home.join("worktrees/source-4e5r/42-2"));
+        card.worktree = Some(second.to_string_lossy().into());
+        card.branch = Some("source-4e5r/42-2".into());
+        assert_eq!(
+            review::current_branch(second.to_str().unwrap()),
+            card.branch
+        );
+        card.title = "A changed title".into();
+        other.name = "Renamed Project".into();
+        assert_eq!(prepare(&home, &other, &card).unwrap(), second);
         archive(&home, &other, &card).unwrap();
         assert_eq!(Ops::local().resume(&home, &other, &card).unwrap(), second);
+        assert_eq!(
+            review::current_branch(second.to_str().unwrap()),
+            card.branch
+        );
+    }
+    #[test]
+    fn occupied_branches_directories_and_registered_missing_paths_choose_matching_suffixes() {
+        let f = Fixture::new();
+        let home = f.dir.path().join("home");
+        let root = home.join("worktrees/source-p");
+        fs::create_dir_all(root.join("42")).unwrap();
+        fs::write(root.join("42/keep"), "unrelated").unwrap();
+        checked(&f.source, &["branch", "source-p/42-2"]).unwrap();
+        // Descendant refs also prevent a leaf from being created.
+        checked(&f.source, &["branch", "source-p/42-3/nested"]).unwrap();
+        let missing = root.join("42-4");
+        checked(
+            &f.source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "unrelated",
+                missing.to_str().unwrap(),
+                "main",
+            ],
+        )
+        .unwrap();
+        fs::remove_dir_all(&missing).unwrap();
+        let result = f.prepare().unwrap();
+        assert_eq!(result, root.join("42-5"));
+        assert_eq!(
+            review::current_branch(result.to_str().unwrap()).as_deref(),
+            Some("source-p/42-5")
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("42/keep")).unwrap(),
+            "unrelated"
+        );
+        assert!(!missing.exists());
+    }
+    #[test]
+    fn namespace_ref_file_and_symlink_conflicts_are_preserved() {
+        let f = Fixture::new();
+        let home = f.dir.path().join("home");
+        checked(&f.source, &["branch", "source-p"]).unwrap();
+        let root = home.join("worktrees");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("source-p-2"), "keep").unwrap();
+        fs::create_dir(root.join("source-p-3")).unwrap();
+        std::os::unix::fs::symlink("/nonexistent/canban-worktree", root.join("source-p-3/42"))
+            .unwrap();
+        let result = f.prepare().unwrap();
+        assert_eq!(result, root.join("source-p-3/42-2"));
+        assert_eq!(
+            review::current_branch(result.to_str().unwrap()).as_deref(),
+            Some("source-p-3/42-2")
+        );
+        assert_eq!(fs::read_to_string(root.join("source-p-2")).unwrap(), "keep");
+        assert!(
+            fs::symlink_metadata(root.join("source-p-3/42"))
+                .unwrap()
+                .is_symlink()
+        );
+    }
+    #[test]
+    fn concurrent_creators_do_not_adopt_each_others_refs_or_paths() {
+        let f = Fixture::new();
+        let mut project = f.project.clone();
+        project.workflow.workspace.sync_base = false;
+        let home = f.dir.path().join("home");
+        let barrier = std::sync::Barrier::new(4);
+        let paths = std::thread::scope(|scope| {
+            let handles = (0..4)
+                .map(|i| {
+                    let project = &project;
+                    let home = &home;
+                    let barrier = &barrier;
+                    let mut card = f.card.clone();
+                    card.id = format!("concurrent-{i}");
+                    scope.spawn(move || {
+                        barrier.wait();
+                        prepare(home, project, &card).unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+        assert_eq!(paths.len(), 4);
+        for path in paths {
+            let branch = review::current_branch(path.to_str().unwrap()).unwrap();
+            assert_eq!(path, home.join("worktrees").join(branch));
+        }
+    }
+    #[test]
+    fn concurrent_creators_with_different_homes_reserve_distinct_git_branches() {
+        let f = Fixture::new();
+        let mut project = f.project.clone();
+        project.workflow.workspace.sync_base = false;
+        let barrier = std::sync::Barrier::new(4);
+        let branches = std::thread::scope(|scope| {
+            let handles = (0..4)
+                .map(|i| {
+                    let project = &project;
+                    let home = f.dir.path().join(format!("home-{i}"));
+                    let barrier = &barrier;
+                    let mut card = f.card.clone();
+                    card.id = format!("concurrent-{i}");
+                    scope.spawn(move || {
+                        barrier.wait();
+                        let path = prepare(&home, project, &card).unwrap();
+                        let branch = review::current_branch(path.to_str().unwrap()).unwrap();
+                        assert_eq!(path, home.join("worktrees").join(&branch));
+                        branch
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+        assert_eq!(branches.len(), 4);
+    }
+    #[test]
+    fn legacy_numeric_path_and_branch_restore_without_renaming() {
+        let mut f = Fixture::new();
+        let home = f.dir.path().join("home");
+        let path = home.join("worktrees/p/42");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        checked(
+            &f.source,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "canban/42",
+                path.to_str().unwrap(),
+                "main",
+            ],
+        )
+        .unwrap();
+        f.card.worktree = Some(path.to_string_lossy().into());
+        f.card.branch = Some("canban/42".into());
+        archive(&home, &f.project, &f.card).unwrap();
+        assert_eq!(
+            Ops::local().resume(&home, &f.project, &f.card).unwrap(),
+            path
+        );
+        assert_eq!(
+            review::current_branch(path.to_str().unwrap()),
+            f.card.branch
+        );
     }
     #[test]
     fn legacy_uuid_checkout_and_branch_resume_at_the_exact_saved_binding() {
@@ -646,14 +801,14 @@ mod sync_tests {
         let mut f = Fixture::new();
         let cwd = f.prepare().unwrap();
         f.card.worktree = Some(cwd.to_string_lossy().into());
-        f.card.branch = Some("canban/42".into());
+        f.card.branch = Some("source-p/42".into());
         let original = checked(&cwd, &["rev-parse", "HEAD"]).unwrap();
         let home = f.dir.path().join("home");
         archive(&home, &f.project, &f.card).unwrap();
         assert!(!cwd.exists());
         // Rebuild even if the ordinary branch was removed: Archive's retained
         // Card ref is authoritative, rather than the now-current Project base.
-        checked(&f.source, &["branch", "-D", "canban/42"]).unwrap();
+        checked(&f.source, &["branch", "-D", "source-p/42"]).unwrap();
         // The template can change after archiving. Resume uses the saved binding.
         f.project.workflow.workspace.create_worktree = false;
         checked(&f.source, &["remote", "remove", "origin"]).unwrap();
@@ -662,7 +817,7 @@ mod sync_tests {
         assert_eq!(checked(&cwd, &["rev-parse", "HEAD"]).unwrap(), original);
         archive(&home, &f.project, &f.card).unwrap();
         checked(&f.source, &["update-ref", "-d", "refs/canban/cards/c"]).unwrap();
-        checked(&f.source, &["branch", "-D", "canban/42"]).unwrap();
+        checked(&f.source, &["branch", "-D", "source-p/42"]).unwrap();
         assert!(
             Ops::local()
                 .resume(&home, &f.project, &f.card)
@@ -690,17 +845,17 @@ mod sync_tests {
         assert_eq!(checked(&f.source, &["rev-parse", "HEAD"]).unwrap(), latest);
         assert_eq!(
             review::current_branch(cwd.to_str().unwrap()).as_deref(),
-            Some("canban/42")
+            Some("source-p/42")
         );
         assert!(cwd.join("remote-change").exists());
         f.card.worktree = Some(cwd.to_string_lossy().into());
-        f.card.branch = Some("canban/42".into());
+        f.card.branch = Some("source-p/42".into());
         checked(&f.source, &["remote", "remove", "origin"]).unwrap();
         assert_eq!(f.prepare().unwrap(), cwd); // Existing work never re-fetches.
         archive(&f.dir.path().join("home"), &f.project, &f.card).unwrap();
         assert!(!cwd.exists());
         assert_eq!(
-            checked(&f.source, &["rev-parse", "refs/heads/canban/42"]).unwrap(),
+            checked(&f.source, &["rev-parse", "refs/heads/source-p/42"]).unwrap(),
             latest
         );
         assert_eq!(f.prepare().unwrap(), cwd);
@@ -734,10 +889,13 @@ mod sync_tests {
         .unwrap();
         assert!(f.prepare().is_err());
         assert!(
-            !git(&f.source, &["show-ref", "--verify", "refs/heads/canban/42"])
-                .unwrap()
-                .status
-                .success()
+            !git(
+                &f.source,
+                &["show-ref", "--verify", "refs/heads/source-p/42"]
+            )
+            .unwrap()
+            .status
+            .success()
         );
         assert_eq!(
             fs::read_to_string(f.source.join("human-draft")).unwrap(),
@@ -781,7 +939,7 @@ mod sync_tests {
         assert_eq!(checked(&cwd, &["rev-parse", "HEAD"]).unwrap(), head);
         assert_eq!(
             review::current_branch(cwd.to_str().unwrap()).as_deref(),
-            Some("canban/42")
+            Some("source-p/42")
         );
         assert_eq!(fs::read_to_string(cwd.join("draft")).unwrap(), "preserve");
         assert!(info(&f.project, &f.card).unwrap().dirty);
