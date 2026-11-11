@@ -1,9 +1,9 @@
 use super::*;
 pub(super) fn blocker(db: Db<'_>, card: &Card) -> Result<Option<String>> {
     if db.list::<Attempt>()?.iter().any(|a| {
-        a.card_id == card.id
-            && a.terminal.is_some()
-            && a.observed.as_ref().is_none_or(|v| v["state"] != "finished")
+        // Continued assignments retain their last observation, but runtime
+        // ownership has moved to the next assignment in the conversation.
+        a.card_id == card.id && a.terminal.is_some() && !a.finished()
     }) {
         return Ok(Some(
             "End active Card Agent terminals before accepting code".into(),
