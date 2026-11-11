@@ -52,14 +52,14 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
                     .items_center()
                     .justify_between()
                     .child(muted(move || {
-                        format!("Conversation · {} status events", activity_count.get())
+                        format!("{} status events", activity_count.get())
                     }))
                     .child(compact_action(
                         move || {
                             if show_activity.get() {
-                                "Hide status events".into()
+                                "Hide".into()
                             } else {
-                                format!("Show status events ({})", activity_count.get())
+                                format!("Show ({})", activity_count.get())
                             }
                         },
                         Variant::Quiet,

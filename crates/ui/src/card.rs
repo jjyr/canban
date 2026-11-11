@@ -123,6 +123,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     .any(|p| p.changed && !p.path.contains(&root))
                 && let Some(editor) = reading.editor.get()
                 && !editor.held.get_untracked()
+                && (editor.active.get_untracked() || editor.focused.get_untracked())
             {
                 editor.blur();
             }
@@ -161,7 +162,9 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .p_3()
                         .gap_3()
                         .on_layout(move |_: &Bounds<Points>| {
-                            if reading.follow.get_untracked() {
+                            if reading.follow.get_untracked()
+                                && !draft.with_untracked(|d| d.editing)
+                            {
                                 reading.scroll.scroll_to_end(false);
                             }
                         })
@@ -173,11 +176,20 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             move || {
                                 view()
                                     .gap_2()
-                                    .child(action(
-                                        "Hide workspace details",
-                                        Variant::Quiet,
-                                        move |_| draft.update(|d| d.workspace_details = false),
-                                    ))
+                                    .child(
+                                        view()
+                                            .flex_row()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(label("Workspace"))
+                                            .child(chrome_button(
+                                                Icon::Close,
+                                                "Hide workspace details",
+                                                move |_| {
+                                                    draft.update(|d| d.workspace_details = false)
+                                                },
+                                            )),
+                                    )
                                     .child(crate::components::git_workspace::panel(ui))
                             },
                         ))
@@ -187,12 +199,12 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .child(when(
             move || reading.unread.get() > 0 || unread_updates.get() > 0,
             move || {
-                action(
+                compact_action(
                     move || {
                         if unread_updates.get() > 0 {
-                            format!("Unread updates ({}) ↓", unread_updates.get())
+                            format!("{} unread ↓", unread_updates.get())
                         } else {
-                            format!("New activity ({}) ↓", reading.unread.get())
+                            format!("{} new ↓", reading.unread.get())
                         }
                     },
                     Variant::Quiet,

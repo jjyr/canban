@@ -320,20 +320,13 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .items_center()
                 .justify_between()
                 .gap_2()
-                .child(
-                    view()
-                        .gap_1()
-                        .min_w(px(0.))
-                        .flex_1()
-                        .child(heading("Review and deliver"))
-                        .child(muted("Review the diff, then deliver through a local merge or a GitHub PR. Archive is separate.")),
-                )
+                .child(heading("Review and deliver"))
                 .child(
                     view()
                         .flex_row()
                         .flex_wrap()
                         .gap_2()
-                        .child(action("Return to Develop", Variant::Secondary, move |_| {
+                        .child(compact_action("← Develop", Variant::Secondary, move |_| {
                             if let Some(c) = ui.current_card() {
                                 let source = ui.location();
                                 dispatch_then(
@@ -378,6 +371,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         view()
                             .flex_row()
                             .flex_wrap()
+                            .items_center()
                             .gap_2()
                             .child(
                                 action("Archive Card", Variant::Primary, move |_| {
@@ -389,7 +383,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 })
                                 .disabled(move || ui.pending.get() || archived),
                             )
-                            .child(action("Refresh diff", Variant::Secondary, move |_| {
+                            .child(chrome_button(Icon::Refresh, "Refresh diff", move |_| {
                                 refresh_diff(ui, target)
                             })),
                     )
@@ -419,7 +413,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     mode,
                                     vec![("local", "Local merge"), ("github_pr", "GitHub PR")],
                                 ))
-                                .child(action("Refresh diff", Variant::Secondary, move |_| {
+                                .child(chrome_button(Icon::Refresh, "Refresh diff", move |_| {
                                     refresh_diff(ui, target)
                                 })),
                         ),
@@ -457,7 +451,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             .items_center()
                             .gap_2()
                             .child(notice(reason, Tone::Attention))
-                            .child(compact_action("Open Card Terminals ↗", Variant::Quiet, move |_| {
+                            .child(compact_action("Terminals ↗", Variant::Quiet, move |_| {
                                 crate::terminals::open_card(ui, &card_id);
                             }))
                             .into_element();
@@ -475,9 +469,9 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             action(
                                 move || {
                                     if mode.get() == "github_pr" {
-                                        "Publish · commit and push"
+                                        "Publish PR"
                                     } else {
-                                        "Accept · commit and merge"
+                                        "Merge"
                                     }
                                 },
                                 Variant::Primary,
@@ -528,7 +522,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         )
         .child(scroll().flex_1().child(dynamic(move || match ui.review.get() {
             Some(p) => diff_panel(p).into_element(),
-            None => muted("Refresh the diff before accepting. Use the Card comment composer to ask an Agent or describe changes before returning to Develop.").into_element(),
+            None => muted("Refresh diff to preview changes.").into_element(),
         })))
 }
 

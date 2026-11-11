@@ -105,7 +105,8 @@ fn review_workspace(ui: Ui) -> impl IntoElement {
                             .child(
                                 view()
                                     .flex_row()
-                                    .gap_2()
+                                    .items_center()
+                                    .gap_1()
                                     .child(compact_action(
                                         if narrow || expanded {
                                             if show_card { "Show work" } else { "Show Card" }
@@ -124,22 +125,18 @@ fn review_workspace(ui: Ui) -> impl IntoElement {
                                             }
                                         },
                                     ))
-                                    .child(
-                                        compact_action(
-                                            "Restore split",
-                                            Variant::Quiet,
-                                            move |_| {
-                                                ui.expanded.set(false);
-                                                ui.focused_card.set(false);
-                                            },
-                                        )
-                                        .disabled(!expanded),
-                                    )
-                                    .child(compact_action(
-                                        "Close panel",
-                                        Variant::Quiet,
-                                        move |_| ui.back(),
-                                    )),
+                                    .child(chrome_button_disabled(
+                                        Icon::Collapse,
+                                        "Restore split",
+                                        move || !expanded,
+                                        move |_| {
+                                            ui.expanded.set(false);
+                                            ui.focused_card.set(false);
+                                        },
+                                    ))
+                                    .child(chrome_button(Icon::Close, "Close panel", move |_| {
+                                        ui.back()
+                                    })),
                             ),
                     )
                     .child(body)

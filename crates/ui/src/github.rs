@@ -386,11 +386,11 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
             view()
                 .flex_row()
                 .items_center()
-                .gap_2()
+                .gap_1()
                 .p_3()
                 .child(heading("New Card").flex_1())
                 .child(crate::editor::expand(ui))
-                .child(action("Close", Variant::Quiet, move |_| {
+                .child(chrome_button(Icon::Close, "Close", move |_| {
                     ui.navigate("board")
                 })),
         )
@@ -586,12 +586,12 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                 .items_center()
                 .gap_2()
                 .child(view().flex_1())
-                .child(action("Discard draft", Variant::Quiet, move |_| {
+                .child(compact_action("Discard", Variant::Quiet, move |_| {
                     drafts::remove(ui, &key);
                     ui.navigate("board");
                 }))
                 .child(
-                    action("Create · ⌘Enter", Variant::Primary, move |_| {
+                    compact_action("Create", Variant::Primary, move |_| {
                         ui.card_submit.update(|n| *n += 1)
                     })
                     .disabled(move || !can_create.get()),
@@ -646,8 +646,8 @@ pub fn card_source(ui: Ui) -> impl IntoElement {
                 .child(view().flex_row().child(badge(i.state)))
                 .child(nsh_base::text_view().markdown(i.body));
         }
-        area.child(action(
-            "Remove from Board · keep GitHub source",
+        area.child(compact_action(
+            "Remove from Board",
             Variant::Quiet,
             move |_| {
                 dispatch(
@@ -706,12 +706,13 @@ pub fn pr_panel(ui: Ui) -> impl IntoElement {
                 view()
                     .flex_row()
                     .flex_wrap()
+                    .items_center()
                     .gap_2()
-                    .child(action("Refresh PR", Variant::Secondary, move |_| {
+                    .child(chrome_button(Icon::Refresh, "Refresh PR", move |_| {
                         dispatch(ui, "github.pr.refresh", json!({"card_id":refresh}))
                     }))
                     .child(
-                        action("Open on GitHub", Variant::Quiet, move |_| {
+                        compact_action("Open on GitHub", Variant::Quiet, move |_| {
                             open_url(ui, url.clone())
                         })
                         .disabled(pr.url.is_empty()),
@@ -719,7 +720,7 @@ pub fn pr_panel(ui: Ui) -> impl IntoElement {
             );
         if pr.number > 0 && pr.state == "open" && !pr.merged {
             area = area.child(
-                action("Accept · merge on GitHub", Variant::Primary, move |_| {
+                action("Merge PR", Variant::Primary, move |_| {
                     dispatch(
                         ui,
                         "github.pr.merge",

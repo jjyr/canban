@@ -36,6 +36,12 @@ pub enum Icon {
     Plus,
     ChevronDown,
     Check,
+    Edit,
+    Refresh,
+    Copy,
+    Expand,
+    Collapse,
+    Paperclip,
 }
 impl Icon {
     fn source(self) -> &'static str {
@@ -72,6 +78,12 @@ impl Icon {
             Self::Plus => include_str!("../assets/lucide/plus.svg"),
             Self::ChevronDown => include_str!("../assets/lucide/chevron-down.svg"),
             Self::Check => include_str!("../assets/lucide/check.svg"),
+            Self::Edit => include_str!("../assets/lucide/pencil.svg"),
+            Self::Refresh => include_str!("../assets/lucide/refresh-cw.svg"),
+            Self::Copy => include_str!("../assets/lucide/copy.svg"),
+            Self::Expand => include_str!("../assets/lucide/maximize-2.svg"),
+            Self::Collapse => include_str!("../assets/lucide/minimize-2.svg"),
+            Self::Paperclip => include_str!("../assets/lucide/paperclip.svg"),
         }
     }
 }

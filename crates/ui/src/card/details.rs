@@ -8,9 +8,10 @@ pub fn render(ui: Ui, draft: Signal<Draft>) -> impl IntoElement {
                 .child(
                     view()
                         .flex_row()
+                        .items_center()
                         .justify_between()
                         .child(label("Attachments"))
-                        .child(action("Hide", Variant::Quiet, move |_| {
+                        .child(chrome_button(Icon::Close, "Hide attachments", move |_| {
                             draft.update(|d| d.details = false)
                         })),
                 )

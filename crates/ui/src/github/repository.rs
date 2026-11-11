@@ -139,8 +139,8 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
         .child(action(move||if rules(d).paused{"✓ Synchronization paused"}else{"Pause synchronization"},Variant::Quiet,move |_|edit(d,|r|r.paused = !r.paused)))
         .child(label("Default code delivery")).child(choice(ui,delivery,vec![("local","Local merge"),("github_pr","GitHub PR")]))
         .child(muted("New matches enter Backlog without starting an Agent. Changing rules keeps existing Cards."))
-        .child(action("Save repository connection",Variant::Primary,move |_|{let r=rules(d);let split=|s:String|s.split(',').map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect::<Vec<_>>();dispatch(ui,"project.github",json!({"project_id":save,"repository":d.get_untracked().title.trim(),"intake":r.intake,"pr_intake":r.pr_intake,"authors":split(r.authors),"labels":split(r.labels),"include_drafts":r.drafts,"paused":r.paused,"delivery_mode":r.delivery}));}).disabled(move||ui.pending.get()||d.get().title.trim().is_empty()))
-        .child(view().flex_row().gap_2().child(action("Sync now",Variant::Secondary,move |_|dispatch(ui,"github.sync",json!({"project_id":sync})))).child(action("Disconnect repository",Variant::Quiet,move |_|dispatch(ui,"github.source.disconnect",json!({"project_id":disconnect})))))
+        .child(action("Save",Variant::Primary,move |_|{let r=rules(d);let split=|s:String|s.split(',').map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect::<Vec<_>>();dispatch(ui,"project.github",json!({"project_id":save,"repository":d.get_untracked().title.trim(),"intake":r.intake,"pr_intake":r.pr_intake,"authors":split(r.authors),"labels":split(r.labels),"include_drafts":r.drafts,"paused":r.paused,"delivery_mode":r.delivery}));}).disabled(move||ui.pending.get()||d.get().title.trim().is_empty()))
+        .child(view().flex_row().items_center().gap_2().child(chrome_button(Icon::Refresh,"Sync now",move |_|dispatch(ui,"github.sync",json!({"project_id":sync})))).child(compact_action("Disconnect",Variant::Quiet,move |_|dispatch(ui,"github.source.disconnect",json!({"project_id":disconnect})))))
         .child(dynamic(move||{let g=ui.snapshot.with(|s|s.projects.iter().find(|p|p.id==id).and_then(|p|p.github.clone()));let mut area=view().gap_1();if let Some(g)=g{area=area.child(muted(g.synced_at.map(|t|format!("Last sync: {}s ago",now().saturating_sub(t)/1000)).unwrap_or_else(||"Not synced yet".into())));if let Some(e)=g.error{area=area.child(notice(e,Tone::Attention));}}area.into_element()}))
 }
 pub fn screen(ui: Ui) -> impl IntoElement {
@@ -152,11 +152,12 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .child(
             view()
                 .flex_row()
-                .child(heading("GitHub repository"))
-                .child(view().flex_1())
-                .child(action("Back to Board", Variant::Quiet, move |_| {
+                .items_center()
+                .gap_2()
+                .child(chrome_button(Icon::Back, "Back to Board", move |_| {
                     ui.navigate("board")
-                })),
+                }))
+                .child(heading("GitHub repository").flex_1()),
         )
         .child(scroll().flex_1().child(dynamic(move || {
             let _ = ui.project.get();

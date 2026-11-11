@@ -15,17 +15,17 @@ pub fn render(ui: Ui) -> impl IntoElement {
             let mut body=view().gap_2().child(muted(format!("{} · {}",run.definition.name,run.state)));
             if run.active(){
                 let id=run.id.clone();
-                body=body.child(action("Stop workflow",Variant::Quiet,move |_|dispatch(ui,"workflow.stop",json!({"run_id":id}))));
+                body=body.child(compact_action("Stop",Variant::Quiet,move |_|dispatch(ui,"workflow.stop",json!({"run_id":id}))));
                 if run.state=="waiting_approval"||run.state=="stale" {
                     if run.state=="waiting_approval" {
                         let id=run.id.clone();let visit=run.visit;
-                        body=body.child(action("Approve and continue",Variant::Primary,move |_|{if let Some(card)=ui.current_card(){dispatch(ui,"workflow.decide",json!({"run_id":id,"visit":visit,"revision":card.revision,"decision":"approve"}));}}));
+                        body=body.child(compact_action("Approve",Variant::Primary,move |_|{if let Some(card)=ui.current_card(){dispatch(ui,"workflow.decide",json!({"run_id":id,"visit":visit,"revision":card.revision,"decision":"approve"}));}}));
                     }
                     let can_rework=run.state=="stale" || run.step.as_ref().is_some_and(|k|matches!(&run.definition.steps[k],WorkflowStep::Approval{rework:Some(_),..}));
-                    if can_rework {let id=run.id.clone();let visit=run.visit;body=body.child(action("Request changes",Variant::Secondary,move |_|{if let Some(card)=ui.current_card(){dispatch(ui,"workflow.decide",json!({"run_id":id,"visit":visit,"revision":card.revision,"decision":"rework"}));}}));}
+                    if can_rework {let id=run.id.clone();let visit=run.visit;body=body.child(compact_action("Request changes",Variant::Secondary,move |_|{if let Some(card)=ui.current_card(){dispatch(ui,"workflow.decide",json!({"run_id":id,"visit":visit,"revision":card.revision,"decision":"rework"}));}}));}
                 }
             }
-            for output in run.outputs.values(){if let Some(path)=output["path"].as_str(){let path=path.to_owned();let card=card_id.clone();body=body.child(action("Read step report",Variant::Quiet,move |_|open_resource(ui,card.clone(),path.clone())));}}
+            for output in run.outputs.values(){if let Some(path)=output["path"].as_str(){let path=path.to_owned();let card=card_id.clone();body=body.child(compact_action("Report",Variant::Quiet,move |_|open_resource(ui,card.clone(),path.clone())));}}
             body.into_element()
         }).collect::<Vec<_>>())
     })

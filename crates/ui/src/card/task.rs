@@ -50,16 +50,18 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 .items_center()
                 .child(muted("Description"))
                 .child(view().flex_1())
-                .child(
-                    action("Edit", Variant::Quiet, move |_| {
+                .child(chrome_button_disabled(
+                    Icon::Edit,
+                    "Edit description",
+                    move || editing.get(),
+                    move |_| {
                         if let Some(editor) = reading.editor.get() {
                             editor.blur();
                         }
                         draft.update(|d| d.editing = true);
                         reading.top();
-                    })
-                    .disabled(move || editing.get()),
-                ),
+                    },
+                )),
         )
         .child(dynamic(move || {
             if editing.get() {
@@ -123,7 +125,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             .flex_wrap()
                             .gap_2()
                             .child(
-                                action("Save changes · ⌘Enter", Variant::Primary, move |_| {
+                                compact_action("Save", Variant::Primary, move |_| {
                                     ui.task_submit.update(|n| *n += 1)
                                 })
                                 .disabled(move || {
@@ -133,7 +135,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                                 }),
                             )
                             .child(
-                                action("Close editor", Variant::Quiet, move |_| {
+                                compact_action("Cancel", Variant::Quiet, move |_| {
                                     draft.update(|d| d.editing = false)
                                 })
                                 .disabled(move || {
@@ -169,40 +171,42 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         })
                         .max_h(px(220.)),
                     )
-                    .child(action(
-                        "Keep draft and use latest revision",
-                        Variant::Secondary,
-                        move |_| {
-                            if let Some(c) = ui.current_card() {
-                                draft.update(|d| {
-                                    if github {
-                                        d.title = c.title.clone();
+                    .child(
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .gap_2()
+                            .child(compact_action(
+                                "Keep draft",
+                                Variant::Secondary,
+                                move |_| {
+                                    if let Some(c) = ui.current_card() {
+                                        draft.update(|d| {
+                                            if github {
+                                                d.title = c.title.clone();
+                                            }
+                                            d.base_title = c.title;
+                                            d.base_body = c.body;
+                                            d.revision = c.revision;
+                                            d.error.clear();
+                                        });
                                     }
-                                    d.base_title = c.title;
-                                    d.base_body = c.body;
-                                    d.revision = c.revision;
-                                    d.error.clear();
-                                });
-                            }
-                        },
-                    ))
-                    .child(action(
-                        "Discard changes and reload",
-                        Variant::Secondary,
-                        move |_| {
-                            if let Some(c) = ui.current_card() {
-                                draft.update(|d| {
-                                    let saved = Draft::card(&c);
-                                    d.title = saved.title;
-                                    d.body = saved.body;
-                                    d.base_title = saved.base_title;
-                                    d.base_body = saved.base_body;
-                                    d.revision = saved.revision;
-                                    d.error.clear();
-                                });
-                            }
-                        },
-                    ))
+                                },
+                            ))
+                            .child(compact_action("Discard", Variant::Secondary, move |_| {
+                                if let Some(c) = ui.current_card() {
+                                    draft.update(|d| {
+                                        let saved = Draft::card(&c);
+                                        d.title = saved.title;
+                                        d.body = saved.body;
+                                        d.base_title = saved.base_title;
+                                        d.base_body = saved.base_body;
+                                        d.revision = saved.revision;
+                                        d.error.clear();
+                                    });
+                                }
+                            })),
+                    )
             },
         ))
 }

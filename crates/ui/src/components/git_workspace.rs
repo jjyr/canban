@@ -88,54 +88,79 @@ pub fn panel(ui: Ui) -> impl IntoElement {
                 .current_card()
                 .and_then(|c| c.workspace.map(|w| w.location))
                 .or_else(|| ui.current_project().map(|p| p.work_location()));
-            muted(
-                location
-                    .map(|l| {
-                        format!(
-                            "{} · {}",
-                            crate::machines::name(ui, &l.machine),
-                            compact(&l.directory, 48)
-                        )
-                    })
-                    .unwrap_or_default(),
-            )
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(
+                    muted(
+                        location
+                            .map(|l| {
+                                format!(
+                                    "{} · {}",
+                                    crate::machines::name(ui, &l.machine),
+                                    compact(&l.directory, 48)
+                                )
+                            })
+                            .unwrap_or_default(),
+                    )
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate(),
+                )
+                .child(chrome_button(
+                    Icon::Refresh,
+                    "Refresh workspace status",
+                    move |_| load(ui, info, error, generation),
+                ))
         }))
         .child(dynamic(move || {
             let Some(info) = info.get() else {
                 return view().into_element();
             };
-            let mut area = view().gap_1().child(muted(format!(
-                "Branch {} → {} · {}{}",
-                compact(info.branch.as_deref().unwrap_or("not created"), 30),
-                compact(info.target_branch.as_deref().unwrap_or("not set"), 20),
-                match info.state.as_str() {
-                    "not_created" => "not created",
-                    "directory" => "project directory",
-                    "available" => "ready",
-                    "missing" => "missing",
-                    "conflict" => "merge conflict",
-                    _ => &info.state,
-                },
-                if info.dirty {
-                    " · uncommitted changes"
-                } else {
-                    ""
-                }
-            )));
+            let mut branch_row = view().flex_row().items_center().gap_1().child(
+                muted(format!(
+                    "Branch {} → {} · {}{}",
+                    compact(info.branch.as_deref().unwrap_or("not created"), 30),
+                    compact(info.target_branch.as_deref().unwrap_or("not set"), 20),
+                    match info.state.as_str() {
+                        "not_created" => "not created",
+                        "directory" => "project directory",
+                        "available" => "ready",
+                        "missing" => "missing",
+                        "conflict" => "merge conflict",
+                        _ => &info.state,
+                    },
+                    if info.dirty {
+                        " · uncommitted changes"
+                    } else {
+                        ""
+                    }
+                ))
+                .flex_1()
+                .min_w(px(0.))
+                .truncate(),
+            );
             if let Some(branch) = info.branch.clone() {
-                area = area.child(action("Copy branch", Variant::Quiet, move |_| {
-                    copy_text(ui, branch.clone())
-                }));
+                branch_row =
+                    branch_row.child(chrome_button(Icon::Copy, "Copy branch", move |_| {
+                        copy_text(ui, branch.clone())
+                    }));
             }
+            let mut area = view().gap_1().child(branch_row);
             if let Some(path) = info.path {
                 let copy = path.clone();
                 area = area.child(
                     view()
+                        .flex_row()
+                        .items_center()
                         .gap_1()
-                        .child(muted(compact(&path, 42)))
-                        .child(action("Copy workspace path", Variant::Quiet, move |_| {
-                            copy_text(ui, copy.clone())
-                        })),
+                        .child(muted(compact(&path, 42)).flex_1().min_w(px(0.)).truncate())
+                        .child(chrome_button(
+                            Icon::Copy,
+                            "Copy workspace path",
+                            move |_| copy_text(ui, copy.clone()),
+                        )),
                 );
             }
             if let Some(commit) = info.base_commit {
@@ -153,11 +178,6 @@ pub fn panel(ui: Ui) -> impl IntoElement {
             }
             area.into_element()
         }))
-        .child(action(
-            "Refresh workspace status",
-            Variant::Quiet,
-            move |_| load(ui, info, error, generation),
-        ))
         .child(dynamic(move || {
             if error.get().is_empty() {
                 view().into_element()

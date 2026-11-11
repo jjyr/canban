@@ -183,7 +183,7 @@ pub fn controls(
         .min_w(px(0.))
         .gap_1()
         .child(chrome_button_disabled(
-            Icon::Plus,
+            Icon::Paperclip,
             "Attach files",
             move || editor.held.get() || ui.current_card().is_none_or(|c| c.archived_at.is_some()),
             move |_| {

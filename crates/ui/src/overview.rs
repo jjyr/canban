@@ -334,19 +334,29 @@ fn inspector(ui: Ui) -> impl IntoElement {
         .flex_1()
         .min_h(px(0.0))
         .gap_2()
-        .child(action(
-            if ui.narrow.get_untracked() {
-                "← Overview"
-            } else {
-                "Close context"
-            },
-            Variant::Quiet,
-            move |_| {
-                ui.clear_output();
-                ui.overview_selection.set(String::new());
-            },
-        ))
-        .child(dynamic(move || row_actions(ui)))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(view().flex_1().child(dynamic(move || row_actions(ui))))
+                .child(chrome_button(
+                    if ui.narrow.get_untracked() {
+                        Icon::Back
+                    } else {
+                        Icon::Close
+                    },
+                    if ui.narrow.get_untracked() {
+                        "Back to Overview"
+                    } else {
+                        "Close context"
+                    },
+                    move |_| {
+                        ui.clear_output();
+                        ui.overview_selection.set(String::new());
+                    },
+                )),
+        )
         .child(scroll().flex_1().min_h(px(0.0)).child(dynamic(move || {
             let snapshot = ui.snapshot.get();
             let id = ui.overview_selection.get();
@@ -417,7 +427,7 @@ fn inspector(ui: Ui) -> impl IntoElement {
                         .child(label("Latest saved outcome"))
                         .child(read_text(format!("{} · {}", report.state, report.message)));
                     let request_id = report.request_id.clone();
-                    body = body.child(action("Read saved report", Variant::Quiet, move |_| {
+                    body = body.child(compact_action("View report", Variant::Quiet, move |_| {
                         load_text(ui, "execution.result", json!({"request_id":request_id}))
                     }));
                 }
@@ -467,7 +477,7 @@ fn inspector(ui: Ui) -> impl IntoElement {
                     let row_id = row.id.clone();
                     let attempt_id = a.id.clone();
                     let finished = a.finished();
-                    body = body.child(action(if finished { "Read saved output" } else { "Read terminal preview" }, Variant::Quiet, move |_| {
+                    body = body.child(compact_action(if finished { "View output" } else { "Terminal preview" }, Variant::Quiet, move |_| {
                         load_text(
                             ui,
                             "overview.preview",
@@ -580,7 +590,7 @@ fn row_actions(ui: Ui) -> impl IntoElement {
                     ps.iter()
                         .any(|p| p.id == profile && !p.resume_command().is_empty())
                 });
-            actions=actions.child(action("Resume exact session",Variant::Secondary,move |_| {
+            actions=actions.child(compact_action("Resume session",Variant::Secondary,move |_| {
                 let origin=ui.location();
                 let saved=resume_row.clone();
                 dispatch_then(ui,"agent.open",json!({"card_id":card_id,"profile_id":profile,"expected_attempt_id":attempt_id}),move |v| {

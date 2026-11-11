@@ -99,16 +99,19 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 view()
                     .flex_row()
                     .flex_wrap()
+                    .items_center()
                     .gap_2()
-                    .child(action("Open on GitHub", Variant::Quiet, move |_| {
-                        open_url(ui, open.url.clone())
-                    }))
-                    .child(
-                        action("Refresh details", Variant::Secondary, move |_| {
-                            load(ui, true)
-                        })
-                        .disabled(move || b.detail_loading.get()),
-                    )
+                    .child(compact_action(
+                        "Open on GitHub",
+                        Variant::Quiet,
+                        move |_| open_url(ui, open.url.clone()),
+                    ))
+                    .child(chrome_button_disabled(
+                        Icon::Refresh,
+                        "Refresh details",
+                        move || b.detail_loading.get(),
+                        move |_| load(ui, true),
+                    ))
                     .child(card_actions(ui, create)),
             )
             .child(dynamic(move || {

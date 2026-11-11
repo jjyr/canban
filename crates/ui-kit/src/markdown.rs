@@ -1,6 +1,6 @@
 //! Shared Markdown reading and source editing. NSH owns the rope, selections,
 //! undo stack and caret completion; changing height/preview never remounts it.
-use super::{Variant, action, tokens::*};
+use super::tokens::*;
 use nsh_base::{Editor, EditorApi, EditorCommand, EditorElement, TextViewElement};
 use nsh_core::prelude::*;
 
@@ -131,8 +131,11 @@ impl MarkdownInput {
         incomplete: bool,
     ) {
         if let Some(api) = self.editor.api::<EditorApi>() {
+            let has_items = !items.is_empty();
             api.present_completions(id, items, Some(incomplete));
-            self.keys_epoch.update(|n| *n += 1);
+            if has_items {
+                self.keys_epoch.update(|n| *n += 1);
+            }
         }
     }
     /// NSH Editor's native sink currently consumes text only. Read file/image
@@ -196,9 +199,10 @@ impl MarkdownInput {
         });
     }
     pub fn blur(self) {
-        self.preview.set(false);
         self.active.set(false);
-        if let Some(api) = self.editor.api::<EditorApi>() {
+        if self.focused.get_untracked()
+            && let Some(api) = self.editor.api::<EditorApi>()
+        {
             api.blur();
         }
     }
@@ -224,6 +228,9 @@ impl MarkdownInput {
             .read_only(move || self.preview.get())
             .font_size(px(13.))
             .line_height(px(20.))
+            .text_color(TEXT)
+            .px_2()
+            .py_1()
             .component_ref(&self.editor)
             .size_full()
     }
@@ -254,80 +261,43 @@ impl MarkdownInput {
                 self.active.set(false);
             }
         });
-        let expanded = computed(move || !compact || self.active.get() || self.held.get());
         let height = computed(move || {
-            if !expanded.get() {
-                return 48.;
-            }
             if !compact {
                 return max_height.get().max(120.);
             }
             let lines = value.with(|v| v.lines().count());
-            (100. + lines.saturating_sub(3) as f32 * 20.).min(max_height.get().max(64.))
-        });
-        let previous_size = stored(None::<(bool, f32)>);
-        effect(move || {
-            let next = (expanded.get(), height.get());
-            if let Some(before) = previous_size.replace(Some(next))
-                && (before.0 != next.0 || (before.1 - next.1).abs() > 0.5)
-            {
-                super::motion::layout(root, super::motion::COMPOSER);
-            }
+            (76. + lines.saturating_sub(2) as f32 * 20.).min(max_height.get().max(76.))
         });
         view()
             .element_ref(&root)
             .min_w(px(0.))
             .rounded(px(RADIUS))
             .border_1()
-            .border_color(BORDER)
+            .border_color(move || if self.focused.get() { ACCENT } else { BORDER })
             .bg(INSET)
+            .overflow_hidden()
             .child(
                 view()
-                    .h(move || px(if expanded.get() { 34. } else { 0. }))
-                    .style_when(move || !expanded.get(), |s| s.hidden())
-                    .overflow_hidden()
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap_1()
-                            .px_2()
-                            .child(
-                                action("Write", Variant::Quiet, move |_| self.focus())
-                                    .selected(move || !self.preview.get()),
-                            )
-                            .child(
-                                action("Preview", Variant::Quiet, move |_| {
-                                    self.preview.set(true);
-                                    self.active.set(true);
-                                })
-                                .selected(move || self.preview.get()),
-                            )
-                            .child(view().flex_1())
-                            .children([
-                                self.format("B", "Bold", "**", "**"),
-                                self.format("I", "Italic", "_", "_"),
-                                self.format("‹›", "Code", "`", "`"),
-                                self.format("↗", "Link", "[", "](https://)"),
-                                self.command("↶", "Undo", EditorCommand::Undo),
-                                self.command("↷", "Redo", EditorCommand::Redo),
-                            ]),
-                    ),
+                    .h(px(32.))
+                    .px_2()
+                    .pt_1()
+                    .flex_row()
+                    .items_end()
+                    .gap_1()
+                    .bg(SURFACE)
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .child(self.tab("Write", false))
+                    .child(self.tab("Preview", true)),
             )
             .child(
                 view()
-                    .h(move || {
-                        px(if self.preview.get() && expanded.get() {
-                            0.
-                        } else {
-                            height.get()
-                        })
-                    })
+                    .h(move || px(if self.preview.get() { 0. } else { height.get() }))
                     .overflow_hidden()
                     .child(source),
             )
             .child(when(
-                move || self.preview.get() && expanded.get(),
+                move || self.preview.get(),
                 move || {
                     scroll()
                         .h(move || px(height.get()))
@@ -335,37 +305,59 @@ impl MarkdownInput {
                 },
             ))
     }
-    fn format(
-        self,
-        title: &str,
-        name: &str,
-        before: &'static str,
-        after: &'static str,
-    ) -> AnyElement {
-        action(title.to_owned(), Variant::Quiet, move |_| {
-            if let Some(api) = self.editor.api::<EditorApi>() {
-                let selected = api.selected_text();
-                api.insert(format!("{before}{selected}{after}"));
-                self.focus();
-            }
-        })
-        .accessibility_label({
-            let name = name.to_owned();
-            move || Some(name.clone().into())
-        })
-        .into_element()
-    }
-    fn command(self, title: &str, name: &str, command: EditorCommand) -> AnyElement {
-        action(title.to_owned(), Variant::Quiet, move |_| {
-            if let Some(api) = self.editor.api::<EditorApi>() {
-                api.run(command);
-                self.focus();
-            }
-        })
-        .accessibility_label({
-            let name = name.to_owned();
-            move || Some(name.clone().into())
-        })
-        .into_element()
+    fn tab(self, title: &'static str, is_preview: bool) -> impl IntoElement {
+        nsh_base::button()
+            .h(px(27.))
+            .px(px(10.))
+            .items_center()
+            .justify_center()
+            .rounded_t(px(6.))
+            .border_t_1()
+            .border_l_1()
+            .border_r_1()
+            .border_color(move || {
+                if self.preview.get() == is_preview {
+                    BORDER
+                } else {
+                    CLEAR
+                }
+            })
+            .bg(move || {
+                if self.preview.get() == is_preview {
+                    INSET
+                } else {
+                    CLEAR
+                }
+            })
+            .hover(move |s| {
+                if self.preview.get() == is_preview {
+                    s
+                } else {
+                    s.text_color(TEXT)
+                }
+            })
+            .selected(move || self.preview.get() == is_preview)
+            .accessibility_label(title)
+            .child(
+                text(title)
+                    .text_size(px(CAPTION_SIZE))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(move || {
+                        if self.preview.get() == is_preview {
+                            TEXT
+                        } else {
+                            MUTED
+                        }
+                    })
+                    .pointer_events(PointerEvents::None),
+            )
+            .on_press(move |_: &()| {
+                if is_preview {
+                    self.preview.set(true);
+                    self.active.set(true);
+                } else {
+                    self.focus();
+                }
+            })
     }
 }

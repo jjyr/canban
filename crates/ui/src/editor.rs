@@ -61,45 +61,62 @@ pub fn reader(ui: Ui, body: impl Fn() -> String + 'static) -> nsh_base::TextView
 }
 
 pub fn draft_status(ui: Ui, key: String, _draft: Signal<Draft>) -> impl IntoElement {
+    let visible_key = key.clone();
     let status_key = key.clone();
     let error_key = key.clone();
-    view()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap_2()
-        .child(muted(move || {
+    when(
+        move || {
             let _ = ui.draft_status.get();
-            persistence::status(&status_key)
-        }))
-        .child(when(
-            move || {
-                let _ = ui.draft_status.get();
-                persistence::status(&error_key).starts_with("Draft not saved:")
-            },
-            move || {
-                let key = key.clone();
-                action("Retry draft save", Variant::Quiet, move |_| {
-                    persistence::retry(&key)
-                })
-            },
-        ))
+            let s = persistence::status(&visible_key);
+            s != "Draft saved" && s != "Preview draft"
+        },
+        move || {
+            let status_key = status_key.clone();
+            let error_key = error_key.clone();
+            let retry_key = key.clone();
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(muted(move || {
+                    let _ = ui.draft_status.get();
+                    persistence::status(&status_key)
+                }))
+                .child(when(
+                    move || {
+                        let _ = ui.draft_status.get();
+                        persistence::status(&error_key).starts_with("Draft not saved:")
+                    },
+                    move || {
+                        let key = retry_key.clone();
+                        compact_action("Retry", Variant::Quiet, move |_| persistence::retry(&key))
+                    },
+                ))
+        },
+    )
 }
 /// The workspace changes width without navigating or replacing the source.
 pub fn expand(ui: Ui) -> impl IntoElement {
-    compact_action(
-        move || {
-            if ui.card_standalone.get() {
+    dynamic(move || {
+        let standalone = ui.card_standalone.get();
+        chrome_button_disabled(
+            if standalone {
+                Icon::Collapse
+            } else {
+                Icon::Expand
+            },
+            if standalone {
                 "Collapse editor"
             } else {
                 "Expand editor"
-            }
-        },
-        Variant::Quiet,
-        move |_| {
-            ui.card_standalone.update(|v| *v = !*v);
-            ui.editor_focus.update(|n| *n += 1);
-        },
-    )
-    .disabled(move || ui.narrow.get())
+            },
+            move || ui.narrow.get(),
+            move |_| {
+                ui.card_standalone.update(|v| *v = !*v);
+                ui.editor_focus.update(|n| *n += 1);
+            },
+        )
+        .into_element()
+    })
 }

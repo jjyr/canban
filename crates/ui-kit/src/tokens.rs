@@ -8,6 +8,7 @@ thread_local! { static THEME: RefCell<Option<Signal<String>>> = const { RefCell:
 pub fn install_theme() {
     set_color_scheme(Appearance::Dark);
     THEME.with(|p| *p.borrow_mut() = Some(signal(canban_themes::DEFAULT.into())));
+    sync_nsh_tokens();
     super::scrollbar::install(canban_themes::resolve(canban_themes::DEFAULT));
 }
 pub fn set_theme(name: &str) {
@@ -17,9 +18,33 @@ pub fn set_theme(name: &str) {
             && s.get_untracked() != name
         {
             s.set(name.into());
+            sync_nsh_tokens();
             super::scrollbar::install(canban_themes::resolve(name));
         }
     });
+}
+fn sync_nsh_tokens() {
+    let mut t = nsh_base::Theme::default();
+    t.background = BACKGROUND.resolve();
+    t.foreground = TEXT.resolve();
+    t.card = SURFACE.resolve();
+    t.card_foreground = TEXT.resolve();
+    t.popover = SURFACE.resolve();
+    t.popover_foreground = TEXT.resolve();
+    t.primary = ACCENT.resolve();
+    t.primary_foreground = ON_ACCENT.resolve();
+    t.secondary = INSET.resolve();
+    t.secondary_foreground = TEXT.resolve();
+    t.muted = INSET.resolve();
+    t.muted_foreground = MUTED.resolve();
+    t.accent = SELECTED.resolve();
+    t.accent_foreground = TEXT.resolve();
+    t.destructive = DANGER.resolve();
+    t.border = BORDER.resolve();
+    t.input = INSET.resolve();
+    t.ring = ACCENT.resolve();
+    t.radius = px(RADIUS);
+    nsh_core::element::set_tokens(t);
 }
 pub fn current_theme() -> &'static canban_themes::Theme {
     let name = THEME.with(|p| {
