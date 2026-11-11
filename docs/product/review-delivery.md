@@ -46,6 +46,19 @@ Human accepts -> persist unknown delivery intent / request key
 
 Active Card terminals and queued/uncertain work block acceptance. Preview exposes the blocker, and merge rechecks it. Git hooks remain active; a hook changing the committed tree or leaving checkout edits stops delivery for inspection. Divergent non-conflicting target changes are integrated in the Card worktree first. Conflicts stay there; the Project source checkout is not left in a half-merged state. Resolve/abort them in the Card terminal, rerun validation and refresh the diff before another acceptance.
 
+Runtime eligibility uses the shared Attempt lifecycle. A `continued` assignment
+is historical: its terminal belongs to the subsequent assignment, so its retained
+`live` observation cannot block delivery after that terminal exits. The current
+assignment still blocks while live or disconnected, even after a completion
+report. Queued, starting and unknown requests remain blockers independently.
+
+The 2026-11-11 regression reproduces the retained Develop `live` snapshot plus
+an exited Review assignment, then exercises preview, commit/merge, retry and
+restart. The original check failed this reproduction; the shared lifecycle check
+passes it. Full workspace tests and `mise run acceptance` passed with a disposable
+home/Core (`/private/tmp/cb-egcgh2zd/home`). Separate assertions retain live,
+disconnected, queued, starting and unknown blockers.
+
 Card and target changes are checked again, but Canban does not lock arbitrary external editors/Git commands. Profiles on one Card still share a worktree. Keep that checkout quiescent during acceptance. External Git hooks, permissions, identity/signing failures and concurrent source changes surface as attention; any created Card commit remains available for inspection. A global delivery mutex prevents two Canban merges from updating checkouts concurrently; it is not an Agent concurrency cap.
 
 ## API and retry contract

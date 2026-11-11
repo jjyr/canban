@@ -4,6 +4,8 @@ use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
+    History,
+    Undo,
     Trigger,
     Update,
     Info,
@@ -38,7 +40,9 @@ pub enum Icon {
 impl Icon {
     fn source(self) -> &'static str {
         match self {
-            Self::Trigger => include_str!("../assets/lucide/zap.svg"),
+            Self::History => include_str!("../assets/lucide/history.svg"),
+            Self::Undo => include_str!("../assets/lucide/undo-2.svg"),
+            Self::Trigger => include_str!("../assets/lucide/workflow.svg"),
             Self::Update => include_str!("../assets/utility/update.svg"),
             Self::Folder => include_str!("../assets/lucide/folder.svg"),
             Self::Coffee => include_str!("../assets/utility/coffee.svg"),

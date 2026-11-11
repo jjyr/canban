@@ -4,14 +4,14 @@ Status: implemented in this worktree, 2026-11-11. Schema 12, desktop API 10. Thi
 
 ## Project authoring and storage
 
-A Project owns multiple named Workflow sources. The Board remains Backlog / Develop / Review. Open **Workflows** in the Project header, or **Project Workflows** in Settings. The page lists sources, preserves original YAML in a native editor, and offers **New workflow**, **History**, **Discard changes / reload**, and **Save and apply**. Card detail retains execution history, reports and approval controls, without a full configuration/graph panel.
+A Project owns multiple named Workflow sources. The Board remains Backlog / Develop / Review. Open **Workflows** in the Project header, or **Project Workflows** in Settings. The page lists sources, preserves original YAML in a native editor, and places **New workflow** below the source list and keeps only the Agent-icon **Edit with agent** action at the top right. The editor has icon actions for **History** and, while modified, **Discard changes and reload**, plus **Save**. There is no permanent Refresh button or active-version label. Card detail retains execution history, reports and approval controls, without a full configuration/graph panel.
 
 ```text
 Project / Workflows
-  development.yaml        | Original YAML editor        [Edit with agent]
-  issue-planning.yaml     | Active v3   [History]
-  pr-review.yaml          |
-                          | [Discard changes]           [Save and apply]
+  development.yaml        | Source name   [History]       [Edit with agent]
+  issue-planning.yaml  •  | YAML editor (syntax colors, line numbers,
+  pr-review.yaml          | two-space indentation and soft wrapping)
+  [+ New workflow]        |                                   [Save]
 ```
 
 Names ending in `.yaml` identify documents, not paths under the Canban home. SQLite is the only source of truth:
@@ -29,9 +29,11 @@ canban.sqlite
 
 No Workflow YAML, source mirror or revision copy is generated under `~/.canban`. An old `config/workflows/default.json`, if present before upgrade, is imported once into the SQL bootstrap template; subsequent reads use SQL. The old input is not monitored or rewritten. Existing Project templates and JSON definitions become visible SQL YAML sources. Existing live/queued assignments and decisions retain their captured identity and semantics.
 
-**Save and apply** validates the entire submitted collection and commits original YAML, immutable revisions, active references and subscriptions in one SQLite transaction. Invalid YAML/graphs/Profiles/columns or any database failure leaves all previously active configuration intact. The editor retains its draft. Successful publication quietly clears dirty state and updates revision metadata and Column descriptions; it produces no success toast or publication banner.
+**Save** (also Command+S) validates the entire submitted collection and commits original YAML, immutable revisions, active references and subscriptions in one SQLite transaction. Invalid YAML/graphs/Profiles/columns or any database failure leaves all previously active configuration intact. The editor retains its draft. Successful publication quietly clears the unsaved marker and updates stored revisions and Column descriptions; it produces no success toast or publication banner.
 
-The collection revision returned by `workflow.sources` is an optimistic concurrency token. A competing Agent/editor publication causes `revision_conflict`. The native page retains the user's buffer and shows the latest sources for comparison; reloading/discarding is explicit. Drafts survive navigation within the current window. Unsaved editor drafts are not another published SQL revision and are not visible to a separately launched Agent.
+The collection revision returned by `workflow.sources` is an optimistic concurrency token. A competing Agent/editor publication causes `revision_conflict`. The native page retains the user's buffer and shows highlighted latest YAML for the selected source alongside the retained editor; reloading/discarding is explicit. Drafts survive navigation within the current window. Unsaved editor drafts are not another published SQL revision and are not visible to a separately launched Agent.
+
+The native YAML editor uses NSH built-in syntax highlighting with the `highlight` feature enabled, two-space indentation, soft wrapping and an explicit unsaved marker in the source list. Agent and History panels use native modal layers; Escape closes them from a focused editor and restores the source caret. Configuration-launch errors remain visible inside the Agent panel.
 
 History reads immutable SQL revisions. **Load as draft** puts historical YAML into the editor. Applying it creates a new revision; it never rewrites history. Original comments, multiline instructions and formatting are retained byte for byte on ordinary YAML publication. JSON compatibility import necessarily generates YAML.
 
@@ -165,7 +167,7 @@ Continue only focuses the retained Terminal; it does not resend the Prompt. Resu
 
 All matching subscriptions receive durable receipts. One main Workflow runs on a Card at a time; another matching event waits visibly in `subscription.deliveries` with its captured definition revision. Waiting for an active run or human gate does not consume failure retries. Other delivery failures use bounded backoff and inspectable failure/retry. New manual starts conflict visibly. Publication applies immediately to future receipts/runs; captured receipts, active runs, queued assignments and human decisions retain their old versions. `workflow.stop` does not kill a PTY.
 
-Enabled column-related triggers show a **flash/trigger** icon on the Column header. Hover explains entry/exit triggers; clicking shows details grouped by Workflow and a **View Workflows source** link. Flow effects are labelled separately. Rules with no clear column association stay in the Project source page. The pure `source::column_details` library derives text from active definitions/rules/subscriptions in the client; AppServer has no hover-prose generation RPC. Unsaved drafts never affect these hints.
+Column headers show the stage name without a Card count and retain equal height whether or not automation exists. Enabled column-related triggers show a **workflow-node** icon. Hover does not open a tooltip. Clicking opens an opaque native popover above Card text, with bounded scrolling, rule details grouped by Workflow and a **View workflows** link. Escape, the close icon and pressing outside dismiss it. Flow effects are labelled separately. Rules with no clear column association stay in the Project source page. The pure `source::column_details` library derives text from active definitions/rules/subscriptions in the client; AppServer has no hover-prose generation RPC. Unsaved drafts never affect these hints.
 
 Column rules default to local-origin events; Workflow-owned moves do not start a duplicate developer through another default column rule. Explicit origin filters can opt into other events; causal ancestry still suppresses workflow loops. Initial GitHub baselines/restoration do not trigger automation without explicit subscription policy.
 
@@ -173,9 +175,14 @@ Column rules default to local-origin events; Workflow-owned moves do not start a
 
 ## Migration and verification
 
+[Workflow UI refinement acceptance](workflow-ui-acceptance-20261111.md) records
+the current click-only popover, simplified editor, syntax colors, native modal
+focus/dismissal and conflicting-publication checks. The earlier evidence below
+retains its original UI labels and layout.
+
 Schema 12 adds SQL source references, the bootstrap template and Project configuration sessions. Original YAML is stored on immutable Workflow revisions. The migration itself is database-only; startup converts legacy Project/template/definition input without relaunching active work. Downgrade refuses to discard authored YAML sources or live configuration sessions. An older binary cannot interpret these sources: preserve/migrate them deliberately before downgrading.
 
-Required checks are `mise run test`, `mise run build`, `mise run acceptance`, `mise run acceptance-workflows`, workspace Clippy and `git diff --check`. Native Gallery scenes `workflows` and `workflow-agent` reuse production editors/panels. `scripts/acceptance-workflows.py --native` runs a scratch packaged App, isolated home/Core and deterministic Profile programs over real PTYs; it never replaces the live home/Core.
+Required checks are `mise run test`, `mise run build`, `mise run acceptance`, `mise run acceptance-workflows`, workspace Clippy and `git diff --check`. Native Gallery scenes `workflows`, `workflow-agent`, `workflows-conflict` (an 800-point viewport and long names) and `column-automations` reuse production editors/panels/popovers. `scripts/acceptance-workflows.py --native` runs a scratch packaged App, isolated home/Core and deterministic Profile programs over real PTYs; it never replaces the live home/Core.
 
 Fresh evidence from 2026-11-11:
 

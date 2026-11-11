@@ -117,7 +117,11 @@ fn load(ui: Ui, discard: bool) {
                     .drafts
                     .with_untracked(|d| d.get(&project).is_some_and(Draft::dirty));
                 if dirty && !discard {
-                    state.latest.set(v);
+                    let same = state.drafts.with_untracked(|d| {
+                        d.get(&project)
+                            .is_some_and(|d| d.base["revision"] == v["revision"])
+                    });
+                    state.latest.set(if same { Value::Null } else { v });
                 } else {
                     state
                         .drafts
@@ -144,6 +148,9 @@ fn save(ui: Ui) {
     let Some(draft) = state.drafts.with_untracked(|d| d.get(&project).cloned()) else {
         return;
     };
+    if ui.pending.get_untracked() || state.loading.get_untracked() || !draft.needs_apply() {
+        return;
+    }
     state.error.set(String::new());
     dispatch_complete(
         ui,
@@ -211,17 +218,27 @@ fn edit_agent(ui: Ui) {
 fn launch(ui: Ui, fresh: bool) {
     let origin = ui.location();
     let state = ui.workflows;
-    dispatch_then(
+    state.error.set(String::new());
+    dispatch_complete(
         ui,
         "configuration.open",
         json!({"project_id":ui.project.get_untracked(),"profile_id":state.profile.get_untracked(),"prompt":state.prompt.get_untracked(),"fresh":fresh}),
-        move |v| {
-            if ui.location() == origin
-                && let Some(id) = v["terminal_id"].as_str()
-            {
-                state.agent.set(false);
-                state.history_open.set(false);
-                ui.open_terminal(id.into());
+        move |result| {
+            if ui.location() != origin {
+                return;
+            }
+            match result {
+                Ok(value) => {
+                    if let Some(id) = value["terminal_id"].as_str() {
+                        state.agent.set(false);
+                        state.history_open.set(false);
+                        ui.open_terminal(id.into());
+                    }
+                }
+                Err(error) => {
+                    state.error.set(error);
+                    ui.operation_error.set(String::new());
+                }
             }
         },
     );
@@ -291,40 +308,210 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             .drafts
             .with(|d| d.get(&project).is_some_and(Draft::dirty))
     });
-    view().flex_1().min_h(px(0.)).min_w(px(0.)).p_5().gap_3()
-        .child(view().flex_row().items_center().gap_3().child(action("← Board",Variant::Quiet,move|_|ui.navigate("board"))).child(heading(move||format!("{} / Workflows",ui.current_project().map(|p|p.name).unwrap_or_default()))).child(view().flex_1()).child(action("+ New workflow",Variant::Secondary,move|_|{
-            let project=ui.project.get_untracked();let mut name=String::new();state.drafts.update(|d|{let draft=d.entry(project).or_default();let mut n=1;while draft.sources.contains_key(&format!("workflow-{n}.yaml")){n+=1;}name=format!("workflow-{n}.yaml");draft.sources.insert(name.clone(),format!("schema: 1\nid: workflow-{}\nname: New workflow\non:\n  manual:\n    event: manual\n    start_at: explain\nsteps:\n  - id: explain\n    uses: agent\n    with:\n      profile: {}\n      instruction: |\n        Read the Card and propose a concrete plan.\n",canban_types::id(),ui.profiles.with_untracked(|p|p.first().map(|p|p.id.clone()).unwrap_or_default())));draft.selected=name.clone();});state.selected.set(name);
-        })).child(action("Edit with agent",Variant::Primary,move|_|edit_agent(ui))))
-        .child(when(move||!state.error.get().is_empty(),move||notice(move||state.error.get(),Tone::Attention)))
-        .child(when(move||!state.latest.get().is_null(),move||view().gap_2().child(muted("Latest sources are available. Your edits are retained; compare before reloading.")).child(scroll().max_h(px(160.)).child(read_dynamic(move||state.latest.with(|v|v["sources"].as_array().into_iter().flatten().map(|f|format!("{}\n{}",f["filename"].as_str().unwrap_or_default(),f["source"].as_str().unwrap_or_default())).collect::<Vec<_>>().join("\n\n")))))))
+    on_key_with(
+        "mod+s",
+        KeyOptions {
+            when: nsh_core::keymap::When::Always,
+            ..Default::default()
+        },
+        move |_| {
+            if !state.agent.get_untracked()
+                && !state.history_open.get_untracked()
+                && !ui.quick_open.get_untracked()
+            {
+                save(ui);
+            }
+        },
+    );
+    view().flex_1().min_h(px(0.)).min_w(px(0.)).p_5().gap_4()
+        .child(view().flex_row().items_center().gap_3()
+            .child(chrome_button(Icon::Back, "Back to Board", move |_| ui.navigate("board")))
+            .child(heading(move || format!("{} / Workflows", ui.current_project().map(|p| p.name).unwrap_or_default())).truncate().min_w(px(0.)).flex_1())
+            .child(action_with_icon(Icon::Agent, "Edit with agent", Variant::Primary, move |_| edit_agent(ui)).flex_shrink_0().disabled(move || ui.pending.get() || state.loading.get())))
+        .child(when(move || !state.error.get().is_empty(), move || notice(move || state.error.get(), Tone::Attention)))
         .child(view().flex_1().min_h(px(0.)).flex_row().gap_4()
-            .child(scroll().w(px(210.)).min_h(px(0.)).child(view().gap_2().child(each(move||names.get(),|name|name.clone(),move|name,_|{let name=name.get_untracked();let select=name.clone();let selected=name.clone();action(name,Variant::Quiet,move|_|{let project=ui.project.get_untracked();state.drafts.update(|d|{if let Some(d)=d.get_mut(&project){d.selected=select.clone();}});state.selected.set(select.clone());}).bg(move||if state.selected.get()==selected{SELECTED}else{CLEAR})}))))
-            .child(view().flex_1().min_w(px(0.)).min_h(px(0.)).gap_2().child(view().flex_row().items_center().gap_2().child(label(move||state.selected.get())).child(muted(move||{
-                let project=ui.project.get();let name=state.selected.get();state.drafts.with(|d|d.get(&project).and_then(|d|d.base["sources"].as_array()).and_then(|rows|rows.iter().find(|r|r["filename"]==name)).map(|r|format!("Active v{}",r["active"]["revision"])).unwrap_or_else(||"New draft".into()))
-            })).child(action("History",Variant::Quiet,move|_|show_history(ui)))).child(dynamic(move||{
-                let name=state.selected.get();let project=ui.project.get_untracked();
-                let initial=state.drafts.with_untracked(|d|d.get(&project).and_then(|d|d.sources.get(&name)).cloned()).unwrap_or_default();
-                let text=signal(initial);let editor=canban_ui_kit::markdown::MarkdownInput::new();
-                editor.restore_after(computed(move||state.agent.get()||state.history_open.get()||ui.quick_open.get()),computed(move||ui.page.get()=="workflows"));
-                let sync_name=name.clone();let sync_project=project.clone();
-                effect(move||{let saved=state.drafts.with(|d|d.get(&sync_project).and_then(|d|d.sources.get(&sync_name)).cloned());if let Some(saved)=saved && saved!=text.get_untracked(){text.set(saved);}});
-                effect(move||{let value=text.get();state.drafts.update(|d|{if let Some(d)=d.get_mut(&project){d.sources.insert(name.clone(),value);}});});
-                view().flex_1().min_h(px(0.)).bg(SURFACE).rounded(px(RADIUS)).p_2().child(editor.source(text,"Workflow YAML","Select or create a Workflow…")).into_element()
-            }))))
-        .child(view().flex_row().items_center().gap_2().child(action("Refresh / compare latest",Variant::Quiet,move|_|load(ui,false))).child(action("Discard changes / reload",Variant::Secondary,move|_|load(ui,true)).disabled(move||!dirty.get() && state.latest.get().is_null())).child(view().flex_1()).child(action("Save and apply",Variant::Primary,move|_|save(ui)).disabled(move||ui.pending.get()||state.loading.get()||!apply.get())))
-        .child(when(move||state.agent.get(),move||agent_panel(ui)))
-        .child(when(move||state.history_open.get(),move||history_panel(ui)))
+            .child(view().w(px(200.)).flex_shrink_0().min_h(px(0.)).gap_2()
+                .child(scroll().min_h(px(0.)).child(view().gap_1().child(each(move || names.get(), |name| name.clone(), move |name, _| {
+                    let name = name.get_untracked();
+                    let selected = name.clone();
+                    let select = name.clone();
+                    let title = name.clone();
+                    let dirty_name = name.clone();
+                    action_with_icon(Icon::Trigger, move || {
+                        let project = ui.project.get();
+                        let unsaved = state.drafts.with(|d| d.get(&project).is_some_and(|d| source_dirty(d, &title)));
+                        format!("{}{}", title, if unsaved { " •" } else { "" })
+                    }, Variant::Quiet, move |_| {
+                        let project = ui.project.get_untracked();
+                        state.drafts.update(|d| { if let Some(d) = d.get_mut(&project) { d.selected = select.clone(); } });
+                        state.selected.set(select.clone());
+                    }).w_full().items_center().justify_start()
+                        .selected(move || state.selected.get() == selected)
+                        .accessibility_label(move || {
+                            let project = ui.project.get();
+                            let unsaved = state.drafts.with(|d| d.get(&project).is_some_and(|d| source_dirty(d, &dirty_name)));
+                            Some(format!("{}{}", dirty_name, if unsaved { " · Unsaved changes" } else { "" }).into())
+                        })
+                        .bg(move || if state.selected.get() == name { SELECTED } else { CLEAR })
+                }))))
+                .child(action_with_icon(Icon::Plus, "New workflow", Variant::Quiet, move |_| new_workflow(ui)).w_full().justify_start().disabled(move || ui.pending.get() || state.loading.get())))
+            .child(view().flex_1().min_w(px(0.)).min_h(px(0.)).gap_2()
+                .child(view().flex_row().items_center().gap_2()
+                    .child(label(move || state.selected.get()).truncate().min_w(px(0.)).flex_1())
+                    .child(chrome_button_disabled(Icon::History, "Workflow history", move || {
+                        let project = ui.project.get(); let name = state.selected.get();
+                        !state.drafts.with(|d| d.get(&project).and_then(|d| d.base["sources"].as_array()).is_some_and(|rows| rows.iter().any(|r| r["filename"] == name && r["active"]["revision"].as_u64().is_some_and(|v| v > 0))))
+                    }, move |_| show_history(ui)))
+                    .child(when(move || dirty.get() || !state.latest.get().is_null(), move || chrome_button_disabled(Icon::Undo, "Discard changes and reload", move || ui.pending.get() || state.loading.get(), move |_| load(ui, true)))))
+                .child(when(move || !state.latest.get().is_null(), move || view().gap_2()
+                    .child(muted("Workflows changed elsewhere. Your edits are kept; discard to load the saved sources."))
+                    .child(view().h(px(150.)).bg(INSET).rounded(px(RADIUS)).p_2().child(
+                        nsh_base::editor().value(move || Some(state.latest.with(|v| v["sources"].as_array().into_iter().flatten().find(|f| f["filename"] == state.selected.get()).and_then(|f| f["source"].as_str()).unwrap_or("# This source is absent from the latest saved collection.").to_owned()).into()))
+                            .language(Some("yaml".into())).read_only(true).soft_wrap(true).line_numbers(false).folding(false).accessibility_label("Latest saved Workflow YAML").size_full()))))
+                .child(dynamic(move || source_editor(ui)))
+                .child(view().flex_row().justify_end().child(action("Save", Variant::Primary, move |_| save(ui)).disabled(move || ui.pending.get() || state.loading.get() || !apply.get())))))
+        .child(when(move || state.agent.get(), move || agent_panel(ui)))
+        .child(when(move || state.history_open.get(), move || history_panel(ui)))
 }
-/// Shared production panel, also exercised in the native Gallery.
-pub fn agent_panel(ui: Ui) -> impl IntoElement {
+fn source_dirty(draft: &Draft, name: &str) -> bool {
+    let original = draft.base["sources"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| r["filename"] == name));
+    original.is_none_or(|row| {
+        row["source"].as_str() != draft.sources.get(name).map(String::as_str)
+            || row["unpublished"] == true
+    })
+}
+fn new_workflow(ui: Ui) {
+    let state = ui.workflows;
+    let project = ui.project.get_untracked();
+    let mut name = String::new();
+    state.drafts.update(|d| {
+        let draft = d.entry(project).or_default();
+        let mut n = 1;
+        while draft.sources.contains_key(&format!("workflow-{n}.yaml")) { n += 1; }
+        name = format!("workflow-{n}.yaml");
+        draft.sources.insert(name.clone(), format!("schema: 1\nid: workflow-{}\nname: New workflow\non:\n  manual:\n    event: manual\n    start_at: explain\nsteps:\n  - id: explain\n    uses: agent\n    with:\n      profile: {}\n      instruction: |\n        Read the Card and propose a concrete plan.\n", canban_types::id(), ui.profiles.with_untracked(|p| p.first().map(|p| p.id.clone()).unwrap_or_default())));
+        draft.selected = name.clone();
+    });
+    state.selected.set(name);
+}
+fn source_editor(ui: Ui) -> AnyElement {
+    let state = ui.workflows;
+    let name = state.selected.get();
+    let project = ui.project.get_untracked();
+    if name.is_empty() {
+        return view()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .child(muted("Choose or create a workflow"))
+            .into_element();
+    }
+    let initial = state
+        .drafts
+        .with_untracked(|d| d.get(&project).and_then(|d| d.sources.get(&name)).cloned())
+        .unwrap_or_default();
+    let text = signal(initial);
+    let editor = canban_ui_kit::markdown::MarkdownInput::new();
+    editor.restore_after(
+        computed(move || state.agent.get() || state.history_open.get() || ui.quick_open.get()),
+        computed(move || ui.page.get() == "workflows"),
+    );
+    let sync_name = name.clone();
+    let sync_project = project.clone();
+    effect(move || {
+        let saved = state.drafts.with(|d| {
+            d.get(&sync_project)
+                .and_then(|d| d.sources.get(&sync_name))
+                .cloned()
+        });
+        if let Some(saved) = saved
+            && saved != text.get_untracked()
+        {
+            text.set(saved);
+        }
+    });
+    effect(move || {
+        let value = text.get();
+        state.drafts.update(|d| {
+            if let Some(d) = d.get_mut(&project) {
+                d.sources.insert(name.clone(), value);
+            }
+        });
+    });
+    view()
+        .flex_1()
+        .min_h(px(0.))
+        .bg(SURFACE)
+        .rounded(px(RADIUS))
+        .p_2()
+        .child(
+            editor
+                .source(text, "Workflow YAML", "Write Workflow YAML…")
+                .language(Some("yaml".into()))
+                .line_numbers(true)
+                .indent_guides(true)
+                .auto_indent(true)
+                .auto_close(true)
+                .tab_size(Some(2)),
+        )
+        .into_element()
+}
+/// Real native modal surface: editor layers behind it cannot paint through it.
+fn workflow_dialog(
+    content: impl IntoElement,
+    close: impl Fn() + Copy + 'static,
+) -> impl IntoElement {
+    // A native editor can blur on Escape before the modal host receives cancel.
+    // Keep dismissal scoped to this mounted dialog, including its editor sink.
     on_key_with(
         "escape",
         KeyOptions {
             when: nsh_core::keymap::When::Always,
             ..Default::default()
         },
-        move |_| ui.workflows.agent.set(false),
+        move |_| close(),
     );
+    nsh_base::dialog()
+        .animation(canban_ui_kit::motion::modal)
+        .close_on_escape(true)
+        .close_on_backdrop_press(true)
+        .on_cancel(close)
+        .child(
+            view()
+                .flex_1()
+                .min_h(px(0.))
+                .p_5()
+                .bg(rgba(0x00000066))
+                .items_center()
+                .justify_center()
+                .child(
+                    view()
+                        .absolute()
+                        .inset_0()
+                        .on_press(close)
+                        .label("Dismiss workflow dialog"),
+                )
+                .child(
+                    view()
+                        .w_full()
+                        .max_w(px(1040.))
+                        .flex_1()
+                        .min_h(px(0.))
+                        .max_h(px(780.))
+                        .p_5()
+                        .gap_3()
+                        .bg(SURFACE)
+                        .border_1()
+                        .border_color(BORDER)
+                        .rounded(px(RADIUS))
+                        .child(content),
+                ),
+        )
+}
+/// Shared production panel, also exercised in the native Gallery.
+pub fn agent_panel(ui: Ui) -> impl IntoElement {
     let state = ui.workflows;
     let prompt_editor = component_ref::<nsh_base::Editor>();
     spawn(async move {
@@ -335,15 +522,16 @@ pub fn agent_panel(ui: Ui) -> impl IntoElement {
             api.focus();
         }
     });
-    view().absolute().inset(px(16.)).p_5().gap_3().bg(SURFACE).border_1().border_color(BORDER).rounded(px(RADIUS))
-        .child(view().flex_row().items_center().gap_3().child(heading("Edit with agent")).child(view().flex_1()).child(action("Close",Variant::Quiet,move|_|state.agent.set(false))))
+    workflow_dialog(view().flex_1().min_h(px(0.)).gap_3()
+        .child(view().flex_row().items_center().gap_3().child(icon(Icon::Agent)).child(heading("Edit with agent")).child(view().flex_1()).child(chrome_button(Icon::Close,"Close agent editor",move|_|state.agent.set(false))))
         .child(muted("Review this Project-wide Prompt, then copy it or start a configuration conversation in Terminal."))
         .child(view().flex_row().flex_wrap().gap_2().child(each(move||ui.profiles.get(),|p|p.id.clone(),move|p,_|{let p=p.get_untracked();let id=p.id.clone();let selected=p.id.clone();action(format!("@{}",p.id),Variant::Secondary,move|_|state.profile.set(id.clone())).bg(move||if state.profile.get()==selected{SELECTED}else{INSET})})))
         .child(view().flex_1().min_h(px(0.)).bg(INSET).p_2().child(nsh_base::editor().value(move||Some(state.prompt.get().into())).read_only(true).soft_wrap(true).line_numbers(false).component_ref(&prompt_editor).accessibility_label("Project Workflow configuration Prompt").size_full()))
+        .child(when(move || !state.error.get().is_empty(), move || notice(move || state.error.get(), Tone::Attention)))
         .child(muted(move||state.copy_status.get()))
         .child(view().flex_row().flex_wrap().gap_2().child(action("Select all",Variant::Secondary,move|_|{if let Some(api)=prompt_editor.api::<nsh_base::EditorApi>(){api.focus();api.run(nsh_base::EditorCommand::SelectAll);}})).child(action("Copy prompt",Variant::Secondary,move|_|copy_prompt(ui))).child(view().flex_1()).child(action(move||{
             let key=format!("configuration:{}:workflows:{}",ui.project.get(),state.profile.get());ui.snapshot.with(|s|{if let Some(c)=s.configuration_sessions.iter().find(|c|c.id==key){if c.state=="finished"{"Resume and open Terminal"}else{"Continue in Terminal"}}else{"Start and open Terminal"}})
-        },Variant::Primary,move|_|launch(ui,false)).disabled(move||ui.pending.get()||state.profile.get().is_empty())).child(action("New conversation",Variant::Quiet,move|_|launch(ui,true)).disabled(move||ui.pending.get()||state.profile.get().is_empty())))
+        },Variant::Primary,move|_|launch(ui,false)).disabled(move||ui.pending.get()||state.profile.get().is_empty())).child(action("New conversation",Variant::Quiet,move|_|launch(ui,true)).disabled(move||ui.pending.get()||state.profile.get().is_empty()))), move || state.agent.set(false))
 }
 /// Pure active-definition projection; no source text or prose RPC is needed.
 pub fn column_trigger(ui: Ui, column: String) -> impl IntoElement {
@@ -368,47 +556,69 @@ pub fn column_trigger(ui: Ui, column: String) -> impl IntoElement {
     when(
         move || !details.get().is_empty(),
         move || {
-            view()
-                .relative()
+            nsh_base::popover()
+                .open(move || Some(open.get()))
+                .on_open_change(move |event: &nsh_base::PopoverEvent| {
+                    if let nsh_base::PopoverEvent::OpenChange(value, _) = event {
+                        open.set(*value);
+                    }
+                })
+                .placement(Placement::Bottom)
+                .align(Align::End)
+                .offset(px(8.))
+                .margin(px(12.))
+                .trigger(
+                    chrome_action(Icon::Trigger, "Column automations", |_| {})
+                        .selected(move || open.get())
+                        .bg(move || if open.get() { SELECTED } else { CLEAR }),
+                )
                 .child(
                     view()
-                        .tooltip(
-                            nsh_base::tooltip().child(label(move || details.get().join("\n\n"))),
+                        .w(px(360.))
+                        .max_w(Percentage(0.9))
+                        .p_4()
+                        .gap_3()
+                        .bg(SURFACE)
+                        .border_1()
+                        .border_color(BORDER)
+                        .rounded(px(RADIUS))
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(icon(Icon::Trigger))
+                                .child(label("Automations").flex_1())
+                                .child(chrome_action(
+                                    Icon::Close,
+                                    "Close automations",
+                                    move |_| open.set(false),
+                                )),
                         )
-                        .child(chrome_button(Icon::Trigger, "Column triggers", move |_| {
-                            open.update(|v| *v = !*v)
-                        })),
-                )
-                .child(when(
-                    move || open.get(),
-                    move || {
-                        view()
-                            .absolute()
-                            .top(px(32.))
-                            .right(px(0.))
-                            .w(px(340.))
-                            .p_3()
-                            .gap_2()
-                            .bg(SURFACE)
-                            .border_1()
-                            .border_color(BORDER)
-                            .rounded(px(RADIUS))
-                            .child(label("Column triggers"))
-                            .child(read_dynamic(move || details.get().join("\n\n")))
-                            .child(action(
-                                "View Workflows source",
+                        .child(scroll().max_h(px(360.)).child(view().gap_3().child(each(
+                            move || details.get(),
+                            |detail| detail.clone(),
+                            move |detail, _| {
+                                read_text(detail.get_untracked())
+                                    .text_size(px(12.))
+                                    .text_color(TEXT)
+                            },
+                        ))))
+                        .child(
+                            action_with_icon(
+                                Icon::Trigger,
+                                "View workflows",
                                 Variant::Secondary,
-                                move |_| ui.navigate("workflows"),
-                            ))
-                            .child(action("Close", Variant::Quiet, move |_| open.set(false)))
-                    },
-                ))
+                                move |_| {
+                                    open.set(false);
+                                    ui.navigate("workflows");
+                                },
+                            )
+                            .w_full(),
+                        ),
+                )
         },
     )
-}
-
-fn read_dynamic(body: impl Fn() -> String + 'static) -> impl IntoElement {
-    dynamic(move || read_text(body()).into_element())
 }
 
 fn show_history(ui: Ui) {
@@ -473,24 +683,16 @@ fn history_panel(ui: Ui) -> impl IntoElement {
             api.focus();
         }
     });
-    on_key_with(
-        "escape",
-        KeyOptions {
-            when: nsh_core::keymap::When::Always,
-            ..Default::default()
-        },
-        move |_| state.history_open.set(false),
-    );
-    view().absolute().inset(px(16.)).p_5().gap_3().bg(SURFACE).border_1().border_color(BORDER).rounded(px(RADIUS))
+    workflow_dialog(view().flex_1().min_h(px(0.)).gap_3()
         .child(view().flex_row().items_center().gap_2().child(heading(move||format!("{} / History",state.history_name.get()))).child(view().flex_1()).child(action("Close",Variant::Quiet,move|_|state.history_open.set(false))))
-        .child(muted("Published SQL revisions are immutable. Loading an earlier version creates an editor draft; Save and apply publishes a new version."))
+        .child(muted("Published SQL revisions are immutable. Loading an earlier version creates an editor draft; Save publishes it as a new version."))
         .child(view().flex_1().min_h(px(0.)).flex_row().gap_3().child(scroll().w(px(190.)).child(each(move||state.history.get(),|w|w.id.clone(),move|w,_|{let revision=w.get_untracked().revision;action(format!("Version {revision}"),Variant::Secondary,move|_|state.history_revision.set(revision)).bg(move||if state.history_revision.get()==revision{SELECTED}else{INSET})})))
-            .child(view().flex_1().min_h(px(0.)).child(nsh_base::editor().value(move||Some(state.history.with(|h|h.iter().find(|w|w.revision==state.history_revision.get()).and_then(|w|w.source_yaml.clone()).unwrap_or_default()).into())).read_only(true).soft_wrap(true).line_numbers(false).folding(false).component_ref(&editor).accessibility_label("Historical Workflow YAML").size_full())))
+            .child(view().flex_1().min_h(px(0.)).child(nsh_base::editor().value(move||Some(state.history.with(|h|h.iter().find(|w|w.revision==state.history_revision.get()).and_then(|w|w.source_yaml.clone()).unwrap_or_default()).into())).language(Some("yaml".into())).read_only(true).soft_wrap(true).line_numbers(true).indent_guides(true).folding(false).component_ref(&editor).accessibility_label("Historical Workflow YAML").size_full())))
         .child(view().flex_row().justify_end().child(action("Load as draft",Variant::Primary,move|_|{
             if let Some(raw)=state.history.with_untracked(|h|h.iter().find(|w|w.revision==state.history_revision.get_untracked()).and_then(|w|w.source_yaml.clone())){
                 let name=state.history_name.get_untracked();let project=ui.project.get_untracked();state.drafts.update(|d|{if let Some(d)=d.get_mut(&project){d.sources.insert(name,raw);}});state.history_open.set(false);
             }
-        })))
+        }))), move || state.history_open.set(false))
 }
 
 #[cfg(test)]

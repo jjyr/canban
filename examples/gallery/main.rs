@@ -394,9 +394,14 @@ pub fn Gallery() -> impl IntoElement {
             .child(canban_ui::frame::screen(ui))
             .into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("column-automations") {
+        ui.snapshot.set(fixtures::automation_board());
+        ui.page.set("board".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
-        Ok("workflows") | Ok("workflow-agent")
+        Ok("workflows") | Ok("workflow-agent") | Ok("workflows-conflict")
     ) {
         let raw = include_str!("../workflows/plan-and-develop.yaml").to_string();
         let name = "issue-planning.yaml".to_string();
@@ -412,9 +417,31 @@ pub fn Gallery() -> impl IntoElement {
         ui.workflows.prompt.set("你是当前 Canban 项目的 Workflow 配置助手。\n本次范围是整个项目的 Workflows，而非某个选中的文件。\n\n请先只读分析全部 Workflow YAML，用 ASCII 展示事件、Agent、审批及三列的影响。\n等待用户提出具体修改要求，再校验和发布。".repeat(4));
         ui.workflows.profile.set("codex".into());
         ui.page.set("workflows".into());
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("workflows-conflict") {
+            ui.workflows.drafts.update(|drafts| {
+                let draft = drafts.get_mut(&ui.project.get_untracked()).unwrap();
+                draft.sources.insert(
+                    "issue-planning.yaml".into(),
+                    "# Keep this unsaved editor draft\n".to_owned()
+                        + &draft.sources["issue-planning.yaml"],
+                );
+                draft.sources.insert(
+                    "a-workflow-source-with-a-long-descriptive-filename.yaml".into(),
+                    "schema: 1\nname: Long source fixture\n".into(),
+                );
+            });
+            ui.workflows.latest.set(json!({"revision":"newer-gallery","sources":[{"filename":"issue-planning.yaml","source":"# Saved elsewhere; local draft must survive.\nschema: 1\nname: Latest saved source\n"}]}));
+        }
         if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("workflow-agent") {
             ui.workflows.agent.set(true);
             return canban_ui::workflows::agent_panel(ui).into_element();
+        }
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("workflows-conflict") {
+            return view()
+                .w(px(800.))
+                .flex_1()
+                .child(canban_ui::frame::screen(ui))
+                .into_element();
         }
         return canban_ui::frame::screen(ui).into_element();
     }

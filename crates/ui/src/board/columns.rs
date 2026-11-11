@@ -9,7 +9,6 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
     let row_stage = id.clone();
     let height_stage = id.clone();
     let empty_stage = id.clone();
-    let count_stage = id.clone();
     let viewport = element_ref();
     let scroll_ref = element_ref();
     state.register(&id, viewport, scroll_ref);
@@ -37,30 +36,11 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
         .child(
             view()
                 .flex_row()
+                .min_h(px(30.))
                 .justify_between()
                 .items_center()
                 .child(label(stage.name).font_weight(FontWeight::SEMIBOLD))
-                .child(crate::workflows::column_trigger(ui, stage.id.clone()))
-                .child(badge(move || {
-                    let visible = state
-                        .cards
-                        .with(|all| all.iter().filter(|c| c.stage == count_stage).count());
-                    let total = ui.snapshot.with(|s| {
-                        s.cards
-                            .iter()
-                            .filter(|c| {
-                                c.project_id == ui.project.get_untracked()
-                                    && c.active()
-                                    && c.stage == count_stage
-                            })
-                            .count()
-                    });
-                    if visible == total {
-                        visible.to_string()
-                    } else {
-                        format!("{visible} / {total}")
-                    }
-                })),
+                .child(crate::workflows::column_trigger(ui, stage.id.clone())),
         )
         .child(
             view()
