@@ -155,6 +155,9 @@ pub fn Gallery() -> impl IntoElement {
     ui.page.set("card".into());
     ui.profiles.set(canban_types::Config::default().profiles);
     ui.machines.set(json!({"machines":[{"id":"gallery-remote","name":"Build machine","state":"connected","target":"ssh-host"},{"id":"gallery-offline","name":"Offline machine","state":"unreachable","target":"another-host"}]}));
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("startup-error") {
+        return canban_ui::startup::error_screen("/preview/development-home".into(), "AppServer API 4 is incompatible with this UI (API 8). Start the matching instance or update the service on its owning host.".into()).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("update-recovery") {
         return canban_ui::updates::recovery_screen(
             "/preview/.canban".into(),
@@ -162,10 +165,16 @@ pub fn Gallery() -> impl IntoElement {
         )
         .into_element();
     }
-    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("updates") {
+    if matches!(
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
+        Ok("updates" | "updates-disabled")
+    ) {
         ui.card.set(String::new());
         ui.page.set("board".into());
-        ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"available","available":{"manifest":{"version":"20261110-3"}}}}));
+        ui.update.set(json!({"build":canban_updater::Build::current(),"disabled":std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("updates-disabled"),"state":{"phase":"available","available":{"manifest":{"version":"20261110-3"}}}}));
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("updates-disabled") {
+            ui.page.set("settings".into());
+        }
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("references") {

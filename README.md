@@ -9,11 +9,11 @@ The first macOS MVP implements local Projects/Boards/Cards, JSON workflows and r
 Prerequisites: macOS, Xcode command-line tools, mise (pinned Rust and Zig), librsvg (`brew install librsvg`, for app icon generation), and an installed compatible hc. Agent profiles use your existing executables and authentication.
 
 ```sh
-mise run build
-mise run run
+mise run dev
+mise run dev-stop
 ```
 
-`mise run run` builds the current UI/CLI, gracefully replaces the AppServer for `~/.canban`, and opens `.local/CanbanDev.app`. Herdr and its existing Agent PTYs remain alive. Repeating the command replaces only the tracked development UI; the ordinary `.local/Canban.app` has a separate bundle identity. Set CANBAN_HOME to an absolute alternate directory for an isolated instance. Explicit CANBAN_ENDPOINT connections remain attach-only. See [development startup and acceptance](docs/development-startup.md).
+`dev` automatically selects an isolated home and native Dev App for the current checkout + Git branch; it returns after startup. `dev-stop` stops only that instance's UI/AppServer and preserves data and Herdr PTYs. `mise run run` uses the same start entry. After switching branches, use `mise run dev-stop -- --branch NAME`, or `--all` for all recorded instances of this checkout. An explicit `CANBAN_HOME` / `--home` overrides branch selection. Development management refuses installed `~/.canban`; generated Dev Apps retain their home when opened directly. Shared Herdr Core remains supported, while acceptance uses its own Core. See [development startup](docs/development-startup.md) and [remaining isolation gaps](docs/instance-isolation.md). `mise run build` still produces the ordinary installable `.local/Canban.app`.
 
 ```sh
 mise run gallery

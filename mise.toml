@@ -14,12 +14,23 @@ depends = ["terminal-deps"]
 run = "cargo test --workspace"
 
 [tasks.run]
-depends = ["build"]
-run = "/usr/bin/python3 scripts/dev.py"
+depends = ["build-binaries"]
+run = "/usr/bin/python3 scripts/dev.py start"
+
+[tasks.dev]
+depends = ["build-binaries"]
+run = "/usr/bin/python3 scripts/dev.py start"
+
+[tasks.dev-stop]
+run = "/usr/bin/python3 scripts/dev.py stop"
+
+[tasks.build-binaries]
+depends = ["terminal-deps"]
+run = "cargo build -p canban-ui -p canban-cli -p canban-updater"
 
 [tasks.build]
-depends = ["terminal-deps"]
-run = ["cargo build -p canban-ui -p canban-cli -p canban-updater", "/usr/bin/python3 scripts/package.py"]
+depends = ["build-binaries"]
+run = "/usr/bin/python3 scripts/package.py"
 
 [tasks.build-gallery]
 depends = ["terminal-deps"]
@@ -101,6 +112,9 @@ run = "/usr/bin/python3 scripts/test-release.py"
 
 [tasks.test-package]
 run = "/usr/bin/python3 scripts/test-package.py"
+
+[tasks.test-dev]
+run = "/usr/bin/python3 scripts/test-dev.py"
 
 [tasks.acceptance-github-workspace]
 depends = ["build"]

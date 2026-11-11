@@ -3,9 +3,13 @@ impl AppServer {
     pub(super) fn update_call(&self, method: &str, p: Value) -> Result<Value> {
         match method {
             "update.state" => Ok(
-                json!({"build":canban_updater::Build::current(),"state":canban_updater::load_state(&self.home),"install":canban_updater::handoff::journal(&self.home).ok().map(|j|json!({"token":j.token,"phase":j.phase}))}),
+                json!({"build":canban_updater::Build::current(),"disabled":self.updates_disabled,"state":canban_updater::load_state(&self.home),"install":canban_updater::handoff::journal(&self.home).ok().map(|j|json!({"token":j.token,"phase":j.phase}))}),
             ),
             "update.check" => {
+                ensure!(
+                    !self.updates_disabled,
+                    "Channel updates are disabled for development instances; use mise run dev to rebuild"
+                );
                 let home = self.home.clone();
                 let github = self.github.clone();
                 std::thread::spawn(move || {
@@ -16,6 +20,10 @@ impl AppServer {
                 Ok(json!({"checking":true}))
             }
             "update.install" => {
+                ensure!(
+                    !self.updates_disabled,
+                    "Channel updates are disabled for development instances; use mise run dev to rebuild"
+                );
                 ensure!(
                     p["execution"].is_null(),
                     "Installing an update requires an explicit user action"
@@ -76,6 +84,7 @@ impl AppServer {
         }
     }
     pub(super) fn start_update_checks(self: &Arc<Self>) {
+        let updates_disabled = self.updates_disabled;
         let home = self.home.clone();
         let weak = Arc::downgrade(self);
         let github = self.github.clone();
@@ -89,7 +98,8 @@ impl AppServer {
                 }
                 if !canban_updater::handoff::active(&home) {
                     let _ = canban_updater::handoff::flush(&home);
-                    if std::time::Instant::now() >= next
+                    if !updates_disabled
+                        && std::time::Instant::now() >= next
                         && std::env::var_os("CANBAN_UPDATES_DISABLED").is_none()
                     {
                         next = std::time::Instant::now() + Duration::from_secs(3600);

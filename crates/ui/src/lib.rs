@@ -29,6 +29,7 @@ pub use screens::screen;
 pub mod quick_open;
 pub mod reminders;
 mod sessions;
+pub mod startup;
 pub mod terminals;
 pub mod workspace;
 use nsh_core::prelude::*;
@@ -38,6 +39,8 @@ static APP: std::sync::OnceLock<Arc<canban_app_server::AppClient>> = std::sync::
 fn native(_: &mut Registry) {}
 #[component]
 pub fn Canban() -> impl IntoElement {
+    startup::watch_quit();
+    startup::ready();
     let ui = Ui::new();
     updates::restore(ui);
     links::install(ui);
@@ -104,15 +107,28 @@ pub fn Canban() -> impl IntoElement {
 }
 
 pub fn run() -> Result<()> {
+    nsh_platform_macos::set_components(canban_terminal::native::register);
+    nsh_platform_macos::set_ui_sets(vec![nsh_base::registry(), registry()]);
+    let mut session = None;
+    let result = (|| {
+        session = startup::prepare()?;
+        run_application()
+    })();
+    if let Err(error) = &result {
+        startup::show(error);
+    }
+    drop(session);
+    result
+}
+
+fn run_application() -> Result<()> {
     let home = canban_app_server::default_home()?;
     let cli = std::env::current_exe()?.with_file_name("canban");
     anyhow::ensure!(
         cli.exists(),
         "Build the Agent CLI first: mise exec -- cargo build -p canban-cli"
     );
-    nsh_platform_macos::set_components(canban_terminal::native::register);
-    nsh_platform_macos::set_ui_sets(vec![nsh_base::registry(), registry()]);
-    let app_id = std::env::var("CANBAN_APP_ID").unwrap_or_else(|_| "com.canban.desktop".into());
+    let app_id = startup::app_id()?;
     let source = if canban_updater::handoff::journal(&home).map_or_else(
         |_| home.join("updates/install.json").exists(),
         |j| j.phase == "manual_recovery",

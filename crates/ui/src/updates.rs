@@ -256,8 +256,9 @@ fn hint(v: &Value) -> String {
 pub fn rail(ui: Ui) -> impl IntoElement {
     when(
         move || {
-            !ui.update.get()["state"]["available"].is_null()
-                || ui.update.get()["state"]["phase"] == "manual_recovery"
+            let value = ui.update.get();
+            (value["disabled"] != true && !value["state"]["available"].is_null())
+                || value["state"]["phase"] == "manual_recovery"
         },
         move || {
             view()
@@ -308,6 +309,7 @@ pub fn rail(ui: Ui) -> impl IntoElement {
 }
 pub fn settings(ui: Ui) -> impl IntoElement {
     settings_section("Updates", "Internal releases from main.")
+        .child(when(move || ui.update.get()["disabled"] == true, || muted("Channel updates are disabled for this development instance. Rebuild with mise run dev.")))
         .child(when(
             move || {
                 matches!(
@@ -337,7 +339,7 @@ pub fn settings(ui: Ui) -> impl IntoElement {
             }),
         ))
         .child(when(
-            move || !ui.update.get()["state"]["available"].is_null(),
+            move || ui.update.get()["disabled"] != true && !ui.update.get()["state"]["available"].is_null(),
             move || {
                 view()
                     .gap_2()
@@ -374,7 +376,7 @@ pub fn settings(ui: Ui) -> impl IntoElement {
         .child(
             view().items_start().child(
                 action("Check for updates", Variant::Secondary, move |_| check(ui))
-                    .disabled(move || busy(ui)),
+                    .disabled(move || busy(ui) || ui.update.get()["disabled"] == true),
             ),
         )
 }
@@ -382,6 +384,7 @@ pub fn settings(ui: Ui) -> impl IntoElement {
 /// Standalone recovery UI reads only the updater journal, never application data.
 #[component]
 pub fn Recovery() -> impl IntoElement {
+    crate::startup::watch_quit();
     canban_ui_kit::tokens::install_theme();
     let home = canban_app_server::default_home().unwrap_or_default();
     let error = canban_updater::handoff::journal(&home)

@@ -40,6 +40,12 @@ impl AppServer {
                 &self.snapshot()?,
             ))?),
             "app.shutdown" => {
+                if let Some(expected) = p["expected_pid"].as_u64() {
+                    ensure!(
+                        expected == u64::from(std::process::id()),
+                        "AppServer identity changed; refusing shutdown"
+                    );
+                }
                 self.stop.store(true, Ordering::SeqCst);
                 self.wake_runtime();
                 self.context_signal.notify_all();
@@ -87,7 +93,7 @@ impl AppServer {
                 )
             }
             "app.ping" => Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"api_version":API_VERSION,"pid":std::process::id(),"home":self.home,"build":canban_updater::Build::current()}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"api_version":API_VERSION,"pid":std::process::id(),"home":self.home,"build":canban_updater::Build::current(),"updates_disabled":self.updates_disabled}),
             ),
             "app.snapshot" => Ok(serde_json::to_value(self.snapshot()?)?),
             "project.list" => Ok(serde_json::to_value(

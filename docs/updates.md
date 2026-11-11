@@ -82,9 +82,14 @@ Local reports/replies carry their original request key through the file outbox. 
 
 ## Build, bootstrap and recovery
 
+Scope decision, 2026-11-11: the existing in-app updater is the supported path for
+installed-version upgrades. Its controlled AppServer handoff is sufficient for
+the current scope. Automatic service takeover after Finder/Homebrew replacement
+or first activation of an older installation is deferred.
+
 `mise run build` packages UI, CLI and updater together. `mise run build-release` produces optimized, ad-hoc-signed binaries; it does not publish. `.github/workflows/release.yml` builds the triggering SHA on a macOS arm64 runner, uploads `Canban-macos-aarch64.tar.zst` plus `manifest-macos-aarch64.json`, and publishes the completed draft as a prerelease. Packaging includes existing third-party notices. Developer ID signing/notarization is not implemented.
 
-The first activation needs this matching UI/AppServer pair, for example the user-run `mise run run` development handoff. Older installed versions without an updater cannot discover/install this feature themselves. Subsequent releases use the sidebar action. Access to the private release repository requires existing Canban GitHub sign-in and installation access to that repository; check failures are inspectable in Settings. No credentials are included in artifacts or diagnostics.
+The first activation needs this matching UI/AppServer pair. Development uses `mise run dev`, which now derives an isolated checkout/branch home and disables channel updates; it does not replace the installed `~/.canban` service. Installed-home activation still requires a matching service handoff. Merely replacing or opening an App bundle does not replace an already answering old AppServer; a startup error is now visible. See [the external-installation gap](instance-isolation.md#g8-external-installation-does-not-perform-the-in-app-service-handoff). Older installed versions without an updater cannot discover/install this feature themselves. Subsequent installed releases use the sidebar action. Access to the private release repository requires existing Canban GitHub sign-in and installation access to that repository; check failures are inspectable in Settings. No credentials are included in artifacts or diagnostics.
 
 An interrupted install is recovered using the saved detached worker, with a single recovery owner. A `manual_recovery` journal is never automatically retried. The standalone Recovery window displays the error/log location and opens the update directory without connecting to AppServer or opening SQLite. After fixing the reported cause, use the token from `install.json` to retry the saved worker:
 

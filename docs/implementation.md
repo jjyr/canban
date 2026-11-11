@@ -7,8 +7,9 @@ Current runtime update (2026-11-09): [Event-driven runtime observation](runtime-
 [Unified Card reminders](reminders.md) (2026-11-10) defines the current unread /
 pending counts, persistent visible-read positions, Overview updates and local
 notification sounds. Current builds use SQLite schema 10 and desktop API version 8 (reminders introduced level 6; the merged GitHub/editor/updater contract uses level 8). Upgrade
-the running AppServer together with the UI; `mise run run` performs the normal
-development handoff. Existing history is baselined quietly during migration.
+the installed AppServer together with its UI. `mise run dev` (also `mise run run`)
+now manages a separate checkout/branch instance; it does not upgrade installed
+`~/.canban`. Existing history is baselined quietly during migration.
 
 [Compact navigation and Quick Open](quick-open-and-navigation.md) covers the implemented icon rail, Command+O fuzzy destination picker and native interaction checks.
 
@@ -27,11 +28,11 @@ The [GitHub workspace and cache](github-workspace.md) extends the integration wi
 Use the pinned mise Rust toolchain. NSH 0.4.0 is pinned to aca7b8f92a33af9d83c3693a516f649f7ea5c5e5 in Cargo.toml and Cargo.lock. Install macOS Xcode command-line tools, librsvg (`brew install librsvg`, for app icon generation) and a compatible hc separately. This implementation was verified with hc 0.1.18 and Codex CLI 0.166.0.
 
 ```sh
-mise run build
-mise run run
+mise run dev
+mise run dev-stop
 ```
 
-Build creates target/debug/canban, target/debug/canban-ui, target/debug/canban-updater and a local .local/Canban.app containing all three executables. `mise run run` then packages `.local/CanbanDev.app`, restarts the selected home's AppServer with that build and opens the separate development UI. It defaults to the existing `~/.canban` data, preserving Herdr terminals; see [development startup](development-startup.md). All bundle variants use ad-hoc signing after assembly, followed by strict/deep signature verification. This supports local Finder launches and moving a build to Applications; Developer ID signing/notarization remains separate distribution work. The Gallery is a separate development example: `mise run gallery` builds/opens `.local/CanbanGallery.app`. It is not part of the production window or its startup modes; it uses local fixtures without starting AppServer or reading application data. See [examples](../examples/README.md). Several UI clients can share an application home; a second AppServer is rejected while the first owns its service lock.
+`mise run build` creates target/debug/canban, target/debug/canban-ui, target/debug/canban-updater and an ordinary installable `.local/Canban.app`. `mise run dev` builds the binaries and starts a checkout/branch-scoped Dev App under `.local/dev/<label>-<hash>/`, with its own home, native ID, bundle binding and process records. `mise run dev-stop` gracefully stops only that instance; `mise run run` is the same isolated start entry. Explicit homes override branch selection, and installed `~/.canban` is refused by the development manager. See [development startup](development-startup.md) and [remaining gaps](instance-isolation.md). All bundles are ad-hoc signed after assembly and pass strict/deep verification. Developer ID signing/notarization remains separate distribution work. The standalone `mise run gallery` uses fixtures without AppServer/data. Several compatible UI clients may still attach to one service; a second AppServer cannot own the same home.
 
 All bundle variants generate the macOS app icon from [the original SVG](../crates/ui/assets/app-icon.svg), including standard and Retina sizes. Packaging installs `Contents/Resources/AppIcon.icns` and declares `CFBundleIconFile` before bundle signing. See [asset provenance and generation](../crates/ui/assets/README.md#app-icon). The release workflow installs librsvg; distributed apps need no SVG renderer at runtime.
 

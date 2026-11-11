@@ -26,7 +26,7 @@ class Packaging(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix="cb-package-regression-")
         self.addCleanup(directory.cleanup)
-        self.root = Path(directory.name)
+        self.root = Path(directory.name).resolve()
         (self.root / "scripts").mkdir()
         shutil.copy2(REPO / "scripts/package.py", self.root / "scripts/package.py")
         (self.root / "crates/ui").mkdir(parents=True)
@@ -41,13 +41,20 @@ class Packaging(unittest.TestCase):
                 shutil.copy2(self.executable, target / binary)
 
     def package(self, *args):
+        if '--dev' in args:
+            directory = self.root / '.local/dev/test'
+            descriptor = self.root / 'dev-instance.json'
+            import json
+            descriptor.write_text(json.dumps(dict(checkout=str(self.root), branch='fixture', key='test',
+                directory=str(directory), home=str(directory/'home'), app_id='com.canban.dev.test')))
+            args = (*args, '--dev-instance', str(descriptor))
         env = {k: v for k, v in os.environ.items()
                if k not in ("CANBAN_RELEASE_VERSION", "GITHUB_RUN_NUMBER")}
         subprocess.run([sys.executable, str(self.root / "scripts/package.py"), *args],
                        env=env, check=True, capture_output=True, text=True)
 
     def verify(self, name="Canban"):
-        bundle = self.root / ".local" / (name + ".app")
+        bundle = self.root / ('.local/dev/test/CanbanDev.app' if name == 'CanbanDev' else '.local/' + name + '.app')
         subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(bundle)],
                        check=True, capture_output=True, text=True)
         return bundle

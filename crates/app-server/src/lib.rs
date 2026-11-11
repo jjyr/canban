@@ -17,9 +17,12 @@ use std::{
 
 /// Increment when desktop clients need operations unavailable in older services.
 pub const API_VERSION: u32 = canban_updater::DESKTOP_API;
+pub mod instance;
 mod updates;
 
 pub struct AppServer {
+    _development: Option<instance::Registration>,
+    updates_disabled: bool,
     _service_lock: std::fs::File,
     utilities: utilities::Utilities,
     pub home: PathBuf,
@@ -200,6 +203,11 @@ fn enqueue(
 }
 impl AppServer {
     pub fn open(home: PathBuf, cli: PathBuf) -> Result<Arc<Self>> {
+        let development = instance::bundled()?;
+        if let Some(instance) = &development {
+            instance.check_home(&home)?;
+        }
+        let updates_disabled = development.is_some();
         let _startup = canban_updater::handoff::startup_guard(&home)?;
         let service_lock = canban_updater::service_lock(&home)?;
         let mut store = Store::open(&home)?;
@@ -317,6 +325,11 @@ impl AppServer {
         }
         Self::publish_migration(&home, migration)?;
         Ok(Arc::new(Self {
+            _development: development
+                .as_ref()
+                .map(|v| instance::register(v, "server"))
+                .transpose()?,
+            updates_disabled,
             _service_lock: service_lock,
             utilities: utilities::Utilities::new(&home),
             github_sync_due: AtomicBool::new(true),
@@ -550,6 +563,9 @@ mod terminals;
 pub fn default_home() -> Result<PathBuf> {
     if let Some(v) = std::env::var_os("CANBAN_HOME") {
         return Ok(v.into());
+    }
+    if let Some(instance) = instance::bundled()? {
+        return Ok(instance.home);
     }
     Ok(PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".canban"))
 }

@@ -37,7 +37,7 @@ Settings now occupies the last bottom utility button, beside the other global ut
 
 Caffeine holds a system-idle sleep assertion while allowing display sleep; its dedicated AppServer worker owns the guard, so closing the UI does not release it. It is off after AppServer restart.
 
-The later real-use failure was an older persistent AppServer returning `Unknown operation: utilities.state` to a new UI. Desktop startup now checks the API level before opening the workspace, and `mise run run` replaces the local service with the current build. See [development startup and upgrade acceptance](development-startup.md). Earlier fresh-service tests did not cover this upgrade scenario.
+The later real-use failure was an older persistent AppServer returning `Unknown operation: utilities.state` to a new UI. Desktop startup checks the API level before opening the workspace and now shows startup failures in a native window. `mise run dev` (also `mise run run`) replaces only its selected isolated development instance; it does not repair an older installed-home service. See [development startup and upgrade acceptance](development-startup.md). Earlier fresh-service tests did not cover this upgrade scenario.
 
 Report issue opens the repository's **Bug report** Issue Form directly, with public version/OS/architecture metadata prefilled in its editable Environment field. It does not submit an issue or require the Canban GitHub connection. Settings also offers Copy diagnostics with the same public metadata. Tokens, Terminal output and logs are not appended to the URL.
 

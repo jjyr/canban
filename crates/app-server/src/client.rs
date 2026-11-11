@@ -132,7 +132,8 @@ fn check_api(ping: &Value) -> Result<()> {
         ping["api_version"]
             .as_u64()
             .is_some_and(|v| v >= u64::from(API_VERSION)),
-        "The running AppServer is older than this UI. Use `mise run run` to restart the local service with the current development build. For CANBAN_ENDPOINT, update the service on its owning host."
+        "The running AppServer API ({}) is older than this UI (API {API_VERSION}). Update the service for the selected home using its matching installation. Development: use `mise run dev` for a separate instance. For CANBAN_ENDPOINT, update the service on its owning host.",
+        ping["api_version"]
     );
     Ok(())
 }

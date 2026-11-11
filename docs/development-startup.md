@@ -1,57 +1,198 @@
-# Development startup and service compatibility
+# Development instances and startup
 
-Implemented and verified on macOS, 2026-11-09.
+Status: implemented on macOS, 2026-11-11. Branch-scoped development startup
+supersedes the earlier default reuse of the installed `~/.canban` home.
 
-## Run the current development build
+## Start and stop
+
+Run these from the desired Git checkout:
 
 ```sh
-mise run run
+mise run dev
+mise run dev-stop
 ```
 
-The user selected the existing `~/.canban` home for development. Override it with an absolute `CANBAN_HOME` for disposable data. This command builds UI/CLI/updater, packages `.local/CanbanDev.app` (`com.canban.dev`), gracefully stops the selected home's AppServer through `app.shutdown`, waits for its service lock, starts the newly packaged CLI as AppServer, checks readiness/API/desktop utilities, then opens the development UI.
+`mise run run` uses the same entry point as `dev`. Start builds the UI/CLI/updater
+binaries and launches the selected instance in the background. Stop does not
+build anything. Repeating start gracefully replaces that instance's UI and
+AppServer, retaining its data. Repeating stop succeeds when it is already stopped.
+Neither command stops Herdr Core or its Agent/shell PTYs.
+
+By default the instance is selected by the canonical checkout path and current
+Git branch. Branch names are sanitized for display and combined with a hash of
+the original selection, so `feature/editor` and `feature-editor` do not collide.
+Different checkouts/worktrees also get different application identities.
 
 ```text
-mise run run
-  -> build current UI + CLI
-  -> close only the previously tracked development UI
-  -> app.shutdown -> wait for the service lock
-  -> start current canban serve -> verify its PID/API/utilities
-  -> open current CanbanDev UI
-              |
-       same ~/.canban records
-              |
-        same Herdr Core / Agent PTYs
+<checkout>/.local/dev/<branch-label>-<hash>/
+  instance.json             checkout, branch, home and application binding
+  control.lock              serializes start/stop for this instance
+  ui.json / server.json     PID, launch time, command and executable records
+  ui.lock                   one UI process per instance
+  CanbanDev.app/            unique signed bundle and macOS application ID
+  home/
+    canban.sqlite
+    app.sock
+    server.lock
+    .dev-owner.json         checkout/controller ownership
+    .dev-control.lock       coordinates controllers using this home
+    config/
+    server.log / ui.log
+    updates/
 ```
 
-The ordinary `.local/Canban.app` retains its own bundle identity, so macOS does not redirect a development launch into an older ordinary window. The runner records a development UI PID, start time and exact command in a home-keyed file under `.local/dev`; another run closes that process only if its identity still matches. The ordinary app is not force-closed. UI drafts/tab selection remain process-local, as before.
+Application display names include the branch. The generated bundle contains
+`Contents/Resources/dev-instance.json`, binding both its UI and CLI to its home
+and application identity. Opening that Dev App directly through Finder does not
+require shell environment variables. A missing or relocated development binding
+is rejected rather than falling back to the installed home; start the instance
+again to regenerate the correct bundle. Normal `.local/Canban.app` builds remain
+installation artifacts and are not branch-bound Dev Apps.
 
-Existing Core/terminal/provider bindings are recovered by the normal AppServer reconciliation. This does not migrate running worktrees or create replacement Agent sessions. Starting/uncertain launches retain the existing recovery policy. Closing or interrupting the development UI leaves AppServer running. Repeating the command uses the next build and replaces the managed development window/service again. Service effects already in progress are not forcibly killed; a shutdown/lock timeout fails the launch without deleting a socket or starting a second authority.
+## Switching branches and selecting another home
 
-`CANBAN_ENDPOINT` remains attach-only. The runner refuses to replace an explicitly selected endpoint; update that service on its owning host, or unset the endpoint to manage a local home. The ordinary UI/CLI can still connect explicitly.
-
-## API compatibility
-
-Desktop API level 8 combines GitHub workspace/source Cards, durable editor drafts and internal release discovery/install with build identity. The three development branches had independently selected level 7; the merged contract uses level 8. It includes durable reminders (level 6), saved last-Project/partial preferences (level 5), Board ordering (level 4), Profile-only selection (level 3) and named themes (level 2). `app.ping` reports `api_version`, process `pid`, package `version`, `home` and release `build` identity. UI startup requires its desktop API before opening a workspace. An older service, even with the same `0.1.0` package version, produces a startup error pointing to the development launch command. The runner derives its required API from the just-packaged CLI's `build-info`, avoiding a second hardcoded API constant.
-
-The development runner always replaces the service, even when its API/package version matches. PID verification establishes that it reached the process it just launched from the newly packaged executable. API level is a compatibility contract, not a source/build fingerprint; increase it when new desktop operations become required.
-
-## Acceptance
+Switching Git branches selects another instance; it does not stop the previous
+branch. To stop it after switching, or stop all instances of this checkout:
 
 ```sh
-mise run acceptance-dev
+mise run dev-stop -- --branch feature/editor
+mise run dev-stop -- --all
 ```
 
-The regression suite creates a temporary home and isolated Core, opens one real shell PTY, changes Theme, and replaces the service. It checks that preferences, saved Core/terminal binding and the PTY process survive. It then replaces a simulated older ping/shutdown-only service with the current one and verifies desktop utilities work. An explicit endpoint is rejected without changing its running PID. No paid Agent is launched. The suite stops only its scratch AppServer/Core.
+`--all` enumerates only this checkout's recorded instances. It leaves other
+checkouts and installed applications alone, and reports individual refusals
+while attempting the other instances. It ignores the environment's home
+selection; an explicit `--home` cannot be combined with `--all`.
 
-Executed evidence: `/private/tmp/cb-dev-start-b9m0ezgg/results.json` and `acceptance.log`. Workspace tests passed (116), including rejection of an old service with a matching package version, numeric branch/path collision handling and exact restoration of a legacy UUID worktree/branch. Workspace/all-target Clippy passed with warnings denied.
+For a custom development home, use the same selection for start and stop:
 
-After the user selected reuse of existing data, `mise run run` was also executed twice against `~/.canban`. The second run closed the tracked development UI and started a new AppServer PID. Native Theme changed to Dark/Forest and remained selected after that repeated launch; System/Canban was restored afterward. Existing execution Core/terminal identities matched the pre-restart snapshot. Evidence: `/private/tmp/canban-before-dev-run.json` and `/private/tmp/canban-live-dev-results.json`. The development UI/service remain available for use.
+```sh
+CANBAN_HOME=/absolute/path/dev-a mise run dev
+CANBAN_HOME=/absolute/path/dev-a mise run dev-stop
+# Equivalent explicit argument:
+mise run dev -- --home /absolute/path/dev-a
+mise run dev-stop -- --home /absolute/path/dev-a
+```
 
-## Readable workspaces
+An explicit home takes precedence over branch selection, so switching branches
+while retaining that home selects/restarts the same instance. `--home` takes
+precedence over `CANBAN_HOME`; `--branch` cannot be combined with either to avoid
+ambiguous stop targets. Custom paths are expanded and normalized. The installed
+`~/.canban`, including a symlink resolving to it, is refused by development
+commands. They do not adopt an already running, unrecorded AppServer.
 
-New Card #42 in directory `canban`, with Project ID beginning `4e5r`, uses branch `canban-4e5r/42` and `~/.canban/worktrees/canban-4e5r/42`. The Project display name and Card title do not affect these names. Normalization supports multilingual directory names. Conflicting branch/path names choose matching suffixes such as `42-2`; namespace conflicts choose `canban-4e5r-2/42`. Existing saved branches and UUID/numeric/readable directories remain unchanged, including Archive/Resume restoration. See [workspace naming and lifecycle](workspace-and-scheduling.md#readable-workspace-names).
+Detached HEAD uses `detached-<commit>` as its branch label. Renaming a branch or
+moving a checkout changes its automatic instance selection; old data is retained,
+never automatically moved/deleted. The macOS Unix socket path must fit its native
+length limit; a long checkout path produces an actionable error asking for a
+shorter explicit home.
 
+## Ownership and shutdown
 
-## Update-aware startup verification (2026-11-10)
+```text
+select checkout + branch (or explicit home)
+  -> acquire instance/home controller locks
+  -> validate recorded processes and current socket owner
+  -> ask this UI to quit normally and flush pending drafts
+  -> app.shutdown(expected_pid) -> wait for server.lock release
+  -> package the matching instance bundle
+  -> start AppServer -> verify PID/home/build/update policy
+  -> start UI -> wait for its rendered-frame readiness record
+```
 
-`mise run acceptance-dev` passed with desktop API 7: `/private/tmp/cb-dev-start-npf7kzjq/results.json`. It preserved Theme and the exact live PTY through current/legacy service replacement and rejected explicit endpoint takeover. Service shutdown is established by release of `server.lock`; a process can exit before its accept thread removes the stale socket path. New startup holds the service lock before opening SQLite. Internal upgrade fencing/recovery additionally runs before database access; see [updates](updates.md). This verification used an isolated home/Core, not the user's existing data.
+Stop performs the shutdown half only. Before signalling a UI or shutting down a
+service, it checks the recorded process's launch time, complete command,
+executable path and PID; it also verifies the responding AppServer's home/PID.
+A stale/reused PID or an unrecorded service does not authorize termination.
+`app.shutdown` checks the expected PID again at the receiver. A timeout reports
+failure and does not force-kill a process or unlink a live socket. Successful
+stop removes only process records; homes, configuration, databases and bundles
+remain available. A Finder-launched bound UI/AppServer writes the same records,
+so it is stoppable through the development command too.
+
+The desktop translates SIGTERM/SIGINT into normal AppKit quit, returns from its
+native loop and flushes the draft writer before releasing its process record.
+AppServer shutdown remains RPC-driven. No global process-name kill is used.
+
+`CANBAN_ENDPOINT` is attach-only: development management commands reject it.
+An ordinary UI/CLI may explicitly attach to an existing endpoint, but an
+unrelated local home variable does not isolate the remote service's data.
+A bound Dev App refuses an endpoint override that would escape its instance.
+
+## Updates, compatibility and startup failures
+
+Generated development bundles disable channel release discovery and installation
+in AppServer, including manual check/install RPCs. Settings explains this policy
+and disables the update action. Rebuild with `mise run dev` to update the dev
+instance. Intentional `CANBAN_UPDATE_*` fixture settings are preserved, while
+inherited Agent/session/endpoint bindings are removed from child environments.
+The ordinary installed application's update behavior is unchanged.
+
+Managed startup verifies the newly launched server PID, canonical home, complete
+build metadata and development update policy. Packaged UI/CLI/updater ship
+together. Desktop API compatibility remains a separate contract; the generic
+attached client still uses its minimum-API check, not a complete negotiated
+compatibility range.
+
+Startup failures now open a standalone native error window with the selected
+home and the actual connection/configuration error. This works before AppServer
+connection and does not require opening SQLite. The Gallery has a
+`CANBAN_GALLERY_SCENE=startup-error` scene using the production surface.
+
+Starting an isolated dev instance does not upgrade or repair an older service
+already running for installed `~/.canban`. The user selected the existing in-app
+updater as the installed-version upgrade path; automatic external-installation
+handoff is deferred. Multi-client upgrade coordination remains tracked in
+[instance isolation and remaining gaps](instance-isolation.md).
+
+Herdr Core may be shared by ordinary development instances for now. It is chosen
+through `hc_session` and `hc_env` in each home's `config/agents.json`; a new Canban
+home does not itself isolate Core. Acceptance still configures a separate Core
+before launching fixtures and never touches the user's live runtime.
+
+## Verification
+
+```sh
+mise run test-dev
+mise run test-package
+mise run acceptance-dev
+# Optional native inspection; follow the printed continue-marker instructions:
+mise run acceptance-dev -- --native
+```
+
+Selection tests cover checkout/branch identity, sanitization collisions,
+detached HEAD, explicit homes, installed-home refusal, socket path limits and
+child environment policy. Packaging tests use real Mach-O fixtures and signature
+verification, including branch-bound Dev App assembly.
+
+The acceptance suite creates disposable Git checkouts and isolated homes/Core.
+It exercises concurrent branches and checkouts, repeated restart/stop, targeted
+branch stop, checkout-scoped `--all`, a home override after switching branches,
+refusal of foreign/reused process records and unrecorded services, disabled
+updates, and exact PTY/configuration preservation. It starts no paid Agents.
+Native mode additionally opens separate real Dev Apps and stops their UI
+processes through the same controller.
+
+Executed 2026-11-11 from the uncommitted tree based on `e6eb1a8`: build, 208 Rust
+tests, workspace/all-target Clippy with warnings denied, three selection tests,
+three packaging tests and standard acceptance passed. The expanded native
+matrix passed at `/private/tmp/cbd-h3c52zul/results.json`, including simultaneous
+start serialization, foreign-checkout home refusal and Finder reopening after
+both UI and AppServer stopped. Earlier native inspection at
+`/private/tmp/cbd-8t9i7r62` verified separate main/feature windows, each home in
+Settings, disabled channel updates and reopening without a shell home override.
+`/private/tmp/cb-startup-9q9nwd5g/results.json` records the real packaged
+API-4/API-8 failure window: only ping requests reached the disposable service,
+SQLite was never opened, and the Quit control closed the window. Production
+Gallery scenes `startup-error` and `updates-disabled` were inspected natively.
+Actual `mise run dev -- --no-ui` / `dev-stop` commands also passed against an
+explicit disposable home; all fixture services/Core were stopped. Logs are
+`/private/tmp/canban-branch-dev-*.log`. No installed-home handoff, paid Agent run
+or multi-client channel upgrade was performed.
+
+Historical 2026-11-09/10 single-home handoff acceptance verified explicit live-data
+reuse and PTY preservation under the earlier launcher. Those runs are not the
+current default, nor proof of current process state. Their recorded evidence
+remains `/private/tmp/cb-dev-start-b9m0ezgg`,
+`/private/tmp/cb-dev-start-npf7kzjq`, `/private/tmp/canban-before-dev-run.json` and
+`/private/tmp/canban-live-dev-results.json`.
