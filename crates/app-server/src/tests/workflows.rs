@@ -710,3 +710,184 @@ fn edited_default_yaml_owns_callback_snapshots_instead_of_historical_stage_field
     finish(&app, &request, "edited-default-complete");
     assert!(app.snapshot().unwrap().cards[0].human_gate.is_none());
 }
+
+#[test]
+fn custom_columns_auto_merge_hold_external_pr_and_rework_feedback() {
+    let (_dir, app, p, c) = setup();
+    let before = collection(&app, &p);
+    let custom_yaml = format!(
+        r#"schema: 1
+id: delivery:{}
+name: Custom 4-Column Auto-merge
+columns:
+  - id: backlog
+    name: Backlog
+  - id: design
+    name: Design
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: condition:external_pr
+    match:
+      column: review
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the task
+    next: move:develop
+  - id: move:develop
+    uses: card.move
+    with:
+      column: review
+    next: condition:external_pr
+  - id: condition:external_pr
+    uses: condition
+    with:
+      pointer: /card/source_trust
+      equals: external_pr
+      then: approval:review
+      otherwise: deliver:review
+  - id: deliver:review
+    uses: deliver
+    next: __end
+    on_changes_requested: agent:develop
+  - id: approval:review
+    uses: approval
+    with:
+      title: External PR requires human review
+    next: __end
+    on_changes_requested: agent:develop
+  - id: __end
+    uses: complete
+workspace:
+  create_worktree: false
+  sync_base: false
+"#,
+        p.id
+    );
+    app.call(
+        "workflow.apply",
+        json!({
+            "project_id": p.id,
+            "revision": before["revision"],
+            "sources": [{"filename": "development.yaml", "source": custom_yaml}]
+        }),
+    )
+    .unwrap();
+
+    // Verify 4 columns synchronized to Project stages
+    let snap = app.snapshot().unwrap();
+    let stage_ids: Vec<_> = snap.projects[0]
+        .workflow
+        .stages
+        .iter()
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(stage_ids, vec!["backlog", "design", "develop", "review"]);
+
+    // Hold auto-merge on Card #1 before moving to develop
+    let held: Card = serde_json::from_value(
+        app.call(
+            "card.hold_auto_merge",
+            json!({"card_id": c.id, "revision": c.revision, "hold": true}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(held.hold_auto_merge);
+
+    // Move to develop -> agent:develop runs -> moves to review -> pauses at deliver:review because hold_auto_merge is true
+    app.call(
+        "card.move",
+        json!({"card_id": c.id, "revision": held.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let req1 = app.snapshot().unwrap().requests[0].clone();
+    finish(&app, &req1, "dev-1");
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.cards[0].stage, "review");
+    assert_eq!(snap.workflow_runs[0].state, "waiting_approval");
+    assert_eq!(
+        snap.workflow_runs[0].step.as_deref(),
+        Some("deliver:review")
+    );
+
+    // Request changes with rework feedback -> returns to agent:develop with feedback in instruction
+    let run = snap.workflow_runs[0].clone();
+    let card_rev = snap.cards[0].revision;
+    app.call(
+        "workflow.decide",
+        json!({
+            "run_id": run.id,
+            "visit": run.visit,
+            "revision": card_rev,
+            "decision": "rework",
+            "feedback": "Please add edge-case unit tests"
+        }),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let req2 = snap.requests.last().unwrap().clone();
+    assert!(req2.instruction.contains("Please add edge-case unit tests"));
+
+    // Unhold auto-merge while agent works, then finish -> auto-merges / completes!
+    let card_rev = snap.cards[0].revision;
+    app.call(
+        "card.hold_auto_merge",
+        json!({"card_id": c.id, "revision": card_rev, "hold": false}),
+    )
+    .unwrap();
+    finish(&app, &req2, "dev-2");
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.workflow_runs[0].state, "completed");
+
+    // Verify external PR card pauses at approval:review even when auto-merge is not held
+    let ext_card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "External PR card"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut ec: Card = db.get(&ext_card.id)?;
+            ec.source_trust = Some("external_pr".into());
+            db.save(&ec)
+        })
+        .unwrap();
+    let ext_card = app
+        .snapshot()
+        .unwrap()
+        .cards
+        .into_iter()
+        .find(|x| x.id == ext_card.id)
+        .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": ext_card.id, "revision": ext_card.revision, "stage": "review"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let ext_run = snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == ext_card.id)
+        .unwrap();
+    assert_eq!(ext_run.state, "waiting_approval");
+    assert_eq!(ext_run.step.as_deref(), Some("approval:review"));
+}

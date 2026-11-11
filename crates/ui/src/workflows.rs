@@ -57,6 +57,9 @@ impl Draft {
 pub struct State {
     pub drafts: Signal<BTreeMap<String, Draft>>,
     pub selected: Signal<String>,
+    pub mode: Signal<String>,
+    pub selected_step: Signal<String>,
+    pub new_column_name: Signal<String>,
     pub error: Signal<String>,
     pub latest: Signal<Value>,
     pub agent: Signal<bool>,
@@ -75,6 +78,9 @@ impl State {
         Self {
             drafts: signal(BTreeMap::new()),
             selected: signal(String::new()),
+            mode: signal("visual".into()),
+            selected_step: signal(String::new()),
+            new_column_name: signal(String::new()),
             error: signal(String::new()),
             latest: signal(Value::Null),
             agent: signal(false),
@@ -358,6 +364,21 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             .child(view().flex_1().min_w(px(0.)).min_h(px(0.)).gap_2()
                 .child(view().flex_row().items_center().gap_2()
                     .child(label(move || state.selected.get()).truncate().min_w(px(0.)).flex_1())
+                    .child(
+                        segmented()
+                            .child(segment(
+                                "Visual Studio",
+                                Some(Icon::Trigger),
+                                move || state.mode.get() != "yaml",
+                                move |_| state.mode.set("visual".into()),
+                            ))
+                            .child(segment(
+                                "YAML Source",
+                                Some(Icon::Edit),
+                                move || state.mode.get() == "yaml",
+                                move |_| state.mode.set("yaml".into()),
+                            )),
+                    )
                     .child(chrome_button_disabled(Icon::History, "Workflow history", move || {
                         let project = ui.project.get(); let name = state.selected.get();
                         !state.drafts.with(|d| d.get(&project).and_then(|d| d.base["sources"].as_array()).is_some_and(|rows| rows.iter().any(|r| r["filename"] == name && r["active"]["revision"].as_u64().is_some_and(|v| v > 0))))
@@ -368,7 +389,13 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     .child(view().h(px(150.)).bg(INSET).rounded(px(RADIUS)).p_2().child(
                         nsh_base::editor().value(move || Some(state.latest.with(|v| v["sources"].as_array().into_iter().flatten().find(|f| f["filename"] == state.selected.get()).and_then(|f| f["source"].as_str()).unwrap_or("# This source is absent from the latest saved collection.").to_owned()).into()))
                             .language(Some("yaml".into())).read_only(true).soft_wrap(true).line_numbers(false).folding(false).accessibility_label("Latest saved Workflow YAML").size_full()))))
-                .child(dynamic(move || source_editor(ui)))
+                .child(dynamic(move || {
+                    if state.mode.get() == "yaml" || !state.latest.get().is_null() {
+                        source_editor(ui)
+                    } else {
+                        visual_studio(ui)
+                    }
+                }))
                 .child(view().flex_row().justify_end().child(action("Save", Variant::Primary, move |_| save(ui)).disabled(move || ui.pending.get() || state.loading.get() || !apply.get())))))
         .child(when(move || state.agent.get(), move || agent_panel(ui)))
         .child(when(move || state.history_open.get(), move || history_panel(ui)))
@@ -396,6 +423,726 @@ fn new_workflow(ui: Ui) {
     });
     state.selected.set(name);
 }
+fn update_doc(ui: Ui, mutate: impl FnOnce(&mut canban_workflow_engine::source::Document)) {
+    let state = ui.workflows;
+    let project = ui.project.get_untracked();
+    let name = state.selected.get_untracked();
+    let Some(raw) = state
+        .drafts
+        .with_untracked(|d| d.get(&project).and_then(|d| d.sources.get(&name)).cloned())
+    else {
+        return;
+    };
+    let Ok(mut doc) = canban_workflow_engine::source::parse(&raw) else {
+        return;
+    };
+    mutate(&mut doc);
+    if let Ok(encoded) = canban_workflow_engine::source::encode(&doc) {
+        state.drafts.update(|d| {
+            if let Some(d) = d.get_mut(&project) {
+                d.sources.insert(name, encoded);
+            }
+        });
+    }
+}
+
+fn visual_studio(ui: Ui) -> AnyElement {
+    use canban_workflow_engine::source::{
+        self, default_step_prompt, is_default_step_prompt,
+    };
+    let state = ui.workflows;
+    let name = state.selected.get();
+    let project = ui.project.get();
+    if name.is_empty() {
+        return view()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .child(muted("Choose or create a workflow"))
+            .into_element();
+    }
+    let raw = state
+        .drafts
+        .with(|d| d.get(&project).and_then(|d| d.sources.get(&name)).cloned())
+        .unwrap_or_default();
+    let doc = match source::parse(&raw) {
+        Ok(doc) => doc,
+        Err(err) => {
+            return view()
+                .flex_1()
+                .min_h(px(0.))
+                .gap_3()
+                .child(notice(
+                    format!("YAML syntax or schema error: {err}. Switch to YAML Source to fix it."),
+                    Tone::Danger,
+                ))
+                .child(source_editor(ui))
+                .into_element();
+        }
+    };
+    let policy = source::detect_policy(&doc);
+    let current_policy = policy.clone().unwrap_or_default();
+    let is_custom = policy.is_none();
+
+    let effective_columns = if !doc.columns.is_empty() {
+        doc.columns.clone()
+    } else {
+        ui.current_project()
+            .map(|p| {
+                p.workflow
+                    .stages
+                    .iter()
+                    .map(|s| canban_types::WorkflowColumn {
+                        id: s.id.clone(),
+                        name: s.name.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| {
+                vec![
+                    canban_types::WorkflowColumn {
+                        id: "backlog".into(),
+                        name: "Backlog".into(),
+                    },
+                    canban_types::WorkflowColumn {
+                        id: "develop".into(),
+                        name: "Develop".into(),
+                    },
+                    canban_types::WorkflowColumn {
+                        id: "review".into(),
+                        name: "Review".into(),
+                    },
+                ]
+            })
+    };
+
+    let visible_steps: Vec<_> = doc
+        .steps
+        .iter()
+        .filter(|s| s.uses != "complete")
+        .cloned()
+        .collect();
+    let active_step_id = {
+        let current = state.selected_step.get();
+        if visible_steps.iter().any(|s| s.id == current) {
+            current
+        } else {
+            visible_steps
+                .iter()
+                .find(|s| s.uses == "agent")
+                .or_else(|| visible_steps.first())
+                .map(|s| s.id.clone())
+                .unwrap_or_default()
+        }
+    };
+
+    // 1. Guided Agent Callout Banner
+    let banner = view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .p_3()
+        .rounded(px(RADIUS))
+        .bg(INSET)
+        .border_1()
+        .border_color(BORDER)
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .min_w(px(0.))
+                .flex_1()
+                .child(icon(Icon::Agent))
+                .child(
+                    view()
+                        .gap_1()
+                        .min_w(px(0.))
+                        .flex_1()
+                        .child(
+                            label("Need a custom multi-column flow or special PR automation?")
+                                .font_weight(FontWeight::MEDIUM),
+                        )
+                        .child(muted(
+                            "Use Edit with agent to let an Agent inspect your Project, guide you through workflow design, and validate & apply the YAML.",
+                        )),
+                ),
+        )
+        .child(compact_action(
+            "Ask Agent to design…",
+            Variant::Secondary,
+            move |_| edit_agent(ui),
+        ));
+
+    // 2. Built-in Policy Bar
+    let p_plan1 = current_policy.clone();
+    let p_plan2 = current_policy.clone();
+    let p_plan3 = current_policy.clone();
+    let p_del1 = current_policy.clone();
+    let p_del2 = current_policy.clone();
+    let p_ext1 = current_policy.clone();
+    let p_ext2 = current_policy.clone();
+    let p_ext3 = current_policy.clone();
+
+    let policy_section = panel()
+        .gap_3()
+        .border_1()
+        .border_color(BORDER)
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .gap_1()
+                        .child(label("Built-in Workflow Policies").font_weight(FontWeight::SEMIBOLD))
+                        .child(muted(
+                            "Choose high-level delivery & external PR rules without editing raw YAML. Per-step prompt customizations are preserved.",
+                        )),
+                )
+                .child(status(
+                    if is_custom {
+                        "Custom Flow"
+                    } else {
+                        "Standard Policy"
+                    },
+                    if is_custom {
+                        Tone::Attention
+                    } else {
+                        Tone::Info
+                    },
+                )),
+        )
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .gap_4()
+                .child(
+                    view()
+                        .gap_1()
+                        .child(label("1. Planning (Backlog)"))
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap_1()
+                                .child(compact_action(
+                                    "Manual",
+                                    if !is_custom && current_policy.planning == "manual" {
+                                        Variant::Primary
+                                    } else {
+                                        Variant::Secondary
+                                    },
+                                    move |_| {
+                                        let mut next = p_plan1.clone();
+                                        next.planning = "manual".into();
+                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                    },
+                                ))
+                                .child(compact_action(
+                                    "Auto-plan (Confirm)",
+                                    if !is_custom && current_policy.planning == "confirm" {
+                                        Variant::Primary
+                                    } else {
+                                        Variant::Secondary
+                                    },
+                                    move |_| {
+                                        let mut next = p_plan2.clone();
+                                        next.planning = "confirm".into();
+                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                    },
+                                ))
+                                .child(compact_action(
+                                    "Auto-plan & Develop",
+                                    if !is_custom && current_policy.planning == "auto" {
+                                        Variant::Primary
+                                    } else {
+                                        Variant::Secondary
+                                    },
+                                    move |_| {
+                                        let mut next = p_plan3.clone();
+                                        next.planning = "auto".into();
+                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                    },
+                                )),
+                        ),
+                )
+                .child(
+                    view()
+                        .gap_1()
+                        .child(label("2. Review & Delivery"))
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap_1()
+                                .child(compact_action(
+                                    "Human Review",
+                                    if !is_custom && current_policy.delivery == "human_review" {
+                                        Variant::Primary
+                                    } else {
+                                        Variant::Secondary
+                                    },
+                                    move |_| {
+                                        let mut next = p_del1.clone();
+                                        next.delivery = "human_review".into();
+                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                    },
+                                ))
+                                .child(compact_action(
+                                    "Auto-merge Queue",
+                                    if !is_custom && current_policy.delivery == "auto_merge" {
+                                        Variant::Primary
+                                    } else {
+                                        Variant::Secondary
+                                    },
+                                    move |_| {
+                                        let mut next = p_del2.clone();
+                                        next.delivery = "auto_merge".into();
+                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                    },
+                                )),
+                        ),
+                )
+                .child(
+                    view()
+                        .gap_1()
+                        .child(label("3. External PR Rule"))
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap_1()
+                                .child(compact_action(
+                                    "Require Human Review",
+                                    if !is_custom && current_policy.external_pr == "require_review" {
+                                        Variant::Primary
+                                    } else {
+                                        Variant::Secondary
+                                    },
+                                    move |_| {
+                                        let mut next = p_ext1.clone();
+                                        next.external_pr = "require_review".into();
+                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                    },
+                                ))
+                                .child(compact_action(
+                                    "Same as Internal",
+                                    if !is_custom && current_policy.external_pr == "same" {
+                                        Variant::Primary
+                                    } else {
+                                        Variant::Secondary
+                                    },
+                                    move |_| {
+                                        let mut next = p_ext2.clone();
+                                        next.external_pr = "same".into();
+                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                    },
+                                ))
+                                .child(compact_action(
+                                    "Manual Only",
+                                    if !is_custom && current_policy.external_pr == "manual_only" {
+                                        Variant::Primary
+                                    } else {
+                                        Variant::Secondary
+                                    },
+                                    move |_| {
+                                        let mut next = p_ext3.clone();
+                                        next.external_pr = "manual_only".into();
+                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                    },
+                                )),
+                        ),
+                ),
+        );
+
+    // 3. Visual Pipeline & Board Columns
+    let mut columns_row = view().flex_row().flex_wrap().items_center().gap_2();
+    let cols_snapshot = effective_columns.clone();
+    for (idx, col) in effective_columns.iter().enumerate() {
+        if idx > 0 {
+            columns_row = columns_row.child(muted("→"));
+        }
+        let col_id = col.id.clone();
+        let col_name = col.name.clone();
+        let can_remove = effective_columns.len() > 1
+            && !matches!(col_id.as_str(), "backlog" | "develop" | "review");
+        let cols_for_remove = cols_snapshot.clone();
+        let mut chip = view()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded(px(6.))
+            .bg(INSET)
+            .border_1()
+            .border_color(BORDER)
+            .child(label(format!("{} ({})", col_name, col_id)));
+        if can_remove {
+            let remove_id = col_id.clone();
+            chip = chip.child(compact_action("×", Variant::Quiet, move |_| {
+                let remaining: Vec<_> = cols_for_remove
+                    .iter()
+                    .filter(|c| c.id != remove_id)
+                    .cloned()
+                    .collect();
+                update_doc(ui, |d| {
+                    d.columns = remaining;
+                });
+            }));
+        }
+        columns_row = columns_row.child(chip);
+    }
+    let cols_for_add = cols_snapshot;
+    let add_col_row = view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_2()
+        .child(columns_row)
+        .child(
+            field(state.new_column_name, "Add column (e.g. QA)…")
+                .w(px(180.)),
+        )
+        .child(compact_action("+ Add column", Variant::Secondary, move |_| {
+            let raw_name = state.new_column_name.get_untracked();
+            let title = raw_name.trim().to_owned();
+            if title.is_empty() {
+                return;
+            }
+            let slug: String = title
+                .to_ascii_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>()
+                .trim_matches('_')
+                .to_owned();
+            if slug.is_empty() || cols_for_add.iter().any(|c| c.id == slug) {
+                return;
+            }
+            let mut updated_cols = cols_for_add.clone();
+            // Insert before review if review exists, else at the end
+            if let Some(pos) = updated_cols.iter().position(|c| c.id == "review") {
+                updated_cols.insert(
+                    pos,
+                    canban_types::WorkflowColumn {
+                        id: slug,
+                        name: title,
+                    },
+                );
+            } else {
+                updated_cols.push(canban_types::WorkflowColumn {
+                    id: slug,
+                    name: title,
+                });
+            }
+            state.new_column_name.set(String::new());
+            update_doc(ui, |d| {
+                d.columns = updated_cols;
+            });
+        }));
+
+    let mut steps_flow = view().flex_row().flex_wrap().items_center().gap_2();
+    for (idx, step) in visible_steps.iter().enumerate() {
+        if idx > 0 {
+            steps_flow = steps_flow.child(muted("→"));
+        }
+        let step_id = step.id.clone();
+        let selected_id = active_step_id.clone();
+        let title = step.name.clone().unwrap_or_else(|| step.id.clone());
+        let subtitle = match step.uses.as_str() {
+            "agent" => {
+                let prof = step
+                    .with
+                    .get("profile")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("default");
+                let instr = step
+                    .with
+                    .get("instruction")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let customized = !is_default_step_prompt(&step.id, Some(prof), instr);
+                format!(
+                    "@{} · {}",
+                    prof,
+                    if customized {
+                        "Custom prompt"
+                    } else {
+                        "Default prompt"
+                    }
+                )
+            }
+            "card.move" => format!(
+                "Move → {}",
+                step.with
+                    .get("column")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("column")
+            ),
+            "approval" => "Human approval gate".into(),
+            "deliver" | "card.deliver" => "Auto-merge queue (unless held)".into(),
+            "condition" => format!(
+                "If {} == {}",
+                step.with
+                    .get("pointer")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+                step.with.get("equals").unwrap_or(&Value::Null)
+            ),
+            other => other.to_owned(),
+        };
+        let is_selected = step_id == selected_id;
+        let click_id = step_id.clone();
+        steps_flow = steps_flow.child(
+            nsh_base::button()
+                .p_3()
+                .gap_1()
+                .rounded(px(RADIUS))
+                .bg(if is_selected { SELECTED } else { INSET })
+                .border_1()
+                .border_color(if is_selected { ACCENT } else { BORDER })
+                .hover(|s| s.border_color(ACCENT))
+                .on_press(move |_: &()| state.selected_step.set(click_id.clone()))
+                .child(label(title).font_weight(FontWeight::SEMIBOLD))
+                .child(muted(subtitle)),
+        );
+    }
+
+    let pipeline_section = panel()
+        .gap_3()
+        .border_1()
+        .border_color(BORDER)
+        .child(
+            view()
+                .gap_1()
+                .child(label("Board Columns & Visual Pipeline").font_weight(FontWeight::SEMIBOLD))
+                .child(muted(
+                    "Define 3, 4, or more Board columns and click any step below to customize its Agent Profile or Prompt.",
+                )),
+        )
+        .child(add_col_row)
+        .child(steps_flow);
+
+    // 4. Step Prompt & Profile Inspector (in the same window!)
+    let inspector = if let Some(step) = visible_steps.iter().find(|s| s.id == active_step_id) {
+        let step_id = step.id.clone();
+        let step_title = step.name.clone().unwrap_or_else(|| step.id.clone());
+        match step.uses.as_str() {
+            "agent" => {
+                let current_profile = step
+                    .with
+                    .get("profile")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("developer")
+                    .to_owned();
+                let current_instruction = step
+                    .with
+                    .get("instruction")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                let default_prompt = default_step_prompt(&step_id, Some(&current_profile));
+                let is_default =
+                    is_default_step_prompt(&step_id, Some(&current_profile), &current_instruction);
+
+                let prompt_sig = signal(current_instruction.clone());
+                let step_for_effect = step_id.clone();
+                effect(move || {
+                    let val = prompt_sig.get();
+                    if val != current_instruction {
+                        let target_id = step_for_effect.clone();
+                        update_doc(ui, |d| {
+                            if let Some(s) = d.steps.iter_mut().find(|s| s.id == target_id) {
+                                s.with.insert("instruction".into(), json!(val));
+                            }
+                        });
+                    }
+                });
+
+                let step_for_reset = step_id.clone();
+                let step_for_prof = step_id.clone();
+                let active_prof = current_profile.clone();
+                let prompt_editor = canban_ui_kit::markdown::MarkdownInput::new();
+
+                panel()
+                    .gap_3()
+                    .border_1()
+                    .border_color(BORDER)
+                    .child(
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        label(format!("Step Prompt & Agent · {step_title} ({step_id})"))
+                                            .font_weight(FontWeight::SEMIBOLD),
+                                    )
+                                    .child(status(
+                                        if is_default {
+                                            "Default prompt"
+                                        } else {
+                                            "Customized prompt"
+                                        },
+                                        if is_default {
+                                            Tone::Neutral
+                                        } else {
+                                            Tone::Info
+                                        },
+                                    )),
+                            )
+                            .child(when(
+                                move || !is_default,
+                                move || {
+                                    let reset_id = step_for_reset.clone();
+                                    compact_action(
+                                        "Reset to default prompt",
+                                        Variant::Secondary,
+                                        move |_| {
+                                            let def =
+                                                default_step_prompt(&reset_id, None).to_owned();
+                                            prompt_sig.set(def.clone());
+                                            let target = reset_id.clone();
+                                            update_doc(ui, |d| {
+                                                if let Some(s) =
+                                                    d.steps.iter_mut().find(|s| s.id == target)
+                                                {
+                                                    s.with.insert("instruction".into(), json!(def));
+                                                }
+                                            });
+                                        },
+                                    )
+                                },
+                            )),
+                    )
+                    .child(
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(muted("Agent Profile:"))
+                            .child(each(
+                                move || ui.profiles.get(),
+                                |p| p.id.clone(),
+                                move |p, _| {
+                                    let p = p.get_untracked();
+                                    let pid = p.id.clone();
+                                    let is_prof = pid == active_prof;
+                                    let target = step_for_prof.clone();
+                                    compact_action(
+                                        format!("@{pid}"),
+                                        if is_prof {
+                                            Variant::Primary
+                                        } else {
+                                            Variant::Secondary
+                                        },
+                                        move |_| {
+                                            let chosen = pid.clone();
+                                            let tid = target.clone();
+                                            update_doc(ui, |d| {
+                                                if let Some(s) =
+                                                    d.steps.iter_mut().find(|s| s.id == tid)
+                                                {
+                                                    s.with.insert("profile".into(), json!(chosen));
+                                                }
+                                            });
+                                        },
+                                    )
+                                },
+                            )),
+                    )
+                    .child(
+                        view()
+                            .h(px(180.))
+                            .bg(INSET)
+                            .rounded(px(RADIUS))
+                            .p_2()
+                            .child(
+                                prompt_editor
+                                    .source(
+                                        prompt_sig,
+                                        "Step Prompt",
+                                        default_prompt,
+                                    )
+                                    .size_full(),
+                            ),
+                    )
+                    .into_element()
+            }
+            "deliver" | "card.deliver" => panel()
+                .gap_2()
+                .border_1()
+                .border_color(BORDER)
+                .child(
+                    label(format!("Auto-merge Step · {step_title} ({step_id})"))
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
+                .child(muted(
+                    "Automatically previews and merges the Card worktree into the target branch after verification succeeds. Users can click 'Hold auto-merge' on any Card to pause this step for manual approval.",
+                ))
+                .into_element(),
+            "approval" => panel()
+                .gap_2()
+                .border_1()
+                .border_color(BORDER)
+                .child(
+                    label(format!("Human Approval Gate · {step_title} ({step_id})"))
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
+                .child(muted(
+                    step.with
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Pauses workflow execution until a human approves or requests changes.")
+                        .to_owned(),
+                ))
+                .into_element(),
+            _ => panel()
+                .gap_2()
+                .border_1()
+                .border_color(BORDER)
+                .child(
+                    label(format!("Step · {step_title} ({step_id})"))
+                        .font_weight(FontWeight::SEMIBOLD),
+                )
+                .child(muted(
+                    "Switch to YAML Source to edit low-level step transition arguments.",
+                ))
+                .into_element(),
+        }
+    } else {
+        view().into_element()
+    };
+
+    scroll()
+        .flex_1()
+        .min_h(px(0.))
+        .child(
+            view()
+                .gap_3()
+                .pb_4()
+                .child(banner)
+                .child(policy_section)
+                .child(pipeline_section)
+                .child(inspector),
+        )
+        .into_element()
+}
+
 fn source_editor(ui: Ui) -> AnyElement {
     let state = ui.workflows;
     let name = state.selected.get();
@@ -535,6 +1282,23 @@ pub fn agent_panel(ui: Ui) -> impl IntoElement {
 }
 /// Pure active-definition projection; no source text or prose RPC is needed.
 pub fn column_trigger(ui: Ui, column: String) -> impl IntoElement {
+    let summary_col = column.clone();
+    let summary = computed(move || {
+        let project = ui.project.get();
+        ui.snapshot.with(|s| {
+            let files = s
+                .workflow_sources
+                .iter()
+                .filter(|f| f.project_id == project)
+                .cloned()
+                .collect::<Vec<_>>();
+            canban_workflow_engine::source::column_summary(
+                &summary_col,
+                &files,
+                &s.workflow_revisions,
+            )
+        })
+    });
     let details = computed(move || {
         let project = ui.project.get();
         ui.snapshot.with(|s| {
@@ -556,65 +1320,75 @@ pub fn column_trigger(ui: Ui, column: String) -> impl IntoElement {
     when(
         move || !details.get().is_empty(),
         move || {
-            nsh_base::popover()
-                .open(move || Some(open.get()))
-                .on_open_change(move |event: &nsh_base::PopoverEvent| {
-                    if let nsh_base::PopoverEvent::OpenChange(value, _) = event {
-                        open.set(*value);
-                    }
-                })
-                .placement(Placement::Bottom)
-                .align(Align::End)
-                .offset(px(8.))
-                .margin(px(12.))
-                .trigger(
-                    chrome_action(Icon::Trigger, "Column automations", |_| {})
-                        .selected(move || open.get())
-                        .bg(move || if open.get() { SELECTED } else { CLEAR }),
-                )
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(when(
+                    move || summary.get().is_some(),
+                    move || badge(move || summary.get().unwrap_or_default()),
+                ))
                 .child(
-                    view()
-                        .w(px(360.))
-                        .max_w(Percentage(0.9))
-                        .p_4()
-                        .gap_3()
-                        .bg(SURFACE)
-                        .border_1()
-                        .border_color(BORDER)
-                        .rounded(px(RADIUS))
+                    nsh_base::popover()
+                        .open(move || Some(open.get()))
+                        .on_open_change(move |event: &nsh_base::PopoverEvent| {
+                            if let nsh_base::PopoverEvent::OpenChange(value, _) = event {
+                                open.set(*value);
+                            }
+                        })
+                        .placement(Placement::Bottom)
+                        .align(Align::End)
+                        .offset(px(8.))
+                        .margin(px(12.))
+                        .trigger(
+                            chrome_action(Icon::Trigger, "Column automations", |_| {})
+                                .selected(move || open.get())
+                                .bg(move || if open.get() { SELECTED } else { CLEAR }),
+                        )
                         .child(
                             view()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(icon(Icon::Trigger))
-                                .child(label("Automations").flex_1())
-                                .child(chrome_action(
-                                    Icon::Close,
-                                    "Close automations",
-                                    move |_| open.set(false),
-                                )),
-                        )
-                        .child(scroll().max_h(px(360.)).child(view().gap_3().child(each(
-                            move || details.get(),
-                            |detail| detail.clone(),
-                            move |detail, _| {
-                                read_text(detail.get_untracked())
-                                    .text_size(px(12.))
-                                    .text_color(TEXT)
-                            },
-                        ))))
-                        .child(
-                            action_with_icon(
-                                Icon::Trigger,
-                                "View workflows",
-                                Variant::Secondary,
-                                move |_| {
-                                    open.set(false);
-                                    ui.navigate("workflows");
-                                },
-                            )
-                            .w_full(),
+                                .w(px(360.))
+                                .max_w(Percentage(0.9))
+                                .p_4()
+                                .gap_3()
+                                .bg(SURFACE)
+                                .border_1()
+                                .border_color(BORDER)
+                                .rounded(px(RADIUS))
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(icon(Icon::Trigger))
+                                        .child(label("Automations").flex_1())
+                                        .child(chrome_action(
+                                            Icon::Close,
+                                            "Close automations",
+                                            move |_| open.set(false),
+                                        )),
+                                )
+                                .child(scroll().max_h(px(360.)).child(view().gap_3().child(each(
+                                    move || details.get(),
+                                    |detail| detail.clone(),
+                                    move |detail, _| {
+                                        read_text(detail.get_untracked())
+                                            .text_size(px(12.))
+                                            .text_color(TEXT)
+                                    },
+                                ))))
+                                .child(
+                                    action_with_icon(
+                                        Icon::Trigger,
+                                        "View workflows",
+                                        Variant::Secondary,
+                                        move |_| {
+                                            open.set(false);
+                                            ui.navigate("workflows");
+                                        },
+                                    )
+                                    .w_full(),
+                                ),
                         ),
                 )
         },

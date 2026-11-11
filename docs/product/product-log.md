@@ -1,5 +1,24 @@
 # Product discussion and decisions
 
+## 2026-11-11 — Built-in workflow policy layer, per-step Prompt overrides, custom columns and visual Pipeline/Stepper UI
+
+Status: **User-confirmed design and implementation direction**.
+
+To make workflows approachable without sacrificing declarative flexibility, separate **built-in policy presets** from low-level YAML topology:
+
+- **Built-in policies**: Provide built-in policy switches on the Project Workflows page for common decisions:
+  1. **Planning (Backlog)**: Manual vs. Auto-plan new Issues (with human confirmation) vs. Full auto-plan into Develop.
+  2. **Review & Delivery**: Human Review (`@reviewer` + human approval + manual merge) vs. Auto-merge Queue (`@merger` + automatic `deliver` step unless manually held by the user on the Card).
+  3. **External PR rule**: Same as internal vs. Require Human Review (never auto-merge external PRs via `card.source_trust == "external_pr"`) vs. Manual only.
+  Custom non-standard YAML graphs remain supported and display as `Custom Flow`.
+- **Per-step default Prompts with inline overrides in the same window**: Built-in workflow steps (`plan`, `develop`, `review`, `merge`) provide curated default Prompts. Clicking any step in the visual Pipeline displays its Prompt editor in the same window so users can view the default Prompt, override it inline, or reset it to the default without hunting through raw YAML.
+- **Guided Edit with agent**: Keep a prominent callout banner in Project Workflows explaining that users can use **Edit with agent** to have an Agent guide them through custom workflow or multi-column design.
+- **Custom Board columns (`4+` columns)**: While `Backlog / Develop / Review` remains the default, users or Agents can declare `columns` (`[{id, name}]`) in a Workflow YAML source to expand the Project's Board to 4 or more columns (e.g., `Backlog / Design / Develop / QA / Review`). Publishing synchronizes the Project's Board columns safely without losing Cards.
+- **Visual presentation**:
+  - Project Workflows defaults to a **Visual Pipeline & Policy Studio** (swimlanes + step cards + inline Step Prompt editor), with a toggle to the **YAML Source** editor.
+  - Board column headers surface concise active policy/automation badges alongside the click-only automation popover.
+  - Card detail renders a live **Step Progress Stepper** (`✓ Plan -> ● Implement -> ○ Auto-merge`), an inline **Hold auto-merge** toggle, and a **Request changes** rework feedback input.
+
 ## 2026-11-11 — Workflow/event implementation
 
 Implemented the initial unified interpreter, schema-11 durable journal/subscriptions, CLI definition validation/publication, old assignment adoption and generic native Card viewer. Publication affects new runs immediately while existing definitions/assignments remain captured. See [concrete operations, evidence and limits](../workflow-implementation.md). This does not implement settings-hosted configuration conversations or provider authentication.

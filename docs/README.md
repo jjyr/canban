@@ -2,7 +2,7 @@
 
 Canban is the product; Human Context names the proposed approach. Current directions center on native Rust/NSH UI, directory-backed Projects, Cards and a unified Timeline. The accepted next architecture uses three Board columns, one workflow engine, durable event subscriptions, Agent-authored/manual workflow definitions and a generic workflow viewer. AppServer is an independent service shared by UI clients and local/remote executions. Documentation is English; accepted directions, implementation and open design are identified separately.
 
-The [Workflow/event implementation](workflow-implementation.md) records Project Workflows, SQLite-only original YAML/version history, Edit with agent, shared Column trigger hints and durable event subscriptions. Manual edits and Agent submissions use one transactional publication path and one interpreter. Onboarding/default Profile setup remains the next product discussion.
+The [Workflow/event implementation](workflow-implementation.md) records Project Workflows, SQLite-only original YAML/version history, built-in delivery/planning/external-PR policy presets, per-step default Prompts with inline overrides, optional YAML-declared Board columns, the visual Pipeline/Stepper UI, Edit with agent guidance, shared Column trigger hints and durable event subscriptions. Manual edits, policy switches and Agent submissions use one transactional publication path and one interpreter. Onboarding/default Profile setup remains the next product discussion.
 
 The repository now has a runnable macOS MVP. [Real Agent acceptance, 2026-11-09](real-agent-acceptance-20261109.md) covers the current Codex workflow, native post-Archive Resume repair and Claude provider-authentication boundary. [Latest acceptance](mvp-acceptance.md) covers the command-defined profile update, real Codex human-input/rework tasks, explicit Review commit/merge, and Terminal recovery checks. Start with [implementation, development and acceptance](implementation.md) for actual behavior, commands and validation limits. Dated pre-implementation statements in the design/research documents describe their original scope; they are not the current implementation status.
 
@@ -44,9 +44,9 @@ editor, modal, window-title and terminal checks.
 | [Multi-machine execution](multi-machine.md) | Independent AppServer, mutable Project work location, remote Agent CLI and native Terminal routing |
 | [Multi-machine acceptance](multi-machine-acceptance.md) | Isolated local/remote verification, limits and reproduction |
 | [Product discussion and decisions](product/product-log.md) | Rationale, superseded proposals, and open questions |
-| [Projects and workflow templates](product/projects-and-workflows.md) | Project/Board ownership, three columns, declarative customization, workspaces and migration boundary |
-| [Workflow/event implementation](workflow-implementation.md) | Concrete CLI/schema, immediate publication, subscription operations, migration, generic UI and acceptance limits |
-| [Unified workflow engine](product/workflow-engine.md) | Accepted next design: entries/steps/runs, Agent authoring, generic display, approval and replacement of stage callbacks |
+| [Projects and workflow templates](product/projects-and-workflows.md) | Project/Board ownership, default three columns plus YAML column declarations, declarative customization, workspaces and migration boundary |
+| [Workflow/event implementation](workflow-implementation.md) | Concrete CLI/schema, built-in policy presets, per-step Prompt overrides, visual Pipeline/Stepper UI, immediate publication, subscription operations and acceptance limits |
+| [Unified workflow engine](product/workflow-engine.md) | Accepted next design: entries/steps/runs, policy layer vs. flow graph, automatic delivery (`deliver`), Agent authoring, generic display and approval |
 | [Board dragging and placement](board-interaction.md) | Whole-Card dragging, animated placeholders/peers, durable ordering and workflow boundary |
 | [Kanban card workflow](product/kanban-workflow.md) | Numbers, resources, stages/run/outcome separation, comments, mentions, and archive |
 | [GitHub workspace and cache](github-workspace.md) | GitHub page, Issue/PR sources, Board filters, remote Review, pagination and event-refreshed disposable cache |
@@ -88,7 +88,7 @@ editor, modal, window-title and terminal checks.
 | [Unified Card reminders](reminders.md) | Per-Card unread/pending items, Project counts, durable visible-read positions and local sound delivery |
 | [Events, subscriptions and notifications](product/events-and-notifications.md) | Accepted next design: durable facts/delivery, Card/GitHub selectors, recovery, source provenance and notifications |
 
-Keep Backlog / Develop / Review for the current design; planning is a workflow step while the Card remains in Backlog, not a Design column. The existing runtime permits custom stages, but expanding columns is not required for the unified engine. Archive retains completed work outside the active Board. Earlier Space organization and required Plan/Process/Ready/In Progress/Done columns are superseded.
+Keep Backlog / Develop / Review as the default Board columns; planning is a workflow step while the Card remains in Backlog, not a required Design column. Projects that want 4 or more columns (such as Design or QA) can declare `columns` directly in their primary Workflow YAML, which synchronizes the Project's Board stages on publication. Archive retains completed work outside the active Board. Earlier Space organization and required Plan/Process/Ready/In Progress/Done columns are superseded.
 
 ## Architecture and integration
 

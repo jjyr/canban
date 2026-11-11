@@ -2,16 +2,38 @@
 
 Status: implemented in this worktree, 2026-11-11. Schema 12, desktop API 10. This is the concrete interface and UX reference for [Workflow rules](product/workflow-engine.md) and [events](product/events-and-notifications.md). The SQLite-only source decision supersedes the earlier proposal for managed YAML files.
 
-## Project authoring and storage
+## Project authoring, Policy Studio and storage
 
-A Project owns multiple named Workflow sources. The Board remains Backlog / Develop / Review. Open **Workflows** in the Project header, or **Project Workflows** in Settings. The page lists sources, preserves original YAML in a native editor, and places **New workflow** below the source list and keeps only the Agent-icon **Edit with agent** action at the top right. The editor has icon actions for **History** and, while modified, **Discard changes and reload**, plus **Save**. There is no permanent Refresh button or active-version label. Card detail retains execution history, reports and approval controls, without a full configuration/graph panel.
+A Project owns multiple named Workflow sources. By default the Board has three columns (Backlog / Develop / Review), and the primary Workflow YAML can optionally declare `columns` to expand the Board to 4 or more columns. Open **Workflows** in the Project header, or **Project Workflows** in Settings.
+
+The page separates **built-in policy choices and per-step Prompts** from low-level YAML topology while keeping one underlying YAML source of truth in SQLite:
+
+1. **Guided Agent Banner**: A callout banner highlights **Edit with agent**, explaining that users can describe their team's process (e.g., custom review gates, 4+ columns, or external PR rules) for an Agent to configure.
+2. **Visual Pipeline & Policy Studio (Default View)** vs **YAML Source View**:
+   - **Built-in Policies**: Direct segmented controls for the selected workflow:
+     - **Planning (Backlog)**: `Manual` | `Auto-plan Issues (Confirm)` | `Auto-plan & Develop`
+     - **Review & Delivery**: `Human Review` (`@reviewer` + human approval + manual merge) | `Auto-merge Queue` (`@merger` validates and runs `deliver` automatically unless the user holds auto-merge on the Card)
+     - **External PR Rule**: `Same as internal` | `Require Human Review (No Auto-merge)` | `Manual Only`
+     - Non-standard custom graphs display as `Custom Flow` without losing any YAML structure.
+   - **Visual Pipeline Swimlanes & Step Prompt Inspector**: Displays columns (`Backlog`, `Develop`, `Review`, or custom declared columns), triggers (`on`), and connected step cards (`agent`, `approval`, `condition`, `deliver`, `card.move`). Selecting any step opens its **Step Prompt & Profile Inspector** in the same window, showing the built-in default Prompt for that step role (`plan`, `develop`, `review`, `merge`), allowing direct inline override, or resetting to the default Prompt (`Reset to default prompt`).
+   - **YAML Source Editor**: Toggle **YAML Source** (`</> YAML`) at any time to edit raw YAML with syntax highlighting, line numbers, two-space indentation, **History** and **Discard changes and reload**, plus **Save** (`Command+S`).
 
 ```text
 Project / Workflows
-  development.yaml        | Source name   [History]       [Edit with agent]
-  issue-planning.yaml  •  | YAML editor (syntax colors, line numbers,
-  pr-review.yaml          | two-space indentation and soft wrapping)
-  [+ New workflow]        |                                   [Save]
+  [💡 Guided banner: Describe your workflow to the Agent...]     [Edit with agent]
+  --------------------------------------------------------------------------------
+  development.yaml        | [Visual Pipeline] [</> YAML]     [History] [Save]
+  issue-planning.yaml  •  | Built-in Policies:
+  [+ New workflow]        |   Planning:    [Manual] [Auto-plan (Confirm)] [Auto]
+                          |   Delivery:    [Human Review] [Auto-merge Queue]
+                          |   External PR: [Require Human Review] [Same]
+                          | Pipeline & Step Prompts:
+                          |   [Backlog] -> [Develop: @developer] -> [Review: ...]
+                          |   Selected Step: Review / Merge · Profile: @merger
+                          |   Step Prompt (Default / Customized)  [Reset default]
+                          |   +-------------------------------------------------+
+                          |   | Inspect the changes, verify tests and merge...  |
+                          |   +-------------------------------------------------+
 ```
 
 Names ending in `.yaml` identify documents, not paths under the Canban home. SQLite is the only source of truth:
@@ -72,18 +94,19 @@ steps:
 
 `schema` versions syntax independently of publication revisions. `id` is stable and must be unique in the current engine registry; `name` is presentation. Named `on` rules have distinct IDs, so several rules can subscribe to the same event. Each provides `event`, optional `match`, `start_at`, and optional `enabled` (default true). Project scope is implicit; `match.types` is rejected because `event` supplies the type. Top-level `enabled: false` disables future starts for that source without destroying history.
 
-`steps` is a sequence. Every step has a stable `id`, optional authoring `name`, `uses`, and `with` arguments. Ordinary steps default to the next sequence item; `next` overrides that successor. `on_changes_requested` supplies an approval rework target. The last ordinary step ends the run. `complete` explicitly ends a path. Supported operations:
+`steps` is a sequence. Every step has a stable `id`, optional authoring `name`, `uses`, and `with` arguments. Ordinary steps default to the next sequence item; `next` overrides that successor. `on_changes_requested` supplies an approval rework target. The last ordinary step ends the run. `complete` explicitly ends a path. Optional top-level `columns` (`[{id, name}]`) declares the Project's Board columns (defaulting to `backlog`, `develop`, `review` when omitted) and updates the Project's stages when published. Supported step operations:
 
 | `uses` | `with` arguments |
 | --- | --- |
-| `agent` | optional `profile`, required `instruction` |
+| `agent` | optional `profile`, required `instruction` (built-in steps provide curated defaults) |
 | `card.move` | `column` |
 | `approval` | `title` |
 | `condition` | JSON `pointer`, exact `equals`, `then`, `otherwise` step IDs |
+| `deliver` | optional `target_branch`, optional `rework` step ID |
 | `notify` | `message` |
 | `complete` | none |
 
-Conditions read `{inputs, outputs, card}`. Outputs reference exact reports/paths and selected messages. Definition-level `workspace` controls checkout preparation; `max_steps` (1–1000, default 100) bounds visits including explicit human rework. Parallel/join/subflow/script execution and per-step filesystem isolation are not implemented.
+Conditions read `{inputs, outputs, card}` (including `card.source_trust`: `"local"`, `"collaborator"`, or `"external_pr"`, and `card.hold_auto_merge`). Outputs reference exact reports/paths and selected messages. `deliver` (`WorkflowStep::Deliver`) performs controlled automatic delivery (local worktree commit/merge or delivery PR merge) if the Card has no `hold_auto_merge` flag and no active blockers/conflicts; if held by the user or blocked by a conflict, it pauses with a human gate so the user can inspect or approve manually. Definition-level `workspace` controls checkout preparation; `max_steps` (1–1000, default 100) bounds visits including explicit human rework. Parallel/join/subflow/script execution and per-step filesystem isolation are not implemented.
 
 ## API and file submission
 
@@ -101,7 +124,8 @@ All clients use the same AppServer validation/publication operations. `canban ca
 | `workflow.template` | read the SQL bootstrap template for Project creation compatibility |
 | `workflow.start` | `card_id`, `workflow_id`, enabled manual `entry` |
 | `workflow.runs` / `workflow.run` | optional `card_id` / exact `run_id` |
-| `workflow.decide` | `run_id`, current `visit`, Card `revision`, `decision: approve/rework`; human caller |
+| `workflow.decide` | `run_id`, current `visit`, Card `revision`, `decision: approve/rework`, optional `feedback`; human caller |
+| `card.hold_auto_merge` | `card_id`, Card `revision`, `hold: bool`; toggles user hold on automatic delivery |
 | `workflow.stop` | `run_id`; stop future progression, without killing the live PTY |
 
 Example `workflow.apply` parameters:
@@ -167,7 +191,9 @@ Continue only focuses the retained Terminal; it does not resend the Prompt. Resu
 
 All matching subscriptions receive durable receipts. One main Workflow runs on a Card at a time; another matching event waits visibly in `subscription.deliveries` with its captured definition revision. Waiting for an active run or human gate does not consume failure retries. Other delivery failures use bounded backoff and inspectable failure/retry. New manual starts conflict visibly. Publication applies immediately to future receipts/runs; captured receipts, active runs, queued assignments and human decisions retain their old versions. `workflow.stop` does not kill a PTY.
 
-Column headers show the stage name without a Card count and retain equal height whether or not automation exists. Enabled column-related triggers show a **workflow-node** icon. Hover does not open a tooltip. Clicking opens an opaque native popover above Card text, with bounded scrolling, rule details grouped by Workflow and a **View workflows** link. Escape, the close icon and pressing outside dismiss it. Flow effects are labelled separately. Rules with no clear column association stay in the Project source page. The pure `source::column_details` library derives text from active definitions/rules/subscriptions in the client; AppServer has no hover-prose generation RPC. Unsaved drafts never affect these hints.
+Column headers show the stage name without a Card count, display a concise inline automation badge (such as `@developer`, `Auto-merge`, or `Review`) when rules apply, and retain equal height whether or not automation exists. Enabled column-related triggers also show a **workflow-node** icon. Hover does not open a tooltip. Clicking the badge or icon opens an opaque native popover above Card text, with bounded scrolling, rule details grouped by Workflow and a **View workflows** link. Escape, the close icon and pressing outside dismiss it. Flow effects are labelled separately. Rules with no clear column association stay in the Project source page. The pure `source::column_details` and `source::column_summary` helpers derive text from active definitions/rules/subscriptions in the client; AppServer has no hover-prose generation RPC. Unsaved drafts never affect these hints.
+
+In Card detail (`crates/ui/src/card/workflow.rs`), active and recent `WorkflowRun`s render as a visual **Step Progress Stepper** (`✓ Plan → ● Implement → ○ Auto-merge`), showing each step's status, Agent profile, clickable report links, an inline **Hold auto-merge / Resume auto-merge** toggle when a run includes a `deliver` step, and a **Request changes** feedback input so rework instructions are passed directly into the next Agent step visit.
 
 Column rules default to local-origin events; Workflow-owned moves do not start a duplicate developer through another default column rule. Explicit origin filters can opt into other events; causal ancestry still suppresses workflow loops. Initial GitHub baselines/restoration do not trigger automation without explicit subscription policy.
 

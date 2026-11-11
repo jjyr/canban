@@ -4,14 +4,16 @@ Status: user-confirmed direction with the initial implementation added 2026-11-1
 
 ## Decisions
 
-- Keep Backlog / Develop / Review for the current Board. Do not add a Design column.
+- Keep Backlog / Develop / Review as the default Board columns. Do not require a Design column by default, while allowing Projects to declare 4 or more columns (`columns` in Workflow YAML) when desired.
 - Separate Board position from workflow progress. Planning and plan approval can happen while a Card remains in Backlog.
-- Use one Workflow Engine for current development/review, manual starts and event-triggered automation. Do not retain a second stage-callback executor.
+- Separate **built-in policy presets** from low-level flow topology. Common team decisions (Issue planning mode, Human Review vs. Auto-merge Queue, and External PR safety rules) are exposed as built-in UI controls that compile into standard declarative YAML, while non-standard graphs gracefully display as Custom Flow.
+- Provide **per-step default Prompts with inline overrides** in the same Workflow window. Every built-in step (`plan`, `develop`, `review`, `merge`) has a curated default instruction that users can inspect, override per step, or reset to default without hunting through raw YAML.
+- Use one Workflow Engine for current development/review, manual starts, event-triggered automation and controlled automatic delivery (`deliver`). Do not retain a second stage-callback executor.
 - Reuse Agent Profiles, Card/profile Conversations, Requests, Attempts, Scheduler, workspaces and Herdr execution.
-- Agents should author and modify workflow definitions. Users can also edit the same declarative source manually. Both paths use shared validation and revision handling.
-- Provide one generic UI for any supported workflow: definition, progress, results and pending decisions. A custom screen per workflow is not the model; a visual graph editor is not required.
+- Agents should author and modify workflow definitions. Users can also adjust built-in policies, edit per-step Prompts in the visual inspector, or edit the declarative YAML source manually. All paths use shared validation and revision handling.
+- Provide one generic visual Pipeline & Stepper UI for any supported workflow: swimlane pipeline map, step prompt inspector, Card step progress stepper, rework feedback input, and pending decisions, alongside a prominent **Edit with agent** guided banner. A drag-and-drop node-wire canvas is not required.
 - Project Workflows owns multiple YAML sources, original text and immutable versions in SQLite. No Workflow files or revision mirrors are generated in ~/.canban; files are only submission/export transport.
-- Edit with agent previews/copies one Project-wide Prompt and launches/continues a Project-owned configuration conversation in Terminal. Column trigger icons use a client-side library to describe active rules. Onboarding remains open.
+- Edit with agent previews/copies one Project-wide Prompt and launches/continues a Project-owned configuration conversation in Terminal. Column header badges and trigger popovers use a client-side library to describe active rules. Onboarding remains open.
 
 ## Model and ownership
 
@@ -74,11 +76,12 @@ By default a Card's main delivery process has one active run. Overlapping trigge
 
 ## Definition and progression rules
 
-The initial vocabulary covers Agent execution, Card movement, conditions, human approval, internal notification and explicit completion. Input/output references connect results to later steps. The implemented YAML vocabulary uses `agent`, `card.move`, `condition`, `approval`, `notify` and `complete`, compiled into the existing interpreter.
+The vocabulary covers Agent execution, Card movement, conditions, human approval, controlled delivery/merge, internal notification and explicit completion. Input/output references connect results to later steps. The implemented YAML vocabulary uses `agent`, `card.move`, `condition`, `approval`, `deliver`, `notify` and `complete`, compiled into the existing interpreter.
 
-- Stable step IDs identify nodes; each visit has a distinct execution identity. Rework preserves earlier plans/reports/decisions.
-- Validate entry points, transition targets, typed parameters, data references, column IDs and Profile references before publishing a revision. Reject unsupported step kinds for execution.
-- Conditions use declared data and a constrained expression model. Arbitrary executable callbacks are not required for authoring.
+- Stable step IDs identify nodes; each visit has a distinct execution identity. Rework preserves earlier plans/reports/decisions and accepts optional human rework instructions (`feedback`) that are injected into the next Agent step visit.
+- Validate entry points, transition targets, typed parameters, data references, column IDs (including YAML-declared custom `columns`) and Profile references before publishing a revision. Reject unsupported step kinds for execution.
+- Conditions use declared data (`{inputs, outputs, card}`) and a constrained expression model, including `card.source_trust` (`local`, `collaborator`, `external_pr`) so workflows can branch between internal tasks and external PRs. Arbitrary executable callbacks are not required for authoring.
+- Controlled automatic delivery (`deliver` / `card.deliver`) commits and merges the Card's clean worktree into the target branch (or merges an eligible delivery PR) unless the user has placed a hold (`hold_auto_merge`) on the Card or a blocker/conflict exists. When held or blocked, progression pauses as a human decision gate rather than forcing an unsafe merge.
 - Capture the definition revision at run creation and effective Profile/task configuration at assignment creation. Edits affect new runs, not active runs or already captured assignments.
 - Advance an Agent step from its explicit bound result. Terminal idle, root `done`, process exit, unrelated comments and generic replies do not establish completion.
 - Trust the Agent's completion declaration; do not add an independent quality evaluator or process-drain prerequisite. Validation work can be an explicitly configured task.

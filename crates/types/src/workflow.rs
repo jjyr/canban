@@ -4,11 +4,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowColumn {
+    pub id: String,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowDefinition {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<WorkflowColumn>,
     pub entries: BTreeMap<String, String>,
     pub steps: BTreeMap<String, WorkflowStep>,
     #[serde(default)]
@@ -37,6 +46,14 @@ pub enum WorkflowStep {
         next: Option<String>,
         rework: Option<String>,
     },
+    Deliver {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_branch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rework: Option<String>,
+    },
     Condition {
         pointer: String,
         equals: Value,
@@ -55,6 +72,7 @@ impl WorkflowStep {
             Self::Agent { next, .. }
             | Self::Move { next, .. }
             | Self::Approval { next, .. }
+            | Self::Deliver { next, .. }
             | Self::Notify { next, .. } => next.as_deref(),
             _ => None,
         }
@@ -233,6 +251,14 @@ pub fn legacy_definition(flow: &Workflow, id: String) -> WorkflowDefinition {
     WorkflowDefinition {
         id,
         name: flow.name.clone(),
+        columns: flow
+            .stages
+            .iter()
+            .map(|s| WorkflowColumn {
+                id: s.id.clone(),
+                name: s.name.clone(),
+            })
+            .collect(),
         entries,
         steps,
         workspace: flow.workspace.clone(),
@@ -251,6 +277,8 @@ pub struct WorkflowSource {
     pub hash: String,
     pub revision_id: String,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub columns: Vec<WorkflowColumn>,
     pub rules: BTreeMap<String, WorkflowRule>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

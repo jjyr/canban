@@ -68,6 +68,13 @@ pub fn run_view(run: WorkflowRun) -> impl IntoElement {
             }
             WorkflowStep::Move { column, .. } => format!("Move to {column}"),
             WorkflowStep::Approval { title, .. } => title.clone(),
+            WorkflowStep::Deliver { target_branch, .. } => {
+                if let Some(branch) = target_branch {
+                    format!("Auto-merge into {branch}")
+                } else {
+                    "Auto-merge queue".into()
+                }
+            }
             WorkflowStep::Condition {
                 then, otherwise, ..
             } => format!("Condition → {then} / {otherwise}"),
@@ -91,6 +98,9 @@ pub fn run_view(run: WorkflowRun) -> impl IntoElement {
             row = row.child(muted(format!("Next → {next}")));
         }
         if let WorkflowStep::Approval {
+            rework: Some(to), ..
+        }
+        | WorkflowStep::Deliver {
             rework: Some(to), ..
         } = step
         {

@@ -260,6 +260,10 @@ pub struct WorkspaceBinding {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Card {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_trust: Option<String>,
+    #[serde(default)]
+    pub hold_auto_merge: bool,
     #[serde(default)]
     pub github_links: Vec<GitHubReference>,
     #[serde(default)]
@@ -796,6 +800,19 @@ impl Card {
     }
     pub fn source_kind(&self) -> &'static str {
         if self.is_github_pr() { "pr" } else { "issue" }
+    }
+    pub fn trust_level(&self) -> &str {
+        if let Some(trust) = self.source_trust.as_deref() {
+            let trimmed = trust.trim();
+            if !trimmed.is_empty() {
+                return trimmed;
+            }
+        }
+        match &self.content {
+            CardContent::Local => "local",
+            CardContent::GitHubIssue { .. } => "collaborator",
+            CardContent::GitHubPr { .. } => "external_pr",
+        }
     }
     pub fn active(&self) -> bool {
         self.removed_at.is_none() && self.archived_at.is_none()
