@@ -172,4 +172,210 @@ impl AppServer {
         }))?;
         Ok(true)
     }
+
+    pub(crate) fn pump_deliveries(&self) -> Result<()> {
+        let pending: Vec<WorkflowRun> = self
+            .store
+            .lock()
+            .unwrap()
+            .db()
+            .list::<WorkflowRun>()?
+            .into_iter()
+            .filter(|r| r.state == "waiting_delivery")
+            .collect();
+        for run in pending {
+            let _ = self.execute_workflow_delivery(&run.id);
+        }
+        Ok(())
+    }
+
+    fn execute_workflow_delivery(&self, run_id: &str) -> Result<()> {
+        let Ok(_gate) = self.review_gate.try_lock() else {
+            return Ok(());
+        };
+        let (card, project, run, blocker_reason) = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let Ok(run) = db.get::<WorkflowRun>(run_id) else {
+                return Ok(());
+            };
+            if run.state != "waiting_delivery" {
+                return Ok(());
+            }
+            let card: Card = db.get(&run.card_id)?;
+            if !card.active() {
+                return Ok(());
+            }
+            let project: Project = db.get(&card.project_id)?;
+            let project = self.bound_project(&project, &card);
+            let blocker_reason = blocker(db, &card)?;
+            (card, project, run, blocker_reason)
+        };
+        let config = self.config();
+        if card.hold_auto_merge {
+            self.store.lock().unwrap().write(|db| {
+                let mut current_card: Card = db.get(&card.id)?;
+                let mut current_run: WorkflowRun = db.get(&run.id)?;
+                if current_run.state == "waiting_delivery" {
+                    canban_workflow_engine::runtime::hold_delivery(
+                        db,
+                        &mut current_card,
+                        &mut current_run,
+                        "Auto-merge held by user; approve or resume to merge",
+                    )?;
+                }
+                Ok(())
+            })?;
+            self.emit("application", Some(card.id));
+            return Ok(());
+        }
+        // No worktree means there is nothing to merge (e.g. create_worktree: false);
+        // complete the step without waiting on Agent terminals.
+        if card.worktree.is_none() {
+            self.store.lock().unwrap().write(|db| {
+                let mut current_card: Card = db.get(&card.id)?;
+                let mut current_run: WorkflowRun = db.get(&run.id)?;
+                if current_run.state == "waiting_delivery" {
+                    canban_workflow_engine::runtime::complete_delivery(
+                        db,
+                        &config,
+                        &mut current_card,
+                        &mut current_run,
+                        json!({"state":"delivered","mode":"no_worktree"}),
+                        enqueue,
+                    )?;
+                }
+                Ok(())
+            })?;
+            self.emit("application", Some(card.id));
+            return Ok(());
+        }
+        if blocker_reason.is_some() {
+            // An Agent terminal may still be closing right after reporting; retry on the next tick.
+            return Ok(());
+        }
+        let target_branch = run.inputs["target_branch"].as_str();
+        let plan = match self
+            .ops(&project.work_location().machine)
+            .review_preview(&project, &card, target_branch)
+        {
+            Ok(plan) => plan,
+            Err(e) => {
+                let reason = format!("Auto-merge paused: {e:#}");
+                self.store.lock().unwrap().write(|db| {
+                    let mut current_card: Card = db.get(&card.id)?;
+                    let mut current_run: WorkflowRun = db.get(&run.id)?;
+                    if current_run.state == "waiting_delivery" {
+                        canban_workflow_engine::runtime::hold_delivery(
+                            db,
+                            &mut current_card,
+                            &mut current_run,
+                            &reason,
+                        )?;
+                    }
+                    Ok(())
+                })?;
+                self.emit("review", Some(card.id));
+                return Ok(());
+            }
+        };
+        if !plan.merge_allowed {
+            let reason = format!(
+                "Auto-merge paused: {}",
+                plan.reason
+                    .as_deref()
+                    .unwrap_or("Merge unavailable; human review required")
+            );
+            self.store.lock().unwrap().write(|db| {
+                let mut current_card: Card = db.get(&card.id)?;
+                let mut current_run: WorkflowRun = db.get(&run.id)?;
+                if current_run.state == "waiting_delivery" {
+                    canban_workflow_engine::runtime::hold_delivery(
+                        db,
+                        &mut current_card,
+                        &mut current_run,
+                        &reason,
+                    )?;
+                }
+                Ok(())
+            })?;
+            self.emit("review", Some(card.id));
+            return Ok(());
+        }
+        let key = format!("workflow-deliver:{}:{}", run.id, run.visit);
+        let message = format!("Canban #{}: {}", card.number, card.title);
+        let result = self.ops(&project.work_location().machine).review_merge(
+            &project,
+            &card,
+            Some(&plan.target_branch),
+            &plan.token,
+            &message,
+        );
+        let mut merged = false;
+        self.store.lock().unwrap().write(|db| {
+            let mut current_card: Card = db.get(&card.id)?;
+            let mut current_run: WorkflowRun = db.get(&run.id)?;
+            if current_run.state != "waiting_delivery" {
+                return Ok(());
+            }
+            match result {
+                Ok(commit) => {
+                    merged = true;
+                    current_card.delivery_mode = Some(DeliveryMode::Local);
+                    current_card.delivery = Some(Delivery {
+                        target_branch: plan.target_branch.clone(),
+                        commit: commit.clone(),
+                        request_key: key.clone(),
+                        merged_at: now(),
+                    });
+                    current_card.attention = None;
+                    current_card.human_gate = None;
+                    current_card.revision += 1;
+                    log(
+                        db,
+                        &current_card,
+                        "review.merged",
+                        "system",
+                        &format!("Auto-merged into {}", plan.target_branch),
+                        None,
+                        json!({"commit":commit,"target_branch":plan.target_branch,"request_key":key,"workflow_run_id":run.id}),
+                    )?;
+                    canban_workflow_engine::runtime::complete_delivery(
+                        db,
+                        &config,
+                        &mut current_card,
+                        &mut current_run,
+                        json!({"state":"merged","commit":commit,"target_branch":plan.target_branch}),
+                        enqueue,
+                    )?;
+                }
+                Err(error) => {
+                    let reason = format!("Auto-merge failed: {error:#}");
+                    log(
+                        db,
+                        &current_card,
+                        "review.merge_failed",
+                        "system",
+                        &reason,
+                        None,
+                        json!({"target_branch":plan.target_branch,"request_key":key,"workflow_run_id":run.id}),
+                    )?;
+                    canban_workflow_engine::runtime::hold_delivery(
+                        db,
+                        &mut current_card,
+                        &mut current_run,
+                        &reason,
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
+        self.git_changed(&project.work_location().machine);
+        drop(_gate);
+        if merged {
+            let _ = self.try_auto_archive_merged(&card.id);
+        }
+        self.emit("review", Some(card.id));
+        Ok(())
+    }
 }

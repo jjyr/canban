@@ -18,13 +18,13 @@ Canban endpoint: {}
 1. 读取当前支持的 Workflow schema、配置接口和 Agent Profiles。
 2. 读取本项目全部 Workflow YAML，以及当前生效的版本和触发状态。
 3. 使用 ASCII 展示整体关系，并逐个解释 Workflow：
-   - 哪些事件或操作会启动它，适用于哪些 Card；
-   - 各步骤使用哪个 Agent；
-   - 如何影响 Backlog、Develop、Review；
-   - 条件分支、人工审批、返工和结束方式；
+   - 哪些事件或操作会启动它，适用于哪些 Card（包括外部 PR 与本地/协作者 Card 的规则差异，如 `/card/source_trust`）；
+   - 各步骤使用哪个 Agent、各步骤 Prompt 如何设置；
+   - 如何影响看板列（默认 Backlog、Develop、Review，或通过 `columns:` 定义的 4 列及更多自定义列）；
+   - 条件分支、人工审批（`approval`）、自动合并队列（`deliver` / Hold auto-merge）、返工（`on_changes_requested`）和结束方式；
    - 不同 Workflow 之间的衔接、重叠或冲突。
 4. 区分已生效配置、未发布修改和已停用规则。
-5. 简要说明如何修改这些 YAML，以及如何校验和发布。
+5. 简要说明如何修改这些 YAML（包括内置策略、分步骤 Prompt 覆盖、自定义多列看板），以及如何校验和发布。
 
 完成说明后，等待用户提出具体修改要求。
 此时不要修改配置或启动业务流程。

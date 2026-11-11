@@ -251,14 +251,23 @@ fn drive(
                 next: continuation,
             } => {
                 let project: Project = db.get(&card.project_id)?;
+                let rework_note = run.inputs["rework_feedback"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| format!("\n\nHuman rework feedback for this visit:\n{}", s.trim()))
+                    .unwrap_or_default();
+                if run.inputs.get("rework_feedback").is_some() {
+                    run.inputs["rework_feedback"] = Value::Null;
+                }
                 let stage = Stage {
                     id: card.stage.clone(),
                     name: card.stage.clone(),
                     execute: true,
                     profile,
                     instruction: format!(
-                        "{}\n\nWorkflow {} revision {}, step {}, visit {}.\nEarlier step results (read report files/resources when needed):\n{}",
+                        "{}{}\n\nWorkflow {} revision {}, step {}, visit {}.\nEarlier step results (read report files/resources when needed):\n{}",
                         instruction,
+                        rework_note,
                         run.workflow_id,
                         run.definition_revision,
                         key,
@@ -350,13 +359,40 @@ fn drive(
                 run.state = "waiting_approval".into();
                 record(db, run, "workflow.waiting_for_human", &title)?;
             }
+            WorkflowStep::Deliver {
+                target_branch,
+                next: to,
+                ..
+            } => {
+                if card.hold_auto_merge {
+                    let title = "Auto-merge held by user; approve or resume to merge";
+                    attention(db, card, title)?;
+                    card.human_gate = Some(HumanGate {
+                        reason: title.into(),
+                        request_id: run.request_id.clone(),
+                        next_stage: None,
+                    });
+                    card.revision += 1;
+                    db.save(card)?;
+                    run.state = "waiting_approval".into();
+                    record(db, run, "workflow.waiting_for_human", title)?;
+                } else {
+                    run.inputs["pending_next"] = json!(to);
+                    run.inputs["target_branch"] = json!(target_branch);
+                    run.state = "waiting_delivery".into();
+                }
+            }
             WorkflowStep::Condition {
                 pointer,
                 equals,
                 then,
                 otherwise,
             } => {
-                let context = json!({"inputs":run.inputs,"outputs":run.outputs,"card":card});
+                let mut card_val = serde_json::to_value(&*card)?;
+                if let Some(obj) = card_val.as_object_mut() {
+                    obj.insert("source_trust".into(), json!(card.trust_level()));
+                }
+                let context = json!({"inputs":run.inputs,"outputs":run.outputs,"card":card_val});
                 next(
                     run,
                     Some(if context.pointer(&pointer) == Some(&equals) {
@@ -446,12 +482,13 @@ pub fn reported(
         return Ok(());
     }
     next(&mut run, to);
-    // Keep the completing request as decision context when the next node is approval.
-    if run
-        .step
-        .as_ref()
-        .is_some_and(|k| matches!(run.definition.steps[k], WorkflowStep::Approval { .. }))
-    {
+    // Keep the completing request as decision context when the next node is approval or delivery.
+    if run.step.as_ref().is_some_and(|k| {
+        matches!(
+            run.definition.steps[k],
+            WorkflowStep::Approval { .. } | WorkflowStep::Deliver { .. }
+        )
+    }) {
         run.request_id = Some(request.id.clone());
     }
     drive(db, config, card, &mut run, queue)
@@ -471,7 +508,7 @@ pub fn advance(
             return Ok(());
         }
         if run.state == "waiting_approval" {
-            return approve(db, config, card, &mut run, false, queue);
+            return approve_with_feedback(db, config, card, &mut run, false, None, queue);
         }
         if run.state == "blocked" && request.state == "completed" {
             ensure!(
@@ -493,6 +530,17 @@ pub fn approve(
     rework: bool,
     queue: Queue,
 ) -> Result<()> {
+    approve_with_feedback(db, config, card, run, rework, None, queue)
+}
+pub fn approve_with_feedback(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    rework: bool,
+    feedback: Option<&str>,
+    queue: Queue,
+) -> Result<()> {
     ensure!(
         matches!(run.state.as_str(), "waiting_approval" | "stale"),
         "Workflow is not awaiting a decision"
@@ -501,6 +549,9 @@ pub fn approve(
     let to = if rework {
         match &run.definition.steps[&key] {
             WorkflowStep::Approval {
+                rework: Some(to), ..
+            }
+            | WorkflowStep::Deliver {
                 rework: Some(to), ..
             } => Some(to.clone()),
             WorkflowStep::Agent { .. } if run.state == "stale" => Some(key.clone()),
@@ -515,9 +566,34 @@ pub fn approve(
             run.state == "waiting_approval",
             "Stale work cannot be approved"
         );
+        if let WorkflowStep::Deliver {
+            target_branch,
+            next: to,
+            ..
+        } = &run.definition.steps[&key]
+        {
+            run.history.push(json!({"step":key,"visit":run.visit,"decision":"approved","outputs":run.outputs,"at":now()}));
+            card.human_gate = None;
+            card.attention = None;
+            card.hold_auto_merge = false;
+            card.revision += 1;
+            run.input_digest = digest(db, card);
+            run.inputs["pending_next"] = json!(to);
+            run.inputs["target_branch"] = json!(target_branch);
+            run.state = "waiting_delivery".into();
+            run.updated_at = now();
+            db.save(run)?;
+            db.save(card)?;
+            record(db, run, "workflow.approved", "Human approved delivery")?;
+            return Ok(());
+        }
         run.definition.steps[&key].next().map(str::to_owned)
     };
-    run.history.push(json!({"step":key,"visit":run.visit,"decision":if rework{"rework"}else{"approved"},"outputs":run.outputs,"at":now()}));
+    let clean_feedback = feedback.map(str::trim).filter(|s| !s.is_empty());
+    if rework && let Some(note) = clean_feedback {
+        run.inputs["rework_feedback"] = json!(note);
+    }
+    run.history.push(json!({"step":key,"visit":run.visit,"decision":if rework{"rework"}else{"approved"},"feedback":clean_feedback,"outputs":run.outputs,"at":now()}));
     card.human_gate = None;
     card.attention = None;
     card.revision += 1;
@@ -528,12 +604,50 @@ pub fn approve(
         run,
         "workflow.approved",
         if rework {
-            "Changes requested"
+            if let Some(note) = clean_feedback {
+                note
+            } else {
+                "Changes requested"
+            }
         } else {
             "Human approved"
         },
     )?;
     drive(db, config, card, run, queue)
+}
+pub fn complete_delivery(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    output: Value,
+    queue: Queue,
+) -> Result<()> {
+    let key = run.step.clone().context("Missing Deliver step")?;
+    run.outputs.insert(key.clone(), output);
+    let to = run.inputs["pending_next"].as_str().map(str::to_owned);
+    next(run, to);
+    drive(db, config, card, run, queue)
+}
+pub fn hold_delivery(
+    db: Db<'_>,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    reason: &str,
+) -> Result<()> {
+    attention(db, card, reason)?;
+    card.human_gate = Some(HumanGate {
+        reason: reason.into(),
+        request_id: run.request_id.clone(),
+        next_stage: None,
+    });
+    card.revision += 1;
+    run.state = "waiting_approval".into();
+    run.updated_at = now();
+    db.save(run)?;
+    db.save(card)?;
+    record(db, run, "workflow.waiting_for_human", reason)?;
+    Ok(())
 }
 
 pub fn initialize(db: Db<'_>, config: &Config) -> Result<()> {

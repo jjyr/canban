@@ -23,6 +23,30 @@ pub fn validate_definition(
         !flow.workspace.sync_base || flow.workspace.create_worktree,
         "sync_base requires create_worktree"
     );
+    let mut declared_cols = BTreeSet::new();
+    for col in &flow.columns {
+        ensure!(
+            !col.id.trim().is_empty() && !col.name.trim().is_empty(),
+            "Workflow column id and name are required"
+        );
+        ensure!(
+            col.id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')),
+            "Invalid workflow column id {}",
+            col.id
+        );
+        ensure!(
+            declared_cols.insert(col.id.clone()),
+            "Duplicate workflow column {}",
+            col.id
+        );
+    }
+    let effective_columns: Vec<String> = if flow.columns.is_empty() {
+        columns.to_vec()
+    } else {
+        flow.columns.iter().map(|c| c.id.clone()).collect()
+    };
     for (entry, target) in &flow.entries {
         ensure!(
             !entry.is_empty() && flow.steps.contains_key(target),
@@ -50,13 +74,21 @@ pub fn validate_definition(
                 }
             }
             WorkflowStep::Move { column, .. } => {
-                ensure!(columns.contains(column), "Unknown column {column} at {id}")
+                ensure!(
+                    effective_columns.contains(column),
+                    "Unknown column {column} at {id}"
+                )
             }
             WorkflowStep::Approval { title, rework, .. } => {
                 ensure!(!title.trim().is_empty(), "Approval needs title at {id}");
                 if let Some(to) = rework {
                     ensure!(flow.steps.contains_key(to), "Unknown rework target {to}");
                 }
+            }
+            WorkflowStep::Deliver {
+                rework: Some(to), ..
+            } => {
+                ensure!(flow.steps.contains_key(to), "Unknown rework target {to}");
             }
             WorkflowStep::Condition {
                 pointer,

@@ -383,6 +383,62 @@ impl AppServer {
                 Ok(serde_json::to_value(c)?)
             }),
             "card.continue" => self.continue_card(p),
+            "card.hold_auto_merge" => {
+                ensure!(
+                    p["execution"].is_null(),
+                    "Holding or resuming auto-merge requires a user invocation"
+                );
+                self.mutate(method, &p, |db| {
+                    let mut c: Card = db.get(strp(&p, "card_id")?)?;
+                    revise(&c, &p)?;
+                    ensure!(c.active(), "Restore the Card before changing auto-merge");
+                    let hold = p["hold"]
+                        .as_bool()
+                        .unwrap_or(!c.hold_auto_merge);
+                    c.hold_auto_merge = hold;
+                    c.revision += 1;
+                    log(
+                        db,
+                        &c,
+                        if hold {
+                            "card.auto_merge_held"
+                        } else {
+                            "card.auto_merge_resumed"
+                        },
+                        "user",
+                        if hold {
+                            "Held automatic merge for this Card"
+                        } else {
+                            "Resumed automatic merge for this Card"
+                        },
+                        None,
+                        json!({"hold_auto_merge":hold}),
+                    )?;
+                    if !hold
+                        && let Some(mut run) = db
+                            .list::<WorkflowRun>()?
+                            .into_iter()
+                            .find(|r| r.card_id == c.id && r.state == "waiting_approval")
+                        && let Some(step) = &run.step
+                        && matches!(
+                            run.definition.steps.get(step),
+                            Some(WorkflowStep::Deliver { .. })
+                        )
+                    {
+                        canban_workflow_engine::runtime::approve_with_feedback(
+                            db,
+                            &config,
+                            &mut c,
+                            &mut run,
+                            false,
+                            None,
+                            enqueue,
+                        )?;
+                    }
+                    db.save(&c)?;
+                    Ok(serde_json::to_value(c)?)
+                })
+            }
             "card.workspace" => {
                 let (card, project) = {
                     let store = self.store.lock().unwrap();

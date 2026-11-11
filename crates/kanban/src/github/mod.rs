@@ -198,6 +198,18 @@ pub fn upsert(
                 source: source.clone(),
             }
         };
+        c.source_trust = Some(if is_pr {
+            if matches!(
+                config.pr_intake,
+                GitHubPrIntake::Collaborators | GitHubPrIntake::Authored
+            ) {
+                "collaborator".into()
+            } else {
+                "external_pr".into()
+            }
+        } else {
+            "collaborator".into()
+        });
         c
     };
     // Finalize only this transaction's creation, never rewrite committed history on refresh.

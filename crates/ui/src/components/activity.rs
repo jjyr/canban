@@ -21,6 +21,8 @@ pub fn activity_header(actor: String, kind: &str, time: u64) -> impl IntoElement
         "workspace.prepared" => "Workspace prepared",
         "workflow.waiting_for_human" => "Human review required",
         "workflow.approved" => "Workflow approved",
+        "card.auto_merge_held" => "Auto-merge held",
+        "card.auto_merge_resumed" => "Auto-merge resumed",
         "review.merge_started" | "github.pr_merge_started" => "Merge started",
         "review.merged" | "github.pr_merged" | "github.pr_delivered" => "Merged",
         "review.merge_failed" | "github.pr_merge_attention" => "Merge failed",
@@ -79,13 +81,18 @@ pub fn card_activity(snapshot: &canban_types::Snapshot, card: &canban_types::Car
     }
     if card.human_gate.is_some() || card.attention.is_some() {
         row = row.child(status(
-            if card.human_gate.is_some() && card.stage == "review" {
+            if card.hold_auto_merge {
+                "Merge held"
+            } else if card.human_gate.is_some() && card.stage == "review" {
                 "Needs review"
             } else {
                 "Needs attention"
             },
             Tone::Attention,
         ));
+        visible = true;
+    } else if card.hold_auto_merge {
+        row = row.child(status("Merge held", Tone::Neutral));
         visible = true;
     }
     let mut latest = std::collections::BTreeMap::new();

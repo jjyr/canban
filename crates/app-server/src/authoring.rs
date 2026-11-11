@@ -48,14 +48,45 @@ fn validate(
     );
     let mut names = BTreeSet::new();
     let mut ids = BTreeSet::new();
-    let mut out = Vec::new();
+    let mut parsed_docs = Vec::new();
+    let mut declared_columns: Option<Vec<WorkflowColumn>> = None;
     for input in inputs {
         let name = strp(input, "filename")?;
         filename(name)?;
         ensure!(names.insert(name), "Duplicate filename {name}");
         let raw = strp(input, "source")?;
+        let doc = source::parse(raw).with_context(|| name.to_owned())?;
+        if !doc.columns.is_empty() && (declared_columns.is_none() || name == "development.yaml") {
+            declared_columns = Some(doc.columns.clone());
+        }
+        parsed_docs.push((name.to_owned(), raw.to_owned(), doc));
+    }
+    let effective_columns: Vec<String> = declared_columns
+        .as_ref()
+        .map(|cols| cols.iter().map(|c| c.id.clone()).collect())
+        .unwrap_or_else(|| {
+            project
+                .workflow
+                .stages
+                .iter()
+                .map(|s| s.id.clone())
+                .collect()
+        });
+    if let Some(cols) = &declared_columns {
+        let col_ids: BTreeSet<_> = cols.iter().map(|c| c.id.as_str()).collect();
+        for card in db.list::<Card>()? {
+            if card.project_id == project.id && card.active() && !col_ids.contains(card.stage.as_str()) {
+                bail!(
+                    "Column '{}' still has active Cards (e.g. #{}); move or archive them before removing the column",
+                    card.stage,
+                    card.number
+                );
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (name, raw, doc) in parsed_docs {
         let parsed = (|| -> Result<_> {
-            let doc = source::parse(raw)?;
             ensure!(
                 doc.id.len() <= 200 && !doc.id.contains('/') && !doc.id.contains(".."),
                 "Invalid workflow ID"
@@ -86,7 +117,7 @@ fn validate(
                 );
                 if let Some(column) = &rule.selector.column {
                     ensure!(
-                        project.workflow.stages.iter().any(|s| &s.id == column),
+                        effective_columns.contains(column),
                         "Unknown trigger column {column}"
                     );
                 }
@@ -94,12 +125,7 @@ fn validate(
             let flow = doc.compile()?;
             canban_workflow_engine::validate_definition(
                 &flow,
-                &project
-                    .workflow
-                    .stages
-                    .iter()
-                    .map(|s| s.id.clone())
-                    .collect::<Vec<_>>(),
+                &effective_columns,
                 &config
                     .profiles
                     .iter()
@@ -108,8 +134,8 @@ fn validate(
             )?;
             Ok((doc, flow))
         })()
-        .with_context(|| name.to_owned())?;
-        out.push((name.into(), raw.into(), parsed.0, parsed.1));
+        .with_context(|| name.clone())?;
+        out.push((name, raw, parsed.0, parsed.1));
     }
     Ok(out)
 }
@@ -166,6 +192,7 @@ fn publish(
             hash,
             revision_id: format!("{}:{revision}", definition.id),
             enabled: doc.enabled,
+            columns: doc.columns.clone(),
             rules: doc.on,
         };
         for (key, rule) in &file.rules {
@@ -211,6 +238,49 @@ fn publish(
         // Historical YAML revisions and captured runs remain available in SQL.
         db.conn
             .execute("DELETE FROM workflow_sources WHERE id=?1", [&f.id])?;
+    }
+    // Synchronize declared YAML columns to Project stages when provided.
+    let active_sources: Vec<_> = db
+        .list::<WorkflowSource>()?
+        .into_iter()
+        .filter(|f| f.project_id == project.id && !f.columns.is_empty())
+        .collect();
+    if let Some(primary) = active_sources
+        .iter()
+        .find(|f| f.filename == "development.yaml")
+        .or_else(|| active_sources.first())
+    {
+        let mut updated: Project = db.get(&project.id)?;
+        let new_stages: Vec<Stage> = primary
+            .columns
+            .iter()
+            .map(|col| {
+                if let Some(mut existing) = updated
+                    .workflow
+                    .stages
+                    .iter()
+                    .find(|s| s.id == col.id)
+                    .cloned()
+                {
+                    existing.name = col.name.clone();
+                    existing
+                } else {
+                    Stage {
+                        id: col.id.clone(),
+                        name: col.name.clone(),
+                        execute: false,
+                        profile: None,
+                        instruction: String::new(),
+                        on_completed: None,
+                        require_human_review: false,
+                    }
+                }
+            })
+            .collect();
+        if updated.workflow.stages != new_stages {
+            updated.workflow.stages = new_stages;
+            db.save(&updated)?;
+        }
     }
     Ok(())
 }

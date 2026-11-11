@@ -6,7 +6,7 @@ Status: reconciled 2026-11-11. The [unified engine](workflow-engine.md) now sepa
 
 A Project has a stable identity, one required directory/current execution location and its own Board. Create its directory if absent; Git is common but not mandatory. Project creation does not imply cloning or initializing Git, and directory failures never make existing files disposable rollback data. A Project does not require a Herdr Space.
 
-Keep the current Board at three columns: Backlog / Develop / Review. Archive retains completed work outside the active Board. Earlier support for configurable runtime stages does not require adding a Design column for planning.
+Keep the default Board at three columns: Backlog / Develop / Review. Archive retains completed work outside the active Board. Planning can run as a workflow step in Backlog without adding a Design column. When a Project needs 4 or more columns (for example `Backlog -> Design -> Develop -> QA -> Review`), its primary Workflow YAML can declare `columns`, and publishing the Workflow updates the Project's Board stages (preserving any column that still holds active Cards or requiring them to move first).
 
 ```text
 Project
@@ -36,7 +36,7 @@ Required human decisions persist and bind exact result/input versions. Reading n
 
 Agents should author/modify workflows through the same declarative model that users can manually edit. Use shared schema validation, useful diagnostics, expected revisions and immutable published revisions. Invalid drafts do not replace active valid configuration; new edits do not silently rewrite active runs or captured assignments.
 
-Project Workflows displays and edits multiple named YAML sources, with immutable SQL version history. Original YAML and active revision references live only in SQLite; files are optional submit/export inputs and no Workflow copies are written under ~/.canban. Edit with agent previews one Project-wide Prompt and opens a Project-owned configuration conversation in Terminal. Column trigger icons show shared-library descriptions of active rules. Cards retain execution/approval controls. See [the concrete contract](../workflow-implementation.md) for validation, conflicts, activation and UI behavior. A graph editor is not required; onboarding remains open.
+Project Workflows provides a unified **Visual Pipeline & Policy Studio** alongside the raw YAML editor, with immutable SQL version history. Built-in policy switches (Planning mode, Human Review vs. Auto-merge Queue, and External PR rules) and per-step default Prompts with inline overrides share the same window, while a prominent **Edit with agent** banner guides users to design custom multi-column or branching workflows with an Agent in Terminal. Column headers show concise active automation badges plus a detailed popover, and Cards render a live step progress stepper with report links, rework feedback and auto-merge hold controls. Original YAML and active revision references live only in SQLite; files are optional submit/export inputs and no Workflow copies are written under ~/.canban. See [the concrete contract](../workflow-implementation.md) for validation, conflicts, activation and UI behavior. Onboarding remains open.
 
 ## Migration and compatibility
 
