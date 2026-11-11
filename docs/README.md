@@ -1,6 +1,8 @@
 # Canban product design and runtime research
 
-Canban is the product; Human Context names the proposed approach. Current user directions center on native Rust/NSH UI, directory-backed Projects, local Boards/cards, stage-triggered workflows, stage-profile/default automatic scheduling, and a unified card timeline. AppServer is an independent service shared by UI clients and local/remote executions; WebView is embedded only as needed. Documentation is English; proposals and unresolved decisions are identified.
+Canban is the product; Human Context names the proposed approach. Current directions center on native Rust/NSH UI, directory-backed Projects, Cards and a unified Timeline. The accepted next architecture uses three Board columns, one workflow engine, durable event subscriptions, Agent-authored/manual workflow definitions and a generic workflow viewer. AppServer is an independent service shared by UI clients and local/remote executions. Documentation is English; accepted directions, implementation and open design are identified separately.
+
+The [Workflow/event implementation](workflow-implementation.md) records Project Workflows, SQLite-only original YAML/version history, Edit with agent, shared Column trigger hints and durable event subscriptions. Manual edits and Agent submissions use one transactional publication path and one interpreter. Onboarding/default Profile setup remains the next product discussion.
 
 The repository now has a runnable macOS MVP. [Real Agent acceptance, 2026-11-09](real-agent-acceptance-20261109.md) covers the current Codex workflow, native post-Archive Resume repair and Claude provider-authentication boundary. [Latest acceptance](mvp-acceptance.md) covers the command-defined profile update, real Codex human-input/rework tasks, explicit Review commit/merge, and Terminal recovery checks. Start with [implementation, development and acceptance](implementation.md) for actual behavior, commands and validation limits. Dated pre-implementation statements in the design/research documents describe their original scope; they are not the current implementation status.
 
@@ -22,6 +24,10 @@ The latest explicit user decision takes precedence over earlier discussion. Befo
 records explicit activation of the installed backend, newer-backend entry and
 persisted daily release checks.
 
+[Workflow/event-system merge acceptance (2026-11-11)](event-system-merge-acceptance-20261111.md)
+records the combined schema-12/API-10 build, Workflow/Terminal interaction,
+local backend activation and branch-isolation regression checks.
+
 ## Current product documents
 
 | Document | Purpose |
@@ -30,7 +36,9 @@ persisted daily release checks.
 | [Multi-machine execution](multi-machine.md) | Independent AppServer, mutable Project work location, remote Agent CLI and native Terminal routing |
 | [Multi-machine acceptance](multi-machine-acceptance.md) | Isolated local/remote verification, limits and reproduction |
 | [Product discussion and decisions](product/product-log.md) | Rationale, superseded proposals, and open questions |
-| [Projects and workflow templates](product/projects-and-workflows.md) | Directory/Board ownership, required Backlog, callbacks, customization, and template migration |
+| [Projects and workflow templates](product/projects-and-workflows.md) | Project/Board ownership, three columns, declarative customization, workspaces and migration boundary |
+| [Workflow/event implementation](workflow-implementation.md) | Concrete CLI/schema, immediate publication, subscription operations, migration, generic UI and acceptance limits |
+| [Unified workflow engine](product/workflow-engine.md) | Accepted next design: entries/steps/runs, Agent authoring, generic display, approval and replacement of stage callbacks |
 | [Board dragging and placement](board-interaction.md) | Whole-Card dragging, animated placeholders/peers, durable ordering and workflow boundary |
 | [Kanban card workflow](product/kanban-workflow.md) | Numbers, resources, stages/run/outcome separation, comments, mentions, and archive |
 | [GitHub workspace and cache](github-workspace.md) | GitHub page, Issue/PR sources, Board filters, remote Review, pagination and event-refreshed disposable cache |
@@ -44,7 +52,7 @@ persisted daily release checks.
 | [Agent CLI and extensibility](product/agent-extensibility.md) | CLI capabilities and integration boundaries; use Agent profile configuration for the current command/preset schema |
 | [Agent interaction](product/agent-interaction.md) | Interactive terminal execution, completion/exit, resume and acceptance limits |
 | [One Session model](product/sessions.md) | Card/profile conversations, request/attempt lifetimes and live replies through one execution model |
-| [Unified timeline](product/timeline.md) | Proposed event envelope, event catalog, comment revisions, attachments, ordering, and recovery |
+| [Unified timeline](product/timeline.md) | Card history presentation, comment revisions, artifacts and ordering; shared event contract links |
 | [Agent-callable interface](product/agent-interface.md) | Proposed application operations shared with the desktop |
 | [MVP sequence](mvp-plan.md) | Scope, implementation proposals, decision gates, and acceptance matrix |
 | [MVP scope review](product/mvp-scope-review.md) | User resolutions and the simplified first-release boundary |
@@ -69,9 +77,9 @@ persisted daily release checks.
 | [Global Agent Overview](product/overview.md) | Herdr UI reference, all-Agent grouped overview, attention highlight, queued/idle/closed states and context inspector |
 | [Attention handling](product/needs-attention.md) | Task/runtime naming, contextual handling inside Overview, Card/Terminal navigation and resolution rules |
 | [Unified Card reminders](reminders.md) | Per-Card unread/pending items, Project counts, durable visible-read positions and local sound delivery |
-| [Events and notifications](product/events-and-notifications.md) | Rust enum/channel/topic direction, needs-attention state, internal notifications; detailed architecture deferred |
+| [Events, subscriptions and notifications](product/events-and-notifications.md) | Accepted next design: durable facts/delivery, Card/GitHub selectors, recovery, source provenance and notifications |
 
-Current default template: Backlog / Develop / Review. Only Backlog is mandatory. Archive retains completed work outside the active Board. Plan/Process are earlier generic planning/execution terms, not additional required columns. Earlier Space-based organization and Ready/In Progress/Done column recommendations have been superseded.
+Keep Backlog / Develop / Review for the current design; planning is a workflow step while the Card remains in Backlog, not a Design column. The existing runtime permits custom stages, but expanding columns is not required for the unified engine. Archive retains completed work outside the active Board. Earlier Space organization and required Plan/Process/Ready/In Progress/Done columns are superseded.
 
 ## Architecture and integration
 
@@ -105,6 +113,6 @@ Project-wide [development conventions](development-conventions.md) specify prefi
 | [Related products](research/product-landscape.md) | Official-documentation workflow comparison and hypotheses |
 | [Sources and verification](research/sources.md) | Pinned source revisions and research verification boundary |
 
-The user's latest MVP decisions are authoritative: agent-reported completion, no residual-process coordination, worktree handling at Archive, ordinary Review reports, JSON templates, existing runnable agent setup, and internal attention/notification events. Detailed event architecture, native macOS notifications, template GUI, and Shear UI come later.
+Preserve Agent-reported completion, no residual-process coordination, worktree handling at Archive, ordinary Review reports and existing execution identities. The 2026-11-11 direction now specifies durable events and a unified workflow engine with Agent/manual authoring and generic display. Native macOS notifications, advanced schedules, a graph editor and Shear UI remain separate/deferred. Project authoring and Edit with agent are selected and implemented; onboarding remains open.
 
 Source facts are tied to inspected revisions. Research examples and proposed API/configuration schemas are not implementation evidence; documents explicitly marked implemented describe the current feature contract. Canban integrates with compatible Herdr Core through its protocol, owning task/context/history and scheduling while Core owns PTYs and observed runtime state.

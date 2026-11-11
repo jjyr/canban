@@ -1,5 +1,23 @@
 # Product discussion and decisions
 
+## 2026-11-11 — Workflow/event implementation
+
+Implemented the initial unified interpreter, schema-11 durable journal/subscriptions, CLI definition validation/publication, old assignment adoption and generic native Card viewer. Publication affects new runs immediately while existing definitions/assignments remain captured. See [concrete operations, evidence and limits](../workflow-implementation.md). This does not implement settings-hosted configuration conversations or provider authentication.
+
+## 2026-11-11 — Unified workflows, durable subscriptions and Agent authoring
+
+Status: user-confirmed architecture direction; documentation only, with no runtime acceptance or implementation authorization in this discussion.
+
+Keep Backlog / Develop / Review; do not add a Design column. Planning and approval are workflow steps that can run while a Card remains in Backlog. Manual starts, subscribed events and external column entry use one Workflow Engine. Replace the current stage callback executor through migration rather than keeping two runtimes. Preserve Profiles, Conversations, Requests/Attempts, Scheduler, workspaces and Herdr bindings; do not relaunch existing work during migration.
+
+Support committed Card membership, replies/comments, column entry/exit and changed-field events, plus corresponding GitHub Issue/PR observations. Internal consumers can subscribe broadly or to a particular Card/object. Persist event facts and delivery progress; keep channels as wake-up/invalidation transport. Retain source relationships/provenance, deduplication and polling/discovery gaps without reinstating permanent remote-content mirrors. Completion is explicit, approvals bind exact results and old results cannot advance superseding work.
+
+Agents should create/modify declarative workflow definitions; users can manually edit the same source. Both paths share validation/revisions. One generic UI should display any supported definition/run and its steps, artifacts, decisions and failures. A bespoke workflow screen or graph editor is not required. Definition editing does not itself run a workflow or approve a human gate.
+
+The next UX discussion should cover default Agent Profiles during onboarding, invoking an Agent conversation from settings to configure Canban, and the complete interaction/UI around these conversations and the generic viewer. Exact defaults, session ownership/layout and apply/activation controls remain open. Earlier manual-start mockups illustrate intent, not approved UI.
+
+See [workflow rules and migration](workflow-engine.md), [events/subscriptions](events-and-notifications.md) and [Project boundaries](projects-and-workflows.md). These supersede the older detailed-event deferral and stage-only automation model; dated MVP evidence remains historical.
+
 ## 2026-11-10 — Project switcher with numeric attention badges
 
 Supersede the earlier recent-event summary strip. Show every other Project as a subtly filled button, including Projects without events; fill available width and fold the remainder without a three-entry limit. Order by recent Project switching, then name, keeping targets stable during background changes. Show only a positive amber count of unique Cards needing permissions/input/recovery or human Review; no working/queued/event text or zero badge. The shared searchable Project picker uses matching badges. The Board-only scope, navigation/history and Terminal boundary remain unchanged. See [current navigation contract](../quick-open-and-navigation.md#board-title-bar-project-activity-2026-11-10).
@@ -610,3 +628,7 @@ The user removed the redundant Board caption and selected Card-body dragging, a 
 ## 2026-11-10 — Directory-based workspace namespaces
 
 Supersedes the earlier numeric-only default `canban/<card-number>` naming decision for new workspaces. The user selected `<project-directory-basename>-<project-id-first-4>/<card-number>`, for example `canban-4e5r/42`, for both branch names and managed paths beneath `worktrees/`. Project display names may be in any language and do not participate. Normalize the directory component into a legal Git ref, preserve valid multilingual letters/numbers, and add matching numeric suffixes for collisions; the short ID is not assumed globally unique. Existing branch/path bindings remain authoritative across later stages and Resume. See the implemented [naming contract and acceptance](../workspace-and-scheduling.md#readable-workspace-names).
+
+## 2026-11-11: Project YAML authoring and SQL source authority
+
+User confirmed Project-level multi-Workflow editing, a single **Edit with agent** entry containing full Prompt preview/copy and explicit Terminal launch, plus Column flash icons with shared-library hover/click descriptions. The later storage decision supersedes the file-source proposal: original YAML and immutable versions live only in SQLite, with no extra Workflow files under ~/.canban. Files are an explicit submit/export transport. Manual edits and configuration Agents use the same transactional revision/check/apply APIs. History can load an old revision as a draft and republish it as a new revision. Configuration conversations have Project + purpose + Profile ownership without a business Card. See [current implementation](../workflow-implementation.md) for actual operations and evidence boundaries; onboarding remains open.

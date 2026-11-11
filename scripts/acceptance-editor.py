@@ -38,7 +38,7 @@ try:
     config.update(hc_env=core_env,hc_session=core_env['HC_SESSION'])
     (home / 'config/agents.json').write_text(json.dumps(config))
     call('config.reload')
-    workflow = json.loads((home / 'config/workflows/default.json').read_text())
+    workflow = call('workflow.template')
     workflow['workspace'].update(create_worktree=False, sync_base=False)
     source = base / 'source'
     source.mkdir()

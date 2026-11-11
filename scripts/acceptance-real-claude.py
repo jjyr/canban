@@ -34,7 +34,7 @@ def wait(predicate,label,timeout=180):
 try:
  wait(lambda _:True,'AppServer startup',20)
  c=json.loads((home/'config/agents.json').read_text());c.update(hc=shutil.which('hc'),hc_env=core,hc_session=core['HC_SESSION']);(home/'config/agents.json').write_text(json.dumps(c));call('config.reload');call('scheduler.configure',{'idle_minutes':1})
- flow=json.loads((home/'config/workflows/default.json').read_text());flow['workspace'].update(create_worktree=False,sync_base=False)
+ flow=call('workflow.template');flow['workspace'].update(create_worktree=False,sync_base=False)
  p=call('project.create',{'name':'Real Claude acceptance','directory':str(base/'source'),'workflow':flow})
  marker='CLAUDE_CONTEXT_'+base.name.replace('-','_')
  card=call('card.create',{'project_id':p['id'],'title':'Claude context and reply smoke','body':'Only exercise Canban replies. Do not change source files. Card context marker: '+marker+'. Follow current Question reply and outcome reporting instructions.'})

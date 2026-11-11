@@ -1,6 +1,6 @@
 # Kanban card workflow
 
-Status: current product requirements from the 2026-11-05 clarification. Recommendations and unresolved behavior are labeled. These are Canban concepts, not existing core APIs.
+Status: product requirements reconciled 2026-11-11. Keep Backlog / Develop / Review. The accepted next [unified engine](workflow-engine.md) separates column from progress and replaces callbacks; the initial slice is implemented; see [workflow implementation](../workflow-implementation.md) for coverage. [Implementation](../implementation.md) records runtime evidence. Recommendations/open behavior remain labeled.
 
 ## The card is the coordination point
 
@@ -27,7 +27,8 @@ Keep these independent:
 
 | Axis | Example | Meaning |
 | --- | --- | --- |
-| Stage | Backlog / Develop / Review / custom stage | Which workflow is relevant |
+| Board column | Backlog / Develop / Review | Business position, independent of process progress |
+| Workflow progress | Planning / Awaiting plan approval / Implementing / Reviewing | Current step of captured definition |
 | Scheduler/run state | Queued / Preparing / Active / Input needed / Failed / Unknown | What is happening operationally |
 | Task outcome | Awaiting decision / Accepted / Changes requested / Canceled | Human or configured workflow disposition |
 | Archive | Active / Archived | Whether the card appears on the active Board |
@@ -46,7 +47,7 @@ These are proposed field categories, not finalized enums. A Develop card can be 
 8. In the default template, the agent declaring development completed automatically moves the card into Review. No independent quality/check/process-exit gate is added. Review produces an ordinary report; the Shear interface follows later. Other JSON templates can configure different outcome transitions.
 9. The human or configured completion policy records an outcome; completed work is archived. Human acceptance, Git commit, merge, and archive remain distinguishable facts.
 
-Backlog entry never automatically starts a stage workflow. Stage preparation and review behavior depend on the selected template; the advanced review editor is optional for MVP.
+Backlog entry has no built-in Agent action. Manual/subscribed planning can run and wait for approval there, then move into Develop. Default delivery and planning use one engine. Workflow-owned moves continue their run instead of duplicating entry work. Preparation/review depend on the definition; detailed start/viewer interactions remain a separate UX discussion.
 
 ## Routing and mentions
 
@@ -70,7 +71,7 @@ When an agent reports blockage/needs input, mark the card needs attention and ge
 
 Keep the managed task worktree through development, Review, and rework. Handle it at Archive. A fresh Session need not create a new worktree, and card history/the Project directory are not disposable execution resources.
 
-Templates are JSON-configurable for MVP. A customization GUI and complex migration of active Boards are deferred. Existing mismatch-warning direction remains relevant when configuration is incompatible.
+Definitions are declarative and authored/modified by an Agent or manually, sharing validation/revisions. A generic UI displays any supported definition/run; a graph editor is not required. Existing templates and active work migrate to the one engine without relaunch; see [migration rules](workflow-engine.md#migration-one-runtime). Detailed authoring/onboarding/settings UX remains open.
 
 ## Unified timeline and resources
 
@@ -111,7 +112,7 @@ Keep the earlier direction of declarative layouts: title, stage/status, resource
 7. Submit user and agent comments, a structured mention, and a pasted image: all persist in the unified timeline. The mention appends or starts/resumes its Card/profile conversation; its reply cannot be mistaken for completion of the active development task.
 8. The development agent reports completed: the default template enters Review and schedules an ordinary report without independent checks or waiting for process exit. Normal repeated report handling does not create another transition.
 9. Archive completed work: retain card number, comments, events, and artifacts; reopening cannot silently dispatch.
-10. Load a JSON template; show a useful mismatch if a change cannot apply. A visual template editor and complex active-template migration are deferred.
+10. Validate Agent-authored/manual definitions through one schema with useful diagnostics. A generic viewer presents supported definitions/runs without custom workflow screens. These are future unified-engine requirements.
 11. Edit card/context after queuing or launching: retain the previous input; a deliberate refresh creates the appropriate new request/history.
 12. Call card operations through the agent interface: the same validation and timeline behavior apply as in the UI.
 

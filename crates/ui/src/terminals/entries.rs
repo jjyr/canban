@@ -218,17 +218,24 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
             .iter()
             .find(|c| c.terminal_id == t.id)
             .cloned();
-        let project_id = agent
-            .as_ref()
-            .map(|r| r.card.project_id.clone())
-            .or_else(|| location.as_ref().and_then(|c| c.project_id.clone()));
-        let card = agent.as_ref().map(|r| r.card.clone()).or_else(|| {
-            location
+        let configuration = s.configuration_sessions.iter().find(|c| c.id == t.id);
+        let project_id = configuration.map(|c| c.project_id.clone()).or_else(|| {
+            agent
                 .as_ref()
-                .and_then(|c| c.card_id.as_ref())
-                .and_then(|id| s.cards.iter().find(|c| &c.id == id))
-                .cloned()
+                .map(|r| r.card.project_id.clone())
+                .or_else(|| location.as_ref().and_then(|c| c.project_id.clone()))
         });
+        let card = if configuration.is_some() {
+            None
+        } else {
+            agent.as_ref().map(|r| r.card.clone()).or_else(|| {
+                location
+                    .as_ref()
+                    .and_then(|c| c.card_id.as_ref())
+                    .and_then(|id| s.cards.iter().find(|c| &c.id == id))
+                    .cloned()
+            })
+        };
         let inferred_card = agent.is_none() && card.is_some();
         let stage = agent.as_ref().and_then(|a| a.request.as_ref()).map(|r| {
             s.projects

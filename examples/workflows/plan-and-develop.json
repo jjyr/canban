@@ -1,0 +1,17 @@
+{
+  "id": "plan-and-develop",
+  "name": "Plan and develop",
+  "workspace": { "create_worktree": true, "sync_base": false },
+  "entries": { "start": "plan", "develop": "implement", "review": "review" },
+  "steps": {
+    "plan": { "type": "agent", "profile": "codex", "instruction": "Read the Card, current GitHub source and relevant code. Write a concrete plan with affected areas, risks and validation. Report the plan as your result. Do not implement yet.", "next": "approve_plan" },
+    "approve_plan": { "type": "approval", "title": "Approve the plan before development", "next": "enter_develop", "rework": "plan" },
+    "enter_develop": { "type": "move", "column": "develop", "next": "implement" },
+    "implement": { "type": "agent", "profile": "developer", "instruction": "Implement the approved plan. Read the exact prior step reports, preserve task scope and report changes and validation.", "next": "enter_review" },
+    "enter_review": { "type": "move", "column": "review", "next": "review" },
+    "review": { "type": "agent", "profile": "reviewer", "instruction": "Review the actual changes, tests and approved plan. Produce a report without implementing unrelated changes.", "next": "approve_review" },
+    "approve_review": { "type": "approval", "title": "Review completed; human disposition required", "next": "complete", "rework": "enter_develop" },
+    "complete": { "type": "complete" }
+  },
+  "max_steps": 100
+}

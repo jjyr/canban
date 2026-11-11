@@ -1,6 +1,14 @@
 # Scheduler, capacity and human approval
 
-Status: implemented 2026-11-07. The default global limit is eight Agents. This supersedes the earlier unrestricted-concurrency decision; old `capacity` fields remain ignored.
+Status: current runtime implemented 2026-11-07, with accepted next architecture recorded 2026-11-11 below. Default global limit is eight Agents; earlier unrestricted concurrency is superseded and old `capacity` fields remain ignored. The [unified engine](workflow-engine.md) is implemented in the initial slice; see [workflow/event implementation](../workflow-implementation.md) for exact coverage.
+
+## Unified workflow admission direction
+
+All workflow Agent steps use this queue/budget. Workflow Engine owns entries, progression and approval; Scheduler owns readiness/admission/execution. Subscribers target the engine rather than launching terminals or creating another scheduler.
+
+Planning in Backlog is valid when an explicit step requests it. Workflow-owned Requests need run/step execution and applicable entry/input identities; they cannot be discarded merely because the legacy stage predicate assumes Backlog cannot execute. Revalidate run/step eligibility, lifecycle and gates at admission. Manual assistance remains available under existing Conversation/Question rules.
+
+Retain current later-column/FIFO priority initially; graph depth does not silently redefine priority. Stage callback fields convert into steps/approvals; Scheduler does not retain a callback executor. The runtime policies below remain applicable; callback configuration is compatibility input converted by the new engine.
 
 ## One path and one global budget
 
@@ -64,4 +72,4 @@ The status contains active usage, limit and queued count. Card approval requires
 
 ## Timers and deferred scope
 
-Scheduler remains the owner of readiness/time waiting. Advanced schedules, fairness policies, per-profile caps and generic workflow scripting remain deferred. See [workspace and acceptance](../workspace-and-scheduling.md) for current validation, and [Agent profiles](agent-profiles.md) for routing configuration.
+Scheduler owns readiness/time waiting. Advanced schedules, fairness, per-profile caps and arbitrary scripting remain deferred. Declarative entries/steps/conditions/approvals now belong to the accepted unified workflow design and use this Scheduler. See [workspace and acceptance](../workspace-and-scheduling.md) for current validation, and [Agent profiles](agent-profiles.md) for routing configuration.

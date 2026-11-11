@@ -2,6 +2,8 @@
 
 Status: architecture discussion/proposal, 2026-11-05. The external boundary is already clear: native Rust/NSH UI plus a logically independent AppServer, co-hosted for MVP; herdr-core is a separate runtime. This comparison concerns the modules inside that AppServer, not another process split or new Session types.
 
+Historical comparison: AppServer is now an independent service. The accepted 2026-11-11 [workflow engine](product/workflow-engine.md) and [events/subscriptions](product/events-and-notifications.md) supersede this document's event-deferral and stage-only examples. Retain these alternatives as design history, not current runtime/delivery contracts.
+
 Keep the user's simplifications: agent-declared completion, ordinary Review report, JSON templates, worktree handling at Archive, no old-execution coordination, and only minimal enum/channel/topic infrastructure for MVP.
 
 ## Common components

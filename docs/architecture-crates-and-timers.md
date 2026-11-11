@@ -2,13 +2,15 @@
 
 Status: current naming/crate direction and timer placement proposal, 2026-11-06. The user selected AppServer and Workflow Engine, proposed Scheduler for queue/execution/time responsibility, and asked for crate separation. Timer placement below is a proposal; adding this boundary does not automatically add recurring scheduling to MVP.
 
+Accepted architecture update, 2026-11-11: the [unified workflow engine](product/workflow-engine.md) and [durable event/subscription contract](product/events-and-notifications.md) now define entries, steps, checkpoints and delivery. They supersede the event-framework deferral below. They are implemented in the initial slice; see [workflow/event implementation](workflow-implementation.md) for exact coverage; crate boundaries and timer ownership remain applicable.
+
 ## Names and responsibilities
 
 | Component | Cargo package | Directory | Responsibility |
 | --- | --- | --- | --- |
 | AppServer | canban-app-server | crates/app-server | Shared operations, composition, lifecycle, adapter entry, and routing to module owners |
 | Kanban | canban-kanban | crates/kanban | Projects, Boards, cards, stage/attention state, and card timing attributes |
-| Workflow Engine | canban-workflow-engine | crates/workflow-engine | Interpret JSON templates and advance workflow through configured actions |
+| Workflow Engine | canban-workflow-engine | crates/workflow-engine | Validate declarative definitions; interpret entries, run/step transitions and approvals through one engine |
 | Scheduler | canban-scheduler | crates/scheduler | Routing/default selection, queue/readiness, timed triggers, and generic Session execution |
 | Agent profile configuration | canban-profiles | crates/profiles | Resolve editable JSON presets, command overrides, generic expansion and legacy configuration conversion |
 | Context | canban-context | crates/context | Notes, resources, attachments, and captured execution input |
@@ -83,7 +85,7 @@ future daemon host -> canban-app-server (no NSH dependency)
 
 Dependency arrows above are a minimum direction sketch, not an exhaustive manifest. Supporting crates depend on shared types and applicable infrastructure; they must not import the UI or depend back on AppServer. Workflow Engine and Scheduler do not need to import one another: they can consume shared event data and produce typed actions wired by AppServer.
 
-A practical implementation can expose pure/template decisions plus async module operations. The exact event publisher/subscriber traits and channel crate remain deferred. Separate crates do not require a mailbox, thread, actor, or process per crate.
+A practical implementation can expose pure workflow decisions plus async module operations. Durable journal/delivery semantics now follow the accepted event contract; exact Rust traits/channel library remain implementation choices. Separate crates do not require a mailbox, thread, actor or process per crate.
 
 ## Where Timer belongs
 

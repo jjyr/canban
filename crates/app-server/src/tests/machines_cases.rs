@@ -46,7 +46,8 @@ fn location_edits_retarget_queued_work_but_not_existing_attempts_or_resumes() {
             let mut p: Project = db.get(&p.id)?;
             p.workflow.workspace.create_worktree = false;
             p.workflow.workspace.sync_base = false;
-            db.save(&p)
+            db.save(&p)?;
+            republish_template(&app, db, &p)
         })
         .unwrap();
     app.call(
@@ -124,7 +125,8 @@ fn changed_environment_never_reviews_an_unrelated_checkout() {
             let mut p: Project = db.get(&p.id)?;
             p.workflow.workspace.create_worktree = false;
             p.workflow.workspace.sync_base = false;
-            db.save(&p)
+            db.save(&p)?;
+            republish_template(&app, db, &p)
         })
         .unwrap();
     app.call(

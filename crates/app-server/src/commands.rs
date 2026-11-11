@@ -24,6 +24,21 @@ impl AppServer {
             return self.update_call(method, p);
         }
 
+        if matches!(
+            method,
+            "workflow.sources" | "workflow.apply" | "workflow.check" | "workflow.prompt"
+        ) {
+            return self.authoring_call(method, p);
+        }
+        if method.starts_with("configuration.") {
+            return self.configuration_call(method, p);
+        }
+        if method.starts_with("workflow.") {
+            return self.workflow_call(method, p);
+        }
+        if method.starts_with("event.") || method.starts_with("subscription.") {
+            return self.event_call(method, p);
+        }
         if method.starts_with("github.") || method == "project.github" {
             return self.github_call(method, p);
         }
@@ -205,9 +220,7 @@ impl AppServer {
                 let workflow = if p["workflow"].is_object() {
                     serde_json::from_value(p["workflow"].clone())?
                 } else {
-                    serde_json::from_slice(&std::fs::read(
-                        self.home.join("config/workflows/default.json"),
-                    )?)?
+                    self.default_workflow()?
                 };
                 Self::validate_workflow(&config, &workflow)?;
                 let location = self.work_location(&p)?;
@@ -229,6 +242,7 @@ impl AppServer {
                 };
                 self.mutate(method, &p, |db| {
                     db.save(&project)?;
+                    authoring::initialize(&self.home, db, &config, &project)?;
                     Ok(serde_json::to_value(project)?)
                 })
             }
@@ -278,6 +292,7 @@ impl AppServer {
                     c.removed_at.is_none(),
                     "Restore the removed Card before editing"
                 );
+                let before = c.clone();
                 if let Some(t) = p["title"].as_str()
                     && c.github_issue().is_none()
                 {
@@ -298,7 +313,7 @@ impl AppServer {
                     "user",
                     "Card updated",
                     None,
-                    json!({"title":c.title,"body":c.body}),
+                    json!({"title":c.title,"body":c.body,"changed_fields": ([if c.title!=before.title {Some("title")}else{None},if c.body!=before.body {Some("body")}else{None}].into_iter().flatten().collect::<Vec<_>>()),"before_revision":before.revision,"after_revision":c.revision}),
                 )?;
                 db.save(&c)?;
                 Ok(serde_json::to_value(c)?)
@@ -313,7 +328,7 @@ impl AppServer {
                 );
                 let target = strp(&p, "stage")?;
                 let project: Project = db.get(&c.project_id)?;
-                let stage = canban_workflow_engine::stage(&project.workflow, target)?;
+                canban_workflow_engine::stage(&project.workflow, target)?;
                 let from = c.stage.clone();
                 let placement = p.get("before_card_id");
                 ensure!(
@@ -361,16 +376,9 @@ impl AppServer {
                     None,
                     json!({"from":from,"to":target,"before_card_id":p["before_card_id"]}),
                 )?;
-                enqueue(
-                    db,
-                    &config,
-                    &mut c,
-                    &project,
-                    stage,
-                    "stage_entry",
-                    None,
-                    None,
-                )?;
+                workflow::stop_card(db, &c.id, "superseded")?;
+                db.save(&c)?;
+                workflow::enter(db, &config, &mut c, target)?;
                 db.save(&c)?;
                 Ok(serde_json::to_value(c)?)
             }),

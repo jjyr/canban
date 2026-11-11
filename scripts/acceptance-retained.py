@@ -44,7 +44,7 @@ try:
  for p in config['profiles']:
   p.update(preset=None,exit={'type':'input','text':'/exit'},session_instruction='',argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'{prompt}'],resume_argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'--resume','{session_id}','{prompt}'])
  (home/'config/agents.json').write_text(json.dumps(config));call('config.reload');call('scheduler.configure',{'idle_minutes':1})
- workflow=json.loads((home/'config/workflows/default.json').read_text());workflow['workspace'].update(create_worktree=False,sync_base=False)
+ workflow=call('workflow.template');workflow['workspace'].update(create_worktree=False,sync_base=False)
  for stage in workflow['stages']:
   if stage['id']=='review':stage['profile']='developer'
  project=call('project.create',{'name':'Retained','directory':str(base/'source'),'workflow':workflow})

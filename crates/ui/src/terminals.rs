@@ -265,6 +265,17 @@ pub fn machine_menu(ui: Ui) {
     });
 }
 pub fn reopen(ui: Ui, id: String) {
+    if let Some(project) = ui.snapshot.with_untracked(|s| {
+        s.configuration_sessions
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.project_id.clone())
+    }) {
+        ui.project.set(project);
+        ui.navigate("workflows");
+        return;
+    }
+
     launch(ui, json!({"inherit_terminal_id":id}));
 }
 pub fn close_tab(ui: Ui, id: &str) {

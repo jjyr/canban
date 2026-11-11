@@ -634,3 +634,18 @@ pub fn github_browser(ui: canban_ui::presenter::Ui, pr: bool) {
     }
     ui.navigate("github");
 }
+
+/// Same generic viewer with planning/approval and a conditional branch.
+pub fn workflow() -> canban_types::WorkflowRun {
+    serde_json::from_value(json!({
+        "id":"gallery-run","project_id":"gallery","card_id":"gallery-card","workflow_id":"plan-delivery","definition_revision":2,
+        "definition":{"id":"plan-delivery","name":"Plan and develop","entries":{"new_issue":"plan"},"steps":{
+            "plan":{"type":"agent","profile":"planner","instruction":"Read and design","next":"approve"},
+            "approve":{"type":"approval","title":"Approve plan v1","next":"choose","rework":"plan"},
+            "choose":{"type":"condition","pointer":"/inputs/implement","equals":true,"then":"develop","otherwise":"done"},
+            "develop":{"type":"move","column":"develop","next":"done"},"done":{"type":"complete"}}},
+        "state":"waiting_approval","step":"approve","visit":2,"request_id":null,"trigger_event_id":null,
+        "input_digest":"fixture","inputs":{"implement":true},"outputs":{"plan":{"message":"Plan v1: preserve existing runtime and add a regression.","report_id":"plan-v1"}},
+        "history":[],"error":null,"created_at":0,"updated_at":0
+    })).unwrap()
+}

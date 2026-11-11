@@ -28,11 +28,9 @@ try:
  for p in config['profiles']:
   p.update(preset=None,exit={'type':'input','text':'/exit'},session_instruction='',argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'{prompt}'],resume_argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'--resume','{session_id}','{prompt}'])
  (home/'config/agents.json').write_text(json.dumps(config,indent=2));call('config.reload')
- workflow_path = home / 'config/workflows/default.json'
- local_workflow = json.loads(workflow_path.read_text())
+ local_workflow = call('workflow.template')
  local_workflow['workspace']['sync_base'] = False  # Fixture repositories have no remote.
- workflow_path.write_text(json.dumps(local_workflow))
- project=call('project.create',{'name':'Interactive acceptance','directory':str(base/'source')})
+ project=call('project.create',{'workflow':local_workflow,'name':'Interactive acceptance','directory':str(base/'source')})
  note=call('note.save',{'project_id':project['id'],'title':'Context.md','body':'Original captured context'})
  ref=call('note.save',{'project_id':project['id'],'title':'Reference.md','body':'[Context](note:'+note['id']+')'})
  card=call('card.create',{'project_id':project['id'],'title':'Exercise interactive task','source_note_id':note['id']})

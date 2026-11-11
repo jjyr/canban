@@ -11,6 +11,8 @@ parser.add_argument('--native',action='store_true');parser.add_argument('--newer
 args=parser.parse_args();repo=P(__file__).resolve().parents[1]
 base=P(tempfile.mkdtemp(prefix='cbb-',dir='/private/tmp'))
 env={k:v for k,v in os.environ.items() if not k.startswith(('CANBAN_','HC_'))}
+build=json.loads(subprocess.check_output([str(repo/'target/debug/canban'),'build-info'],env=env))
+current_schema=build['schema']
 requests=[];fail_http=False
 class HTTP(http.server.BaseHTTPRequestHandler):
  def do_GET(self):
@@ -83,6 +85,15 @@ def cleanup(home,bundle,environment,core,processes):
      else:
       try:os.kill(p['pid'],signal.SIGTERM)
       except ProcessLookupError:pass
+ # A script UI can exec Python after the worker records its launch identity.
+ # Recovery can also replace that journal entry. Match only this disposable
+ # bundle's exact UI command, including earlier fixture attempts.
+ expected=str(bundle/'Contents/MacOS/canban-ui')
+ for line in run(['/bin/ps','-axo','pid=,command='],env).stdout.splitlines():
+  pid,command=line.strip().split(None,1)
+  if command==expected or command.endswith(' '+expected):
+   try:os.kill(int(pid),signal.SIGTERM)
+   except ProcessLookupError:pass
  core_stop(core)
 
 def fake_ui(path):
@@ -122,7 +133,7 @@ def local_case(name,schema,native=False):
   terminal_pid=json.loads(run([shutil.which('hc'),'get',terminal['runtime']['terminal'],'--json'],{**env,**core}).stdout)['pid']
   stop(home,seed)
   db=sqlite3.connect(home/'canban.sqlite');db.execute('CREATE TABLE keep(value TEXT)');db.execute("INSERT INTO keep VALUES('preserved')");db.commit();db.close()
-  if schema<10:run([cli,'database','--target','8'],environment)
+  if schema<current_schema:run([cli,'database','--target',str(max(schema,8))],environment)
   if schema==7:
    db=sqlite3.connect(home/'canban.sqlite');db.executescript('DROP TABLE card_reads; PRAGMA user_version=7;');db.close()
   # Count actual migration CLI invocations and inject bounded failures.
@@ -171,9 +182,9 @@ os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_n
   assert len(requests)==before_http,requests
   assert hashes=={str(p.relative_to(bundle)):hashlib.sha256(p.read_bytes()).hexdigest() for p in bundle.rglob('*') if p.is_file()}
   calls=(home/'migration-calls').read_text().splitlines() if (home/'migration-calls').exists() else []
-  assert len(calls)==(0 if schema==10 else 2 if expected=='manual_recovery' else 1),calls
-  assert (home/'updates/jobs'/journal()['token']/'database-before.sqlite').exists()==(schema<10)
-  db=sqlite3.connect(home/'canban.sqlite');assert db.execute('PRAGMA user_version').fetchone()[0]==10;assert db.execute('SELECT * FROM keep').fetchall()==[('preserved',)];db.close()
+  assert len(calls)==(0 if schema==current_schema else 2 if expected=='manual_recovery' else 1),calls
+  assert (home/'updates/jobs'/journal()['token']/'database-before.sqlite').exists()==(schema<current_schema)
+  db=sqlite3.connect(home/'canban.sqlite');assert db.execute('PRAGMA user_version').fetchone()[0]==current_schema;assert db.execute('SELECT * FROM keep').fetchall()==[('preserved',)];db.close()
   assert json.loads(run([shutil.which('hc'),'get',terminal['runtime']['terminal'],'--json'],{**env,**core}).stdout)['pid']==terminal_pid
   (root/'result.json').write_text(json.dumps(dict(schema_before=schema,migration_calls=len(calls),downloads=0,bundle_unchanged=True,pty_preserved=True,journal=journal()),indent=2))
   print('LOCAL_'+name.upper().replace('-','_')+'_OK',flush=True)
@@ -245,9 +256,9 @@ def newer_native():
 
 try:
  if args.newer_native:newer_native()
- elif args.native:local_case('native',10,True)
+ elif args.native:local_case('native',current_schema,True)
  else:
-  for name,schema in [('same-schema',10),('migration',8),('legacy',7),('up-failure',8),('boot-failure',8)]:local_case(name,schema)
+  for name,schema in [('same-schema',current_schema),('schema-10',10),('migration',8),('legacy',7),('up-failure',8),('boot-failure',8)]:local_case(name,schema)
   daily_case()
  print('BACKEND_ACCEPTANCE_PASSED',flush=True)
 finally:http.shutdown();http.server_close()

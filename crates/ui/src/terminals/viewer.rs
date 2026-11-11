@@ -74,11 +74,14 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         current(ui).and_then(|e| e.binding())
     });
     view().flex_1().min_h(px(0.)).min_w(px(0.)).gap_0()
+        .child(when(move||ui.snapshot.with(|s|s.configuration_sessions.iter().any(|c|c.id==ui.terminal_selection.get())),move||action("← Back to Workflows",Variant::Quiet,move|_|{
+            if let Some(project)=ui.snapshot.with_untracked(|s|s.configuration_sessions.iter().find(|c|c.id==ui.terminal_selection.get_untracked()).map(|c|c.project_id.clone())){ui.project.set(project);ui.navigate("workflows");}
+        })))
         .child(dynamic(move|| {
             let Some(run)=binding.get() else {
                 let entry=current(ui);
                 return view().flex_1().min_h(px(0.)).p_5().gap_3().child(if entry.is_some() {
-                    view().gap_2().child(muted("Connecting…"))
+                    view().gap_2().child(muted(move||ui.snapshot.with(|s|s.configuration_sessions.iter().find(|c|c.id==ui.terminal_selection.get()).map(|c|c.error.clone().unwrap_or_else(||format!("{}…",c.state))).unwrap_or_else(||"Connecting…".into()))))
                 } else {
                     view().items_start().gap_3().child(when(move || card_context(ui).is_some(), move || {
                         let c=card_context(ui).unwrap();

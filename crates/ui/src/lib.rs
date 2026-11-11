@@ -31,6 +31,7 @@ pub mod reminders;
 mod sessions;
 pub mod startup;
 pub mod terminals;
+pub mod workflows;
 pub mod workspace;
 use nsh_core::prelude::*;
 use presenter::*;

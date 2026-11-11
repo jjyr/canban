@@ -22,6 +22,7 @@ pub struct Ui {
     /// Commands outlive transient buttons/lists, but end with the window.
     pub owner: Owner,
     pub github: crate::github::Browser,
+    pub workflows: crate::workflows::State,
     /// Optional host adapter for the reusable Board drop intent (Gallery uses local fixtures).
     pub board_move: Stored<Option<crate::board::DropHandler>>,
     pub new_draft: Signal<String>,
@@ -155,6 +156,7 @@ impl Ui {
         Self {
             owner: Owner::current(),
             github: crate::github::Browser::new(),
+            workflows: crate::workflows::State::new(),
             board_move: stored(None),
             new_draft: signal(String::new()),
             draft_epoch: signal(0),

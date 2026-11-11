@@ -5,6 +5,7 @@ mod details;
 mod header;
 mod task;
 mod timeline;
+mod workflow;
 use crate::{drafts::*, presenter::*};
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::{TouchEvent, TouchPhase, prelude::*};
@@ -166,6 +167,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         })
                         .child(task::render(ui, draft, reading))
                         .child(details::render(ui, draft))
+                        .child(workflow::render(ui))
                         .child(when(
                             move || draft.with(|d| d.workspace_details),
                             move || {

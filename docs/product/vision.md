@@ -1,38 +1,39 @@
 # Canban: Human Context
 
-Status: product direction, updated 2026-11-10 for Profile-only selection. See [implementation](../implementation.md) for actual behavior and acceptance; explicitly marked proposals remain open.
+Status: product direction reconciled 2026-11-11 for unified workflows, durable subscriptions and Agent authoring. The initial engine/subscription slice is implemented; see [concrete operations and limits](../workflow-implementation.md) for current behavior/evidence. Explicitly open UX/schema choices remain open.
 
 ## Product thesis
 
 Canban is a Kanban-centered workbench that preserves human intent and coordinates agent work. Human Context is the proposed name for the approach. A person describes work, moves it into an actionable stage, and follows its execution, discussion, and outcome in one card.
 
-The automation model has two distinct questions: **the stage determines what workflow to execute; its Profile selects the Agent, falling back to the global default**. Scheduler manages when eligible work actually starts under configured limits.
+The automation model separates **Board position, workflow progress and execution admission**. Manual starts, event subscriptions and column entries address one Workflow Engine. Its Agent steps reference Profiles; Scheduler admits their Requests under the existing global budget. Planning/approval can run in Backlog. See [unified workflow rules](workflow-engine.md).
 
 ## Confirmed product directions
 
 - A Project can be created freely and must correspond to a directory. Create the directory if it does not exist. It is usually a Git repository, but a Git repository is not mandatory.
 - Each Project has its own Board. Canban owns this organization; it does not need to inherit Herdr's Space/Tab/Pane model.
-- A Board is a configurable set of workflow stages and triggers. The default template is Backlog, Develop, Review; completed cards are archived.
-- Backlog is required and does not start a workflow on entry. Other stages can be customized.
-- Entering Develop makes the card eligible for the development workflow; entering Review makes it eligible for the review workflow.
+- Keep the current Board at Backlog / Develop / Review; planning is a process step, not a Design column. Completed Cards are archived.
+- Backlog entry has no built-in Agent action; an enabled manual/event entry can plan and wait for approval there.
+- External Develop/Review entry retains current delivery behavior through the same engine. Workflow-owned movement does not start duplicate runs. Earlier configurable-stage support does not require new columns for this design.
 - Outcome transitions are template-configurable. The agent itself reports whether it has completed; in the default template that completed report moves the card into Review and triggers its ordinary report workflow. No independent quality/check/process-exit gate is required.
-- Eligible Cards are scheduled automatically. Selection is explicit @profile, workflow stage.profile, then global default_agent. Routing tags and Profile aliases are removed; users choose automatic roles through workflow JSON and direct questions through explicit mentions.
+- Ready Agent steps use the existing Scheduler/Profile system. Definitions reference Agent Profiles; legacy stage Profile references convert to step references. Direct @profile questions preserve their independent binding. Routing tags and aliases remain removed.
 - Each Project has project-local card numbers, comparable to issue numbers, for easy reference.
 - Every card has a unified timeline of comments, state changes, agent executions, and other relevant updates. Users and agents can comment; users can mention agents.
 - A submitted @profile request reuses its Card/profile conversation, delivering immediately when live or starting/resuming when absent/exited. Stage assignments keep independent Request/Attempt and callback bindings; different profiles retain separate histories.
 - Use one Session model for all executions. The difference is the scheduling trigger/input, not a question/stage session type. Canban makes the scheduling decisions and controls the actual runtime through herdr-core.
 - Cards can reference resources and accept pasted images. Local cards are the first backend; GitHub issue cards are a later extension with the same outward card experience.
 - Notes are deferred pending further product design. They have no current UI/search/creation flow, and saved Notes are not automatically injected into new Agent executions. Preserve existing data and historical captures. Card content, comments, reports and attachments supply current Human Context. See [Notes deferred](../notes-deferred.md).
-- Projects choose a Kanban template at creation. JSON-style configuration is the initial customization surface; template UI and deeper migration features follow later. Incompatible stage mappings must be made visible rather than silently applied.
-- Custom workflows can be created by people or with agent assistance.
+- Workflow definitions are declarative, primarily Agent-authored and also manually editable through shared validation/revisions. A generic UI displays any supported definition/run; a graph editor is not required.
+- Replace existing stage callbacks through one engine migration, retaining queued/running work and human gates without relaunch. Compatibility parsing does not justify a second executor.
+- Default Profile onboarding and settings Agent conversations are the next UX topic; exact setup, ownership, layout and apply/activation behavior remain open.
 - Canban must expose an interface that agents can call directly.
 - Modular Kanban and Scheduler remain the MVP core. Advanced review/editor functionality can follow.
 - Main UI surfaces use native Rust/NSH; embed WebView only when a surface needs it. This supersedes the earlier main-workbench WebView suggestion. Reuse Herdr's existing runnable agent setup through core.
-- Canban's AppServer is logically independent of NSH but co-hosted in the desktop process for MVP; its business logic can later be hosted in a daemon.
+- AppServer is an independent service shared by UI clients and local/remote executions; UI exit does not stop scheduling.
 - Keep managed task worktrees through active development/Review/rework, and handle them at Archive.
 - Accept exceptional old executions continuing in MVP; do not add process-drain, writer handover, or independent completion verification before normal progression.
 - A blocked/input-needed agent marks the card needs attention and generates an internal notification event. Native macOS notifications follow later.
-- Drive internal product activity with Rust enum events, an in-memory channel, and interested topic subscribers. Detailed event architecture is explicitly deferred until after MVP.
+- Use canonical committed typed events, durable scoped subscriptions and consumer progress for automation; memory channels provide advisory wake-ups/invalidation. Support broad/specific-Card and GitHub object events with source provenance, polling gaps and deduplication. See [event rules](events-and-notifications.md).
 
 Earlier Plan/Process wording describes the general transition from planning to schedulable work. The current default stage names are Backlog/Develop/Review. Do not introduce mandatory Plan, Process, Ready, In Progress, or Done columns from earlier research proposals.
 
@@ -44,11 +45,11 @@ Canban
   |     +-- Directory (often a Git repository)
   |     +-- Board
   |     |     +-- Backlog -> Develop -> Review
-  |     |     +-- custom stages and trigger bindings
+  |     |     +-- workflow entry bindings
   |     |     +-- Cards #1, #2, ...
   |     |           +-- description + resource references
   |     |           +-- unified timeline
-  |     |           +-- dispatch requests -> run attempts
+  |     |           +-- workflow runs -> step executions -> requests/attempts
   |     |           +-- changes / artifacts / human outcomes
   |     +-- Archive
   |     +-- Card content / comments / reports / attachments
@@ -66,7 +67,7 @@ From a card, a person should be able to answer:
 | Question | Evidence |
 | --- | --- |
 | Why does this work exist? | Description, discussions, decisions, and resource references |
-| Why did an agent start? | Stage-entry or mention event, workflow revision, routing decision, dispatch request |
+| Why did an agent start? | Manual/event/column entry, workflow/run/step revision, Profile and execution request |
 | What did it receive? | Captured card/context revisions and effective workflow/profile configuration |
 | What happened? | Each run, questions, comments, updates, artifacts, and check evidence in the timeline |
 | What changed? | Repository/worktree and exact change identity where applicable |
@@ -74,9 +75,9 @@ From a card, a person should be able to answer:
 
 Current living context and the immutable input used for a particular run are separate. A later edit must not rewrite what a previous agent received.
 
-## MVP boundary
+## Historical first-MVP boundary
 
-The user has now resolved the main scope questions with explicit MVP simplifications. The updated [scope review](mvp-scope-review.md) records those decisions rather than keeping superseded hardening recommendations as release requirements.
+The following records the initial MVP scope, not a deferral of the 2026-11-11 workflow/event design. GitHub integration and independent AppServer execution have since shipped; see [implementation](../implementation.md). The earlier [scope review](mvp-scope-review.md) preserves the original release decisions.
 
 The first useful loop is **Project -> local card in Backlog -> Develop -> automatic dispatch -> visible result and discussion -> human disposition -> archive**.
 
@@ -86,7 +87,7 @@ Review produces an ordinary report through the existing generic Scheduler path; 
 
 Defer the GitHub issue backend, GitHub write synchronization, advanced Shear-derived review UI, public executable widget/plugin ecosystem, and sophisticated schedule management. Local merge and simple recurring schedules remain product-scope choices rather than prerequisites for the core loop.
 
-## Refinements during implementation
+## Historical MVP simplifications
 
 The main MVP policy decisions are settled: self-reported completion, no old-process coordination, worktree handling at Archive, ordinary Review reports, JSON templates, existing Herdr agent setup, internal attention notifications, and a minimal event-driven direction.
 

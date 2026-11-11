@@ -1,5 +1,5 @@
 use super::*;
-fn uuid_session_id() -> String {
+pub(super) fn uuid_session_id() -> String {
     let s = id();
     format!(
         "{}-{}-{}-{}-{}",
@@ -179,7 +179,12 @@ impl AppServer {
         {
             self.inventory.lock().unwrap().remote_error = Some(format!("{e:#}"));
         }
+        self.store
+            .lock()
+            .unwrap()
+            .write(|db| events::pump(db, &self.config()))?;
         self.observe_terminals()?;
+        self.pump_configuration()?;
         let client = canban_herdr::Client {
             config: self.config(),
         };
@@ -591,6 +596,16 @@ impl AppServer {
             .map(Ok)
             .unwrap_or_else(|| self.execution_home(&location.machine))?;
         let mut project = project.clone();
+        if let Some(id) = &req.workflow_run_id {
+            project.workflow.workspace = self
+                .store
+                .lock()
+                .unwrap()
+                .db()
+                .get::<WorkflowRun>(id)?
+                .definition
+                .workspace;
+        }
         project.directory = location.directory.clone();
         project.location = Some(location.clone());
         let mut prepared = card.clone();

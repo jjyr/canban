@@ -58,7 +58,7 @@ for prof in config['profiles']:
 (a.home/'config/agents.json').write_text(json.dumps(config));call('config.reload');call('scheduler.configure',{'idle_minutes':0})
 source=root+'/source'
 run("import os,subprocess,sys;os.makedirs(sys.argv[1]);p=sys.argv[1];\nfor args in [['init','-b','main'],['config','user.name','Acceptance'],['config','user.email','acceptance@example.invalid'],['config','core.hooksPath','/dev/null'],['config','commit.gpgsign','false'],['commit','--allow-empty','-m','seed']]:subprocess.run(['git','-C',p]+args,check=True,stdout=subprocess.DEVNULL)\nprint('ready')",source)
-flow=json.loads((a.home/'config/workflows/default.json').read_text());flow['workspace']['sync_base']=False
+flow=call('workflow.template');flow['workspace']['sync_base']=False
 project=call('project.create',{'name':'Remote acceptance','location':{'machine':machine,'directory':source},'workflow':flow})
 card=call('card.create',{'project_id':project['id'],'title':'Remote develop, review and resume','body':'Disposable multi-machine acceptance.'})
 tracked.append(card['id'])

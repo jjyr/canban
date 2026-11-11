@@ -142,6 +142,21 @@ impl AppServer {
             .unwrap()
             .clone();
         let filtered = Snapshot {
+            workflow_sources: Vec::new(),
+            configuration_sessions: Vec::new(),
+            event_subscriptions: Vec::new(),
+            workflow_runs: snapshot
+                .workflow_runs
+                .iter()
+                .filter(|r| r.card_id == card_id)
+                .cloned()
+                .collect(),
+            workflow_revisions: snapshot
+                .workflow_revisions
+                .iter()
+                .filter(|r| r.project_id == card.project_id)
+                .cloned()
+                .collect(),
             card_reads: snapshot
                 .card_reads
                 .iter()

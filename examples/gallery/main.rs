@@ -82,6 +82,7 @@ fn controls() -> impl IntoElement {
                 )
                 .child(canban_ui::components::scheduling::settings(ui))
                 .child(profiles::registry(profile_fixture))
+                .child(canban_ui::components::workflow::run_view(fixtures::workflow()))
                 .child(review::diff_panel(fixtures::review()))
                 .child(
                     panel().child(label("Native libghostty terminal")).child(
@@ -343,6 +344,30 @@ pub fn Gallery() -> impl IntoElement {
             )
             .child(canban_ui::frame::screen(ui))
             .into_element();
+    }
+    if matches!(
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
+        Ok("workflows") | Ok("workflow-agent")
+    ) {
+        let raw = include_str!("../workflows/plan-and-develop.yaml").to_string();
+        let name = "issue-planning.yaml".to_string();
+        let mut draft = canban_ui::workflows::Draft {
+            base: json!({"revision":"gallery","sources":[{"filename":name,"source":raw,"active":{"revision":1,"workflow_id":"gallery-workflow"}}]}),
+            ..Default::default()
+        };
+        draft.sources.insert(name.clone(), raw);
+        draft.selected = name;
+        ui.workflows.drafts.update(|d| {
+            d.insert(ui.project.get_untracked(), draft);
+        });
+        ui.workflows.prompt.set("你是当前 Canban 项目的 Workflow 配置助手。\n本次范围是整个项目的 Workflows，而非某个选中的文件。\n\n请先只读分析全部 Workflow YAML，用 ASCII 展示事件、Agent、审批及三列的影响。\n等待用户提出具体修改要求，再校验和发布。".repeat(4));
+        ui.workflows.profile.set("codex".into());
+        ui.page.set("workflows".into());
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("workflow-agent") {
+            ui.workflows.agent.set(true);
+            return canban_ui::workflows::agent_panel(ui).into_element();
+        }
+        return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("project-activity") {
         nsh_core::element::desktop::set_title_bar(

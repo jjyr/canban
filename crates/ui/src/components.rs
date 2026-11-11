@@ -84,3 +84,4 @@ pub fn output_panel(ui: Ui) -> impl IntoElement {
         )
         .child(nsh_base::text_view().markdown(move || Some(ui.output.get().into())))
 }
+pub mod workflow;

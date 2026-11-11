@@ -49,6 +49,47 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
                 );
             }
         }
+        let workflows = ui.snapshot.with_untracked(|s| {
+            let mut latest = std::collections::BTreeMap::new();
+            for w in s
+                .workflow_revisions
+                .iter()
+                .filter(|w| w.project_id == card.project_id)
+            {
+                latest.insert(w.workflow_id.clone(), w.clone());
+            }
+            latest.into_values().collect::<Vec<_>>()
+        });
+        let active = ui.snapshot.with_untracked(|s| {
+            s.workflow_runs
+                .iter()
+                .any(|r| r.card_id == card.id && r.active())
+        });
+        for workflow in workflows {
+            for entry in workflow.definition.entries.keys() {
+                let permitted = ui.snapshot.with_untracked(|s| {
+                    s.workflow_sources
+                        .iter()
+                        .find(|f| f.workflow_id == workflow.workflow_id)
+                        .is_none_or(|f| {
+                            f.enabled
+                                && f.rules
+                                    .get(entry)
+                                    .is_some_and(|r| r.enabled && r.event == "manual")
+                        })
+                });
+                if !permitted {
+                    continue;
+                }
+                let params =
+                    json!({"workflow_id":workflow.workflow_id,"card_id":card.id,"entry":entry});
+                items.push(
+                    MenuItem::new(format!("Run {} · {}", workflow.definition.name, entry))
+                        .disabled(active || !card.active() || card.human_gate.is_some())
+                        .on_select(move || dispatch(ui, "workflow.start", params.clone())),
+                );
+            }
+        }
         items.push(MenuItem::separator());
         items.extend(crate::card_actions::items(ui, card));
         popup_menu(items).await;

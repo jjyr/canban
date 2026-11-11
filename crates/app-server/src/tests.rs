@@ -554,9 +554,8 @@ fn legacy_registry_and_workflow_are_preserved_without_starter_role_injection() {
         std::fs::read(home.join("config/agents.json")).unwrap(),
         original
     );
-    let flow: Workflow =
-        serde_json::from_slice(&std::fs::read(home.join("config/workflows/default.json")).unwrap())
-            .unwrap();
+    let flow = app.default_workflow().unwrap();
+    assert!(!home.join("config/workflows").exists());
     assert!(flow.stages.iter().all(|s| s.profile.is_none()));
     assert_eq!(app.config().profiles.len(), 1);
 }
@@ -1130,7 +1129,10 @@ fn later_template_stages_win_across_boards_and_human_cards_are_skipped() {
     app.store
         .lock()
         .unwrap()
-        .write(|db| db.save(&project))
+        .write(|db| {
+            db.save(&project)?;
+            republish_template(&app, db, &project)
+        })
         .unwrap();
     let second: Card = serde_json::from_value(
         app.call(
@@ -1198,7 +1200,10 @@ fn human_review_gate_survives_reports_acknowledgement_restart_and_requires_expli
     app.store
         .lock()
         .unwrap()
-        .write(|db| db.save(&project))
+        .write(|db| {
+            db.save(&project)?;
+            republish_template(&app, db, &project)
+        })
         .unwrap();
     app.call(
         "card.move",
@@ -1594,3 +1599,16 @@ fn agent_callbacks_cannot_install_desktop_updates() {
 }
 
 mod github;
+
+mod workflows;
+
+// Fixtures changing a historical Project template explicitly republish its YAML.
+fn republish_template(app: &AppServer, db: Db<'_>, project: &Project) -> Result<()> {
+    let flow = legacy_definition(&project.workflow, format!("delivery:{}", project.id));
+    if workflow::published(db, &flow.id).is_err() {
+        return authoring::initialize(&app.home, db, &app.config(), project);
+    }
+    let revision = workflow::published(db, &flow.id)?.revision;
+    authoring::import(&app.home, db, &app.config(), project, &flow, revision)?;
+    Ok(())
+}

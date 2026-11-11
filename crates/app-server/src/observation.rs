@@ -409,6 +409,9 @@ impl AppServer {
                     let duration = Duration::from_millis(at.saturating_sub(now()).max(1));
                     wait = Some(wait.map_or(duration, |w| w.min(duration)));
                 };
+                if let Some(at) = server.event_deadline() {
+                    due(at);
+                }
                 for a in &s.attempts {
                     if a.close_state == "closing"
                         && let Some(at) = a.close_requested_at

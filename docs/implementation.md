@@ -4,9 +4,11 @@ Current runtime update (2026-11-09): [Event-driven runtime observation](runtime-
 
 # MVP implementation and development
 
+Workflow/event implementation (2026-11-11): [concrete operations, source storage, UX and limits](workflow-implementation.md) implement the unified engine and durable subscriptions. Projects have multiple YAML sources, original text and immutable versions in SQLite; no Workflow files or revision mirrors are generated in the Canban home. Project Workflows supports manual editing/history and Edit with agent; Column trigger details are derived client-side. Configuration conversations have Project ownership and use the existing Terminal. Onboarding remains a separate topic; deterministic fixture acceptance does not imply live provider authentication.
+
 [Unified Card reminders](reminders.md) (2026-11-10) defines the current unread /
 pending counts, persistent visible-read positions, Overview updates and local
-notification sounds. Current builds use SQLite schema 10 and desktop API version 8 (reminders introduced level 6; the merged GitHub/editor/updater contract uses level 8). Upgrade
+notification sounds. Current builds use SQLite schema 12 and desktop API version 10 (the earlier merged GitHub/editor/updater contract used schema 10/API 8). Upgrade
 the installed AppServer together with its UI. `mise run dev` (also `mise run run`)
 now manages a separate checkout/branch instance; it does not upgrade installed
 `~/.canban`. Existing history is baselined quietly during migration.
@@ -21,7 +23,7 @@ Status: native macOS MVP with multi-machine execution; current contracts reconci
 
 ## GitHub workspace update
 
-The [GitHub workspace and cache](github-workspace.md) extends the integration with a dedicated rail page, paginated notifications/Issues/PRs, PR source Cards, local GitHub references, Board source filters, repository rules and explicit remote comments/Review. Account controls moved out of Settings. Remote data uses disposable event-refreshed file caches instead of permanent business-table mirrors; schema 9 preserves bindings and local work. The integrated schema is 10 and API is 8; [combined acceptance](merge-integration-20261111.md) records migration and native verification.
+The [GitHub workspace and cache](github-workspace.md) extends the integration with a dedicated rail page, paginated notifications/Issues/PRs, PR source Cards, local GitHub references, Board source filters, repository rules and explicit remote comments/Review. Account controls moved out of Settings. Remote data uses disposable event-refreshed file caches instead of permanent business-table mirrors; schema 9 preserves bindings and local work. The GitHub/editor integration used schema 10/API 8, extended to schema 12/API 10 by Workflows; [combined acceptance](merge-integration-20261111.md) records migration and native verification.
 
 ## Build and launch
 
@@ -60,11 +62,11 @@ Current service lifecycle (2026-11-09): the desktop attaches to or starts an ind
 
 ## Configuration
 
-First startup creates config/agents.json and config/workflows/default.json. The local hc path resolves when available. Profile commands remain portable and resolve on the selected execution host at launch. Edit JSON and choose Reload agent configuration in Settings, or call config.reload. Invalid configuration leaves the previous in-memory configuration active. Stage profile IDs are validated at startup, Project creation and configuration reload against the global registry; removing a profile referenced by the default/saved Project workflow is rejected. Requests already queued keep their profile/instruction/callback snapshot.
+First startup creates config/agents.json and stores the default Workflow bootstrap in SQLite. An existing config/workflows/default.json is imported once; no new Workflow file is created. The local hc path resolves when available. Profile commands remain portable and resolve on the selected execution host at launch. Edit JSON and choose Reload agent configuration in Settings, or call config.reload. Invalid configuration leaves the previous in-memory configuration active. Stage profile IDs are validated at startup, Project creation and configuration reload against the global registry; removing a profile referenced by the default/saved Project workflow is rejected. Requests already queued keep their profile/instruction/callback snapshot.
 
-Fresh homes receive developer and reviewer starter profiles (both initially using the existing Codex launch setup), plus codex/claude profiles for direct mentions. The default workflow references developer from Develop and reviewer from Review. Existing registries/workflow files and saved Project workflows are preserved without injecting or rewriting roles. If a workflow file is missing under an older registry, generated stages omit references to unavailable starter profiles and use the global default.
+Fresh homes receive developer and reviewer starter profiles (both initially using the existing Codex launch setup), plus codex/claude profiles for direct mentions. The default workflow references developer from Develop and reviewer from Review. Existing registries/workflow files and saved Project workflows are preserved without injecting or rewriting roles. When creating the SQL bootstrap under an older registry, generated stages omit references to unavailable starter profiles and use the global default.
 
-The default workflow is Backlog -> Develop -> Review. Backlog does nothing; Develop completion enters Review and queues its ordinary review-report task. Review completion awaits human disposition. New Projects load the current default workflow JSON; existing Projects retain their saved workflow. Template replacement/migration UI is deferred.
+The default workflow is Backlog -> Develop -> Review. Backlog does nothing; Develop completion enters Review and queues its ordinary review-report task. Review completion awaits human disposition. New Projects use the SQL bootstrap and receive a visible development.yaml source document in Project Workflows. Existing Projects retain their configured behavior through conversion to SQL YAML sources. Source document names do not imply managed files.
 
 Agent configuration has hc, hc_session, hc_env, default_agent and profiles. Profiles have id, optional preset, role_instruction, optional argv/resume_argv, exit and session_instruction. canban-profiles resolves editable JSON defaults and explicit whole-field overrides. Commands expand {prompt}, {home}, {cli} and {session_id} as individual arguments. The runtime has no provider-specific invocation branches or Herdr launch-template mode. See [profile schema and migration](product/agent-profiles.md).
 
@@ -197,7 +199,7 @@ Schema v6 adds a separate durable manual Terminal sequence. Agent inventory entr
 
 [Internal releases and updates](updates.md) defines the implementation, migration authoring rules and acceptance. The main-triggered release workflow reserves `YYYYMMDD-N`, builds one UI/CLI/updater App, and publishes only complete prereleases. Persisted rolling-24-hour and unrestricted manual checks feed the global bottom-rail Update action. Installation immediately replaces the initiating UI/AppServer without draining Herdr Agents; durable idempotent reports/replies survive the handoff. Paired database-only up/down batches are transactional, with no automatic database backup for release installation. Failed candidate startup rolls back schema/bundle and verifies the restored version; failed down stops with a standalone database-free Recovery window.
 
-After integration with GitHub workspace and editor drafts, current schema is 10 and desktop API is 8. The service lock is acquired before opening SQLite. Six isolated update/failure cases and a real packaged native sidebar upgrade passed, including unsent-draft restoration and exact Agent terminal/Core/worktree preservation. See the linked evidence for the simulated future-schema boundary and unverified GitHub publication.
+The earlier GitHub/editor integration used schema 10/API 8; Workflow sources and subscriptions now extend that to schema 12/API 10. The service lock is acquired before opening SQLite. The earlier integration's six isolated update/failure cases and native sidebar upgrade covered schema 10, including unsent-draft restoration and exact Agent terminal/Core/worktree preservation. The [Workflow/event-system merge acceptance](event-system-merge-acceptance-20261111.md) separately records schema-12 local backend activation and native Workflow checks; it does not rerun the release download/bundle-swap matrix. See the linked evidence for the simulated future-schema boundary and unverified GitHub publication.
 
 ### Local backend activation (2026-11-11)
 

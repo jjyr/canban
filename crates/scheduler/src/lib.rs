@@ -28,6 +28,8 @@ pub fn request(
     on_completed: Option<String>,
 ) -> Request {
     Request {
+        workflow_run_id: None,
+        workflow_step: None,
         location: None,
         resume_from: None,
         id: id(),
@@ -64,6 +66,16 @@ pub fn active_count(snapshot: &canban_types::Snapshot) -> usize {
         .count();
     bound
         + snapshot
+            .configuration_sessions
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.state.as_str(),
+                    "starting" | "unknown" | "running" | "working"
+                )
+            })
+            .count()
+        + snapshot
             .requests
             .iter()
             .filter(|r| {
@@ -76,7 +88,7 @@ pub fn active_count(snapshot: &canban_types::Snapshot) -> usize {
             .count()
 }
 pub fn automatic(request: &Request) -> bool {
-    request.trigger == "stage_entry"
+    matches!(request.trigger.as_str(), "stage_entry" | "workflow")
 }
 /// A completed, idle invocation may take another assignment in the same environment.
 pub fn retained<'a>(
@@ -124,6 +136,17 @@ pub fn eligible(snapshot: &canban_types::Snapshot, request: &Request) -> bool {
             && (card.human_gate.is_some()
                 || card.attention.is_some()
                 || card.stage != request.stage))
+    {
+        return false;
+    }
+    if automatic(request)
+        && let Some(id) = &request.workflow_run_id
+        && !snapshot.workflow_runs.iter().any(|r| {
+            r.id == *id
+                && r.active()
+                && r.request_id.as_deref() == Some(&request.id)
+                && r.state == "waiting_agent"
+        })
     {
         return false;
     }
