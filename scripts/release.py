@@ -17,6 +17,17 @@ def get_optional(path):
         if error.code==404:return None
         raise
 
+def find_release(repo,version):
+    # GitHub's release-by-tag endpoint only resolves published releases.
+    # The authenticated list includes drafts, so reserve retries and publication
+    # can both find the same immutable release ID before it is published.
+    for page in range(1,101):
+        releases=api('GET',f'/repos/{repo}/releases?per_page=100&page={page}')
+        for release in releases:
+            if release['tag_name']==version:return release
+        if len(releases)<100:return None
+    raise RuntimeError('Release lookup exceeded pagination limit')
+
 def reserve(repo,commit,run_id):
     run=api('GET',f'/repos/{repo}/actions/runs/{run_id}')
     day=datetime.datetime.fromisoformat(run['created_at'].replace('Z','+00:00')).astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d')
@@ -51,7 +62,7 @@ def main():
         version=reserve(repo,commit,os.environ['GITHUB_RUN_ID'])
         if os.environ.get('GITHUB_OUTPUT'):
             with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('version='+version+'\n')
-        release=get_optional(f'/repos/{repo}/releases/tags/{version}')
+        release=find_release(repo,version)
         if release is None:api('POST',f'/repos/{repo}/releases',{'tag_name':version,'target_commitish':commit,'name':version,'draft':True,'prerelease':True,'generate_release_notes':True})
         print(version);return
     args.directory.mkdir(parents=True,exist_ok=True)
@@ -62,7 +73,8 @@ def main():
         subprocess.run([str(helper),'pack','.local/Canban.app',str(asset)],check=True)
         manifest={**build,'rollback_floor':8,'asset':name,'size':asset.stat().st_size,'sha256':hashlib.sha256(asset.read_bytes()).hexdigest()}
         (args.directory/('manifest-'+build['platform']+'.json')).write_text(json.dumps(manifest,indent=2)+'\n');return
-    release=api('GET',f'/repos/{repo}/releases/tags/{version}')
+    release=find_release(repo,version)
+    if release is None:raise RuntimeError('Reserved release is missing: '+version)
     if not release['draft']:
         print('Already published; immutable release unchanged');return
     # Draft retries may replace incomplete assets; published assets are immutable.
