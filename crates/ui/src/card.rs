@@ -19,6 +19,8 @@ pub(super) struct Reading {
     composer_height: Signal<f32>,
     editor: Stored<Option<canban_ui_kit::markdown::MarkdownInput>>,
     reader: crate::reminders::Reader,
+    revealed_request: Stored<String>,
+    jump_ready: Signal<bool>,
 }
 impl Reading {
     fn latest(self) {
@@ -59,8 +61,32 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         composer_height: signal(180.),
         editor: stored(None),
         reader: crate::reminders::Reader::new(saved.y.0),
+        revealed_request: stored(String::new()),
+        jump_ready: signal(false),
     };
     let draft = document(ui, key, Draft::card(&card));
+    effect(move || {
+        let target = ui.card_event.get();
+        let source_card = ui.card_id();
+        if target.is_none() {
+            return;
+        }
+        reading.jump_ready.set(false);
+        ui.spawn(async move {
+            // Markdown measures asynchronously; reveal the Timeline after initial layout,
+            // then its actual row bounds refine the requested message position.
+            next_frame().await;
+            next_frame().await;
+            if reading.jump_ready.try_get().is_some()
+                && ui.card_event.get_untracked() == target
+                && ui.page.get_untracked() == "card"
+                && ui.card.get_untracked() == source_card
+            {
+                reading.jump_ready.set(true);
+                reading.scroll.scroll_to_end(false);
+            }
+        });
+    });
     effect(move || {
         let _ = ui.reminders.get();
         let _ = crate::reminders::foreground();
@@ -181,6 +207,49 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     .child(crate::components::git_workspace::panel(ui))
                             },
                         ))
+                        .child(dynamic(move || {
+                            let request = ui.request.get();
+                            let req = ui.snapshot.with(|s| {
+                                s.requests
+                                    .iter()
+                                    .find(|r| r.id == request && r.card_id == ui.card_id())
+                                    .cloned()
+                            });
+                            if let Some(req) = req {
+                                let request_id = req.id.clone();
+                                view()
+                                    .on_layout(move |b: &Bounds<Points>| {
+                                        if reading.revealed_request.get() != request_id {
+                                            reading.revealed_request.replace(request_id.clone());
+                                            reading.follow.set(false);
+                                            reading.scroll.scroll_to(
+                                                Point::new(
+                                                    px(0.),
+                                                    px((b.origin.y.0 - 12.).max(0.)),
+                                                ),
+                                                false,
+                                            );
+                                        }
+                                    })
+                                    .gap_2()
+                                    .child(compact_action(
+                                        "Close execution details",
+                                        Variant::Quiet,
+                                        move |_| {
+                                            ui.request.set(String::new());
+                                            ui.clear_output();
+                                        },
+                                    ))
+                                    .child(crate::components::run_panel(ui, req))
+                                    .child(when(
+                                        move || !ui.output.get().is_empty(),
+                                        move || crate::components::output_panel(ui),
+                                    ))
+                                    .into_element()
+                            } else {
+                                view().into_element()
+                            }
+                        }))
                         .child(timeline::render(ui, reading)),
                 ),
         )

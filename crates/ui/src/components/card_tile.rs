@@ -7,6 +7,7 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
             .with(|all| all.get(&reminder_id).copied().unwrap_or_default())
     });
     let selected_id = card.id.clone();
+    let terminal_card = card.id.clone();
     let snapshot = ui.snapshot.get_untracked();
     let mut tile = panel()
         .p_3()
@@ -55,6 +56,11 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
                         .child(reminder_count(
                             move || count.get().total,
                             move || count.get().pending > 0,
+                        ))
+                        .child(chrome_button(
+                            Icon::Terminal,
+                            format!("Open Terminals for Card #{}", card.number),
+                            move |_| crate::terminals::open_card(ui, &terminal_card),
                         ))
                         .child(
                             icon(Icon::Grip)

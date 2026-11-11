@@ -70,6 +70,12 @@ pub fn items(ui: Ui, card: Card) -> Vec<MenuItem> {
             )
         }),
     ];
+    let terminal_card = card.id.clone();
+    items.insert(
+        0,
+        MenuItem::new("Open Card Terminals")
+            .on_select(move || crate::terminals::open_card(ui, &terminal_card)),
+    );
     // GitHub removal excludes a source from intake; local Cards only archive.
     if card.removed_at.is_none() && card.github_issue().is_some() {
         items.push(

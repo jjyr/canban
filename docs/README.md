@@ -83,7 +83,8 @@ editor, modal, window-title and terminal checks.
 | [Development startup](development-startup.md) | Branch-scoped dev/dev-stop, bound homes/bundles, ownership checks, native startup errors and acceptance |
 | [Instance isolation and remaining gaps](instance-isolation.md) | Implemented checkout/branch isolation and explicit installed-backend activation and remaining generic compatibility boundaries |
 | [Herdr UI layout and product references](research/herdr-ui-product-and-layout.md) | Source-backed recommendations for workspace chrome, navigation, Quick Open, contextual feedback and Review |
-| [Global Agent Overview](product/overview.md) | Herdr UI reference, all-Agent grouped overview, attention highlight, queued/idle/closed states and context inspector |
+| [Global Overview](product/overview.md) | Compact global handling/execution, direct destinations, unread updates and collapsed idle/history |
+| [Overview and Terminal refinement](overview-and-terminal-navigation-proposal.md) | Selected design, cross-surface Terminal entry inventory and navigation rules |
 | [Attention handling](product/needs-attention.md) | Task/runtime naming, contextual handling inside Overview, Card/Terminal navigation and resolution rules |
 | [Unified Card reminders](reminders.md) | Per-Card unread/pending items, Project counts, durable visible-read positions and local sound delivery |
 | [Events, subscriptions and notifications](product/events-and-notifications.md) | Accepted next design: durable facts/delivery, Card/GitHub selectors, recovery, source provenance and notifications |

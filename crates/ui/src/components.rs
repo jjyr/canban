@@ -23,15 +23,41 @@ pub fn run_panel(ui: Ui, req: Request) -> impl IntoElement {
     let mut panel = panel()
         .child(label(format!("@{} · {}", req.profile.id, req.state)))
         .child(muted(format!("{} · {}", req.stage, req.trigger)));
-    let card_id = req.card_id.clone();
-    let profile_id = req.profile.id.clone();
-    panel = panel.child(action(
-        "Open / resume Agent",
-        Variant::Secondary,
-        move |_| {
-            crate::sessions::open(ui, card_id.clone(), profile_id.clone());
-        },
-    ));
+    panel = panel.child(read_text(req.instruction.clone()));
+    let current = crate::terminals::model::conversations(&ui.snapshot.get_untracked())
+        .into_iter()
+        .find(|r| {
+            r.card.id == req.card_id
+                && r.request
+                    .as_ref()
+                    .is_some_and(|r| r.profile.id == req.profile.id)
+        });
+    let can_retry = current.as_ref().is_none_or(crate::terminals::model::closed)
+        && ui
+            .snapshot
+            .with_untracked(|s| s.cards.iter().any(|c| c.id == req.card_id && c.active()));
+    if let Some(row) = current {
+        if crate::terminals::model::binding(&row).is_some() {
+            let id = row.id.clone();
+            panel = panel.child(action(
+                if row.request.as_ref().is_some_and(|r| r.id == req.id) {
+                    "Open Terminal"
+                } else {
+                    "Open current conversation"
+                },
+                Variant::Secondary,
+                move |_| ui.open_terminal(id.clone()),
+            ));
+        } else if crate::terminals::model::can_resume(&row, &ui.profiles.get_untracked()) {
+            let id = row.id.clone();
+            panel = panel.child(
+                action("Resume Agent", Variant::Secondary, move |_| {
+                    crate::terminals::navigation::resume(ui, &id)
+                })
+                .disabled(move || ui.pending.get()),
+            );
+        }
+    }
     if let Some(run) = run {
         let id = run.id.clone();
         panel = panel
@@ -60,13 +86,16 @@ pub fn run_panel(ui: Ui, req: Request) -> impl IntoElement {
             panel = panel.child(label(error).text_color(DANGER));
         }
     }
-    if matches!(req.state.as_str(), "failed" | "blocked" | "needs_report") {
+    if can_retry && matches!(req.state.as_str(), "failed" | "blocked" | "needs_report") {
         let id = req.id.clone();
-        panel = panel.child(action(
-            "Retry with a fresh Session",
-            Variant::Secondary,
-            move |_| dispatch(ui, "execution.retry", json!({"request_id":id})),
-        ));
+        panel = panel.child(
+            action(
+                "Retry with a fresh Session",
+                Variant::Secondary,
+                move |_| dispatch(ui, "execution.retry", json!({"request_id":id})),
+            )
+            .disabled(move || ui.pending.get()),
+        );
     }
     panel
 }

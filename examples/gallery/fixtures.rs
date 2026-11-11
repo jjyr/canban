@@ -345,6 +345,51 @@ pub fn overview() -> canban_types::Snapshot {
         s.requests.push(req);
         s.cards.push(card);
     }
+    // Multi-reason and long-title row exercises compact layout and both direct actions.
+    s.cards[0].title =
+        "修复支付重试逻辑 · preserve the complete task identity when the window is narrow".into();
+    s.cards[0].human_gate = Some(HumanGate {
+        reason: "Decide whether to raise the retry limit".into(),
+        request_id: Some(s.requests[0].id.clone()),
+        next_stage: None,
+    });
+    if let Some(a) = s
+        .attempts
+        .iter_mut()
+        .find(|a| a.request_id == "overview-request-2")
+    {
+        a.observed = Some(
+            json!({"state":"live","status":{"state":"working","msg":"Adding keyboard focus regression coverage"}}),
+        );
+    }
+    // A second live profile makes Card-level navigation require an explicit choice.
+    let mut req = s.requests[2].clone();
+    req.id = "overview-reviewer".into();
+    req.profile.id = "reviewer".into();
+    let mut attempt = s
+        .attempts
+        .iter()
+        .find(|a| a.request_id == "overview-request-2")
+        .unwrap()
+        .clone();
+    attempt.id = "overview-reviewer-attempt".into();
+    attempt.request_id = req.id.clone();
+    attempt.terminal = Some("reviewer-pty".into());
+    s.requests.push(req);
+    s.attempts.push(attempt);
+    for (index, card_index) in [(1, 0), (2, 2)] {
+        let mut event = timeline();
+        event.id = format!("overview-unread-{index}");
+        event.sequence = index;
+        event.card_id = s.cards[card_index].id.clone();
+        event.project_id = s.cards[card_index].project_id.clone();
+        event.kind = "comment.replied".into();
+        event.actor = "agent:codex".into();
+        event.message = "Added regression coverage; please check the new boundary case.".into();
+        event.request_id = Some(s.requests[card_index].id.clone());
+        s.events.push(event);
+    }
+    s.cards[2].body=(0..20).map(|i|format!("### Context {i}\n\nLong task context tests direct navigation to an unread reply.\n\n")).collect();
     let mut recovery = base;
     recovery.id = "workspace-recovery".into();
     recovery.title = "Reconnect the execution machine".into();

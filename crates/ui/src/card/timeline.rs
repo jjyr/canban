@@ -80,7 +80,20 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
                         return view().into_element();
                     }
                     view()
-                        .on_layout(move |b: &Bounds<Points>| reading.reader.row(ui, sequence, *b))
+                        .on_layout(move |b: &Bounds<Points>| {
+                            reading.reader.row(ui, sequence, *b);
+                            if reading.jump_ready.get_untracked()
+                                && ui.card_event.get_untracked() == Some(sequence)
+                                && ui.card_id() == ui.card.get_untracked()
+                            {
+                                ui.card_event.set(None);
+                                reading.follow.set(false);
+                                reading.scroll.scroll_to(
+                                    Point::new(px(0.), px((b.origin.y.0 - 12.).max(0.))),
+                                    false,
+                                );
+                            }
+                        })
                         .child(crate::components::timeline_item::render(
                             ui, event, narrative,
                         ))

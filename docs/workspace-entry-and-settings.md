@@ -53,9 +53,7 @@ The UI Kit emits the chosen path; Project-name policy and `project.create` stay 
 
 ## Overview
 
-Overview renders all nonempty groups in the existing projection order: **Needs you**, **Ready for review**, **Working**, **Queued**, **Idle**, then collapsed **Closed**. There is no All/Needs you/Working filter toolbar or filter state. Each conversation/recovery row appears once. The internal `Needs attention` group key remains unchanged; only its section heading reads Needs you. The global actionable count includes human Review decisions as before, so it can exceed the first group's count.
-
-The context inspector, exact Card/Terminal destinations, retained selection/scroll and Closed expansion continue to work. Wide layouts show list and inspector; narrow layouts show the inspector with a return to Overview. Empty groups are omitted; an empty Overview shows one contextual empty state. There is no duplicate All group.
+Overview now renders compact Needs you, Updates, Running and Queued groups, with Idle and Closed collapsed by default. No filter toolbar is required. Rows directly open Card, Review, Terminal or saved history; the previous context inspector has been removed. Selection, scroll, expansion and row keyboard focus survive Back. See [current Overview](product/overview.md) and [2026-11-11 refinement acceptance](overview-terminal-acceptance-20261111.md). Dated acceptance below records the earlier inspector implementation.
 
 ## Settings composition
 
@@ -79,7 +77,7 @@ This is a grouped presentation of current capabilities, not a new template/profi
 | `ui-kit/directory_field.rs` | Controlled directory string, native chooser/cancellation/error/pending behavior and path-selected intent |
 | `ui-kit/settings.rs` | Section/field visual composition; parent owns scrolling and persistence |
 | `ui/board.rs`, `ui/screens.rs` | Project availability, form/autoname policy and application operations |
-| `ui/overview.rs` | Grouped projection and context-inspector composition; no filtering |
+| `ui/overview.rs` | Compact global rows and direct destinations; no filtering |
 | `ui/components/scheduling.rs`, `ui/profiles.rs` | Shared settings section and content-only profile projection |
 
 The production Gallery includes Empty Board, Settings, existing all-state Overview fixtures, and shared entry/directory controls. Narrow viewport now constrains the workspace to 720 points, crossing the native narrow-layout breakpoint. These scenarios reuse production components and require no application data or Agent.

@@ -224,7 +224,11 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 let req = agent.request.as_ref().unwrap();
                 let (mark, _) = crate::profiles::provider(&req.profile);
                 let text = if crate::terminals::model::closed(&agent) {
-                    "Resume"
+                    if crate::terminals::model::can_resume(&agent, &ui.profiles.get()) {
+                        "Resume"
+                    } else {
+                        "View history"
+                    }
                 } else if agent
                     .attempt
                     .as_ref()
@@ -251,9 +255,8 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 let title = format!("{} · {text}", req.profile.id);
                 let id = agent.id.clone();
                 let ended = crate::terminals::model::closed(&agent);
-                let can_open = c.active();
-                let profile = req.profile.id.clone();
-                let card_id = c.id.clone();
+                let resumable = crate::terminals::model::can_resume(&agent, &ui.profiles.get());
+                let can_open = !c.removed_at.is_some();
                 row = row.child(
                     view()
                         .min_w(px(0.))
@@ -286,8 +289,8 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                                         .truncate(),
                                 )
                                 .on_press(move |_: &()| {
-                                    if ended {
-                                        crate::sessions::open(ui, card_id.clone(), profile.clone());
+                                    if ended && resumable {
+                                        crate::terminals::navigation::resume(ui, &id);
                                     } else {
                                         ui.open_terminal(id.clone());
                                     }

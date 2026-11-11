@@ -79,7 +79,10 @@ pub struct Ui {
     pub idle_minutes: Signal<u64>,
     pub overview_selection: Signal<String>,
     pub overview_closed: Signal<bool>,
-    pub overview_width: Signal<f32>,
+    pub overview_idle: Signal<bool>,
+    pub terminal_recent: Stored<BTreeMap<String, String>>,
+    pub terminal_pending_open: Signal<Option<crate::terminals::navigation::PendingOpen>>,
+    pub card_event: Signal<Option<u64>>,
     pub project: Signal<String>,
     pub archive_query: Signal<String>,
     pub archive_folds: Signal<BTreeSet<String>>,
@@ -94,7 +97,6 @@ pub struct Ui {
     pub snapshot_epoch: Signal<u64>,
     pub output: Signal<String>,
     pub output_observed_at: Signal<Option<u64>>,
-    pub overview_history: Signal<bool>,
     pub output_request: Signal<u64>,
     pub review: Signal<Option<ReviewPreview>>,
     pub review_request: Signal<u64>,
@@ -214,7 +216,10 @@ impl Ui {
             ),
             overview_selection: signal(String::new()),
             overview_closed: signal(false),
-            overview_width: signal(700.0),
+            overview_idle: signal(false),
+            terminal_recent: stored(BTreeMap::new()),
+            terminal_pending_open: signal(None),
+            card_event: signal(None),
             max_agents: signal(
                 crate::APP
                     .get()
@@ -240,7 +245,6 @@ impl Ui {
             snapshot_epoch: signal(0),
             output: signal(String::new()),
             output_observed_at: signal(None),
-            overview_history: signal(false),
             output_request: signal(0),
             review: signal(None),
             review_request: signal(0),
@@ -278,15 +282,26 @@ impl Ui {
         }
     }
     pub fn open_terminal(self, conversation: String) {
-        if let Some(entry) = crate::terminals::entries(&self.snapshot.get_untracked())
+        let Some(entry) = crate::terminals::entries(&self.snapshot.get_untracked())
             .into_iter()
             .find(|e| e.saved.id == conversation)
-            && !entry.listed()
-        {
-            if let Some(c) = entry.card {
-                self.open_card(c.id);
+        else {
+            self.operation_error
+                .set("This Terminal is no longer available".into());
+            return;
+        };
+        if !entry.listed() || entry.agent.is_some() && entry.binding().is_none() {
+            if let Some(row) = entry.agent {
+                crate::terminals::navigation::history(self, &row);
+            } else {
+                self.operation_error.set("This Terminal has ended".into());
             }
             return;
+        }
+        if let Some(card) = &entry.card {
+            self.terminal_recent.with(|recent| {
+                recent.insert(card.id.clone(), conversation.clone());
+            });
         }
         self.card_standalone.set(false);
         self.clear_output();
@@ -351,10 +366,15 @@ impl Ui {
         })
     }
     pub fn open_card(self, id: String) {
-        self.card_standalone.set(matches!(
-            self.page.get_untracked().as_str(),
-            "terminals" | "overview" | "github"
-        ));
+        self.request.set(String::new());
+        self.card_event.set(None);
+        self.card_standalone.set(
+            matches!(
+                self.page.get_untracked().as_str(),
+                "terminals" | "overview" | "github"
+            ) || self.card_standalone.get_untracked()
+                && matches!(self.page.get_untracked().as_str(), "card" | "review"),
+        );
         self.review.set(None);
         self.review_request
             .set(self.review_request.get_untracked() + 1);

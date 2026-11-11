@@ -57,6 +57,10 @@ Exit is confirmed by observing the original Core/terminal finish. No forced kill
 
 ## Global Overview
 
+The current UI uses compact direct-action rows without an inspector, with shared Terminal resolution and explicit exact Resume. See [Overview](product/overview.md) and [refinement acceptance](overview-terminal-acceptance-20261111.md). Runtime grouping, gates, capacity and provider-history ownership remain unchanged.
+
+### Historical 2026-11-07 UI composition
+
 Overview sits below Board in the compact rail. Project controls live in Board; Settings is in the bottom utility bar. The inspector uses the same destinations and lifecycle operations as Card and Terminal views.
 
 ```text

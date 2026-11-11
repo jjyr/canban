@@ -68,7 +68,13 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
             title: title.clone(),
             detail: format!(
                 "Agent · {} · {} · {}",
-                row.project_name, row.card.stage, row.group
+                row.project_name,
+                row.card.stage,
+                format_args!(
+                    "{} · {}",
+                    row.group,
+                    crate::terminals::navigation::label(&row)
+                )
             ),
             kind: "Agent",
             target: Target::Agent(row.id),

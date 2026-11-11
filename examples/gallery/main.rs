@@ -295,6 +295,11 @@ pub fn Gallery() -> impl IntoElement {
         });
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("overview") {
+        ui.snapshot.set(fixtures::overview());
+        ui.page.set("overview".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("archive") {
         ui.snapshot.set(fixtures::archive());
         ui.project.set("archive-empty".into());
