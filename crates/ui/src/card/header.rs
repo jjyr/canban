@@ -190,6 +190,15 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 .flex_row()
                 .items_center()
                 .gap_1()
+                .child(when(
+                    move || {
+                        ui.page.get() == "card"
+                            && (ui.narrow.get() || ui.card_standalone.get())
+                    },
+                    move || {
+                        chrome_button(Icon::Back, "Back to Board", move |_| close(ui))
+                    },
+                ))
                 .child(
                     view()
                         .flex_1()
@@ -200,10 +209,14 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         .child(
                             label(move || ui.current_card().map(|c| c.title).unwrap_or_default())
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(px(17.)),
+                                .text_size(px(17.))
+                                .truncate(),
                         ),
                 )
-                .child(crate::editor::expand(ui))
+                .child(when(
+                    move || ui.page.get() != "review",
+                    move || crate::editor::expand(ui),
+                ))
                 .child(chrome_button(
                     Icon::Terminal,
                     "Open Card Terminals",
@@ -216,10 +229,11 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 .child(chrome_button(Icon::More, "Card actions", move |_| {
                     menu(ui, draft, reading)
                 }))
-                .child(chrome_button(
-                    Icon::Close,
-                    "Close Card details",
-                    move |_| close(ui),
+                .child(when(
+                    move || ui.page.get() != "review",
+                    move || {
+                        chrome_button(Icon::Close, "Close Card details", move |_| close(ui))
+                    },
                 )),
         )
         .child(dynamic(move || {
@@ -227,23 +241,72 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 return view();
             };
             let s = ui.snapshot.get();
-            let stage = s
+            let project_stages = s
                 .projects
                 .iter()
                 .find(|p| p.id == c.project_id)
-                .and_then(|p| p.workflow.stages.iter().find(|t| t.id == c.stage));
+                .map(|p| p.workflow.stages.clone())
+                .unwrap_or_default();
+            let stage = project_stages.iter().find(|t| t.id == c.stage);
+            let stage_name = stage
+                .map(|t| t.name.clone())
+                .unwrap_or_else(|| c.stage.clone());
+            let stage_a11y = stage_name.clone();
+            let stage_anchor = element_ref();
+            let stage_card = c.clone();
+            let stages_for_menu = project_stages.clone();
             let mut row = view()
                 .flex_row()
                 .flex_wrap()
                 .items_center()
                 .gap_2()
                 .min_w(px(0.))
-                .child(muted(format!(
-                    "Workflow: {}",
-                    stage
-                        .map(|t| t.name.clone())
-                        .unwrap_or_else(|| c.stage.clone())
-                )));
+                .child(
+                    nsh_base::button()
+                        .element_ref(&stage_anchor)
+                        .h(px(24.))
+                        .px_2()
+                        .rounded(px(5.))
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .bg(INSET)
+                        .hover(|st| st.bg(CARD_HOVER))
+                        .focus(|st| st.border_1().border_color(ACCENT))
+                        .disabled(!c.active() || stages_for_menu.is_empty())
+                        .accessibility_label(move || {
+                            Some(format!("Change stage · {stage_a11y}").into())
+                        })
+                        .child(muted(format!("{stage_name} ▾")))
+                        .on_press(move |_: &()| {
+                            use nsh_core::element::desktop::popup_menu_at;
+                            let stages = stages_for_menu.clone();
+                            let card = stage_card.clone();
+                            ui.spawn(async move {
+                                let Some(bounds) = stage_anchor.measure().await else {
+                                    return;
+                                };
+                                let items = stages
+                                    .into_iter()
+                                    .map(|st| {
+                                        let cid = card.id.clone();
+                                        let target = st.id.clone();
+                                        let prefix = if st.id == card.stage { "✓ " } else { "" };
+                                        MenuItem::new(format!("{prefix}{}", st.name))
+                                            .disabled(st.id == card.stage || !card.active())
+                                            .on_select(move || {
+                                                crate::presenter::move_card(ui, &cid, &target)
+                                            })
+                                    })
+                                    .collect::<Vec<_>>();
+                                popup_menu_at(
+                                    items,
+                                    point(bounds.page.x, bounds.page.y + bounds.frame.size.height),
+                                )
+                                .await;
+                            });
+                        }),
+                );
             if c.delivery.is_some() || c.pull_request.as_ref().is_some_and(|p| p.merged) {
                 row = row.child(status("Merged", Tone::Success));
             }
@@ -364,14 +427,50 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         ),
                 );
             }
+            let attachment_count = s
+                .artifacts
+                .iter()
+                .filter(|a| a.card_id == c.id)
+                .count();
+            if attachment_count > 0 {
+                row = row.child(
+                    nsh_base::button()
+                        .h(px(24.))
+                        .px_2()
+                        .rounded(px(5.))
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .bg(CLEAR)
+                        .hover(|st| st.bg(INSET))
+                        .focus(|st| st.border_1().border_color(ACCENT))
+                        .accessibility_label(move || {
+                            Some(format!("Toggle attachments ({attachment_count})").into())
+                        })
+                        .child(icon(Icon::Paperclip).w(px(12.)).h(px(12.)))
+                        .child(muted(attachment_count.to_string()))
+                        .on_press(move |_: &()| {
+                            draft.update(|d| d.details = !d.details);
+                            reading.top();
+                        }),
+                );
+            }
             row = row.child(view().flex_1().min_w(px(0.)));
-            if c.stage == "review" || stage.is_some_and(|t| t.require_human_review) {
-                row = row.child(compact_action("Review", Variant::Quiet, move |_| {
-                    review(ui)
-                }));
+            if ui.page.get() != "review"
+                && (c.stage == "review" || stage.is_some_and(|t| t.require_human_review))
+            {
+                row = row.child(compact_action(
+                    "Review",
+                    if c.stage == "review" {
+                        Variant::Primary
+                    } else {
+                        Variant::Secondary
+                    },
+                    move |_| review(ui),
+                ));
             } else if c.human_gate.is_some() {
                 row = row.child(
-                    compact_action("Continue workflow", Variant::Quiet, move |_| {
+                    compact_action("Continue workflow", Variant::Secondary, move |_| {
                         if let Some(c) = ui.current_card() {
                             dispatch(
                                 ui,
@@ -380,7 +479,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             );
                         }
                     })
-                    .disabled(move || ui.pending.get()),
+                    .disabled(move || ui.is_method_pending("card.continue")),
                 );
             }
             if let Some(reason) = c.attention.or_else(|| c.human_gate.map(|g| g.reason)) {
@@ -388,7 +487,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     view()
                         .tooltip(nsh_base::tooltip().child(label(reason)))
                         .child(
-                            compact_action("Needs attention", Variant::Quiet, move |_| {
+                            compact_action("Needs attention", Variant::Secondary, move |_| {
                                 crate::overview::show_card_attention(
                                     ui,
                                     &untracked(|| ui.card_id()),

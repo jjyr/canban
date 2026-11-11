@@ -117,18 +117,8 @@ pub fn diff_panel(p: ReviewPreview) -> impl IntoElement {
             Tone::Attention,
         ));
     }
-    if parsed.len() <= 1 {
-        let fence = "`".repeat(
-            p.patch
-                .split(|c| c != '`')
-                .map(str::len)
-                .max()
-                .unwrap_or(0)
-                .max(2)
-                + 1,
-        );
-        let code = format!("{fence}diff\n{}\n{fence}", p.patch);
-        return body.child(nsh_base::text_view().markdown(code));
+    if parsed.is_empty() {
+        return body.child(muted("No file changes between these commits."));
     }
     let folded = signal(std::collections::BTreeSet::<String>::new());
     for file in parsed {
@@ -312,6 +302,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     {
         refresh_diff(ui, target);
     }
+    let customize = signal(false);
     view().flex_1().min_h(px(0.0)).p_4().gap_3()
         .child(
             view()
@@ -326,7 +317,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .flex_row()
                         .flex_wrap()
                         .gap_2()
-                        .child(compact_action("← Develop", Variant::Secondary, move |_| {
+                        .child(compact_action("Return to Develop", Variant::Secondary, move |_| {
                             if let Some(c) = ui.current_card() {
                                 let source = ui.location();
                                 dispatch_then(
@@ -381,7 +372,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                         crate::card_actions::Action::Archive,
                                     );
                                 })
-                                .disabled(move || ui.pending.get() || archived),
+                                .disabled(move || ui.is_method_pending("card.archive") || archived),
                             )
                             .child(chrome_button(Icon::Refresh, "Refresh diff", move |_| {
                                 refresh_diff(ui, target)
@@ -393,6 +384,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         }))
         .child(
             panel()
+                .p_3()
                 .gap_2()
                 .child(
                     view()
@@ -401,7 +393,6 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .items_center()
                         .justify_between()
                         .gap_2()
-                        .child(label("Delivery").font_weight(FontWeight::SEMIBOLD))
                         .child(
                             view()
                                 .flex_row()
@@ -413,33 +404,109 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     mode,
                                     vec![("local", "Local merge"), ("github_pr", "GitHub PR")],
                                 ))
-                                .child(chrome_button(Icon::Refresh, "Refresh diff", move |_| {
-                                    refresh_diff(ui, target)
-                                })),
-                        ),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap_3()
-                        .child(
-                            view()
-                                .w(px(200.))
-                                .min_w(px(140.))
-                                .gap_1()
-                                .child(muted("Target branch"))
-                                .child(field(target, "Existing local branch")),
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_1()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded(px(5.))
+                                        .bg(INSET)
+                                        .child(icon(Icon::Branch).w(px(12.)).h(px(12.)))
+                                        .child(muted(move || format!("→ {}", target.get()))),
+                                )
+                                .child(compact_action(
+                                    move || {
+                                        if customize.get() {
+                                            "Customize ▴"
+                                        } else {
+                                            "Customize ▾"
+                                        }
+                                    },
+                                    Variant::Quiet,
+                                    move |_| customize.update(|v| *v = !*v),
+                                )),
                         )
                         .child(
                             view()
-                                .flex_1()
-                                .min_w(px(220.))
-                                .gap_1()
-                                .child(muted("Commit message"))
-                                .child(field(message, "Commit message")),
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .child(chrome_button(Icon::Refresh, "Refresh diff", move |_| {
+                                    refresh_diff(ui, target)
+                                }))
+                                .child(
+                                    action(
+                                        move || {
+                                            if mode.get() == "github_pr" {
+                                                "Publish PR"
+                                            } else {
+                                                "Merge"
+                                            }
+                                        },
+                                        Variant::Primary,
+                                        move |_| {
+                                            if let Some(p) = ui.review.get_untracked() {
+                                                let source = ui.location();
+                                                dispatch_then(
+                                                    ui,
+                                                    if mode.get_untracked() == "github_pr" {
+                                                        "github.pr.publish"
+                                                    } else {
+                                                        "review.merge"
+                                                    },
+                                                    json!({"card_id":p.card_id,"revision":p.revision,"token":p.token,"target_branch":p.target_branch,"message":message.get_untracked()}),
+                                                    move |_| {
+                                                        if ui.location() == source {
+                                                            ui.review.set(None);
+                                                        }
+                                                    },
+                                                );
+                                            }
+                                        },
+                                    )
+                                    .disabled(move || {
+                                        ui.is_method_pending("review.merge")
+                                            || ui.is_method_pending("github.pr.publish")
+                                            || ui.review.get().is_none_or(|p| {
+                                                !p.merge_allowed
+                                                    || p.target_branch != target.get()
+                                                    || ui.current_card().is_none_or(|c| {
+                                                        c.revision != p.revision
+                                                            || c.id != p.card_id
+                                                    })
+                                            })
+                                    }),
+                                ),
                         ),
                 )
+                .child(when(
+                    move || customize.get(),
+                    move || {
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .gap_3()
+                            .pt_1()
+                            .child(
+                                view()
+                                    .w(px(200.))
+                                    .min_w(px(140.))
+                                    .gap_1()
+                                    .child(muted("Target branch"))
+                                    .child(field(target, "Existing local branch")),
+                            )
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .min_w(px(220.))
+                                    .gap_1()
+                                    .child(muted("Commit message"))
+                                    .child(field(message, "Commit message")),
+                            )
+                    },
+                ))
                 .child(dynamic(move || {
                     if let Some(p) = ui.review.get()
                         && let Some(reason) = p.reason
@@ -458,67 +525,18 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     }
                     view().into_element()
                 }))
-                .child(
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(
-                            action(
-                                move || {
-                                    if mode.get() == "github_pr" {
-                                        "Publish PR"
-                                    } else {
-                                        "Merge"
-                                    }
-                                },
-                                Variant::Primary,
-                                move |_| {
-                                    if let Some(p) = ui.review.get_untracked() {
-                                        let source = ui.location();
-                                        dispatch_then(
-                                            ui,
-                                            if mode.get_untracked() == "github_pr" {
-                                                "github.pr.publish"
-                                            } else {
-                                                "review.merge"
-                                            },
-                                            json!({"card_id":p.card_id,"revision":p.revision,"token":p.token,"target_branch":p.target_branch,"message":message.get_untracked()}),
-                                            move |_| {
-                                                if ui.location() == source {
-                                                    ui.review.set(None);
-                                                }
-                                            },
-                                        );
-                                    }
-                                },
-                            )
-                            .disabled(move || {
-                                ui.pending.get()
-                                    || ui.review.get().is_none_or(|p| {
-                                        !p.merge_allowed
-                                            || p.target_branch != target.get()
-                                            || ui.current_card().is_none_or(|c| {
-                                                c.revision != p.revision || c.id != p.card_id
-                                            })
-                                    })
-                            }),
-                        )
-                        .child(dynamic(move || {
-                            ui.current_card()
-                                .and_then(|c| c.delivery)
-                                .map(|d| {
-                                    muted(format!(
-                                        "Last accepted delivery: {} · {}",
-                                        d.target_branch, d.commit
-                                    ))
-                                    .into_element()
-                                })
-                                .unwrap_or_else(|| view().into_element())
-                        })),
-                ),
+                .child(dynamic(move || {
+                    ui.current_card()
+                        .and_then(|c| c.delivery)
+                        .map(|d| {
+                            muted(format!(
+                                "Last accepted delivery: {} · {}",
+                                d.target_branch, d.commit
+                            ))
+                            .into_element()
+                        })
+                        .unwrap_or_else(|| view().into_element())
+                })),
         )
         .child(scroll().flex_1().child(dynamic(move || match ui.review.get() {
             Some(p) => diff_panel(p).into_element(),

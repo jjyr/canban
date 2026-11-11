@@ -26,7 +26,9 @@ pub fn new_project(ui: Ui) -> impl IntoElement {
         .min_h(px(0.))
         .p_5()
         .gap_4()
-        .child(heading("New Project"))
+        .child(subpage_header("Back to Board", "New Project", move |_| {
+            ui.navigate("board")
+        }))
         .child(scroll().flex_1().min_h(px(0.)).child(
             view()
                 .w_full()

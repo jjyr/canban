@@ -25,7 +25,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         move || ui.comment_submit.update(|n| *n += 1),
     );
     let enabled = computed(move || {
-        !ui.pending.get()
+        !ui.is_method_pending("comment.add")
             && !comment.get().trim().is_empty()
             && !super::attachments::busy(draft, true)
             && ui.current_card().is_some_and(|c| c.archived_at.is_none())
@@ -41,12 +41,14 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             return;
         }
         let body = comment.get_untracked();
+        let current_draft = draft.get_untracked();
         let mut mentions = crate::profiles::addressed(&body, &ui.profiles.get_untracked());
-        for recipient in draft.get_untracked().recipients {
+        for recipient in current_draft.recipients {
             if !mentions.contains(&recipient) {
                 mentions.push(recipient);
             }
         }
+        mentions.retain(|id| !current_draft.suppressed_recipients.contains(id));
         let submitted_mentions = mentions.clone();
         let card = card.clone();
         let key = key.clone();
@@ -68,6 +70,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         {
                             value.comment.clear();
                             value.recipients.clear();
+                            value.suppressed_recipients.clear();
                             value.uploads.retain(|a| !a.is_comment());
                         }
                         value.comment_error.clear();
@@ -111,6 +114,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             && ui.profiles.with_untracked(|p| p.iter().any(|p| p.id == id))
         {
             draft.update(|d| {
+                d.suppressed_recipients.retain(|p| p != &id);
                 if !d.recipients.contains(&id) {
                     d.recipients.push(id);
                 }
@@ -138,7 +142,14 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         .p_2()
         .gap_1()
         .flex_shrink_0()
-        .child(muted("Local discussion · not posted to GitHub"))
+        .child(when(
+            move || {
+                ui.current_card().is_some_and(|c| {
+                    c.github_issue().is_some() || c.pull_request.is_some()
+                })
+            },
+            || muted("Local discussion · not posted to GitHub"),
+        ))
         .child(editor.render_with_preview(
             comment,
             source,
@@ -151,23 +162,38 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             move || notice(move || reference_error.get(), Tone::Attention),
         ))
         .child(dynamic(move || {
+            let d = draft.get();
             let mut recipients = crate::profiles::addressed(&comment.get(), &ui.profiles.get());
-            for id in draft.get().recipients {
+            for id in d.recipients {
                 if !recipients.contains(&id) {
                     recipients.push(id);
                 }
             }
+            recipients.retain(|id| !d.suppressed_recipients.contains(id));
             view().flex_row().flex_wrap().gap_1().children(
                 recipients
                     .into_iter()
                     .map(|id| {
                         action(format!("@{id} ×"), Variant::Quiet, move |_| {
-                            draft.update(|d| d.recipients.retain(|p| p != &id));
-                            comment.set(crate::profiles::remove_address(
+                            let updated = crate::profiles::remove_address(
                                 &comment.get_untracked(),
                                 &id,
                                 &ui.profiles.get_untracked(),
-                            ));
+                            );
+                            let still_in_prose = crate::profiles::addressed(
+                                &updated,
+                                &ui.profiles.get_untracked(),
+                            )
+                            .contains(&id);
+                            draft.update(|d| {
+                                d.recipients.retain(|p| p != &id);
+                                if still_in_prose && !d.suppressed_recipients.contains(&id) {
+                                    d.suppressed_recipients.push(id.clone());
+                                }
+                            });
+                            if updated != comment.get_untracked() {
+                                comment.set(updated);
+                            }
                             editor.focus();
                         })
                         .into_element()

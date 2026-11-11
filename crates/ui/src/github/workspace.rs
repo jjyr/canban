@@ -243,7 +243,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 ),
         )
         .child(
-            view().flex_row().gap_2().children(
+            segmented().children(
                 [
                     ("notifications", "Notifications"),
                     ("issues", "Issues"),
@@ -251,15 +251,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 ]
                 .into_iter()
                 .map(|(id, title)| {
-                    action(title, Variant::Quiet, move |_| change_tab(ui, id))
-                        .bg(move || {
-                            if b.tab.get() == id {
-                                SELECTED.resolve()
-                            } else {
-                                CLEAR.resolve()
-                            }
-                        })
-                        .into_element()
+                    segment(title, None, move || b.tab.get() == id, move |_| {
+                        change_tab(ui, id)
+                    })
+                    .into_element()
                 })
                 .collect::<Vec<_>>(),
             ),
@@ -359,11 +354,64 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 }
             })
         }))
+}
+fn list_panel(ui: Ui) -> impl IntoElement {
+    let b = ui.github;
+    view()
+        .flex_1()
+        .min_h(px(0.))
+        .min_w(px(260.))
+        .gap_2()
+        .child(dynamic(move || {
+            let key = format!(
+                "github-list:{}:{}:{}:{}:{}:{}",
+                b.tab.get(),
+                b.query.get(),
+                b.repository.get(),
+                b.relation.get(),
+                b.state.get(),
+                b.page.get()
+            );
+            let position = drafts::scroll_position(ui, &key);
+            scroll()
+                .flex_1()
+                .min_h(px(0.))
+                .content_offset(position)
+                .on_scroll(move |e: &ScrollEvent| drafts::capture_scroll(ui, key.clone(), e))
+                .child(dynamic(move || {
+                    let rows = b.list.get()["items"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    if rows.is_empty() {
+                        return muted(if b.loading.get() {
+                            "Loading GitHub…"
+                        } else {
+                            "No items. Change filters or refresh."
+                        })
+                        .into_element();
+                    }
+                    view()
+                        .gap_1()
+                        .children(
+                            rows.into_iter()
+                                .map(|row| list_row(ui, row))
+                                .collect::<Vec<_>>(),
+                        )
+                        .into_element()
+                }))
+                .into_element()
+        }))
         .child(
             view()
+                .flex_shrink_0()
                 .flex_row()
+                .flex_wrap()
                 .items_center()
                 .gap_2()
+                .pt_1()
+                .border_t_1()
+                .border_color(BORDER)
                 .child(muted(move || {
                     if b.loading.get() {
                         "Refreshing…".into()
@@ -378,64 +426,21 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 }))
                 .child(view().flex_1())
                 .child(
-                    action("Previous", Variant::Secondary, move |_| {
+                    compact_action("Previous", Variant::Secondary, move |_| {
                         b.page.update(|p| *p = p.saturating_sub(1).max(1));
                         b.list.set(json!({}));
                     })
                     .disabled(move || b.page.get() <= 1 || b.loading.get()),
                 )
-                .child(label(move || format!("Page {}", b.page.get())))
+                .child(muted(move || format!("Page {}", b.page.get())))
                 .child(
-                    action("Next", Variant::Secondary, move |_| {
+                    compact_action("Next", Variant::Secondary, move |_| {
                         b.page.update(|p| *p += 1);
                         b.list.set(json!({}));
                     })
                     .disabled(move || b.list.with(|v| v["has_next"] != true) || b.loading.get()),
                 ),
         )
-}
-fn list_panel(ui: Ui) -> impl IntoElement {
-    let b = ui.github;
-    dynamic(move || {
-        let key = format!(
-            "github-list:{}:{}:{}:{}:{}:{}",
-            b.tab.get(),
-            b.query.get(),
-            b.repository.get(),
-            b.relation.get(),
-            b.state.get(),
-            b.page.get()
-        );
-        let position = drafts::scroll_position(ui, &key);
-        scroll()
-            .flex_1()
-            .min_w(px(260.))
-            .content_offset(position)
-            .on_scroll(move |e: &ScrollEvent| drafts::capture_scroll(ui, key.clone(), e))
-            .child(dynamic(move || {
-                let rows = b.list.get()["items"]
-                    .as_array()
-                    .cloned()
-                    .unwrap_or_default();
-                if rows.is_empty() {
-                    return muted(if b.loading.get() {
-                        "Loading GitHub…"
-                    } else {
-                        "No items. Change filters or refresh."
-                    })
-                    .into_element();
-                }
-                view()
-                    .gap_1()
-                    .children(
-                        rows.into_iter()
-                            .map(|row| list_row(ui, row))
-                            .collect::<Vec<_>>(),
-                    )
-                    .into_element()
-            }))
-            .into_element()
-    })
 }
 fn list_row(ui: Ui, row: Value) -> AnyElement {
     let item = &row["item"];
@@ -548,11 +553,66 @@ fn list_row(ui: Ui, row: Value) -> AnyElement {
     result.into_element()
 }
 pub fn account(ui: Ui) -> impl IntoElement {
-    view().flex_1().min_h(px(0.)).p_5().gap_3().child(view().flex_row().child(heading("GitHub account & access")).child(view().flex_1()).child(action("Back to GitHub",Variant::Quiet,move |_|ui.navigate("github"))))
-        .child(scroll().flex_1().child(view().max_w(px(880.)).gap_4().child(super::settings(ui))
-            .child(settings_section("GitHub CLI notifications","Use the account already signed in with gh. Canban does not copy its credentials.")
-                .child(muted(move||ui.github.gh_status.with(|v|v["login"].as_str().map(|s|format!("GitHub CLI: {s}")).unwrap_or_else(||v["message"].as_str().unwrap_or("Run gh auth login, then check the connection.").into()))))
-                .child(action("Check gh connection",Variant::Secondary,move |_|check_cli(ui))))
-            .child(settings_section("Cache","Remote content stays available until a refresh updates it or cache cleanup removes it.")
-                .child(action("Clear GitHub cache",Variant::Secondary,move |_|dispatch_then(ui,"github.cache.clear",json!({}),move |_|{ui.github.list.set(json!({}));ui.github.detail.set(json!({}));ui.github.overview.set(json!({}));}))))))
+    view()
+        .flex_1()
+        .min_h(px(0.))
+        .p_5()
+        .gap_4()
+        .child(subpage_header(
+            "Back to GitHub",
+            "GitHub / Account & access",
+            move |_| ui.navigate("github"),
+        ))
+        .child(
+            scroll()
+                .flex_1()
+                .min_h(px(0.))
+                .child(
+                    view()
+                        .max_w(px(880.))
+                        .gap_4()
+                        .child(super::settings(ui))
+                        .child(
+                            settings_section(
+                                "GitHub CLI notifications",
+                                "Use the account already signed in with gh. Canban does not copy its credentials.",
+                            )
+                            .child(muted(move || {
+                                ui.github.gh_status.with(|v| {
+                                    v["login"]
+                                        .as_str()
+                                        .map(|s| format!("GitHub CLI: {s}"))
+                                        .unwrap_or_else(|| {
+                                            v["message"]
+                                                .as_str()
+                                                .unwrap_or("Run gh auth login, then check the connection.")
+                                                .into()
+                                        })
+                                })
+                            }))
+                            .child(
+                                action("Check gh connection", Variant::Secondary, move |_| {
+                                    check_cli(ui)
+                                })
+                                .self_start(),
+                            ),
+                        )
+                        .child(
+                            settings_section(
+                                "Cache",
+                                "Remote content stays available until a refresh updates it or cache cleanup removes it.",
+                            )
+                            .child(
+                                action("Clear GitHub cache", Variant::Secondary, move |_| {
+                                    dispatch_then(ui, "github.cache.clear", json!({}), move |_| {
+                                        ui.github.list.set(json!({}));
+                                        ui.github.detail.set(json!({}));
+                                        ui.github.overview.set(json!({}));
+                                    })
+                                })
+                                .self_start(),
+                            ),
+                        ),
+                ),
+        )
 }

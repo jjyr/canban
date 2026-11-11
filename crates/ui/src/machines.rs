@@ -49,36 +49,41 @@ pub fn name(ui: Ui, id: &str) -> String {
 pub fn picker(ui: Ui, machine: Signal<String>, directory: Signal<String>) -> impl IntoElement {
     use nsh_core::element::desktop::{MenuItem, popup_menu};
     dynamic(move || {
-        action(name(ui, &machine.get()), Variant::Secondary, move |_| {
-            ui.spawn(async move {
-                let mut rows = vec![("local".to_owned(), "AppServer host".to_owned())];
-                rows.extend(
-                    ui.machines
-                        .with_untracked(|v| v["machines"].as_array().cloned().unwrap_or_default())
-                        .iter()
-                        .filter_map(|m| {
-                            Some((
-                                m["id"].as_str()?.into(),
-                                format!("{} · {}", m["name"].as_str()?, m["state"].as_str()?),
-                            ))
-                        }),
-                );
-                let mut items = Vec::new();
-                for (id, label) in rows {
-                    items.push(MenuItem::new(label).on_select(move || {
-                        if machine.try_get().is_some_and(|old| old != id) {
-                            machine.try_set(id.clone());
-                            directory.try_set(String::new());
-                        }
-                    }));
-                }
-                items.push(MenuItem::separator());
-                items.push(
-                    MenuItem::new("Manage machines…").on_select(move || ui.navigate("machines")),
-                );
-                popup_menu(items).await;
-            });
-        })
+        action(
+            format!("{} ▾", name(ui, &machine.get())),
+            Variant::Secondary,
+            move |_| {
+                ui.spawn(async move {
+                    let mut rows = vec![("local".to_owned(), "AppServer host".to_owned())];
+                    rows.extend(
+                        ui.machines
+                            .with_untracked(|v| v["machines"].as_array().cloned().unwrap_or_default())
+                            .iter()
+                            .filter_map(|m| {
+                                Some((
+                                    m["id"].as_str()?.into(),
+                                    format!("{} · {}", m["name"].as_str()?, m["state"].as_str()?),
+                                ))
+                            }),
+                    );
+                    let mut items = Vec::new();
+                    for (id, label) in rows {
+                        items.push(MenuItem::new(label).on_select(move || {
+                            if machine.try_get().is_some_and(|old| old != id) {
+                                machine.try_set(id.clone());
+                                directory.try_set(String::new());
+                            }
+                        }));
+                    }
+                    items.push(MenuItem::separator());
+                    items.push(
+                        MenuItem::new("Manage machines…").on_select(move || ui.navigate("machines")),
+                    );
+                    popup_menu(items).await;
+                });
+            },
+        )
+        .self_start()
     })
 }
 fn browse(
@@ -250,13 +255,59 @@ pub fn project_location(ui: Ui) -> impl IntoElement {
     let directory = signal(initial.directory.clone());
     let title = p
         .as_ref()
-        .map(|p| format!("Work location · {}", p.name))
-        .unwrap_or_else(|| "Select a Project".into());
+        .map(|p| format!("{} / Work location", p.name))
+        .unwrap_or_else(|| "Work location".into());
     let expected = initial.clone();
     let id = p.map(|p| p.id).unwrap_or_default();
-    view().flex_1().p_5().gap_4().child(heading(title)).child(scroll().flex_1().child(settings_section("Work location","Changes affect new executions. Resume, Review and code delivery stay on the original machine and directory.")
-        .max_w(px(760.)).child(location_fields(ui,machine,directory))
-        .child(action("Save work location",Variant::Primary,move |_|{let id=id.clone();dispatch_then(ui,"project.location",json!({"project_id":id,"expected_location":expected,"location":{"machine":machine.get_untracked(),"directory":directory.get_untracked().trim()}}),move |_|ui.navigate("board"));}).disabled(move||ui.pending.get()||directory.get().trim().is_empty()))))
+    view()
+        .flex_1()
+        .min_h(px(0.))
+        .p_5()
+        .gap_4()
+        .child(subpage_header("Back to Board", title, move |_| {
+            ui.navigate("board")
+        }))
+        .child(
+            scroll().flex_1().min_h(px(0.)).child(
+                settings_section(
+                    "Work location",
+                    "Changes affect new executions. Resume, Review and code delivery stay on the original machine and directory.",
+                )
+                .max_w(px(760.))
+                .child(location_fields(ui, machine, directory))
+                .child(
+                    view()
+                        .flex_row()
+                        .justify_end()
+                        .gap_2()
+                        .child(action("Cancel", Variant::Quiet, move |_| {
+                            ui.navigate("board")
+                        }))
+                        .child(
+                            action("Save work location", Variant::Primary, move |_| {
+                                let id = id.clone();
+                                dispatch_then(
+                                    ui,
+                                    "project.location",
+                                    json!({
+                                        "project_id": id,
+                                        "expected_location": expected,
+                                        "location": {
+                                            "machine": machine.get_untracked(),
+                                            "directory": directory.get_untracked().trim()
+                                        }
+                                    }),
+                                    move |_| ui.navigate("board"),
+                                );
+                            })
+                            .disabled(move || {
+                                ui.is_method_pending("project.location")
+                                    || directory.get().trim().is_empty()
+                            }),
+                        ),
+                ),
+            ),
+        )
 }
 pub fn settings(ui: Ui) -> impl IntoElement {
     let default_machine = signal(
@@ -272,18 +323,18 @@ pub fn settings(ui: Ui) -> impl IntoElement {
     let remove = signal(String::new());
     settings_section("Machines","Connections use AppServer's SSH configuration. Remote programs and history remain when a connection is removed.")
         .child(muted("AppServer host · Local execution"))
-        .child(settings_field("Default Terminal machine","Used when no Terminal is selected. An unavailable target never falls back silently.",view().flex_row().gap_2().child(picker(ui,default_machine,unused)).child(action("Save default",Variant::Quiet,move |_|dispatch(ui,"machine.default",json!({"machine":default_machine.get_untracked()}))))))
+        .child(settings_field("Default Terminal machine","Used when no Terminal is selected. An unavailable target never falls back silently.",view().flex_row().items_center().gap_2().child(picker(ui,default_machine,unused)).child(action("Save default",Variant::Quiet,move |_|dispatch(ui,"machine.default",json!({"machine":default_machine.get_untracked()}))))))
         .child(dynamic(move||{let v=ui.machines.get();let mut list=view().gap_2();
             if let Some(error)=v["error"].as_str(){list=list.child(notice(error.to_owned(),Tone::Attention));}
             for row in v["machines"].as_array().cloned().unwrap_or_default(){let id=row["id"].as_str().unwrap_or("").to_owned();let confirmed=remove.get()==id;let display=format!("{} · {}",row["name"].as_str().unwrap_or("Machine"),row["state"].as_str().unwrap_or("unknown"));
                 let choose=id.clone();let refs=ui.snapshot.with(|s|s.projects.iter().filter(|p|p.work_location().machine==id).count());
                 list=list.child(panel().child(label(display)).child(muted(format!("{} · {refs} Project references",row["target"].as_str().unwrap_or(""))))
-                    .child(action(if confirmed{"Confirm disconnect · retain programs"}else{"Disconnect…"},Variant::Quiet,move |_|{if confirmed{dispatch_then(ui,"machine.remove",json!({"machine":choose,"confirmed":true}),move |_|refresh_catalog(ui));remove.set(String::new());}else{remove.set(choose.clone());}})));
+                    .child(action(if confirmed{"Confirm disconnect · retain programs"}else{"Disconnect…"},Variant::Quiet,move |_|{if confirmed{dispatch_then(ui,"machine.remove",json!({"machine":choose,"confirmed":true}),move |_|refresh_catalog(ui));remove.set(String::new());}else{remove.set(choose.clone());}}).self_start()));
             }list}))
         .child(settings_field("Add an SSH machine","Login, host-key and installation prompts open in a setup Terminal on the AppServer host.",view().gap_2()
             .child(field(alias,"Display name (optional)").label("Machine name"))
             .child(field(target,"SSH target, for example user@host").label("SSH target"))
             .child(field(session,"Remote Core session (optional)").label("Remote Core session"))
-            .child(action("Connect machine…",Variant::Secondary,move |_|dispatch_then(ui,"machine.add",json!({"name":alias.get_untracked(),"target":target.get_untracked().trim(),"session":session.get_untracked()}),move |v|{if let Some(id)=v["id"].as_str(){ui.open_terminal(id.into());}})).disabled(move||ui.pending.get()||target.get().trim().is_empty()))))
-        .child(action("Refresh machines",Variant::Quiet,move |_|refresh_catalog(ui)))
+            .child(action("Connect machine…",Variant::Secondary,move |_|dispatch_then(ui,"machine.add",json!({"name":alias.get_untracked(),"target":target.get_untracked().trim(),"session":session.get_untracked()}),move |v|{if let Some(id)=v["id"].as_str(){ui.open_terminal(id.into());}})).self_start().disabled(move||ui.is_method_pending("machine.add")||target.get().trim().is_empty()))))
+        .child(action("Refresh machines",Variant::Quiet,move |_|refresh_catalog(ui)).self_start())
 }

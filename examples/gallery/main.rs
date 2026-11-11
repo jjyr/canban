@@ -761,6 +761,25 @@ pub fn Gallery() -> impl IntoElement {
                     scene.set("workspace".into());
                     ui.navigate("settings");
                 }))
+                .child(action("Workflows", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    let raw = include_str!("../workflows/plan-and-develop.yaml").to_string();
+                    let name = "issue-planning.yaml".to_string();
+                    let mut draft = canban_ui::workflows::Draft {
+                        base: json!({"revision":"gallery","sources":[{"filename":name,"source":raw,"active":{"revision":1,"workflow_id":"gallery-workflow"}}]}),
+                        ..Default::default()
+                    };
+                    draft.sources.insert(name.clone(), raw);
+                    draft.selected = name;
+                    ui.workflows.drafts.update(|d| {
+                        d.insert(ui.project.get_untracked(), draft);
+                    });
+                    ui.navigate("workflows");
+                }))
+                .child(action("Toast preview", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    ui.notify("Copied to clipboard");
+                }))
                 .child(action("Work location",Variant::Quiet,move |_|{scene.set("workspace".into());ui.navigate("project-location");}))
                 .child(action("Controls", Variant::Quiet, move |_| {
                     scene.set("controls".into())

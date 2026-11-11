@@ -332,7 +332,7 @@ pub fn bar(ui: Ui) -> impl IntoElement {
                     Icon::Coffee,
                     "Keep AppServer host awake · display may sleep",
                     move || ui.utility.with(|v| v["awake"] == true),
-                    move || ui.pending.get(),
+                    move || ui.is_method_pending("utilities.awake"),
                     move |_| {
                         let on = ui.utility.with_untracked(|v| v["awake"] == true);
                         if crate::APP.get().is_none() {
@@ -362,10 +362,13 @@ pub fn bar(ui: Ui) -> impl IntoElement {
                 ))
                 .child(utility_button(
                     Icon::Keyboard,
-                    "Shortcuts · ⌘/",
-                    move || ui.utility_popup.get() == "shortcuts",
+                    "Commands & Shortcuts · ⌘/",
+                    move || {
+                        ui.quick_open.get()
+                            && ui.search_query.get().trim_start().starts_with('>')
+                    },
                     || false,
-                    move |_| open(ui, "shortcuts"),
+                    move |_| crate::commands::execute(ui, "shortcuts"),
                 ))
                 .child(utility_button(
                     Icon::Bug,
@@ -509,22 +512,29 @@ pub fn settings(ui: Ui) -> impl IntoElement {
                 },
             );
         })
-        .disabled(move || ui.pending.get()),
+        .disabled(move || ui.is_method_pending("utilities.configure")),
     )
-    .child(action("Choose theme…", Variant::Secondary, move |_| {
-        open(ui, "theme")
-    }))
-    .child(action(
-        "Show Shortcuts · ⌘/",
-        Variant::Secondary,
-        move |_| open(ui, "shortcuts"),
-    ))
-    .child(action("Report issue", Variant::Secondary, move |_| {
-        report::open(ui)
-    }))
-    .child(action("Copy diagnostics", Variant::Quiet, move |_| {
-        copy_text(ui, report::diagnostics())
-    }))
+    .child(
+        view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(action("Choose theme…", Variant::Secondary, move |_| {
+                open(ui, "theme")
+            }))
+            .child(action(
+                "Commands & Shortcuts · ⌘/",
+                Variant::Secondary,
+                move |_| crate::commands::execute(ui, "shortcuts"),
+            ))
+            .child(action("Report issue", Variant::Secondary, move |_| {
+                report::open(ui)
+            }))
+            .child(action("Copy diagnostics", Variant::Quiet, move |_| {
+                copy_text(ui, report::diagnostics())
+            })),
+    )
 }
 
 /// Use the exact Terminal palette; App chrome derives separate semantic colors.

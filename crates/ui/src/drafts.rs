@@ -31,6 +31,8 @@ pub struct Draft {
     #[serde(skip)]
     pub comment_error: String,
     pub recipients: Vec<String>,
+    #[serde(default)]
+    pub suppressed_recipients: Vec<String>,
     #[serde(skip)]
     pub uploads: Vec<crate::card::attachments::Upload>,
     pub base_title: String,

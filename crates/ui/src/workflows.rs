@@ -154,7 +154,10 @@ fn save(ui: Ui) {
     let Some(draft) = state.drafts.with_untracked(|d| d.get(&project).cloned()) else {
         return;
     };
-    if ui.pending.get_untracked() || state.loading.get_untracked() || !draft.needs_apply() {
+    if ui.is_method_pending("workflow.apply")
+        || state.loading.get_untracked()
+        || !draft.needs_apply()
+    {
         return;
     }
     state.error.set(String::new());
@@ -172,7 +175,7 @@ fn save(ui: Ui) {
                 });
                 if ui.project.get_untracked() == project {
                     state.latest.set(Value::Null);
-                    ui.status.set(String::new());
+                    ui.notify("Workflow saved");
                 }
             }
             Err(e) => {
@@ -396,7 +399,50 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         visual_studio(ui)
                     }
                 }))
-                .child(view().flex_row().justify_end().child(action("Save", Variant::Primary, move |_| save(ui)).disabled(move || ui.pending.get() || state.loading.get() || !apply.get())))))
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(RADIUS))
+                        .bg(move || if apply.get() { SELECTED } else { CLEAR })
+                        .border_1()
+                        .border_color(move || if apply.get() { ACCENT } else { CLEAR })
+                        .child(muted(move || {
+                            if apply.get() {
+                                "Unsaved workflow changes · Press Save or ⌘S to apply"
+                            } else {
+                                "All workflow changes saved"
+                            }
+                        }))
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(when(
+                                    move || dirty.get() || !state.latest.get().is_null(),
+                                    move || {
+                                        action("Discard", Variant::Quiet, move |_| load(ui, true))
+                                            .disabled(move || {
+                                                ui.is_method_pending("workflow.apply")
+                                                    || state.loading.get()
+                                            })
+                                    },
+                                ))
+                                .child(
+                                    action("Save · ⌘S", Variant::Primary, move |_| save(ui))
+                                        .disabled(move || {
+                                            ui.is_method_pending("workflow.apply")
+                                                || state.loading.get()
+                                                || !apply.get()
+                                        }),
+                                ),
+                        ),
+                )))
         .child(when(move || state.agent.get(), move || agent_panel(ui)))
         .child(when(move || state.history_open.get(), move || history_panel(ui)))
 }
@@ -622,143 +668,121 @@ fn visual_studio(ui: Ui) -> AnyElement {
                 .flex_row()
                 .flex_wrap()
                 .gap_4()
-                .child(
+                .child({
+                    let p_val = current_policy.planning.clone();
+                    let p1 = p_val.clone();
+                    let p2 = p_val.clone();
+                    let p3 = p_val;
                     view()
                         .gap_1()
                         .child(label("1. Planning (Backlog)"))
                         .child(
-                            view()
-                                .flex_row()
-                                .flex_wrap()
-                                .gap_1()
-                                .child(compact_action(
+                            segmented()
+                                .child(compact_segment(
                                     "Manual",
-                                    if !is_custom && current_policy.planning == "manual" {
-                                        Variant::Primary
-                                    } else {
-                                        Variant::Secondary
-                                    },
+                                    None,
+                                    move || !is_custom && p1 == "manual",
                                     move |_| {
                                         let mut next = p_plan1.clone();
                                         next.planning = "manual".into();
                                         update_doc(ui, |d| source::apply_policy(d, &next));
                                     },
                                 ))
-                                .child(compact_action(
+                                .child(compact_segment(
                                     "Auto-plan (Confirm)",
-                                    if !is_custom && current_policy.planning == "confirm" {
-                                        Variant::Primary
-                                    } else {
-                                        Variant::Secondary
-                                    },
+                                    None,
+                                    move || !is_custom && p2 == "confirm",
                                     move |_| {
                                         let mut next = p_plan2.clone();
                                         next.planning = "confirm".into();
                                         update_doc(ui, |d| source::apply_policy(d, &next));
                                     },
                                 ))
-                                .child(compact_action(
+                                .child(compact_segment(
                                     "Auto-plan & Develop",
-                                    if !is_custom && current_policy.planning == "auto" {
-                                        Variant::Primary
-                                    } else {
-                                        Variant::Secondary
-                                    },
+                                    None,
+                                    move || !is_custom && p3 == "auto",
                                     move |_| {
                                         let mut next = p_plan3.clone();
                                         next.planning = "auto".into();
                                         update_doc(ui, |d| source::apply_policy(d, &next));
                                     },
                                 )),
-                        ),
-                )
-                .child(
+                        )
+                })
+                .child({
+                    let d_val = current_policy.delivery.clone();
+                    let d1 = d_val.clone();
+                    let d2 = d_val;
                     view()
                         .gap_1()
                         .child(label("2. Review & Delivery"))
                         .child(
-                            view()
-                                .flex_row()
-                                .flex_wrap()
-                                .gap_1()
-                                .child(compact_action(
+                            segmented()
+                                .child(compact_segment(
                                     "Human Review",
-                                    if !is_custom && current_policy.delivery == "human_review" {
-                                        Variant::Primary
-                                    } else {
-                                        Variant::Secondary
-                                    },
+                                    None,
+                                    move || !is_custom && d1 == "human_review",
                                     move |_| {
                                         let mut next = p_del1.clone();
                                         next.delivery = "human_review".into();
                                         update_doc(ui, |d| source::apply_policy(d, &next));
                                     },
                                 ))
-                                .child(compact_action(
+                                .child(compact_segment(
                                     "Auto-merge Queue",
-                                    if !is_custom && current_policy.delivery == "auto_merge" {
-                                        Variant::Primary
-                                    } else {
-                                        Variant::Secondary
-                                    },
+                                    None,
+                                    move || !is_custom && d2 == "auto_merge",
                                     move |_| {
                                         let mut next = p_del2.clone();
                                         next.delivery = "auto_merge".into();
                                         update_doc(ui, |d| source::apply_policy(d, &next));
                                     },
                                 )),
-                        ),
-                )
-                .child(
+                        )
+                })
+                .child({
+                    let e_val = current_policy.external_pr.clone();
+                    let e1 = e_val.clone();
+                    let e2 = e_val.clone();
+                    let e3 = e_val;
                     view()
                         .gap_1()
                         .child(label("3. External PR Rule"))
                         .child(
-                            view()
-                                .flex_row()
-                                .flex_wrap()
-                                .gap_1()
-                                .child(compact_action(
+                            segmented()
+                                .child(compact_segment(
                                     "Require Human Review",
-                                    if !is_custom && current_policy.external_pr == "require_review" {
-                                        Variant::Primary
-                                    } else {
-                                        Variant::Secondary
-                                    },
+                                    None,
+                                    move || !is_custom && e1 == "require_review",
                                     move |_| {
                                         let mut next = p_ext1.clone();
                                         next.external_pr = "require_review".into();
                                         update_doc(ui, |d| source::apply_policy(d, &next));
                                     },
                                 ))
-                                .child(compact_action(
+                                .child(compact_segment(
                                     "Same as Internal",
-                                    if !is_custom && current_policy.external_pr == "same" {
-                                        Variant::Primary
-                                    } else {
-                                        Variant::Secondary
-                                    },
+                                    None,
+                                    move || !is_custom && e2 == "same",
                                     move |_| {
                                         let mut next = p_ext2.clone();
                                         next.external_pr = "same".into();
                                         update_doc(ui, |d| source::apply_policy(d, &next));
                                     },
                                 ))
-                                .child(compact_action(
+                                .child(compact_segment(
                                     "Manual Only",
-                                    if !is_custom && current_policy.external_pr == "manual_only" {
-                                        Variant::Primary
-                                    } else {
-                                        Variant::Secondary
-                                    },
+                                    None,
+                                    move || !is_custom && e3 == "manual_only",
                                     move |_| {
                                         let mut next = p_ext3.clone();
                                         next.external_pr = "manual_only".into();
                                         update_doc(ui, |d| source::apply_policy(d, &next));
                                     },
                                 )),
-                        ),
-                ),
+                        )
+                }),
         );
 
     // 3. Visual Pipeline & Board Columns
@@ -1035,7 +1059,7 @@ fn visual_studio(ui: Ui) -> AnyElement {
                             .items_center()
                             .gap_2()
                             .child(muted("Agent Profile:"))
-                            .child(each(
+                            .child(segmented().child(each(
                                 move || ui.profiles.get(),
                                 |p| p.id.clone(),
                                 move |p, _| {
@@ -1043,13 +1067,10 @@ fn visual_studio(ui: Ui) -> AnyElement {
                                     let pid = p.id.clone();
                                     let is_prof = pid == active_prof;
                                     let target = step_for_prof.clone();
-                                    compact_action(
+                                    compact_segment(
                                         format!("@{pid}"),
-                                        if is_prof {
-                                            Variant::Primary
-                                        } else {
-                                            Variant::Secondary
-                                        },
+                                        None,
+                                        move || is_prof,
                                         move |_| {
                                             let chosen = pid.clone();
                                             let tid = target.clone();
@@ -1063,7 +1084,7 @@ fn visual_studio(ui: Ui) -> AnyElement {
                                         },
                                     )
                                 },
-                            )),
+                            ))),
                     )
                     .child(
                         view()

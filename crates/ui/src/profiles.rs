@@ -3,38 +3,116 @@ use canban_types::Profile;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
 
-/// Only leading @tokens address Agents; names quoted/discussed in prose are ordinary text.
+fn strip_inline_code(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut in_ticks = false;
+    let mut prev_backslash = false;
+    for c in line.chars() {
+        if c == '`' && !prev_backslash {
+            in_ticks = !in_ticks;
+            out.push(' ');
+            prev_backslash = false;
+            continue;
+        }
+        if !in_ticks {
+            out.push(c);
+        } else {
+            out.push(' ');
+        }
+        prev_backslash = c == '\\' && !prev_backslash;
+    }
+    out
+}
+
+/// Scans prose for standalone `@profile` tokens, ignoring fenced code blocks,
+/// inline backtick code spans, escaped `\@`, emails (`user@profile`), and `>` blockquotes.
 pub fn addressed(body: &str, profiles: &[Profile]) -> Vec<String> {
     let mut ids = Vec::new();
-    for word in body.split_whitespace() {
-        let Some(name) = word.strip_prefix('@') else {
-            break;
+    let mut fence: Option<char> = None;
+    for raw_line in body.lines() {
+        let trimmed = raw_line.trim_start();
+        let fence_mark = if trimmed.starts_with("```") {
+            Some('`')
+        } else if trimmed.starts_with("~~~") {
+            Some('~')
+        } else {
+            None
         };
-        let name = name.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_');
-        if !profiles.iter().any(|p| p.id == name) {
-            break;
+        if let Some(mark) = fence_mark {
+            if fence == Some(mark) {
+                fence = None;
+            } else if fence.is_none() {
+                fence = Some(mark);
+            }
+            continue;
         }
-        if !ids.iter().any(|id| id == name) {
-            ids.push(name.to_owned());
+        if fence.is_some() || trimmed.starts_with('>') {
+            continue;
+        }
+        let clean = strip_inline_code(raw_line);
+        let bytes = clean.as_bytes();
+        let mut idx = 0;
+        while let Some(rel) = clean[idx..].find('@') {
+            let at = idx + rel;
+            let valid_before = if at == 0 {
+                true
+            } else {
+                let prev = clean[..at].chars().next_back().unwrap_or(' ');
+                prev.is_whitespace() || matches!(prev, '(' | '[' | '{' | '"' | '\'' | ',' | ';' | ':')
+            };
+            let rest = &clean[at + 1..];
+            let name_len = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                .map(char::len_utf8)
+                .sum::<usize>();
+            if valid_before && name_len > 0 {
+                let name = &rest[..name_len];
+                if profiles.iter().any(|p| p.id == name) && !ids.iter().any(|id| id == name) {
+                    ids.push(name.to_owned());
+                }
+                idx = at + 1 + name_len;
+            } else {
+                idx = at + 1;
+            }
+            if idx >= bytes.len() {
+                break;
+            }
         }
     }
     ids
 }
+
 pub fn remove_address(body: &str, id: &str, profiles: &[Profile]) -> String {
-    let prefix = addressed(body, profiles);
     let mut rest = body;
-    // Consume actual leading tokens, including duplicates and arbitrary whitespace.
+    let mut kept_prefix = Vec::new();
+    let mut removed_any = false;
     loop {
         let trimmed = rest.trim_start();
         let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
-        if end == 0 || addressed(&trimmed[..end], profiles).is_empty() {
+        if end == 0 {
             break;
+        }
+        let token = &trimmed[..end];
+        let Some(name) = token.strip_prefix('@') else {
+            break;
+        };
+        let clean = name.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_');
+        if !profiles.iter().any(|p| p.id == clean) {
+            break;
+        }
+        if clean == id {
+            removed_any = true;
+        } else if !kept_prefix.iter().any(|p| p == clean) {
+            kept_prefix.push(clean.to_owned());
         }
         rest = &trimmed[end..];
     }
-    let mut next = prefix
+    if !removed_any {
+        return body.to_owned();
+    }
+    let mut next = kept_prefix
         .into_iter()
-        .filter(|p| p != id)
         .map(|p| format!("@{p}"))
         .collect::<Vec<_>>();
     if !rest.trim_start().is_empty() {
@@ -92,14 +170,20 @@ pub fn provider(profile: &Profile) -> (Icon, String) {
 mod mention_tests {
     use super::*;
     #[test]
-    fn only_explicit_prefix_targets_are_notified_and_removing_one_retains_the_question() {
+    fn prose_mentions_are_addressed_while_code_and_quotes_are_ignored() {
         let profiles = canban_types::Config::default().profiles;
         assert_eq!(
             addressed("@codex @claude explain this", &profiles),
             vec!["codex", "claude"]
         );
-        assert!(addressed("The UI shows Ask @claude", &profiles).is_empty());
+        assert_eq!(
+            addressed("Please ask @claude, and let (@codex) review.", &profiles),
+            vec!["claude", "codex"]
+        );
         assert!(addressed("> @claude quoted", &profiles).is_empty());
+        assert!(addressed("Use `@claude` inline or email user@codex", &profiles).is_empty());
+        assert!(addressed("```md\n@claude in fence\n```", &profiles).is_empty());
+        assert!(addressed("\\@claude escaped", &profiles).is_empty());
         assert_eq!(
             remove_address(
                 "  @codex  @codex\n@claude  explain\n  details",
@@ -115,6 +199,10 @@ mod mention_tests {
         assert_eq!(
             remove_address("@codex @claude explain this", "claude", &profiles),
             "@codex explain this"
+        );
+        assert_eq!(
+            remove_address("Please ask @claude to check", "claude", &profiles),
+            "Please ask @claude to check"
         );
     }
 }

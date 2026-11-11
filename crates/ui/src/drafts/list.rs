@@ -7,19 +7,16 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     view()
         .flex_1()
         .min_h(px(0.))
-        .p_4()
-        .gap_3()
+        .p_5()
+        .gap_4()
+        .child(subpage_header("Back to Board", "Drafts", move |_| {
+            ui.navigate("board")
+        }))
         .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(action("← Board", Variant::Quiet, move |_| {
-                    ui.navigate("board")
-                }))
-                .child(heading("Drafts").flex_1()),
+            field(query, "Search drafts…")
+                .label("Search drafts")
+                .max_w(px(1000.)),
         )
-        .child(field(query, "Search drafts…").label("Search drafts"))
         .child(scroll().flex_1().min_h(px(0.)).child(dynamic(move || {
             let _ = ui.draft_epoch.get();
             let query = query.get().to_lowercase();

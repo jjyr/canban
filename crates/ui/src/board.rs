@@ -16,7 +16,6 @@ pub struct Drop {
     pub before_card_id: Option<String>,
 }
 pub fn screen(ui: Ui) -> impl IntoElement {
-    let compact = signal(false);
     let project = computed(move || {
         let _ = ui.project.get();
         ui.current_project()
@@ -42,81 +41,33 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .justify_between()
                 .items_center()
                 .gap_2()
-                .on_layout(move |b: &Bounds<Points>| compact.set(b.size.width.0 < 760.))
                 .child(
                     view()
                         .flex_row()
                         .items_center()
                         .gap_1()
                         .flex_1()
-                        .min_w(px(120.))
+                        .min_w(px(100.))
                         .child(project_picker(ui))
                         .child(when(
                             move || project.get().is_some(),
                             move || {
-                                icon_action(
+                                view().flex_shrink_0().child(icon_action(
                                     Icon::GitHub,
                                     "GitHub repository & synchronization".into(),
                                     move || project.get().is_some_and(|p| p.github.is_some()),
                                     || 0,
                                     move |_| ui.navigate("github-repository"),
-                                )
+                                ))
                             },
                         )),
                 )
                 .child(when(
-                    move || project.get().is_some() && !compact.get(),
-                    move || {
-                        action("Archive", Variant::Quiet, move |_| {
-                            ui.navigate("archive")
-                        })
-                        .into_element()
-                    },
-                ))
-                .child(when(
-                    move || project.get().is_some() && !compact.get(),
+                    move || project.get().is_some(),
                     move || {
                         action("Workflows", Variant::Quiet, move |_| {
                             ui.navigate("workflows")
                         })
-                        .into_element()
-                    },
-                ))
-                .child(when(
-                    move || project.get().is_some() && !compact.get(),
-                    move || {
-                        action("Work location…", Variant::Quiet, move |_| {
-                            ui.navigate("project-location")
-                        })
-                    },
-                ))
-                .child(when(
-                    move || project.get().is_some() && compact.get(),
-                    move || {
-                        let anchor = element_ref();
-                        action("More…", Variant::Quiet, move |_| {
-                            use nsh_core::element::desktop::{MenuItem, popup_menu_at};
-                            ui.spawn(async move {
-                                if let Some(bounds) = anchor.measure().await {
-                                    popup_menu_at(
-                                        vec![
-                                            MenuItem::new("Archive")
-                                                .on_select(move || ui.navigate("archive")),
-                                            MenuItem::new("Workflows")
-                                                .on_select(move || ui.navigate("workflows")),
-                                            MenuItem::new("Work location…")
-                                                .on_select(move || ui.navigate("project-location")),
-                                        ],
-                                        point(
-                                            bounds.page.x,
-                                            bounds.page.y + bounds.frame.size.height,
-                                        ),
-                                    )
-                                    .await;
-                                }
-                            });
-                        })
-                        .element_ref(&anchor)
                         .flex_shrink_0()
                     },
                 ))
@@ -145,6 +96,41 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     move || {
                         action("+ Add Card", Variant::Primary, move |_| ui.new_card())
                             .flex_shrink_0()
+                    },
+                ))
+                .child(when(
+                    move || project.get().is_some(),
+                    move || {
+                        let anchor = element_ref();
+                        chrome_button(Icon::More, "Project actions", move |_| {
+                            use nsh_core::element::desktop::{MenuItem, popup_menu_at};
+                            ui.spawn(async move {
+                                if let Some(bounds) = anchor.measure().await {
+                                    popup_menu_at(
+                                        vec![
+                                            MenuItem::new("Archive")
+                                                .on_select(move || ui.navigate("archive")),
+                                            MenuItem::new("Work location…")
+                                                .on_select(move || ui.navigate("project-location")),
+                                            MenuItem::new("GitHub repository…").on_select(
+                                                move || ui.navigate("github-repository"),
+                                            ),
+                                            MenuItem::separator(),
+                                            MenuItem::new("Switch Project…")
+                                                .on_select(move || ui.show_search(true)),
+                                            MenuItem::new("New Project…")
+                                                .on_select(move || ui.navigate("new-project")),
+                                        ],
+                                        point(
+                                            bounds.page.x,
+                                            bounds.page.y + bounds.frame.size.height,
+                                        ),
+                                    )
+                                    .await;
+                                }
+                            });
+                        })
+                        .element_ref(&anchor)
                     },
                 )),
         )
@@ -222,10 +208,9 @@ fn project_picker(ui: Ui) -> impl IntoElement {
             items.iter().any(|i| i.project_id == project && i.pending),
         )
     });
-    view().flex_1().min_w(px(100.)).child(
+    view().min_w(px(80.)).max_w(px(560.)).child(
         nsh_base::button()
             .min_h(px(40.))
-            .w_full()
             .min_w(px(80.))
             .max_w(px(560.))
             .flex_row()
@@ -256,7 +241,6 @@ fn project_picker(ui: Ui) -> impl IntoElement {
                         .map(|p| p.name)
                         .unwrap_or_else(|| "Choose Project".into())
                 })
-                .flex_1()
                 .truncate()
                 .min_w(px(0.)),
             )
@@ -264,7 +248,7 @@ fn project_picker(ui: Ui) -> impl IntoElement {
                 move || updates.get().0,
                 move || updates.get().1,
             ))
-            .child(icon(Icon::ChevronDown))
+            .child(icon(Icon::ChevronDown).flex_shrink_0())
             .on_press(move |_: &()| ui.show_search(true)),
     )
 }

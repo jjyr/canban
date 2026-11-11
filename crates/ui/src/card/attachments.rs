@@ -196,6 +196,54 @@ pub fn controls(
                 }
             },
         ))
+        .child(when(
+            move || comment && !ui.profiles.get().is_empty(),
+            move || {
+                let anchor = element_ref();
+                chrome_button_disabled(
+                    Icon::Agent,
+                    "Mention an Agent (@)",
+                    move || ui.current_card().is_none_or(|c| c.archived_at.is_some()),
+                    move |_| {
+                        use nsh_core::element::desktop::{MenuItem, popup_menu_at};
+                        let profiles = ui.profiles.get_untracked();
+                        ui.spawn(async move {
+                            let Some(bounds) = anchor.measure().await else {
+                                return;
+                            };
+                            let items = profiles
+                                .into_iter()
+                                .map(|p| {
+                                    let id = p.id.clone();
+                                    MenuItem::new(format!("@{id}")).on_select(move || {
+                                        draft.update(|d| {
+                                            d.suppressed_recipients.retain(|r| r != &id);
+                                            if !d.recipients.contains(&id) {
+                                                d.recipients.push(id.clone());
+                                            }
+                                            let token = format!("@{id} ");
+                                            if !d.comment.contains(&format!("@{id}")) {
+                                                if d.comment.is_empty()
+                                                    || d.comment.ends_with(char::is_whitespace)
+                                                {
+                                                    d.comment.push_str(&token);
+                                                } else {
+                                                    d.comment.push(' ');
+                                                    d.comment.push_str(&token);
+                                                }
+                                            }
+                                        });
+                                        editor.focus();
+                                    })
+                                })
+                                .collect::<Vec<_>>();
+                            popup_menu_at(items, point(bounds.page.x, bounds.page.y)).await;
+                        });
+                    },
+                )
+                .element_ref(&anchor)
+            },
+        ))
         .child(
             scroll()
                 .horizontal()

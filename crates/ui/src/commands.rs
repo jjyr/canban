@@ -96,9 +96,80 @@ pub const CATALOG: &[Command] = &[
         display: "⌘]",
         context: "Global",
     },
+    Command {
+        id: "go-board",
+        title: "Go to Board",
+        key: "",
+        display: "Board",
+        context: "Navigation",
+    },
+    Command {
+        id: "go-overview",
+        title: "Go to Overview",
+        key: "",
+        display: "Overview",
+        context: "Navigation",
+    },
+    Command {
+        id: "go-terminals",
+        title: "Go to Terminals",
+        key: "",
+        display: "Terminals",
+        context: "Navigation",
+    },
+    Command {
+        id: "go-github",
+        title: "Go to GitHub",
+        key: "",
+        display: "GitHub",
+        context: "Navigation",
+    },
+    Command {
+        id: "go-workflows",
+        title: "Open Project Workflows",
+        key: "",
+        display: "Project",
+        context: "Navigation",
+    },
+    Command {
+        id: "go-drafts",
+        title: "Open Drafts",
+        key: "",
+        display: "Workspace",
+        context: "Navigation",
+    },
+    Command {
+        id: "go-archive",
+        title: "Open Project Archive",
+        key: "",
+        display: "Project",
+        context: "Navigation",
+    },
+    Command {
+        id: "go-settings",
+        title: "Open Settings",
+        key: "",
+        display: "App",
+        context: "Navigation",
+    },
+    Command {
+        id: "choose-theme",
+        title: "Choose Theme",
+        key: "",
+        display: "Appearance",
+        context: "Preferences",
+    },
+    Command {
+        id: "switch-project",
+        title: "Switch Project",
+        key: "",
+        display: "Workspace",
+        context: "Navigation",
+    },
 ];
 pub fn execute(ui: Ui, id: &str) {
     crate::utilities::close(ui);
+    ui.quick_open.set(false);
     match id {
         "back" => crate::navigation::go(ui, false),
         "forward" => crate::navigation::go(ui, true),
@@ -109,7 +180,22 @@ pub fn execute(ui: Ui, id: &str) {
         "save-card" => ui.task_submit.update(|n| *n += 1),
         "send-comment" if ui.current_card().is_some() => ui.comment_submit.update(|n| *n += 1),
         "quick-open" => ui.show_search(false),
-        "shortcuts" => crate::utilities::open(ui, "shortcuts"),
+        "shortcuts" => {
+            ui.utility_popup.set(String::new());
+            ui.project_picker.set(false);
+            ui.search_query.set(">".into());
+            ui.quick_open.set(true);
+        }
+        "go-board" => ui.navigate("board"),
+        "go-overview" => ui.navigate("overview"),
+        "go-terminals" => ui.navigate("terminals"),
+        "go-github" => ui.navigate("github"),
+        "go-workflows" => ui.navigate("workflows"),
+        "go-drafts" => ui.navigate("drafts"),
+        "go-archive" => ui.navigate("archive"),
+        "go-settings" => ui.navigate("settings"),
+        "choose-theme" => crate::utilities::open(ui, "theme"),
+        "switch-project" => ui.show_search(true),
         "new-terminal" => {
             ui.navigate("terminals");
             crate::terminals::new_tab(ui);
@@ -140,7 +226,10 @@ pub fn bindings(ui: Ui) {
             );
         }
     });
-    for command in CATALOG.iter().filter(|c| c.context == "Global") {
+    for command in CATALOG
+        .iter()
+        .filter(|c| c.context == "Global" && !c.key.is_empty())
+    {
         on_key_with(
             command.key,
             KeyOptions {
