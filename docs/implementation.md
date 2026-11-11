@@ -27,7 +27,7 @@ The [GitHub workspace and cache](github-workspace.md) extends the integration wi
 
 ## Build and launch
 
-Use the pinned mise Rust toolchain. NSH 0.4.0 is pinned to aca7b8f92a33af9d83c3693a516f649f7ea5c5e5 in Cargo.toml and Cargo.lock. Install macOS Xcode command-line tools, librsvg (`brew install librsvg`, for app icon generation) and a compatible hc separately. This implementation was verified with hc 0.1.18 and Codex CLI 0.166.0.
+Use the pinned mise Rust toolchain. NSH 0.5.0 is pinned to f4d68f7f9f31eb7b3ecc8a4cbc31096d5c6238a1 (upstream tag `v0.5.0`) in Cargo.toml and Cargo.lock. See the [upgrade and acceptance record](nsh-050-upgrade-20261111.md). Install macOS Xcode command-line tools, librsvg (`brew install librsvg`, for app icon generation) and a compatible hc separately. This implementation was verified with hc 0.1.18 and Codex CLI 0.166.0.
 
 ```sh
 mise run dev

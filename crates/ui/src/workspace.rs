@@ -99,7 +99,9 @@ fn review_workspace(ui: Ui) -> impl IntoElement {
                             .bg(SURFACE)
                             .border_b_1()
                             .border_color(BORDER)
-                            .child(compact_action("← Back", Variant::Quiet, move |_| ui.back()))
+                            .child(compact_action("← Back", Variant::Quiet, move |_| {
+                                ui.back()
+                            }))
                             .child(
                                 view()
                                     .flex_row()
@@ -123,18 +125,20 @@ fn review_workspace(ui: Ui) -> impl IntoElement {
                                         },
                                     ))
                                     .child(
-                                        compact_action("Restore split", Variant::Quiet, move |_| {
-                                            ui.expanded.set(false);
-                                            ui.focused_card.set(false);
-                                        })
+                                        compact_action(
+                                            "Restore split",
+                                            Variant::Quiet,
+                                            move |_| {
+                                                ui.expanded.set(false);
+                                                ui.focused_card.set(false);
+                                            },
+                                        )
                                         .disabled(!expanded),
                                     )
                                     .child(compact_action(
                                         "Close panel",
                                         Variant::Quiet,
-                                        move |_| {
-                                            ui.back()
-                                        },
+                                        move |_| ui.back(),
                                     )),
                             ),
                     )

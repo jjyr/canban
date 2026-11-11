@@ -198,7 +198,11 @@ pub fn diff_panel(p: ReviewPreview) -> impl IntoElement {
                 )
                 .child(when(
                     move || !folded.with(|s| s.contains(&path)),
-                    move || view().p_2().child(nsh_base::text_view().markdown(code.clone())),
+                    move || {
+                        view()
+                            .p_2()
+                            .child(nsh_base::text_view().markdown(code.clone()))
+                    },
                 )),
         );
     }

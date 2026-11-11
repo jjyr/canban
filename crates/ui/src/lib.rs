@@ -62,15 +62,15 @@ pub fn Canban() -> impl IntoElement {
     reminders::init(ui);
     projects::selection::remember(ui);
     terminals::bindings(ui);
+    let window = nsh_core::element::desktop::current_window();
     effect(move || {
         if ui.page.get() != "terminals" {
-            nsh_core::element::desktop::set_title("Canban — Human Context");
+            let mut attributes = nsh_core::desktop::WindowAttributes::default();
+            attributes.title = Some("Canban — Human Context".into());
+            window.set(attributes);
         }
     });
-    nsh_core::element::desktop::set_title_bar(
-        nsh_core::desktop::TitleBarStyle::Hidden,
-        Some(px(42.)),
-    );
+    frame::configure_window_chrome();
     refresh(ui);
     machines::refresh_catalog(ui);
     set_interval(std::time::Duration::from_secs(5), move || {

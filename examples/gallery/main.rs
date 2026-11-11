@@ -303,6 +303,7 @@ pub fn Gallery() -> impl IntoElement {
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("reminders") {
+        let window = nsh_core::element::desktop::current_window();
         let mut snapshot = fixtures::workspace();
         snapshot.cards[2].body = (0..30)
             .map(|i| {
@@ -388,7 +389,7 @@ pub fn Gallery() -> impl IntoElement {
                         ui.navigate("overview")
                     }))
                     .child(action("Focus window", Variant::Quiet, move |_| {
-                        nsh_core::element::desktop::order_front()
+                        window.focus()
                     })),
             )
             .child(canban_ui::frame::screen(ui))
@@ -446,10 +447,7 @@ pub fn Gallery() -> impl IntoElement {
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("project-activity") {
-        nsh_core::element::desktop::set_title_bar(
-            nsh_core::desktop::TitleBarStyle::Hidden,
-            Some(px(42.)),
-        );
+        canban_ui::frame::configure_window_chrome();
         ui.snapshot.set(fixtures::project_activity());
         ui.page.set("board".into());
         return canban_ui::frame::screen(ui).into_element();
@@ -460,10 +458,7 @@ pub fn Gallery() -> impl IntoElement {
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminals") {
-        nsh_core::element::desktop::set_title_bar(
-            nsh_core::desktop::TitleBarStyle::Hidden,
-            Some(px(42.)),
-        );
+        canban_ui::frame::configure_window_chrome();
         ui.snapshot.set(fixtures::terminal_workspace());
         ui.open_terminal("gallery-manual".into());
         return canban_ui::frame::screen(ui).into_element();

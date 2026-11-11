@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::components::git_workspace::compact;
-use nsh_core::element::desktop::{MenuItem, popup_menu, popup_menu_at, set_title};
+use nsh_core::element::desktop::{MenuItem, current_window, popup_menu, popup_menu_at};
 pub fn context_updates(ui: Ui) {
     // Regrouping only reveals the selected row. It never changes the tab/viewer.
     let group =
@@ -28,7 +28,12 @@ pub fn context_updates(ui: Ui) {
             })
             .unwrap_or_else(|| "Canban".into())
     });
-    effect(move || set_title(title.get()));
+    let window = current_window();
+    effect(move || {
+        let mut attributes = nsh_core::desktop::WindowAttributes::default();
+        attributes.title = Some(title.get());
+        window.set(attributes);
+    });
 }
 pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
     let Some(e) = entries(&ui.snapshot.get_untracked())
@@ -551,7 +556,9 @@ pub fn rename_dialog(ui: Ui) -> impl IntoElement {
                                         .flex_row()
                                         .justify_between()
                                         .items_center()
-                                        .child(label("Rename tab").font_weight(FontWeight::SEMIBOLD))
+                                        .child(
+                                            label("Rename tab").font_weight(FontWeight::SEMIBOLD),
+                                        )
                                         .child(chrome_button(
                                             Icon::Close,
                                             "Close rename dialog",

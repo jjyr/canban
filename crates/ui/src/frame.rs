@@ -2,6 +2,17 @@
 use crate::{presenter::*, quick_open, screens, sidebar, terminals};
 use canban_ui_kit::tokens::*;
 use nsh_core::prelude::*;
+
+/// Keep production and Gallery custom chrome on the same native window API.
+pub fn configure_window_chrome() {
+    let mut title_bar = nsh_core::desktop::TitleBarOptions::default();
+    title_bar.style = nsh_core::desktop::TitleBarStyle::Hidden;
+    title_bar.height = Some(px(42.));
+    let mut attributes = nsh_core::desktop::WindowAttributes::default();
+    attributes.title_bar = Some(title_bar);
+    nsh_core::element::desktop::current_window().set(attributes);
+}
+
 pub fn screen(ui: Ui) -> impl IntoElement {
     let route = computed(move || {
         let page = ui.page.get();

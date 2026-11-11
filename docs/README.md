@@ -32,6 +32,10 @@ local backend activation and branch-isolation regression checks.
 records click-only Column automations, the simplified source editor, native
 modal dismissal/focus, syntax highlighting and publication-conflict retention.
 
+[NSH 0.5.0 upgrade acceptance (2026-11-11)](nsh-050-upgrade-20261111.md)
+records the official release pin, WindowRef API migration and isolated native
+editor, modal, window-title and terminal checks.
+
 ## Current product documents
 
 | Document | Purpose |
