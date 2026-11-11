@@ -70,7 +70,7 @@ Gallery workspace scenes import the exact production components, including focus
 
 ### Overview components
 
-`ui/overview.rs` composes the global grouped list, stable Card/profile rows, nonempty status groups, Closed/history disclosure, context inspector and explicit destination actions. Inputs are the shared typed pure projection plus retained UI selection/scroll state; selection has no execution side effects. Inspector actions remain outside the scrolling assignment/history. Narrow layouts show the same context with an explicit return. Preview requests are asynchronous and generation/identity fenced. The Gallery Overview scene supplies every group, independent reasons, multiple Projects and request-less recovery. `ui-kit::read_text` reuses NSH selectable document behavior for plain Agent/runtime text without interpreting markup.
+`ui/overview.rs` owns compact global rows, Needs you/Updates/Running/Queued sections and collapsed Idle/Closed disclosure. Rows consume prepared Card/profile and Project configuration state and emit direct destination intents. Primary actions and row activation share eligibility; explicit Resume remains separate. Task titles truncate with full source context in a tooltip; Profile stays first in the secondary column at narrow widths. Returning restores row focus, selection and scroll. There is no context inspector or embedded Terminal preview. `terminals/navigation.rs` shares Card/profile/request resolution, a native multiple-Agent menu, exact historical context and queued launch navigation with location fencing. Gallery Overview fixtures cover multiple Projects/profiles, simultaneous task/runtime reasons, long multilingual titles, unread replies after long Markdown, disconnected/queued/closed states and 720-point layout. See [refinement acceptance](overview-terminal-acceptance-20261111.md).
 
 
 ### Compact navigation and search
@@ -228,3 +228,16 @@ verifies exact saved completion text and real default-browser navigation; see
 `ui::workflows` owns the Project source editor, SQL history/restore-as-draft and Edit with agent panel. Native NSH editors preserve text selection and local undo; UI state retains per-Project drafts across navigation. Prompt preview is read-only, scrollable and selectable, with explicit Select all/Copy and an inline manual-copy fallback. Source validation/conflict errors preserve the draft. Successful publication quietly clears the unsaved marker; active-version numbers stay out of the main editor. The top-right action is Agent-icon Edit with agent, New workflow sits below the source list, and Save/Command+S share eligibility and publication. NSH YAML highlighting, two-space indentation, line numbers and soft wrapping are enabled. History and Agent panels use native modal layers with focused-editor Escape dismissal, caret restoration and inline configuration-launch errors. `workflow-agent`, `workflows`, `workflows-conflict` and `column-automations` Gallery scenes compose production components with deterministic fixtures.
 
 Column trigger icons use `Icon::Trigger` and the pure `workflow-engine::source::column_details` projection. Only click opens details and links to Project source. NSH Popover owns overlay placement, clipping, Escape/outside dismissal and focus return, so native Card text cannot paint over the opaque panel. UI Kit owns the Lucide workflow-node icon and a tooltip-free compact action, not Workflow interpretation. Configuration Agent entries are grouped under Project / Configuration in the existing Terminal inventory and offer Back to Workflows.
+
+## Card conversation refinement (2026-11-11)
+
+`card/header.rs` owns local/Issue/PR identity; `github/references.rs` owns the
+saved-content reference projection. `components/timeline_item.rs` accepts an
+Event and narrative classification, rendering shared author/time/Markdown
+message chrome or a compact system row. It owns local full-body expansion and
+report loading; navigation retains explicit request identity. The Card Timeline
+owns adjacent routine-event grouping, read coordinates and execution disclosure.
+`MarkdownInput` keeps nonempty compact drafts expanded on blur for every consumer.
+Gallery scenes `card-local`, `card-issue`, and `card-pr` cover narrow identity,
+references, long reports, routine groups, failures and historical details using
+production components. See [verification](card-conversation-acceptance-20261111.md).

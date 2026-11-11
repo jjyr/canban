@@ -261,12 +261,27 @@ impl MarkdownInput {
                 self.active.set(false);
             }
         });
+        let expanded = computed(move || {
+            !compact || self.active.get() || self.held.get() || value.with(|v| !v.is_empty())
+        });
         let height = computed(move || {
+            if !expanded.get() {
+                return 48.;
+            }
             if !compact {
                 return max_height.get().max(120.);
             }
             let lines = value.with(|v| v.lines().count());
             (76. + lines.saturating_sub(2) as f32 * 20.).min(max_height.get().max(76.))
+        });
+        let previous_size = stored(None::<(bool, f32)>);
+        effect(move || {
+            let next = (expanded.get(), height.get());
+            if let Some(before) = previous_size.replace(Some(next))
+                && (before.0 != next.0 || (before.1 - next.1).abs() > 0.5)
+            {
+                super::motion::layout(root, super::motion::COMPOSER);
+            }
         });
         view()
             .element_ref(&root)
@@ -278,7 +293,8 @@ impl MarkdownInput {
             .overflow_hidden()
             .child(
                 view()
-                    .h(px(32.))
+                    .h(move || px(if expanded.get() { 32. } else { 0. }))
+                    .style_when(move || !expanded.get(), |s| s.hidden())
                     .px_2()
                     .pt_1()
                     .flex_row()
@@ -287,17 +303,24 @@ impl MarkdownInput {
                     .bg(SURFACE)
                     .border_b_1()
                     .border_color(BORDER)
+                    .overflow_hidden()
                     .child(self.tab("Write", false))
                     .child(self.tab("Preview", true)),
             )
             .child(
                 view()
-                    .h(move || px(if self.preview.get() { 0. } else { height.get() }))
+                    .h(move || {
+                        px(if self.preview.get() && expanded.get() {
+                            0.
+                        } else {
+                            height.get()
+                        })
+                    })
                     .overflow_hidden()
                     .child(source),
             )
             .child(when(
-                move || self.preview.get(),
+                move || self.preview.get() && expanded.get(),
                 move || {
                     scroll()
                         .h(move || px(height.get()))

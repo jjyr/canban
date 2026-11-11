@@ -13,14 +13,33 @@ use nsh_core::{TouchEvent, TouchPhase, prelude::*};
 #[derive(Clone, Copy)]
 pub(super) struct Reading {
     scroll: ElementRef,
+    content: ElementRef,
     follow: Signal<bool>,
     unread: Signal<usize>,
     composer: ElementRef,
     composer_height: Signal<f32>,
     editor: Stored<Option<canban_ui_kit::markdown::MarkdownInput>>,
     reader: crate::reminders::Reader,
+    revealed_request: Stored<String>,
+    jump_ready: Signal<bool>,
 }
 impl Reading {
+    /// Layout callbacks are parent-relative. Compare measured root positions
+    /// to the scroll content root, so nesting never changes history coordinates.
+    async fn bounds(self, target: ElementRef) -> Option<Bounds<Points>> {
+        let target = target.measure();
+        let content = self.content.measure();
+        let target = target.await?;
+        let content = content.await?;
+        Some(Bounds {
+            origin: Point::new(
+                target.page.x - content.page.x,
+                target.page.y - content.page.y,
+            ),
+            size: target.frame.size,
+        })
+    }
+
     fn latest(self) {
         if self.follow.try_get().is_none() {
             return;
@@ -53,14 +72,39 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     let saved = scroll_position(ui, &scroll_key);
     let reading = Reading {
         scroll: element_ref(),
+        content: element_ref(),
         follow: signal(false),
         unread: signal(0),
         composer: element_ref(),
         composer_height: signal(180.),
         editor: stored(None),
         reader: crate::reminders::Reader::new(saved.y.0),
+        revealed_request: stored(String::new()),
+        jump_ready: signal(false),
     };
     let draft = document(ui, key, Draft::card(&card));
+    effect(move || {
+        let target = ui.card_event.get();
+        let source_card = ui.card_id();
+        if target.is_none() {
+            return;
+        }
+        reading.jump_ready.set(false);
+        ui.spawn(async move {
+            // Markdown measures asynchronously; reveal the Timeline after initial layout,
+            // then its actual row bounds refine the requested message position.
+            next_frame().await;
+            next_frame().await;
+            if reading.jump_ready.try_get().is_some()
+                && ui.card_event.get_untracked() == target
+                && ui.page.get_untracked() == "card"
+                && ui.card.get_untracked() == source_card
+            {
+                reading.jump_ready.set(true);
+                reading.scroll.scroll_to_end(false);
+            }
+        });
+    });
     effect(move || {
         let _ = ui.reminders.get();
         let _ = crate::reminders::foreground();
@@ -159,6 +203,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 })
                 .child(
                     view()
+                        .element_ref(&reading.content)
+                        .w_full()
+                        .max_w(px(920.))
+                        .self_center()
                         .p_3()
                         .gap_3()
                         .on_layout(move |_: &Bounds<Points>| {
@@ -170,7 +218,6 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         })
                         .child(task::render(ui, draft, reading))
                         .child(details::render(ui, draft))
-                        .child(workflow::render(ui))
                         .child(when(
                             move || draft.with(|d| d.workspace_details),
                             move || {
@@ -213,6 +260,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .self_center()
             },
         ))
+        .child(workflow::render(ui))
         .child(composer::render(ui, draft, reading))
         .into_element()
 }

@@ -71,56 +71,15 @@ pub fn render(ui: Ui) -> impl IntoElement {
         let runs = ui.snapshot.with(|s| {
             s.workflow_runs
                 .iter()
-                .filter(|r| r.card_id == card_id && r.active())
+                .filter(|r| {
+                    r.card_id == card_id
+                        && r.active()
+                        && matches!(r.state.as_str(), "waiting_approval" | "stale")
+                })
                 .cloned()
                 .collect::<Vec<_>>()
         });
-        let has_deliver_in_project = ui.snapshot.with(|s| {
-            let project = ui.project.get();
-            s.workflow_revisions.iter().any(|w| {
-                w.project_id == project
-                    && w.definition
-                        .steps
-                        .values()
-                        .any(|st| matches!(st, WorkflowStep::Deliver { .. }))
-            })
-        });
-        let mut container = view().gap_2();
-        if runs.is_empty()
-            && has_deliver_in_project
-            && let Some(c) = &card_opt
-            && c.active()
-        {
-            let rev = c.revision;
-            let held = c.hold_auto_merge;
-            let cid = c.id.clone();
-            container = container.child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .p_2()
-                    .rounded(px(RADIUS))
-                    .bg(INSET)
-                    .child(muted(if held {
-                        "Auto-merge is held for this Card; workflow delivery will pause for your approval."
-                    } else {
-                        "Auto-merge queue is enabled for this Project."
-                    }))
-                    .child(compact_action(
-                        if held { "Resume auto-merge" } else { "Hold auto-merge" },
-                        if held { Variant::Primary } else { Variant::Secondary },
-                        move |_| {
-                            dispatch(
-                                ui,
-                                "card.hold_auto_merge",
-                                json!({"card_id":cid,"revision":rev,"hold":!held}),
-                            )
-                        },
-                    )),
-            );
-        }
-        container.children(
+        view().gap_2().children(
             runs.into_iter()
                 .rev()
                 .map(|run| {
@@ -203,7 +162,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                 let id = run.id.clone();
                                 let visit = run.visit;
                                 actions = actions.child(compact_action(
-                                    "Approve",
+                                    "Approve and continue",
                                     Variant::Primary,
                                     move |_| {
                                         if let Some(card) = ui.current_card() {
@@ -267,17 +226,16 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                 ));
                             }
                         }
-                        let id = run.id.clone();
-                        actions = actions.child(compact_action("Stop", Variant::Quiet, move |_| {
-                            dispatch(ui, "workflow.stop", json!({"run_id":id}))
-                        }));
                     }
                     for (step_key, output) in &run.outputs {
                         if let Some(path) = output["path"].as_str() {
                             let path = path.to_owned();
                             let card = card_id.clone();
                             let label_text = if run.outputs.len() > 1 {
-                                format!("Report ({})", step_key.strip_prefix("agent:").unwrap_or(step_key))
+                                format!(
+                                    "Report ({})",
+                                    step_key.strip_prefix("agent:").unwrap_or(step_key)
+                                )
                             } else {
                                 "Report".into()
                             };
@@ -289,10 +247,16 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         }
                     }
 
+                    let state_label = if run.state == "stale" {
+                        "Changes required"
+                    } else {
+                        "Review required"
+                    };
                     let mut body = view()
-                        .p_3()
+                        .p_2()
                         .gap_2()
-                        .rounded(px(RADIUS))
+                        .border_t_1()
+                        .border_color(BORDER)
                         .bg(INSET)
                         .child(
                             view()
@@ -302,18 +266,15 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                 .justify_between()
                                 .gap_2()
                                 .child(
-                                    label(format!(
-                                        "{} · {}",
-                                        run.definition.name,
-                                        run.state.replace('_', " ")
-                                    ))
-                                    .font_weight(FontWeight::MEDIUM),
+                                    label(format!("{} · {state_label}", run.definition.name))
+                                        .font_weight(FontWeight::MEDIUM),
                                 )
                                 .child(actions),
                         )
                         .child(stepper);
 
-                    if rework_open.get() && (run.state == "waiting_approval" || run.state == "stale") {
+                    if rework_open.get() && (run.state == "waiting_approval" || run.state == "stale")
+                    {
                         let id = run.id.clone();
                         let visit = run.visit;
                         body = body.child(

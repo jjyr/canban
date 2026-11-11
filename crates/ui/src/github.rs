@@ -599,67 +599,6 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
         )
 }
 
-pub fn card_source(ui: Ui) -> impl IntoElement {
-    dynamic(move || {
-        let Some(c) = ui.current_card() else {
-            return view().into_element();
-        };
-        let Some(source) = c.github_issue().cloned() else {
-            return view().into_element();
-        };
-        let cached = ui.snapshot.with(|s| {
-            s.github_issues
-                .iter()
-                .find(|i| {
-                    i.project_id == c.project_id
-                        && i.source.issue_id == source.issue_id
-                        && i.source.repository_id == source.repository_id
-                })
-                .cloned()
-        });
-        let source_kind = c.source_kind();
-        let mut area = panel().child(
-            view()
-                .flex_row()
-                .gap_2()
-                .items_center()
-                .child(icon(Icon::GitHub))
-                .child(action(
-                    format!("{}#{}", source.repository, source.number),
-                    Variant::Quiet,
-                    move |_| {
-                        open(
-                            ui,
-                            GitHubReference {
-                                repository: source.repository.clone(),
-                                kind: source_kind.into(),
-                                number: Some(source.number),
-                                sha: None,
-                                url: source.url.clone(),
-                            },
-                        )
-                    },
-                )),
-        );
-        if let Some(i) = cached {
-            area = area
-                .child(view().flex_row().child(badge(i.state)))
-                .child(nsh_base::text_view().markdown(i.body));
-        }
-        area.child(compact_action(
-            "Remove from Board",
-            Variant::Quiet,
-            move |_| {
-                dispatch(
-                    ui,
-                    "card.remove",
-                    json!({"card_id":c.id,"revision":c.revision}),
-                )
-            },
-        ))
-        .into_element()
-    })
-}
 pub fn pr_panel(ui: Ui) -> impl IntoElement {
     dynamic(move || {
         let Some(c) = ui.current_card() else {

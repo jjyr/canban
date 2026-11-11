@@ -188,7 +188,7 @@ Close lifecycle acceptance: real isolated Core/PTys at `/private/tmp/cb-close-00
 
 ## Compact Card entry (2026-11-09)
 
-The [Card conversation](card-conversation.md) header/Timeline link into the existing Terminal workspace. Navigation alone never starts/resumes a process. A Card without a conversation opens a Card-context empty view; **Choose Agent** (or the chrome Agent control) explicitly invokes `agent.open`. Existing terminal menus and ended-session controls own lifecycle management and history. Back to source restores the Card's draft and scroll offset.
+The [Card conversation](card-conversation.md) header/Timeline link into the existing Terminal workspace. Navigation alone never starts/resumes a process. A Card without a live conversation opens a compact menu with saved history and eligible explicit Start/Resume choices; it does not open an empty Terminal page. Existing terminal menus and ended-session controls own lifecycle management and history. Back to source restores the Card's draft and scroll offset.
 
 ## Inline session metadata (2026-11-09)
 
@@ -203,3 +203,15 @@ Executed acceptance: wide and narrow native Gallery layouts passed title expansi
 ## Project Workflow configuration Agents
 
 Project-owned configuration Agents are an additional stable owner, independent of Card assignments or inferred directories. The tree groups these entries under **Project / Configuration / Workflows · Profile**. They reuse the native viewer and terminal lifecycle controls; **Back to Workflows** returns to the Project editor. Starting/continuing/resuming is explicit in **Edit with agent**. Continue only focuses a retained binding; Resume uses exact provider history. Closing a queued entry cancels admission. See [the configuration contract](workflow-implementation.md#edit-with-agent).
+
+## Unified Terminal navigation
+
+Updated 2026-11-11. Overview, Card header/profile controls, Board Terminal buttons/context menus, Review, Timeline, Quick Open and Terminal controls converge on shared target resolution in `terminals/navigation.rs` and `Ui::open_terminal`.
+
+An exact live target reuses its tab, reveals its tree group and focuses the existing PTY. Disconnection retains the original binding and read-only connection feedback. Missing targets produce an explicit error. A queued request without a PTY opens its saved Card request context; navigation cannot bypass admission or create a replacement.
+
+For a Card-level entry, reuse its last explicitly opened live Agent, otherwise open the sole live Agent. Multiple candidates show a native menu. With no live target the menu offers saved request/history, eligible Resume Agent and explicitly labelled Start choices for profiles without an existing conversation. Archived Cards cannot start execution. A direct profile link skips the picker.
+
+Timeline request links attach only when that request is the current live invocation. Historical requests open their own assignment/state/output on the Card, with a separately labelled Open current conversation action when applicable. Closed Quick Open candidates advertise View history. Resume is an explicit exact-session operation with an expected-attempt fence; unavailable provider history cannot silently become a fresh start. Start and Resume receipts respect pending guards. When admission initially queues a request, the UI shows its context and attaches only after that exact request obtains a PTY. Leaving that context cancels automatic navigation. Successful attachment returns directly to the launch origin on Back, without an extra queue-context history entry.
+
+Back/Forward retain existing route, draft and scroll behavior and never replay execution. Overview no longer embeds a Terminal preview or context inspector. The [entry inventory and design](overview-and-terminal-navigation-proposal.md) records the full cross-surface scope.

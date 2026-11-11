@@ -29,6 +29,16 @@ Project P / Card #42
 
 The default Develop -> Review transition follows explicit completion. In the unified design, the owning step progresses; direct questions retain independent completion semantics. Mentions deliver to or start/resume the Card/profile conversation under the [Session contract](sessions.md). WorkflowRun is distinct from Conversation/Request/Attempt. Planning/approval can appear here while the Card remains in Backlog. Worktrees remain through Archive under the current lifecycle contract.
 
+## Current native presentation
+
+The Card reader uses one message style for human and Agent prose, compact
+individual decision/failure rows, and collapsed adjacent routine events grouped
+by request. Long Markdown folds by visual height, without truncating its source.
+Execution details expand at the corresponding request in the history rather
+than preceding the entire conversation. Ordering, unread positions and exact
+request identities remain unchanged. See [Card conversation](../card-conversation.md)
+for the implemented rules and local-only quick reply scope.
+
 ## Shared facts and Card history
 
 Use the [event envelope and catalog](events-and-notifications.md#event-envelope) rather than a second Timeline schema. Stable IDs, Card sequence, journal offset, provenance, operation/causation and workflow/step/request/attempt references survive grouping/pagination. Timestamps do not establish processing order.

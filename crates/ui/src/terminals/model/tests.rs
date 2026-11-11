@@ -306,3 +306,62 @@ fn inactive_is_a_live_unattended_conversation_and_closed_entries_leave_inventory
     s.cards[0].archived_at = Some(now());
     assert!(!entry(&s).listed());
 }
+
+#[test]
+fn card_destination_requires_choice_and_remembers_only_live_selection() {
+    use crate::terminals::{entries, navigation::direct};
+    let mut s = fixture();
+    let mut r = s.requests[0].clone();
+    r.id = "second-agent".into();
+    r.profile.id = "reviewer".into();
+    let mut a = s.attempts[0].clone();
+    a.id = "second-attempt".into();
+    a.request_id = r.id.clone();
+    a.terminal = Some("second-pty".into());
+    s.requests.push(r);
+    s.attempts.push(a);
+    let card_entries = |s: &Snapshot| {
+        entries(s)
+            .into_iter()
+            .filter(|e| e.card.as_ref().is_some_and(|c| c.id == "c1"))
+            .collect::<Vec<_>>()
+    };
+    let rows = card_entries(&s);
+    assert_eq!(direct(&rows, None), None);
+    let preferred = Conversation::key("c1", "reviewer");
+    assert_eq!(direct(&rows, Some(&preferred)), Some(preferred.clone()));
+    // Disconnection retains the original target; exit invalidates the preference.
+    s.attempts.last_mut().unwrap().connection_state = "unavailable".into();
+    assert_eq!(
+        direct(&card_entries(&s), Some(&preferred)),
+        Some(preferred.clone())
+    );
+    s.attempts.last_mut().unwrap().observed = Some(json!({"state":"finished"}));
+    assert_eq!(
+        direct(&card_entries(&s), Some(&preferred)),
+        Some(Conversation::key("c1", "codex"))
+    );
+    s.attempts[0].terminal = None;
+    assert_eq!(direct(&card_entries(&s), Some(&preferred)), None);
+}
+
+#[test]
+fn historical_request_never_attaches_to_a_newer_profile_invocation() {
+    use crate::terminals::navigation::live_request;
+    let mut s = fixture();
+    let original = s.requests[0].id.clone();
+    assert!(live_request(&s, &original).is_some());
+    s.attempts[0].observed = Some(json!({"state":"finished"}));
+    let mut next = s.requests[0].clone();
+    next.id = "new-request".into();
+    next.created_at = 2;
+    let mut attempt = s.attempts[0].clone();
+    attempt.id = "new-attempt".into();
+    attempt.request_id = next.id.clone();
+    attempt.observed = Some(json!({"state":"live","status":{"state":"working"}}));
+    s.requests.push(next);
+    s.attempts.push(attempt);
+    assert_eq!(live_request(&s, &original), None);
+    assert!(live_request(&s, "new-request").is_some());
+    assert_eq!(live_request(&s, "removed-request"), None);
+}

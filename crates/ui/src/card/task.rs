@@ -50,18 +50,20 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 .items_center()
                 .child(muted("Description"))
                 .child(view().flex_1())
-                .child(chrome_button_disabled(
-                    Icon::Edit,
-                    "Edit description",
-                    move || editing.get(),
-                    move |_| {
-                        if let Some(editor) = reading.editor.get() {
-                            editor.blur();
-                        }
-                        draft.update(|d| d.editing = true);
-                        reading.top();
-                    },
-                )),
+                .child(
+                    compact_action(
+                        if github { "Edit local context" } else { "Edit" },
+                        Variant::Quiet,
+                        move |_| {
+                            if let Some(editor) = reading.editor.get() {
+                                editor.blur();
+                            }
+                            draft.update(|d| d.editing = true);
+                            reading.top();
+                        },
+                    )
+                    .disabled(move || editing.get()),
+                ),
         )
         .child(dynamic(move || {
             if editing.get() {
@@ -149,11 +151,36 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             }
             view()
                 .gap_2()
-                .child(crate::github::card_source(ui))
-                .child(crate::github::references::panel(ui))
+                .child(dynamic(move || {
+                    let Some(c) = ui.current_card() else {
+                        return view().into_element();
+                    };
+                    let Some(source) = c.github_issue() else {
+                        return view().into_element();
+                    };
+                    let cached = ui.snapshot.with(|s| {
+                        s.github_issues
+                            .iter()
+                            .find(|i| i.project_id == c.project_id && i.source == *source)
+                            .cloned()
+                    });
+                    let mut area = view().gap_2();
+                    if let Some(issue) = cached {
+                        area = area.child(super::markdown(ui, move || issue.body.clone()));
+                    } else {
+                        area = area.child(muted(
+                            "GitHub description unavailable · Open in GitHub to view source",
+                        ));
+                    }
+                    if !c.body.trim().is_empty() {
+                        area = area.child(muted("Local context"));
+                    }
+                    area.into_element()
+                }))
                 .child(super::markdown(ui, move || {
                     ui.current_card().map(|c| c.body).unwrap_or_default()
                 }))
+                .child(crate::github::references::panel(ui))
                 .into_element()
         }))
         .child(when(

@@ -2,6 +2,7 @@
 pub mod entries;
 mod labels;
 pub mod model;
+pub mod navigation;
 mod tabs;
 mod tree;
 mod viewer;
@@ -14,6 +15,7 @@ use serde_json::json;
 
 /// Finished/archived entries retain Card history but never leave stale tabs in Terminals.
 pub fn watch(ui: Ui) {
+    navigation::watch(ui);
     effect(move || {
         let terminal = ui.terminal_selection.get();
         let page = ui.page.get();
@@ -111,18 +113,9 @@ pub fn reveal_group(ui: Ui, id: &str) {
 }
 /// Navigation never creates/resumes an invocation; that requires an explicit Agent action.
 pub fn open_card(ui: Ui, card_id: &str) {
-    let existing = entries(&ui.snapshot.get_untracked())
-        .into_iter()
-        .filter(|e| e.agent.is_some() && e.card.as_ref().is_some_and(|c| c.id == card_id))
-        .min_by_key(|e| e.ended());
-    if let Some(entry) = existing {
-        ui.open_terminal(entry.saved.id);
-    } else {
-        ui.navigate("terminals");
-        ui.terminal_selection.set(String::new());
-        ui.terminal_card_context.set(card_id.into());
-    }
+    navigation::open_card(ui, card_id);
 }
+
 pub fn card_context(ui: Ui) -> Option<canban_types::Card> {
     if let Some(entry) = current(ui) {
         return entry.card;
@@ -143,27 +136,27 @@ pub fn choose_card_agent(ui: Ui) {
             .into_iter()
             .map(|p| {
                 let card = card.id.clone();
-                MenuItem::new(format!("Open @{}", p.id))
-                    .on_select(move || crate::sessions::open(ui, card.clone(), p.id.clone()))
+                MenuItem::new(format!(
+                    "{} @{}",
+                    ui.snapshot
+                        .with_untracked(|s| crate::terminals::model::conversations(s)
+                            .iter()
+                            .find(|r| r.card.id == card
+                                && r.request.as_ref().is_some_and(|r| r.profile.id == p.id))
+                            .map(|r| if model::closed(r) { "Resume" } else { "Open" })
+                            .unwrap_or("Start")),
+                    p.id
+                ))
+                .on_select(move || crate::sessions::open(ui, card.clone(), p.id.clone()))
             })
             .collect();
         popup_menu(items).await;
     });
 }
 pub fn open_request(ui: Ui, request_id: &str) {
-    let key = ui.snapshot.with_untracked(|s| {
-        s.requests
-            .iter()
-            .find(|r| r.id == request_id)
-            .map(|r| canban_types::Conversation::key(&r.card_id, &r.profile.id))
-    });
-    if let Some(key) = key {
-        ui.open_terminal(key);
-    } else {
-        ui.operation_error
-            .set("This Agent execution is no longer available".into());
-    }
+    navigation::open_request(ui, request_id);
 }
+
 pub fn create(ui: Ui, project: String, card: Option<String>) {
     if card.as_ref().is_some_and(|id| {
         ui.snapshot.with_untracked(|s| {
