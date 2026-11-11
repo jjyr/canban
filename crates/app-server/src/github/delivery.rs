@@ -356,13 +356,21 @@ impl AppServer {
             ),
             json!({"checks":next.checks,"reviews":next.review_summary}),
         );
+        let mut newly_merged = false;
         self.store.lock().unwrap().write(|db|{
             ensure!(self.github.generation()==account_generation,"GitHub account changed; discarded stale PR refresh");
             let mut current:Card=db.get(&card.id)?;
             ensure!(current.pull_request.as_ref()==Some(old),"PR binding changed during refresh; refresh again");
             let before=current.clone();
             if old.number==0 {let mut binding=old.clone();binding.number=next.number;binding.url=next.url.clone();binding.state="published".into();current.pull_request=Some(binding);}
+            if next.merged
+                && let Some(pr) = &mut current.pull_request
+            {
+                pr.merged = true;
+                pr.state = "closed".into();
+            }
             if next.merged && current.delivery.as_ref().is_none_or(|d|d.request_key!=format!("github:{}:{}",next.repository_id,next.number)){
+                newly_merged = true;
                 current.delivery=Some(Delivery{target_branch:next.base_branch.clone(),commit:remote["merge_commit_sha"].as_str().unwrap_or(&next.head).into(),request_key:format!("github:{}:{}",next.repository_id,next.number),merged_at:now()});
                 current.attention=None;
                 if let Some(gate)=current.human_gate.clone() && let Some(id)=gate.request_id {let request:Request=db.get(&id)?;if request.state=="completed" {current.human_gate=None;crate::workflow::advance(db,&self.config(),&mut current,&request)?;}}
@@ -373,8 +381,123 @@ impl AppServer {
             if current!=before{current.revision+=1;db.save(&current)?;}
             Ok(())
         })?;
+        if newly_merged {
+            self.sync_merged_target(&card, Some(&next.base_branch));
+        }
+        if next.merged {
+            let _ = self.try_auto_archive_merged(&card.id);
+        }
         self.emit("github", Some(card.id));
         Ok(serde_json::to_value(next)?)
+    }
+    pub(crate) fn sync_merged_target(&self, card: &Card, target_branch: Option<&str>) {
+        let project = {
+            let store = self.store.lock().unwrap();
+            store.db().get::<Project>(&card.project_id).ok()
+        };
+        if let Some(project) = project {
+            let project = self.bound_project(&project, card);
+            let _ = self
+                .ops(&project.work_location().machine)
+                .sync_target(&project, target_branch);
+            self.git_changed(&project.work_location().machine);
+        }
+    }
+    pub(crate) fn reconcile_remote_pr_merge(
+        &self,
+        repository: &str,
+        number: u64,
+        pr_data: &Value,
+    ) -> Result<()> {
+        if pr_data["merged"] != true {
+            return Ok(());
+        }
+        let mut merged_cards = Vec::new();
+        self.store.lock().unwrap().write(|db| {
+            let repo_id_fallback = pr_data["base"]["repo"]["id"].as_u64().unwrap_or(0);
+            for mut current in db.list::<Card>()? {
+                if !current.active() {
+                    continue;
+                }
+                let matches_delivery = current.pull_request.as_ref().is_some_and(|p| {
+                    p.repository.eq_ignore_ascii_case(repository) && p.number == number
+                });
+                let matches_source = current.is_github_pr()
+                    && current.github_issue().is_some_and(|s| {
+                        s.repository.eq_ignore_ascii_case(repository) && s.number == number
+                    });
+                if !matches_delivery && !matches_source {
+                    continue;
+                }
+                let before = current.clone();
+                let repo_id = current
+                    .pull_request
+                    .as_ref()
+                    .map(|p| p.repository_id)
+                    .or_else(|| current.github_issue().map(|s| s.repository_id))
+                    .unwrap_or(repo_id_fallback);
+                let request_key = format!("github:{repo_id}:{number}");
+                let base_branch = pr_data["base"]["ref"]
+                    .as_str()
+                    .or_else(|| current.pull_request.as_ref().map(|p| p.base_branch.as_str()))
+                    .unwrap_or("main")
+                    .to_owned();
+                let commit = pr_data["merge_commit_sha"]
+                    .as_str()
+                    .or_else(|| pr_data["head"]["sha"].as_str())
+                    .or_else(|| current.pull_request.as_ref().map(|p| p.head.as_str()))
+                    .unwrap_or("merged")
+                    .to_owned();
+                if let Some(pr) = &mut current.pull_request {
+                    pr.merged = true;
+                    pr.state = "closed".into();
+                }
+                let newly_merged = current
+                    .delivery
+                    .as_ref()
+                    .is_none_or(|d| d.request_key != request_key);
+                if newly_merged {
+                    current.delivery = Some(Delivery {
+                        target_branch: base_branch.clone(),
+                        commit: commit.clone(),
+                        request_key,
+                        merged_at: now(),
+                    });
+                    current.attention = None;
+                    if let Some(gate) = current.human_gate.clone()
+                        && let Some(id) = gate.request_id
+                    {
+                        let request: Request = db.get(&id)?;
+                        if request.state == "completed" {
+                            current.human_gate = None;
+                            crate::workflow::advance(db, &self.config(), &mut current, &request)?;
+                        }
+                    }
+                    log(
+                        db,
+                        &current,
+                        "github.pr_delivered",
+                        "github",
+                        "Delivery PR merged",
+                        None,
+                        json!({"number":number,"commit":commit}),
+                    )?;
+                }
+                if current != before {
+                    current.revision += 1;
+                    db.save(&current)?;
+                }
+                merged_cards.push((current, base_branch, newly_merged));
+            }
+            Ok(())
+        })?;
+        for (card, base_branch, newly_merged) in merged_cards {
+            if newly_merged {
+                self.sync_merged_target(&card, Some(&base_branch));
+            }
+            let _ = self.try_auto_archive_merged(&card.id);
+        }
+        Ok(())
     }
     pub(super) fn github_pr_merge(&self, p: Value) -> Result<Value> {
         let _guard = self
@@ -494,6 +617,11 @@ impl AppServer {
             )?;
             Ok(())
         })?;
+        drop(_guard);
+        if value["state"] == "merged" {
+            self.sync_merged_target(&card, Some(&pr.base_branch));
+            let _ = self.try_auto_archive_merged(&card.id);
+        }
         self.github_sync_due.store(true, Ordering::SeqCst);
         self.emit("github", Some(strp(&p, "card_id")?.into()));
         Ok(value)

@@ -3,22 +3,25 @@ impl AppServer {
     /// Remote fields are an ephemeral projection. Opening a Board never causes HTTP calls.
     pub(crate) fn project_github(&self, snapshot: &mut Snapshot) {
         snapshot.github_issues.clear();
-        let Ok(client) = self.github_cached_client() else {
-            return;
-        };
+        let client = self.github_cached_client().ok();
         for card in &mut snapshot.cards {
             if let Some(source) = card.github_issue().cloned() {
                 card.title = format!("{}#{}", source.repository, source.number);
-                let issue = client.cached::<Value>(&format!(
-                    "/repos/{}/issues/{}",
-                    source.repository, source.number
-                ));
+                let issue = client.as_ref().and_then(|client| {
+                    client.cached::<Value>(&format!(
+                        "/repos/{}/issues/{}",
+                        source.repository, source.number
+                    ))
+                });
                 let remote = if card.is_github_pr() {
                     client
-                        .cached::<Value>(&format!(
-                            "/repos/{}/pulls/{}",
-                            source.repository, source.number
-                        ))
+                        .as_ref()
+                        .and_then(|client| {
+                            client.cached::<Value>(&format!(
+                                "/repos/{}/pulls/{}",
+                                source.repository, source.number
+                            ))
+                        })
                         .or(issue)
                 } else {
                     issue
@@ -26,14 +29,18 @@ impl AppServer {
                 if let Some(value) = remote {
                     card.title = value["title"].as_str().unwrap_or(&card.title).to_owned();
                     let pr = if card.is_github_pr() {
-                        client.cached::<Value>(&format!(
-                            "/repos/{}/pulls/{}",
-                            source.repository, source.number
-                        ))
+                        client.as_ref().and_then(|client| {
+                            client.cached::<Value>(&format!(
+                                "/repos/{}/pulls/{}",
+                                source.repository, source.number
+                            ))
+                        })
                     } else {
                         None
                     };
-                    let state = if pr.as_ref().is_some_and(|p| p["merged"] == true) {
+                    let state = if pr.as_ref().is_some_and(|p| p["merged"] == true)
+                        || card.delivery.is_some()
+                    {
                         "merged"
                     } else if pr.as_ref().is_some_and(|p| p["draft"] == true) {
                         "draft"
@@ -67,16 +74,18 @@ impl AppServer {
                 }
             }
             if let Some(pr) = &mut card.pull_request {
-                if let Some(value) =
+                if let Some(value) = client.as_ref().and_then(|client| {
                     client.cached::<Value>(&format!("/repos/{}/pulls/{}", pr.repository, pr.number))
-                    && let Ok(projected) = integration::delivery::project(&value, pr)
+                }) && let Ok(projected) = integration::delivery::project(&value, pr)
                 {
                     *pr = projected;
                 }
-                if let Some(summary) = client.cached::<Value>(&format!(
-                    "/repos/{}/pulls/{}/canban-summary",
-                    pr.repository, pr.number
-                )) {
+                if let Some(summary) = client.as_ref().and_then(|client| {
+                    client.cached::<Value>(&format!(
+                        "/repos/{}/pulls/{}/canban-summary",
+                        pr.repository, pr.number
+                    ))
+                }) {
                     pr.checks = summary["checks"].as_str().unwrap_or("").into();
                     pr.review_summary = summary["reviews"].as_str().unwrap_or("").into();
                 }

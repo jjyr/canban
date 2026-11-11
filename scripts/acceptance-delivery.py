@@ -39,15 +39,12 @@ try:
         assert git(source,'rev-parse','HEAD')==result['commit']!=before
         assert git(source,'status','--porcelain')==''
         checks=subprocess.run(['/usr/bin/python3','-m','unittest','-v'],cwd=source,capture_output=True,text=True,check=True)
-        card=call('card.get',{'card_id':card_id})
-        assert not card['archived_at'] and card['delivery']['commit']==result['commit']
-        assert Path(card['worktree']).is_dir()
+        archived=call('card.get',{'card_id':card_id})
+        assert archived['archive'] and archived['archived_at'] and archived['delivery']['commit']==result['commit']
+        assert not Path(card['worktree']).exists()
         snapshot=call('app.snapshot')
         report=next(r for r in snapshot['reports'] if r['card_id']==card_id and r.get('path'))
         retained=call('resource.read',{'card_id':card_id,'path':report['path']})['body']
-        call('card.archive',{'card_id':card_id,'revision':card['revision']})
-        archived=call('card.get',{'card_id':card_id})
-        assert archived['archive'] and archived['archived_at'] and not Path(card['worktree']).exists()
         assert call('resource.read',{'card_id':card_id,'path':report['path']})['body']==retained
         call('card.restore',{'card_id':card_id,'revision':archived['revision']})
         assert git(source,'rev-parse','HEAD')==result['commit']

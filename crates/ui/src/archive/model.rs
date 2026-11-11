@@ -14,6 +14,14 @@ pub struct Group {
     pub name: String,
     pub entries: Vec<Entry>,
 }
+pub fn project_entries(snapshot: &Snapshot, project_id: &str, query: &str) -> Vec<Entry> {
+    groups(snapshot, query)
+        .into_iter()
+        .filter(|g| project_id.is_empty() || g.id == project_id)
+        .flat_map(|g| g.entries)
+        .collect()
+}
+
 pub fn groups(snapshot: &Snapshot, query: &str) -> Vec<Group> {
     let mut groups = BTreeMap::<String, Vec<(usize, Entry)>>::new();
     for card in snapshot
@@ -166,7 +174,16 @@ mod tests {
         let mut s = fixture();
         let removed = s.cards.last_mut().unwrap();
         removed.archived_at = Some(50);
-        assert!(groups(&s, "Deleted").is_empty());
+        assert_eq!(groups(&s, "Deleted").len(), 0);
         assert!(!groups(&s, "").iter().any(|g| g.id == "empty"));
+        assert_eq!(
+            project_entries(&s, "a", "")
+                .iter()
+                .map(|e| e.card.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["two", "one"]
+        );
+        assert_eq!(project_entries(&s, "b", "").len(), 1);
+        assert!(project_entries(&s, "empty", "").is_empty());
     }
 }

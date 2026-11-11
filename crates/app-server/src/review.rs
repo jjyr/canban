@@ -107,7 +107,69 @@ impl AppServer {
             Ok(value)
         })?;
         self.git_changed(&project.work_location().machine);
+        drop(_gate);
+        if value["state"] == "merged" {
+            let _ = self.try_auto_archive_merged(&card.id);
+        }
         self.emit("review", Some(card.id));
         Ok(value)
+    }
+    pub(crate) fn try_auto_archive_merged(&self, card_id: &str) -> Result<bool> {
+        let (card, project) = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let Ok(card) = db.get::<Card>(card_id) else {
+                return Ok(false);
+            };
+            if !card.active()
+                || (card.delivery.is_none()
+                    && !card.pull_request.as_ref().is_some_and(|p| p.merged))
+                || card.attention.is_some()
+                || card.human_gate.is_some()
+                || blocker(db, &card)?.is_some()
+            {
+                return Ok(false);
+            }
+            let last_lifecycle = db
+                .list::<Event>()?
+                .into_iter()
+                .filter(|e| {
+                    e.card_id == card.id
+                        && matches!(
+                            e.kind.as_str(),
+                            "review.merged"
+                                | "github.pr_merged"
+                                | "github.pr_delivered"
+                                | "card.restored"
+                                | "card.archived"
+                        )
+                })
+                .max_by_key(|e| e.sequence);
+            if last_lifecycle
+                .is_some_and(|e| matches!(e.kind.as_str(), "card.restored" | "card.archived"))
+            {
+                return Ok(false);
+            }
+            let project: Project = db.get(&card.project_id)?;
+            let project = self.bound_project(&project, &card);
+            (card, project)
+        };
+        if card.worktree.is_some() {
+            if self.terminal_retains_worktree(&card).unwrap_or(true) {
+                return Ok(false);
+            }
+            if let Ok(info) = self
+                .ops(&project.work_location().machine)
+                .info(&project, &card)
+                && (info.dirty || info.state == "conflict")
+            {
+                return Ok(false);
+            }
+        }
+        self.archive(&json!({
+            "card_id": card.id,
+            "revision": card.revision,
+        }))?;
+        Ok(true)
     }
 }

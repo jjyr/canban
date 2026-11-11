@@ -1,4 +1,4 @@
-//! Global Project -> archived Card conversations. Search is local/debounced;
+//! Project-scoped archived Card conversations. Search is local/debounced;
 //! opening history does not launch Agents or restore archived work.
 pub mod model;
 use crate::{
@@ -10,20 +10,37 @@ use nsh_core::prelude::*;
 
 pub fn screen(ui: Ui) -> impl IntoElement {
     let query = input::debounced(ui.archive_query, std::time::Duration::from_millis(120));
-    let archived = computed(move || model::groups(&ui.snapshot.get(), &query.get()));
+    let archived =
+        computed(move || model::project_entries(&ui.snapshot.get(), &ui.project.get(), &query.get()));
     let searching = computed(move || !query.get().trim().is_empty());
-    let search_folds = signal(std::collections::BTreeSet::<String>::new());
-    effect(move || {
-        let _ = query.get();
-        search_folds.set(Default::default());
-    });
+    let scroll_key = format!("archive:list:{}", ui.project.get_untracked());
+    let scroll_capture_key = scroll_key.clone();
     view()
         .flex_1()
         .min_h(px(0.))
         .min_w(px(0.))
         .p_5()
         .gap_4()
-        .child(heading("Archive"))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .min_w(px(0.))
+                .child(action("← Board", Variant::Quiet, move |_| {
+                    ui.navigate("board")
+                }))
+                .child(
+                    heading(move || {
+                        ui.current_project()
+                            .map(|p| format!("Archive · {}", p.name))
+                            .unwrap_or_else(|| "Archive".into())
+                    })
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate(),
+                ),
+        )
         .child(
             view()
                 .flex_row()
@@ -35,7 +52,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .child(
                     field(
                         ui.archive_query,
-                        "Search projects, Cards, numbers or Agents…",
+                        "Search archived Cards, numbers or Agents…",
                     )
                     .label("Search archive")
                     .flex_1()
@@ -54,8 +71,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             scroll()
                 .flex_1()
                 .min_h(px(0.))
-                .content_offset(scroll_position(ui, "archive:list"))
-                .on_scroll(move |e: &ScrollEvent| capture_scroll(ui, "archive:list".into(), e))
+                .content_offset(scroll_position(ui, &scroll_key))
+                .on_scroll(move |e: &ScrollEvent| {
+                    capture_scroll(ui, scroll_capture_key.clone(), e)
+                })
                 .child(
                     view()
                         .w_full()
@@ -77,66 +96,25 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     }))
                                     .child(muted(move || {
                                         if searching.get() {
-                                            "Try a Project name, Card number or Agent."
+                                            "Try a Card title, number or Agent."
                                         } else {
-                                            "Archived Cards will appear here, grouped by Project."
+                                            "Archived Cards for this Project will appear here."
                                         }
                                     }))
                             },
                         ))
-                        .child(groups(ui, archived, searching, search_folds, "archive")),
+                        .child(each(
+                            move || archived.get(),
+                            |e| e.card.id.clone(),
+                            move |entry, _| dynamic(move || row(ui, entry.get())),
+                        )),
                 ),
         )
-}
-fn groups(
-    ui: Ui,
-    groups: Memo<Vec<model::Group>>,
-    searching: Memo<bool>,
-    search_folds: Signal<std::collections::BTreeSet<String>>,
-    scope: &'static str,
-) -> impl IntoElement {
-    each(
-        move || groups.get(),
-        |g| g.id.clone(),
-        move |group, _| {
-            let key = format!("{scope}:{}", group.get_untracked().id);
-            let folded_key = key.clone();
-            let open = computed(move || {
-                !(if searching.get() {
-                    search_folds
-                } else {
-                    ui.archive_folds
-                })
-                .with(|f| f.contains(&folded_key))
-            });
-            tree_group(
-                move || group.get().name,
-                move || group.get().entries.len(),
-                open,
-                move || {
-                    (if searching.get_untracked() {
-                        search_folds
-                    } else {
-                        ui.archive_folds
-                    })
-                    .update(|folds| {
-                        if !folds.remove(&key) {
-                            folds.insert(key.clone());
-                        }
-                    })
-                },
-                each(
-                    move || group.get().entries,
-                    |e| e.card.id.clone(),
-                    move |entry, _| dynamic(move || row(ui, entry.get())),
-                ),
-            )
-        },
-    )
 }
 fn row(ui: Ui, entry: model::Entry) -> impl IntoElement {
     let card = entry.card;
     let archive_error = card.archive_error.clone();
+    let merged = card.delivery.is_some() || card.pull_request.as_ref().is_some_and(|p| p.merged);
     let id = card.id.clone();
     let title = format!("#{} {}", card.number, card.title);
     let timestamp = card.archived_at.unwrap_or(card.created_at);
@@ -147,15 +125,24 @@ fn row(ui: Ui, entry: model::Entry) -> impl IntoElement {
         if agents.is_empty() { "" } else { " · " },
         agents
     );
-    let content = view()
+    let mut header = view()
+        .flex_row()
+        .items_center()
+        .gap_2()
         .min_w(px(0.))
-        .gap_1()
         .child(
             label(title.clone())
                 .font_weight(FontWeight::MEDIUM)
                 .truncate()
                 .min_w(px(0.)),
-        )
+        );
+    if merged {
+        header = header.child(status("Merged", Tone::Success));
+    }
+    let content = view()
+        .min_w(px(0.))
+        .gap_1()
+        .child(header)
         .child(muted(meta).truncate().min_w(px(0.)));
     let main = nsh_base::button()
         .flex_1()

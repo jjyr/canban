@@ -1,27 +1,22 @@
 # Archive browser
 
-Status: implemented; lifecycle UI simplified for Card #11, 2026-11-11.
+Status: implemented; Project-scoped Archive and automatic post-merge archive updated 2026-11-11 (superseding the earlier global rail Archive entry).
 
-Archive is a global browser of archived Card conversations, independent of the selected Board Project. Canban conversations belong to Cards; Agents remain metadata inside those conversations rather than a third navigation level.
+Archive is opened from the current Project's Board header (**Archive**, or inside **More…** on narrow viewports) and displays that Project's archived Card conversations. The left navigation rail no longer has a global Archive icon; **Board** remains selected while viewing a Project's Archive.
 
 ```text
-Archive
-[ Search projects, Cards, numbers or Agents…       × ]
+← Board   Archive · Project A
+[ Search archived Cards, numbers or Agents…        × ]
 
-v  Project A                                      2
-   |  #42 Improve search                  Restore
-   |  #39 Preserve session history        Restore
-v  Project B                                      1
-   |  #7 Fix reconnect                    Restore
+#42 Improve search   [Merged]                Restore
+#39 Preserve session history                 Restore
 ```
 
 ## Hierarchy and interaction
 
-Project headers use a folder, disclosure arrow, item count and indented guide. Groups start expanded; clicking a header or pressing Space/Enter while it is focused toggles it with the shared disclosure animation. Projects without archived Cards are absent. Removed Cards and Projects with only removed Cards are absent, including legacy removed records that also carry an archive timestamp.
+Rows show Card number/title, a **Merged** status badge when delivered, archive age and known Agent profile names. Removed Cards are absent, including legacy removed records that also carry an archive timestamp. Clicking **← Board** returns to the Project's Board with retained column scroll.
 
-Rows show Card number/title, archive age and known Agent profile names. Long titles truncate. Clicking an archived row opens its existing Card history; it does not restore the Card, resume an Agent or schedule work. Back returns to Archive with the search and normal group expansion state retained for the current App session. Restore uses the same lifecycle intent as the Card header. Restoring a Project's last archived Card removes that Project from this tree.
-
-Projects sort by name and Cards by newest archive time, with stable tie-breaking. Matching relevance takes precedence while searching. One scroll owner contains the tree; the search field stays above it.
+Clicking an archived row opens its existing Card history; it does not restore the Card, resume an Agent or schedule work. Back returns to Archive with the search query and scroll offset retained for the current App session. Restore uses the same lifecycle intent as the Card header.
 
 ## Search
 

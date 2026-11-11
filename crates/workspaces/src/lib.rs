@@ -100,6 +100,23 @@ impl Ops {
         self.checked(source, &["update-ref", &local, &latest, &old])?;
         Ok(())
     }
+    /// Best-effort fast-forward of the Project target branch when its checkout is clean.
+    pub fn sync_target(&self, project: &Project, target_branch: Option<&str>) -> Result<()> {
+        let source = Path::new(&project.directory);
+        let base = target_branch
+            .filter(|b| !b.trim().is_empty())
+            .map(str::to_owned)
+            .or_else(|| project.workflow.workspace.base_branch.clone())
+            .or_else(|| project.target_branch.clone())
+            .or_else(|| self.current_branch(&project.directory))
+            .context("Choose a base_branch for the workspace")?;
+        let remote = if project.workflow.workspace.remote.trim().is_empty() {
+            "origin"
+        } else {
+            project.workflow.workspace.remote.as_str()
+        };
+        self.sync_base(source, &base, remote)
+    }
     /// Resume always returns to the saved location. A removed managed Card
     /// checkout can be reconstructed from its retained branch/commit, without
     /// fetching a new base or falling back to a different directory.

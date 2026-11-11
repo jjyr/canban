@@ -260,6 +260,9 @@ impl AppServer {
             }
             Ok(())
         })?;
+        if section == "overview" && kind == "pr" && data["merged"] == true {
+            let _ = self.reconcile_remote_pr_merge(&repo, number, data);
+        }
         self.wake_runtime();
         Ok(())
     }
