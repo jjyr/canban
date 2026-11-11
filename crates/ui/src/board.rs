@@ -58,6 +58,15 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .child(when(
                     move || project.get().is_some() && !compact.get(),
                     move || {
+                        action("Archive", Variant::Quiet, move |_| {
+                            ui.navigate("archive")
+                        })
+                        .into_element()
+                    },
+                ))
+                .child(when(
+                    move || project.get().is_some() && !compact.get(),
+                    move || {
                         action("Workflows", Variant::Quiet, move |_| {
                             ui.navigate("workflows")
                         })
@@ -82,6 +91,8 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 if let Some(bounds) = anchor.measure().await {
                                     popup_menu_at(
                                         vec![
+                                            MenuItem::new("Archive")
+                                                .on_select(move || ui.navigate("archive")),
                                             MenuItem::new("Workflows")
                                                 .on_select(move || ui.navigate("workflows")),
                                             MenuItem::new("Work location…")

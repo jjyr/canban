@@ -135,10 +135,9 @@ try:
         assert call('github.pr.merge',payload)==result
         card=current(card)
         assert card['pull_request']['merged'] and card['delivery']
-        assert not card.get('archived_at')
-        archive=mutate('card.archive',{'card_id':card['id'],'revision':card['revision']})
-        assert (args.home/archive['path']).exists()
-        check('GitHub merge synchronization and separate Card Archive')
+        assert card.get('archived_at') and card.get('archive')
+        assert (args.home/card['archive']).exists()
+        check('GitHub merge synchronization and automatic Card Archive')
     evidence={'repository':args.repository,'project_id':args.project_id,'card_id':card['id'],'checks':checks,'snapshot':call('app.snapshot')}
     path=args.home.parent/'github-evidence.json';path.write_text(json.dumps(evidence,indent=2))
     print('GITHUB_ACCEPTANCE_PASSED\nEVIDENCE='+str(path),flush=True)

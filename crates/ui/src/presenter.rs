@@ -528,6 +528,15 @@ pub fn dispatch_complete(
                         }
                     }
                     "card.archive" if active => ui.page.set("archive".into()),
+                    "review.merge" | "github.pr.merge" | "github.pr.refresh"
+                        if active
+                            && ui.current_card().is_some_and(|c| c.archived_at.is_some()) =>
+                    {
+                        ui.review.set(None);
+                        ui.card.set(String::new());
+                        ui.card_standalone.set(false);
+                        ui.page.set("board".into());
+                    }
                     "card.remove" if active => {
                         ui.card.set(String::new());
                         ui.page.set("board".into());

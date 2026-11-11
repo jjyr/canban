@@ -297,7 +297,7 @@ pub fn Gallery() -> impl IntoElement {
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("archive") {
         ui.snapshot.set(fixtures::archive());
-        ui.project.set("archive-empty".into());
+        ui.project.set("gallery-project".into());
         ui.card.set(String::new());
         ui.page.set("archive".into());
         return canban_ui::frame::screen(ui).into_element();
@@ -625,7 +625,7 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Update available",Variant::Quiet,move |_|{scene.set("workspace".into());ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"available","available":{"manifest":{"version":"20261110-3"}}}}));}))
                 .child(action("Update failed",Variant::Quiet,move |_|{scene.set("workspace".into());ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"error","error":"Download interrupted. Retry the update.","available":{"manifest":{"version":"20261110-3"}}}}));}))
                 .child(action("Archived Cards", Variant::Quiet, move |_| {
-                    ui.snapshot.set(fixtures::archive());ui.card.set(String::new());ui.page.set("archive".into());scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::archive());ui.project.set("gallery-project".into());ui.card.set(String::new());ui.page.set("archive".into());scene.set("workspace".into());
                 }))
                 .child(action("Card states", Variant::Quiet, move |_| {
                     scene.set("workspace".into());ui.snapshot.set(fixtures::board_cards());ui.card.set(String::new());ui.page.set("board".into());

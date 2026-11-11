@@ -311,6 +311,9 @@ impl AppServer {
                         }
                         db.save(&current)
                     })?;
+                    if finished {
+                        let _ = self.try_auto_archive_merged(&run.card_id);
+                    }
                     self.emit("runtime", Some(run.card_id.clone()));
                 }
             }

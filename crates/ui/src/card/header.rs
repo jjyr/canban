@@ -193,6 +193,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         .map(|t| t.name.clone())
                         .unwrap_or_else(|| c.stage.clone()),
                 ));
+            if c.delivery.is_some() || c.pull_request.as_ref().is_some_and(|p| p.merged) {
+                row = row.child(status("Merged", Tone::Success));
+            }
             if let Some(branch) = c.branch.clone().filter(|b| !b.is_empty()) {
                 row = row.child(
                     view()

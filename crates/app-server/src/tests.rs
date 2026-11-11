@@ -833,7 +833,8 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
         accepted["commit"].as_str().unwrap()
     );
     let snap = app.snapshot().unwrap();
-    assert!(snap.cards[0].archived_at.is_none());
+    assert!(snap.cards[0].archived_at.is_some());
+    assert!(snap.cards[0].archive.is_some());
     assert!(snap.cards[0].delivery.is_some());
     assert_eq!(app.call("review.merge", request.clone()).unwrap(), accepted);
     assert_eq!(
@@ -866,13 +867,6 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
         "unknown"
     );
     assert_eq!(git(&["rev-parse", "HEAD"]), head);
-    let c = app.snapshot().unwrap().cards[0].clone();
-    app.call(
-        "card.archive",
-        json!({"card_id":c.id,"revision":c.revision}),
-    )
-    .unwrap();
-    assert_eq!(git(&["rev-parse", "HEAD"]), head);
     let archived = app.snapshot().unwrap().cards[0].clone();
     assert!(archived.archived_at.is_some());
     std::fs::write(source.join("later-project-change"), "later").unwrap();
@@ -889,6 +883,115 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
     assert!(cwd.join("delivered").exists());
     assert!(!cwd.join("later-project-change").exists());
     assert_eq!(git(&["rev-parse", "HEAD"]), source_head);
+}
+
+#[test]
+fn remote_pr_merge_defers_archive_while_agent_live_then_archives_and_handles_pr_source_cards() {
+    let (_dir, app, project, card) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":card.id,"revision":1,"stage":"develop"}),
+    )
+    .unwrap();
+    let req = app.snapshot().unwrap().requests[0].clone();
+    let run = admit(&app, &req);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut c: Card = db.get(&card.id)?;
+            c.stage = "review".into();
+            c.pull_request = Some(GitHubPr {
+                repository_id: 1,
+                repository: "example/repo".into(),
+                number: 7,
+                url: "https://github.com/example/repo/pull/7".into(),
+                head_branch: "canban/1".into(),
+                base_branch: "main".into(),
+                head: "abc1234".into(),
+                state: "open".into(),
+                merged: false,
+                checks: "success".into(),
+                review_summary: "approved".into(),
+                workspace: WorkspaceBinding {
+                    location: project.work_location(),
+                    path: run.cwd.clone(),
+                    branch: Some("canban/1".into()),
+                    base_commit: None,
+                    target_branch: Some("main".into()),
+                },
+            });
+            db.save(&c)?;
+            let mut a: Attempt = db.get(&run.id)?;
+            a.observed = Some(json!({"state":"live","status":{"state":"working"}}));
+            db.save(&a)
+        })
+        .unwrap();
+    app.reconcile_remote_pr_merge(
+        "example/repo",
+        7,
+        &json!({"merged":true,"merge_commit_sha":"deadbeef","base":{"ref":"main","repo":{"id":1}}}),
+    )
+    .unwrap();
+    let after_remote_merge = app.snapshot().unwrap().cards[0].clone();
+    assert!(after_remote_merge.delivery.is_some());
+    assert!(after_remote_merge.pull_request.as_ref().unwrap().merged);
+    // Active terminal prevents immediate archive so local work is not interrupted.
+    assert!(after_remote_merge.archived_at.is_none());
+
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut a: Attempt = db.get(&run.id)?;
+            a.state = "completed".into();
+            a.observed = Some(json!({"state":"finished","exit_code":0}));
+            db.save(&a)?;
+            let mut r: Request = db.get(&req.id)?;
+            r.state = "completed".into();
+            db.save(&r)
+        })
+        .unwrap();
+    assert!(app.try_auto_archive_merged(&card.id).unwrap());
+    assert!(app.snapshot().unwrap().cards[0].archived_at.is_some());
+
+    // A PR source card observed merged on GitHub also records delivery and archives.
+    let pr_card: Card = serde_json::from_value(
+        app.call("card.create", json!({"project_id":project.id,"title":"PR source"}))
+            .unwrap(),
+    )
+    .unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut c: Card = db.get(&pr_card.id)?;
+            c.content = CardContent::GitHubPr {
+                source: GitHubIssueRef {
+                    repository: "example/repo".into(),
+                    repository_id: 1,
+                    issue_id: 99,
+                    number: 12,
+                    url: "https://github.com/example/repo/pull/12".into(),
+                },
+            };
+            db.save(&c)
+        })
+        .unwrap();
+    app.observe_github_response(
+        "/repos/example/repo/pulls/12",
+        &json!({"id":99,"number":12,"state":"closed","merged":true,"merge_commit_sha":"feedface","base":{"ref":"main","repo":{"id":1}},"updated_at":"2026-11-11T10:00:00Z","user":{"id":1}}),
+    )
+    .unwrap();
+    let pr_updated = app
+        .snapshot()
+        .unwrap()
+        .cards
+        .into_iter()
+        .find(|c| c.id == pr_card.id)
+        .unwrap();
+    assert_eq!(pr_updated.delivery.as_ref().unwrap().commit, "feedface");
+    assert!(pr_updated.archived_at.is_some());
 }
 
 #[test]

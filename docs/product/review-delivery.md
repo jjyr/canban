@@ -74,8 +74,10 @@ canban call review.merge '{"card_id":"CARD_ID","revision":7,"target_branch":"mai
 
 Success saves `Card.delivery` with target branch, commit, request key and merged timestamp. Timeline events are review.merge_started, review.merged or review.merge_failed. Failed operations request attention. Delivery metadata does not change the workflow stage or imply Archive. Subsequent rework retains the earlier delivery as history until a newer successful acceptance replaces the Card's latest-delivery summary.
 
-## Archive
+## Archive and remote PR merge
 
-Card work now uses a named branch plus worktree. A successful human merge clears the review gate and applies a configured pending completion callback; the default Review has no next stage, so it remains there until explicit Archive.
+Card work now uses a named branch plus worktree. A successful human merge (`review.merge` or `github.pr.merge`) clears the review gate, applies any configured completion steps, records `Card.delivery` (`Merged` status), and automatically archives the Card once no active Agent terminal, active workflow run or uncommitted worktree changes remain.
 
-Archive packages Card-owned reports/context/replies/output and exported records with zstd. It does not commit or merge. Clean managed worktrees can be removed after retaining their HEAD under the Card ref and retaining the named branch; dirty worktrees remain with a notice. Restore expands content without scheduling work. Provider-owned conversation files are outside this portable archive boundary.
+When a delivery PR (`card.pull_request`) or a GitHub PR source Card (`CardContent::GitHubPr`) is merged directly on GitHub, Canban reconciles the remote merge state (`Card.delivery` + `Merged` badge), attempts a best-effort fast-forward of the local Project target branch when its checkout is clean (`sync_target`), and automatically archives the Card if no live Agent terminal or uncommitted worktree edits are present. If a live Agent terminal or dirty worktree exists at the time of remote merge, the Card stays in `Review` with the `Merged` badge and automatically archives when the terminal finishes (or when archived manually). Restoring an archived Card retains its `Merged` badge without re-archiving it automatically.
+
+Archive packages Card-owned reports/context/replies/output and exported records with zstd. Clean managed worktrees are removed after retaining their HEAD under the Card ref and retaining the named branch; dirty worktrees remain with a notice. Restore expands content without scheduling work. Provider-owned conversation files are outside this portable archive boundary.

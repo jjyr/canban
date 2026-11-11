@@ -376,6 +376,7 @@ impl AppServer {
         let sync = integration::pull_requests::fetch(&client, project, &cards, &login)?;
         let changes = sync.changes;
         if !changes.is_empty() {
+            let pr_numbers: Vec<u64> = changes.iter().map(|c| c.issue.number).collect();
             self.store.lock().unwrap().write(|db| {
                 ensure!(
                     self.github.generation() == generation,
@@ -383,8 +384,15 @@ impl AppServer {
                 );
                 let observations = changes
                     .iter()
-                    .map(|c| serde_json::to_value(&c.issue))
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                    .map(|c| {
+                        Ok(client
+                            .cached::<Value>(&format!(
+                                "/repos/{}/pulls/{}",
+                                source.repository, c.issue.number
+                            ))
+                            .unwrap_or(serde_json::to_value(&c.issue)?))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
                 integration::apply(
                     db,
                     project,
@@ -404,6 +412,15 @@ impl AppServer {
                 }
                 Ok(())
             })?;
+            for number in pr_numbers {
+                if let Some(pr_value) = client.cached::<Value>(&format!(
+                    "/repos/{}/pulls/{number}",
+                    source.repository
+                )) && pr_value["merged"] == true
+                {
+                    let _ = self.reconcile_remote_pr_merge(&source.repository, number, &pr_value);
+                }
+            }
             self.emit("github", None);
         }
         Ok(())

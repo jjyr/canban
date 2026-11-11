@@ -101,6 +101,8 @@ plan2=call('review.preview',{'card_id':card['id']});assert plan2['worktree']==de
 merged=call('review.merge',{'card_id':card['id'],'revision':current(s,card)['revision'],'token':plan2['token'],'request_key':'remote-merge-'+uuid.uuid4().hex});assert merged['state']=='merged',merged
 assert run("import pathlib,sys;print(pathlib.Path(sys.argv[1],'delivery.txt').read_text())",source).strip()=='remote deliverable'
 assert not (local_source/'delivery.txt').exists()
+s=call('app.snapshot');assert current(s,card)['archived_at']
+call('card.restore',{'card_id':card['id'],'revision':current(s,card)['revision']})
 print('REMOTE_WORKFLOW_BLOCK_NOTE_REVIEW_MERGE_OK',flush=True)
 opened=call('agent.open',{'card_id':card['id'],'profile_id':'developer','expected_attempt_id':dev['id']})
 s=wait(lambda s:any(x['request_id']==opened['request_id'] and x.get('terminal') and x.get('provider_session_id') for x in s['attempts']),'exact remote resume');resumed=next(x for x in s['attempts'] if x['request_id']==opened['request_id'])

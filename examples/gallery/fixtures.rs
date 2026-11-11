@@ -13,6 +13,12 @@ pub fn archive() -> canban_types::Snapshot {
     s.cards[1].title = "原生终端恢复 · preserve session history".into();
     s.cards[1].attention = None;
     s.cards[1].human_gate = None;
+    s.cards[1].delivery = Some(Delivery {
+        target_branch: "main".into(),
+        commit: "91ab162".into(),
+        request_key: "gallery-merge".into(),
+        merged_at: now().saturating_sub(3_600_000),
+    });
     for (id, name) in [
         ("archive-tools", "Tools"),
         ("archive-empty", "No archived Cards"),

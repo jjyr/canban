@@ -21,6 +21,11 @@ pub fn activity_header(actor: String, kind: &str, time: u64) -> impl IntoElement
         "workspace.prepared" => "Workspace prepared",
         "workflow.waiting_for_human" => "Human review required",
         "workflow.approved" => "Workflow approved",
+        "review.merge_started" | "github.pr_merge_started" => "Merge started",
+        "review.merged" | "github.pr_merged" | "github.pr_delivered" => "Merged",
+        "review.merge_failed" | "github.pr_merge_attention" => "Merge failed",
+        "card.archived" => "Card archived",
+        "card.restored" => "Card restored",
         "execution.queued" => "Queued",
         "execution.started" => "Agent started",
         "execution.reported" => "Result submitted",
@@ -68,6 +73,10 @@ pub fn card_activity(snapshot: &canban_types::Snapshot, card: &canban_types::Car
         .gap_2()
         .min_w(px(0.));
     let mut visible = false;
+    if card.delivery.is_some() || card.pull_request.as_ref().is_some_and(|p| p.merged) {
+        row = row.child(status("Merged", Tone::Success));
+        visible = true;
+    }
     if card.human_gate.is_some() || card.attention.is_some() {
         row = row.child(status(
             if card.human_gate.is_some() && card.stage == "review" {
