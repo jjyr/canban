@@ -26,7 +26,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             move || {
                 matches!(
                     ui.page.get().as_str(),
-                    "board" | "card" | "review" | "new-project" | "new-card"
+                    "board" | "card" | "review" | "new-project" | "new-card" | "drafts"
                 )
             },
             || 0,
@@ -60,17 +60,16 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         || 0,
         move |_| ui.navigate("archive"),
     ))
-    .child(icon_action(
-        Icon::Note,
-        "Drafts".into(),
-        move || ui.page.get() == "drafts",
-        move || {
-            let _ = ui.draft_epoch.get();
-            ui.drafts
-                .with(|all| all.iter().filter(|(k, d)| d.has_content(k)).count())
-        },
-        move |_| ui.navigate("drafts"),
-    ))
     .child(view().flex_1())
     .child(crate::updates::rail(ui))
+    .child(icon_action(
+        Icon::Settings,
+        "Settings".into(),
+        move || ui.page.get() == "settings",
+        || 0,
+        move |_| {
+            crate::utilities::close(ui);
+            ui.navigate("settings");
+        },
+    ))
 }

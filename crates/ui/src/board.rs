@@ -16,6 +16,7 @@ pub struct Drop {
     pub before_card_id: Option<String>,
 }
 pub fn screen(ui: Ui) -> impl IntoElement {
+    let compact = signal(false);
     let project = computed(move || {
         let _ = ui.project.get();
         ui.current_project()
@@ -32,6 +33,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .justify_between()
                 .items_center()
                 .gap_2()
+                .on_layout(move |b: &Bounds<Points>| compact.set(b.size.width.0 < 760.))
                 .child(
                     view()
                         .flex_row()
@@ -54,7 +56,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         )),
                 )
                 .child(when(
-                    move || project.get().is_some(),
+                    move || project.get().is_some() && !compact.get(),
                     move || {
                         action("Workflows", Variant::Quiet, move |_| {
                             ui.navigate("workflows")
@@ -63,13 +65,61 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     },
                 ))
                 .child(when(
-                    move || project.get().is_some(),
+                    move || project.get().is_some() && !compact.get(),
                     move || {
                         action("Work location…", Variant::Quiet, move |_| {
                             ui.navigate("project-location")
                         })
                     },
                 ))
+                .child(when(
+                    move || project.get().is_some() && compact.get(),
+                    move || {
+                        let anchor = element_ref();
+                        action("More…", Variant::Quiet, move |_| {
+                            use nsh_core::element::desktop::{MenuItem, popup_menu_at};
+                            ui.spawn(async move {
+                                if let Some(bounds) = anchor.measure().await {
+                                    popup_menu_at(
+                                        vec![
+                                            MenuItem::new("Workflows")
+                                                .on_select(move || ui.navigate("workflows")),
+                                            MenuItem::new("Work location…")
+                                                .on_select(move || ui.navigate("project-location")),
+                                        ],
+                                        point(
+                                            bounds.page.x,
+                                            bounds.page.y + bounds.frame.size.height,
+                                        ),
+                                    )
+                                    .await;
+                                }
+                            });
+                        })
+                        .element_ref(&anchor)
+                        .flex_shrink_0()
+                    },
+                ))
+                .child(
+                    action(
+                        move || {
+                            let _ = ui.draft_epoch.get();
+                            let count = ui.drafts.with(|all| {
+                                all.iter()
+                                    .filter(|(key, draft)| draft.has_content(key))
+                                    .count()
+                            });
+                            if count == 0 {
+                                "Drafts".into()
+                            } else {
+                                format!("Drafts ({count})")
+                            }
+                        },
+                        Variant::Secondary,
+                        move |_| ui.navigate("drafts"),
+                    )
+                    .flex_shrink_0(),
+                )
                 .child(when(
                     move || project.get().is_some(),
                     move || {

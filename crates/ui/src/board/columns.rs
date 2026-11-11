@@ -15,6 +15,7 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
     state.register(&id, viewport, scroll_ref);
     let key = format!("board:{}:{id}", ui.project.get_untracked());
     let position = scroll_position(ui, &key);
+    let restored = stored(false);
     let gap_y = animated_value(0.);
     let gap_stage = id.clone();
     effect(move || {
@@ -71,7 +72,6 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
                 .child(
                     scroll()
                         .element_ref(&scroll_ref)
-                        .content_offset(position)
                         .flex_1()
                         .on_scroll(move |e: &ScrollEvent| {
                             state.scrolled(&id, e.offset.y.0);
@@ -81,6 +81,17 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
                             view()
                                 .relative()
                                 .w_full()
+                                .on_layout(move |_: &Bounds<Points>| {
+                                    if !restored.replace(true) && position.y.0 > 0. {
+                                        // Rows start at zero and receive measured transforms.
+                                        // Restore only after their first native layout: mounting
+                                        // already scrolled can leave their text layers empty.
+                                        spawn(async move {
+                                            next_frame().await;
+                                            scroll_ref.scroll_to(position, false);
+                                        });
+                                    }
+                                })
                                 .h(move || {
                                     px(state.layout.with(|l| {
                                         l.heights.get(&height_stage).copied().unwrap_or(0.) + 2.

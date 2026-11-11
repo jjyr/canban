@@ -6,7 +6,36 @@ Implemented 2026-11-07; navigation refined 2026-11-08. This follows the user-sel
 
 The sidebar is a 56-point rail with 40-point icon targets. Its top-to-bottom order is Quick Open, Board, global Overview, Terminals, GitHub and Archive, with Settings pinned to the bottom. There is no brand letter, separate Project picker, New Project or connection-check action in the rail. Herdr connection diagnostics remain in Settings. Selected state, keyboard focus, accessible names and hover tooltips accompany the icons. Overview retains its global actionable-row badge.
 
+Drafts has a single entry in the Board header, immediately before Add Card. It shows the count of meaningful drafts across all Projects, omitting the count at zero while remaining available for the empty state. Drafts opens a searchable Board subview: Board stays selected in the rail, each draft identifies its Project, and an explicit **← Board** action restores the current Project's Board and retained column scroll. Continue editing opens the draft's owning Project. The New Card footer has no separate Drafts entry. Persistence and explicit discard retain the [editor contract](card-editor.md).
+
+The Board header measures its own available width, including when Card details are attached. Below 760 points, Workflows and Work location move to a native **More…** menu while Drafts and Add Card remain directly reachable. The Project name truncates first. Conditional Update appears above Settings, leaving Settings the last rail action. The utility bar has no Settings duplicate.
+
 The Board header owns a Project-name button with a chevron. It opens the same search popup restricted to Projects, with a Project-specific placeholder, a checkmark/current label for the active Project and a persistent **New Project** footer action even when no matches remain. New Project closes the popup and opens the existing creation form. Command+O switches an open Project picker into global Quick Open, removing that footer action and current marker. Picking a Project opens its Board, clears the previous Card selection and updates the visible Project name. Empty Boards provide one fully clickable **Create a Project** card; **New Card** stays hidden until a valid Project is selected. Board has no scheduler summary. Its [GitHub filter bar](github-workspace.md) filters source/type/author/state without affecting scheduling. Long Project names truncate while preserving the chevron and Card action. Archive identifies its current Project; Overview remains global.
+
+### Drafts and Settings navigation acceptance (2026-11-11)
+
+Card #12 passed `mise run build`, all 231 workspace tests, `mise run acceptance`
+and `git diff --check`. The standalone `mise run gallery` at 720 logical points
+verified Update above Settings, the anchored More menu and both destinations,
+cross-Project draft ownership, count changes 2 → 1 → zero without a numeric
+badge, the empty list, and returning to a scrolled Board with wrapped Card titles.
+
+An isolated copy of the packaged `.local/Canban.app` at 1360 logical points
+verified draft count 2 → 3 after closing an unsent New Card, cross-Project
+Continue editing, selected Settings without a utility-bar duplicate, and Board
+scroll/text restoration. The final copied UI's SHA-256 matched the packaged UI.
+The navigation run retained all 28 published Cards and created zero execution
+requests; three drafts remained persisted. Local evidence is under
+`/private/tmp/cb-card12-ee5iizuq/` (`before.json`, `after.json`, `checks.json`).
+The final general acceptance home was `/private/tmp/cb-ecfdr_1j/home`.
+The native app, fixture AppServer and isolated Core were stopped after acceptance.
+
+The return-path regression initially restored the scroll offset during mount,
+before absolute Card rows received their measured transforms, leaving visible
+Card text blank. `ui/board/columns.rs` now restores after the first native layout
+and a display frame. Repeating the same native/Gallery round trip preserved both
+the offset and readable text. This is native navigation acceptance, not a new
+live-model run or a broader drag-and-drop acceptance matrix.
 
 ### Board title-bar Project activity (2026-11-10)
 

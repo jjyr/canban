@@ -143,7 +143,7 @@ The shared icon set includes Folder for grouping. Terminal rows use indented gui
 
 ## Named theme choice
 
-`ui-kit/theme_choice.rs` composes an NSH button with a name, fixed source swatches, reactive selected border/check, hover and keyboard focus. It takes a static `canban-themes::Theme`, saved-selection and disabled readers, a hover-preview intent and a press handler; it owns no persistence or product state. A wrapper receives native mouse-enter/leave events while the inner NSH button retains click/keyboard/disabled behavior. `ui/utilities/panel.rs` composes two columns in the existing scrollable popup. The presenter holds ephemeral preview separately from saved preferences; only confirmation saves through AppServer. All screens use fixed-dark reactive semantic tokens; Terminal ANSI colors come directly from the shared catalog. Gallery exercises this production picker through the bottom Theme button. Settings is a selected utility button in the bottom bar, not a rail item.
+`ui-kit/theme_choice.rs` composes an NSH button with a name, fixed source swatches, reactive selected border/check, hover and keyboard focus. It takes a static `canban-themes::Theme`, saved-selection and disabled readers, a hover-preview intent and a press handler; it owns no persistence or product state. A wrapper receives native mouse-enter/leave events while the inner NSH button retains click/keyboard/disabled behavior. `ui/utilities/panel.rs` composes two columns in the existing scrollable popup. The presenter holds ephemeral preview separately from saved preferences; only confirmation saves through AppServer. All screens use fixed-dark reactive semantic tokens; Terminal ANSI colors come directly from the shared catalog. Gallery exercises this production picker through the bottom Theme button. Settings uses the shared selected icon action at the bottom of the navigation rail; it is absent from the utility bar.
 
 Terminal list metadata is owned by `ui/terminals/tree.rs` and `labels.rs`: selected titles wrap, Provider/Profile names deduplicate, state remains textual, and Local/catalog machine names are inline. List rows and their Provider labels have no tooltip and expose no directory; compact tab Provider rendering remains a separate variant. Project folders and the existing branch chrome supply the other context. The production Gallery contains Local/remote, custom-name, long-title and unavailable states.
 
@@ -202,6 +202,9 @@ Command+Enter submission. The right-pane split retains its editor while expanded
 screen, and `drafts/persistence.rs` one coalescing background writer. AppServer
 `drafts.rs` owns revision-checked SQLite persistence outside Card/Timeline state.
 The Gallery's `CANBAN_GALLERY_SCENE=editor` imports the production New Card flow.
+The `board-drafts` scene exercises counted cross-Project drafts and Update above
+bottom-pinned Settings; `board-drafts-empty` exercises the count-free entry and
+empty list. Both use the production frame, Board and Drafts navigation.
 See [Card editor](card-editor.md) for native verification and limits.
 
 ## Markdown reference links (2026-11-10)

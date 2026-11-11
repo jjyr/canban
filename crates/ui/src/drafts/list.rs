@@ -14,8 +14,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .flex_row()
                 .items_center()
                 .gap_2()
-                .child(heading("Drafts").flex_1())
-                .child(action("New Card", Variant::Primary, move |_| ui.new_card())),
+                .child(action("← Board", Variant::Quiet, move |_| {
+                    ui.navigate("board")
+                }))
+                .child(heading("Drafts").flex_1()),
         )
         .child(field(query, "Search drafts…").label("Search drafts"))
         .child(scroll().flex_1().min_h(px(0.)).child(dynamic(move || {

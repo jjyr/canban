@@ -155,6 +155,55 @@ pub fn Gallery() -> impl IntoElement {
     ui.card.set("card-1".into());
     ui.page.set("card".into());
     ui.profiles.set(canban_types::Config::default().profiles);
+    if matches!(
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
+        Ok("board-drafts" | "board-drafts-empty")
+    ) {
+        ui.card.set(String::new());
+        ui.page.set("board".into());
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("board-drafts") {
+            let mut snapshot = fixtures::workspace();
+            let mut project = snapshot.projects[0].clone();
+            project.id = "draft-other-project".into();
+            project.name = "Other Project".into();
+            snapshot.projects.push(project);
+            for number in 4..=30 {
+                let mut card = snapshot.cards[0].clone();
+                card.id = format!("draft-navigation-card-{number}");
+                card.number = number;
+                card.title = format!("Draft navigation scroll fixture {number}");
+                card.stage = "backlog".into();
+                snapshot.cards.push(card);
+            }
+            ui.snapshot.set(snapshot);
+            for (key, project, title) in [
+                (
+                    "new-card:gallery-draft",
+                    "gallery-project",
+                    "Unfinished local Card",
+                ),
+                (
+                    "new-card:other-draft",
+                    "draft-other-project",
+                    "Cross-Project draft",
+                ),
+            ] {
+                canban_ui::drafts::put(
+                    ui,
+                    key.into(),
+                    canban_ui::drafts::Draft {
+                        project_id: project.into(),
+                        title: title.into(),
+                        body: "Retain content when navigating between Board, Drafts and Settings."
+                            .into(),
+                        ..Default::default()
+                    },
+                );
+            }
+            ui.update.set(json!({"state":{"phase":"available","available":{"manifest":{"version":"20261111-99"}}}}));
+        }
+        return canban_ui::frame::screen(ui).into_element();
+    }
     ui.machines.set(json!({"machines":[{"id":"gallery-remote","name":"Build machine","state":"connected","target":"ssh-host"},{"id":"gallery-offline","name":"Offline machine","state":"unreachable","target":"another-host"}]}));
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("startup-error") {
         return canban_ui::startup::error_screen("/preview/development-home".into(), "AppServer API 4 is incompatible with this UI (API 8). Start the matching instance or update the service on its owning host.".into()).into_element();

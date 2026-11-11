@@ -212,16 +212,6 @@ pub fn bar(ui: Ui) -> impl IntoElement {
                     || false,
                     || false,
                     move |_| report::open(ui),
-                ))
-                .child(utility_button(
-                    Icon::Settings,
-                    "Settings",
-                    move || ui.page.get() == "settings",
-                    || false,
-                    move |_| {
-                        close(ui);
-                        ui.navigate("settings");
-                    },
                 )),
         )
 }
