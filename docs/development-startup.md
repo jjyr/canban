@@ -126,13 +126,13 @@ in AppServer, including manual check/install RPCs. Settings explains this policy
 and disables the update action. Rebuild with `mise run dev` to update the dev
 instance. Intentional `CANBAN_UPDATE_*` fixture settings are preserved, while
 inherited Agent/session/endpoint bindings are removed from child environments.
-The ordinary installed application's update behavior is unchanged.
+Ordinary installed Apps use the [backend activation and daily release-check rules](updates.md).
 
 Managed startup verifies the newly launched server PID, canonical home, complete
 build metadata and development update policy. Packaged UI/CLI/updater ship
 together. Desktop API compatibility remains a separate contract; the generic
-attached client still uses its minimum-API check, not a complete negotiated
-compatibility range.
+attached client orders published releases or falls back to API levels. It does
+not negotiate a compatibility range.
 
 Startup failures now open a standalone native error window with the selected
 home and the actual connection/configuration error. This works before AppServer
@@ -140,9 +140,10 @@ connection and does not require opening SQLite. The Gallery has a
 `CANBAN_GALLERY_SCENE=startup-error` scene using the production surface.
 
 Starting an isolated dev instance does not upgrade or repair an older service
-already running for installed `~/.canban`. The user selected the existing in-app
-updater as the installed-version upgrade path; automatic external-installation
-handoff is deferred. Multi-client upgrade coordination remains tracked in
+already running for installed `~/.canban`. Ordinary local Apps now offer
+**Update backend** for an older service, using their installed binaries without
+downloading. A newer service permits entry with a newer-App notice. This action
+is unavailable to bound Dev Apps and explicit endpoints. Multi-client upgrade coordination remains tracked in
 [instance isolation and remaining gaps](instance-isolation.md).
 
 Herdr Core may be shared by ordinary development instances for now. It is chosen

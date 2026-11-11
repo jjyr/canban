@@ -193,8 +193,19 @@ Terminal creation no longer requires Project: `terminal.create {}` starts at hom
 Schema v6 adds a separate durable manual Terminal sequence. Agent inventory entries show two lines (Card/title + execution stage; provider/Profile + status), with one-line bounded tabs. Independent entries display Terminal N without a type icon. Custom names override the title portion and clearing them restores the generated title. Codex/Claude vector marks are shared UI Kit assets with preserved Herdr notices. Branch/directory labels shorten visually while full values remain in hover/actions. See [Terminal workspace](terminal-workspace.md) for contracts and current validation.
 
 
-## Internal updater (2026-11-10)
+## Internal updater (updated 2026-11-11)
 
-[Internal releases and updates](updates.md) defines the implementation, migration authoring rules and acceptance. The main-triggered release workflow reserves `YYYYMMDD-N`, builds one UI/CLI/updater App, and publishes only complete prereleases. Startup/hourly/manual checks feed the global bottom-rail Update action. Installation immediately replaces the initiating UI/AppServer without draining Herdr Agents; durable idempotent reports/replies survive the handoff. Paired database-only up/down batches are transactional, with no automatic database backup. Failed candidate startup rolls back schema/bundle and verifies the restored version; failed down stops with a standalone database-free Recovery window.
+[Internal releases and updates](updates.md) defines the implementation, migration authoring rules and acceptance. The main-triggered release workflow reserves `YYYYMMDD-N`, builds one UI/CLI/updater App, and publishes only complete prereleases. Persisted rolling-24-hour and unrestricted manual checks feed the global bottom-rail Update action. Installation immediately replaces the initiating UI/AppServer without draining Herdr Agents; durable idempotent reports/replies survive the handoff. Paired database-only up/down batches are transactional, with no automatic database backup for release installation. Failed candidate startup rolls back schema/bundle and verifies the restored version; failed down stops with a standalone database-free Recovery window.
 
 After integration with GitHub workspace and editor drafts, current schema is 10 and desktop API is 8. The service lock is acquired before opening SQLite. Six isolated update/failure cases and a real packaged native sidebar upgrade passed, including unsent-draft restoration and exact Agent terminal/Core/worktree preservation. See the linked evidence for the simulated future-schema boundary and unverified GitHub publication.
+
+### Local backend activation (2026-11-11)
+
+Ordinary local Apps show **Update backend** only when the answering backend is
+older. The action uses the installed App through the existing updater and never
+downloads or replaces a bundle. Actual equal schema skips migration; pending
+schema changes take a database snapshot for failure recovery. Equal/newer
+backends permit normal entry; a newer backend shows a newer-App notice and is
+never downgraded. Dev instances still restart via `mise run dev`. See
+[the current update contract](updates.md) and
+[executed backend acceptance](backend-update-acceptance-20261111.md).

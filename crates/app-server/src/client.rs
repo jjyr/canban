@@ -4,7 +4,24 @@ pub struct AppClient {
     pub home: PathBuf,
     endpoint: PathBuf,
     config: RwLock<Config>,
+    server_notice: Option<String>,
 }
+#[derive(Debug, Clone)]
+pub struct BackendOlder {
+    pub home: PathBuf,
+    pub ping: Value,
+    pub explicit_endpoint: bool,
+}
+impl std::fmt::Display for BackendOlder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "The backend is older than this App (backend API {}, App API {API_VERSION}). Update the backend using the installed App.",
+            self.ping["api_version"]
+        )
+    }
+}
+impl std::error::Error for BackendOlder {}
 impl AppClient {
     pub fn connect_or_start(home: PathBuf, cli: &Path) -> Result<Arc<Self>> {
         let explicit = std::env::var_os("CANBAN_ENDPOINT");
@@ -50,9 +67,26 @@ impl AppClient {
                 .spawn()?;
         }
         let mut state = None;
+        let mut server_notice = None;
         for _ in 0..100 {
             if let Ok(ping) = rpc(&endpoint, "app.ping", json!({})) {
-                check_api(&ping)?;
+                match canban_updater::backend_order(&ping, &canban_updater::Build::current()) {
+                    std::cmp::Ordering::Less => {
+                        return Err(BackendOlder {
+                            home,
+                            ping,
+                            explicit_endpoint: explicit.is_some(),
+                        }
+                        .into());
+                    }
+                    std::cmp::Ordering::Greater => {
+                        server_notice = Some(
+                            "The backend is newer than this App. Please use a newer Canban App."
+                                .into(),
+                        )
+                    }
+                    std::cmp::Ordering::Equal => {}
+                }
                 if let Ok(v) = rpc(&endpoint, "app.state", json!({})) {
                     state = Some(v);
                     break;
@@ -69,10 +103,14 @@ impl AppClient {
             home: PathBuf::from(strp(&state, "home")?),
             endpoint,
             config: RwLock::new(serde_json::from_value(state["config"].clone())?),
+            server_notice,
         }))
     }
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
         rpc(&self.endpoint, method, params)
+    }
+    pub fn server_notice(&self) -> Option<&str> {
+        self.server_notice.as_deref()
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
         let state = self.call("app.state", json!({}))?;
@@ -127,17 +165,6 @@ fn change_topic(connected: bool, previous: &Value, next: &Value) -> &'static str
     }
 }
 
-fn check_api(ping: &Value) -> Result<()> {
-    ensure!(
-        ping["api_version"]
-            .as_u64()
-            .is_some_and(|v| v >= u64::from(API_VERSION)),
-        "The running AppServer API ({}) is older than this UI (API {API_VERSION}). Update the service for the selected home using its matching installation. Development: use `mise run dev` for a separate instance. For CANBAN_ENDPOINT, update the service on its owning host.",
-        ping["api_version"]
-    );
-    Ok(())
-}
-
 impl AppServer {
     pub(super) fn relay(&self, mut stream: UnixStream, params: &Value) -> Result<()> {
         let mut target = None;
@@ -189,10 +216,14 @@ mod tests {
         assert_eq!(change_topic(true, &old, &old), "application");
     }
     #[test]
-    fn old_service_is_rejected_even_when_package_versions_match() {
-        assert!(check_api(&json!({"version":env!("CARGO_PKG_VERSION")})).is_err());
-        assert!(check_api(&json!({"api_version":0})).is_err());
-        assert!(check_api(&json!({"api_version":API_VERSION-1})).is_err());
-        check_api(&json!({"api_version":API_VERSION})).unwrap();
+    fn legacy_service_order_uses_api_not_cargo_package_version() {
+        let app = canban_updater::Build::current();
+        assert!(
+            canban_updater::backend_order(&json!({"version":env!("CARGO_PKG_VERSION")}), &app)
+                .is_lt()
+        );
+        assert!(canban_updater::backend_order(&json!({"api_version":API_VERSION-1}), &app).is_lt());
+        assert!(canban_updater::backend_order(&json!({"api_version":API_VERSION}), &app).is_eq());
+        assert!(canban_updater::backend_order(&json!({"api_version":API_VERSION+1}), &app).is_gt());
     }
 }

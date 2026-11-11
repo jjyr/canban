@@ -42,6 +42,12 @@ pub fn Canban() -> impl IntoElement {
     startup::watch_quit();
     startup::ready();
     let ui = Ui::new();
+    ui.backend_notice.set(
+        APP.get()
+            .and_then(|app| app.server_notice())
+            .unwrap_or_default()
+            .to_owned(),
+    );
     updates::restore(ui);
     links::install(ui);
     set_interval(std::time::Duration::from_millis(250), move || {

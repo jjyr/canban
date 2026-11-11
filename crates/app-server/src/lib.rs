@@ -543,7 +543,7 @@ mod client;
 mod commands;
 mod drafts;
 mod github;
-pub use client::AppClient;
+pub use client::{AppClient, BackendOlder};
 mod machines;
 mod remote;
 mod workflow;

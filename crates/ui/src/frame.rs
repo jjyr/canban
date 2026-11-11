@@ -65,6 +65,15 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 }
             })
         }))
+        .child(when(
+            move || !ui.backend_notice.get().is_empty(),
+            move || {
+                canban_ui_kit::notice(
+                    move || ui.backend_notice.get(),
+                    canban_ui_kit::Tone::Attention,
+                )
+            },
+        ))
         .child(crate::utilities::bar(ui))
         .child(when(
             move || !ui.operation_error.get().is_empty(),

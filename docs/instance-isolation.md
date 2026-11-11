@@ -37,19 +37,21 @@ The earlier audit identified eight gaps. These are their current dispositions:
 | Gap | Current disposition |
 | --- | --- |
 | G1: development defaults to installed data | Addressed: automatic checkout/branch homes; `dev` and `run` share the isolated launcher; installed-home management is refused. |
-| G2: Finder startup errors are invisible | Addressed: native startup error window, including API mismatch before the workspace opens. |
+| G2: Finder startup errors are invisible | Addressed: native startup error window, including the older-backend update prompt before the workspace opens. |
 | G3: a new home still shares Core | Accepted boundary for ordinary development; acceptance keeps its own Core. |
 | G4: shared application identity/bundle destination | Addressed for generated instances: unique bundle destinations and IDs, instance/home controller locks, UI process lock. |
-| G5: generic connection lacks expected-instance/protocol negotiation | Partially addressed: managed dev startup checks PID/home/build/policy, bound UI/CLI enforce their home. Generic attached clients still need the remaining work below. |
+| G5: generic connection lacks expected-instance/protocol negotiation | Partially addressed: managed dev startup checks PID/home/build/policy, bound UI/CLI enforce their home. Startup now orders release/API versions; expected generic identity and negotiated compatibility remain open. |
 | G6: update controls are dropped by the runner | Addressed: generated instances enforce disabled channel updates at AppServer; update fixture overrides are preserved instead of accidentally filtered. |
 | G7: upgrade coordinates only its initiating UI | Still open for shared-service clients. |
-| G8: external installation leaves an old service alive | Deferred by user decision, 2026-11-11: the existing in-app updater is the supported installed-version upgrade path; no automatic external-installation handoff is required now. |
+| G8: external installation leaves an old service alive | Addressed by explicit Update backend for ordinary local Apps; reuses installed binaries, migrates only pending schema, and never downloads or downgrades. Unattended takeover remains out of scope. |
 
 ## G5: generic attached-client compatibility
 
-[AppClient](../crates/app-server/src/client.rs) still checks a minimum API level.
-It does not negotiate an explicit compatibility range or bind an expected server
-identity during generic attachment. Local build metadata can still report
+[AppClient](../crates/app-server/src/client.rs) compares published release versions,
+falling back to desktop API for legacy/unversioned builds. An older backend
+blocks entry with an update prompt; a newer backend allows entry with a newer-App
+notice. It does not negotiate an explicit compatibility range or bind an expected
+server identity during generic attachment. Local build metadata can still report
 `development` / `unknown`; it is not a unique source fingerprint.
 
 Managed dev startup verifies its specific new PID/executable and bundled build,
@@ -72,26 +74,27 @@ than independent service replacement by each window. Per-branch development
 homes avoid cross-branch interference but do not implement this shared-service
 upgrade protocol.
 
-## G8: external installation does not perform the in-app service handoff
+## G8: explicit activation after external installation
 
-`AppClient::connect_or_start` starts its packaged service when ping fails. If an
-older installed service still answers, Finder/Homebrew replacement does not by
-itself replace that process. An incompatible UI now opens an error window; it
-does not automatically take over that authority.
+Finder/Homebrew replacement can leave the old AppServer answering. Ordinary
+local Apps now detect an older backend and offer **Update backend**, using the
+installed App's binaries through the existing updater locks/journal/readiness.
+The actual database schema decides whether migration is necessary; equal schema
+skips it. No download or bundle replacement occurs. A newer backend continues
+normally with a newer-App notice, without downgrade. See [updates](updates.md)
+for activation/recovery and the daily release-check contract.
 
-Scope decision, 2026-11-11: use the existing in-app updater for installed-version
-upgrades. Its service shutdown, migration, readiness and recovery transaction
-already covers that path. Automatic handoff after Finder/Homebrew replacement
-or first activation of an older installation is deferred; it is not required
-to complete branch isolation. No new runtime manager or versioned-runtime
-storage is selected. Development commands deliberately do not serve as an
-installed-instance repair command.
+This 2026-11-11 decision supersedes the earlier deferral of local activation.
+No unattended takeover, new runtime manager or versioned-runtime store is added.
+Explicit remote endpoints require updating on the owning host. Development
+commands remain isolated and do not repair an installed instance.
 
 ## Verification boundary
 
 See [development verification](development-startup.md#verification) for executed
 checks. The new multi-instance suite uses disposable checkouts, homes and Core,
 and verifies that targeted stop/restart leaves other service PIDs and a real PTY
-unchanged. Source auditing and successful isolated launches are not evidence of
-an installed-home migration or multi-client update. The user's installed
+unchanged. The [backend acceptance](backend-update-acceptance-20261111.md) separately verifies
+local activation with disposable installed-style bundles and homes. These runs
+do not establish multi-client update coordination. The user's installed
 AppServer is not restarted by these checks.

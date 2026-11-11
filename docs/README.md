@@ -18,6 +18,10 @@ The latest explicit user decision takes precedence over earlier discussion. Befo
 
 [Combined GitHub/editor/updater acceptance (2026-11-11)](merge-integration-20261111.md) records local branch integration, paired schema 9/10 migrations, desktop API 8 and native schema-8 upgrades.
 
+[Backend activation acceptance (2026-11-11)](backend-update-acceptance-20261111.md)
+records explicit activation of the installed backend, newer-backend entry and
+persisted daily release checks.
+
 ## Current product documents
 
 | Document | Purpose |
@@ -58,9 +62,9 @@ The latest explicit user decision takes precedence over earlier discussion. Befo
 | [Card conversation workspace](card-conversation.md) | Compact Card header, scrolling task/Timeline, explicit recipients, comment shortcuts and Terminal boundary |
 | [Native UI motion](ui-motion.md) | Shared motion policy, retained Card reveal, editor resizing, native modal fades and regression scenes |
 | [Desktop utilities](desktop-utilities.md) | Implemented Usage/reset countdown, Caffeine, Theme, Shortcuts, target-Project creation and acceptance |
-| [Internal releases and updates](updates.md) | Main-triggered prereleases, bottom-rail upgrades, paired migrations and recovery |
+| [Internal releases and updates](updates.md) | Main-triggered prereleases, daily release checks, local backend activation, paired migrations and recovery |
 | [Development startup](development-startup.md) | Branch-scoped dev/dev-stop, bound homes/bundles, ownership checks, native startup errors and acceptance |
-| [Instance isolation and remaining gaps](instance-isolation.md) | Implemented checkout/branch isolation and remaining generic compatibility / installed-upgrade boundaries |
+| [Instance isolation and remaining gaps](instance-isolation.md) | Implemented checkout/branch isolation and explicit installed-backend activation and remaining generic compatibility boundaries |
 | [Herdr UI layout and product references](research/herdr-ui-product-and-layout.md) | Source-backed recommendations for workspace chrome, navigation, Quick Open, contextual feedback and Review |
 | [Global Agent Overview](product/overview.md) | Herdr UI reference, all-Agent grouped overview, attention highlight, queued/idle/closed states and context inspector |
 | [Attention handling](product/needs-attention.md) | Task/runtime naming, contextual handling inside Overview, Card/Terminal navigation and resolution rules |

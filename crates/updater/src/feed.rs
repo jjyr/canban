@@ -117,7 +117,7 @@ pub fn discover(
     current: &Build,
     client: Option<&canban_github::Client>,
 ) -> Result<Option<Available>> {
-    // Explicit/hourly release checks must revalidate GitHub's disposable cache.
+    // Explicit/daily release checks must revalidate GitHub's disposable cache.
     let fresh = client.cloned().map(canban_github::Client::refreshing);
     let client = fresh.as_ref();
     let api = api()?;
@@ -236,9 +236,24 @@ pub fn discover(
     Ok(None)
 }
 pub fn check(home: &Path, client: Option<canban_github::Client>) -> Result<()> {
+    check_inner(home, client, false)
+}
+pub fn check_automatically(home: &Path, client: Option<canban_github::Client>) -> Result<()> {
+    check_inner(home, client, true)
+}
+fn check_inner(home: &Path, client: Option<canban_github::Client>, automatic: bool) -> Result<()> {
     let _lock = lock(home, "operation.lock")?;
     ensure!(!handoff::active(home), "Upgrade is in progress");
     let mut state = load_state(home);
+    if automatic && state.automatic_delay(now()) > 0 {
+        if state.phase == "checking" {
+            state.phase = "error".into();
+            state.error = Some("The previous update check was interrupted. Check again manually or wait for the next daily check.".into());
+            save_state(home, &state)?;
+        }
+        return Ok(());
+    }
+    state.last_check_started_at = now();
     state.phase = "checking".into();
     state.error = None;
     save_state(home, &state)?;

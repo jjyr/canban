@@ -1,10 +1,10 @@
 # Internal releases and desktop updates
 
-Status: implemented on macOS arm64, 2026-11-10. Local fixture and native acceptance are recorded below; GitHub publication has not been exercised.
+Status: implemented on macOS arm64, updated 2026-11-11. Local fixture and native acceptance are recorded below; GitHub publication has not been exercised.
 
 ## Product boundary
 
-A push to GitHub `main` (including a merged PR) triggers the release workflow. Releases do not become Cards or workflow stages. The installed AppServer checks for published internal releases at startup, hourly and on explicit request. The compact navigation rail reserves its bottom for a highlighted Update button when a newer compatible release exists. Clicking it downloads and immediately installs/restarts; it never waits for automatic Agent tasks to complete. Download/progress/error/retry share the same operation path. Settings offers a manual check and current version details.
+A push to GitHub `main` (including a merged PR) triggers the release workflow. Releases do not become Cards or workflow stages. The installed AppServer checks for published internal releases once per rolling 24 hours and on explicit request. Automatic checks persist their start time before networking, including failed attempts, so restarting does not trigger another check within the interval. First launch or an overdue restart checks immediately. Manual checks bypass the interval; interrupted checks remain inspectable and may be retried manually. The compact navigation rail reserves its bottom for a highlighted Update button when a newer compatible release exists. Clicking it downloads and immediately installs/restarts; it never waits for automatic Agent tasks to complete. Download/progress/error/retry share the same operation path. Settings offers a manual check and current version details.
 
 ```text
 PR merge / push main -> GitHub Actions -> versioned GitHub Prerelease
@@ -37,7 +37,7 @@ Download/validation finishes before stopping the current App. A detached updater
 
 Candidate startup must report the exact version/commit and UI readiness. Until that handshake commits the upgrade, business writes, new scheduling and GitHub effects are held. A failed start returns the database to its pre-upgrade schema using the new version's down migrations, restores the old bundle and restarts it. This is automatic recovery only for the installation/startup transaction, not arbitrary crashes after the new version has accepted writes. CLI report/reply operations with stable idempotency keys persist during handoff and retry after success or recovery. Arbitrary Git/user mutations are never blindly replayed.
 
-If down/restore fails, preserve the current database, bundle copies, pending reports and journal/log; stop with a manual-recovery error. Do not open it with an incompatible old server or repeatedly retry migration. No automatic database backup or whole-home snapshot is made. In-progress Agent-created files and worktrees are not rolled back.
+If down/restore fails, preserve the current database, bundle copies, pending reports and journal/log; stop with a manual-recovery error. Do not open it with an incompatible old server or repeatedly retry migration. Release installation does not make an automatic database backup or whole-home snapshot. The local backend activation described below takes a database snapshot only when a schema upgrade is needed. In-progress Agent-created files and worktrees are not rolled back.
 
 ## Migration authoring rules
 
@@ -82,14 +82,46 @@ Local reports/replies carry their original request key through the file outbox. 
 
 ## Build, bootstrap and recovery
 
-Scope decision, 2026-11-11: the existing in-app updater is the supported path for
-installed-version upgrades. Its controlled AppServer handoff is sufficient for
-the current scope. Automatic service takeover after Finder/Homebrew replacement
-or first activation of an older installation is deferred.
+The in-app updater remains the release installation path. A newer App installed
+externally can also activate its bundled backend through the explicit startup
+action below. Opening an App never silently replaces an answering backend.
 
 `mise run build` packages UI, CLI and updater together. `mise run build-release` produces optimized, ad-hoc-signed binaries; it does not publish. `.github/workflows/release.yml` builds the triggering SHA on a macOS arm64 runner, uploads `Canban-macos-aarch64.tar.zst` plus `manifest-macos-aarch64.json`, and publishes the completed draft as a prerelease. Packaging includes existing third-party notices. Developer ID signing/notarization is not implemented.
 
-The first activation needs this matching UI/AppServer pair. Development uses `mise run dev`, which now derives an isolated checkout/branch home and disables channel updates; it does not replace the installed `~/.canban` service. Installed-home activation still requires a matching service handoff. Merely replacing or opening an App bundle does not replace an already answering old AppServer; a startup error is now visible. See [the external-installation gap](instance-isolation.md#g8-external-installation-does-not-perform-the-in-app-service-handoff). Older installed versions without an updater cannot discover/install this feature themselves. Subsequent installed releases use the sidebar action. Access to the private release repository requires existing Canban GitHub sign-in and installation access to that repository; check failures are inspectable in Settings. No credentials are included in artifacts or diagnostics.
+Development uses `mise run dev`, which derives an isolated checkout/branch home
+and disables channel updates; it does not replace the installed `~/.canban`
+service. For an ordinary installed App, startup compares the backend and App:
+
+- **Older backend:** show **Update backend** before entering the workspace.
+- **Equal version:** enter normally.
+- **Newer backend:** enter normally with **Please use a newer Canban App**. Never downgrade the backend.
+
+Published `YYYYMMDD-N` versions are compared numerically when both are available;
+legacy/unversioned builds fall back to desktop API level (missing legacy API is
+zero). Equal-API unversioned builds do not establish source-version ordering.
+This is a version rule, not a negotiated protocol compatibility range.
+An explicit `CANBAN_ENDPOINT` does not offer local replacement; update the backend
+on its owning host. Bound Dev Apps are restarted through `mise run dev`.
+
+**Update backend** uses the CLI/updater beside the currently running App. It
+rechecks PID/process identity, home and version, then uses the existing updater
+journal, service/upgrade locks, startup fences, outbox and exact server/UI
+readiness. It quits the startup prompt, stops only the identified backend and
+starts the installed matching pair. It performs no release check, asset download
+or App-bundle replacement. Herdr Core and existing PTYs stay alive.
+
+The worker reads the actual database schema after service shutdown. Equal schema
+skips the migration CLI and snapshot entirely, even if the old service binary
+was left behind after a newer App was installed. A pending schema upgrade first
+captures a SQLite snapshot including committed WAL data, then runs the installed
+CLI's database-only migration. Pre-schema-8 initialization uses the existing
+legacy Store path to the current schema; a newer database is refused. A failed
+migration or candidate boot restores that snapshot and stops at manual Recovery;
+the saved worker's explicit `--recover` retries activation after the cause is
+fixed. A failure before database work reopens the startup prompt. It never
+restores or downloads an older App bundle.
+
+Subsequent installed releases use the sidebar action. Access to the private release repository requires existing Canban GitHub sign-in and installation access to that repository; check failures are inspectable in Settings. No credentials are included in artifacts or diagnostics.
 
 An interrupted install is recovered using the saved detached worker, with a single recovery owner. A `manual_recovery` journal is never automatically retried. The standalone Recovery window displays the error/log location and opens the update directory without connecting to AppServer or opening SQLite. After fixing the reported cause, use the token from `install.json` to retry the saved worker:
 
@@ -102,6 +134,10 @@ Do not delete the journal, pending reports or bundle copies to bypass a failed d
 ## Verification boundary
 
 Use isolated homes, bundle copies, HTTP release fixtures and Herdr Cores. Cover normal update, corrupt/wrong-architecture assets, concurrent checks/install, upgrade-lock startup gating, exact candidate identity/readiness, forward migration failure, candidate startup failure with down, down failure requiring manual repair, and running-Agent report/reply delivery across the restart. Native Gallery exercises bottom-rail pending/progress/error states; packaged-App acceptance exercises the actual install/restart. CI/public release publication must be reported separately from local fixture acceptance.
+
+[Local backend activation and daily checks acceptance](backend-update-acceptance-20261111.md)
+records the 2026-11-11 matrix, real startup-button handoff, newer-backend entry
+and isolated development regression checks.
 
 ### Executed acceptance (2026-11-10)
 

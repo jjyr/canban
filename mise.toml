@@ -107,6 +107,10 @@ run = ["cargo build --release --locked -p canban-ui -p canban-cli -p canban-upda
 [tasks.acceptance-updates]
 run = "/usr/bin/python3 scripts/acceptance-updates.py"
 
+[tasks.acceptance-backend]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-backend.py"
+
 [tasks.test-release]
 run = "/usr/bin/python3 scripts/test-release.py"
 

@@ -158,6 +158,20 @@ pub fn Gallery() -> impl IntoElement {
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("startup-error") {
         return canban_ui::startup::error_screen("/preview/development-home".into(), "AppServer API 4 is incompatible with this UI (API 8). Start the matching instance or update the service on its owning host.".into()).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("backend-older") {
+        return canban_ui::startup::backend_update_screen(
+            "/preview/.canban".into(),
+            "The backend is older than this App (backend API 4, App API 8).".into(),
+            || async { anyhow::bail!("Fixture: the real action uses the installed backend") },
+        )
+        .into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("backend-newer") {
+        ui.backend_notice
+            .set("The backend is newer than this App. Please use a newer Canban App.".into());
+        ui.page.set("board".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("update-recovery") {
         return canban_ui::updates::recovery_screen(
             "/preview/.canban".into(),

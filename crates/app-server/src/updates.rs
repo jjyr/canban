@@ -102,8 +102,16 @@ impl AppServer {
                         && std::time::Instant::now() >= next
                         && std::env::var_os("CANBAN_UPDATES_DISABLED").is_none()
                     {
-                        next = std::time::Instant::now() + Duration::from_secs(3600);
-                        let _ = canban_updater::feed::check(&home, github.client().ok());
+                        let result =
+                            canban_updater::feed::check_automatically(&home, github.client().ok());
+                        let delay = if result.is_ok() {
+                            canban_updater::load_state(&home)
+                                .automatic_delay(canban_updater::now())
+                                .max(1)
+                        } else {
+                            60
+                        };
+                        next = std::time::Instant::now() + Duration::from_secs(delay);
                     }
                 }
                 std::thread::sleep(Duration::from_secs(1));

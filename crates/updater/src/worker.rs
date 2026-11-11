@@ -7,6 +7,7 @@ use std::{
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
+pub mod local;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Process {
     pub pid: u32,
@@ -40,6 +41,8 @@ fn stop_process(p: &Process) -> Result<()> {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Journal {
+    #[serde(default)]
+    pub local: Option<local::Handoff>,
     pub token: String,
     pub phase: String,
     pub home: PathBuf,
@@ -110,6 +113,7 @@ pub fn prepare_locked(
     )?;
     let schema_before = before.schema;
     let j = Journal {
+        local: None,
         token: token.clone(),
         phase: "prepared".into(),
         home: home.into(),
@@ -279,6 +283,9 @@ pub fn run(home: &Path, recover: bool) -> Result<()> {
         "Manual recovery required: {}",
         j.error.as_deref().unwrap_or("unknown")
     );
+    if j.local.is_some() {
+        return local::run(&mut j, recover);
+    }
     if recover && matches!(j.phase.as_str(), "prepared" | "stopping") {
         j.phase = "rolled_back".into();
         j.error = Some("Interrupted upgrade cancelled before database migration".into());
@@ -530,6 +537,7 @@ mod recovery_tests {
         let home = dir.path();
         std::fs::write(home.join("canban.sqlite"), b"must not open this file").unwrap();
         let j = Journal {
+            local: None,
             token: "fixture".into(),
             phase: "prepared".into(),
             home: home.into(),

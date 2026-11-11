@@ -1,5 +1,5 @@
 //! Native startup failures and graceful controller-requested desktop shutdown.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use canban_app_server::instance::{self, Registration};
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
@@ -11,6 +11,7 @@ use std::sync::{
 static QUIT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 static UI_RECORD: OnceLock<std::path::PathBuf> = OnceLock::new();
 static ERROR: OnceLock<String> = OnceLock::new();
+static OLDER: OnceLock<canban_app_server::BackendOlder> = OnceLock::new();
 
 pub fn prepare() -> Result<Option<Registration>> {
     let flag = Arc::new(AtomicBool::new(false));
@@ -66,6 +67,12 @@ pub fn ready() {
 }
 
 pub fn show(error: &anyhow::Error) {
+    if let Some(old) = error.downcast_ref::<canban_app_server::BackendOlder>()
+        && !old.explicit_endpoint
+        && instance::bundled().ok().flatten().is_none()
+    {
+        let _ = OLDER.set(old.clone());
+    }
     let detail = format!("{error:#}");
     record("error", detail.clone().into());
     let _ = ERROR.set(detail);
@@ -90,7 +97,80 @@ fn StartupError() -> impl IntoElement {
     let home = canban_app_server::default_home()
         .map(|v| v.display().to_string())
         .unwrap_or_else(|_| "Unavailable".into());
-    error_screen(home, ERROR.get().cloned().unwrap_or_default())
+    if let Some(old) = OLDER.get() {
+        let old = old.clone();
+        return backend_update_screen(home, ERROR.get().cloned().unwrap_or_default(), move || {
+            let old = old.clone();
+            async move {
+                let cli = std::env::current_exe()?.with_file_name("canban");
+                let app_id = app_id()?;
+                let result = blocking(move || {
+                    canban_updater::worker::local::prepare(
+                        &old.home,
+                        &cli,
+                        &old.ping,
+                        std::process::id(),
+                        app_id,
+                    )
+                })
+                .await;
+                result.context("Backend updater could not be started")?
+            }
+        })
+        .into_element();
+    }
+    error_screen(home, ERROR.get().cloned().unwrap_or_default()).into_element()
+}
+
+pub fn backend_update_screen<F, Fut>(home: String, detail: String, update: F) -> impl IntoElement
+where
+    F: Fn() -> Fut + 'static,
+    Fut: std::future::Future<Output = Result<()>> + 'static,
+{
+    let pending = signal(false);
+    let error = signal(String::new());
+    view()
+        .flex_1()
+        .bg(BACKGROUND)
+        .p_5()
+        .items_center()
+        .justify_center()
+        .child(
+            panel()
+                .w_full()
+                .max_w(px(720.))
+                .gap_4()
+                .child(heading("Update backend"))
+                .child(muted(
+                    "Use the backend included in this installed App. No update download is needed.",
+                ))
+                .child(label(format!("Home: {home}")))
+                .child(notice(detail, Tone::Attention))
+                .child(when(
+                    move || !error.get().is_empty(),
+                    move || notice(move || error.get(), Tone::Attention),
+                ))
+                .child(
+                    action("Update backend", Variant::Primary, move |_| {
+                        if pending.get_untracked() {
+                            return;
+                        }
+                        pending.set(true);
+                        error.set(String::new());
+                        let future = update();
+                        spawn(async move {
+                            if let Err(e) = future.await {
+                                error.set(format!("{e:#}"));
+                                pending.set(false);
+                            }
+                        });
+                    })
+                    .disabled(move || pending.get()),
+                )
+                .child(action("Quit", Variant::Quiet, |_| {
+                    nsh_core::element::desktop::quit()
+                })),
+        )
 }
 
 /// Production startup surface, also rendered by the native Gallery.

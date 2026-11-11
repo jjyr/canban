@@ -1,5 +1,5 @@
 //! Paired database-only migrations after the legacy schema-8 baseline.
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
@@ -151,6 +151,15 @@ fn batch(conn: &mut Connection, steps: &[Migration], target: u32) -> Result<()> 
 /// Called by the candidate CLI while the updater owns the upgrade lock and no
 /// AppServer owns the service lock. It never opens product/runtime services.
 pub fn migrate(home: &Path, target: u32) -> Result<u32> {
+    if database_version(home)? < BASELINE {
+        ensure!(
+            target == CURRENT,
+            "Legacy databases can only be upgraded to the current schema"
+        );
+        // Reuse the legacy initialization steps without starting product/runtime services.
+        drop(crate::Store::open(home)?);
+        return database_version(home);
+    }
     let mut conn = Connection::open(home.join("canban.sqlite"))?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -160,12 +169,63 @@ pub fn migrate(home: &Path, target: u32) -> Result<u32> {
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     Ok(result)
 }
+
+/// Consistent SQLite snapshot, including committed WAL data, without mutating source.
+pub fn backup(home: &Path, destination: &Path) -> Result<()> {
+    let conn = Connection::open_with_flags(
+        home.join("canban.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    conn.execute(
+        "VACUUM INTO ?1",
+        [destination.to_str().context("Invalid snapshot path")?],
+    )?;
+    std::fs::File::open(destination)?.sync_all()?;
+    Ok(())
+}
 pub fn database_version(home: &Path) -> Result<u32> {
     let conn = Connection::open_with_flags(
         home.join("canban.sqlite"),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
     version(&conn)
+}
+
+#[cfg(test)]
+mod local_handoff_tests {
+    use super::*;
+    #[test]
+    fn legacy_upgrade_uses_existing_steps_and_snapshot_includes_wal_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        drop(crate::Store::open(home).unwrap());
+        migrate(home, BASELINE).unwrap();
+        let conn = Connection::open(home.join("canban.sqlite")).unwrap();
+        conn.execute_batch("DROP TABLE card_reads; PRAGMA user_version=7; CREATE TABLE keep(value TEXT); INSERT INTO keep VALUES('preserved');").unwrap();
+        let snapshot = home.join("before.sqlite");
+        backup(home, &snapshot).unwrap();
+        conn.execute("INSERT INTO keep VALUES('later')", [])
+            .unwrap();
+        drop(conn);
+        assert!(migrate(home, BASELINE).is_err());
+        assert_eq!(database_version(home).unwrap(), 7);
+        assert_eq!(migrate(home, CURRENT).unwrap(), CURRENT);
+        assert_eq!(migrate(home, CURRENT).unwrap(), CURRENT);
+        let old = Connection::open(snapshot).unwrap();
+        assert_eq!(version(&old).unwrap(), 7);
+        assert_eq!(
+            old.query_row("SELECT count(*) FROM keep", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
+        let current = Connection::open(home.join("canban.sqlite")).unwrap();
+        assert_eq!(
+            current
+                .query_row("SELECT count(*) FROM keep", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+    }
 }
 
 /// Export legacy remote mirrors before the database-only migration transaction.
