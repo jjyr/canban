@@ -155,6 +155,55 @@ pub fn Gallery() -> impl IntoElement {
     ui.card.set("card-1".into());
     ui.page.set("card".into());
     ui.profiles.set(canban_types::Config::default().profiles);
+    if matches!(
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
+        Ok("board-drafts" | "board-drafts-empty")
+    ) {
+        ui.card.set(String::new());
+        ui.page.set("board".into());
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("board-drafts") {
+            let mut snapshot = fixtures::workspace();
+            let mut project = snapshot.projects[0].clone();
+            project.id = "draft-other-project".into();
+            project.name = "Other Project".into();
+            snapshot.projects.push(project);
+            for number in 4..=30 {
+                let mut card = snapshot.cards[0].clone();
+                card.id = format!("draft-navigation-card-{number}");
+                card.number = number;
+                card.title = format!("Draft navigation scroll fixture {number}");
+                card.stage = "backlog".into();
+                snapshot.cards.push(card);
+            }
+            ui.snapshot.set(snapshot);
+            for (key, project, title) in [
+                (
+                    "new-card:gallery-draft",
+                    "gallery-project",
+                    "Unfinished local Card",
+                ),
+                (
+                    "new-card:other-draft",
+                    "draft-other-project",
+                    "Cross-Project draft",
+                ),
+            ] {
+                canban_ui::drafts::put(
+                    ui,
+                    key.into(),
+                    canban_ui::drafts::Draft {
+                        project_id: project.into(),
+                        title: title.into(),
+                        body: "Retain content when navigating between Board, Drafts and Settings."
+                            .into(),
+                        ..Default::default()
+                    },
+                );
+            }
+            ui.update.set(json!({"state":{"phase":"available","available":{"manifest":{"version":"20261111-99"}}}}));
+        }
+        return canban_ui::frame::screen(ui).into_element();
+    }
     ui.machines.set(json!({"machines":[{"id":"gallery-remote","name":"Build machine","state":"connected","target":"ssh-host"},{"id":"gallery-offline","name":"Offline machine","state":"unreachable","target":"another-host"}]}));
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("startup-error") {
         return canban_ui::startup::error_screen("/preview/development-home".into(), "AppServer API 4 is incompatible with this UI (API 8). Start the matching instance or update the service on its owning host.".into()).into_element();
@@ -345,9 +394,14 @@ pub fn Gallery() -> impl IntoElement {
             .child(canban_ui::frame::screen(ui))
             .into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("column-automations") {
+        ui.snapshot.set(fixtures::automation_board());
+        ui.page.set("board".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
-        Ok("workflows") | Ok("workflow-agent")
+        Ok("workflows") | Ok("workflow-agent") | Ok("workflows-conflict")
     ) {
         let raw = include_str!("../workflows/plan-and-develop.yaml").to_string();
         let name = "issue-planning.yaml".to_string();
@@ -363,9 +417,31 @@ pub fn Gallery() -> impl IntoElement {
         ui.workflows.prompt.set("你是当前 Canban 项目的 Workflow 配置助手。\n本次范围是整个项目的 Workflows，而非某个选中的文件。\n\n请先只读分析全部 Workflow YAML，用 ASCII 展示事件、Agent、审批及三列的影响。\n等待用户提出具体修改要求，再校验和发布。".repeat(4));
         ui.workflows.profile.set("codex".into());
         ui.page.set("workflows".into());
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("workflows-conflict") {
+            ui.workflows.drafts.update(|drafts| {
+                let draft = drafts.get_mut(&ui.project.get_untracked()).unwrap();
+                draft.sources.insert(
+                    "issue-planning.yaml".into(),
+                    "# Keep this unsaved editor draft\n".to_owned()
+                        + &draft.sources["issue-planning.yaml"],
+                );
+                draft.sources.insert(
+                    "a-workflow-source-with-a-long-descriptive-filename.yaml".into(),
+                    "schema: 1\nname: Long source fixture\n".into(),
+                );
+            });
+            ui.workflows.latest.set(json!({"revision":"newer-gallery","sources":[{"filename":"issue-planning.yaml","source":"# Saved elsewhere; local draft must survive.\nschema: 1\nname: Latest saved source\n"}]}));
+        }
         if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("workflow-agent") {
             ui.workflows.agent.set(true);
             return canban_ui::workflows::agent_panel(ui).into_element();
+        }
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("workflows-conflict") {
+            return view()
+                .w(px(800.))
+                .flex_1()
+                .child(canban_ui::frame::screen(ui))
+                .into_element();
         }
         return canban_ui::frame::screen(ui).into_element();
     }

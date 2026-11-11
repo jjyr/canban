@@ -651,3 +651,49 @@ pub fn workflow() -> canban_types::WorkflowRun {
         "history":[],"error":null,"created_at":0,"updated_at":0
     })).unwrap()
 }
+
+/// Active column rules over real Card text, including the first/last columns.
+/// Exercises popover stacking, clipping, dismissal and overflow with production UI.
+pub fn automation_board() -> canban_types::Snapshot {
+    use canban_types::*;
+    let mut snapshot = workspace();
+    let raw = include_str!("../workflows/plan-and-develop.yaml");
+    let mut document = canban_workflow_engine::source::parse(raw).unwrap();
+    for column in ["backlog", "review"] {
+        document.on.insert(
+            column.into(),
+            serde_json::from_value(json!({
+                "event":"card.column_entered", "start_at":"plan", "match":{"column":column}
+            }))
+            .unwrap(),
+        );
+    }
+    for index in 0..5 {
+        let workflow_id = format!("gallery-automation-{index}");
+        let revision_id = format!("{workflow_id}:1");
+        let mut definition = document.compile().unwrap();
+        definition.id = workflow_id.clone();
+        definition.name = format!("Plan and deliver · automation {}", index + 1);
+        snapshot.workflow_revisions.push(WorkflowRevision {
+            source_yaml: Some(raw.into()),
+            id: revision_id.clone(),
+            project_id: "gallery-project".into(),
+            workflow_id: workflow_id.clone(),
+            revision: 1,
+            definition,
+            created_at: now(),
+        });
+        snapshot.workflow_sources.push(WorkflowSource {
+            id: workflow_id.clone(),
+            project_id: "gallery-project".into(),
+            filename: format!("automation-{index}.yaml"),
+            workflow_id,
+            revision: 1,
+            hash: "gallery".into(),
+            revision_id,
+            enabled: true,
+            rules: document.on.clone(),
+        });
+    }
+    snapshot
+}

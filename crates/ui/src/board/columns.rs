@@ -9,12 +9,12 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
     let row_stage = id.clone();
     let height_stage = id.clone();
     let empty_stage = id.clone();
-    let count_stage = id.clone();
     let viewport = element_ref();
     let scroll_ref = element_ref();
     state.register(&id, viewport, scroll_ref);
     let key = format!("board:{}:{id}", ui.project.get_untracked());
     let position = scroll_position(ui, &key);
+    let restored = stored(false);
     let gap_y = animated_value(0.);
     let gap_stage = id.clone();
     effect(move || {
@@ -36,30 +36,11 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
         .child(
             view()
                 .flex_row()
+                .min_h(px(30.))
                 .justify_between()
                 .items_center()
                 .child(label(stage.name).font_weight(FontWeight::SEMIBOLD))
-                .child(crate::workflows::column_trigger(ui, stage.id.clone()))
-                .child(badge(move || {
-                    let visible = state
-                        .cards
-                        .with(|all| all.iter().filter(|c| c.stage == count_stage).count());
-                    let total = ui.snapshot.with(|s| {
-                        s.cards
-                            .iter()
-                            .filter(|c| {
-                                c.project_id == ui.project.get_untracked()
-                                    && c.active()
-                                    && c.stage == count_stage
-                            })
-                            .count()
-                    });
-                    if visible == total {
-                        visible.to_string()
-                    } else {
-                        format!("{visible} / {total}")
-                    }
-                })),
+                .child(crate::workflows::column_trigger(ui, stage.id.clone())),
         )
         .child(
             view()
@@ -71,7 +52,6 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
                 .child(
                     scroll()
                         .element_ref(&scroll_ref)
-                        .content_offset(position)
                         .flex_1()
                         .on_scroll(move |e: &ScrollEvent| {
                             state.scrolled(&id, e.offset.y.0);
@@ -81,6 +61,17 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
                             view()
                                 .relative()
                                 .w_full()
+                                .on_layout(move |_: &Bounds<Points>| {
+                                    if !restored.replace(true) && position.y.0 > 0. {
+                                        // Rows start at zero and receive measured transforms.
+                                        // Restore only after their first native layout: mounting
+                                        // already scrolled can leave their text layers empty.
+                                        spawn(async move {
+                                            next_frame().await;
+                                            scroll_ref.scroll_to(position, false);
+                                        });
+                                    }
+                                })
                                 .h(move || {
                                     px(state.layout.with(|l| {
                                         l.heights.get(&height_stage).copied().unwrap_or(0.) + 2.

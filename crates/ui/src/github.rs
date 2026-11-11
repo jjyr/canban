@@ -585,9 +585,6 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                 .flex_wrap()
                 .items_center()
                 .gap_2()
-                .child(action("Drafts", Variant::Quiet, move |_| {
-                    ui.navigate("drafts")
-                }))
                 .child(view().flex_1())
                 .child(action("Discard draft", Variant::Quiet, move |_| {
                     drafts::remove(ui, &key);

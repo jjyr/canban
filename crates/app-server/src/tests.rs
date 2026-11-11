@@ -786,9 +786,45 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
         "code",
     )
     .unwrap();
+    // A retained terminal can serve several assignments. Its old Develop
+    // observation stays live after Review exits, but no longer owns runtime.
+    app.call(
+        "comment.add",
+        json!({"card_id":card.id,"body":"@codex review"}),
+    )
+    .unwrap();
+    let run = admit(&app, &app.snapshot().unwrap().requests[0]);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut previous = run.clone();
+            previous.state = "continued".into();
+            previous.observed = Some(json!({"state":"live","status":{"state":"done"}}));
+            db.save(&previous)?;
+            let mut current = run.clone();
+            current.id = Attempt::key(&run.request_id, 2);
+            current.number = 2;
+            current.state = "completed".into();
+            current.observed = Some(json!({"state":"finished","exit_code":0}));
+            db.save(&current)?;
+            let mut request: Request = db.get(&run.request_id)?;
+            request.attempt = 2;
+            request.state = "completed".into();
+            db.save(&request)
+        })
+        .unwrap();
+    card = app
+        .snapshot()
+        .unwrap()
+        .cards
+        .into_iter()
+        .find(|c| c.id == card.id)
+        .unwrap();
     let preview = app
         .call("review.preview", json!({"card_id":card.id}))
         .unwrap();
+    assert_eq!(preview["merge_allowed"], true, "{preview}");
     let request = json!({"card_id":card.id,"revision":card.revision,"token":preview["token"],"request_key":"accept-once"});
     let accepted = app.call("review.merge", request.clone()).unwrap();
     assert_eq!(accepted["state"], "merged");
@@ -853,6 +889,58 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
     assert!(cwd.join("delivered").exists());
     assert!(!cwd.join("later-project-change").exists());
     assert_eq!(git(&["rev-parse", "HEAD"]), source_head);
+}
+
+#[test]
+fn review_still_blocks_live_disconnected_and_queued_work_after_handoff() {
+    let (_dir, app, _project, card) = setup();
+    app.call(
+        "comment.add",
+        json!({"card_id":card.id,"body":"@codex review"}),
+    )
+    .unwrap();
+    let run = admit(&app, &app.snapshot().unwrap().requests[0]);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut request: Request = db.get(&run.request_id)?;
+            request.state = "completed".into();
+            db.save(&request)?;
+            let mut previous = run.clone();
+            previous.state = "continued".into();
+            previous.observed = Some(json!({"state":"live"}));
+            db.save(&previous)?;
+            let mut current = run.clone();
+            current.id = Attempt::key(&run.request_id, 2);
+            current.number = 2;
+            current.state = "completed".into();
+            // A completion report or disconnected observation does not prove exit.
+            for connection in ["connected", "unavailable", "replaced"] {
+                current.connection_state = connection.into();
+                current.observed = Some(json!({"state":"live","status":{"state":"done"}}));
+                db.save(&current)?;
+                assert!(
+                    super::review::blocker(db, &card)?
+                        .unwrap()
+                        .contains("End active")
+                );
+            }
+            current.observed = Some(json!({"state":"finished"}));
+            db.save(&current)?;
+            assert!(super::review::blocker(db, &card)?.is_none());
+            for state in ["queued", "starting", "unknown"] {
+                request.state = state.into();
+                db.save(&request)?;
+                assert!(
+                    super::review::blocker(db, &card)?
+                        .unwrap()
+                        .contains("queued or uncertain")
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
 }
 
 #[test]

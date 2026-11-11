@@ -13,8 +13,11 @@ Command+Enter dispatches the same guarded create/save intent as the button.
 
 Drafts are saved independently of published Card content. Closing or navigating
 away retains a draft; only explicit confirmation updates a Card. A searchable Drafts screen
-restores new Cards and pending edits after restart. Explicit discard removes the
-draft. Existing optimistic Card revisions prevent overwriting concurrent edits.
+restores new Cards and pending edits after restart. Its sole entry is the counted
+Drafts button in the Board header; the list includes all Projects with ownership
+labels, keeps Board selected in the rail and provides an explicit return to Board.
+Explicit discard removes the draft. Existing optimistic Card revisions prevent
+overwriting concurrent edits.
 
 At-sign completion references configured Profiles. Hash completion searches
 local Cards and, only while the GitHub account is connected, the Project's
