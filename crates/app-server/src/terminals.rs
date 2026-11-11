@@ -243,17 +243,38 @@ impl AppServer {
                 env,
                 std::collections::BTreeMap::from([("canban.terminal".into(), item.id.clone())]),
             )?;
+            let address = receipt["address"]
+                .as_str()
+                .context("Terminal launch receipt has no address")?
+                .to_owned();
             runtime.owner_core_id = if runtime.machine == "local" {
                 runtime.core_id.clone()
             } else {
                 Some(runtime.machine.clone())
             };
-            runtime.terminal = Some(
-                receipt["address"]
-                    .as_str()
-                    .context("Terminal launch receipt has no address")?
-                    .into(),
-            );
+            runtime.terminal = Some(address.clone());
+            // Seed the in-memory inventory immediately so an observe_terminals pass
+            // racing ahead of Herdr's async "created" subscription event does not
+            // transiently downgrade connection -> "unavailable" (read_only = true).
+            {
+                let mut inv = self.inventory.lock().unwrap();
+                if let Some(core_id) = &runtime.core_id
+                    && inv.core == *core_id
+                {
+                    let key = inv.address(&address);
+                    inv.records.entry(key.clone()).or_insert_with(|| {
+                        let mut seeded = receipt.clone();
+                        seeded["address"] = json!(key);
+                        if seeded["state"].is_null() {
+                            seeded["state"] = json!("live");
+                        }
+                        if seeded["cwd"].is_null() {
+                            seeded["cwd"] = json!(cwd);
+                        }
+                        seeded
+                    });
+                }
+            }
             Ok(())
         })();
         match result {
@@ -504,7 +525,12 @@ impl AppServer {
                         runtime.error = Some(format!("{e:#}"));
                     }
                     _ if runtime.state != "finished" => {
-                        runtime.connection = "unavailable".into();
+                        // Guard against async subscription lag immediately after launch.
+                        let fresh_launch = runtime.connection == "connected"
+                            && now().saturating_sub(item.created_at) < 3_000;
+                        if !fresh_launch {
+                            runtime.connection = "unavailable".into();
+                        }
                     }
                     _ => {}
                 }
@@ -570,5 +596,70 @@ impl AppServer {
                         .and_then(|c| c.cwd.as_deref())
                         .is_none_or(|cwd| self.ops(owner).c_contains(worktree, cwd))
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freshly_launched_terminal_stays_connected_before_subscription_catches_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+        app.observer_running.store(true, Ordering::SeqCst);
+        {
+            let mut inv = app.inventory.lock().unwrap();
+            inv.core = "core-live".into();
+            inv.last_at = now();
+        }
+        let created = now();
+        let entry = TerminalEntry {
+            id: "shell-fresh".into(),
+            conversation_id: None,
+            number: 1,
+            name: None,
+            manual_number: Some(1),
+            created_at: created,
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: Some("core-live".into()),
+                core_id: Some("core-live".into()),
+                terminal: Some("local/tty-1".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+            }),
+        };
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| db.save(&entry))
+            .unwrap();
+
+        // While within the launch grace window, async inventory lag must not mark it unavailable.
+        app.observe_terminals().unwrap();
+        let s = app.snapshot().unwrap();
+        assert_eq!(
+            s.terminals[0].runtime.as_ref().unwrap().connection,
+            "connected"
+        );
+
+        // Once older than the launch grace window and still absent from inventory, it becomes unavailable.
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut stale: TerminalEntry = db.get("shell-fresh")?;
+                stale.created_at = created.saturating_sub(5_000);
+                db.save(&stale)
+            })
+            .unwrap();
+        app.observe_terminals().unwrap();
+        let s2 = app.snapshot().unwrap();
+        assert_eq!(
+            s2.terminals[0].runtime.as_ref().unwrap().connection,
+            "unavailable"
+        );
     }
 }

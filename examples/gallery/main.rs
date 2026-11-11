@@ -84,9 +84,12 @@ fn controls() -> impl IntoElement {
                 .child(profiles::registry(profile_fixture))
                 .child(canban_ui::components::workflow::run_view(fixtures::workflow()))
                 .child(review::diff_panel(fixtures::review()))
+                .child(canban_ui::utilities::terminal_settings(ui))
                 .child(
                     panel().child(label("Native libghostty terminal")).child(
                         native("canban/terminal")
+                            .prop("theme", canban_ui::utilities::terminal_theme)
+                            .prop("font", move || canban_ui::utilities::terminal_font(ui))
                             .prop("content", json!(fixtures::TERMINAL))
                             .prop("read_only", json!(true))
                             .h(px(320.0)),

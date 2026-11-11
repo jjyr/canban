@@ -91,9 +91,48 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 }).into_element();
             };
             let Some(app)=crate::APP.get() else {
-                return native("canban/terminal").prop("theme",crate::utilities::terminal_theme).prop("ui_command_keys",json!(["o","n","/","t","w","[","]","{","}"])).prop("focus",move||json!({"ticket":ui.terminal_focus.get(),"enabled":!ui.quick_open.get() && ui.utility_popup.get().is_empty() && ui.terminal_rename.get().is_none()})).key(run["id"].as_str().unwrap_or("").to_owned()).prop("content",json!("Canban native Terminal\r\nGallery preview · no Core connection\r\n")).prop("read_only",json!(true)).flex_1().min_h(px(0.)).into_element();
+                return native("canban/terminal")
+                    .prop("theme", crate::utilities::terminal_theme)
+                    .prop("font", move || crate::utilities::terminal_font(ui))
+                    .prop("ui_command_keys", json!(["o","n","/","t","w","[","]","{","}"]))
+                    .prop("focus", move || {
+                        json!({
+                            "ticket": ui.terminal_focus.get(),
+                            "enabled": !ui.quick_open.get()
+                                && ui.utility_popup.get().is_empty()
+                                && ui.terminal_rename.get().is_none()
+                        })
+                    })
+                    .key(run["id"].as_str().unwrap_or("").to_owned())
+                    .prop("content", json!(concat!(
+                        "\x1b[1;36mCanban native Terminal\x1b[0m · Gallery preview (no Core connection)\r\n",
+                        "Styles: \x1b[1mBold\x1b[0m · \x1b[3mItalic\x1b[0m · \x1b[4:3;58;2;255;105;97mCurly underline\x1b[0m · 世界 · ░▒▓█\r\n",
+                        "Links : https://canban.dev · \x1b]8;;https://ghostty.org\x07libghostty-vt\x1b]8;;\x07\r\n",
+                    )))
+                    .prop("read_only", json!(true))
+                    .flex_1()
+                    .min_h(px(0.))
+                    .into_element();
             };
-            native("canban/terminal").prop("theme",crate::utilities::terminal_theme).prop("ui_command_keys",json!(["o","n","/","t","w","[","]","{","}"])).prop("focus",move||json!({"ticket":ui.terminal_focus.get(),"enabled":!ui.quick_open.get() && ui.utility_popup.get().is_empty() && ui.terminal_rename.get().is_none()})).key(run["id"].as_str().unwrap_or("").to_owned()).prop("binding",json!({"config":app.config(),"terminal":run["terminal"],"core_id":run["core_id"]})).prop("read_only",run["read_only"].clone()).prop("input_status",run["input_status"].clone()).flex_1().min_h(px(0.)).into_element()
+            native("canban/terminal")
+                .prop("theme", crate::utilities::terminal_theme)
+                .prop("font", move || crate::utilities::terminal_font(ui))
+                .prop("ui_command_keys", json!(["o","n","/","t","w","[","]","{","}"]))
+                .prop("focus", move || {
+                    json!({
+                        "ticket": ui.terminal_focus.get(),
+                        "enabled": !ui.quick_open.get()
+                            && ui.utility_popup.get().is_empty()
+                            && ui.terminal_rename.get().is_none()
+                    })
+                })
+                .key(run["id"].as_str().unwrap_or("").to_owned())
+                .prop("binding", json!({"config":app.config(),"terminal":run["terminal"],"core_id":run["core_id"]}))
+                .prop("read_only", run["read_only"].clone())
+                .prop("input_status", run["input_status"].clone())
+                .flex_1()
+                .min_h(px(0.))
+                .into_element()
         }))
         .child(when(move||ui.terminal_details.get() && binding.get().is_some(),move||scroll().h(px(220.)).border_t_1().border_color(BORDER).child(view().p_4().gap_2().child(action("Hide details",Variant::Quiet,move |_|ui.terminal_details.set(false))).child(context(ui)))))
 }

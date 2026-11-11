@@ -82,26 +82,187 @@ fn refresh(ui: Ui) {
         }
     });
 }
-pub fn configure(ui: Ui, theme: String) {
+pub const DEFAULT_TERMINAL_FONT_SIZE: u16 = 13;
+pub const MIN_TERMINAL_FONT_SIZE: u16 = 9;
+pub const MAX_TERMINAL_FONT_SIZE: u16 = 32;
+
+pub fn configure_preferences(ui: Ui, patch: Value) {
     if crate::APP.get().is_none() {
-        ui.utility
-            .update(|v| v["preferences"]["theme"] = json!(theme));
+        ui.utility.update(|v| {
+            if let Some(obj) = patch.as_object() {
+                for (k, val) in obj {
+                    if val.is_null() {
+                        if let Some(prefs) = v["preferences"].as_object_mut() {
+                            prefs.remove(k);
+                        }
+                    } else {
+                        v["preferences"][k] = val.clone();
+                    }
+                }
+            }
+        });
         return;
     }
     ui.utility_epoch.update(|n| *n += 1);
-    dispatch_complete(
-        ui,
-        "utilities.configure",
-        json!({"theme":theme}),
-        move |r| {
-            if let Ok(v) = r {
-                ui.utility_epoch.update(|n| *n += 1);
-                ui.utility.set(v);
-            } else {
-                ui.theme_preview.set(None);
-            }
-        },
-    );
+    dispatch_complete(ui, "utilities.configure", patch, move |r| {
+        if let Ok(v) = r {
+            ui.utility_epoch.update(|n| *n += 1);
+            ui.utility.set(v);
+        } else {
+            ui.theme_preview.set(None);
+        }
+    });
+}
+
+pub fn configure(ui: Ui, theme: String) {
+    configure_preferences(ui, json!({"theme":theme}));
+}
+
+pub fn terminal_font(ui: Ui) -> Value {
+    ui.utility.with(|v| {
+        let family = v["preferences"]["terminal_font_family"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let size = v["preferences"]["terminal_font_size"]
+            .as_u64()
+            .map(|n| (n as u16).clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE))
+            .unwrap_or(DEFAULT_TERMINAL_FONT_SIZE);
+        json!({"family":family,"size":size})
+    })
+}
+
+pub fn terminal_settings(ui: Ui) -> impl IntoElement {
+    let catalog = canban_terminal::installed_fonts();
+    let mono_count = catalog.monospaced.len();
+    let adjust_size = move |delta: i32| {
+        let current = ui.utility.with_untracked(|v| {
+            v["preferences"]["terminal_font_size"]
+                .as_u64()
+                .map(|n| n as i32)
+                .unwrap_or(i32::from(DEFAULT_TERMINAL_FONT_SIZE))
+        });
+        let next = (current + delta).clamp(
+            i32::from(MIN_TERMINAL_FONT_SIZE),
+            i32::from(MAX_TERMINAL_FONT_SIZE),
+        ) as u16;
+        let payload = if next == DEFAULT_TERMINAL_FONT_SIZE {
+            json!({"terminal_font_size":null})
+        } else {
+            json!({"terminal_font_size":next})
+        };
+        configure_preferences(ui, payload);
+    };
+
+    settings_section(
+        "Terminal",
+        "Font family and size apply immediately to open Terminals without reconnecting.",
+    )
+    .child(settings_field(
+        "Font family",
+        &format!(
+            "Choose from {mono_count} installed monospaced font families on this Mac (or System Mono)."
+        ),
+        view()
+            .flex_row()
+            .items_center()
+            .flex_wrap()
+            .gap_2()
+            .child(
+                action(
+                    move || {
+                        let current = ui.utility.with(|v| {
+                            v["preferences"]["terminal_font_family"]
+                                .as_str()
+                                .unwrap_or("")
+                                .trim()
+                                .to_owned()
+                        });
+                        if current.is_empty() {
+                            "System Mono ▾".into()
+                        } else {
+                            format!("{current} ▾")
+                        }
+                    },
+                    Variant::Secondary,
+                    move |_| open(ui, "terminal-font"),
+                )
+                .accessibility_label("Choose terminal font family")
+                .disabled(move || ui.pending.get()),
+            )
+            .child(when(
+                move || {
+                    ui.utility.with(|v| {
+                        v["preferences"]["terminal_font_family"]
+                            .as_str()
+                            .is_some_and(|s| !s.trim().is_empty())
+                    })
+                },
+                move || {
+                    compact_action("Use System Mono", Variant::Quiet, move |_| {
+                        configure_preferences(ui, json!({"terminal_font_family":null}));
+                    })
+                    .disabled(move || ui.pending.get())
+                },
+            )),
+    ))
+    .child(settings_field(
+        "Font size",
+        "Point size for terminal cells (9–32 pt).",
+        view()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(
+                compact_action("−", Variant::Secondary, move |_| adjust_size(-1)).disabled(
+                    move || {
+                        ui.pending.get()
+                            || ui.utility.with(|v| {
+                                v["preferences"]["terminal_font_size"]
+                                    .as_u64()
+                                    .unwrap_or(u64::from(DEFAULT_TERMINAL_FONT_SIZE))
+                                    <= u64::from(MIN_TERMINAL_FONT_SIZE)
+                            })
+                    },
+                ),
+            )
+            .child(label(move || {
+                let sz = ui.utility.with(|v| {
+                    v["preferences"]["terminal_font_size"]
+                        .as_u64()
+                        .unwrap_or(u64::from(DEFAULT_TERMINAL_FONT_SIZE))
+                });
+                format!("{sz} pt")
+            }))
+            .child(
+                compact_action("+", Variant::Secondary, move |_| adjust_size(1)).disabled(
+                    move || {
+                        ui.pending.get()
+                            || ui.utility.with(|v| {
+                                v["preferences"]["terminal_font_size"]
+                                    .as_u64()
+                                    .unwrap_or(u64::from(DEFAULT_TERMINAL_FONT_SIZE))
+                                    >= u64::from(MAX_TERMINAL_FONT_SIZE)
+                            })
+                    },
+                ),
+            )
+            .child(
+                compact_action("Reset font", Variant::Quiet, move |_| {
+                    configure_preferences(
+                        ui,
+                        json!({"terminal_font_family":null,"terminal_font_size":null}),
+                    );
+                })
+                .disabled(move || {
+                    ui.pending.get()
+                        || ui.utility.with(|v| {
+                            v["preferences"]["terminal_font_family"].is_null()
+                                && v["preferences"]["terminal_font_size"].is_null()
+                        })
+                }),
+            ),
+    ))
 }
 pub fn usage(ui: Ui, machine: String, force: bool) {
     let Some(app) = crate::APP.get().cloned() else {

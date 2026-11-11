@@ -1,6 +1,10 @@
 //! Desktop preferences, host power assertion and public subscription readings.
 use super::*;
 use serde::{Deserialize, Serialize};
+pub const DEFAULT_TERMINAL_FONT_SIZE: u16 = 13;
+pub const MIN_TERMINAL_FONT_SIZE: u16 = 9;
+pub const MAX_TERMINAL_FONT_SIZE: u16 = 32;
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(from = "SavedPreferences")]
 struct Preferences {
@@ -9,6 +13,10 @@ struct Preferences {
     notification_sound: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_font_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terminal_font_size: Option<u16>,
 }
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -18,9 +26,21 @@ struct SavedPreferences {
     // Retire appearance/palette modes while preserving the optional Project ID.
     palette: Option<String>,
     notification_sound: Option<bool>,
+    terminal_font_family: Option<String>,
+    terminal_font_size: Option<u16>,
 }
 fn enabled(value: &bool) -> bool {
     *value
+}
+fn normalize_font_family(value: Option<String>) -> Option<String> {
+    value
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty() && s.chars().count() <= 80 && !s.chars().any(char::is_control))
+}
+fn normalize_font_size(value: Option<u16>) -> Option<u16> {
+    value
+        .filter(|&sz| (MIN_TERMINAL_FONT_SIZE..=MAX_TERMINAL_FONT_SIZE).contains(&sz))
+        .filter(|&sz| sz != DEFAULT_TERMINAL_FONT_SIZE)
 }
 impl From<SavedPreferences> for Preferences {
     fn from(saved: SavedPreferences) -> Self {
@@ -29,6 +49,8 @@ impl From<SavedPreferences> for Preferences {
             theme: canban_themes::resolve(&requested).id.into(),
             last_project: saved.last_project,
             notification_sound: saved.notification_sound.unwrap_or(true),
+            terminal_font_family: normalize_font_family(saved.terminal_font_family),
+            terminal_font_size: normalize_font_size(saved.terminal_font_size),
         }
     }
 }
@@ -38,6 +60,8 @@ impl Default for Preferences {
             theme: canban_themes::DEFAULT.into(),
             last_project: None,
             notification_sound: true,
+            terminal_font_family: None,
+            terminal_font_size: None,
         }
     }
 }
@@ -123,8 +147,10 @@ impl AppServer {
                 ensure!(
                     p.get("theme").is_some()
                         || p.get("last_project").is_some()
-                        || p.get("notification_sound").is_some(),
-                    "theme, last_project or notification_sound required"
+                        || p.get("notification_sound").is_some()
+                        || p.get("terminal_font_family").is_some()
+                        || p.get("terminal_font_size").is_some(),
+                    "theme, last_project, notification_sound, terminal_font_family or terminal_font_size required"
                 );
                 if let Some(sound) = p.get("notification_sound") {
                     ensure!(sound.is_boolean(), "notification_sound must be a boolean");
@@ -146,6 +172,30 @@ impl AppServer {
                         let _: Project = self.store.lock().unwrap().db().get(id)?;
                     }
                 }
+                if let Some(family) = p.get("terminal_font_family") {
+                    ensure!(
+                        family.is_null() || family.is_string(),
+                        "terminal_font_family must be a string or null"
+                    );
+                    if let Some(s) = family.as_str() {
+                        let trimmed = s.trim();
+                        ensure!(
+                            trimmed.chars().count() <= 80 && !trimmed.chars().any(char::is_control),
+                            "Use at most 80 printable characters for terminal font family"
+                        );
+                    }
+                }
+                if let Some(size) = p.get("terminal_font_size") {
+                    ensure!(
+                        size.is_null()
+                            || size.as_u64().is_some_and(|n| {
+                                (u64::from(MIN_TERMINAL_FONT_SIZE)
+                                    ..=u64::from(MAX_TERMINAL_FONT_SIZE))
+                                    .contains(&n)
+                            }),
+                        "terminal_font_size must be an integer between {MIN_TERMINAL_FONT_SIZE} and {MAX_TERMINAL_FONT_SIZE} or null"
+                    );
+                }
                 let mut prefs = self.utilities.preferences.lock().unwrap();
                 let mut next = prefs.clone();
                 if let Some(sound) = p["notification_sound"].as_bool() {
@@ -156,6 +206,13 @@ impl AppServer {
                 }
                 if let Some(project) = p.get("last_project") {
                     next.last_project = project.as_str().map(str::to_owned);
+                }
+                if let Some(family) = p.get("terminal_font_family") {
+                    next.terminal_font_family =
+                        normalize_font_family(family.as_str().map(str::to_owned));
+                }
+                if let Some(size) = p.get("terminal_font_size") {
+                    next.terminal_font_size = normalize_font_size(size.as_u64().map(|n| n as u16));
                 }
                 let changed = next != *prefs;
                 if changed {
@@ -324,5 +381,55 @@ mod tests {
             // Loading does not rewrite an existing configuration.
             assert_eq!(std::fs::read(path).unwrap(), bytes);
         }
+    }
+    #[test]
+    fn terminal_font_preferences_validate_persist_and_reset_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+
+        app.call(
+            "utilities.configure",
+            json!({"terminal_font_family":"  JetBrains Mono  ","terminal_font_size":15}),
+        )
+        .unwrap();
+
+        assert!(
+            app.call("utilities.configure", json!({"terminal_font_size":6}))
+                .is_err()
+        );
+        assert!(
+            app.call("utilities.configure", json!({"terminal_font_size":48}))
+                .is_err()
+        );
+        assert!(
+            app.call(
+                "utilities.configure",
+                json!({"terminal_font_family":"bad\nname"})
+            )
+            .is_err()
+        );
+
+        drop(app);
+        let reopened = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+        assert_eq!(
+            reopened.call("utilities.state", json!({})).unwrap()["preferences"],
+            json!({
+                "theme":"canban",
+                "terminal_font_family":"JetBrains Mono",
+                "terminal_font_size":15
+            })
+        );
+
+        reopened
+            .call(
+                "utilities.configure",
+                json!({"terminal_font_family":"","terminal_font_size":DEFAULT_TERMINAL_FONT_SIZE}),
+            )
+            .unwrap();
+        assert_eq!(
+            reopened.call("utilities.state", json!({})).unwrap()["preferences"],
+            json!({"theme":"canban"})
+        );
     }
 }

@@ -46,6 +46,7 @@ fn settings(ui: Ui) -> impl IntoElement {
     layout("Settings", "Application preferences and Agent configuration.")
         .child(scroll().flex_1().min_h(px(0.)).child(view().w_full().max_w(px(880.)).min_w(px(0.)).gap_4()
             .child(crate::utilities::settings(ui))
+            .child(crate::utilities::terminal_settings(ui))
             .child(crate::updates::settings(ui))
             .child(crate::components::scheduling::settings(ui))
             .child(crate::machines::settings(ui))
