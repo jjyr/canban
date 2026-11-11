@@ -93,7 +93,14 @@ pub fn review() -> ReviewPreview {
     }
 }
 
-pub const TERMINAL: &str = "\x1b[1;36mCanban native terminal\x1b[0m\x1b[?25l\r\nUnicode: 世界 · café\r\nRead-only preview: selection and scroll use the production component.\r\n";
+pub const TERMINAL: &str = concat!(
+    "\x1b[1;38;2;110;210;255m╭─ Canban Native Terminal · libghostty-vt ──────────────────────╮\x1b[0m\r\n",
+    "\x1b[1;38;2;110;210;255m│\x1b[0m Styles : \x1b[1mBold\x1b[0m · \x1b[3mItalic\x1b[0m · \x1b[2mFaint\x1b[0m · \x1b[9mStrike\x1b[0m · \x1b[4:3;58;2;255;105;97mCurly diagnostic\x1b[0m     \x1b[1;38;2;110;210;255m│\x1b[0m\r\n",
+    "\x1b[1;38;2;110;210;255m│\x1b[0m CJK    : 世界你好 · café · Grid [中文对齐] · Blocks ░▒▓█▀▄▌▐  \x1b[1;38;2;110;210;255m│\x1b[0m\r\n",
+    "\x1b[1;38;2;110;210;255m│\x1b[0m Braille: ⠁⠃⠇⠏⠟⠿⣿ · Links: https://canban.dev (\x1b]8;;https://ghostty.org\x07OSC-8 link\x1b]8;;\x07)     \x1b[1;38;2;110;210;255m│\x1b[0m\r\n",
+    "\x1b[1;38;2;110;210;255m╰───────────────────────────────────────────────────────────────╯\x1b[0m\r\n",
+    "\x1b[32m❯\x1b[0m Select text, Cmd-hover links, or change Terminal font in Settings.\r\n",
+);
 
 pub fn workspace() -> canban_types::Snapshot {
     use canban_types::*;

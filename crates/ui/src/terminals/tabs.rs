@@ -501,6 +501,10 @@ pub fn rename_dialog(ui: Ui) -> impl IntoElement {
                 move |_| input.set_selection(0, name.get_untracked().encode_utf16().count() as u32),
             );
             let error = signal(String::new());
+            let close_rename = move || {
+                ui.terminal_rename.set(None);
+                ui.terminal_focus.update(|n| *n += 1);
+            };
             let save = move || {
                 let next = name.get_untracked();
                 if next.chars().count() > 80 || next.chars().any(char::is_control) {
@@ -513,7 +517,7 @@ pub fn rename_dialog(ui: Ui) -> impl IntoElement {
                             t.name = (!next.trim().is_empty()).then(|| next.trim().into());
                         }
                     });
-                    ui.terminal_rename.set(None);
+                    close_rename();
                     return;
                 }
                 let source = id.clone();
@@ -526,7 +530,7 @@ pub fn rename_dialog(ui: Ui) -> impl IntoElement {
                             return;
                         }
                         match r {
-                            Ok(_) => ui.terminal_rename.set(None),
+                            Ok(_) => close_rename(),
                             Err(e) => {
                                 let _ = error.try_set(e);
                             }
@@ -539,7 +543,7 @@ pub fn rename_dialog(ui: Ui) -> impl IntoElement {
                 .animation(canban_ui_kit::motion::modal)
                 .close_on_escape(true)
                 .close_on_backdrop_press(true)
-                .on_cancel(move || ui.terminal_rename.set(None))
+                .on_cancel(close_rename)
                 .child(
                     view()
                         .flex_1()
@@ -562,7 +566,7 @@ pub fn rename_dialog(ui: Ui) -> impl IntoElement {
                                         .child(chrome_button(
                                             Icon::Close,
                                             "Close rename dialog",
-                                            move |_| ui.terminal_rename.set(None),
+                                            move |_| close_rename(),
                                         )),
                                 )
                                 .child(
@@ -586,7 +590,7 @@ pub fn rename_dialog(ui: Ui) -> impl IntoElement {
                                         .gap_2()
                                         .child(action("Save", Variant::Primary, move |_| save()))
                                         .child(action("Cancel", Variant::Quiet, move |_| {
-                                            ui.terminal_rename.set(None)
+                                            close_rename()
                                         })),
                                 ),
                         ),

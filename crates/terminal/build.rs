@@ -19,13 +19,18 @@ fn zig_target(target: &str) -> &'static str {
 }
 
 fn main() {
-    cc::Build::new()
-        .file("src/native.m")
-        .flag("-fobjc-arc")
-        .flag("-Wno-incompatible-pointer-types")
-        .compile("canban-terminal-native");
-    println!("cargo:rustc-link-lib=framework=AppKit");
-    println!("cargo:rerun-if-changed=src/native.m");
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "macos" {
+        cc::Build::new()
+            .file("src/native.m")
+            .flag("-fobjc-arc")
+            .flag("-Wno-incompatible-pointer-types")
+            .compile("canban-terminal-native");
+        for fw in ["AppKit", "CoreText", "CoreGraphics", "Foundation"] {
+            println!("cargo:rustc-link-lib=framework={fw}");
+        }
+        println!("cargo:rerun-if-changed=src/native.m");
+    }
     println!("cargo:rerun-if-changed=src/ffi.h");
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let src = manifest

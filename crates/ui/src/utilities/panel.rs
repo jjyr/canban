@@ -6,7 +6,109 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
         move || {
             dynamic(move || {
                 let popup = ui.utility_popup.get();
-                if popup == "shortcuts" || popup == "card-project" {
+                if popup == "shortcuts" || popup == "card-project" || popup == "terminal-font" {
+                    if popup == "terminal-font" {
+                        let show_all = signal(false);
+                        let catalog = canban_terminal::installed_fonts();
+                        let mono_count = catalog.monospaced.len();
+                        let other_count = catalog.others.len();
+                        let choices = computed(move || {
+                            let query = ui.utility_query.get().to_lowercase();
+                            let all = show_all.get();
+                            let current = ui.utility.with(|v| {
+                                v["preferences"]["terminal_font_family"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_owned()
+                            });
+                            let mut rows = Vec::new();
+                            let default_title = "System Mono";
+                            let default_detail = "Default system monospaced font";
+                            if query.is_empty()
+                                || default_title.to_lowercase().contains(&query)
+                                || default_detail.to_lowercase().contains(&query)
+                            {
+                                rows.push(SearchChoice {
+                                    attention: 0,
+                                    id: "__system__".into(),
+                                    title: default_title.into(),
+                                    detail: default_detail.into(),
+                                    icon: Icon::Terminal,
+                                    selected: current.is_empty(),
+                                });
+                            }
+                            for fam in &catalog.monospaced {
+                                if query.is_empty() || fam.to_lowercase().contains(&query) {
+                                    rows.push(SearchChoice {
+                                        attention: 0,
+                                        id: fam.clone(),
+                                        title: fam.clone(),
+                                        detail: "Monospaced · Installed".into(),
+                                        icon: Icon::Terminal,
+                                        selected: current == *fam,
+                                    });
+                                }
+                            }
+                            if all {
+                                for fam in &catalog.others {
+                                    if query.is_empty() || fam.to_lowercase().contains(&query) {
+                                        rows.push(SearchChoice {
+                                            attention: 0,
+                                            id: fam.clone(),
+                                            title: fam.clone(),
+                                            detail: "Proportional · Installed".into(),
+                                            icon: Icon::Note,
+                                            selected: current == *fam,
+                                        });
+                                    }
+                                }
+                            }
+                            rows
+                        });
+                        return search_dialog(
+                            move || "Choose Terminal Font".into(),
+                            ui.utility_query,
+                            choices,
+                            move |id| {
+                                let payload = if id == "__system__" || id.trim().is_empty() {
+                                    json!({"terminal_font_family":null})
+                                } else {
+                                    json!({"terminal_font_family":id})
+                                };
+                                configure_preferences(ui, payload);
+                                close(ui);
+                            },
+                            move || close(ui),
+                            move || format!("Search {} installed monospaced fonts…", mono_count),
+                            view()
+                                .flex_row()
+                                .justify_between()
+                                .items_center()
+                                .gap_2()
+                                .child(muted(move || {
+                                    if show_all.get() {
+                                        format!(
+                                            "{} monospaced + {} other installed families",
+                                            mono_count, other_count
+                                        )
+                                    } else {
+                                        format!("{} monospaced families installed", mono_count)
+                                    }
+                                }))
+                                .child(compact_action(
+                                    move || {
+                                        if show_all.get() {
+                                            "Monospaced only".into()
+                                        } else {
+                                            format!("Include all fonts ({other_count})")
+                                        }
+                                    },
+                                    Variant::Quiet,
+                                    move |_| show_all.update(|v| *v = !*v),
+                                )),
+                        )
+                        .into_element();
+                    }
                     let project_mode = popup == "card-project";
                     let choices = computed(move || {
                         let query = ui.utility_query.get().to_lowercase();
