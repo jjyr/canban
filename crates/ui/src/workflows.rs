@@ -684,7 +684,7 @@ fn history_panel(ui: Ui) -> impl IntoElement {
         }
     });
     workflow_dialog(view().flex_1().min_h(px(0.)).gap_3()
-        .child(view().flex_row().items_center().gap_2().child(heading(move||format!("{} / History",state.history_name.get()))).child(view().flex_1()).child(action("Close",Variant::Quiet,move|_|state.history_open.set(false))))
+        .child(view().flex_row().items_center().gap_2().child(heading(move||format!("{} / History",state.history_name.get()))).child(view().flex_1()).child(chrome_button(Icon::Close,"Close workflow history",move|_|state.history_open.set(false))))
         .child(muted("Published SQL revisions are immutable. Loading an earlier version creates an editor draft; Save publishes it as a new version."))
         .child(view().flex_1().min_h(px(0.)).flex_row().gap_3().child(scroll().w(px(190.)).child(each(move||state.history.get(),|w|w.id.clone(),move|w,_|{let revision=w.get_untracked().revision;action(format!("Version {revision}"),Variant::Secondary,move|_|state.history_revision.set(revision)).bg(move||if state.history_revision.get()==revision{SELECTED}else{INSET})})))
             .child(view().flex_1().min_h(px(0.)).child(nsh_base::editor().value(move||Some(state.history.with(|h|h.iter().find(|w|w.revision==state.history_revision.get()).and_then(|w|w.source_yaml.clone()).unwrap_or_default()).into())).language(Some("yaml".into())).read_only(true).soft_wrap(true).line_numbers(true).indent_guides(true).folding(false).component_ref(&editor).accessibility_label("Historical Workflow YAML").size_full())))

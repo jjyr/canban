@@ -17,7 +17,7 @@ pub fn render(ui: Ui, event: Event, narrative: bool) -> impl IntoElement {
             .child(muted(event.message).flex_1().min_w(px(0.)))
             .child(muted(crate::components::activity::age(event.created_at)));
         if let Some(request) = event.request_id {
-            row = row.child(action("Agent ↗", Variant::Quiet, move |_| {
+            row = row.child(compact_action("Agent ↗", Variant::Quiet, move |_| {
                 crate::terminals::open_request(ui, &request)
             }));
         }
@@ -56,7 +56,7 @@ pub fn render(ui: Ui, event: Event, narrative: bool) -> impl IntoElement {
         .map(|a| format!("@{a}"))
         .unwrap_or(event.actor.clone());
     let actor = if let Some(request) = event.request_id.clone() {
-        action(format!("{actor} ↗"), Variant::Quiet, move |_| {
+        compact_action(format!("{actor} ↗"), Variant::Quiet, move |_| {
             crate::terminals::open_request(ui, &request)
         })
         .into_element()

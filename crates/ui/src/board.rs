@@ -21,6 +21,15 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         let _ = ui.project.get();
         ui.current_project()
     });
+    let has_github = computed(move || {
+        let current = ui.project.get();
+        project.get().is_some_and(|p| p.github.is_some())
+            || ui.snapshot.with(|s| {
+                s.cards
+                    .iter()
+                    .any(|c| c.project_id == current && c.github_issue().is_some())
+            })
+    });
     view()
         .flex_1()
         .min_w(px(0.))
@@ -40,7 +49,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .items_center()
                         .gap_1()
                         .flex_1()
-                        .min_w(px(0.))
+                        .min_w(px(120.))
                         .child(project_picker(ui))
                         .child(when(
                             move || project.get().is_some(),
@@ -129,7 +138,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 )),
         )
         .child(when(
-            move || project.get().is_some(),
+            move || has_github.get(),
             move || crate::github::filters::toolbar(ui),
         ))
         .child(dynamic(move || {
@@ -202,11 +211,11 @@ fn project_picker(ui: Ui) -> impl IntoElement {
             items.iter().any(|i| i.project_id == project && i.pending),
         )
     });
-    view().flex_1().min_w(px(0.)).child(
+    view().flex_1().min_w(px(100.)).child(
         nsh_base::button()
             .min_h(px(40.))
             .w_full()
-            .min_w(px(0.))
+            .min_w(px(80.))
             .max_w(px(560.))
             .flex_row()
             .items_center()

@@ -5,7 +5,7 @@ pub mod input;
 mod scrollbar;
 pub mod surface;
 pub mod tokens;
-pub use button::{Variant, action, action_with_icon};
+pub use button::{Variant, action, action_with_icon, compact_action};
 pub use checkbox::checkbox;
 pub use input::{bound_field, field};
 pub use surface::{badge, heading, label, muted, panel, read_text};

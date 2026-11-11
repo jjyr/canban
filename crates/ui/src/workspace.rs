@@ -94,16 +94,17 @@ fn review_workspace(ui: Ui) -> impl IntoElement {
                             .flex_wrap()
                             .justify_between()
                             .items_center()
-                            .p_3()
+                            .px_3()
+                            .py_2()
                             .bg(SURFACE)
                             .border_b_1()
                             .border_color(BORDER)
-                            .child(action("← Back", Variant::Quiet, move |_| ui.back()))
+                            .child(compact_action("← Back", Variant::Quiet, move |_| ui.back()))
                             .child(
                                 view()
                                     .flex_row()
                                     .gap_2()
-                                    .child(action(
+                                    .child(compact_action(
                                         if narrow || expanded {
                                             if show_card { "Show work" } else { "Show Card" }
                                         } else {
@@ -122,15 +123,19 @@ fn review_workspace(ui: Ui) -> impl IntoElement {
                                         },
                                     ))
                                     .child(
-                                        action("Restore split", Variant::Quiet, move |_| {
+                                        compact_action("Restore split", Variant::Quiet, move |_| {
                                             ui.expanded.set(false);
                                             ui.focused_card.set(false);
                                         })
                                         .disabled(!expanded),
                                     )
-                                    .child(action("Close panel", Variant::Quiet, move |_| {
-                                        ui.back()
-                                    })),
+                                    .child(compact_action(
+                                        "Close panel",
+                                        Variant::Quiet,
+                                        move |_| {
+                                            ui.back()
+                                        },
+                                    )),
                             ),
                     )
                     .child(body)

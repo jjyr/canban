@@ -35,23 +35,59 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
                 .collect::<Vec<_>>()
         })
     });
-    each(
-        move || entries(&events.get()),
-        |(e, _)| e.id.clone(),
-        move |item, _| {
-            let narrative = computed(move || item.get().1);
-            dynamic(move || {
-                let narrative = narrative.get();
-                let event = item.get_untracked().0;
-                let sequence = event.sequence;
+    let show_activity = signal(true);
+    let activity_count = computed(move || {
+        entries(&events.get())
+            .iter()
+            .filter(|(_, narrative)| !*narrative)
+            .count()
+    });
+    view()
+        .gap_2()
+        .child(when(
+            move || activity_count.get() > 3,
+            move || {
                 view()
-                    .on_layout(move |b: &Bounds<Points>| reading.reader.row(ui, sequence, *b))
-                    .child(crate::components::timeline_item::render(
-                        ui, event, narrative,
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(muted(move || {
+                        format!("Conversation · {} status events", activity_count.get())
+                    }))
+                    .child(compact_action(
+                        move || {
+                            if show_activity.get() {
+                                "Hide status events".into()
+                            } else {
+                                format!("Show status events ({})", activity_count.get())
+                            }
+                        },
+                        Variant::Quiet,
+                        move |_| show_activity.update(|v| *v = !*v),
                     ))
-            })
-        },
-    )
+            },
+        ))
+        .child(each(
+            move || entries(&events.get()),
+            |(e, _)| e.id.clone(),
+            move |item, _| {
+                let narrative = computed(move || item.get().1);
+                dynamic(move || {
+                    let narrative = narrative.get();
+                    let event = item.get_untracked().0;
+                    let sequence = event.sequence;
+                    if !narrative && !show_activity.get() {
+                        return view().into_element();
+                    }
+                    view()
+                        .on_layout(move |b: &Bounds<Points>| reading.reader.row(ui, sequence, *b))
+                        .child(crate::components::timeline_item::render(
+                            ui, event, narrative,
+                        ))
+                        .into_element()
+                })
+            },
+        ))
 }
 
 #[cfg(test)]

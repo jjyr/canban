@@ -17,6 +17,19 @@ pub fn action(
         .child(action_label(label, variant))
         .on_press(on_press)
 }
+/// Compact action for toolbars, inline status rows and secondary headers.
+pub fn compact_action(
+    label: impl IntoReactive<SharedString>,
+    variant: Variant,
+    on_press: impl Fn(&()) + 'static,
+) -> nsh_base::ButtonElement {
+    base(variant)
+        .min_h(px(26.0))
+        .px_2()
+        .rounded(px(5.0))
+        .child(action_label(label, variant))
+        .on_press(on_press)
+}
 /// The same action contract with a leading semantic icon.
 pub fn action_with_icon(
     kind: Icon,
@@ -57,7 +70,7 @@ fn base(variant: Variant) -> nsh_base::ButtonElement {
         Variant::Danger | Variant::Secondary => SURFACE,
         Variant::Quiet => CLEAR,
     };
-    let button = nsh_base::button()
+    nsh_base::button()
         .min_h(px(CONTROL_HEIGHT))
         .px_3()
         .justify_center()
@@ -79,10 +92,5 @@ fn base(variant: Variant) -> nsh_base::ButtonElement {
         })
         .active(|s| s.opacity(0.6))
         .focus(|s| s.border_color(ACCENT))
-        .disabled_style(|s| s.opacity(0.4));
-    if matches!(variant, Variant::Quiet) {
-        button.items_start().justify_center()
-    } else {
-        button
-    }
+        .disabled_style(|s| s.opacity(0.4))
 }

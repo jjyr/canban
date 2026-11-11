@@ -428,7 +428,14 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .min_h(px(0.))
                 .handle_accessibility_label("Resize Terminal sidebar")
                 .render_handle(|_: &nsh_base::ResizeHandleContext| {
-                    view().w(px(1.)).h_full().bg(BORDER)
+                    view()
+                        .w(px(5.))
+                        .h_full()
+                        .items_center()
+                        .justify_center()
+                        .hover(|s| s.bg(ACCENT))
+                        .active(|s| s.bg(ACCENT))
+                        .child(view().w(px(1.)).h_full().bg(BORDER))
                 })
                 .on_resize(move |sizes: &Vec<Points>| {
                     if !ui.narrow.get_untracked()

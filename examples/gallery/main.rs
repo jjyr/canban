@@ -552,6 +552,27 @@ pub fn Gallery() -> impl IntoElement {
                     scene.set("workspace".into()); ui.snapshot.set(fixtures::conversation());
                     ui.card.set("card-1".into()); ui.page.set("card".into());
                 }))
+                .child(action("Review delivery", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::workspace());
+                    ui.card.set("card-1".into());
+                    ui.review.set(Some(fixtures::review()));
+                    ui.page.set("review".into());
+                }))
+                .child(action("Delivered receipt", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    let mut snapshot = fixtures::workspace();
+                    snapshot.cards[0].delivery = Some(canban_types::Delivery {
+                        target_branch: "main".into(),
+                        commit: "91ab162fe5e5b9".into(),
+                        merged_at: canban_types::now(),
+                        request_key: "gallery-delivery".into(),
+                    });
+                    ui.snapshot.set(snapshot);
+                    ui.card.set("card-1".into());
+                    ui.review.set(None);
+                    ui.page.set("review".into());
+                }))
                 .child(action("Append reply", Variant::Quiet, move |_| {
                     ui.snapshot.update(|s| {
                         let mut event=fixtures::timeline();

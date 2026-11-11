@@ -130,9 +130,11 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                             .justify_between()
                                             .items_center()
                                             .child(label(title).font_weight(FontWeight::SEMIBOLD))
-                                            .child(action("Close", Variant::Quiet, move |_| {
-                                                close(ui)
-                                            })),
+                                            .child(chrome_button(
+                                                Icon::Close,
+                                                "Close panel",
+                                                move |_| close(ui),
+                                            )),
                                     )
                                     .child(
                                         scroll().flex_1().min_h(px(0.)).overflow_hidden().child(

@@ -24,6 +24,7 @@ pub struct Browser {
     pub detail_ticket: Signal<u64>,
     pub gh_status: Signal<Value>,
     pub filters: Signal<std::collections::BTreeMap<String, BoardFilter>>,
+    pub width: Signal<f32>,
 }
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BoardFilter {
@@ -61,6 +62,7 @@ impl Browser {
             detail_ticket: signal(0),
             gh_status: signal(json!({})),
             filters: signal(Default::default()),
+            width: signal(480.),
         }
     }
 }
@@ -335,24 +337,28 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             move || !b.error.get().is_empty(),
             move || notice(move || b.error.get(), Tone::Attention),
         ))
-        .child(
-            view()
-                .flex_row()
-                .gap_3()
-                .flex_1()
-                .min_h(px(0.))
-                .min_w(px(0.))
-                .child(list_panel(ui))
-                .child(when(
-                    move || b.reference.get().is_some(),
-                    move || {
-                        view()
-                            .flex_1()
-                            .min_w(px(320.))
-                            .child(super::detail::screen(ui))
-                    },
-                )),
-        )
+        .child(dynamic(move || {
+            let has_detail = b.reference.get().is_some();
+            let narrow = ui.narrow.get();
+            untracked(|| {
+                if has_detail {
+                    if narrow {
+                        super::detail::screen(ui).into_element()
+                    } else {
+                        canban_ui_kit::split(
+                            list_panel(ui).into_element(),
+                            super::detail::screen(ui).into_element(),
+                            b.width,
+                            280.,
+                            340.,
+                        )
+                        .into_element()
+                    }
+                } else {
+                    list_panel(ui).into_element()
+                }
+            })
+        }))
         .child(
             view()
                 .flex_row()
@@ -460,14 +466,25 @@ fn list_row(ui: Ui, row: Value) -> AnyElement {
         item["state"].as_str().unwrap_or("")
     };
     let open_ref = r.clone();
+    let selected_ref = r.clone();
+    let b = ui.github;
     let mut result = nsh_base::button()
         .w_full()
         .p_3()
         .gap_1()
         .items_start()
+        .rounded(px(RADIUS))
+        .bg(move || {
+            if selected_ref.is_some() && b.reference.get() == selected_ref {
+                SELECTED.resolve()
+            } else {
+                SURFACE.resolve()
+            }
+        })
         .border_b_1()
         .border_color(BORDER)
         .hover(|s| s.bg(INSET))
+        .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
         .accessibility_label(format!("Open GitHub item: {title}"))
         .on_press(move |_: &()| {
             if let Some(r) = &open_ref {

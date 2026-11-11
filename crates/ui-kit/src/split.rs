@@ -11,7 +11,16 @@ pub fn split(
     nsh_base::h_resizable()
         .flex_1()
         .min_h(px(0.0))
-        .render_handle(|_: &nsh_base::ResizeHandleContext| view().w(px(1.0)).h_full().bg(BORDER))
+        .render_handle(|_: &nsh_base::ResizeHandleContext| {
+            view()
+                .w(px(5.0))
+                .h_full()
+                .items_center()
+                .justify_center()
+                .hover(|s| s.bg(ACCENT))
+                .active(|s| s.bg(ACCENT))
+                .child(view().w(px(1.0)).h_full().bg(BORDER))
+        })
         .handle_accessibility_label("Resize workspace panels")
         .on_resize(move |sizes: &Vec<Points>| {
             if let Some(size) = sizes.first() {
@@ -63,9 +72,18 @@ pub fn reveal_split(
                 .min_w(px(0.))
                 .render_handle(move |_: &nsh_base::ResizeHandleContext| {
                     view()
-                        .w(move || px(if wide.get() { 1. } else { 0. }))
+                        .w(move || px(if wide.get() { 5. } else { 0. }))
                         .h_full()
-                        .bg(BORDER)
+                        .items_center()
+                        .justify_center()
+                        .hover(|s| s.bg(ACCENT))
+                        .active(|s| s.bg(ACCENT))
+                        .child(
+                            view()
+                                .w(move || px(if wide.get() { 1. } else { 0. }))
+                                .h_full()
+                                .bg(BORDER),
+                        )
                 })
                 .handle_accessibility_label("Resize workspace panels")
                 .on_resize(move |sizes: &Vec<Points>| {

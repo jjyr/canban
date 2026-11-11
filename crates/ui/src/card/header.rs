@@ -297,10 +297,12 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             }
             row = row.child(view().flex_1().min_w(px(0.)));
             if c.stage == "review" || stage.is_some_and(|t| t.require_human_review) {
-                row = row.child(action("Review", Variant::Quiet, move |_| review(ui)));
+                row = row.child(compact_action("Review", Variant::Quiet, move |_| {
+                    review(ui)
+                }));
             } else if c.human_gate.is_some() {
                 row = row.child(
-                    action("Continue workflow", Variant::Quiet, move |_| {
+                    compact_action("Continue workflow", Variant::Quiet, move |_| {
                         if let Some(c) = ui.current_card() {
                             dispatch(
                                 ui,
@@ -317,7 +319,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     view()
                         .tooltip(nsh_base::tooltip().child(label(reason)))
                         .child(
-                            action("Needs attention", Variant::Quiet, move |_| {
+                            compact_action("Needs attention", Variant::Quiet, move |_| {
                                 crate::overview::show_card_attention(
                                     ui,
                                     &untracked(|| ui.card_id()),

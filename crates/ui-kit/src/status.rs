@@ -80,15 +80,19 @@ pub fn status(value: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoEl
         )
 }
 pub fn notice(message: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoElement {
-    let color = match tone {
-        Tone::Danger => DANGER,
-        Tone::Attention => ATTENTION,
-        _ => MUTED,
+    let (bg, border, color) = match tone {
+        Tone::Danger => (DANGER_SURFACE, DANGER, DANGER),
+        Tone::Attention => (ATTENTION_SURFACE, ATTENTION, ATTENTION),
+        Tone::Success => (SUCCESS_SURFACE, SUCCESS, SUCCESS),
+        Tone::Info => (SELECTED, ACCENT, ACCENT),
+        Tone::Neutral => (INSET, BORDER, MUTED),
     };
     view()
         .px_3()
         .py_2()
-        .bg(INSET)
+        .bg(bg)
+        .border_1()
+        .border_color(border)
         .rounded(px(RADIUS))
         .child(text(message).text_size(px(BODY_SIZE)).text_color(color))
 }

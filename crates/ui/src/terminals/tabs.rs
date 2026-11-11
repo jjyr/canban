@@ -540,11 +540,24 @@ pub fn rename_dialog(ui: Ui) -> impl IntoElement {
                         .flex_1()
                         .items_center()
                         .justify_center()
-                        .bg(rgba(0x00000044))
+                        .bg(rgba(0x00000055))
                         .child(
                             panel()
                                 .w(px(360.))
-                                .child(label("Rename tab"))
+                                .border_1()
+                                .border_color(BORDER)
+                                .child(
+                                    view()
+                                        .flex_row()
+                                        .justify_between()
+                                        .items_center()
+                                        .child(label("Rename tab").font_weight(FontWeight::SEMIBOLD))
+                                        .child(chrome_button(
+                                            Icon::Close,
+                                            "Close rename dialog",
+                                            move |_| ui.terminal_rename.set(None),
+                                        )),
+                                )
                                 .child(
                                     field(name, "Custom name (optional)")
                                         .element_ref(&input)

@@ -75,6 +75,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         let mut area = view()
             .flex_1()
             .min_h(px(0.))
+            .pl_2()
             .gap_2()
             .child(
                 view()
@@ -88,9 +89,11 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         r.number.map(|n| format!(" #{n}")).unwrap_or_default()
                     )))
                     .child(view().flex_1())
-                    .child(action("Close", Variant::Quiet, move |_| {
-                        b.reference.set(None)
-                    })),
+                    .child(chrome_button(
+                        Icon::Close,
+                        "Close GitHub detail",
+                        move |_| b.reference.set(None),
+                    )),
             )
             .child(
                 view()

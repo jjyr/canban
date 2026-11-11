@@ -68,7 +68,23 @@ pub fn archive() -> canban_types::Snapshot {
 }
 
 pub fn review() -> ReviewPreview {
-    ReviewPreview {card_id:"gallery".into(),revision:1,target_branch:"main".into(),target_head:"0123456789".into(),card_head:"abcdef0123".into(),source_branch:"main".into(),worktree:"/example/Card".into(),files:vec!["src/example.rs".into()],patch:"diff --git a/src/example.rs b/src/example.rs\n--- a/src/example.rs\n+++ b/src/example.rs\n@@ -1 +1 @@\n-// old\n+// Reviewed · 中文".into(),truncated:false,dirty:true,conflicts:vec![],token:String::new(),merge_allowed:true,reason:None}
+    ReviewPreview {
+        card_id: "card-1".into(),
+        revision: 1,
+        target_branch: "main".into(),
+        target_head: "0123456789".into(),
+        card_head: "abcdef0123".into(),
+        source_branch: "main".into(),
+        worktree: "/example/Card".into(),
+        files: vec!["src/example.rs".into(), "src/review.rs".into()],
+        patch: "diff --git a/src/example.rs b/src/example.rs\n--- a/src/example.rs\n+++ b/src/example.rs\n@@ -1 +1,2 @@\n-// old\n+// Reviewed · 中文\n+pub fn ready() {}\ndiff --git a/src/review.rs b/src/review.rs\n--- a/src/review.rs\n+++ b/src/review.rs\n@@ -1 +1 @@\n-const MERGED: bool = false;\n+const MERGED: bool = true;".into(),
+        truncated: false,
+        dirty: true,
+        conflicts: vec![],
+        token: "gallery-token".into(),
+        merge_allowed: true,
+        reason: None,
+    }
 }
 
 pub const TERMINAL: &str = "\x1b[1;36mCanban native terminal\x1b[0m\x1b[?25l\r\nUnicode: 世界 · café\r\nRead-only preview: selection and scroll use the production component.\r\n";

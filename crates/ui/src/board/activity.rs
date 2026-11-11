@@ -99,16 +99,30 @@ pub fn strip(ui: Ui) -> impl IntoElement {
 fn chip(ui: Ui, row: ReadSignal<Summary>) -> impl IntoElement {
     view().window_drag(false).flex_shrink_0().child(
         nsh_base::button()
-            .h(px(28.))
+            .h(px(26.))
             .w(move || px(model::chip_width(&row.get())))
             .min_w(px(0.))
             .px_2()
             .flex_row()
             .items_center()
-            .gap_2()
+            .gap_1()
             .rounded(px(5.))
-            .bg(INSET)
-            .hover(|s| s.bg(CARD_HOVER))
+            .bg(move || {
+                if row.get().attention > 0 {
+                    INSET.resolve()
+                } else {
+                    CLEAR.resolve()
+                }
+            })
+            .border_1()
+            .border_color(move || {
+                if row.get().attention > 0 {
+                    BORDER.resolve()
+                } else {
+                    CLEAR.resolve()
+                }
+            })
+            .hover(|s| s.bg(INSET))
             .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
             .accessibility_label(move || {
                 let row = row.get();
@@ -124,9 +138,17 @@ fn chip(ui: Ui, row: ReadSignal<Summary>) -> impl IntoElement {
                     .into(),
                 )
             })
+            .child(icon(Icon::Folder).w(px(12.)).h(px(12.)).flex_shrink_0())
             .child(
                 label(move || row.get().name)
                     .text_size(px(12.))
+                    .text_color(move || {
+                        if row.get().attention > 0 {
+                            TEXT.resolve()
+                        } else {
+                            MUTED.resolve()
+                        }
+                    })
                     .font_weight(FontWeight::MEDIUM)
                     .min_w(px(0.))
                     .flex_1()

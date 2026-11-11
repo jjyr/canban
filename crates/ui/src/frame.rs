@@ -80,15 +80,24 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             move || {
                 view()
                     .absolute()
-                    .bottom(px(16.))
+                    .bottom(px(44.))
                     .right(px(16.))
                     .max_w(px(520.))
-                    .p_3()
+                    .px_3()
+                    .py_2()
                     .bg(canban_ui_kit::tokens::ATTENTION_SURFACE)
+                    .border_1()
+                    .border_color(canban_ui_kit::tokens::ATTENTION)
                     .rounded(px(8.))
                     .flex_row()
+                    .items_center()
                     .gap_2()
-                    .child(canban_ui_kit::muted(move || ui.operation_error.get()))
+                    .child(
+                        canban_ui_kit::label(move || ui.operation_error.get())
+                            .text_color(canban_ui_kit::tokens::ATTENTION)
+                            .flex_1()
+                            .min_w(px(0.)),
+                    )
                     .child(canban_ui_kit::chrome_button(
                         canban_ui_kit::Icon::Close,
                         "Dismiss message",

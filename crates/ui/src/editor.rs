@@ -87,7 +87,7 @@ pub fn draft_status(ui: Ui, key: String, _draft: Signal<Draft>) -> impl IntoElem
 }
 /// The workspace changes width without navigating or replacing the source.
 pub fn expand(ui: Ui) -> impl IntoElement {
-    action(
+    compact_action(
         move || {
             if ui.card_standalone.get() {
                 "Collapse editor"
