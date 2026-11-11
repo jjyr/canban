@@ -228,3 +228,16 @@ verifies exact saved completion text and real default-browser navigation; see
 `ui::workflows` owns the Project source editor, SQL history/restore-as-draft and Edit with agent panel. Native NSH editors preserve text selection and local undo; UI state retains per-Project drafts across navigation. Prompt preview is read-only, scrollable and selectable, with explicit Select all/Copy and an inline manual-copy fallback. Source validation/conflict errors preserve the draft. Successful publication quietly clears the unsaved marker; active-version numbers stay out of the main editor. The top-right action is Agent-icon Edit with agent, New workflow sits below the source list, and Save/Command+S share eligibility and publication. NSH YAML highlighting, two-space indentation, line numbers and soft wrapping are enabled. History and Agent panels use native modal layers with focused-editor Escape dismissal, caret restoration and inline configuration-launch errors. `workflow-agent`, `workflows`, `workflows-conflict` and `column-automations` Gallery scenes compose production components with deterministic fixtures.
 
 Column trigger icons use `Icon::Trigger` and the pure `workflow-engine::source::column_details` projection. Only click opens details and links to Project source. NSH Popover owns overlay placement, clipping, Escape/outside dismissal and focus return, so native Card text cannot paint over the opaque panel. UI Kit owns the Lucide workflow-node icon and a tooltip-free compact action, not Workflow interpretation. Configuration Agent entries are grouped under Project / Configuration in the existing Terminal inventory and offer Back to Workflows.
+
+## Card conversation refinement (2026-11-11)
+
+`card/header.rs` owns local/Issue/PR identity; `github/references.rs` owns the
+saved-content reference projection. `components/timeline_item.rs` accepts an
+Event and narrative classification, rendering shared author/time/Markdown
+message chrome or a compact system row. It owns local full-body expansion and
+report loading; navigation retains explicit request identity. The Card Timeline
+owns adjacent routine-event grouping, read coordinates and execution disclosure.
+`MarkdownInput` keeps nonempty compact drafts expanded on blur for every consumer.
+Gallery scenes `card-local`, `card-issue`, and `card-pr` cover narrow identity,
+references, long reports, routine groups, failures and historical details using
+production components. See [verification](card-conversation-acceptance-20261111.md).

@@ -24,88 +24,240 @@ pub fn entries(events: &[Event]) -> Vec<(Event, bool)> {
         })
         .collect()
 }
+/// Only known routine facts collapse; questions, failures and decisions stay visible.
+fn routine(event: &Event, narrative: bool) -> bool {
+    !narrative
+        && event.request_id.is_some()
+        && matches!(
+            event.kind.as_str(),
+            "execution.queued" | "execution.started" | "execution.attached" | "execution.reported"
+        )
+}
+fn groups(events: &[Event]) -> Vec<Vec<(Event, bool)>> {
+    let mut groups: Vec<Vec<(Event, bool)>> = Vec::new();
+    for (event, narrative) in entries(events) {
+        if routine(&event, narrative)
+            && let Some(last) = groups.last_mut()
+            && last
+                .iter()
+                .all(|(e, n)| routine(e, *n) && e.request_id == event.request_id)
+        {
+            last.push((event, narrative));
+        } else {
+            groups.push(vec![(event, narrative)]);
+        }
+    }
+    groups
+}
+fn execution(ui: Ui, reading: Reading, request_id: String) -> impl IntoElement {
+    dynamic(move || {
+        let request = ui.request.get();
+        if request != request_id {
+            return view().into_element();
+        }
+        let req = ui.snapshot.with(|s| {
+            s.requests
+                .iter()
+                .find(|r| r.id == request && r.card_id == ui.card_id())
+                .cloned()
+        });
+        if let Some(req) = req {
+            let request_id = req.id.clone();
+            let target = element_ref();
+            let pending = stored(false);
+            view()
+                .element_ref(&target)
+                .on_layout(move |_: &Bounds<Points>| {
+                    if reading.revealed_request.get() == request_id || pending.replace(true) {
+                        return;
+                    }
+                    let request_id = request_id.clone();
+                    ui.spawn(async move {
+                        next_frame().await;
+                        next_frame().await;
+                        if let Some(bounds) = reading.bounds(target).await
+                            && ui.request.get_untracked() == request_id
+                            && ui.card_id() == ui.card.get_untracked()
+                        {
+                            reading.revealed_request.replace(request_id);
+                            reading.follow.set(false);
+                            reading.scroll.scroll_to(
+                                Point::new(px(0.), px((bounds.origin.y.0 - 12.).max(0.))),
+                                false,
+                            );
+                        }
+                    });
+                })
+                .gap_2()
+                .child(compact_action(
+                    "Close execution details",
+                    Variant::Quiet,
+                    move |_| {
+                        reading.revealed_request.replace(String::new());
+                        ui.request.set(String::new());
+                        ui.clear_output();
+                    },
+                ))
+                .child(crate::components::run_panel(ui, req))
+                .child(when(
+                    move || !ui.output.get().is_empty(),
+                    move || crate::components::output_panel(ui),
+                ))
+                .into_element()
+        } else {
+            view().into_element()
+        }
+    })
+}
 pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
     let events = computed(move || {
-        let card = ui.card_id();
         ui.snapshot.with(|s| {
             s.events
                 .iter()
-                .filter(|e| e.card_id == card)
+                .filter(|e| e.card_id == ui.card_id())
                 .cloned()
                 .collect::<Vec<_>>()
         })
     });
-    let show_activity = signal(true);
-    let activity_count = computed(move || {
-        entries(&events.get())
-            .iter()
-            .filter(|(_, narrative)| !*narrative)
-            .count()
-    });
     view()
-        .gap_2()
-        .child(when(
-            move || activity_count.get() > 3,
-            move || {
-                view()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .child(muted(move || {
-                        format!("Conversation · {} status events", activity_count.get())
-                    }))
-                    .child(compact_action(
-                        move || {
-                            if show_activity.get() {
-                                "Hide status events".into()
-                            } else {
-                                format!("Show status events ({})", activity_count.get())
-                            }
-                        },
-                        Variant::Quiet,
-                        move |_| show_activity.update(|v| *v = !*v),
-                    ))
-            },
-        ))
+        .gap_3()
+        .child(muted("Activity"))
         .child(each(
-            move || entries(&events.get()),
-            |(e, _)| e.id.clone(),
+            move || groups(&events.get()),
+            |group| group[0].0.id.clone(),
             move |item, _| {
-                let narrative = computed(move || item.get().1);
+                let expanded = signal(false);
                 dynamic(move || {
-                    let narrative = narrative.get();
-                    let event = item.get_untracked().0;
-                    let sequence = event.sequence;
-                    if !narrative && !show_activity.get() {
-                        return view().into_element();
+                    let group = item.get();
+                    let targeted = group.iter().any(|(e, _)| {
+                        ui.card_event.get() == Some(e.sequence)
+                            || e.request_id.as_deref() == Some(ui.request.get().as_str())
+                    });
+                    let grouped = group.len() > 1;
+                    let visible = expanded.get() || targeted || !grouped;
+                    let tracked = group.iter().map(|(e, _)| e.sequence).collect::<Vec<_>>();
+                    let target = element_ref();
+                    let mut area =
+                        view()
+                            .element_ref(&target)
+                            .gap_1()
+                            .on_layout(move |_: &Bounds<Points>| {
+                                let tracked = tracked.clone();
+                                ui.spawn(async move {
+                                    let Some(bounds) = reading.bounds(target).await else {
+                                        return;
+                                    };
+                                    if reading.jump_ready.try_get().is_none() {
+                                        return;
+                                    }
+                                    for sequence in &tracked {
+                                        reading.reader.row(ui, *sequence, bounds);
+                                    }
+                                    if reading.jump_ready.get_untracked()
+                                        && ui
+                                            .card_event
+                                            .get_untracked()
+                                            .is_some_and(|target| tracked.contains(&target))
+                                        && ui.card_id() == ui.card.get_untracked()
+                                    {
+                                        ui.card_event.set(None);
+                                        expanded.set(true);
+                                        reading.follow.set(false);
+                                        reading.scroll.scroll_to(
+                                            Point::new(
+                                                px(0.),
+                                                px((bounds.origin.y.0 - 12.).max(0.)),
+                                            ),
+                                            false,
+                                        );
+                                    }
+                                });
+                            });
+                    if grouped {
+                        let actor = group[0].0.actor.trim_start_matches("agent:");
+                        area = area.child(
+                            compact_action(
+                                format!(
+                                    "{} {actor} · {} execution events",
+                                    if visible { "▾" } else { "▸" },
+                                    group.len()
+                                ),
+                                Variant::Quiet,
+                                move |_| expanded.update(|v| *v = !*v),
+                            )
+                            .self_start(),
+                        );
                     }
-                    view()
-                        .on_layout(move |b: &Bounds<Points>| {
-                            reading.reader.row(ui, sequence, *b);
-                            if reading.jump_ready.get_untracked()
-                                && ui.card_event.get_untracked() == Some(sequence)
-                                && ui.card_id() == ui.card.get_untracked()
-                            {
-                                ui.card_event.set(None);
-                                reading.follow.set(false);
-                                reading.scroll.scroll_to(
-                                    Point::new(px(0.), px((b.origin.y.0 - 12.).max(0.))),
-                                    false,
-                                );
-                            }
-                        })
-                        .child(crate::components::timeline_item::render(
-                            ui, event, narrative,
-                        ))
-                        .into_element()
+                    if visible {
+                        for (event, narrative) in &group {
+                            area = area.child(crate::components::timeline_item::render(
+                                ui,
+                                event.clone(),
+                                *narrative,
+                            ));
+                        }
+                    }
+                    // One detail owner per request, placed beside its earliest event.
+                    if let Some(request) = group[0].0.request_id.clone() {
+                        let first = events.with(|all| {
+                            all.iter()
+                                .filter(|e| e.request_id.as_ref() == Some(&request))
+                                .map(|e| e.sequence)
+                                .min()
+                        });
+                        if first == Some(group[0].0.sequence) {
+                            area = area.child(execution(ui, reading, request));
+                        }
+                    }
+                    area.into_element()
                 })
             },
         ))
+        .child(dynamic(move || {
+            let request = ui.request.get();
+            if !request.is_empty()
+                && !events.with(|all| all.iter().any(|e| e.request_id.as_ref() == Some(&request)))
+            {
+                execution(ui, reading, request).into_element()
+            } else {
+                view().into_element()
+            }
+        }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn grouping_preserves_decisions_comments_failures_and_request_boundaries() {
+        let make = |seq, kind: &str, request: &str| Event {
+            id: format!("e{seq}"),
+            sequence: seq,
+            project_id: "p".into(),
+            card_id: "c".into(),
+            kind: kind.into(),
+            actor: "agent:developer".into(),
+            message: kind.into(),
+            request_id: Some(request.into()),
+            data: serde_json::json!({}),
+            created_at: 1,
+        };
+        let rows = groups(&[
+            make(1, "execution.queued", "r"),
+            make(2, "execution.started", "r"),
+            make(3, "comment.created", "r"),
+            make(4, "execution.queued", "r"),
+            make(5, "execution.started", "other"),
+            make(6, "execution.failed", "other"),
+            make(7, "workflow.approved", "other"),
+            make(8, "execution.reported", "other"),
+        ]);
+        assert_eq!(
+            rows.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![2, 1, 1, 1, 1, 1, 1]
+        );
+        assert!(rows.last().unwrap()[0].1);
+    }
     #[test]
     fn explicit_report_identity_hides_the_body_echo_without_a_file() {
         let report = Event {

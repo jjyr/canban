@@ -16,8 +16,16 @@ pub fn render(ui: Ui, event: Event, narrative: bool) -> impl IntoElement {
             .child(muted("·"))
             .child(muted(event.message).flex_1().min_w(px(0.)))
             .child(muted(crate::components::activity::age(event.created_at)));
-        if let Some(request) = event.request_id {
-            row = row.child(compact_action("Agent ↗", Variant::Quiet, move |_| {
+        if let Some(request) = event.request_id
+            && !matches!(
+                event.kind.as_str(),
+                "execution.queued"
+                    | "execution.started"
+                    | "execution.attached"
+                    | "execution.reported"
+            )
+        {
+            row = row.child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
                 crate::terminals::open_request(ui, &request)
             }));
         }
@@ -55,39 +63,58 @@ pub fn render(ui: Ui, event: Event, narrative: bool) -> impl IntoElement {
         .strip_prefix("agent:")
         .map(|a| format!("@{a}"))
         .unwrap_or(event.actor.clone());
-    let actor = if let Some(request) = event.request_id.clone() {
-        compact_action(format!("{actor} ↗"), Variant::Quiet, move |_| {
-            crate::terminals::open_request(ui, &request)
-        })
-        .into_element()
-    } else {
-        label(actor).font_weight(FontWeight::MEDIUM).into_element()
-    };
-    let mut row = view()
+    let initials = actor
+        .trim_start_matches('@')
+        .chars()
+        .take(2)
+        .collect::<String>()
+        .to_uppercase();
+    let mut heading = view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
         .gap_2()
-        .py_2()
-        .border_b_1()
+        .px_3()
+        .py_1()
+        .bg(INSET)
+        .child(label(actor).font_weight(FontWeight::MEDIUM))
+        .child(muted(crate::components::activity::age(event.created_at)))
+        .child(view().flex_1());
+    if let Some(request) = event.request_id.clone() {
+        let details = request.clone();
+        heading = heading
+            .child(compact_action("Details", Variant::Quiet, move |_| {
+                ui.request.set(details.clone())
+            }))
+            .child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
+                crate::terminals::open_request(ui, &request)
+            }));
+    }
+    let mut row = view()
+        .flex_1()
+        .min_w(px(0.))
+        .border_1()
         .border_color(BORDER)
-        .child(
-            view()
-                .flex_row()
-                .justify_between()
-                .gap_2()
-                .child(actor)
-                .child(muted(crate::components::activity::age(event.created_at))),
-        );
+        .rounded(px(RADIUS))
+        .overflow_hidden()
+        .child(heading);
+    let measured = signal(0f32);
     if narrative {
         row = row
-            .child(crate::links::reader(ui, move || {
-                let value = body.get();
-                if expanded.get() {
-                    value
-                } else {
-                    value.chars().take(12000).collect::<String>()
-                }
-            }))
+            .child(
+                view()
+                    .p_3()
+                    .max_h(move || px(if expanded.get() { f32::MAX } else { 280. }))
+                    .overflow_hidden()
+                    .child(
+                        view()
+                            .flex_shrink_0()
+                            .on_layout(move |b: &Bounds<Points>| measured.set(b.size.height.0))
+                            .child(crate::links::reader(ui, move || body.get())),
+                    ),
+            )
             .child(when(
-                move || body.with(|s| s.chars().count() > 12000),
+                move || measured.get() > 256.,
                 move || {
                     action(
                         move || {
@@ -109,5 +136,21 @@ pub fn render(ui: Ui, event: Event, narrative: bool) -> impl IntoElement {
         move || !error.get().is_empty(),
         move || notice(error.get(), Tone::Attention),
     ));
-    row.into_element()
+    view()
+        .flex_row()
+        .items_start()
+        .gap_2()
+        .py_1()
+        .child(
+            view()
+                .w(px(28.))
+                .h(px(28.))
+                .rounded(px(14.))
+                .bg(INSET)
+                .items_center()
+                .justify_center()
+                .child(muted(initials)),
+        )
+        .child(row)
+        .into_element()
 }

@@ -13,6 +13,7 @@ use nsh_core::{TouchEvent, TouchPhase, prelude::*};
 #[derive(Clone, Copy)]
 pub(super) struct Reading {
     scroll: ElementRef,
+    content: ElementRef,
     follow: Signal<bool>,
     unread: Signal<usize>,
     composer: ElementRef,
@@ -23,6 +24,22 @@ pub(super) struct Reading {
     jump_ready: Signal<bool>,
 }
 impl Reading {
+    /// Layout callbacks are parent-relative. Compare measured root positions
+    /// to the scroll content root, so nesting never changes history coordinates.
+    async fn bounds(self, target: ElementRef) -> Option<Bounds<Points>> {
+        let target = target.measure();
+        let content = self.content.measure();
+        let target = target.await?;
+        let content = content.await?;
+        Some(Bounds {
+            origin: Point::new(
+                target.page.x - content.page.x,
+                target.page.y - content.page.y,
+            ),
+            size: target.frame.size,
+        })
+    }
+
     fn latest(self) {
         if self.follow.try_get().is_none() {
             return;
@@ -55,6 +72,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     let saved = scroll_position(ui, &scroll_key);
     let reading = Reading {
         scroll: element_ref(),
+        content: element_ref(),
         follow: signal(false),
         unread: signal(0),
         composer: element_ref(),
@@ -184,6 +202,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 })
                 .child(
                     view()
+                        .element_ref(&reading.content)
+                        .w_full()
+                        .max_w(px(920.))
+                        .self_center()
                         .p_3()
                         .gap_3()
                         .on_layout(move |_: &Bounds<Points>| {
@@ -193,7 +215,6 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         })
                         .child(task::render(ui, draft, reading))
                         .child(details::render(ui, draft))
-                        .child(workflow::render(ui))
                         .child(when(
                             move || draft.with(|d| d.workspace_details),
                             move || {
@@ -207,49 +228,6 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     .child(crate::components::git_workspace::panel(ui))
                             },
                         ))
-                        .child(dynamic(move || {
-                            let request = ui.request.get();
-                            let req = ui.snapshot.with(|s| {
-                                s.requests
-                                    .iter()
-                                    .find(|r| r.id == request && r.card_id == ui.card_id())
-                                    .cloned()
-                            });
-                            if let Some(req) = req {
-                                let request_id = req.id.clone();
-                                view()
-                                    .on_layout(move |b: &Bounds<Points>| {
-                                        if reading.revealed_request.get() != request_id {
-                                            reading.revealed_request.replace(request_id.clone());
-                                            reading.follow.set(false);
-                                            reading.scroll.scroll_to(
-                                                Point::new(
-                                                    px(0.),
-                                                    px((b.origin.y.0 - 12.).max(0.)),
-                                                ),
-                                                false,
-                                            );
-                                        }
-                                    })
-                                    .gap_2()
-                                    .child(compact_action(
-                                        "Close execution details",
-                                        Variant::Quiet,
-                                        move |_| {
-                                            ui.request.set(String::new());
-                                            ui.clear_output();
-                                        },
-                                    ))
-                                    .child(crate::components::run_panel(ui, req))
-                                    .child(when(
-                                        move || !ui.output.get().is_empty(),
-                                        move || crate::components::output_panel(ui),
-                                    ))
-                                    .into_element()
-                            } else {
-                                view().into_element()
-                            }
-                        }))
                         .child(timeline::render(ui, reading)),
                 ),
         )
@@ -270,6 +248,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .self_center()
             },
         ))
+        .child(workflow::render(ui))
         .child(composer::render(ui, draft, reading))
         .into_element()
 }

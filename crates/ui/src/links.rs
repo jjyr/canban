@@ -2,6 +2,7 @@
 mod document;
 use crate::presenter::*;
 use canban_ui_kit::{tokens::*, *};
+pub(crate) use document::content_links;
 use nsh_base::text_view::{CustomNode, MarkdownPlugin, MarkdownPlugins, Parser};
 use nsh_core::prelude::*;
 use serde_json::json;
@@ -208,18 +209,34 @@ pub fn open(ui: Ui, url: &str) {
                 open_resource(ui, a.card_id, a.path);
             }
         }
-        Destination::Web(url) => ui.spawn(async move {
-            let result = blocking(move || {
-                std::process::Command::new("/usr/bin/open")
-                    .arg(url)
-                    .status()
-            })
-            .await;
-            if !matches!(result,Ok(Ok(status)) if status.success()) {
-                ui.operation_error
-                    .try_set("Could not open the link in your browser".into());
+        Destination::Web(url) => {
+            let parsed = url::Url::parse(&url).ok();
+            if parsed.as_ref().is_some_and(|u| {
+                u.fragment().is_none()
+                    && u.query().is_none()
+                    && u.path().trim_end_matches('/').split('/').count() == 5
+            }) && let Ok(reference) = canban_github::parse_reference(&url)
+                && matches!(reference.kind.as_str(), "issue" | "pr")
+                && ui
+                    .snapshot
+                    .with_untracked(|s| s.github.state == "connected")
+            {
+                crate::github::open(ui, reference);
+                return;
             }
-        }),
+            ui.spawn(async move {
+                let result = blocking(move || {
+                    std::process::Command::new("/usr/bin/open")
+                        .arg(url)
+                        .status()
+                })
+                .await;
+                if !matches!(result,Ok(Ok(status)) if status.success()) {
+                    ui.operation_error
+                        .try_set("Could not open the link in your browser".into());
+                }
+            });
+        }
         Destination::Other => {}
     }
 }

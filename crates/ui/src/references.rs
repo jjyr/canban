@@ -83,6 +83,7 @@ pub fn source(
             let range = EditorRange::new(api.offset_to_position(start), request.position);
             let snapshot = ui.snapshot.get_untracked();
             let target = project.get_untracked();
+            let remote_first = ui.current_card().is_some_and(|c| c.github_issue().is_some());
             let mut items = local_candidates(&snapshot,&ui.profiles.get_untracked(),&target,trigger,&query,range);
             // Recompute against the complete inventory as the query grows and
             // refresh the explicit replacement range through the current caret.
@@ -94,6 +95,7 @@ pub fn source(
             let cache_key = format!("{:?}:{target}:{}:{query}",snapshot.github.login,source.generation);
             if let Some(rows) = cache.with(|c| c.get(&cache_key).cloned()) {
                 append_remote(&mut items,rows,&source.repository,range);
+                rank_candidates(&mut items, remote_first);
                 editor.completions(request.id,items,true); return;
             }
             let local = items.clone();
@@ -119,6 +121,7 @@ pub fn source(
                             cache.with(|c| { if c.len() >= 100 { c.clear(); } c.insert(cache_key,rows.clone()); });
                             let mut items = local;
                             append_remote(&mut items,rows,&repository,range);
+                            rank_candidates(&mut items, remote_first);
                             editor.completions(request.id,items,true);
                         }
                         Ok(Err(error)) => { remote_error.try_set(format!("GitHub references unavailable: {error:#}")); }
@@ -197,6 +200,18 @@ fn local_candidates(
             )
         })
         .collect()
+}
+fn rank_candidates(items: &mut [EditorCompletionItem], remote_first: bool) {
+    if !remote_first {
+        return;
+    }
+    for (i, item) in items.iter_mut().enumerate() {
+        let remote = item
+            .insert_text
+            .as_ref()
+            .is_some_and(|text| text.contains("](https://github.com/"));
+        item.sort_text = Some(format!("{:05}", i + if remote { 0 } else { 1000 }).into());
+    }
 }
 fn append_remote(
     items: &mut Vec<EditorCompletionItem>,

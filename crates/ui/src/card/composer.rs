@@ -99,7 +99,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         comment,
         computed(move || ui.current_card().map(|c| c.project_id).unwrap_or_default()),
         "Card comment",
-        "Comment or @Agent, #Card…",
+        "Write a comment… @Agent or #Card / Issue / PR",
     );
     let source = source.on_completion_accept(move |event: &EditorCompletionAcceptEvent| {
         let id = event.item.label.to_string();
@@ -138,6 +138,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         .p_2()
         .gap_1()
         .flex_shrink_0()
+        .child(muted("Local discussion · not posted to GitHub"))
         .child(editor.render_with_preview(
             comment,
             source,

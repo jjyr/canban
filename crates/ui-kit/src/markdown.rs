@@ -254,7 +254,9 @@ impl MarkdownInput {
                 self.active.set(false);
             }
         });
-        let expanded = computed(move || !compact || self.active.get() || self.held.get());
+        let expanded = computed(move || {
+            !compact || self.active.get() || self.held.get() || value.with(|v| !v.is_empty())
+        });
         let height = computed(move || {
             if !expanded.get() {
                 return 48.;

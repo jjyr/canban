@@ -36,6 +36,8 @@ modal dismissal/focus, syntax highlighting and publication-conflict retention.
 records the official release pin, WindowRef API migration and isolated native
 editor, modal, window-title and terminal checks.
 
+[Card conversation refinement acceptance (2026-11-11)](card-conversation-acceptance-20261111.md) records content-derived references, local/Issue/PR identity, grouped Timeline, quick replies and native verification boundaries.
+
 ## Current product documents
 
 | Document | Purpose |

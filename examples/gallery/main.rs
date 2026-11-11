@@ -241,6 +241,85 @@ pub fn Gallery() -> impl IntoElement {
         }
         return canban_ui::frame::screen(ui).into_element();
     }
+    if matches!(
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
+        Ok("card-local" | "card-issue" | "card-pr")
+    ) {
+        let mut snapshot = fixtures::workspace();
+        let scene = std::env::var("CANBAN_GALLERY_SCENE").unwrap();
+        snapshot.cards[0].body = "## Conversation layout\n\nKeep the task and discussion readable. Reference [Issue #42](https://github.com/acme/app/issues/42) or paste https://github.com/acme/app/pull/57.\n\n- [ ] Verify narrow layout\n- [ ] Keep draft on blur".into();
+        snapshot.cards[0].title = "Improve Card discussion and content references".into();
+        if scene != "card-local" {
+            let pr = scene == "card-pr";
+            let source = canban_types::GitHubIssueRef {
+                repository: "acme/app".into(),
+                repository_id: 1,
+                issue_id: if pr { 57 } else { 42 },
+                number: if pr { 57 } else { 42 },
+                url: format!(
+                    "https://github.com/acme/app/{}/{}",
+                    if pr { "pull" } else { "issues" },
+                    if pr { 57 } else { 42 }
+                ),
+            };
+            snapshot.cards[0].content = if pr {
+                canban_types::CardContent::GitHubPr {
+                    source: source.clone(),
+                }
+            } else {
+                canban_types::CardContent::GitHubIssue {
+                    source: source.clone(),
+                }
+            };
+            snapshot.github_issues.push(canban_types::GitHubIssueSnapshot { id:"source".into(),project_id:snapshot.cards[0].project_id.clone(),source,title:snapshot.cards[0].title.clone(),body:"## GitHub description\n\nThis is the remote source. Local context remains separate.".into(),state:if pr {"draft".into()} else {"open".into()},author_id:1,author_login:"octocat".into(),labels:vec![],assignees:vec![],updated_at:String::new(),synced_at:canban_types::now() });
+        }
+        let mut request = canban_scheduler::request(
+            &snapshot.cards[0].project_id,
+            "card-1",
+            "develop",
+            "stage_entry",
+            canban_types::Config::default().profiles[0].clone(),
+            "Card conversation fixture".into(),
+            None,
+        );
+        request.id = "card-fixture-request".into();
+        request.state = "completed".into();
+        snapshot.requests.push(request);
+        snapshot.events.retain(|e| e.card_id != "card-1");
+        for (index, kind) in [
+            "comment.created",
+            "execution.queued",
+            "execution.started",
+            "comment.replied",
+            "execution.failed",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut event = fixtures::timeline();
+            event.id = format!("card-conversation-{index}");
+            event.card_id = "card-1".into();
+            event.sequence = index as u64 + 1;
+            event.kind = (*kind).into();
+            event.actor = if index == 0 {
+                "JJy".into()
+            } else {
+                "agent:developer".into()
+            };
+            event.request_id = if index == 0 {
+                None
+            } else {
+                Some("card-fixture-request".into())
+            };
+            event.message = match index { 0 => "Please preserve the review decision and local discussion scope.".into(), 3 => "## Implementation report\n\n".to_owned() + &"A readable paragraph with **Markdown** and a stable reference [Issue #42](https://github.com/acme/app/issues/42).\n\n".repeat(18), 4 => "Execution failed: check the terminal before continuing.".into(), _ => kind.replace('.', " ") };
+            snapshot.events.push(event);
+        }
+        ui.snapshot.set(snapshot);
+        ui.card.set("card-1".into());
+        ui.page.set("card".into());
+        ui.card_standalone.set(true);
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("references") {
         let mut snapshot = fixtures::workspace();
         for number in 4..=65 {

@@ -603,6 +603,7 @@ dependencies = [
  "base64 0.22.1",
  "canban-app-server",
  "canban-context",
+ "canban-github",
  "canban-notifications",
  "canban-scheduler",
  "canban-terminal",

@@ -90,6 +90,18 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
                 );
             }
         }
+        for run in ui.snapshot.with_untracked(|s| {
+            s.workflow_runs
+                .iter()
+                .filter(|r| r.card_id == card.id && r.active())
+                .cloned()
+                .collect::<Vec<_>>()
+        }) {
+            items.push(
+                MenuItem::new(format!("Stop {}", run.definition.name))
+                    .on_select(move || dispatch(ui, "workflow.stop", json!({"run_id":run.id}))),
+            );
+        }
         items.push(MenuItem::separator());
         items.extend(crate::card_actions::items(ui, card));
         popup_menu(items).await;
@@ -103,6 +115,48 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         .border_b_1()
         .border_color(BORDER)
         .flex_shrink_0()
+        .child(dynamic(move || {
+            let Some(c) = ui.current_card() else {
+                return view().into_element();
+            };
+            let mut row = view().flex_row().flex_wrap().items_center().gap_2();
+            if let Some(source) = c.github_issue() {
+                let state = ui
+                    .snapshot
+                    .with(|s| {
+                        s.github_issues
+                            .iter()
+                            .find(|i| i.project_id == c.project_id && i.source == *source)
+                            .map(|i| i.state.clone())
+                    })
+                    .unwrap_or_else(|| "Status unavailable".into());
+                row = row.child(icon(Icon::GitHub)).child(muted(format!(
+                    "{} {}#{} · {}",
+                    if c.is_github_pr() { "PR" } else { "Issue" },
+                    source.repository,
+                    source.number,
+                    state
+                )));
+                let url = source.url.clone();
+                row = row.child(view().flex_1()).child(compact_action(
+                    "Open in GitHub ↗",
+                    Variant::Quiet,
+                    move |_| crate::github::open_url(ui, url.clone()),
+                ));
+            } else {
+                let project = ui
+                    .snapshot
+                    .with(|s| {
+                        s.projects
+                            .iter()
+                            .find(|p| p.id == c.project_id)
+                            .map(|p| p.name.clone())
+                    })
+                    .unwrap_or_default();
+                row = row.child(muted(format!("{project} / Card #{}", c.number)));
+            }
+            row.into_element()
+        }))
         .child(
             view()
                 .flex_row()
@@ -113,19 +167,12 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         .flex_1()
                         .min_w(px(0.))
                         .tooltip(nsh_base::tooltip().child(label(move || {
-                            ui.current_card()
-                                .map(|c| format!("#{} {}", c.number, c.title))
-                                .unwrap_or_default()
+                            ui.current_card().map(|c| c.title).unwrap_or_default()
                         })))
                         .child(
-                            label(move || {
-                                ui.current_card()
-                                    .map(|c| format!("#{} {}", c.number, c.title))
-                                    .unwrap_or_default()
-                            })
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(px(15.))
-                            .truncate(),
+                            label(move || ui.current_card().map(|c| c.title).unwrap_or_default())
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(17.)),
                         ),
                 )
                 .child(crate::editor::expand(ui))
@@ -138,32 +185,6 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         }
                     },
                 ))
-                .child(dynamic(move || {
-                    let Some(c) = ui.current_card() else {
-                        return view();
-                    };
-                    let archived = c.archived_at.is_some();
-                    chrome_button_disabled(
-                        Icon::Archive,
-                        if archived {
-                            "Restore Card"
-                        } else {
-                            "Archive Card"
-                        },
-                        move || ui.pending.get(),
-                        move |_| {
-                            crate::card_actions::apply(
-                                ui,
-                                c.clone(),
-                                if archived {
-                                    crate::card_actions::Action::Restore
-                                } else {
-                                    crate::card_actions::Action::Archive
-                                },
-                            );
-                        },
-                    )
-                }))
                 .child(chrome_button(Icon::More, "Card actions", move |_| {
                     menu(ui, draft, reading)
                 }))
@@ -185,14 +206,16 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 .and_then(|p| p.workflow.stages.iter().find(|t| t.id == c.stage));
             let mut row = view()
                 .flex_row()
+                .flex_wrap()
                 .items_center()
                 .gap_2()
                 .min_w(px(0.))
-                .child(muted(
+                .child(muted(format!(
+                    "Workflow: {}",
                     stage
                         .map(|t| t.name.clone())
-                        .unwrap_or_else(|| c.stage.clone()),
-                ));
+                        .unwrap_or_else(|| c.stage.clone())
+                )));
             if let Some(branch) = c.branch.clone().filter(|b| !b.is_empty()) {
                 row = row.child(
                     view()

@@ -71,18 +71,21 @@ remote edits, delivery selection or Agent dispatch.
 Description, editor Preview, comments, replies and reports share the product
 Markdown reader. Headings, emphasis, lists and code retain Markdown rendering.
 Explicit links and recognized prose references have a hover preview and click
-routing. Code and email-like text remain literal. Raw `#number` resolves to a
-Card in the current Project first, then to that Project's repository Issue URL;
-selecting a completion inserts an explicit destination without ambiguity.
+routing. Code and email-like text remain literal. Raw `#number` resolves locally only in a Project without a GitHub source. In a
+GitHub-connected Project it remains literal until the user selects an explicit
+Card/Issue/PR completion, avoiding ambiguous numbering and Issue/PR guessing.
+GitHub-owned Cards rank remote candidates before local Cards once available.
 
 - Local Card links show title, Project/number, stage and a short description;
   clicking opens the Card inside Canban, including archived Cards.
 - Known `@Profile` references show provider/role details and open local Settings.
   Reading or opening a reference never starts an Agent. Comment completion still
   adds an explicit recipient chip, independently of link navigation.
-- HTTP(S) links open the default browser. Ordinary web previews show the label,
+- Ordinary HTTP(S) links open the default browser. Web previews show the label,
   hostname and URL; they do not fetch arbitrary webpage content or screenshots.
 - GitHub Issue/PR links show repository/type/number and available cached metadata.
+  Connected root links open native GitHub details consistently with the reference
+  summary. Fragment/query/subpath links retain their exact browser destination.
   Hover can load a short detail preview for a connected configured repository.
   Requests and the bounded 60-second cache are fenced by account/source identity.
   Disconnected GitHub does not perform remote completion or preview lookup;

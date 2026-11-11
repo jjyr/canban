@@ -6,27 +6,28 @@ Status: Card reading/editing redesign implemented 2026-11-10. See the dated veri
 
 ```text
 +---------------------------------------------------------------+
-| #42 Card title                        Terminal Archive ...  X | fixed
-| Develop   branch                         Review / Continue    | fixed
+| Project / Card #42 OR GitHub Issue/PR repository#42   GitHub ↗ |
+| Card title                                  Terminal ...  X   | fixed
+| Workflow: Review    branch                  Review / Continue |
 +---------------------------------------------------------------+
-| Description                                             Edit  | scroll
-| Full Markdown description; no default disclosure or summary    |
-|                                                               |
-| · Card created                                     timestamp  |
-| user                                               timestamp  |
-|   Markdown comment                                            |
-| · Agent started                                    timestamp  |
-| @developer                                         timestamp  |
-|   Markdown reply / report                                     |
-|                                                               |
+| Description (GitHub source + distinct local context)     Edit | scroll
+| References: Issue/PR links from saved content, when present     |
+| Delivery PR: explicit delivery relation, when present          |
+| Activity                                                      |
+| JJ [ Author · time                                            |
+|      Markdown reply                                         ] |
+|    > developer · 2 execution events                            |
+| AG [ Author · time                       Details / Terminal   |
+|      Markdown report · Show full report                     ] |
+| · Failure or human decision stays individually visible         |
 +-------------------- New activity (N) --------------------------+
-| Write  Preview                       B I Code Link Undo Redo  | focused
-| Markdown source editor; grows on focus, shrinks on blur         | fixed
-| @developer ×     +  [attachment chips]              Send ⌘Enter |
+| Contextual workflow approval/rework, only when required        |
+| Local discussion · not posted to GitHub                        |
+| Write a comment…                                      Send    | fixed
 +---------------------------------------------------------------+
 ```
 
-The Board keeps its ordinary columns and Cards, without execution-slot summary or filter buttons. Wide layouts retain the Board beside the Card; narrow layouts use the Card pane with a Back action. Branch text is compact, copyable and has a full-value tooltip. Host, path, base commit and manual workspace refresh are available under **... → Workspace details**, rather than consuming permanent conversation space. **Archive/Restore** has a dedicated header icon. **...** also owns stage moves, Archive/Restore, Delete/Remove and context/attachment controls. Board Cards expose the same lifecycle actions in their right-click menu. The X action is labeled **Close Card details** and only dismisses the pane. Review and human Continue remain directly reachable when applicable.
+The Board keeps its ordinary columns and Cards, without execution-slot summary or filter buttons. Wide layouts retain the Board beside the Card; narrow layouts use the Card pane with a Back action. Branch text is compact, copyable and has a full-value tooltip. Host, path, base commit and manual workspace refresh are available under **... → Workspace details**, rather than consuming permanent conversation space. **...** owns stage moves, Archive/Restore, Delete/Remove, Stop workflow and context/attachment controls. Board Cards expose the same lifecycle actions in their right-click menu. The X action is labeled **Close Card details** and only dismisses the pane. Review and human Continue remain directly reachable when applicable.
 
 Opening/closing the pane now uses a shared native reveal/fade while retaining
 the Board. Switching Cards does not replay the reveal. Composer resizing and
@@ -40,9 +41,53 @@ Description is fully visible in the common reader by default. **Edit** opens tit
 
 The comment composer uses the same UI Kit Markdown source editor and reader. NSH owns its rope, selection, caret completion and undo/redo history. Write/Preview and height changes keep the source editor mounted. Ordinary snapshot updates reconcile retained drafts and keyed Timeline rows without rebuilding the editing owner. Draft text, explicit recipients and saved resource references now survive application restart through AppServer draft storage. Pending attachment bytes remain window-local. Editor undo history is retained within the mounted editor, including expansion/collapse, and does not survive route destruction or application restart.
 
-Focus expands the composer, with additional lines growing toward approximately one-third of the Card pane. Blur collapses it while keeping the draft. Toolbar operations, caret completion and a native attachment picker belong to the editing interaction. Clicking the Card reading area ends composing focus; scrolling does not itself discard the draft. Preview prevents edits to the hidden source. Clipboard reads occur only in response to the explicit Paste shortcut, with a value/selection check that rejects a stale asynchronous insertion.
+Focus expands the composer, with additional lines growing toward approximately one-third of the Card pane. Blur collapses only an empty composer; a nonempty draft stays expanded. Toolbar operations, caret completion and a native attachment picker belong to the editing interaction. Clicking the Card reading area ends composing focus; scrolling does not itself discard the draft. Preview prevents edits to the hidden source. Clipboard reads occur only in response to the explicit Paste shortcut, with a value/selection check that rejects a stale asynchronous insertion.
 
 Enter inserts a newline. Command+Enter sends through the same intent as **Send**, with empty/pending/archived/attachment/modal checks. The UI Kit reclaims Command+Enter after each native editor focus event: NSH otherwise uses that key for a code-editor newline command. Attach suspends editor shortcuts, releases the real input focus before presenting the system sheet, and restores editing on selection or cancellation. Chinese IME acceptance remains excluded.
+
+## Card identity and content references
+
+The fixed header distinguishes local Card identity from GitHub Issue/PR identity.
+GitHub repository/number and cached remote state are separate from the local
+Workflow stage. Unknown remote state is labelled unavailable. The source opens
+externally through **Open in GitHub**. The cached source description remains
+readable; **Edit local context** edits only the local body, never remote prose.
+
+There is no permanent Add reference/URL form. The References row derives a
+read-only index from the saved local body, cached source body and saved
+comment/reply bodies, plus existing legacy explicit links. Explicit Markdown
+links (including hash completion selections) and pasted GitHub URLs are indexed;
+code literals and images are excluded. Drafts do not create relations. Removing
+an occurrence from editable content removes that contribution; another saved
+occurrence keeps the reference. Historical comments remain historical. Legacy
+explicit links remain visible and retain the existing RPC removal path.
+
+References deduplicate by repository/type/number or commit SHA. The Card's own
+source and explicit delivery PR are excluded from ordinary references. Delivery
+is never inferred from a pasted PR link. Neither referencing nor following a
+link imports a Card, changes its source identity, publishes prose, or closes a
+remote object. No new persisted relationship/schema is introduced.
+
+## Conversation presentation
+
+Human and Agent messages use the same identity marker, author/time header and
+bordered Markdown body. Long bodies fold at a visual height while retaining the
+complete Markdown document; **Read full report / Show less** toggles the body.
+The main reader is bounded to 920 points in wide layouts.
+
+Only adjacent routine queued/started/attached/report-echo facts for the same
+request collapse into an execution group. Comments, failures, questions, review
+decisions and unknown event kinds break groups and remain visible. Durable
+sequence order and report/reply identity deduplication are preserved. Opening
+a targeted event expands its group. Selected execution details appear beside
+that request's earliest event (or at the end if its events are absent), retaining
+exact historical request identity and explicit Terminal navigation.
+
+Routine Workflow blocks no longer precede the discussion. Approval/rework
+controls appear above the fixed composer only when required; Stop lives in the
+Card menu. Workflow decisions remain distinct from Terminal permission/input.
+The composer explicitly labels its local scope; this change adds no GitHub
+comment publishing control.
 
 ## Recipients and attachments
 
@@ -51,8 +96,10 @@ Typing a standalone `@` opens configured Profile candidates at the caret. Typing
 Hash completion uses the same local Card and connected GitHub Issue/PR source as
 the task editor. Candidates are recomputed across the full inventory as the query
 changes. Description, comment, reply and report readers share hover previews and
-navigation: Cards open locally, Profiles open Settings, and HTTP(S) destinations
-open in the browser. Code literals remain literal. See [reference behavior and
+navigation: Cards open locally and Profiles open Settings. Connected GitHub
+Issue/PR root URLs open the native GitHub detail; disconnected links and links
+with query/fragment/subpaths open the browser, preserving their exact target.
+Other HTTP(S) destinations open the browser. Code literals remain literal. See [reference behavior and
 native acceptance](card-editor.md#readers-previews-and-navigation).
 
 Desktop comments always send an explicit `mentions` array (including `[]`); legacy clients omitting the field keep the server's existing parser. An asynchronous send clears only the submitted draft, preserving newer text/recipients and failed submissions. No CLI interface change is required.
