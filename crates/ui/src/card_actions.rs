@@ -70,15 +70,12 @@ pub fn items(ui: Ui, card: Card) -> Vec<MenuItem> {
             )
         }),
     ];
-    if card.removed_at.is_none() {
+    // GitHub removal excludes a source from intake; local Cards only archive.
+    if card.removed_at.is_none() && card.github_issue().is_some() {
         items.push(
-            MenuItem::new(if card.github_issue().is_some() {
-                "Remove from Board"
-            } else {
-                "Delete Card"
-            })
-            .disabled(ui.pending.get_untracked())
-            .on_select(move || apply(ui, card.clone(), Action::Remove)),
+            MenuItem::new("Remove from Board")
+                .disabled(ui.pending.get_untracked())
+                .on_select(move || apply(ui, card.clone(), Action::Remove)),
         );
     }
     items

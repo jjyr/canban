@@ -548,7 +548,7 @@ pub fn Gallery() -> impl IntoElement {
                 }))
                 .child(action("Update available",Variant::Quiet,move |_|{scene.set("workspace".into());ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"available","available":{"manifest":{"version":"20261110-3"}}}}));}))
                 .child(action("Update failed",Variant::Quiet,move |_|{scene.set("workspace".into());ui.update.set(json!({"build":canban_updater::Build::current(),"state":{"phase":"error","error":"Download interrupted. Retry the update.","available":{"manifest":{"version":"20261110-3"}}}}));}))
-                .child(action("Archived / deleted", Variant::Quiet, move |_| {
+                .child(action("Archived Cards", Variant::Quiet, move |_| {
                     ui.snapshot.set(fixtures::archive());ui.card.set(String::new());ui.page.set("archive".into());scene.set("workspace".into());
                 }))
                 .child(action("Card states", Variant::Quiet, move |_| {

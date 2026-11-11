@@ -14,28 +14,14 @@ pub struct Group {
     pub name: String,
     pub entries: Vec<Entry>,
 }
-#[derive(Clone, Copy, PartialEq)]
-pub enum Kind {
-    Archived,
-    Deleted,
-}
-
-pub fn groups(snapshot: &Snapshot, removed: &[Card], query: &str, kind: Kind) -> Vec<Group> {
-    let mut source = snapshot
+pub fn groups(snapshot: &Snapshot, query: &str) -> Vec<Group> {
+    let mut groups = BTreeMap::<String, Vec<(usize, Entry)>>::new();
+    for card in snapshot
         .cards
         .iter()
-        .map(|c| (c.id.clone(), c.clone()))
-        .collect::<BTreeMap<_, _>>();
-    for card in removed {
-        source
-            .entry(card.id.clone())
-            .or_insert_with(|| card.clone());
-    }
-    let mut groups = BTreeMap::<String, Vec<(usize, Entry)>>::new();
-    for card in source.into_values().filter(|c| match kind {
-        Kind::Archived => c.archived_at.is_some() && c.removed_at.is_none(),
-        Kind::Deleted => c.removed_at.is_some(),
-    }) {
+        .filter(|c| c.archived_at.is_some() && c.removed_at.is_none())
+        .cloned()
+    {
         let name = snapshot
             .projects
             .iter()
@@ -77,16 +63,7 @@ pub fn groups(snapshot: &Snapshot, removed: &[Card], query: &str, kind: Kind) ->
         .map(|(id, mut entries)| {
             entries.sort_by(|(a, x), (b, y)| {
                 a.cmp(b)
-                    .then_with(|| {
-                        let time = |e: &Entry| {
-                            if kind == Kind::Deleted {
-                                e.card.removed_at
-                            } else {
-                                e.card.archived_at
-                            }
-                        };
-                        time(y).cmp(&time(x))
-                    })
+                    .then(y.card.archived_at.cmp(&x.card.archived_at))
                     .then(x.card.number.cmp(&y.card.number))
                     .then(x.card.id.cmp(&y.card.id))
             });
@@ -149,7 +126,7 @@ mod tests {
     #[test]
     fn archive_is_cross_project_nested_and_hides_active_deleted_and_empty_projects() {
         let s = fixture();
-        let result = groups(&s, &[], "", Kind::Archived);
+        let result = groups(&s, "");
         assert_eq!(
             result.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
             vec!["a", "b"]
@@ -162,12 +139,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["two", "one"]
         );
-        assert_eq!(
-            groups(&s, &[], "Tools", Kind::Archived)[0].entries[0]
-                .card
-                .id,
-            "three"
-        );
+        assert_eq!(groups(&s, "Tools")[0].entries[0].card.id, "three");
     }
     #[test]
     fn fuzzy_terms_numbers_unicode_and_agent_metadata_filter_only_matching_children() {
@@ -184,37 +156,17 @@ mod tests {
         );
         r.id = "request".into();
         s.requests.push(r);
-        assert_eq!(
-            groups(&s, &[], "cnBn impr srch", Kind::Archived)[0].entries[0]
-                .card
-                .id,
-            "one"
-        );
-        assert_eq!(
-            groups(&s, &[], "原终恢复 #42", Kind::Archived)[0].entries[0]
-                .card
-                .id,
-            "two"
-        );
-        assert_eq!(
-            groups(&s, &[], "codex resume", Kind::Archived)[0].entries[0]
-                .card
-                .id,
-            "three"
-        );
-        assert!(groups(&s, &[], "not-found", Kind::Archived).is_empty());
+        assert_eq!(groups(&s, "cnBn impr srch")[0].entries[0].card.id, "one");
+        assert_eq!(groups(&s, "原终恢复 #42")[0].entries[0].card.id, "two");
+        assert_eq!(groups(&s, "codex resume")[0].entries[0].card.id, "three");
+        assert!(groups(&s, "not-found").is_empty());
     }
     #[test]
-    fn stale_deleted_results_cannot_resurrect_a_restored_card() {
+    fn removed_cards_stay_out_of_archive_even_with_an_archive_timestamp() {
         let mut s = fixture();
-        let removed = s.cards.pop().unwrap();
-        assert_eq!(
-            groups(&s, std::slice::from_ref(&removed), "", Kind::Deleted).len(),
-            1
-        );
-        let mut restored = removed.clone();
-        restored.removed_at = None;
-        s.cards.push(restored);
-        assert!(groups(&s, &[removed], "", Kind::Deleted).is_empty());
+        let removed = s.cards.last_mut().unwrap();
+        removed.archived_at = Some(50);
+        assert!(groups(&s, "Deleted").is_empty());
+        assert!(!groups(&s, "").iter().any(|g| g.id == "empty"));
     }
 }

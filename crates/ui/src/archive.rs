@@ -5,82 +5,17 @@ use crate::{
     drafts::{capture_scroll, scroll_position},
     presenter::*,
 };
-use canban_types::Card;
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
-use serde_json::json;
 
 pub fn screen(ui: Ui) -> impl IntoElement {
     let query = input::debounced(ui.archive_query, std::time::Duration::from_millis(120));
-    let removed = signal(Vec::<Card>::new());
-    let error = signal(String::new());
-    let epoch = signal(0u64);
-    let reload = signal(0u64);
-    let lifecycle = computed(move || {
-        ui.snapshot.with(|s| {
-            s.cards
-                .iter()
-                .map(|c| (c.id.clone(), c.archived_at, c.removed_at))
-                .collect::<Vec<_>>()
-        })
-    });
-    effect(move || {
-        let _ = lifecycle.get();
-        let _ = reload.get();
-        let Some(app) = crate::APP.get().cloned() else {
-            removed.set(Vec::new());
-            return;
-        };
-        let ticket = epoch.get_untracked() + 1;
-        epoch.set(ticket);
-        ui.spawn(async move {
-            let result = blocking(move || {
-                app.call("card.list", json!({"include_removed":true}))
-                    .and_then(|v| Ok(serde_json::from_value::<Vec<Card>>(v)?))
-            })
-            .await;
-            if epoch.try_get() != Some(ticket) {
-                return;
-            }
-            match result {
-                Ok(Ok(cards)) => {
-                    removed.set(
-                        cards
-                            .into_iter()
-                            .filter(|c| c.removed_at.is_some())
-                            .collect(),
-                    );
-                    error.set(String::new());
-                }
-                other => error.set(format!("Could not load deleted Cards: {other:?}")),
-            }
-        });
-    });
-    let archived = computed(move || {
-        model::groups(&ui.snapshot.get(), &[], &query.get(), model::Kind::Archived)
-    });
-    let deleted = computed(move || {
-        model::groups(
-            &ui.snapshot.get(),
-            &removed.get(),
-            &query.get(),
-            model::Kind::Deleted,
-        )
-    });
+    let archived = computed(move || model::groups(&ui.snapshot.get(), &query.get()));
     let searching = computed(move || !query.get().trim().is_empty());
     let search_folds = signal(std::collections::BTreeSet::<String>::new());
-    let search_deleted = signal(true);
     effect(move || {
         let _ = query.get();
         search_folds.set(Default::default());
-        search_deleted.set(true);
-    });
-    let deleted_open = computed(move || {
-        if searching.get() {
-            search_deleted.get()
-        } else {
-            ui.archive_deleted.get()
-        }
     });
     view()
         .flex_1()
@@ -128,7 +63,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .min_w(px(0.))
                         .gap_3()
                         .child(when(
-                            move || archived.get().is_empty() && deleted.get().is_empty(),
+                            move || archived.get().is_empty(),
                             move || {
                                 view()
                                     .py_5()
@@ -149,36 +84,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     }))
                             },
                         ))
-                        .child(groups(ui, archived, searching, search_folds, "archive"))
-                        .child(when(
-                            move || !deleted.get().is_empty(),
-                            move || {
-                                tree_group(
-                                    || "Deleted Cards".into(),
-                                    move || deleted.get().iter().map(|g| g.entries.len()).sum(),
-                                    deleted_open,
-                                    move || {
-                                        if searching.get_untracked() {
-                                            search_deleted.update(|v| *v = !*v)
-                                        } else {
-                                            ui.archive_deleted.update(|v| *v = !*v)
-                                        }
-                                    },
-                                    groups(ui, deleted, searching, search_folds, "deleted"),
-                                )
-                            },
-                        ))
-                        .child(when(
-                            move || !error.get().is_empty(),
-                            move || {
-                                view()
-                                    .gap_2()
-                                    .child(notice(move || error.get(), Tone::Attention))
-                                    .child(action("Retry", Variant::Quiet, move |_| {
-                                        reload.update(|n| *n += 1)
-                                    }))
-                            },
-                        )),
+                        .child(groups(ui, archived, searching, search_folds, "archive")),
                 ),
         )
 }
@@ -233,18 +139,10 @@ fn row(ui: Ui, entry: model::Entry) -> impl IntoElement {
     let archive_error = card.archive_error.clone();
     let id = card.id.clone();
     let title = format!("#{} {}", card.number, card.title);
-    let timestamp = card
-        .removed_at
-        .or(card.archived_at)
-        .unwrap_or(card.created_at);
-    let state = if card.removed_at.is_some() {
-        "Deleted"
-    } else {
-        "Archived"
-    };
+    let timestamp = card.archived_at.unwrap_or(card.created_at);
     let agents = entry.agents.join(" · ");
     let meta = format!(
-        "{state} {}{}{}",
+        "Archived {}{}{}",
         crate::components::activity::age(timestamp),
         if agents.is_empty() { "" } else { " · " },
         agents
@@ -259,28 +157,18 @@ fn row(ui: Ui, entry: model::Entry) -> impl IntoElement {
                 .min_w(px(0.)),
         )
         .child(muted(meta).truncate().min_w(px(0.)));
-    let main = if card.removed_at.is_some() {
-        view()
-            .flex_1()
-            .min_w(px(0.))
-            .py_3()
-            .px_3()
-            .child(content)
-            .into_element()
-    } else {
-        nsh_base::button()
-            .flex_1()
-            .min_w(px(0.))
-            .items_start()
-            .py_3()
-            .px_3()
-            .bg(CLEAR)
-            .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
-            .accessibility_label(format!("Open archived Card {title}"))
-            .child(content)
-            .on_press(move |_: &()| ui.open_card(id.clone()))
-            .into_element()
-    };
+    let main = nsh_base::button()
+        .flex_1()
+        .min_w(px(0.))
+        .items_start()
+        .py_3()
+        .px_3()
+        .bg(CLEAR)
+        .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
+        .accessibility_label(format!("Open archived Card {title}"))
+        .child(content)
+        .on_press(move |_: &()| ui.open_card(id.clone()))
+        .into_element();
     let mut item = view()
         .min_w(px(0.))
         .rounded(px(RADIUS))

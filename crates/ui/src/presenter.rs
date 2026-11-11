@@ -83,7 +83,6 @@ pub struct Ui {
     pub project: Signal<String>,
     pub archive_query: Signal<String>,
     pub archive_folds: Signal<BTreeSet<String>>,
-    pub archive_deleted: Signal<bool>,
     pub card: Signal<String>,
     /// Read-only identity of a mounted Card, retained during its exit animation.
     pub card_view: Option<Signal<String>>,
@@ -231,7 +230,6 @@ impl Ui {
             project: signal(String::new()),
             archive_query: signal(String::new()),
             archive_folds: signal(BTreeSet::new()),
-            archive_deleted: signal(false),
             card: signal(String::new()),
             card_view: None,
             request: signal(String::new()),

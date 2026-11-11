@@ -16,7 +16,7 @@ pub fn archive() -> canban_types::Snapshot {
     for (id, name) in [
         ("archive-tools", "Tools"),
         ("archive-empty", "No archived Cards"),
-        ("archive-deleted", "Deleted only"),
+        ("archive-deleted", "Legacy removed only (hidden)"),
     ] {
         let mut project = s.projects[0].clone();
         project.id = id.into();
@@ -37,7 +37,9 @@ pub fn archive() -> canban_types::Snapshot {
     card.id = "archive-deleted-card".into();
     card.project_id = "archive-deleted".into();
     card.removed_at = Some(now());
-    card.title = "Recover deleted work".into();
+    // Retain legacy removed data to verify it never appears in Archive.
+    card.archived_at = Some(now());
+    card.title = "Legacy removed work (hidden)".into();
     s.cards.push(card);
     for (card, profile, provider) in [
         ("card-1", "developer", "codex"),
