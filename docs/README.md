@@ -28,6 +28,10 @@ persisted daily release checks.
 records the combined schema-12/API-10 build, Workflow/Terminal interaction,
 local backend activation and branch-isolation regression checks.
 
+[Workflow UI refinement acceptance (2026-11-11)](workflow-ui-acceptance-20261111.md)
+records click-only Column automations, the simplified source editor, native
+modal dismissal/focus, syntax highlighting and publication-conflict retention.
+
 ## Current product documents
 
 | Document | Purpose |
