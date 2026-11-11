@@ -19,8 +19,18 @@ pub fn screen(ui: Ui, page: &str) -> AnyElement {
         "workflows" => crate::workflows::screen(ui).into_element(),
         "machines" => view()
             .flex_1()
+            .min_h(px(0.))
             .p_5()
-            .child(scroll().flex_1().child(crate::machines::settings(ui)))
+            .gap_4()
+            .child(subpage_header("Back to Settings", "Settings / Machines", move |_| {
+                ui.navigate("settings")
+            }))
+            .child(
+                scroll()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(view().w_full().max_w(px(880.)).child(crate::machines::settings(ui))),
+            )
             .into_element(),
         "project-location" => crate::machines::project_location(ui).into_element(),
         "new-project" => crate::projects::new_project(ui).into_element(),
@@ -49,13 +59,11 @@ fn settings(ui: Ui) -> impl IntoElement {
             .child(crate::updates::settings(ui))
             .child(crate::components::scheduling::settings(ui))
             .child(crate::machines::settings(ui))
-            .child(settings_section("Project work location","Change where future work runs for the selected Project.").child(action("Edit work location…",Variant::Secondary,move |_|ui.navigate("project-location"))))
             .child(settings_section("Agent profiles", "Define Agents once; workflow stages and @mentions reference these profiles.")
                 .child(settings_field("Configuration", "Command and profile changes apply after reloading, to newly queued work.",
                     muted(format!("{home}/config/agents.json"))))
                 .child(crate::profiles::registry_items(ui.profiles))
                 .child(view().items_start().child(action("Reload configuration", Variant::Secondary, move |_| dispatch(ui, "config.reload", json!({}))))))
-            .child(settings_section("Workflows", "Edit the selected Project's YAML sources, or configure them through an Agent conversation.").child(action("Project Workflows", Variant::Secondary, move |_|ui.navigate("workflows"))))
             .child(settings_section("Herdr", "Terminal runtime connection; configure it in agents.json.")
                 .child(settings_field("Executable", "Used to connect to the configured runtime.", muted(runtime.hc)))
                 .child(settings_field("Session", "The configured Herdr runtime session.", muted(runtime.hc_session)))

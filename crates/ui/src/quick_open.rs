@@ -75,7 +75,45 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                 )
             });
             let choices = computed(move || {
-                rows.get()
+                let raw_query = ui.search_query.get();
+                let trimmed = raw_query.trim_start();
+                let command_mode = !ui.project_picker.get() && trimmed.starts_with('>');
+                let cmd_query = trimmed.strip_prefix('>').unwrap_or(trimmed).trim();
+                let matching_commands = || {
+                    let mut scored = crate::commands::CATALOG
+                        .iter()
+                        .filter_map(|c| {
+                            let fields = vec![
+                                c.title.to_owned(),
+                                c.context.to_owned(),
+                                c.display.to_owned(),
+                            ];
+                            let score = canban_ui_kit::search::score(&fields, cmd_query)?;
+                            Some((score, c))
+                        })
+                        .collect::<Vec<_>>();
+                    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.title.cmp(b.1.title)));
+                    scored
+                        .into_iter()
+                        .map(|(_, c)| SearchChoice {
+                            attention: 0,
+                            selected: false,
+                            id: format!("cmd:{}", c.id),
+                            title: c.title.into(),
+                            detail: if c.display.is_empty() {
+                                c.context.into()
+                            } else {
+                                format!("{} · {}", c.display, c.context)
+                            },
+                            icon: Icon::Keyboard,
+                        })
+                        .collect::<Vec<_>>()
+                };
+                if command_mode {
+                    return matching_commands();
+                }
+                let mut list: Vec<SearchChoice> = rows
+                    .get()
                     .into_iter()
                     .map(|r| SearchChoice {
                         attention: if ui.project_picker.get() {
@@ -104,12 +142,18 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                             _ => Icon::Agent,
                         },
                     })
-                    .collect()
+                    .collect();
+                if list.is_empty() && !ui.project_picker.get() && !trimmed.is_empty() {
+                    list = matching_commands();
+                }
+                list
             });
             search_dialog(
                 move || {
                     if ui.project_picker.get() {
                         "Switch Project".into()
+                    } else if ui.search_query.get().trim_start().starts_with('>') {
+                        "Commands & Shortcuts".into()
                     } else {
                         "Quick Open".into()
                     }
@@ -117,6 +161,10 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                 ui.search_query,
                 choices,
                 move |id| {
+                    if let Some(cmd_id) = id.strip_prefix("cmd:") {
+                        crate::commands::execute(ui, cmd_id);
+                        return;
+                    }
                     // Resolve against fresh local state, rather than an obsolete retained attempt.
                     if let Some(row) = candidates(&ui.snapshot.get_untracked())
                         .into_iter()
@@ -124,8 +172,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                     {
                         activate(ui, row);
                     } else {
-                        ui.status
-                            .set("This destination is no longer available".into());
+                        ui.notify("This destination is no longer available");
                         ui.quick_open.set(false);
                     }
                 },
@@ -134,15 +181,15 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                     if ui.project_picker.get() {
                         "Search projects…".into()
                     } else {
-                        "Search projects, cards, agents, terminals…".into()
+                        "Search projects, cards, agents… or type > for commands".into()
                     }
                 },
                 view()
                     .gap_2()
                     .child(muted(move || {
                         format!(
-                            "{} results · ↑ ↓ choose · Enter open · Esc close",
-                            rows.get().len()
+                            "{} results · ↑ ↓ choose · Enter run · > commands · Esc close",
+                            choices.get().len()
                         )
                     }))
                     .child(when(

@@ -13,7 +13,7 @@ pub use surface::{badge, heading, label, muted, panel, read_text};
 pub mod navigation;
 pub mod split;
 pub mod status;
-pub use navigation::navigation;
+pub use navigation::{navigation, subpage_header};
 pub use split::split;
 pub use status::{Tone, attention_count, notice, reminder_count, status};
 
@@ -32,7 +32,7 @@ pub mod chrome;
 pub use chrome::{chrome_action, chrome_button, chrome_button_disabled, utility_button};
 
 pub mod segmented;
-pub use segmented::{segment, segmented};
+pub use segmented::{compact_segment, segment, segmented};
 
 pub mod theme_choice;
 pub use theme_choice::theme_choice;

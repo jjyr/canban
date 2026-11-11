@@ -108,12 +108,33 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
     }
     rows
 }
+fn kind_rank(kind: &str) -> u8 {
+    match kind {
+        "Project" => 0,
+        "Agent" => 1,
+        "Card" => 2,
+        "Terminal" => 3,
+        _ => 4,
+    }
+}
+
+fn card_number(title: &str) -> Option<(u64, &str)> {
+    let rest = title.strip_prefix('#')?;
+    let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 {
+        return None;
+    }
+    let number = rest[..digits].parse::<u64>().ok()?;
+    Some((number, rest[digits..].trim_start()))
+}
+
 pub fn ranked(
     rows: &[Candidate],
     query: &str,
     recent: &[String],
     projects_only: bool,
 ) -> Vec<Candidate> {
+    let empty_query = query.trim().is_empty();
     let mut scored = rows
         .iter()
         .filter(|r| !projects_only || r.kind == "Project")
@@ -123,17 +144,37 @@ pub fn ranked(
                 .iter()
                 .position(|id| id == &row.id)
                 .unwrap_or(usize::MAX);
-            Some((total, visit, row))
+            let archived = row.detail.ends_with(" · Archived");
+            Some((total, visit, archived, row))
         })
         .collect::<Vec<_>>();
     scored.sort_by(|a, b| {
         a.0.cmp(&b.0)
             .then(a.1.cmp(&b.1))
-            .then(a.2.title.to_lowercase().cmp(&b.2.title.to_lowercase()))
-            .then(a.2.detail.to_lowercase().cmp(&b.2.detail.to_lowercase()))
-            .then(a.2.id.cmp(&b.2.id))
+            .then(a.2.cmp(&b.2))
+            .then_with(|| {
+                if empty_query {
+                    kind_rank(a.3.kind).cmp(&kind_rank(b.3.kind))
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .then_with(|| match (card_number(&a.3.title), card_number(&b.3.title)) {
+                (Some((na, ta)), Some((nb, tb))) if a.3.kind == "Card" && b.3.kind == "Card" => {
+                    if empty_query {
+                        nb.cmp(&na)
+                            .then_with(|| ta.to_lowercase().cmp(&tb.to_lowercase()))
+                    } else {
+                        na.cmp(&nb)
+                            .then_with(|| ta.to_lowercase().cmp(&tb.to_lowercase()))
+                    }
+                }
+                _ => a.3.title.to_lowercase().cmp(&b.3.title.to_lowercase()),
+            })
+            .then(a.3.detail.to_lowercase().cmp(&b.3.detail.to_lowercase()))
+            .then(a.3.id.cmp(&b.3.id))
     });
-    scored.into_iter().map(|(_, _, r)| r.clone()).collect()
+    scored.into_iter().map(|(_, _, _, r)| r.clone()).collect()
 }
 #[cfg(test)]
 mod tests;

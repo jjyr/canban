@@ -27,6 +27,8 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
     let gap_visible_stage = id.clone();
     let gap_height_stage = id.clone();
     let list_stage = id.clone();
+    let count_stage = id.clone();
+    let is_backlog = stage.id == "backlog";
     view()
         .w(px(260.))
         .flex_1()
@@ -39,8 +41,43 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
                 .min_h(px(30.))
                 .justify_between()
                 .items_center()
-                .child(label(stage.name).font_weight(FontWeight::SEMIBOLD))
-                .child(crate::workflows::column_trigger(ui, stage.id.clone())),
+                .gap_2()
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .min_w(px(0.))
+                        .child(label(stage.name).font_weight(FontWeight::SEMIBOLD).truncate())
+                        .child(
+                            view()
+                                .px_1p5()
+                                .py_0p5()
+                                .rounded(px(10.))
+                                .bg(INSET)
+                                .child(muted(move || {
+                                    state
+                                        .cards
+                                        .with(|all| {
+                                            all.iter().filter(|c| c.stage == count_stage).count()
+                                        })
+                                        .to_string()
+                                })),
+                        ),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1()
+                        .child(crate::workflows::column_trigger(ui, stage.id.clone()))
+                        .child(when(
+                            move || is_backlog,
+                            move || {
+                                chrome_button(Icon::Plus, "Add Card", move |_| ui.new_card())
+                            },
+                        )),
+                ),
         )
         .child(
             view()
@@ -134,11 +171,22 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
                                 .with(|l| l.gap.as_ref().is_none_or(|(s, _, _)| s != &row_stage))
                     },
                     move || {
-                        muted("No cards")
+                        view()
                             .pointer_events(PointerEvents::None)
                             .absolute()
                             .top(px(0.))
                             .left(px(0.))
+                            .right(px(0.))
+                            .py_5()
+                            .px_3()
+                            .rounded(px(RADIUS))
+                            .border_1()
+                            .border_color(BORDER)
+                            .bg(INSET)
+                            .opacity(0.65)
+                            .items_center()
+                            .justify_center()
+                            .child(muted("No cards"))
                     },
                 )),
         )

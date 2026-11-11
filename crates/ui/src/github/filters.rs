@@ -1,6 +1,5 @@
 use super::workspace::BoardFilter;
 use super::*;
-use canban_ui_kit::tokens::*;
 pub fn matches(ui: Ui, c: &Card, snapshot: &Snapshot) -> bool {
     let filter = ui
         .github
@@ -70,18 +69,21 @@ pub fn toolbar(ui: Ui) -> impl IntoElement {
                 m.insert(save.clone(), filter);
             });
         });
-        let mut row = view().flex_row().flex_wrap().items_center().gap_2();
+        let mut source_seg = segmented();
         for (key, title) in [("all", "All"), ("local", "Local"), ("github", "GitHub")] {
-            row = row.child(
-                action(title, Variant::Quiet, move |_| source.set(key.into())).bg(move || {
-                    if source.get() == key {
-                        SELECTED.resolve()
-                    } else {
-                        CLEAR.resolve()
-                    }
-                }),
-            );
+            source_seg = source_seg.child(compact_segment(
+                title,
+                None,
+                move || source.get() == key,
+                move |_| source.set(key.into()),
+            ));
         }
+        let row = view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(source_seg);
         row.child(choice(
             ui,
             kind,

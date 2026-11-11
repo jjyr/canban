@@ -144,7 +144,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     )
                     .into_element()
             }));
-        let mut tabs = view().flex_row().flex_wrap().gap_1();
+        let mut tabs = segmented();
         for (id, title) in [
             ("overview", "Overview"),
             ("discussion", "Discussion"),
@@ -159,15 +159,12 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             if r.kind != "pr" && !matches!(id, "overview" | "discussion") {
                 continue;
             }
-            tabs = tabs.child(
-                action(title, Variant::Quiet, move |_| select_section(ui, id)).bg(move || {
-                    if b.section.get() == id {
-                        SELECTED.resolve()
-                    } else {
-                        CLEAR.resolve()
-                    }
-                }),
-            );
+            tabs = tabs.child(compact_segment(
+                title,
+                None,
+                move || b.section.get() == id,
+                move |_| select_section(ui, id),
+            ));
         }
         area = area
             .child(tabs)
@@ -222,21 +219,25 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 }
             })))
             .child(when(
-                move || b.section.get() != "overview",
+                move || {
+                    b.section.get() != "overview"
+                        && (b.detail_page.get() > 1 || b.detail.with(|v| v["has_next"] == true))
+                },
                 move || {
                     view()
+                        .flex_shrink_0()
                         .flex_row()
                         .items_center()
                         .gap_2()
                         .child(
-                            action("Previous", Variant::Quiet, move |_| {
+                            compact_action("Previous", Variant::Quiet, move |_| {
                                 b.detail_page.update(|p| *p = p.saturating_sub(1).max(1));
                             })
                             .disabled(move || b.detail_page.get() <= 1 || b.detail_loading.get()),
                         )
                         .child(muted(move || format!("Page {}", b.detail_page.get())))
                         .child(
-                            action("Next", Variant::Quiet, move |_| {
+                            compact_action("Next", Variant::Quiet, move |_| {
                                 b.detail_page.update(|p| *p += 1)
                             })
                             .disabled(move || {
@@ -483,6 +484,46 @@ fn submit(
         }
     });
 }
+fn multiline_box(
+    value: impl Fn() -> String + 'static,
+    on_change: impl Fn(String) + 'static,
+    label_text: &'static str,
+    placeholder: &'static str,
+    height: f32,
+) -> View {
+    let focused = signal(false);
+    view()
+        .h(px(height))
+        .min_w(px(0.))
+        .rounded(px(RADIUS))
+        .border_1()
+        .border_color(move || if focused.get() { ACCENT } else { BORDER })
+        .bg(INSET)
+        .overflow_hidden()
+        .child(
+            nsh_base::editor()
+                .value(move || Some(value().into()))
+                .on_change(move |v: &SharedString| on_change(v.to_string()))
+                .on_focus(move |_: &()| focused.set(true))
+                .on_blur(move |_: &()| focused.set(false))
+                .accessibility_label(label_text)
+                .placeholder(placeholder)
+                .line_numbers(false)
+                .folding(false)
+                .soft_wrap(true)
+                .active_line(false)
+                .indent_guides(false)
+                .auto_close(false)
+                .auto_indent(false)
+                .font_size(px(13.))
+                .line_height(px(19.))
+                .text_color(TEXT)
+                .px_2()
+                .py_1()
+                .size_full(),
+        )
+}
+
 fn composer(ui: Ui, d: Signal<Draft>, r: GitHubReference) -> impl IntoElement {
     let is_pr = r.kind == "pr";
     let comment = r.clone();
@@ -491,8 +532,14 @@ fn composer(ui: Ui, d: Signal<Draft>, r: GitHubReference) -> impl IntoElement {
         .flex_wrap()
         .items_center()
         .gap_2()
-        .child(action(
-            "Write a GitHub comment",
+        .child(compact_action(
+            move || {
+                if d.get().github_compose == "comment" {
+                    "Hide GitHub comment ▾"
+                } else {
+                    "Write a GitHub comment"
+                }
+            },
             Variant::Secondary,
             move |_| {
                 d.update(|d| {
@@ -505,12 +552,19 @@ fn composer(ui: Ui, d: Signal<Draft>, r: GitHubReference) -> impl IntoElement {
             },
         ));
     if is_pr {
-        buttons = buttons.child(action(
+        buttons = buttons.child(compact_action(
             move || {
-                format!(
-                    "Review · {} pending comments",
-                    d.get().github_comments.len()
-                )
+                if d.get().github_compose == "review" {
+                    format!(
+                        "Hide Review ({} pending) ▾",
+                        d.get().github_comments.len()
+                    )
+                } else {
+                    format!(
+                        "Review · {} pending comments",
+                        d.get().github_comments.len()
+                    )
+                }
             },
             Variant::Secondary,
             move |_| {
@@ -526,9 +580,13 @@ fn composer(ui: Ui, d: Signal<Draft>, r: GitHubReference) -> impl IntoElement {
     }
     let check = r.url.clone();
     view()
+        .flex_shrink_0()
+        .border_t_1()
+        .border_color(BORDER)
+        .pt_2()
         .gap_2()
         .child(buttons)
-        .child(when(move||d.get().github_unknown,move||view().gap_1().child(notice("Publication outcome is unknown. Your draft is retained; check GitHub before submitting again.",Tone::Attention)).child(action("Check on GitHub",Variant::Quiet,{let check=check.clone();move |_|open_url(ui,check.clone())})).child(action("I checked GitHub · enable a new submission",Variant::Secondary,move |_|d.update(|d|{d.github_unknown=false;d.github_action_key.clear();d.github_action_payload.clear();})))))
+        .child(when(move||d.get().github_unknown,move||view().gap_1().child(notice("Publication outcome is unknown. Your draft is retained; check GitHub before submitting again.",Tone::Attention)).child(action("Check on GitHub",Variant::Quiet,{let check=check.clone();move |_|open_url(ui,check.clone())}).self_start()).child(action("I checked GitHub · enable a new submission",Variant::Secondary,move |_|d.update(|d|{d.github_unknown=false;d.github_action_key.clear();d.github_action_payload.clear();})).self_start())))
         .child(when(
             move || d.get().github_compose == "comment",
             move || comment_form(ui, d, comment.clone()),
@@ -537,34 +595,271 @@ fn composer(ui: Ui, d: Signal<Draft>, r: GitHubReference) -> impl IntoElement {
             move || d.get().github_compose == "review",
             move || {
                 scroll()
-                    .max_h(px(300.))
+                    .max_h(px(230.))
                     .min_h(px(0.))
                     .child(review_form(ui, d, r.clone()))
             },
         ))
 }
 fn comment_form(ui: Ui, d: Signal<Draft>, r: GitHubReference) -> impl IntoElement {
-    panel().gap_2().child(label("GitHub comment"))
-        .child(bound_field(move||d.get().comment,move|v|d.update(|d|d.comment=v.into()),"Write a comment to publish on GitHub…").key(format!("github-comment:{}",r.url)))
-        .child(view().flex_row().gap_2()
-            .child(action(move||if d.get().github_reply>0{"Publish reply to thread"}else{"Publish to GitHub"},Variant::Primary,move |_|{
-                let draft=d.get_untracked();let method=if draft.github_reply>0{"github.remote.reply"}else{"github.remote.comment"};
-                submit(ui,d,method,json!({"reference":r,"body":draft.comment,"comment_id":draft.github_reply}),move|_|{d.update(|d|{d.comment.clear();d.github_reply=0;d.github_compose.clear();});load(ui,true);});
-            }).disabled(move||ui.pending.get()||d.get().github_unknown||d.with(|d|d.comment.trim().is_empty())))
-            .child(when(move||d.get().github_reply>0,move||action("Cancel thread reply",Variant::Quiet,move |_|d.update(|d|d.github_reply=0)))))
+    panel()
+        .p_3()
+        .gap_2()
+        .border_1()
+        .border_color(BORDER)
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(label("GitHub comment").font_weight(FontWeight::SEMIBOLD))
+                .child(chrome_button(Icon::Close, "Close comment composer", move |_| {
+                    d.update(|d| d.github_compose.clear())
+                })),
+        )
+        .child(multiline_box(
+            move || d.get().comment,
+            move |v| d.update(|d| d.comment = v),
+            "GitHub comment",
+            "Write a comment to publish on GitHub…",
+            82.,
+        ))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    action(
+                        move || {
+                            if d.get().github_reply > 0 {
+                                "Publish reply to thread"
+                            } else {
+                                "Publish to GitHub"
+                            }
+                        },
+                        Variant::Primary,
+                        move |_| {
+                            let draft = d.get_untracked();
+                            let method = if draft.github_reply > 0 {
+                                "github.remote.reply"
+                            } else {
+                                "github.remote.comment"
+                            };
+                            submit(
+                                ui,
+                                d,
+                                method,
+                                json!({"reference":r,"body":draft.comment,"comment_id":draft.github_reply}),
+                                move |_| {
+                                    d.update(|d| {
+                                        d.comment.clear();
+                                        d.github_reply = 0;
+                                        d.github_compose.clear();
+                                    });
+                                    load(ui, true);
+                                },
+                            );
+                        },
+                    )
+                    .disabled(move || {
+                        ui.is_method_pending("github.remote.comment")
+                            || ui.is_method_pending("github.remote.reply")
+                            || d.get().github_unknown
+                            || d.with(|d| d.comment.trim().is_empty())
+                    }),
+                )
+                .child(when(
+                    move || d.get().github_reply > 0,
+                    move || {
+                        action("Cancel thread reply", Variant::Quiet, move |_| {
+                            d.update(|d| d.github_reply = 0)
+                        })
+                    },
+                )),
+        )
 }
 fn review_form(ui: Ui, d: Signal<Draft>, r: GitHubReference) -> impl IntoElement {
     let event = signal("COMMENT".to_owned());
     let side = signal("RIGHT".to_owned());
-    panel().gap_2().child(label("Review · current PR version"))
-        .child(when(move||d.with(|d|!d.github_head.is_empty()) && d.get().github_head!=ui.github.overview.with(|v|v["head"]["sha"].as_str().unwrap_or("").to_owned()),move||view().gap_1().child(notice("The PR has a new version. Your Review draft still belongs to the previous head.",Tone::Attention)).child(action("Discard line comments and use latest version",Variant::Secondary,move |_|{let head=ui.github.overview.get_untracked()["head"]["sha"].as_str().unwrap_or("").to_owned();d.update(|d|{d.github_comments.clear();d.github_file.clear();d.github_line.clear();d.instructions.clear();d.github_head=head;});}))))
-        .child(view().flex_row().flex_wrap().gap_1().child(muted(move||format!("File: {}",d.get().github_file)))
-            .child(bound_field(move||d.get().github_line,move|v|d.update(|d|d.github_line=v.into()),"Line number").key("github-review-line"))
-            .child(choice(ui,side,vec![("RIGHT","New side"),("LEFT","Old side")])))
-        .child(bound_field(move||d.get().instructions,move|v|d.update(|d|d.instructions=v.into()),"Line comment").key("github-review-line-body"))
-        .child(action("Add to pending Review",Variant::Secondary,move |_|{let draft=d.get_untracked();if let Ok(line)=draft.github_line.parse::<u64>() && line>0 && !draft.github_file.is_empty() && !draft.instructions.trim().is_empty(){d.update(|d|{d.github_comments.push(json!({"path":draft.github_file,"line":line,"side":side.get_untracked(),"body":draft.instructions}));d.instructions.clear();});}}).disabled(move||d.with(|d|d.github_file.is_empty()||d.github_line.parse::<u64>().is_err()||d.instructions.trim().is_empty())))
-        .child(muted(move||format!("{} pending line comments",d.get().github_comments.len())))
-        .child(bound_field(move||d.get().body,move|v|d.update(|d|d.body=v.into()),"Review summary").key("github-review-summary"))
-        .child(view().flex_row().gap_2().child(choice(ui,event,vec![("COMMENT","Comment"),("APPROVE","Approve"),("REQUEST_CHANGES","Request changes")]))
-            .child(action("Submit Review to GitHub",Variant::Primary,move |_|{let draft=d.get_untracked();submit(ui,d,"github.remote.review",json!({"reference":r,"head":draft.github_head,"body":draft.body,"comments":draft.github_comments,"event":event.get_untracked()}),move|_|{d.update(|d|{d.github_comments.clear();d.body.clear();d.github_compose.clear();});load(ui,true);});}).disabled(move||ui.pending.get()||d.get().github_unknown||(event.get()=="COMMENT"&&d.with(|d|d.body.trim().is_empty()&&d.github_comments.is_empty()))||d.get().github_head.is_empty()||d.get().github_head!=ui.github.overview.with(|v|v["head"]["sha"].as_str().unwrap_or("").to_owned()))))
+    panel()
+        .p_3()
+        .gap_2()
+        .border_1()
+        .border_color(BORDER)
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .child(label("Review · current PR version").font_weight(FontWeight::SEMIBOLD))
+                .child(chrome_button(Icon::Close, "Close review composer", move |_| {
+                    d.update(|d| d.github_compose.clear())
+                })),
+        )
+        .child(when(
+            move || {
+                d.with(|d| !d.github_head.is_empty())
+                    && d.get().github_head
+                        != ui
+                            .github
+                            .overview
+                            .with(|v| v["head"]["sha"].as_str().unwrap_or("").to_owned())
+            },
+            move || {
+                view()
+                    .gap_1()
+                    .child(notice(
+                        "The PR has a new version. Your Review draft still belongs to the previous head.",
+                        Tone::Attention,
+                    ))
+                    .child(
+                        action(
+                            "Discard line comments and use latest version",
+                            Variant::Secondary,
+                            move |_| {
+                                let head = ui.github.overview.get_untracked()["head"]["sha"]
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_owned();
+                                d.update(|d| {
+                                    d.github_comments.clear();
+                                    d.github_file.clear();
+                                    d.github_line.clear();
+                                    d.instructions.clear();
+                                    d.github_head = head;
+                                });
+                            },
+                        )
+                        .self_start(),
+                    )
+            },
+        ))
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(muted(move || {
+                    let f = d.get().github_file;
+                    if f.is_empty() {
+                        "File: select a file above".into()
+                    } else {
+                        format!("File: {f}")
+                    }
+                }))
+                .child(
+                    bound_field(
+                        move || d.get().github_line,
+                        move |v| d.update(|d| d.github_line = v.into()),
+                        "Line #",
+                    )
+                    .w(px(96.))
+                    .key("github-review-line"),
+                )
+                .child(choice(ui, side, vec![("RIGHT", "New side"), ("LEFT", "Old side")])),
+        )
+        .child(multiline_box(
+            move || d.get().instructions,
+            move |v| d.update(|d| d.instructions = v),
+            "Line comment",
+            "Write an inline comment for the selected file and line…",
+            62.,
+        ))
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    compact_action("Add to pending Review", Variant::Secondary, move |_| {
+                        let draft = d.get_untracked();
+                        if let Ok(line) = draft.github_line.parse::<u64>()
+                            && line > 0
+                            && !draft.github_file.is_empty()
+                            && !draft.instructions.trim().is_empty()
+                        {
+                            d.update(|d| {
+                                d.github_comments.push(json!({
+                                    "path": draft.github_file,
+                                    "line": line,
+                                    "side": side.get_untracked(),
+                                    "body": draft.instructions
+                                }));
+                                d.instructions.clear();
+                            });
+                        }
+                    })
+                    .disabled(move || {
+                        d.with(|d| {
+                            d.github_file.is_empty()
+                                || d.github_line.parse::<u64>().is_err()
+                                || d.instructions.trim().is_empty()
+                        })
+                    }),
+                )
+                .child(muted(move || {
+                    format!("{} pending line comments", d.get().github_comments.len())
+                })),
+        )
+        .child(multiline_box(
+            move || d.get().body,
+            move |v| d.update(|d| d.body = v),
+            "Review summary",
+            "Write overall review summary…",
+            68.,
+        ))
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(choice(
+                    ui,
+                    event,
+                    vec![
+                        ("COMMENT", "Comment"),
+                        ("APPROVE", "Approve"),
+                        ("REQUEST_CHANGES", "Request changes"),
+                    ],
+                ))
+                .child(
+                    action("Submit Review to GitHub", Variant::Primary, move |_| {
+                        let draft = d.get_untracked();
+                        submit(
+                            ui,
+                            d,
+                            "github.remote.review",
+                            json!({"reference":r,"head":draft.github_head,"body":draft.body,"comments":draft.github_comments,"event":event.get_untracked()}),
+                            move |_| {
+                                d.update(|d| {
+                                    d.github_comments.clear();
+                                    d.body.clear();
+                                    d.github_compose.clear();
+                                });
+                                load(ui, true);
+                            },
+                        );
+                    })
+                    .disabled(move || {
+                        ui.is_method_pending("github.remote.review")
+                            || d.get().github_unknown
+                            || (event.get() == "COMMENT"
+                                && d.with(|d| {
+                                    d.body.trim().is_empty() && d.github_comments.is_empty()
+                                }))
+                            || d.get().github_head.is_empty()
+                            || d.get().github_head
+                                != ui
+                                    .github
+                                    .overview
+                                    .with(|v| v["head"]["sha"].as_str().unwrap_or("").to_owned())
+                    }),
+                ),
+        )
 }

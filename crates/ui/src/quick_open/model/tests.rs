@@ -137,3 +137,34 @@ fn duplicate_titles_sort_by_visible_owner_before_internal_identity() {
     b.detail = "Card · Tools".into();
     assert_eq!(ranked(&[b, a], "Architecture", &[], false)[0].id, "z");
 }
+
+#[test]
+fn card_numbers_use_numeric_order_and_unarchived_before_archived() {
+    let card = |id: &str, num: u64, archived: bool| Candidate {
+        id: id.into(),
+        title: format!("#{num} Task"),
+        detail: if archived {
+            "Card · Canban · done · Archived".into()
+        } else {
+            "Card · Canban · backlog".into()
+        },
+        kind: "Card",
+        target: Target::Card(id.into()),
+        fields: vec![format!("#{num} Task"), "Card".into()],
+    };
+    let rows = vec![
+        card("c1", 1, false),
+        card("c10", 10, false),
+        card("c2", 2, false),
+        card("c11", 11, true),
+    ];
+    // Empty query surfaces newest unarchived cards first, archived last.
+    let initial = ranked(&rows, "", &[], false);
+    let ids: Vec<_> = initial.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(ids, vec!["c10", "c2", "c1", "c11"]);
+
+    // Text query sorts matching cards in natural ascending card number (#1, #2, #10), never #1, #10, #2.
+    let matched = ranked(&rows, "Task", &[], false);
+    let matched_ids: Vec<_> = matched.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(matched_ids, vec!["c1", "c2", "c10", "c11"]);
+}

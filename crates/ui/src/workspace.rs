@@ -95,13 +95,20 @@ fn review_workspace(ui: Ui) -> impl IntoElement {
                             .justify_between()
                             .items_center()
                             .px_3()
-                            .py_2()
+                            .py_1p5()
                             .bg(SURFACE)
                             .border_b_1()
                             .border_color(BORDER)
-                            .child(compact_action("← Back", Variant::Quiet, move |_| {
-                                ui.back()
-                            }))
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(chrome_button(Icon::Back, "Back to Card", move |_| {
+                                        ui.back()
+                                    }))
+                                    .child(muted("Review workspace")),
+                            )
                             .child(
                                 view()
                                     .flex_row()
@@ -109,9 +116,9 @@ fn review_workspace(ui: Ui) -> impl IntoElement {
                                     .gap_1()
                                     .child(compact_action(
                                         if narrow || expanded {
-                                            if show_card { "Show work" } else { "Show Card" }
+                                            if show_card { "Show diff" } else { "Show Card" }
                                         } else {
-                                            "Expand work"
+                                            "Focus diff"
                                         },
                                         Variant::Quiet,
                                         move |_| {
@@ -125,18 +132,24 @@ fn review_workspace(ui: Ui) -> impl IntoElement {
                                             }
                                         },
                                     ))
-                                    .child(chrome_button_disabled(
-                                        Icon::Collapse,
-                                        "Restore split",
-                                        move || !expanded,
-                                        move |_| {
-                                            ui.expanded.set(false);
-                                            ui.focused_card.set(false);
+                                    .child(when(
+                                        move || expanded,
+                                        move || {
+                                            chrome_button(
+                                                Icon::Collapse,
+                                                "Restore split",
+                                                move |_| {
+                                                    ui.expanded.set(false);
+                                                    ui.focused_card.set(false);
+                                                },
+                                            )
                                         },
                                     ))
-                                    .child(chrome_button(Icon::Close, "Close panel", move |_| {
-                                        ui.back()
-                                    })),
+                                    .child(chrome_button(
+                                        Icon::Close,
+                                        "Close Review",
+                                        move |_| ui.back(),
+                                    )),
                             ),
                     )
                     .child(body)

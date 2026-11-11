@@ -123,10 +123,21 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
         let v = delivery.get();
         untracked(|| edit(d, |r| r.delivery = v));
     });
+    let drafts_flag = signal(rules(d).drafts);
+    let paused_flag = signal(rules(d).paused);
+    effect(move || {
+        let r = rules(d);
+        if drafts_flag.get_untracked() != r.drafts {
+            drafts_flag.set(r.drafts);
+        }
+        if paused_flag.get_untracked() != r.paused {
+            paused_flag.set(r.paused);
+        }
+    });
     let save = id.clone();
     let sync = id.clone();
     let disconnect = id.clone();
-    view().gap_3().key(format!("github-repository:{id}"))
+    view().max_w(px(760.)).gap_3().key(format!("github-repository:{id}"))
         .child(label(format!("Project: {name}")))
         .child(bound_field(move||d.get().title,move|v|d.update(|d|d.title=v.into()),"owner/repository").key("github-repository"))
         .child(label("Automatically add Open Issues"))
@@ -135,12 +146,26 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
         .child(choice(ui,pr,vec![("off","Off"),("all","All authors"),("collaborators","Repository collaborators"),("review_requested","Review requested from me"),("assigned","Assigned to me"),("authored","Created by me")]))
         .child(bound_field(move||rules(d).authors,move|v|edit(d,|r|r.authors=v.into()),"Authors: comma-separated logins, or empty for everyone").key("github-rule-authors"))
         .child(bound_field(move||rules(d).labels,move|v|edit(d,|r|r.labels=v.into()),"Labels: match any of these, or empty for all").key("github-rule-labels"))
-        .child(action(move||if rules(d).drafts{"✓ Include Draft PRs"}else{"Include Draft PRs"},Variant::Quiet,move |_|edit(d,|r|r.drafts = !r.drafts)))
-        .child(action(move||if rules(d).paused{"✓ Synchronization paused"}else{"Pause synchronization"},Variant::Quiet,move |_|edit(d,|r|r.paused = !r.paused)))
+        .child(checkbox("Include Draft PRs".into(), drafts_flag, move |enabled| {
+            edit(d, |r| r.drafts = *enabled);
+        }))
+        .child(checkbox("Pause synchronization".into(), paused_flag, move |enabled| {
+            edit(d, |r| r.paused = *enabled);
+        }))
         .child(label("Default code delivery")).child(choice(ui,delivery,vec![("local","Local merge"),("github_pr","GitHub PR")]))
         .child(muted("New matches enter Backlog without starting an Agent. Changing rules keeps existing Cards."))
-        .child(action("Save",Variant::Primary,move |_|{let r=rules(d);let split=|s:String|s.split(',').map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect::<Vec<_>>();dispatch(ui,"project.github",json!({"project_id":save,"repository":d.get_untracked().title.trim(),"intake":r.intake,"pr_intake":r.pr_intake,"authors":split(r.authors),"labels":split(r.labels),"include_drafts":r.drafts,"paused":r.paused,"delivery_mode":r.delivery}));}).disabled(move||ui.pending.get()||d.get().title.trim().is_empty()))
-        .child(view().flex_row().items_center().gap_2().child(chrome_button(Icon::Refresh,"Sync now",move |_|dispatch(ui,"github.sync",json!({"project_id":sync})))).child(compact_action("Disconnect",Variant::Quiet,move |_|dispatch(ui,"github.source.disconnect",json!({"project_id":disconnect})))))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    action("Save",Variant::Primary,move |_|{let r=rules(d);let split=|s:String|s.split(',').map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect::<Vec<_>>();dispatch(ui,"project.github",json!({"project_id":save,"repository":d.get_untracked().title.trim(),"intake":r.intake,"pr_intake":r.pr_intake,"authors":split(r.authors),"labels":split(r.labels),"include_drafts":r.drafts,"paused":r.paused,"delivery_mode":r.delivery}));})
+                        .disabled(move||ui.is_method_pending("project.github")||d.get().title.trim().is_empty()),
+                )
+                .child(chrome_button(Icon::Refresh,"Sync now",move |_|dispatch(ui,"github.sync",json!({"project_id":sync}))))
+                .child(compact_action("Disconnect",Variant::Quiet,move |_|dispatch(ui,"github.source.disconnect",json!({"project_id":disconnect})))),
+        )
         .child(dynamic(move||{let g=ui.snapshot.with(|s|s.projects.iter().find(|p|p.id==id).and_then(|p|p.github.clone()));let mut area=view().gap_1();if let Some(g)=g{area=area.child(muted(g.synced_at.map(|t|format!("Last sync: {}s ago",now().saturating_sub(t)/1000)).unwrap_or_else(||"Not synced yet".into())));if let Some(e)=g.error{area=area.child(notice(e,Tone::Attention));}}area.into_element()}))
 }
 pub fn screen(ui: Ui) -> impl IntoElement {
@@ -148,17 +173,16 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .flex_1()
         .min_h(px(0.))
         .p_5()
-        .gap_3()
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(chrome_button(Icon::Back, "Back to Board", move |_| {
-                    ui.navigate("board")
-                }))
-                .child(heading("GitHub repository").flex_1()),
-        )
+        .gap_4()
+        .child(subpage_header(
+            "Back to Board",
+            move || {
+                ui.current_project()
+                    .map(|p| format!("{} / GitHub repository", p.name))
+                    .unwrap_or_else(|| "GitHub repository".into())
+            },
+            move |_| ui.navigate("board"),
+        ))
         .child(scroll().flex_1().child(dynamic(move || {
             let _ = ui.project.get();
             if let Some(p) = ui.current_project() {

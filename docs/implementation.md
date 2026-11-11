@@ -80,7 +80,7 @@ See [Card conversation workspace](card-conversation.md) for the current compact 
 ## Product behavior
 
 - Create a Project in an existing or new absolute directory; Git is optional. Each Project has a Board and increasing local Card numbers.
-- Create/edit Cards, move with stage buttons or the Board's dedicated drag handle, and inspect current execution/attention status.
+- Create/edit Cards, move with stage buttons, the Card header stage switcher or Board card dragging, and inspect current execution/attention status.
 - Notes are deferred pending product design. Their UI/editor/search/Card-selection flows are removed; new executions use Card content, Timeline, reports and attachments without automatically injecting legacy Notes. Existing Note records, associations and capture files remain intact. See [current scope and compatibility](notes-deferred.md).
 - Comment and mention configured Agents. Reports and state changes join the same ordered Timeline. Pasted images in Card/comment editors save bytes as Card resources and insert an attachment reference into the draft; save/post the draft to retain that text reference. Resources also support file-path import and native opening.
 - Card creation and task editing share a native Markdown editor in the Board right pane with retained expanded mode. Drafts persist independently in schema v9 and are restored through Drafts. `@` offers Profile references; `#` offers local Cards and connected GitHub Issues/PRs. Enter/Shift+Enter always insert newlines; Tab selects candidates and Command+Enter confirms. See [Card editor](card-editor.md) for current behavior and acceptance limits.

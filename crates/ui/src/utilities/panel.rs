@@ -118,8 +118,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                 panel()
                                     .w(px(460.))
                                     .max_w(Percentage(0.95))
-                                    .h(px(if popup == "usage" { 480. } else { 660. }))
-                                    .max_h(Percentage(0.8))
+                                    .max_h(Percentage(0.76))
                                     .overflow_hidden()
                                     .border_1()
                                     .border_color(BORDER)
@@ -179,7 +178,7 @@ fn theme_panel(ui: Ui) -> impl IntoElement {
                                 ui.theme_preview.set(None);
                             }
                         },
-                        move || ui.pending.get(),
+                        move || ui.is_method_pending("utilities.configure"),
                         move |_| configure(ui, theme.id.into()),
                     )
                     .into_element()

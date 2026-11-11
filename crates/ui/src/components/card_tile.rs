@@ -9,12 +9,20 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
     let selected_id = card.id.clone();
     let terminal_card = card.id.clone();
     let snapshot = ui.snapshot.get_untracked();
+    let has_terminal = snapshot.attempts.iter().any(|a| a.card_id == card.id)
+        || snapshot.requests.iter().any(|r| r.card_id == card.id)
+        || crate::terminals::entries(&snapshot)
+            .into_iter()
+            .any(|e| e.card.as_ref().is_some_and(|c| c.id == card.id) && e.listed());
+    let hovered = signal(false);
     let mut tile = panel()
         .p_3()
         .min_w(px(0.))
         .gap_2()
         .border_1()
         .border_color(BORDER)
+        .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
+        .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
         .bg(move || {
             if ui.card.get() == selected_id {
                 SELECTED.resolve()
@@ -26,6 +34,7 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
         .child(
             view()
                 .flex_row()
+                .min_h(px(28.))
                 .justify_between()
                 .items_center()
                 .child(if let Some(source) = card.github_issue() {
@@ -51,22 +60,25 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
                 .child(
                     view()
                         .flex_row()
-                        .gap_2()
+                        .gap_1p5()
                         .items_center()
                         .child(reminder_count(
                             move || count.get().total,
                             move || count.get().pending > 0,
                         ))
-                        .child(chrome_button(
-                            Icon::Terminal,
-                            format!("Open Terminals for Card #{}", card.number),
-                            move |_| crate::terminals::open_card(ui, &terminal_card),
-                        ))
                         .child(
-                            icon(Icon::Grip)
-                                .w(px(14.))
-                                .h(px(14.))
-                                .pointer_events(PointerEvents::None),
+                            chrome_button(
+                                Icon::Terminal,
+                                format!("Open Terminals for Card #{}", card.number),
+                                move |_| crate::terminals::open_card(ui, &terminal_card),
+                            )
+                            .opacity(move || {
+                                if has_terminal || hovered.get() {
+                                    1.0_f32
+                                } else {
+                                    0.0_f32
+                                }
+                            }),
                         ),
                 ),
         )

@@ -92,7 +92,10 @@ pub struct Ui {
     pub request: Signal<String>,
     pub page: Signal<String>,
     pub status: Signal<String>,
+    pub toast: Signal<String>,
+    pub toast_epoch: Signal<u64>,
     pub pending: Signal<bool>,
+    pub pending_methods: Signal<BTreeSet<&'static str>>,
     pub refreshing: Signal<bool>,
     pub snapshot_epoch: Signal<u64>,
     pub output: Signal<String>,
@@ -240,7 +243,10 @@ impl Ui {
             request: signal(String::new()),
             page: signal("board".into()),
             status: signal(String::new()),
+            toast: signal(String::new()),
+            toast_epoch: signal(0),
             pending: signal(false),
+            pending_methods: signal(BTreeSet::new()),
             refreshing: signal(false),
             snapshot_epoch: signal(0),
             output: signal(String::new()),
@@ -398,6 +404,27 @@ impl Ui {
     pub fn back(self) {
         crate::navigation::go(self, false);
     }
+    pub fn is_method_pending(self, method: &'static str) -> bool {
+        self.pending_methods.with(|s| s.contains(method))
+    }
+    pub fn notify(self, message: impl Into<String>) {
+        let message = message.into();
+        self.status.set(message.clone());
+        if message.trim().is_empty() {
+            self.toast.set(String::new());
+            return;
+        }
+        let next = self.toast_epoch.get_untracked() + 1;
+        self.toast_epoch.set(next);
+        self.toast.set(message);
+        self.owner.run(|| {
+            set_timeout(std::time::Duration::from_millis(2500), move || {
+                if self.toast_epoch.try_get() == Some(next) {
+                    self.toast.try_set(String::new());
+                }
+            });
+        });
+    }
 }
 pub fn refresh(ui: Ui) {
     if ui.refreshing.get_untracked() {
@@ -486,9 +513,9 @@ pub fn dispatch_complete(
     mut params: Value,
     after: impl FnOnce(Result<Value, String>) + 'static,
 ) {
-    if ui.pending.get_untracked() {
+    if ui.pending_methods.with_untracked(|s| s.contains(method)) {
         after(Err(
-            "Another operation is pending; your draft is retained".into()
+            "This operation is already in progress; your draft is retained".into(),
         ));
         return;
     }
@@ -496,6 +523,9 @@ pub fn dispatch_complete(
         after(Err("Gallery preview: no AppServer connected".into()));
         return;
     };
+    ui.pending_methods.update(|s| {
+        s.insert(method);
+    });
     ui.pending.set(true);
     ui.operation_error.set(String::new());
     ui.status.set(format!("{method}…"));
@@ -515,7 +545,11 @@ pub fn dispatch_complete(
             ))
         })
         .await;
-        ui.pending.set(false);
+        ui.pending_methods.update(|s| {
+            s.remove(method);
+        });
+        ui.pending
+            .set(!ui.pending_methods.with_untracked(BTreeSet::is_empty));
         match result {
             Ok(Ok((value, snapshot, profiles, max_agents, idle_minutes))) => {
                 ui.snapshot_epoch.update(|v| *v += 1);
@@ -523,16 +557,37 @@ pub fn dispatch_complete(
                 ui.max_agents.set(max_agents);
                 ui.idle_minutes.set(idle_minutes);
                 ui.snapshot.set(snapshot);
-                ui.status.set(match value["state"].as_str() {
-                    Some("failed" | "unknown") => format!(
+                let failed = matches!(value["state"].as_str(), Some("failed" | "unknown"));
+                if failed {
+                    let msg = format!(
                         "{}: {}",
                         method,
                         value["message"]
                             .as_str()
                             .unwrap_or("Inspect before retrying")
-                    ),
-                    _ => "Saved".into(),
-                });
+                    );
+                    ui.status.set(msg.clone());
+                    ui.operation_error.set(msg);
+                } else {
+                    match method {
+                        "herdr.status" => ui.notify(format!(
+                            "Herdr connected · core {}",
+                            value["core"]["id"].as_str().unwrap_or("")
+                        )),
+                        "config.reload" => ui.notify("Configuration reloaded"),
+                        "scheduler.configure" => ui.notify("Scheduling settings saved"),
+                        "project.location" => ui.notify("Work location updated"),
+                        "workflow.save" => ui.notify("Workflow saved"),
+                        "utilities.awake" => ui.notify(if value["awake"] == true {
+                            "Host awake enabled"
+                        } else {
+                            "Host awake disabled"
+                        }),
+                        "utilities.configure" | "comment.add" | "card.move" | "project.create"
+                        | "card.create" => ui.status.set("Saved".into()),
+                        _ => ui.notify("Saved"),
+                    }
+                }
                 let active = ui.location() == source;
                 match method {
                     "project.create" if active => {
@@ -560,14 +615,7 @@ pub fn dispatch_complete(
                         ui.card.set(String::new());
                         ui.page.set("board".into());
                     }
-                    "herdr.status" => ui.status.set(format!(
-                        "Herdr connected · core {}",
-                        value["core"]["id"].as_str().unwrap_or("")
-                    )),
                     _ => {}
-                }
-                if matches!(value["state"].as_str(), Some("failed" | "unknown")) {
-                    ui.operation_error.set(ui.status.get_untracked());
                 }
                 after(Ok(value));
             }
@@ -664,7 +712,7 @@ pub fn open_resource(ui: Ui, card_id: String, path: String) {
         })
         .await
         {
-            Ok(Ok(())) => ui.status.set("Attachment opened".into()),
+            Ok(Ok(())) => ui.notify("Attachment opened"),
             Ok(Err(e)) => ui
                 .operation_error
                 .set(format!("Unable to open attachment: {e:#}")),
@@ -685,10 +733,10 @@ pub fn copy_text(ui: Ui, value: String) {
             Ok(())
         })
         .await;
-        ui.status.set(match result {
-            Ok(Ok(())) => "Copied to clipboard".into(),
-            Ok(Err(e)) => e.to_string(),
-            Err(e) => e.to_string(),
-        });
+        match result {
+            Ok(Ok(())) => ui.notify("Copied to clipboard"),
+            Ok(Err(e)) => ui.operation_error.set(e.to_string()),
+            Err(e) => ui.operation_error.set(e.to_string()),
+        }
     });
 }

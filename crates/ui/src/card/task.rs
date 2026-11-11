@@ -177,8 +177,37 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     }
                     area.into_element()
                 }))
-                .child(super::markdown(ui, move || {
-                    ui.current_card().map(|c| c.body).unwrap_or_default()
+                .child(dynamic(move || {
+                    let body_text = ui
+                        .current_card()
+                        .map(|c| c.body)
+                        .unwrap_or_default();
+                    let has_github_issue = ui
+                        .current_card()
+                        .is_some_and(|c| c.github_issue().is_some());
+                    if body_text.trim().is_empty() && !has_github_issue {
+                        return nsh_base::button()
+                            .self_start()
+                            .py_1()
+                            .px_2()
+                            .rounded(px(5.))
+                            .bg(CLEAR)
+                            .hover(|s| s.bg(INSET))
+                            .focus(|s| s.border_1().border_color(ACCENT))
+                            .child(muted("No description yet · Click to add context"))
+                            .on_press(move |_: &()| {
+                                if let Some(editor) = reading.editor.get() {
+                                    editor.blur();
+                                }
+                                draft.update(|d| d.editing = true);
+                                reading.top();
+                            })
+                            .into_element();
+                    }
+                    super::markdown(ui, move || {
+                        ui.current_card().map(|c| c.body).unwrap_or_default()
+                    })
+                    .into_element()
                 }))
                 .child(crate::github::references::panel(ui))
                 .into_element()

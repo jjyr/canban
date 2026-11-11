@@ -87,6 +87,40 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         ))
         .child(crate::utilities::bar(ui))
         .child(when(
+            move || ui.operation_error.get().is_empty() && !ui.toast.get().is_empty(),
+            move || {
+                view()
+                    .absolute()
+                    .bottom(px(44.))
+                    .right(px(16.))
+                    .max_w(px(420.))
+                    .px_3()
+                    .py_2()
+                    .bg(canban_ui_kit::tokens::SURFACE)
+                    .border_1()
+                    .border_color(canban_ui_kit::tokens::BORDER)
+                    .rounded(px(8.))
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .pointer_events(PointerEvents::None)
+                    .child(
+                        canban_ui_kit::icon_tinted(
+                            canban_ui_kit::Icon::Check,
+                            canban_ui_kit::tokens::ACCENT,
+                        )
+                        .w(px(15.))
+                        .h(px(15.)),
+                    )
+                    .child(
+                        canban_ui_kit::label(move || ui.toast.get())
+                            .font_weight(FontWeight::MEDIUM)
+                            .truncate()
+                            .min_w(px(0.)),
+                    )
+            },
+        ))
+        .child(when(
             move || !ui.operation_error.get().is_empty(),
             move || {
                 view()

@@ -21,26 +21,15 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .min_w(px(0.))
         .p_5()
         .gap_4()
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .min_w(px(0.))
-                .child(action("← Board", Variant::Quiet, move |_| {
-                    ui.navigate("board")
-                }))
-                .child(
-                    heading(move || {
-                        ui.current_project()
-                            .map(|p| format!("Archive · {}", p.name))
-                            .unwrap_or_else(|| "Archive".into())
-                    })
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate(),
-                ),
-        )
+        .child(subpage_header(
+            "Back to Board",
+            move || {
+                ui.current_project()
+                    .map(|p| format!("{} / Archive", p.name))
+                    .unwrap_or_else(|| "Archive".into())
+            },
+            move |_| ui.navigate("board"),
+        ))
         .child(
             view()
                 .flex_row()
