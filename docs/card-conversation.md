@@ -85,13 +85,13 @@ These checks covered the earlier compact Card implementation. Its default disclo
 
 This is deterministic integration/UI acceptance; it does not establish provider authentication readiness or a new real-model acceptance run. Chinese IME was excluded at the user's request.
 
-## Direct lifecycle actions and recovery (2026-11-09)
+## Direct lifecycle actions and recovery (updated 2026-11-11)
 
-Local Cards offer **Delete Card**; GitHub Issue Cards offer **Remove from Board**. Both use the reversible `card.remove` boundary, retaining the Card number, content and Timeline. The operation cancels queued work and excludes the Card from normal snapshots and dispatch. Live or uncertain Agent invocations must be ended/resolved first; a failed removal leaves the Card active. No GitHub Issue or PR is closed or deleted.
+Local Cards offer **Archive Card** while active and **Restore Card** while archived. GitHub source Cards additionally offer **Remove from Board**, a reversible local sync exclusion through `card.remove`, retaining the Card number, content and Timeline. Removal cancels queued work and excludes the Card from normal snapshots and dispatch. Live or uncertain Agent invocations must be ended/resolved first; a failed removal leaves the Card active. No GitHub Issue or PR is closed or deleted.
 
-[**Archived Cards**](archive.md) shows a global Project → archived Card conversation tree, hides empty Projects, and filters metadata with 120 ms debounced fuzzy search. It provides inline Restore and a separate **Deleted Cards** recovery section loaded through one global `card.list(include_removed: true)` call. `card.restore` clears local removal/archive state without scheduling work. Archive remains the completed-work/compression lifecycle; Delete is local removal and preserves recoverable data. There is no additional Close workflow stage.
+[**Archived Cards**](archive.md) shows a global Project → archived Card conversation tree, hides empty Projects, and filters metadata with 120 ms debounced fuzzy search. Inline Restore and the Card header use the same lifecycle intent. Removed records are absent, including legacy records with an archive timestamp; Archive makes no separate removed-record fetch. The compatibility removal/restoration API and existing removed data remain intact. Archive retains and compresses completed work, and Restore does not schedule work. There is no additional Close workflow stage.
 
-Native isolated checks covered header Archive → archived list → Restore, Board right-click Delete → Deleted Cards → Restore with the same Card number, and X dismissing only the detail pane. Backend tests cover queue cancellation/history preservation and rejection of removal with a live Agent. Gallery includes an **Archived / deleted** scene using production controls.
+Historical isolated checks on 2026-11-09 covered header Archive → archived list → Restore, Board right-click Delete → Deleted Cards → Restore with the same Card number, and X dismissing only the detail pane. The Delete/recovery controls were superseded by Card #11; see the [2026-11-11 Archive acceptance](archive.md#verification-card-11-2026-11-11). Backend compatibility tests still cover queue cancellation/history preservation and rejection of removal with a live Agent. Gallery now labels its production scene **Archived Cards**, retaining hidden legacy removed fixtures as regression data.
 
 [Terminal interaction and navigation](terminal-interaction.md) records the current delayed-exit/inactive contract and unified Back/Forward behavior.
 

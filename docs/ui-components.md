@@ -135,7 +135,7 @@ Gallery workspace scenes now use the exact production frame, including utilities
 
 `card/` separates fixed header, scrolling task/context/details, Timeline projection and fixed composer. `components/timeline_item.rs` owns inline file-backed Markdown replies/reports; `profiles.rs` owns the shared explicit-recipient menu/projection; `terminals.rs` owns Card-context navigation and explicit Agent selection. See [contracts and native evidence](card-conversation.md). Gallery **Card conversation** and **Append reply** cover long histories, narrow layouts and reading-position behavior through production components.
 
-`card_actions.rs` shares lifecycle intents between the Card header, Board right-click menu and Archive recovery rows. Direct Archive/Restore, reversible local Delete/Remove, archive failures and recovery use existing UI Kit chrome/buttons/panels. Gallery **Archived / deleted** covers both recovery groups. The compact bottom bar omits the redundant Usage/machine prefix.
+`card_actions.rs` shares lifecycle intents between the Card header, Board right-click menu and Archive rows. Local Cards use Archive/Restore; GitHub source Cards additionally retain reversible Remove from Board. These actions, archive failures and restoration use existing UI Kit chrome/buttons/panels. Gallery **Archived Cards** covers archived Project groups and excludes hidden legacy removed fixtures. The compact bottom bar omits the redundant Usage/machine prefix.
 
 ## Terminal interaction and navigation (2026-11-09)
 
@@ -177,7 +177,7 @@ The Gallery's **Card conversation**, **Append reply** and **Reply in 5s** scenes
 
 `ui/archive.rs` composes the global archived-conversation browser; `archive/model.rs` owns grouping, metadata matching and ordering. The controlled UI Kit `tree_group` accepts title/count readers, expansion state, a toggle intent and children. It uses NSH disclosure/reveal behavior, keyboard activation, expanded accessibility state, indentation and a guide; hidden descendants do not accept pointer input or appear in accessibility navigation. Generic shared `search::score` preserves Quick Open matching, while `input::debounced` owns a trailing-edge, scope-cancelled timeout without replacing the native text field. Product-specific state and RPC remain outside UI Kit.
 
-Gallery **Archived / deleted**, or `CANBAN_GALLERY_SCENE=archive mise run gallery`, covers multiple Projects, an active-only Project, Unicode/long titles, Agent metadata and separate deleted recovery. See [Archive contract and verification](archive.md).
+Gallery **Archived Cards**, or `CANBAN_GALLERY_SCENE=archive mise run gallery`, covers multiple Projects, an active-only Project, Unicode/long titles, Agent metadata and hidden legacy removed records, including a removed record with an archive timestamp. See [Archive contract and verification](archive.md).
 
 
 ## Global update and recovery components (2026-11-10)

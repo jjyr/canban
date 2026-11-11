@@ -61,6 +61,7 @@ modal dismissal/focus, syntax highlighting and publication-conflict retention.
 | [MVP sequence](mvp-plan.md) | Scope, implementation proposals, decision gates, and acceptance matrix |
 | [MVP scope review](product/mvp-scope-review.md) | User resolutions and the simplified first-release boundary |
 | [Review and code delivery](product/review-delivery.md) | Basic Diff, return-to-Develop, explicit commit/merge, conflict and receipt behavior |
+| [Live Review and delivery exercise](review-delivery-dogfood-20261111.md) | Two real App deliveries, continued-assignment blocker repair and interaction findings |
 | [MVP progress and next steps](product/mvp-next-steps.md) | Current acceptance boundaries and recommended daily-use, review and code-delivery priorities |
 | [Event-driven runtime observation](runtime-observation.md) | Subscription, connection recovery, bounded discovery, Git caches and exit classification |
 | [Runtime observation cost](runtime-observation-cost.md) | Historical polling baseline and prototype; superseded by event-driven runtime observation |
