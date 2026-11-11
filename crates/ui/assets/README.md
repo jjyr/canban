@@ -17,8 +17,9 @@ highlighted. It is a flat geometric 1024×1024 vector on the macOS icon grid
 then uses macOS `iconutil` to generate `Contents/Resources/AppIcon.icns` with
 16, 32, 128, 256 and 512-point images at 1× and 2×. `CFBundleIconFile` declares
 the icon for Finder, the Dock and the application switcher. Normal, development,
-Gallery and release bundles share this source; release signing happens after
-the icon is installed, and the updater archive includes the whole bundle.
+Gallery and release bundles share this source. Every bundle is ad-hoc signed
+after all resources are installed, then verified with `codesign --verify --deep
+--strict`. The updater archive includes the whole bundle.
 Generated PNGs and ICNS files are build artifacts, not additional source assets.
 
 Install the build dependency with `brew install librsvg`, then run

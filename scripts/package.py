@@ -56,13 +56,15 @@ version = os.environ.get("CANBAN_RELEASE_VERSION", "0.1.0")
 sequence = os.environ.get("GITHUB_RUN_NUMBER", "1")
 with (app / "Contents/Info.plist").open("wb") as file:
     plistlib.dump({"CFBundleIdentifier": app_id, "CFBundleName": name, "CFBundleDisplayName": name, "CFBundleExecutable": executable, "CFBundlePackageType": "APPL", "CFBundleIconFile": "AppIcon.icns", "CFBundleVersion": sequence, "CFBundleShortVersionString": version, "NSHighResolutionCapable": True, "LSMinimumSystemVersion": "13.0"}, file)
-print(app)
-
 resources=app/"Contents/Resources/licenses"
 resources.mkdir(parents=True,exist_ok=True)
 for source in (root/"third_party").glob("*-LICENSE.txt"):
     shutil.copy2(source,resources/source.name)
 shutil.copy2(root/"THIRD_PARTY_NOTICES.md",resources/"THIRD_PARTY_NOTICES.md")
 
-if args.release:
-    subprocess.run(["codesign", "--force", "--sign", "-", "--timestamp=none", str(app)], check=True)
+# Every variant can be opened or moved through Finder. Replacing a linker-signed
+# executable invalidates an existing bundle seal, including after Release -> Debug.
+# Sign only after all binaries, plist and resources have reached their final paths.
+subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", str(app)], check=True)
+subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)], check=True)
+print(app)

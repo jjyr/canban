@@ -99,6 +99,9 @@ run = "/usr/bin/python3 scripts/acceptance-updates.py"
 [tasks.test-release]
 run = "/usr/bin/python3 scripts/test-release.py"
 
+[tasks.test-package]
+run = "/usr/bin/python3 scripts/test-package.py"
+
 [tasks.acceptance-github-workspace]
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance-github-workspace.py"
