@@ -1,112 +1,66 @@
-# Projects, JSON workflow templates, and worktrees
+# Projects, Boards and workflow definitions
 
-Status: updated 2026-11-07. The workspace settings and human-review gate below are implemented. Older illustrative workflow examples in this document remain conceptual; use the current types and [implementation contract](../workspace-and-scheduling.md) for actual JSON.
+Status: reconciled 2026-11-11. The [unified engine](workflow-engine.md) now separates Board position from progress and interprets converted stage templates/custom definitions through one runtime. See [workflow implementation](../workflow-implementation.md) for actual authoring, activation, API and verification limits; Project source editing and Edit with agent are implemented; onboarding remains open.
 
-## Project
+## Project and Board
 
-A user-created Project has one required directory and its own Board. Create the directory if absent. It is usually a Git repository, but Git is not mandatory. A Canban Project does not need a corresponding Herdr Space.
+A Project has a stable identity, one required directory/current execution location and its own Board. Create its directory if absent; Git is common but not mandatory. Project creation does not imply cloning or initializing Git, and directory failures never make existing files disposable rollback data. A Project does not require a Herdr Space.
 
-Creating a Project does not imply cloning a repository or initializing Git. Directory failures should be visible; existing files are not disposable rollback data. Stable Project identity is independent of its path.
-
-The main creation experience is name/directory, template/default agent configuration, then the Board. A missing directory later does not erase card history.
-
-## Board, stage, and workflow
+Keep the current Board at three columns: Backlog / Develop / Review. Archive retains completed work outside the active Board. Earlier support for configurable runtime stages does not require adding a Design column for planning.
 
 ```text
 Project
-  +-- directory
-  +-- Board
-        +-- Backlog -> no automatic entry workflow
-        +-- Develop -> development task
-        +-- Review  -> ordinary review report
-        +-- custom stages from JSON configuration
+  +-- directory / execution location
+  +-- Board: Backlog / Develop / Review
+  +-- declarative workflow definitions
+  +-- event subscriptions / entry bindings
+  +-- Cards
+       +-- Board position
+       +-- workflow progress, independent of column
+       +-- conversations / execution / results / decisions
 ```
 
-A card's stage is a property; stage entry produces an event and can trigger a configured workflow. The workflow defines the task and callbacks. The stage profile or global default selects the Agent; an explicit @profile selects the mentioned Profile. Routing tags are removed. Scheduler starts/resumes or reuses the Card/profile conversation through herdr-core.
+Column IDs are stable; names are presentation. Backlog entry has no built-in Agent task, but a manual or subscribed planning entry can execute while a Card remains there. Board filtering does not affect workflow admission.
 
-All Sessions have the same structure. An @mention and a stage entry differ in their scheduling input/callback, not in session type. See [Sessions](sessions.md).
+## One workflow model
 
-## Completion and progression
+A definition describes entries, steps, transitions, inputs/outputs, Agent references, approval and workspace policy. A WorkflowRun captures one invocation and definition revision. The same engine handles manual starts, subscribed facts and external column entry. There is no separate stage-callback runtime.
 
-The agent decides/reports whether it has completed. When it reports completed, Canban applies the workflow's configured next action. In the default template, completion of development moves the card to Review, which starts its review workflow.
+The default behavior remains externally moving to Develop -> developer -> move to Review -> reviewer -> human decision. The planning entry adds read/design and optional approval before that sequence, without adding a column. Workflow-owned moves carry run/step causality and do not start duplicate work.
 
-Do not add an independent test/artifact-quality gate or wait for terminal exit before this normal progression. Check output and change references can be recorded as context, but they are not a separate Canban verification requirement.
+Explicit completion advances only its owning request/attempt and workflow step. A response to a direct mention is not completion of the main delivery process. Profiles retain separate Card conversations; physical execution continues through the existing Scheduler and Herdr. Idle/process exit is not completion, and the next business step does not require old-process drain or independent quality verification.
 
-The user explicitly accepts exceptional old executions continuing during MVP. Do not require process drain, writer quiescence, or coordinated shutdown before stage progression. The ordinary assumption is that the agent reports completion before the card moves.
+Required human decisions persist and bind exact result/input versions. Reading notifications, unrelated replies and another Agent's completion cannot release them. Rework, stop, stale-result handling and external moves follow the [engine rules](workflow-engine.md), retaining existing history.
 
-Keep simple request/callback association and avoid processing an identical completed report twice. A response to an @mention uses that request's callback; it does not become the stage's completion merely because the same profile was used.
+## Authoring and display
 
-When the agent reports blockage/needs input, mark the card needs attention and publish an internal notification event. This is independent of its Board stage. See [events and notifications](events-and-notifications.md).
+Agents should author/modify workflows through the same declarative model that users can manually edit. Use shared schema validation, useful diagnostics, expected revisions and immutable published revisions. Invalid drafts do not replace active valid configuration; new edits do not silently rewrite active runs or captured assignments.
 
-## JSON templates first
+Project Workflows displays and edits multiple named YAML sources, with immutable SQL version history. Original YAML and active revision references live only in SQLite; files are optional submit/export inputs and no Workflow copies are written under ~/.canban. Edit with agent previews one Project-wide Prompt and opens a Project-owned configuration conversation in Terminal. Column trigger icons show shared-library descriptions of active rules. Cards retain execution/approval controls. See [the concrete contract](../workflow-implementation.md) for validation, conflicts, activation and UI behavior. A graph editor is not required; onboarding remains open.
 
-Confirmed: users can customize templates via JSON-style configuration; a template-editing UI is deferred. Rich template depth and complex live migration can follow MVP.
+## Migration and compatibility
 
-Illustrative configuration:
+Convert existing Stage `execute/profile/instruction`, `on_completed` and `require_human_review` into Agent steps, transitions and approval steps. Legacy format parsing may remain as conversion; only one engine executes the result. Preserve existing template/workspace behavior during conversion.
 
-```json
-{
-  "id": "default-development",
-  "revision": 1,
-  "stages": [
-    { "id": "backlog", "title": "Backlog", "on_enter": null },
-    { "id": "develop", "title": "Develop", "on_enter": "development" },
-    { "id": "review", "title": "Review", "on_enter": "review" }
-  ],
-  "workflows": {
-    "development": {
-      "task": "implement-card",
-      "prepare": "prepare-development-checkout",
-      "on_completed": { "enter_stage": "review" }
-    },
-    "review": {
-      "task": "produce-review-report",
-      "on_completed": { "record_report": true }
-    }
-  }
-}
-```
+Migrate active/queued assignments and human gates into run/step checkpoints without relaunching Agents, recreating worktrees, changing provider IDs or replaying completed callbacks. Reject/roll back an incompatible conversion rather than activating partial state. Configuration revisions and database changes must follow the [update/migration contract](../updates.md).
 
-Only Backlog is mandatory and has no automatic entry workflow. Stable stage IDs determine bindings, not display labels. Validate that referenced stages/workflows exist and retain enough configuration identity to explain an execution. The exact file path/schema/reload mechanism remains an implementation choice, not a new product-design project.
+## Workspaces and lifecycle
 
-The earlier direction of selecting templates and explaining unmapped stages remains relevant. For MVP, configuration can reject an incompatible change with a useful mismatch message instead of implementing complex live remapping of active Boards. Agent-assisted configuration can use the same JSON and application interface. A visual designer is not required.
-
-## What worktree lifecycle means
-
-A worktree lifecycle describes **when a task checkout is created, which stages reuse it, and when it is handled for cleanup**. It does not mean repeatedly creating a new directory for every agent conversation.
-
-The user chose:
+Worktree lifecycle defines when a task checkout is prepared, reused and handled for cleanup. It does not create a new checkout for every step/conversation.
 
 ```text
-Develop: prepare task worktree when applicable
+Planning: explicit execution/workspace requirements
                   |
-Review: reuse it and its change
+Develop: prepare/reuse task checkout when applicable
                   |
-Rework: keep using the task checkout as appropriate
+Review / rework: retain checkout and exact change association
                   |
-Archive: handle managed-worktree cleanup
+Archive: handle managed-worktree cleanup; preserve Card history
 ```
 
-Retain the worktree throughout active card work. A fresh Session does not require a new worktree. Record the checkout/change reference so development and review operate on the intended task. A non-Git Project can use its configured directory without a worktree.
+Planning can be read-only and must not create a worktree merely because a Card entered Backlog. Each Agent step needs an explicit/inherited execution location policy. New policy syntax and read-only enforcement details remain implementation work; preserve existing saved workspace/provider bindings.
 
-Archive is the cleanup boundary. Exact removal/retention treatment of modified managed worktrees is an implementation detail still to specify. It does not authorize deleting the Project directory or discarding unrelated files/card history. Do not clean an active card's worktree merely because one Session ends.
-
-## Preparation and result callbacks
-
-Keep the MVP callbacks small: prepare/reuse the execution directory, supply the task/context, record agent reports/results, and apply configured stage progression. Preparation failures should appear on the card rather than launch in an unintended directory.
-
-Callbacks and all other internal product operations participate in the event-driven direction. Do not design a script editor, plugin SDK, lease/handover framework, or detailed event infrastructure before completing MVP.
-
-## Review and archive
-
-Review produces an ordinary report in the card/timeline. The Shear review interface is a later integration. Agent-reported completion of a workflow is distinct from a human accepting the code, merging it, or archiving the card.
-
-Archive removes finished work from the active Board while retaining its number and history, and is the point at which Canban handles its managed worktree. A mandatory Done column is unnecessary.
-
-
-## Implemented workspace settings (2026-11-07)
-
-A Workflow has one `workspace` object rather than an operation graph:
+Implemented workflow workspace settings are currently:
 
 ```json
 {
@@ -119,10 +73,10 @@ A Workflow has one `workspace` object rather than an operation graph:
 }
 ```
 
-Fresh default templates enable worktree creation and base synchronization. An omitted `base_branch` uses the Project target/current local branch. Templates lacking the new object retain local-only preparation for compatibility; existing Project snapshots are not silently rewritten. Set both worktree and synchronization off for non-Git Projects. Sync requires worktree creation and a committed Git base.
+Fresh defaults enable worktree/base synchronization. An omitted base uses the Project target/current branch; older templates without the object retain local-only preparation. Non-Git Projects can turn both off. Sync requires a committed Git base and worktree creation.
 
-Before the first checkout, fetch the configured remote base and fast-forward the local base. Local commits already containing the remote are retained; divergence, dirty checked-out base or fetch failure stops preparation and requests human attention. A checked-out base is updated through that checkout; an unoccupied base uses a checked ref update. No automatic push or rebase occurs.
+Before the first checkout, fetch and fast-forward the configured base. Already containing the remote is acceptable; divergence, a dirty checked-out base or fetch failure prevents unsafe preparation. Do not silently push/rebase. Review/rework/resume reuse the Card workspace without another initial base synchronization. Existing detached worktrees are adopted without discarding edits. Current readable branch naming and saved location behavior are documented in [workspace and scheduling](../workspace-and-scheduling.md).
 
-Each Card gets `canban/<project-id>/<card-number>` plus its own managed worktree. Review, rework and resume reuse both without another base synchronization. Existing detached worktrees are adopted at their current HEAD without discarding edits. Card stores branch/base commit/path, and its UI exposes copies and a read-only status refresh. Archive removes clean worktrees while retaining branch and Card ref; dirty worktrees remain. Restore/open can recreate from retained history.
+Archive removes clean managed worktrees while retaining branch/Card refs; dirty worktrees remain. Restore/open can recreate from retained history without automatically dispatching. Do not remove the Project directory or Card history as execution cleanup.
 
-Each stage can set `require_human_review`. It pauses after its Agent finishes and before the next callback. The default Review stage requires human approval. See [Scheduler](scheduler.md) for the global limit and persistent human gate.
+Review reports, human acceptance, commit/merge and archive remain distinct facts. The default flow does not auto-merge or auto-archive. See [Review delivery](review-delivery.md).

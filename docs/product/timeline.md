@@ -1,6 +1,6 @@
 # Unified card timeline and event format
 
-Status: unified comments/events and per-execution history are confirmed product requirements. The envelope/catalog below is an earlier history-format draft, not a finalized Rust event enum, topic schema, delivery protocol, or MVP requirement to implement the whole catalog. The user chose a Rust enum + in-memory channel + topic subscribers and deferred detailed event architecture until after MVP; see [event direction](events-and-notifications.md).
+Status: history requirements reconciled 2026-11-11. The accepted next [event/subscription contract](events-and-notifications.md) owns the shared envelope, catalog and delivery; [workflow rules](workflow-engine.md) own run/step progress. See [implementation coverage](../workflow-implementation.md) for the delivered slice and verification. Timeline is the readable Card history projection, not a second event authority. Payload details below remain proposals unless covered by [implementation](../implementation.md).
 
 ## One history surface
 
@@ -17,8 +17,8 @@ Project P / Card #42
   seq 7   Agent      started run R1 in terminal t7
   seq 8   Agent      commented with a question
   seq 9   User       commented and mentioned @codex
-  seq 10  Scheduler   queued a fresh execution for the mentioned question
-  seq 11  Agent R2   answered in a new conversation linked to that comment
+  seq 10  Scheduler   delivered/queued the Question for its Card/profile conversation
+  seq 11  Agent      replied with explicit Question/request binding
   seq 12  Agent R1   declared development completed; optional result context
   seq 13  Workflow   automatically moved Develop -> Review
   seq 14  Scheduler   queued a fresh execution linked to that result/artifact
@@ -27,80 +27,17 @@ Project P / Card #42
   ...     Lifecycle archived card
 ```
 
-The default automatic Develop -> Review transition is confirmed and configurable by template, driven by the agent's completion declaration. Submitted @mentions and executable-stage entries both schedule fresh conversations using one Session/Run model. Their callbacks differ. Worktrees are retained until Archive; detailed cleanup treatment can be refined during implementation.
+The default Develop -> Review transition follows explicit completion. In the unified design, the owning step progresses; direct questions retain independent completion semantics. Mentions deliver to or start/resume the Card/profile conversation under the [Session contract](sessions.md). WorkflowRun is distinct from Conversation/Request/Attempt. Planning/approval can appear here while the Card remains in Backlog. Worktrees remain through Archive under the current lifecycle contract.
 
-## Proposed common envelope
+## Shared facts and Card history
 
-Every persisted card event has one envelope. A proposed JSON example:
+Use the [event envelope and catalog](events-and-notifications.md#event-envelope) rather than a second Timeline schema. Stable IDs, Card sequence, journal offset, provenance, operation/causation and workflow/step/request/attempt references survive grouping/pagination. Timestamps do not establish processing order.
 
-```json
-{
-  "schema_version": 1,
-  "event_id": "event_456",
-  "project_id": "project_123",
-  "card_id": "card_789",
-  "card_number": 42,
-  "sequence": 18,
-  "type": "card.stage_changed",
-  "recorded_at": "2026-11-05T09:18:00Z",
-  "actor": {
-    "kind": "user",
-    "id": "user_local"
-  },
-  "operation_id": "operation_321",
-  "causation_id": null,
-  "run_id": null,
-  "workflow_revision": null,
-  "data": {
-    "from_stage_id": "backlog",
-    "to_stage_id": "develop",
-    "stage_entry_id": "entry_654",
-    "reason": "user_move"
-  }
-}
-```
+Local events retain revision/artifact references; workflow steps and decisions retain exact run/version associations. A move is one canonical fact with entry/exit subscription views, not three separately authored history entries.
 
-| Field | Proposed contract |
-| --- | --- |
-| schema_version / type | Version the common envelope and typed payload registry; preserve unknown fields/types for later readers |
-| event_id | Stable immutable event identity |
-| project_id / card_id | Canonical association; card_number is a display/reference convenience |
-| sequence | Strictly increasing, transactionally allocated order within the card; never derived from wall-clock timestamps |
-| recorded_at | Service-assigned time when the observation or action was recorded |
-| actor | Validated user, agent, or system identity; distinguish a service action from an agent assertion |
-| operation_id | Groups events from one accepted command or workflow operation |
-| causation_id | Links the action to its trigger, such as stage entry -> request -> run |
-| run_id | Optional explicit execution association |
-| workflow_revision | Optional captured workflow version; full request/configuration data may be referenced separately |
-| data | Typed payload or references to immutable revisions/artifacts |
+GitHub activity can appear beside local history from disposable cache and durable event metadata. Do not permanently copy remote prose/diffs/snapshots into Timeline. Source facts may have no Card; later association does not rewrite/replay history. Missing bodies and observation gaps are explicit. See the [GitHub contract](../github-workspace.md).
 
-Source observations can additionally carry source_event_id and source_occurred_at. These do not control timeline ordering or become trusted human authorship. A reconnect may record an observation later than it actually occurred; preserve that distinction.
-
-The service derives actor identity from the UI/agent connection and run binding. A client-provided display name or terminal label cannot impersonate a person. Imported remote authors, if a backend is added later, retain source provenance.
-
-## Event families
-
-Names below are proposals. Finalize payload schemas before implementation rather than scattering free-form event strings across modules.
-
-| Family | Example events | Required association/evidence |
-| --- | --- | --- |
-| Card content | card.created, card.description_changed, card.title_changed | Before/after or immutable content/configuration revisions |
-| Workflow | card.stage_changed, card.order_changed, card.template_mapped | Stable stage IDs, entry identity, template/migration operation |
-| Comments | comment.created, comment.revised, comment.removed | Stable comment ID and revision; original event remains |
-| Resources | resource.added, resource.removed | Typed resource ID, durable attachment reference or URI |
-| Routing/admission | dispatch.queued, dispatch.routing_blocked, dispatch.paused, dispatch.canceled | Trigger, workflow, routing decision/reason, captured context |
-| Preparation | workflow.preparation_started, workflow.preparation_finished, workflow.preparation_failed | Request/run, callback identity, checkout/resource or error |
-| Execution | run.started, run.status_observed, run.input_needed, run.cancel_requested, run.finished | Request/attempt binding; completion follows the agent's explicit report without a process-exit gate |
-| Attention/notification | needs-attention and internal-notification event names are not yet fixed | Blocked card, originating request/report, and notification context; native delivery later |
-| Recovery | run.launch_unknown, run.reconciled, observation.gap | Connection epoch, known evidence, unresolved facts |
-| Mention scheduling | mention.requested, mention.answered | Comment/mention ID, addressed profile, dispatch request and fresh Run; launch ambiguity uses the normal Run events |
-| Code/checks | change.recorded, commit.observed, check.recorded | Repository + exact change/commit identity, check source/result |
-| Review/outcome | review.reported, outcome.recorded | Reviewed artifact identity and author; distinguish report from approval |
-| Lifecycle | card.archived, card.restored | Actor/reason and recorded outcome, without deleting prior history |
-
-Project creation and Board/template changes also need project-level history. When a migration changes individual cards, emit corresponding card events linked to the project-level operation. Do not fabricate a card event for every unaffected card or claim a full GitHub-style push feed before source observation exists.
-
-Raw terminal bytes, keystrokes, typing drafts, hover, and focus are not all separate card events. Persist meaningful execution/state/content changes; provide terminal output as a distinct bounded stream or referenced artifact. Group events visually when useful while retaining their identities and details.
+Raw terminal bytes, keystrokes, drafts, hover and focus remain separate streams/transient state. Project/template changes have project-level facts; only affected Cards receive corresponding changes.
 
 ## Comments and mentions
 
@@ -127,11 +64,11 @@ Proposed comment payload:
 }
 ```
 
-A structured mention identifies the profile to schedule; the text alone is not executable. context_run_id is optional context for the new execution, not a terminal/Run to reuse. Submitting a comment records the comment and its new dispatch intent consistently. When admitted, that request starts a fresh conversation under a new Run. Replaying the accepted submission returns the existing intent rather than another conversation.
+A structured mention identifies the Profile; text alone is not executable. A previous execution reference is context, not permission to complete its assignment. Submission durably records the comment and Question/request association. Live questions are delivered through the existing invocation; absent/exited conversations start/resume through Scheduler. Replay returns the existing intent without blindly resending uncertain input.
 
-No session_type field is needed: request causality links the result to its initiating comment or stage entry. All Runs share the same envelope, lifecycle, and observation mechanism. See [Session model](sessions.md).
+No question/stage Session classes are needed. WorkflowRun adds process-level progress above Conversations/Requests/Attempts. See [Session model](sessions.md).
 
-Recommendation: editing a comment preserves old revisions and does not automatically redeliver its old mentions. A newly added mention or explicit resend is a new, attributable action. Removing a comment preserves an event/tombstone; content retention/redaction rules require a separate policy. Neither an idle nor an active matching profile changes the fresh-conversation rule. A future explicit continuation operation remains a separate open feature.
+Recommendation: comment edits preserve revisions without automatically redelivering old mentions. New mentions/resends are attributable separately. Removal retains a tombstone; retention/redaction needs separate policy. Ordinary replies cannot approve a workflow decision.
 
 ## Resources and pasted images
 
@@ -149,9 +86,10 @@ Arbitrary resource references do not imply running arbitrary referenced HTML/scr
 
 Recommended contracts:
 
-- A card mutation, projection revision, and its event(s) commit together. Stage entry and its automatic dispatch intent also commit together.
-- Record request/attempt identity before external IO. A later runtime observation appends another event.
-- On the current development result, record result linkage, the configured automatic Review transition, and next dispatch intent consistently; the stage event is caused by that result, not attributed to a human drag. A repeated result submission cannot create another transition/request.
+- Card mutation, projection revision and canonical fact commit together. Durable dispatch may consume the journal later; live channel delivery is not required.
+- Persist delivery/entry intent before advancing its dispatch cursor; persist a consumer effect/checkpoint/next intent before acknowledgement. See [delivery transactions](events-and-notifications.md#transactions-and-delivery).
+- Record Request/Attempt intent before external IO. Later observations append facts.
+- Results retain run/step/request/attempt binding. Engine commits transitions and resulting intents consistently. Repeated reports cannot duplicate progression; workflow moves are not attributed to a human drag.
 - A retried mutation with the same scoped request key returns its original operation/result; it does not allocate another card number or repeat a stage trigger.
 - Use expected card/configuration revisions to reject stale competing changes. Deduplication must be checked before rejecting a retry solely because its first attempt already changed the revision.
 - Allocate sequence monotonically per card. Event IDs and causal links survive display grouping and pagination.
@@ -159,7 +97,7 @@ Recommended contracts:
 - Retain basic request/callback association. The user's MVP deliberately excludes elaborate old-process, writer-handover, or generation-coordination systems; this history draft must not reintroduce them as release gates.
 - Show reconciliation gaps explicitly. A fresh snapshot does not reconstruct every missed event.
 
-An append-only history with transactional current-state tables is a proposed storage strategy, not a commitment to implementing a complete event-sourcing framework. Corrections use new events and revision references rather than silently rewriting history.
+The accepted journal/current-state design supports durable reactions without requiring a complete event-sourcing framework. Corrections use new events and revision references rather than silently rewriting history.
 
 ## Readability and retention
 

@@ -15,15 +15,6 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
     state.register(&id, viewport, scroll_ref);
     let key = format!("board:{}:{id}", ui.project.get_untracked());
     let position = scroll_position(ui, &key);
-    let explanation = if stage.execute {
-        stage
-            .profile
-            .as_ref()
-            .map(|p| format!("Workflow Agent: @{p}"))
-            .unwrap_or_else(|| "Workflow Agent: global default".into())
-    } else {
-        "No automatic Agent execution in this stage".into()
-    };
     let gap_y = animated_value(0.);
     let gap_stage = id.clone();
     effect(move || {
@@ -47,8 +38,8 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
                 .flex_row()
                 .justify_between()
                 .items_center()
-                .tooltip(nsh_base::tooltip().child(label(explanation)))
                 .child(label(stage.name).font_weight(FontWeight::SEMIBOLD))
+                .child(crate::workflows::column_trigger(ui, stage.id.clone()))
                 .child(badge(move || {
                     let visible = state
                         .cards

@@ -79,18 +79,8 @@ impl AppServer {
                     attention(db,&mut card,if report.message.is_empty(){state}else{&report.message})?;
                     if let Some(gate)=&mut card.human_gate && gate.request_id.is_none() { gate.request_id=Some(req.id.clone()); }
                 }
-                if state=="completed" && card.archived_at.is_none() {
-                    if let Some(gate)=&mut card.human_gate {
-                        if gate.request_id.is_none() && req.trigger=="stage_entry" && req.stage==card.stage { gate.request_id=Some(req.id.clone()); }
-                        if gate.request_id.as_deref()==Some(&req.id) && req.stage==card.stage { gate.next_stage=req.on_completed.clone(); }
-                    } else if req.require_human_review && req.stage==card.stage {
-                        attention(db,&mut card,"Agent report ready; human review is required before continuing")?;
-                        card.human_gate=Some(HumanGate{reason:"Agent report ready; human review is required before continuing".into(),request_id:Some(req.id.clone()),next_stage:req.on_completed.clone()});
-                        log(db,&card,"workflow.waiting_for_human","system","Workflow is waiting for human review",Some(req.id.clone()),json!({"next_stage":req.on_completed}))?;
-                    } else {
-                        card.attention=None;
-                        crate::workflow::advance(db,&config,&mut card,&req)?;
-                    }
+                if req.workflow_run_id.is_some() {
+                    crate::workflow::reported(db,&config,&mut card,&req,&report)?;
                 }
                 card.revision+=1;db.save(&card)?;
             }

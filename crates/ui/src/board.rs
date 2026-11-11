@@ -56,6 +56,15 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .child(when(
                     move || project.get().is_some(),
                     move || {
+                        action("Workflows", Variant::Quiet, move |_| {
+                            ui.navigate("workflows")
+                        })
+                        .into_element()
+                    },
+                ))
+                .child(when(
+                    move || project.get().is_some(),
+                    move || {
                         action("Work location…", Variant::Quiet, move |_| {
                             ui.navigate("project-location")
                         })

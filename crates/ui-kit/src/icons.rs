@@ -4,6 +4,7 @@ use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
+    Trigger,
     Update,
     Info,
     Folder,
@@ -37,6 +38,7 @@ pub enum Icon {
 impl Icon {
     fn source(self) -> &'static str {
         match self {
+            Self::Trigger => include_str!("../assets/lucide/zap.svg"),
             Self::Update => include_str!("../assets/utility/update.svg"),
             Self::Folder => include_str!("../assets/lucide/folder.svg"),
             Self::Coffee => include_str!("../assets/utility/coffee.svg"),

@@ -16,6 +16,7 @@ fn layout(
 }
 pub fn screen(ui: Ui, page: &str) -> AnyElement {
     match page {
+        "workflows" => crate::workflows::screen(ui).into_element(),
         "machines" => view()
             .flex_1()
             .p_5()
@@ -42,7 +43,7 @@ fn settings(ui: Ui) -> impl IntoElement {
         .map(|app| app.home.to_string_lossy().into_owned())
         .unwrap_or_else(|| "/preview/.canban".into());
     let runtime = crate::APP.get().map(|app| app.config()).unwrap_or_default();
-    layout("Settings", "Application preferences and JSON configuration.")
+    layout("Settings", "Application preferences and Agent configuration.")
         .child(scroll().flex_1().min_h(px(0.)).child(view().w_full().max_w(px(880.)).min_w(px(0.)).gap_4()
             .child(crate::utilities::settings(ui))
             .child(crate::updates::settings(ui))
@@ -54,9 +55,7 @@ fn settings(ui: Ui) -> impl IntoElement {
                     muted(format!("{home}/config/agents.json"))))
                 .child(crate::profiles::registry_items(ui.profiles))
                 .child(view().items_start().child(action("Reload configuration", Variant::Secondary, move |_| dispatch(ui, "config.reload", json!({}))))))
-            .child(settings_section("Workflow", "New Projects use this default template. Existing Projects retain their workflow.")
-                .child(settings_field("Default workflow configuration", "Edit this JSON file to customize stages, profiles and workspace behavior.",
-                    muted(format!("{home}/config/workflows/default.json")))))
+            .child(settings_section("Workflows", "Edit the selected Project's YAML sources, or configure them through an Agent conversation.").child(action("Project Workflows", Variant::Secondary, move |_|ui.navigate("workflows"))))
             .child(settings_section("Herdr", "Terminal runtime connection; configure it in agents.json.")
                 .child(settings_field("Executable", "Used to connect to the configured runtime.", muted(runtime.hc)))
                 .child(settings_field("Session", "The configured Herdr runtime session.", muted(runtime.hc_session)))

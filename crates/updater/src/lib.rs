@@ -3,7 +3,7 @@ pub mod feed;
 pub mod handoff;
 mod quarantine;
 pub mod worker;
-pub const DESKTOP_API: u32 = 8;
+pub const DESKTOP_API: u32 = 10;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{

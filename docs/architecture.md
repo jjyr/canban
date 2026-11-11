@@ -35,7 +35,9 @@ Rust / NSH UI       Agent CLI        other UI clients
 
 The AppServer crate composes domain modules and owns their transactional and
 runtime boundaries. It has no dependency on NSH, AppKit or UI component handles.
-Workflow Engine determines what a stage means and how completion progresses.
+The accepted next [unified engine](product/workflow-engine.md) interprets entries,
+steps and decisions independently of Board columns, replacing the current stage
+callback progression. It is implemented in the initial slice; see [workflow/event implementation](workflow-implementation.md) for exact coverage.
 Scheduler determines when eligible work starts, using workflow depth and a
 configurable global budget. Herdr owns the programs and their runtime status;
 Canban owns durable context, task outcomes, human decisions and history.
@@ -116,9 +118,19 @@ correctness. See [UI architecture](ui-architecture.md) and
 
 ## Events and timers
 
-AppServer publishes internal topic changes over Rust channels; the first remote
-UI client refreshes snapshots. Durable product events remain in Timeline.
-Detailed event infrastructure remains deferred. Card timing attributes belong
-to Kanban; readiness/timer waiting belongs to Scheduler; Workflow Engine applies
-configured actions. Timer widgets edit configuration through AppServer. Timer
-placement does not imply that recurring jobs or a timer UI have been implemented.
+Current AppServer topic-change channels invalidate client snapshots, while
+Timeline persists local history. The accepted next [event/subscription design](product/events-and-notifications.md)
+adds canonical durable facts, scoped selectors, delivery/checkpoint progress and
+recovery; channels remain advisory wake-ups. State changes and facts commit
+together; consumers persist effects/intents before acknowledgement. No separate
+broker or full event-sourced application is required.
+
+Manual/event/column entries use the same Workflow Engine and existing Scheduler.
+Workflow-owned moves carry run/step causality so they do not start duplicate
+Agents. Agent/manual definitions share validation and a generic definition/run
+viewer. See the implementation contract for exact delivered coverage and runtime evidence. Detailed
+onboarding/settings Agent conversations and viewer interaction remain open.
+
+Card timing belongs to Kanban; readiness/time waiting belongs to Scheduler;
+Workflow Engine applies actions. Timer placement does not imply recurring jobs
+or a timer UI are implemented.

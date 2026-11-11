@@ -60,6 +60,14 @@ macro_rules! record {
     };
 }
 record!(Project, "projects");
+record!(WorkflowTemplate, "workflow_templates");
+record!(WorkflowSource, "workflow_sources", project);
+record!(ConfigurationSession, "configuration_sessions", project);
+record!(WorkflowRevision, "workflow_revisions", project);
+record!(WorkflowBinding, "workflow_bindings", project);
+record!(WorkflowRun, "workflow_runs", card);
+record!(EventSubscription, "event_subscriptions");
+record!(EventDelivery, "event_deliveries");
 record!(GitHubIssueSnapshot, "github_issues", project);
 record!(Note, "notes", project);
 record!(NoteRevision, "note_revisions", project);
@@ -130,10 +138,10 @@ impl Record for Event {
         &self.id
     }
     fn project(&self) -> Option<&str> {
-        Some(&self.project_id)
+        (!self.project_id.is_empty()).then_some(self.project_id.as_str())
     }
     fn card(&self) -> Option<&str> {
-        Some(&self.card_id)
+        (!self.card_id.is_empty()).then_some(self.card_id.as_str())
     }
     fn number(&self) -> u64 {
         self.sequence
@@ -379,12 +387,74 @@ impl Db<'_> {
             })?)
     }
     pub fn append(&self, mut event: Event) -> Result<Event> {
-        event.sequence = self.counter(&format!("timeline:{}", event.card_id))?;
+        if !event.card_id.is_empty() {
+            event.sequence = self.counter(&format!("timeline:{}", event.card_id))?;
+            if let Ok(card) = self.get::<Card>(&event.card_id)
+                && event.data.is_object()
+            {
+                event.data["stage"] = serde_json::json!(card.stage);
+                event.data["source_kind"] = serde_json::json!(match card.content {
+                    CardContent::Local => "local",
+                    CardContent::GitHubIssue { .. } => "github.issue",
+                    CardContent::GitHubPr { .. } => "github.pr",
+                });
+                event.data["card_revision"] = serde_json::json!(card.revision);
+            }
+        }
+        if event.data.is_object() && event.data.get("reason").is_none() {
+            let reason = match event.kind.as_str() {
+                "card.created" => Some("manual"),
+                "card.restored" => Some("restoration"),
+                "card.archived" => Some("archive"),
+                "card.removed" => Some("removal"),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                event.data["reason"] = serde_json::json!(reason);
+            }
+        }
+        if event.data.is_object() && event.data.get("origin").is_none() {
+            event.data["origin"] = serde_json::json!(if event.actor == "github" {
+                "github"
+            } else {
+                "local"
+            });
+        }
+        if let Some(request) = event
+            .request_id
+            .as_ref()
+            .and_then(|id| self.get::<Request>(id).ok())
+            && let Some(run) = request.workflow_run_id
+        {
+            event.data["workflow_run_id"] = serde_json::json!(run);
+            event.data["workflow_step"] = serde_json::json!(request.workflow_step);
+        }
+        if event.data.get("workflow_run_id").is_some() && event.data["origin"] == "local" {
+            event.data["origin"] = serde_json::json!("workflow");
+        }
+        if let Some(revision) = event.data.get("after_revision").cloned() {
+            event.data["card_revision"] = revision;
+        }
         self.save(&event)?;
+        self.conn.execute(
+            "INSERT INTO event_journal(event_id) VALUES(?1)",
+            [&event.id],
+        )?;
         Ok(event)
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
+        let sources: Vec<WorkflowSource> = self.list()?;
+        let revisions: Vec<WorkflowRevision> = self.list()?;
+        let active = revisions
+            .into_iter()
+            .filter(|w| sources.iter().any(|s| s.revision_id == w.id))
+            .collect();
         Ok(Snapshot {
+            workflow_runs: self.list()?,
+            workflow_revisions: active,
+            workflow_sources: sources,
+            event_subscriptions: self.list()?,
+            configuration_sessions: self.list()?,
             card_reads: self.list()?,
             github: Default::default(),
             github_issues: self.list()?,

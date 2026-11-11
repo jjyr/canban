@@ -47,6 +47,14 @@ pub struct AppServer {
     context_signal: std::sync::Condvar,
     remote_workers: Mutex<std::collections::HashSet<String>>,
 }
+// A concurrently spawned child can briefly inherit the open file description
+// before exec closes it. Closing just our descriptor would leave its flock held.
+// Ownership ends with the last AppServer, independently of inherited descriptors.
+impl Drop for AppServer {
+    fn drop(&mut self) {
+        let _ = self._service_lock.unlock();
+    }
+}
 pub struct Running {
     server: Arc<AppServer>,
 }
@@ -294,11 +302,17 @@ impl AppServer {
             canban_context::atomic(&path, &serde_json::to_vec_pretty(&Config::default())?)?;
         }
         let (config, migration) = Self::read_config(&home)?;
-        let flow = home.join("config/workflows/default.json");
-        if !flow.exists() {
-            let mut initial = Workflow::default();
-            // An older/custom registry may not define the new starter roles.
-            // Use the global default instead of modifying user profiles.
+        // Import an existing pre-YAML template once. New homes never create a
+        // Workflow file; the bootstrap template is also held in SQLite.
+        let template = if let Ok(saved) = store.db().get::<WorkflowTemplate>("default") {
+            saved.workflow
+        } else {
+            let legacy = home.join("config/workflows/default.json");
+            let mut initial: Workflow = if legacy.exists() {
+                serde_json::from_slice(&std::fs::read(legacy)?)?
+            } else {
+                Workflow::default()
+            };
             for stage in &mut initial.stages {
                 if stage
                     .profile
@@ -308,14 +322,26 @@ impl AppServer {
                     stage.profile = None;
                 }
             }
-            canban_context::atomic(&flow, &serde_json::to_vec_pretty(&initial)?)?;
-        }
-        let default_workflow: Workflow = serde_json::from_slice(&std::fs::read(&flow)?)?;
-        Self::validate_workflow(&config, &default_workflow)?;
+            store.write(|db| {
+                db.save(&WorkflowTemplate {
+                    id: "default".into(),
+                    workflow: initial.clone(),
+                })
+            })?;
+            initial
+        };
+        Self::validate_workflow(&config, &template)?;
         for project in store.db().list::<Project>()? {
             Self::validate_workflow(&config, &project.workflow)?;
         }
         Self::publish_migration(&home, migration)?;
+        store.write(|db| {
+            workflow::initialize(db, &config)?;
+            for project in db.list::<Project>()? {
+                authoring::initialize(&home, db, &config, &project)?;
+            }
+            Ok(())
+        })?;
         Ok(Arc::new(Self {
             _service_lock: service_lock,
             utilities: utilities::Utilities::new(&home),
@@ -419,14 +445,43 @@ impl AppServer {
         }
         Ok(())
     }
+    fn default_workflow(&self) -> Result<Workflow> {
+        Ok(self
+            .store
+            .lock()
+            .unwrap()
+            .db()
+            .get::<WorkflowTemplate>("default")?
+            .workflow)
+    }
     fn validate_references(&self, config: &Config) -> Result<()> {
-        let workflow: Workflow = serde_json::from_slice(&std::fs::read(
-            self.home.join("config/workflows/default.json"),
-        )?)?;
+        let workflow = self.default_workflow()?;
         Self::validate_workflow(config, &workflow)?;
-        for project in self.snapshot()?.projects {
+        for project in &self.snapshot()?.projects {
             Self::validate_workflow(config, &project.workflow)
                 .with_context(|| format!("Project {} workflow", project.name))?;
+        }
+        let snapshot = self.snapshot()?;
+        for w in snapshot.workflow_revisions {
+            let project = snapshot
+                .projects
+                .iter()
+                .find(|p| p.id == w.project_id)
+                .context("Workflow Project missing")?;
+            canban_workflow_engine::validate_definition(
+                &w.definition,
+                &project
+                    .workflow
+                    .stages
+                    .iter()
+                    .map(|s| s.id.clone())
+                    .collect::<Vec<_>>(),
+                &config
+                    .profiles
+                    .iter()
+                    .map(|p| p.id.clone())
+                    .collect::<Vec<_>>(),
+            )?;
         }
         Ok(())
     }
@@ -512,7 +567,9 @@ impl AppServer {
                 );
                 return Ok(serde_json::from_str(&result)?);
             }
+            events::pump(db, &self.config())?;
             let result = f(db)?;
+            events::pump(db, &self.config())?;
             if let Some(key) = key {
                 db.conn.execute(
                     "INSERT INTO operations(id,fingerprint,result) VALUES(?1,?2,?3)",
@@ -531,6 +588,9 @@ mod commands;
 mod drafts;
 mod github;
 pub use client::AppClient;
+mod authoring;
+mod configuration;
+mod events;
 mod machines;
 mod remote;
 mod workflow;

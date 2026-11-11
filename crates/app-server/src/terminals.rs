@@ -14,6 +14,10 @@ impl AppServer {
         let mut invocation = None;
         let saved = self.mutate("terminal.close", &p, |db| {
             let mut item: TerminalEntry = db.get(terminal_id)?;
+            if let Ok(mut configuration)=db.get::<ConfigurationSession>(terminal_id) && configuration.state=="queued" {
+                configuration.state="cancelled".into();db.save(&configuration)?;
+                item.runtime=Some(TerminalRuntime{machine:"local".into(),owner_core_id:None,core_id:None,terminal:None,state:"finished".into(),connection:"connected".into(),error:None});db.save(&item)?;
+            }
             if let Some(conversation) = &item.conversation_id {
                 let row = canban_notifications::overview(&db.snapshot()?).into_iter().find(|r| &r.id == conversation);
                 if let Some(mut run) = row.and_then(|r| r.attempt)

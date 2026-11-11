@@ -21,6 +21,11 @@ struct Args {
 enum Cmd {
     /// Show immutable release identity without opening application data.
     BuildInfo,
+    /// Submit/export YAML; SQLite remains the only configuration source.
+    Workflow {
+        #[command(subcommand)]
+        command: WorkflowCmd,
+    },
     /// Apply a supported schema up/down batch without starting product services.
     Database {
         #[arg(long)]
@@ -47,9 +52,9 @@ enum Cmd {
         #[arg(long, env = "CANBAN_SESSION_ID")]
         session_id: String,
         #[arg(long, env = "CANBAN_REQUEST_ID")]
-        request_id: String,
+        request_id: Option<String>,
         #[arg(long, env = "CANBAN_ATTEMPT")]
-        attempt: u32,
+        attempt: Option<u32>,
     },
     /// Publish a reply without completing the current task.
     Reply {
@@ -142,6 +147,30 @@ fn main() {
         std::process::exit(1)
     }
 }
+#[derive(Subcommand)]
+enum WorkflowCmd {
+    Submit {
+        #[arg(long)]
+        project_id: String,
+        #[arg(long)]
+        revision: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        check: bool,
+    },
+    Export {
+        #[arg(long)]
+        project_id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+}
+
 fn run() -> Result<()> {
     let args = Args::parse();
     let home = args.home.unwrap_or(canban_app_server::default_home()?);
@@ -169,6 +198,87 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
+    if let Cmd::Workflow { command } = &args.command {
+        match command {
+            WorkflowCmd::Submit {
+                project_id,
+                revision,
+                file,
+                name,
+                check,
+            } => {
+                let collection = canban_app_server::rpc(
+                    &endpoint,
+                    "workflow.sources",
+                    json!({"project_id":project_id}),
+                )?;
+                anyhow::ensure!(
+                    collection["revision"].as_str() == Some(revision),
+                    "revision_conflict: read workflow.sources before submitting"
+                );
+                let name = name
+                    .clone()
+                    .or_else(|| file.file_name().map(|s| s.to_string_lossy().into_owned()))
+                    .context("Source name required")?;
+                let raw = std::fs::read_to_string(file)?;
+                let mut sources = collection["sources"]
+                    .as_array()
+                    .context("No Workflow sources")?
+                    .iter()
+                    .filter(|s| s["filename"] != name)
+                    .map(|s| json!({"filename":s["filename"],"source":s["source"]}))
+                    .collect::<Vec<_>>();
+                sources.push(json!({"filename":name,"source":raw}));
+                let value = canban_app_server::rpc(
+                    &endpoint,
+                    if *check {
+                        "workflow.check"
+                    } else {
+                        "workflow.apply"
+                    },
+                    json!({"project_id":project_id,"revision":revision,"sources":sources,"request_key":canban_types::id()}),
+                )?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            }
+            WorkflowCmd::Export {
+                project_id,
+                name,
+                output,
+            } => {
+                use std::io::Write;
+                let collection = canban_app_server::rpc(
+                    &endpoint,
+                    "workflow.sources",
+                    json!({"project_id":project_id}),
+                )?;
+                let source = collection["sources"]
+                    .as_array()
+                    .context("No Workflow sources")?
+                    .iter()
+                    .find(|s| s["filename"] == *name)
+                    .context("Workflow source not found")?;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(output)
+                    .context(
+                        "Choose a new output path; export never overwrites an existing file",
+                    )?;
+                file.write_all(
+                    source["source"]
+                        .as_str()
+                        .context("YAML missing")?
+                        .as_bytes(),
+                )?;
+                file.sync_all()?;
+                println!(
+                    "{}",
+                    json!({"output":output,"revision":collection["revision"]})
+                );
+            }
+        }
+        return Ok(());
+    }
     let raw_note = matches!(
         &args.command,
         Cmd::Note {
@@ -176,6 +286,7 @@ fn run() -> Result<()> {
         }
     );
     let (method, mut p) = match args.command {
+        Cmd::Workflow { .. } => unreachable!(),
         Cmd::Note { command } => match command {
             NoteCmd::List { project_id } => ("note.list".into(), json!({"project_id":project_id})),
             NoteCmd::Read { note_id, .. } => ("note.read".into(), json!({"note_id":note_id})),
@@ -211,16 +322,31 @@ fn run() -> Result<()> {
         },
         Cmd::Call { method, params } => (
             method,
-            serde_json::from_str::<Value>(&params).context("Parameters must be a JSON object")?,
+            serde_json::from_str::<Value>(&if let Some(path) = params.strip_prefix('@') {
+                std::fs::read_to_string(path)
+                    .with_context(|| format!("Could not read parameter file {path}"))?
+            } else {
+                params
+            })
+            .context("Parameters must be a JSON object")?,
         ),
         Cmd::BindSession {
             session_id,
             request_id,
             attempt,
-        } => (
-            "agent.bind".into(),
-            json!({"session_id":session_id,"request_id":request_id,"attempt":attempt}),
-        ),
+        } => {
+            if let Ok(configuration) = std::env::var("CANBAN_CONFIGURATION_ID") {
+                (
+                    "configuration.bind".into(),
+                    json!({"configuration_id":configuration,"generation":std::env::var("CANBAN_CONFIGURATION_GENERATION")?.parse::<u64>()?,"session_id":session_id}),
+                )
+            } else {
+                (
+                    "agent.bind".into(),
+                    json!({"session_id":session_id,"request_id":request_id.context("request ID required")?,"attempt":attempt.context("attempt required")?}),
+                )
+            }
+        }
         Cmd::Reply {
             question_id,
             file,
@@ -287,6 +413,8 @@ fn run() -> Result<()> {
             | "review.merge"
             | "card.archive"
             | "update.install"
+            | "workflow.decide"
+            | "workflow.stop"
     ) && p.get("execution").is_none()
     {
         let request = std::env::var("CANBAN_REQUEST_ID").ok();

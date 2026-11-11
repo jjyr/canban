@@ -81,11 +81,9 @@ try:
     core = call("herdr.status")
     assert core["core"]["id"]
     print(f"HERDR_CONNECTED {core['version']} core={core['core']['id']}", flush=True)
-    workflow_path = home / 'config/workflows/default.json'
-    local_workflow = json.loads(workflow_path.read_text())
+    local_workflow = call('workflow.template')
     local_workflow['workspace']['sync_base'] = False  # Fixture repositories have no remote.
-    workflow_path.write_text(json.dumps(local_workflow))
-    project = call("project.create", {"name": "MVP Acceptance", "directory": str(source)})
+    project = call("project.create", {"workflow":local_workflow,"name": "MVP Acceptance", "directory": str(source)})
     note = call("note.save", {"project_id": project["id"], "title": "Human Context", "body": "Only modify the disposable acceptance project."})
     card = call("card.create", {"project_id": project["id"], "title": "Verify automatic development and review", "body": "Create the acceptance deliverable and report the result."})
     call("attachment.add", {"card_id": card["id"], "name": "sample.txt", "bytes": list(b"pasted resource")})
@@ -138,7 +136,7 @@ try:
     print("RESTART_OK", flush=True)
     cards = []
     for index in range(3):
-        project = call("project.create", {"name": f"Concurrent {index}", "directory": str(base / f"concurrent-{index}")})
+        project = call("project.create", {"workflow":local_workflow,"name": f"Concurrent {index}", "directory": str(base / f"concurrent-{index}")})
         card = call("card.create", {"project_id": project["id"], "title": "Concurrent Agent"})
         cards.append(card["id"])
         call("comment.add", {"card_id": card["id"], "body": "@fixture concurrency-barrier"})

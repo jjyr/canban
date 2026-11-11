@@ -35,11 +35,13 @@ This Canban API is separate from core's terminal API. Agents should not edit Can
 | Execution | Inspect requests and generic Sessions/Runs, submit scoped progress/results/artifacts/check evidence, request cancellation or retry |
 | Observation | Subscribe to application changes with reconnection and snapshot recovery |
 
-Workflow/template creation by an agent is part of the product direction. MVP uses JSON-style configuration and ordinary shared configuration validation, with useful incompatible-stage messages. A customization UI and complex active-template migration are deferred. Card text is not itself executable configuration.
+Initial implementation (2026-11-11; see [concrete API and limits](../workflow-implementation.md)): Agents author/modify the same declarative [workflow definitions](workflow-engine.md) that users manually edit. Both paths share validation, expected revisions and published definition identity. A generic viewer displays supported definitions/runs; a graph editor is not required. Schema discovery, definition read/validate/save, subscription configuration and run/decision inspection need shared operations; actual operations are listed in the implementation contract. Saving a definition is distinct from enabling a trigger, starting/replaying a run or approving an existing gate. Card prose is not executable configuration.
+
+Manual/subscribed/column entries use one engine and the existing execution queue. Convert current stage configuration/callbacks instead of retaining another executor. Active runs capture revisions; authoring must not rewrite their assignments or pending decisions. Settings configuration conversations and onboarding defaults are the next UX/ownership discussion, not yet implemented.
 
 A routine card.move into Develop automatically creates work under its binding. No separate agent-launch call is necessary. The agent explicitly reports whether it has completed; a completed report invokes the request callback, with automatic Review/report generation by default. MVP does not independently verify output/checks or wait for terminal exit. The user accepts exceptional residual old execution rather than requiring coordination before progression. Basic callback association and repeated-operation handling remain useful.
 
-Submitted comments with actionable @mentions also create dispatch requests, each starting a fresh conversation when admitted. Entering a stage independently selects an agent and creates another fresh execution. Both use the same Session/Run API and identity; do not expose separate question-session and stage-session resources. A reference to an earlier Run supplies context, not an implicit send/continue target. Canban applies the request-bound result callback and controls execution through core.
+Submitted @profile comments use the existing Card/profile conversation: deliver a Question when live or start/resume through Scheduler when absent/exited. Workflow Agent steps retain independent Request/Attempt and owning run/step bindings. These use the same execution model, not question/stage Session classes. A reply does not complete a different assignment or approve a decision. See [Session contract](sessions.md).
 
 ## Example move
 
@@ -91,20 +93,20 @@ Preserve both agent profile and run identity for attribution. A generic profile 
 - Mutations use scoped request keys and return stable operation identity. A repeated accepted command returns the same logical result.
 - JSON-RPC message IDs only correlate messages; the request key is the application deduplication identity.
 - Expected revisions prevent stale changes. Return structured conflicts with the current revision and a useful hint.
-- A move, its timeline entry, and its automatic dispatch intent use one transaction.
+- A move and its canonical fact commit together. Durable subscriptions persist entry/delivery intent and cursor progress atomically; the accepted [delivery contract](events-and-notifications.md#transactions-and-delivery) does not depend on live channel receipt.
 - Return observed states: accepted, queued, preparing, active, failed, unknown, or appropriate structured errors.
 - An unknown terminal launch or initial-message outcome requires reconciliation; replaying a submitted mention returns its existing request rather than launching another conversation.
 - Associate reports with their request/execution and callback. Artifact/check information can enrich context without becoming an independent completion gate. Do not require a full stale-process/resource-handover system for MVP.
 - History and list responses need bounded pagination. Resource upload limits and content handling should be explicit in the eventual schema.
 
-Recommend a discoverable versioned schema and a thin CLI over the same operations, borrowing Herdr's interface pattern. The concrete current proposal is local JSON-RPC over a Unix socket for macOS MVP, as specified in the interface contract. The proposal has not been implemented. Full subscription/delivery design remains deferred; a durable timeline reader is distinct from a live notification stream.
+The current CLI and Unix-socket RPC boundary are implemented. The new workflow/authoring and durable subscription operations are implemented in the initial slice; see [concrete operations](../workflow-implementation.md). Use discoverable versioned schemas and the same validation for thin CLI/UI adapters. Durable event consumption differs from ephemeral invalidation and a paginated Timeline reader; see [subscriptions](events-and-notifications.md).
 
 ## Completion, blockage, and events
 
 Use execution.report through the proposed Canban CLI so existing agents launched through Herdr can declare working, completed, blocked, or failed. The CLI reads the request/attempt association injected at launch; message/Markdown body are optional. See the [payload, receipt, and retry contract](../interfaces/mvp-contract.md#agent-report-rpc). A completed declaration directly drives the stored callback without a provider-specific evaluator or independent quality gate.
 
-Blockage marks the card needs attention and generates an internal notification event. API and UI activity participate in the Rust enum/in-memory channel/topic-subscription direction. The internal bus design and macOS notification adapter are deferred beyond the minimum MVP implementation; see [event direction](events-and-notifications.md).
+Blockage marks Card attention and generates an internal notification. The accepted durable event design commits facts/progress, with channels for wake-up/invalidation. UI/CLI mutations share that boundary. Native macOS notifications remain separately deferred; durable subscriptions are now specified in [events](events-and-notifications.md).
 
 ## Acceptance
 
-A fixture agent should create a card, add a comment/resource, move it to Develop, observe the resulting request/run, submit a scoped result, and read the unified timeline using only the interface. Replaying any mutation must preserve card numbers and trigger counts. JSON configuration must report incompatible stage mappings; no visual editor/live-migration feature is required. API and UI operations must produce equivalent application outcomes.
+A fixture agent should create a card, add a comment/resource, move it to Develop, observe the resulting request/run, submit a scoped result, and read the unified timeline using only the interface. Replaying any mutation must preserve card numbers and trigger counts. New declarative definitions must share Agent/manual validation and generic display; migration must preserve existing live/queued work and decisions. Project Workflows, SQL YAML history and Edit with agent use the same source/check/apply APIs. Local YAML files are explicit submission/export inputs, not monitored configuration. Onboarding remains open. API and UI operations must produce equivalent application outcomes.

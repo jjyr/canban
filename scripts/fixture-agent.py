@@ -5,8 +5,21 @@ import os
 from pathlib import Path
 import subprocess
 import time
+import sys
 
 home = Path(os.environ["CANBAN_HOME"])
+if os.environ.get("CANBAN_CONFIGURATION_ID"):
+    key=os.environ["CANBAN_CONFIGURATION_ID"]
+    generation=os.environ["CANBAN_CONFIGURATION_GENERATION"]
+    folder=home/"configuration-evidence";folder.mkdir(exist_ok=True)
+    prompt=sys.argv[-1] if len(sys.argv)>1 else ""
+    (folder/(generation+".json")).write_text(json.dumps({"id":key,"generation":generation,"prompt":prompt,"session_id":os.environ.get("CANBAN_SESSION_ID"),"argv":sys.argv[1:]}))
+    print("Project Workflow configuration assistant ready. No business Card created.",flush=True)
+    for line in sys.stdin:
+        if line.strip()=="/exit":break
+        print("Configuration conversation: "+line.strip(),flush=True)
+    sys.exit(0)
+
 request = os.environ["CANBAN_REQUEST_ID"]
 manifest = next(home.glob(f"projects/*/cards/*/runs/{request}/{os.environ['CANBAN_ATTEMPT']}/context.json"))
 context = json.loads(manifest.read_text())

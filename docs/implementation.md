@@ -4,9 +4,11 @@ Current runtime update (2026-11-09): [Event-driven runtime observation](runtime-
 
 # MVP implementation and development
 
+Workflow/event implementation (2026-11-11): [concrete operations, source storage, UX and limits](workflow-implementation.md) implement the unified engine and durable subscriptions. Projects have multiple YAML sources, original text and immutable versions in SQLite; no Workflow files or revision mirrors are generated in the Canban home. Project Workflows supports manual editing/history and Edit with agent; Column trigger details are derived client-side. Configuration conversations have Project ownership and use the existing Terminal. Onboarding remains a separate topic; deterministic fixture acceptance does not imply live provider authentication.
+
 [Unified Card reminders](reminders.md) (2026-11-10) defines the current unread /
 pending counts, persistent visible-read positions, Overview updates and local
-notification sounds. Current builds use SQLite schema 10 and desktop API version 8 (reminders introduced level 6; the merged GitHub/editor/updater contract uses level 8). Upgrade
+notification sounds. Current builds use SQLite schema 12 and desktop API version 10 (the earlier merged GitHub/editor/updater contract used schema 10/API 8). Upgrade
 the running AppServer together with the UI; `mise run run` performs the normal
 development handoff. Existing history is baselined quietly during migration.
 
@@ -59,11 +61,11 @@ Current service lifecycle (2026-11-09): the desktop attaches to or starts an ind
 
 ## Configuration
 
-First startup creates config/agents.json and config/workflows/default.json. The local hc path resolves when available. Profile commands remain portable and resolve on the selected execution host at launch. Edit JSON and choose Reload agent configuration in Settings, or call config.reload. Invalid configuration leaves the previous in-memory configuration active. Stage profile IDs are validated at startup, Project creation and configuration reload against the global registry; removing a profile referenced by the default/saved Project workflow is rejected. Requests already queued keep their profile/instruction/callback snapshot.
+First startup creates config/agents.json and stores the default Workflow bootstrap in SQLite. An existing config/workflows/default.json is imported once; no new Workflow file is created. The local hc path resolves when available. Profile commands remain portable and resolve on the selected execution host at launch. Edit JSON and choose Reload agent configuration in Settings, or call config.reload. Invalid configuration leaves the previous in-memory configuration active. Stage profile IDs are validated at startup, Project creation and configuration reload against the global registry; removing a profile referenced by the default/saved Project workflow is rejected. Requests already queued keep their profile/instruction/callback snapshot.
 
-Fresh homes receive developer and reviewer starter profiles (both initially using the existing Codex launch setup), plus codex/claude profiles for direct mentions. The default workflow references developer from Develop and reviewer from Review. Existing registries/workflow files and saved Project workflows are preserved without injecting or rewriting roles. If a workflow file is missing under an older registry, generated stages omit references to unavailable starter profiles and use the global default.
+Fresh homes receive developer and reviewer starter profiles (both initially using the existing Codex launch setup), plus codex/claude profiles for direct mentions. The default workflow references developer from Develop and reviewer from Review. Existing registries/workflow files and saved Project workflows are preserved without injecting or rewriting roles. When creating the SQL bootstrap under an older registry, generated stages omit references to unavailable starter profiles and use the global default.
 
-The default workflow is Backlog -> Develop -> Review. Backlog does nothing; Develop completion enters Review and queues its ordinary review-report task. Review completion awaits human disposition. New Projects load the current default workflow JSON; existing Projects retain their saved workflow. Template replacement/migration UI is deferred.
+The default workflow is Backlog -> Develop -> Review. Backlog does nothing; Develop completion enters Review and queues its ordinary review-report task. Review completion awaits human disposition. New Projects use the SQL bootstrap and receive a visible development.yaml source document in Project Workflows. Existing Projects retain their configured behavior through conversion to SQL YAML sources. Source document names do not imply managed files.
 
 Agent configuration has hc, hc_session, hc_env, default_agent and profiles. Profiles have id, optional preset, role_instruction, optional argv/resume_argv, exit and session_instruction. canban-profiles resolves editable JSON defaults and explicit whole-field overrides. Commands expand {prompt}, {home}, {cli} and {session_id} as individual arguments. The runtime has no provider-specific invocation branches or Herdr launch-template mode. See [profile schema and migration](product/agent-profiles.md).
 

@@ -113,3 +113,7 @@ run = "/usr/bin/python3 scripts/acceptance-github-workspace.py --native"
 [tasks.acceptance-editor]
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance-editor.py"
+
+[tasks.acceptance-workflows]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/acceptance-workflows.py"

@@ -100,11 +100,11 @@ os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_n
         for profile in config['profiles']:
             profile.update(preset=None,exit={'type':'input','text':'/exit'},session_instruction='',argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'{prompt}'],resume_argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'--resume','{session_id}','{prompt}'])
         config_path.write_text(json.dumps(config));call('config.reload')
-        flow=home/'config/workflows/default.json';v=json.loads(flow.read_text());v['workspace']['sync_base']=False;flow.write_text(json.dumps(v))
+        v=call('workflow.template');v['workspace']['sync_base']=False
         source=root/'source';source.mkdir()
         for command in [['init','-b','main'],['config','user.name','Acceptance'],['config','user.email','acceptance@example.invalid'],['config','core.hooksPath','/dev/null'],['config','commit.gpgsign','false']]:subprocess.run(['git','-C',str(source),*command],capture_output=True,check=True)
         (source/'seed').write_text('preserve');subprocess.run(['git','-C',str(source),'add','.'],check=True,capture_output=True);subprocess.run(['git','-C',str(source),'commit','-m','Seed'],check=True,capture_output=True)
-        project=call('project.create',{'name':'Self update acceptance','directory':str(source)})
+        project=call('project.create',{'workflow':v,'name':'Self update acceptance','directory':str(source)})
         card=call('card.create',{'project_id':project['id'],'title':'Keep the Agent alive across update','body':'Disposable update acceptance.'});call('card.move',{'card_id':card['id'],'revision':card['revision'],'stage':'develop'})
         attempt=wait(lambda:next((a for a in call('app.snapshot')['attempts'] if a.get('provider_session_id')),None),'provider binding')
         core_id=attempt['owner_core_id'];terminal=attempt['terminal'];worktree=call('card.get',{'card_id':card['id']})['worktree']

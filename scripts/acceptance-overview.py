@@ -35,7 +35,7 @@ try:
  (home/'config/agents.json').write_text(json.dumps(config));call('config.reload')
  assert call('scheduler.status')['max_agents']==8
  call('scheduler.configure',{'max_agents':2,'idle_minutes':1})
- workflow=json.loads((home/'config/workflows/default.json').read_text());workflow['workspace']['create_worktree']=False;workflow['workspace']['sync_base']=False
+ workflow=call('workflow.template');workflow['workspace']['create_worktree']=False;workflow['workspace']['sync_base']=False
  projects=[call('project.create',{'name':'Overview '+str(i),'directory':str(base/('project-'+str(i))),'workflow':workflow}) for i in range(2)]
  cards=[card(projects[i%2],'Working '+str(i)) for i in range(4)]
  for c in cards:move(c)

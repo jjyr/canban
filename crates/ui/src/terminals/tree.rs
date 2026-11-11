@@ -245,6 +245,13 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                             .terminal_tabs
                                             .with_untracked(|tabs| tabs.contains(&e.saved.id)))
                             }) {
+                                if snapshot
+                                    .configuration_sessions
+                                    .iter()
+                                    .any(|c| c.id == e.saved.id)
+                                {
+                                    group = group.child(muted("Configuration").ml_3());
+                                }
                                 group = group.child(
                                     view()
                                         .ml_3()

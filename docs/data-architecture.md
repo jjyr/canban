@@ -268,3 +268,7 @@ for ownership, indexed read updates, UI behavior and acceptance evidence.
 ## Internal upgrade migration policy (2026-11-10)
 
 Automatic desktop updates deliberately make no database backup. The generic backup guidance above describes an optional backup procedure, not an updater prerequisite. New production migrations after the schema-8 baseline require paired transactional up/down steps; failed up rolls back its transaction, failed candidate startup invokes reverse down, and failed down stops for manual repair. Schema reversal cannot restore discarded values. See [migration rules and updater ownership](updates.md#migration-authoring-rules).
+
+## Workflow source authority, 2026-11-11
+
+Workflow configuration follows the later user-selected SQL-only design. Original YAML, immutable publication revisions, active source references, named trigger subscriptions and runtime checkpoints live in SQLite. Do not generate Workflow YAML mirrors or revision files under ~/.canban. A YAML filename is a source document name; optional user/Agent files are only submission or export inputs. The source/revision/subscription change commits in one transaction, and optimistic collection revisions protect concurrent manual/Agent edits. Execution prompts/reports remain file-backed under their existing contracts. See [Workflow implementation](workflow-implementation.md).

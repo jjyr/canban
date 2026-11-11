@@ -82,11 +82,9 @@ def project(name, files):
     git(source, 'config', 'commit.gpgsign', 'false')
     git(source, 'add', '.')
     git(source, 'commit', '-m', 'Seed acceptance repository')
-    workflow_path = home / 'config/workflows/default.json'
-    workflow = json.loads(workflow_path.read_text())
+    workflow = call('workflow.template')
     workflow['workspace']['sync_base'] = False
-    workflow_path.write_text(json.dumps(workflow))
-    return call('project.create', {'name': name, 'directory': str(source)}), source
+    return call('project.create', {'name': name, 'directory': str(source),'workflow':workflow}), source
 
 def reviewed(snapshot, card_id):
     requests = [r for r in snapshot['requests'] if r['card_id'] == card_id]

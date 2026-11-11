@@ -30,6 +30,7 @@ pub mod quick_open;
 pub mod reminders;
 mod sessions;
 pub mod terminals;
+pub mod workflows;
 pub mod workspace;
 use nsh_core::prelude::*;
 use presenter::*;

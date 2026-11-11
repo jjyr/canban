@@ -17,6 +17,8 @@ Project -> Card -> profile conversation (Card ID + profile ID)
 
 The conversation is Canban's durable Card/profile association with an opaque provider history ID. A Request captures an assignment; an Attempt records an execution of it. Neither the provider history ID nor the Herdr terminal address replaces these product identities. Developer/Reviewer profiles remain separate conversations even if both use Codex. Different Cards never share the same conversation binding.
 
+Accepted next [workflow model](workflow-engine.md), 2026-11-11: WorkflowRun and step executions add durable process progress above these identities; Agent steps reference existing Requests/Attempts. They do not add question/stage Session classes or replace provider history identity. The initial engine migration is implemented; see [operations and evidence](../workflow-implementation.md). Project Workflows configuration conversations now have Project + purpose + Profile ownership, independent of business Cards/Requests/Attempts. They reuse Profile commands, Scheduler admission and the native Terminal. They cannot approve a business human gate. Onboarding remains separate; see [Edit with agent](../workflow-implementation.md#edit-with-agent).
+
 ## Independent state dimensions
 
 | Dimension | Meaning | It does not establish |

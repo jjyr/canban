@@ -3,7 +3,7 @@ use anyhow::{Result, ensure};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 10;
+pub const CURRENT: u32 = 12;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -11,6 +11,7 @@ pub struct Migration {
 }
 // Append paired steps here; retain down steps for the supported rollback floor.
 const STEPS: &[Migration] = &[
+    // Versions remain consecutive; workflow steps follow the merged schema 10.
     Migration {
         version: 9,
         up: github_up,
@@ -21,7 +22,43 @@ const STEPS: &[Migration] = &[
         up: editor_up,
         down: editor_down,
     },
+    Migration {
+        version: 11,
+        up: workflows_up,
+        down: workflows_down,
+    },
+    Migration {
+        version: 12,
+        up: authoring_up,
+        down: authoring_down,
+    },
 ];
+fn workflows_up(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch("CREATE TABLE IF NOT EXISTS event_journal(offset INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE REFERENCES events(id)); INSERT OR IGNORE INTO event_journal(event_id) SELECT id FROM events ORDER BY rowid; CREATE TABLE IF NOT EXISTS source_observations(id TEXT PRIMARY KEY,data TEXT NOT NULL);")?;
+    for table in [
+        "workflow_revisions",
+        "workflow_bindings",
+        "workflow_runs",
+        "event_subscriptions",
+        "event_deliveries",
+    ] {
+        tx.execute_batch(&format!("CREATE TABLE IF NOT EXISTS {table}(id TEXT PRIMARY KEY,project_id TEXT,card_id TEXT,state TEXT NOT NULL,number INTEGER NOT NULL,data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS {table}_scope ON {table}(project_id,card_id,state);"))?;
+    }
+    tx.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS workflow_revision_number ON workflow_revisions(json_extract(data,'$.workflow_id'),json_extract(data,'$.revision')); CREATE UNIQUE INDEX IF NOT EXISTS event_delivery_key ON event_deliveries(json_extract(data,'$.subscription_id'),json_extract(data,'$.event_id'));")?;
+    Ok(())
+}
+fn workflows_down(tx: &Transaction<'_>) -> Result<()> {
+    let definitions: u64 =
+        tx.query_row("SELECT count(*) FROM workflow_revisions", [], |r| r.get(0))?;
+    ensure!(
+        definitions == 0,
+        "Cannot downgrade while custom workflow definitions exist; preserve/export them before selecting an older application"
+    );
+    // Do not allow an old binary to replay workflow-owned queued assignments.
+    // Current legacy-compatible requests retain their snapshots for old recovery.
+    tx.execute_batch("UPDATE requests SET data=json_set(data,'$.state','cancelled'),state='cancelled' WHERE json_extract(data,'$.workflow_run_id') IS NOT NULL AND state='queued' AND json_extract(data,'$.trigger')!='stage_entry'; DROP TABLE event_deliveries; DROP TABLE event_subscriptions; DROP TABLE workflow_runs; DROP TABLE workflow_bindings; DROP TABLE workflow_revisions; DROP TABLE source_observations; DROP TABLE event_journal;")?;
+    Ok(())
+}
 fn github_up(tx: &Transaction<'_>) -> Result<()> {
     use rusqlite::params;
     tx.execute_batch("DELETE FROM github_issues; DELETE FROM events WHERE json_extract(data,'$.kind') IN ('github.comment','github.pr_comment','github.pr_review','github.issue_synced','github.pr_synced'); CREATE UNIQUE INDEX IF NOT EXISTS github_source_card ON cards(project_id,json_extract(data,'$.content.source.repository_id'),json_extract(data,'$.content.source.issue_id')) WHERE json_extract(data,'$.content.kind') IN ('github_issue','github_pr');")?;
@@ -197,6 +234,28 @@ pub fn prepare(home: &Path, conn: &Connection, target: u32) -> Result<()> {
             std::fs::File::open(&root)?.sync_all()?;
         }
     }
+    Ok(())
+}
+
+fn authoring_up(tx: &Transaction<'_>) -> Result<()> {
+    for table in [
+        "workflow_sources",
+        "configuration_sessions",
+        "workflow_templates",
+    ] {
+        tx.execute_batch(&format!("CREATE TABLE IF NOT EXISTS {table}(id TEXT PRIMARY KEY,project_id TEXT,card_id TEXT,state TEXT NOT NULL,number INTEGER NOT NULL,data TEXT NOT NULL);"))?;
+    }
+    Ok(())
+}
+fn authoring_down(tx: &Transaction<'_>) -> Result<()> {
+    let count: u64 = tx.query_row("SELECT count(*) FROM workflow_sources", [], |r| r.get(0))?;
+    ensure!(
+        count == 0,
+        "Cannot downgrade while YAML workflow sources exist; preserve their configuration first"
+    );
+    let live: u64 = tx.query_row("SELECT count(*) FROM configuration_sessions WHERE json_extract(data,'$.state') NOT IN ('finished','cancelled')", [], |r| r.get(0))?;
+    ensure!(live == 0, "End configuration sessions before downgrading");
+    tx.execute_batch("DROP TABLE configuration_sessions; DROP TABLE workflow_sources; DROP TABLE workflow_templates;")?;
     Ok(())
 }
 

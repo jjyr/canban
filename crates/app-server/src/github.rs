@@ -332,7 +332,28 @@ impl AppServer {
                     self.github.generation() == account_generation,
                     "GitHub account changed; discarded stale sync"
                 );
-                integration::apply(db, &project, &source.generation, sync)
+                let observations = sync
+                    .changes
+                    .iter()
+                    .map(|c| serde_json::to_value(&c.issue))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                integration::apply(db, &project, &source.generation, sync)?;
+                for item in observations {
+                    events::github::observe(
+                        db,
+                        &source.repository,
+                        item["number"].as_u64().context("Missing source number")?,
+                        if item.get("pull_request").is_some() {
+                            "pr"
+                        } else {
+                            "issue"
+                        },
+                        "overview",
+                        &item,
+                        false,
+                    )?;
+                }
+                Ok(())
             }
             Err(ref e) => {
                 let mut current: Project = db.get(project_id)?;
@@ -351,6 +372,116 @@ impl AppServer {
             bail!("{error}")
         }
         self.github_pr_intake(&project)?;
+        self.github_event_refresh(&project)?;
+        Ok(())
+    }
+}
+
+impl AppServer {
+    fn github_event_refresh(&self, project: &Project) -> Result<()> {
+        let (cards, enabled) = {
+            let store = self.store.lock().unwrap();
+            (
+                store.db().list::<Card>()?,
+                store.db().list::<EventSubscription>()?.iter().any(|s| {
+                    s.enabled
+                        && (s.selector.types.is_empty()
+                            || s.selector
+                                .types
+                                .iter()
+                                .any(|t| t == "*" || t.starts_with("github.")))
+                }),
+            )
+        };
+        if !enabled {
+            return Ok(());
+        }
+        for card in cards
+            .iter()
+            .filter(|c| c.project_id == project.id && c.active())
+        {
+            let Some(source) = card.github_issue() else {
+                continue;
+            };
+            let overview = format!(
+                "/repos/{}/{}/{}",
+                source.repository,
+                if card.is_github_pr() {
+                    "pulls"
+                } else {
+                    "issues"
+                },
+                source.number
+            );
+            self.github_read(&overview, true, false)?;
+            let mut sections = vec![format!(
+                "/repos/{}/issues/{}/comments",
+                source.repository, source.number
+            )];
+            if card.is_github_pr() {
+                sections.push(format!(
+                    "/repos/{}/pulls/{}/reviews",
+                    source.repository, source.number
+                ));
+                sections.push(format!(
+                    "/repos/{}/pulls/{}/comments",
+                    source.repository, source.number
+                ));
+            }
+            let overview_value = self.github_read(&overview, false, false)?.data;
+            if card.is_github_pr()
+                && let Some(sha) = overview_value["head"]["sha"].as_str()
+            {
+                sections.push(format!(
+                    "/repos/{}/commits/{sha}/check-runs",
+                    source.repository
+                ));
+            }
+            for root in sections {
+                let section = if root.contains("/check-runs") {
+                    "checks"
+                } else if root.ends_with("/reviews") {
+                    "reviews"
+                } else if root.contains("/pulls/") {
+                    "threads"
+                } else {
+                    "discussion"
+                };
+                let mut items = Vec::new();
+                for page in 1..=100 {
+                    let response =
+                        self.github_read(&format!("{root}?per_page=30&page={page}"), true, false)?;
+                    let values = if section == "checks" {
+                        response.data["check_runs"].as_array()
+                    } else {
+                        response.data.as_array()
+                    }
+                    .context("Expected GitHub collection")?;
+                    items.extend(values.iter().cloned());
+                    if !response
+                        .link
+                        .as_ref()
+                        .is_some_and(|l| l.contains("rel=\"next\""))
+                    {
+                        break;
+                    }
+                    ensure!(
+                        page < 100,
+                        "GitHub observation page bound reached; scan is incomplete"
+                    );
+                }
+                self.store.lock().unwrap().write(|db| {
+                    events::github::complete_collection(
+                        db,
+                        &source.repository,
+                        source.number,
+                        if card.is_github_pr() { "pr" } else { "issue" },
+                        section,
+                        &items,
+                    )
+                })?;
+            }
+        }
         Ok(())
     }
 }

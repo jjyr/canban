@@ -11,8 +11,10 @@ Status: implemented 2026-11-07; current contract reconciled 2026-11-10. This is 
 
 Profiles are application-wide configurations in `~/.canban/config/agents.json`. Workflow templates reference their IDs and define stage tasks/transitions. A Card retains one provider conversation for each profile ID. Developer and Reviewer may both use Codex but have independent histories. Neither profile definitions nor workflow templates are live Sessions.
 
+Current extension (2026-11-11): [unified YAML Workflows](workflow-engine.md) reference Profiles from Agent steps independently of Board columns. Original YAML and immutable versions are stored only in SQLite. Project Workflows provides manual editing/history and Edit with agent. Its Project + configuration purpose + Profile conversation reuses command expansion, Scheduler admission and Terminal transport without a business Card. Onboarding/default Profile setup and provider authentication remain separate. See [the implementation contract](../workflow-implementation.md).
+
 ```text
-config/agents.json                 workflow JSON
+config/agents.json                 Workflow YAML in SQLite
   developer + commands + role <--- Develop.profile
   reviewer  + commands + role <--- Review.profile
                                       |
@@ -78,7 +80,7 @@ The `exit` recipe supplies a normal provider exit command; it is not a completio
 
 ## Workflow and routing
 
-The default JSON workflow has non-executing Backlog, Develop using `developer` with `on_completed: "review"`, and Review using `reviewer` with no automatic next stage. Review means an ordinary report, followed by human disposition.
+The SQL bootstrap creates visible default YAML with non-executing Backlog, Develop using `developer`, movement to Review using `reviewer`, and a human decision after its report. Historical Stage callback fields remain compatibility snapshots. Review means an ordinary report, followed by human disposition.
 
 Selection order is explicit `@profile`, stage `profile`, then global `default_agent`. Routing tags were removed on 2026-11-10: neither Cards nor Profiles expose a `tags` field. Old JSON fields are ignored on decode without a dedicated migration; raw configuration files and historical records are not proactively rewritten. New `card.create`/`card.update` calls reject `tags`, including empty arrays. Desktop API level 3 rejects an older AppServer that could still apply tag-based routing; `mise run run` starts a matched UI/service build. Explicit unknown Profile IDs fail instead of falling back. Direct mentions do not change the workflow callback. Startup, Project creation and reload validate profile references before activating the new registry.
 

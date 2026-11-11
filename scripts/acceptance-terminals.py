@@ -40,7 +40,7 @@ try:
         p.update(preset=None,exit={'type':'input','text':'/exit'},session_instruction='',argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'{prompt}'],resume_argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'--resume','{session_id}','{prompt}'])
     (home/'config/agents.json').write_text(json.dumps(config,indent=2));call('config.reload')
     call('scheduler.configure',{'max_agents':2,'idle_minutes':0})
-    workflow=json.loads((home/'config/workflows/default.json').read_text());workflow['workspace'].update(create_worktree=False,sync_base=False)
+    workflow=call('workflow.template');workflow['workspace'].update(create_worktree=False,sync_base=False)
     projects=[call('project.create',{'name':name,'directory':str(base/name.lower()),'workflow':workflow}) for name in ['Alpha','Beta']]
     for project in projects:
         subprocess.run(['git','-C',project['directory'],'init','-b','main'],check=True,capture_output=True)

@@ -346,6 +346,10 @@ pub struct Event {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Request {
     #[serde(default)]
+    pub workflow_run_id: Option<String>,
+    #[serde(default)]
+    pub workflow_step: Option<String>,
+    #[serde(default)]
     pub location: Option<WorkLocation>,
     #[serde(default)]
     pub resume_from: Option<String>,
@@ -574,6 +578,16 @@ pub struct Artifact {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub workflow_runs: Vec<WorkflowRun>,
+    #[serde(default)]
+    pub workflow_sources: Vec<WorkflowSource>,
+    #[serde(default)]
+    pub event_subscriptions: Vec<EventSubscription>,
+    #[serde(default)]
+    pub configuration_sessions: Vec<ConfigurationSession>,
+    #[serde(default)]
+    pub workflow_revisions: Vec<WorkflowRevision>,
     #[serde(default)]
     pub card_reads: Vec<CardRead>,
     #[serde(default)]
@@ -830,3 +844,6 @@ pub struct GitHubPr {
     pub checks: String,
     pub workspace: WorkspaceBinding,
 }
+
+mod workflow;
+pub use workflow::*;

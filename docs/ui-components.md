@@ -219,3 +219,9 @@ Task, editor Preview and Timeline narrative readers use this common component.
 Markdown and local/Profile/web/GitHub links. Native App acceptance additionally
 verifies exact saved completion text and real default-browser navigation; see
 [Card editor](card-editor.md#reference-follow-up-acceptance-2026-11-10).
+
+## Workflow authoring components
+
+`ui::workflows` owns the Project source editor, SQL history/restore-as-draft and Edit with agent panel. Native NSH editors preserve text selection and local undo; UI state retains per-Project drafts across navigation. Prompt preview is read-only, scrollable and selectable, with explicit Select all/Copy and an inline manual-copy fallback. Source validation/conflict errors preserve the draft. Successful publication quietly updates the version metadata. `workflow-agent` and `workflows` Gallery scenes compose production components with deterministic fixtures.
+
+Column trigger icons use `Icon::Trigger` and the pure `workflow-engine::source::column_details` projection. Hover and click describe active rules; click also links to Project source. UI Kit owns the flash icon, not Workflow interpretation. Configuration Agent entries are grouped under Project / Configuration in the existing Terminal inventory and offer Back to Workflows.

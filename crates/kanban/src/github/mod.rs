@@ -165,6 +165,7 @@ pub fn upsert(
     {
         return Ok(card);
     }
+    let created = existing.is_none();
     let card = if let Some(mut c) = existing {
         if c.removed_at.is_some() {
             ensure!(manual, "Issue was removed locally");
@@ -199,6 +200,10 @@ pub fn upsert(
         };
         c
     };
+    // Finalize only this transaction's creation, never rewrite committed history on refresh.
+    if created {
+        db.conn.execute("UPDATE events SET data=json_set(data,'$.data.source_kind',?2,'$.data.reason',?3,'$.data.initial_sync',json(?4)) WHERE card_id=?1 AND json_extract(data,'$.kind')='card.created'",[card.id.as_str(),if is_pr {"github.pr"}else{"github.issue"},if manual {"manual"}else{"automatic_intake"},if !manual && config.synced_at.is_none(){"true"}else{"false"}])?;
+    }
     // Source data belongs to the disposable provider cache. Persist only workflow ownership.
     db.save(&card)?;
     Ok(card)

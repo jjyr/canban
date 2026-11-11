@@ -67,3 +67,10 @@ pub fn stage<'a>(flow: &'a Workflow, id: &str) -> Result<&'a Stage> {
         bail!("Unknown stage: {id}")
     }
 }
+
+mod definition;
+pub use definition::{matches, validate_definition};
+
+pub mod runtime;
+
+pub mod source;

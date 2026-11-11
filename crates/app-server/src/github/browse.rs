@@ -77,7 +77,12 @@ impl AppServer {
             _ => return None,
         })
     }
-    fn github_read(&self, path: &str, refresh: bool, notification: bool) -> Result<Response> {
+    pub(super) fn github_read(
+        &self,
+        path: &str,
+        refresh: bool,
+        notification: bool,
+    ) -> Result<Response> {
         let generation = self.github.generation();
         let result = if notification {
             let value = self.github_cli.response(path, refresh)?;
@@ -104,6 +109,9 @@ impl AppServer {
             self.github.generation() == generation,
             "GitHub account changed; discarded stale response"
         );
+        if let Ok(response) = &result {
+            self.observe_github_response(path, &response.data)?;
+        }
         if result.as_ref().is_ok_and(|response| !response.cached) {
             self.emit("github", None);
         }
@@ -373,12 +381,28 @@ impl AppServer {
                     self.github.generation() == generation,
                     "GitHub account changed"
                 );
+                let observations = changes
+                    .iter()
+                    .map(|c| serde_json::to_value(&c.issue))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
                 integration::apply(
                     db,
                     project,
                     &source.generation,
                     integration::Sync { changes },
-                )
+                )?;
+                for item in observations {
+                    events::github::observe(
+                        db,
+                        &source.repository,
+                        item["number"].as_u64().context("Missing source number")?,
+                        "pr",
+                        "overview",
+                        &item,
+                        false,
+                    )?;
+                }
+                Ok(())
             })?;
             self.emit("github", None);
         }

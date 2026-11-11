@@ -1,0 +1,58 @@
+# Planning stays in Backlog; approval is an explicit human decision.
+schema: 1
+id: plan-and-develop
+name: Plan and develop
+on:
+  manual:
+    event: manual
+    start_at: plan
+  new_issue:
+    event: card.created
+    match:
+      source_kind: github.issue
+      reason: automatic_intake
+    start_at: plan
+  enter_develop:
+    event: card.column_entered
+    match:
+      column: develop
+    start_at: implement
+steps:
+  - id: plan
+    name: Read and design
+    uses: agent
+    with:
+      profile: codex
+      instruction: |
+        Read the Card, current Issue and relevant code.
+        Produce a concrete implementation plan.
+  - id: approve_plan
+    uses: approval
+    with:
+      title: Approve the implementation plan
+    on_changes_requested: plan
+  - id: enter_develop
+    uses: card.move
+    with:
+      column: develop
+  - id: implement
+    uses: agent
+    with:
+      profile: developer
+      instruction: |
+        Implement the approved plan.
+  - id: enter_review
+    uses: card.move
+    with:
+      column: review
+  - id: review
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: |
+        Review the changes against the approved plan.
+  - id: approve_review
+    uses: approval
+    with:
+      title: Review completed; human decision required
+    on_changes_requested: enter_develop

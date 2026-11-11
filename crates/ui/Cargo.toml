@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+canban-workflow-engine.workspace = true
 canban-updater.workspace = true
 canban-themes.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["std"] }
