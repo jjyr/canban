@@ -25,6 +25,8 @@ jobs:
         run: |
           mise run test
           mise run test-release
+      - name: Install SVG icon renderer
+        run: brew install librsvg
       - name: Build release bundle
         env:
           CANBAN_RELEASE_VERSION: ${{ steps.identity.outputs.version }}

@@ -6,7 +6,7 @@ The first macOS MVP implements local Projects/Boards/Cards, JSON workflows and r
 
 ## Run
 
-Prerequisites: macOS, Xcode command-line tools, mise (pinned Rust and Zig), and an installed compatible hc. Agent profiles use your existing executables and authentication.
+Prerequisites: macOS, Xcode command-line tools, mise (pinned Rust and Zig), librsvg (`brew install librsvg`, for app icon generation), and an installed compatible hc. Agent profiles use your existing executables and authentication.
 
 ```sh
 mise run build

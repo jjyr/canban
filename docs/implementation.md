@@ -24,7 +24,7 @@ The [GitHub workspace and cache](github-workspace.md) extends the integration wi
 
 ## Build and launch
 
-Use the pinned mise Rust toolchain. NSH 0.4.0 is pinned to aca7b8f92a33af9d83c3693a516f649f7ea5c5e5 in Cargo.toml and Cargo.lock. Install macOS Xcode command-line tools and a compatible hc separately. This implementation was verified with hc 0.1.18 and Codex CLI 0.166.0.
+Use the pinned mise Rust toolchain. NSH 0.4.0 is pinned to aca7b8f92a33af9d83c3693a516f649f7ea5c5e5 in Cargo.toml and Cargo.lock. Install macOS Xcode command-line tools, librsvg (`brew install librsvg`, for app icon generation) and a compatible hc separately. This implementation was verified with hc 0.1.18 and Codex CLI 0.166.0.
 
 ```sh
 mise run build
@@ -32,6 +32,8 @@ mise run run
 ```
 
 Build creates target/debug/canban, target/debug/canban-ui, target/debug/canban-updater and a local .local/Canban.app containing all three executables. `mise run run` then packages `.local/CanbanDev.app`, restarts the selected home's AppServer with that build and opens the separate development UI. It defaults to the existing `~/.canban` data, preserving Herdr terminals; see [development startup](development-startup.md). Development packages are unsigned. Release packages use ad-hoc signing; Developer ID signing/notarization and actual GitHub publication are not yet verified. The Gallery is a separate development example: `mise run gallery` builds/opens `.local/CanbanGallery.app`. It is not part of the production window or its startup modes; it uses local fixtures without starting AppServer or reading application data. See [examples](../examples/README.md). Several UI clients can share an application home; a second AppServer is rejected while the first owns its service lock.
+
+All bundle variants generate the macOS app icon from [the original SVG](../crates/ui/assets/app-icon.svg), including standard and Retina sizes. Packaging installs `Contents/Resources/AppIcon.icns` and declares `CFBundleIconFile` before release signing. See [asset provenance and generation](../crates/ui/assets/README.md#app-icon). The release workflow installs librsvg; distributed apps need no SVG renderer at runtime.
 
 CANBAN_HOME selects an alternate absolute application-data directory. Its default is ~/.canban/. Native UI connects through AppClient RPC to a separate, persistent AppServer. A same-user, mode-0600 Unix socket exposes JSON-RPC to the CLI. The home directory is mode 0700.
 
