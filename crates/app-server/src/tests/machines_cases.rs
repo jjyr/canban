@@ -46,6 +46,9 @@ fn location_edits_retarget_queued_work_but_not_existing_attempts_or_resumes() {
             let mut p: Project = db.get(&p.id)?;
             p.workflow.workspace.create_worktree = false;
             p.workflow.workspace.sync_base = false;
+            p.workflow.stages[2].execute = true;
+            p.workflow.stages[2].profile = Some("reviewer".into());
+            p.workflow.stages[2].instruction = "Review".into();
             db.save(&p)?;
             republish_template(&app, db, &p)
         })
@@ -125,6 +128,9 @@ fn changed_environment_never_reviews_an_unrelated_checkout() {
             let mut p: Project = db.get(&p.id)?;
             p.workflow.workspace.create_worktree = false;
             p.workflow.workspace.sync_base = false;
+            p.workflow.stages[2].execute = true;
+            p.workflow.stages[2].profile = Some("reviewer".into());
+            p.workflow.stages[2].instruction = "Review".into();
             db.save(&p)?;
             republish_template(&app, db, &p)
         })

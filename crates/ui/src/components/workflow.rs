@@ -68,11 +68,20 @@ pub fn run_view(run: WorkflowRun) -> impl IntoElement {
             }
             WorkflowStep::Move { column, .. } => format!("Move to {column}"),
             WorkflowStep::Approval { title, .. } => title.clone(),
-            WorkflowStep::Deliver { target_branch, .. } => {
-                if let Some(branch) = target_branch {
-                    format!("Auto-merge into {branch}")
+            WorkflowStep::Deliver {
+                target_branch,
+                sync_upstream,
+                ..
+            } => {
+                let sync_note = if *sync_upstream {
+                    " + sync upstream"
                 } else {
-                    "Auto-merge queue".into()
+                    " (local only)"
+                };
+                if let Some(branch) = target_branch {
+                    format!("Queue merge into {branch}{sync_note}")
+                } else {
+                    format!("Queue merge{sync_note}")
                 }
             }
             WorkflowStep::Condition {

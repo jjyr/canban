@@ -21,7 +21,7 @@ To make workflows approachable without sacrificing declarative flexibility, sepa
 
 ## 2026-11-11 — Workflow/event implementation
 
-Implemented the initial unified interpreter, schema-11 durable journal/subscriptions, CLI definition validation/publication, old assignment adoption and generic native Card viewer. Publication affects new runs immediately while existing definitions/assignments remain captured. See [concrete operations, evidence and limits](../workflow-implementation.md). This does not implement settings-hosted configuration conversations or provider authentication.
+Implemented the initial unified interpreter, schema-11 durable journal/subscriptions, CLI definition validation/publication, old assignment adoption and generic native Card viewer. Publication affects new runs immediately while existing definitions/assignments remain captured. See [concrete operations, evidence and limits](workflow-engine.md). This does not implement settings-hosted configuration conversations or provider authentication.
 
 ## 2026-11-11 — Unified workflows, durable subscriptions and Agent authoring
 
@@ -35,7 +35,7 @@ Agents should create/modify declarative workflow definitions; users can manually
 
 The next UX discussion should cover default Agent Profiles during onboarding, invoking an Agent conversation from settings to configure Canban, and the complete interaction/UI around these conversations and the generic viewer. Exact defaults, session ownership/layout and apply/activation controls remain open. Earlier manual-start mockups illustrate intent, not approved UI.
 
-See [workflow rules and migration](workflow-engine.md), [events/subscriptions](events-and-notifications.md) and [Project boundaries](projects-and-workflows.md). These supersede the older detailed-event deferral and stage-only automation model; dated MVP evidence remains historical.
+See [workflow rules and migration](workflow-engine.md), [events/subscriptions](events-and-notifications.md) and [Project boundaries](workflow-engine.md). These supersede the older detailed-event deferral and stage-only automation model; dated MVP evidence remains historical.
 
 ## 2026-11-10 — Project switcher with numeric attention badges
 
@@ -137,7 +137,7 @@ Recommended detailed policies, still proposals: archive as a separate lifecycle 
 
 At this point automatic development-to-review advancement was raised for discussion. The next clarification resolves its configuration/default. The subsequent unified Session clarification resolves the fresh-conversation rule for mentions and stage entry. Active-run moves, archive eligibility, and worktree retention still need choices; do not treat remaining recommendations as confirmed requirements.
 
-Current design is in [vision](vision.md), [Projects/templates](projects-and-workflows.md), [Kanban workflow](kanban-workflow.md), [Dispatch](scheduler.md), [Timeline](timeline.md), and [agent interface](agent-interface.md).
+Current design is in [vision](vision.md), [Projects/templates](workflow-engine.md), [Kanban workflow](kanban-workflow.md), [Dispatch](scheduler.md), [Timeline](timeline.md), and [agent interface](agent-interface.md).
 
 ## 2026-11-05: default automatic development-to-review transition
 
@@ -197,7 +197,7 @@ The user resolved the scope questions:
 
 These decisions make the MVP scope reasonably converged. Exact report encoding, JSON fields, attachment limits, internal notification presentation, and managed-worktree cleanup details can be refined during implementation. Timeline persistence remains a requirement; the memory channel is transport, not a new durable event store.
 
-Current scope and event direction are recorded in [MVP plan](../mvp-plan.md), [scope review](mvp-scope-review.md), [Projects/worktrees](projects-and-workflows.md), and [events/notifications](events-and-notifications.md).
+Current scope and event direction are recorded in [MVP plan](../mvp-plan.md), [scope review](mvp-scope-review.md), [Projects/worktrees](workflow-engine.md), and [events/notifications](events-and-notifications.md).
 
 ## 2026-11-05: concrete MVP interface mechanisms
 
@@ -650,4 +650,4 @@ Supersedes the earlier numeric-only default `canban/<card-number>` naming decisi
 
 ## 2026-11-11: Project YAML authoring and SQL source authority
 
-User confirmed Project-level multi-Workflow editing, a single **Edit with agent** entry containing full Prompt preview/copy and explicit Terminal launch, plus Column flash icons with shared-library hover/click descriptions. The later storage decision supersedes the file-source proposal: original YAML and immutable versions live only in SQLite, with no extra Workflow files under ~/.canban. Files are an explicit submit/export transport. Manual edits and configuration Agents use the same transactional revision/check/apply APIs. History can load an old revision as a draft and republish it as a new revision. Configuration conversations have Project + purpose + Profile ownership without a business Card. See [current implementation](../workflow-implementation.md) for actual operations and evidence boundaries; onboarding remains open.
+User confirmed Project-level multi-Workflow editing, a single **Edit with agent** entry containing full Prompt preview/copy and explicit Terminal launch, plus Column flash icons with shared-library hover/click descriptions. The later storage decision supersedes the file-source proposal: original YAML and immutable versions live only in SQLite, with no extra Workflow files under ~/.canban. Files are an explicit submit/export transport. Manual edits and configuration Agents use the same transactional revision/check/apply APIs. History can load an old revision as a draft and republish it as a new revision. Configuration conversations have Project + purpose + Profile ownership without a business Card. See [current implementation](workflow-engine.md) for actual operations and evidence boundaries; onboarding remains open.

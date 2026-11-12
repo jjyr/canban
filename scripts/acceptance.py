@@ -83,6 +83,11 @@ try:
     print(f"HERDR_CONNECTED {core['version']} core={core['core']['id']}", flush=True)
     local_workflow = call('workflow.template')
     local_workflow['workspace']['sync_base'] = False  # Fixture repositories have no remote.
+    for stage in local_workflow['stages']:
+        if stage['id'] == 'review':
+            stage['execute'] = True
+            stage['profile'] = 'reviewer'
+            stage['instruction'] = 'Review the changes and report the result.'
     project = call("project.create", {"workflow":local_workflow,"name": "MVP Acceptance", "directory": str(source)})
     note = call("note.save", {"project_id": project["id"], "title": "Human Context", "body": "Only modify the disposable acceptance project."})
     card = call("card.create", {"project_id": project["id"], "title": "Verify automatic development and review", "body": "Create the acceptance deliverable and report the result."})

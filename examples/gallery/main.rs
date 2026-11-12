@@ -512,14 +512,29 @@ pub fn Gallery() -> impl IntoElement {
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
         Ok("workflows") | Ok("workflow-agent") | Ok("workflows-conflict")
     ) {
-        let raw = include_str!("../workflows/plan-and-develop.yaml").to_string();
-        let name = "issue-planning.yaml".to_string();
+        let default_raw = canban_workflow_engine::source::encode(
+            &canban_workflow_engine::source::default_document(
+                "delivery:gallery-project",
+                canban_types::WorkspaceSettings::default(),
+            ),
+        )
+        .unwrap();
+        let plan_raw = include_str!("../workflows/plan-and-develop.yaml").to_string();
         let mut draft = canban_ui::workflows::Draft {
-            base: json!({"revision":"gallery","sources":[{"filename":name,"source":raw,"active":{"revision":1,"workflow_id":"gallery-workflow"}}]}),
+            base: json!({"revision":"gallery","sources":[
+                {"filename":"development.yaml","source":default_raw,"active":{"revision":1,"workflow_id":"delivery:gallery-project"}},
+                {"filename":"issue-planning.yaml","source":plan_raw,"active":{"revision":1,"workflow_id":"gallery-workflow"}}
+            ]}),
             ..Default::default()
         };
-        draft.sources.insert(name.clone(), raw);
-        draft.selected = name;
+        draft.sources.insert("development.yaml".into(), default_raw);
+        draft.sources.insert("issue-planning.yaml".into(), plan_raw);
+        draft.selected =
+            if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("workflows-conflict") {
+                "issue-planning.yaml".into()
+            } else {
+                "development.yaml".into()
+            };
         ui.workflows.drafts.update(|d| {
             d.insert(ui.project.get_untracked(), draft);
         });
@@ -808,14 +823,26 @@ pub fn Gallery() -> impl IntoElement {
                 }))
                 .child(action("Workflows", Variant::Quiet, move |_| {
                     scene.set("workspace".into());
-                    let raw = include_str!("../workflows/plan-and-develop.yaml").to_string();
-                    let name = "issue-planning.yaml".to_string();
+                    let default_raw = canban_workflow_engine::source::encode(
+                        &canban_workflow_engine::source::default_document(
+                            "delivery:gallery-project",
+                            canban_types::WorkspaceSettings::default(),
+                        ),
+                    )
+                    .unwrap();
+                    let plan_raw = include_str!("../workflows/plan-and-develop.yaml").to_string();
                     let mut draft = canban_ui::workflows::Draft {
-                        base: json!({"revision":"gallery","sources":[{"filename":name,"source":raw,"active":{"revision":1,"workflow_id":"gallery-workflow"}}]}),
+                        base: json!({"revision":"gallery","sources":[
+                            {"filename":"development.yaml","source":default_raw,"active":{"revision":1,"workflow_id":"delivery:gallery-project"}},
+                            {"filename":"issue-planning.yaml","source":plan_raw,"active":{"revision":1,"workflow_id":"gallery-workflow"}}
+                        ]}),
                         ..Default::default()
                     };
-                    draft.sources.insert(name.clone(), raw);
-                    draft.selected = name;
+                    draft.sources.insert("development.yaml".into(), default_raw);
+                    draft
+                        .sources
+                        .insert("issue-planning.yaml".into(), plan_raw);
+                    draft.selected = "development.yaml".into();
                     ui.workflows.drafts.update(|d| {
                         d.insert(ui.project.get_untracked(), draft);
                     });

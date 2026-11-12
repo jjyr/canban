@@ -117,6 +117,52 @@ impl Ops {
         };
         self.sync_base(source, &base, remote)
     }
+    /// Returns true if the Project checkout has a configured push URL for its workspace remote.
+    pub fn has_push_remote(&self, project: &Project) -> bool {
+        let source = Path::new(&project.directory);
+        let remote = if project.workflow.workspace.remote.trim().is_empty() {
+            "origin"
+        } else {
+            project.workflow.workspace.remote.as_str()
+        };
+        if remote.starts_with('-') {
+            return false;
+        }
+        self.git(source, &["remote", "get-url", "--push", remote])
+            .is_ok_and(|out| out.status.success())
+    }
+    /// Pushes the merged local `target_branch` to the configured upstream Git remote (`origin/<target_branch>`).
+    /// Returns `Ok(Some(remote_name))` when pushed, or `Ok(None)` when no Git remote is configured.
+    pub fn push_target_branch(
+        &self,
+        project: &Project,
+        target_branch: &str,
+    ) -> Result<Option<String>> {
+        let source = Path::new(&project.directory);
+        let remote = if project.workflow.workspace.remote.trim().is_empty() {
+            "origin"
+        } else {
+            project.workflow.workspace.remote.as_str()
+        };
+        ensure!(
+            !remote.is_empty() && !remote.starts_with('-'),
+            "Invalid remote name"
+        );
+        self.checked(source, &["check-ref-format", "--branch", target_branch])?;
+        if !self.has_push_remote(project) {
+            return Ok(None);
+        }
+        self.checked(
+            source,
+            &[
+                "push",
+                "--porcelain",
+                remote,
+                &format!("refs/heads/{target_branch}:refs/heads/{target_branch}"),
+            ],
+        )?;
+        Ok(Some(remote.to_owned()))
+    }
     /// Resume always returns to the saved location. A removed managed Card
     /// checkout can be reconstructed from its retained branch/commit, without
     /// fetching a new base or falling back to a different directory.

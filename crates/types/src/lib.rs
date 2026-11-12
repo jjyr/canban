@@ -91,10 +91,10 @@ impl Default for Workflow {
                     on_completed: Some("review".into()), require_human_review: false,
                 },
                 Stage {
-                    id: "review".into(), name: "Review".into(), execute: true,
-                    profile: Some("reviewer".into()),
-                    instruction: "Review the work for this card. Inspect the code and earlier results, then write an ordinary Markdown review report. Report findings and any remaining concerns. Do not implement unrelated changes.".into(),
-                    on_completed: None, require_human_review: true,
+                    id: "review".into(), name: "Review".into(), execute: false,
+                    profile: None,
+                    instruction: String::new(),
+                    on_completed: None, require_human_review: false,
                 },
             ],
         }

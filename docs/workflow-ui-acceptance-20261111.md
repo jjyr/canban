@@ -2,7 +2,7 @@
 
 Executed on macOS arm64, 2026-11-11, from an uncommitted tree based on
 `fe5e5b9` (schema 12 / API 10). The current contract is
-[Workflow implementation](workflow-implementation.md).
+[Workflow implementation](product/workflow-engine.md).
 
 ## Changes and review findings
 

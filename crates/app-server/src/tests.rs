@@ -80,7 +80,7 @@ fn state_history_and_queue_are_atomic_and_retries_do_not_dispatch_twice() {
     app.call("execution.report", report).unwrap();
     let snap = app.snapshot().unwrap();
     assert_eq!(snap.cards[0].stage, "review");
-    assert_eq!(snap.requests.len(), 2);
+    assert_eq!(snap.requests.len(), 1);
     assert_eq!(snap.reports.len(), 1);
     assert!(
         snap.events
@@ -397,7 +397,18 @@ fn legacy_capacity_fields_do_not_survive_config_or_request_loading() {
 
 #[test]
 fn template_profiles_and_mentions_select_independent_roles_and_callbacks() {
-    let (_dir, app, _project, card) = setup();
+    let (_dir, app, mut project, card) = setup();
+    project.workflow.stages[2].execute = true;
+    project.workflow.stages[2].profile = Some("reviewer".into());
+    project.workflow.stages[2].instruction = "Review changes".into();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.save(&project)?;
+            republish_template(&app, db, &project)
+        })
+        .unwrap();
     app.call(
         "card.move",
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
@@ -458,7 +469,18 @@ fn unknown_stage_profiles_fail_before_project_creation() {
 
 #[test]
 fn referenced_profile_removal_is_rejected_without_replacing_active_config() {
-    let (_dir, app, _project, _card) = setup();
+    let (_dir, app, mut project, _card) = setup();
+    project.workflow.stages[2].execute = true;
+    project.workflow.stages[2].profile = Some("reviewer".into());
+    project.workflow.stages[2].instruction = "Review".into();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.save(&project)?;
+            republish_template(&app, db, &project)
+        })
+        .unwrap();
     let mut changed = app.config();
     changed.profiles.retain(|p| p.id != "reviewer");
     std::fs::write(
@@ -562,7 +584,18 @@ fn legacy_registry_and_workflow_are_preserved_without_starter_role_injection() {
 
 #[test]
 fn live_replies_preserve_task_callback_and_require_current_invocation() {
-    let (_dir, app, _project, card) = setup();
+    let (_dir, app, mut project, card) = setup();
+    project.workflow.stages[2].execute = true;
+    project.workflow.stages[2].profile = Some("reviewer".into());
+    project.workflow.stages[2].instruction = "Review".into();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.save(&project)?;
+            republish_template(&app, db, &project)
+        })
+        .unwrap();
     app.call(
         "card.move",
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
@@ -1319,6 +1352,9 @@ fn later_template_stages_win_across_boards_and_human_cards_are_skipped() {
     .unwrap();
     project.id = "second-board".into();
     project.workflow.stages[2].id = "custom-final-check".into();
+    project.workflow.stages[2].execute = true;
+    project.workflow.stages[2].profile = Some("reviewer".into());
+    project.workflow.stages[2].instruction = "Final check".into();
     project.workflow.stages[1].on_completed = Some("custom-final-check".into());
     app.store
         .lock()
@@ -1391,6 +1427,9 @@ fn later_template_stages_win_across_boards_and_human_cards_are_skipped() {
 fn human_review_gate_survives_reports_acknowledgement_restart_and_requires_explicit_approval() {
     let (dir, app, mut project, card) = setup();
     project.workflow.stages[1].require_human_review = true;
+    project.workflow.stages[2].execute = true;
+    project.workflow.stages[2].profile = Some("reviewer".into());
+    project.workflow.stages[2].instruction = "Review".into();
     app.store
         .lock()
         .unwrap()
@@ -1914,7 +1953,10 @@ mod workflows;
 
 // Fixtures changing a historical Project template explicitly republish its YAML.
 fn republish_template(app: &AppServer, db: Db<'_>, project: &Project) -> Result<()> {
-    let flow = legacy_definition(&project.workflow, format!("delivery:{}", project.id));
+    let flow = canban_workflow_engine::source::migrate_legacy_stages(
+        &project.workflow,
+        format!("delivery:{}", project.id),
+    );
     if workflow::published(db, &flow.id).is_err() {
         return authoring::initialize(&app.home, db, &app.config(), project);
     }

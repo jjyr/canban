@@ -370,14 +370,21 @@ fn restoring_a_card_does_not_implicitly_reenter_its_workflow() {
 
 #[test]
 fn compatible_continue_records_one_human_approval_fact() {
-    let (_dir, app, _p, c) = setup();
+    let (_dir, app, _p, mut c) = setup();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            c.source_trust = Some("external_pr".into());
+            db.save(&c)
+        })
+        .unwrap();
     app.call(
         "card.move",
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     finish(&app, &app.snapshot().unwrap().requests[0], "develop-done");
-    finish(&app, &app.snapshot().unwrap().requests[1], "review-done");
     let card = app.snapshot().unwrap().cards[0].clone();
     app.call(
         "card.continue",
@@ -683,7 +690,15 @@ fn closing_a_queued_configuration_agent_cancels_launch_without_creating_a_card()
 #[test]
 fn edited_default_yaml_owns_callback_snapshots_instead_of_historical_stage_fields() {
     let (_dir, app, p, c) = setup();
-    let mut definition = legacy_definition(&p.workflow, format!("delivery:{}", p.id));
+    let mut legacy = p.workflow.clone();
+    legacy.stages[2].execute = true;
+    legacy.stages[2].profile = Some("reviewer".into());
+    legacy.stages[2].instruction = "Review".into();
+    legacy.stages[2].require_human_review = true;
+    let mut definition = canban_workflow_engine::source::migrate_legacy_stages(
+        &legacy,
+        format!("delivery:{}", p.id),
+    );
     if let Some(WorkflowStep::Agent { next, .. }) = definition.steps.get_mut("agent:review") {
         *next = None;
     }
@@ -890,4 +905,387 @@ workspace:
         .unwrap();
     assert_eq!(ext_run.state, "waiting_approval");
     assert_eq!(ext_run.step.as_deref(), Some("approval:review"));
+}
+
+fn finish_closed(app: &AppServer, req: &Request, key: &str) {
+    let a = admit(app, req);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut run: Attempt = db.get(&a.id)?;
+            run.terminal = None;
+            db.save(&run)
+        })
+        .unwrap();
+    app.call("execution.report",json!({"execution":{"request_id":req.id,"attempt_number":a.number},"request_key":key,"state":"completed","message":"Plan ready","body":"Exact plan artifact"})).unwrap();
+}
+
+#[test]
+fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = dir.path().join("remote.git");
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&remote).unwrap();
+    std::fs::create_dir_all(&source).unwrap();
+
+    let git = |cwd: &std::path::Path, args: &[&str]| -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .trim_end_matches('\n')
+            .to_owned()
+    };
+
+    git(&remote, &["init", "--bare", "-b", "main"]);
+    git(&source, &["init", "-b", "main"]);
+    git(&source, &["config", "user.name", "Tester"]);
+    git(&source, &["config", "user.email", "tester@example.invalid"]);
+    git(&source, &["config", "commit.gpgsign", "false"]);
+    git(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    std::fs::write(source.join("README.md"), "# Initial\n").unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "init"]);
+    git(&source, &["push", "-u", "origin", "main"]);
+    let initial_sha = git(&source, &["rev-parse", "refs/heads/main"]);
+    assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), initial_sha);
+
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Default Queue Merge", "directory": source}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // 1. Default workflow: joining Backlog does NOT analyze and does NOT move to Develop.
+    let c1: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Feature 1", "body": "Sync upstream by default"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.cards[0].stage, "backlog");
+    assert!(snap.requests.is_empty());
+    assert!(snap.workflow_runs.is_empty());
+
+    // 2. Entering Develop runs @developer automatically, moves to Review (no @reviewer),
+    // and Queue Merge merges locally + pushes to upstream remote!
+    app.call(
+        "card.move",
+        json!({"card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.requests.len(), 1);
+    assert_eq!(snap.requests[0].profile.id, "developer");
+
+    let ops = canban_workspaces::Ops::local();
+    let wt1 = ops.prepare(&app.home, &p, &snap.cards[0]).unwrap();
+    let branch1 = ops
+        .current_branch(wt1.to_str().unwrap())
+        .expect("worktree branch");
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c1.id)?;
+            card.worktree = Some(wt1.to_str().unwrap().into());
+            card.branch = Some(branch1);
+            db.save(&card)
+        })
+        .unwrap();
+    git(&wt1, &["config", "user.name", "Tester"]);
+    git(&wt1, &["config", "user.email", "tester@example.invalid"]);
+    git(&wt1, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(wt1.join("feature1.txt"), "hello upstream\n").unwrap();
+
+    finish_closed(&app, &snap.requests[0], "dev-c1-done");
+    app.pump_deliveries().unwrap();
+    // Ensure only 1 agent request ran (no @reviewer step in default Review).
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.requests.len(), 1);
+    let run1 = snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == c1.id)
+        .unwrap();
+    assert_eq!(run1.state, "completed");
+
+    let merged_sha_1 = git(&source, &["rev-parse", "refs/heads/main"]);
+    assert_ne!(merged_sha_1, initial_sha);
+    assert_eq!(
+        git(&remote, &["rev-parse", "refs/heads/main"]),
+        merged_sha_1,
+        "Default Queue Merge must sync merged target branch to upstream remote"
+    );
+    let snap = app.snapshot().unwrap();
+    let delivered_c1 = snap.cards.iter().find(|x| x.id == c1.id).unwrap();
+    assert_eq!(delivered_c1.delivery.as_ref().unwrap().commit, merged_sha_1);
+    assert!(
+        snap.events.iter().any(|e| {
+            e.card_id == c1.id && e.kind == "review.merged" && e.data["synced_upstream"] == true
+        }),
+        "review.merged event should record synced_upstream: true"
+    );
+
+    // 3. Toggle "Merge Only (Local)" via derived source options (sync_upstream: false).
+    let col = collection(&app, &p);
+    let raw = col["sources"][0]["source"].as_str().unwrap();
+    let mut doc = canban_workflow_engine::source::parse(raw).unwrap();
+    let derived = canban_workflow_engine::source::derive_options(&doc);
+    assert!(!derived.backlog_analyze);
+    assert!(!derived.backlog_auto_develop);
+    assert!(!derived.review_manual);
+    assert!(derived.sync_upstream);
+
+    canban_workflow_engine::source::set_sync_upstream(&mut doc, false);
+    assert!(!canban_workflow_engine::source::derive_options(&doc).sync_upstream);
+    let updated_yaml = canban_workflow_engine::source::encode(&doc).unwrap();
+    app.call(
+        "workflow.apply",
+        json!({
+            "project_id": p.id,
+            "revision": col["revision"],
+            "sources": [{"filename": "development.yaml", "source": updated_yaml}]
+        }),
+    )
+    .unwrap();
+
+    let c2: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Feature 2", "body": "Local merge without upstream push"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c2.id, "revision": c2.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let req2 = snap
+        .requests
+        .iter()
+        .find(|r| r.card_id == c2.id)
+        .unwrap()
+        .clone();
+
+    let card2 = snap.cards.iter().find(|x| x.id == c2.id).unwrap().clone();
+    let wt2 = ops.prepare(&app.home, &p, &card2).unwrap();
+    let branch2 = ops
+        .current_branch(wt2.to_str().unwrap())
+        .expect("worktree branch 2");
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c2.id)?;
+            card.worktree = Some(wt2.to_str().unwrap().into());
+            card.branch = Some(branch2);
+            db.save(&card)
+        })
+        .unwrap();
+    git(&wt2, &["config", "user.name", "Tester"]);
+    git(&wt2, &["config", "user.email", "tester@example.invalid"]);
+    git(&wt2, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(wt2.join("feature2.txt"), "local merge only\n").unwrap();
+
+    finish_closed(&app, &req2, "dev-c2-done");
+    app.pump_deliveries().unwrap();
+
+    let merged_sha_2 = git(&source, &["rev-parse", "refs/heads/main"]);
+    assert_ne!(
+        merged_sha_2, merged_sha_1,
+        "Local target branch should advance"
+    );
+    assert_eq!(
+        git(&remote, &["rev-parse", "refs/heads/main"]),
+        merged_sha_1,
+        "Upstream remote must NOT advance when sync_upstream is false"
+    );
+    let snap = app.snapshot().unwrap();
+    assert!(
+        snap.events.iter().any(|e| {
+            e.card_id == c2.id && e.kind == "review.merged" && e.data["synced_upstream"] == false
+        }),
+        "review.merged event should record synced_upstream: false"
+    );
+}
+
+#[test]
+fn backlog_and_review_options_drive_card_lifecycle_and_preserve_custom_stages() {
+    let (_dir, app, p, _) = setup();
+
+    // Helper to patch development.yaml via Studio's derived option helpers.
+    let update_doc = |mutate: &dyn Fn(&mut canban_workflow_engine::source::Document)| {
+        let col = collection(&app, &p);
+        let raw = col["sources"][0]["source"].as_str().unwrap();
+        let mut doc = canban_workflow_engine::source::parse(raw).unwrap();
+        mutate(&mut doc);
+        let next_yaml = canban_workflow_engine::source::encode(&doc).unwrap();
+        app.call(
+            "workflow.apply",
+            json!({
+                "project_id": p.id,
+                "revision": col["revision"],
+                "sources": [{"filename": "development.yaml", "source": next_yaml}]
+            }),
+        )
+        .unwrap();
+    };
+
+    // Case A: Enable Backlog Auto-Analyze + Backlog Auto-Start Develop + Manual Review,
+    // AND add a custom QA stage between Develop and Review to verify non-destructive derivation.
+    update_doc(&|doc| {
+        doc.columns = vec![
+            WorkflowColumn {
+                id: "backlog".into(),
+                name: "Backlog".into(),
+            },
+            WorkflowColumn {
+                id: "develop".into(),
+                name: "Develop".into(),
+            },
+            WorkflowColumn {
+                id: "qa".into(),
+                name: "QA".into(),
+            },
+            WorkflowColumn {
+                id: "review".into(),
+                name: "Review".into(),
+            },
+        ];
+        canban_workflow_engine::source::set_backlog_options(doc, true, true);
+        canban_workflow_engine::source::set_review_manual(doc, true);
+    });
+
+    // Creating a new Card in Backlog immediately runs agent:plan, waits for it to finish,
+    // then automatically moves to Develop and runs agent:develop, then pauses at Manual Review!
+    let c_plan_dev: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Analyze then Develop", "body": "Wait for analysis"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let card_state = snap.cards.iter().find(|x| x.id == c_plan_dev.id).unwrap();
+    assert_eq!(
+        card_state.stage, "backlog",
+        "Card stays in Backlog until auto-analysis completes"
+    );
+    let plan_req = snap
+        .requests
+        .iter()
+        .find(|r| r.card_id == c_plan_dev.id)
+        .expect("agent:plan request should queue on card.create")
+        .clone();
+    assert!(
+        plan_req
+            .workflow_step
+            .as_deref()
+            .is_some_and(|s| s.starts_with("agent:plan:"))
+    );
+
+    finish(&app, &plan_req, "analysis-done");
+    let snap = app.snapshot().unwrap();
+    let card_state = snap.cards.iter().find(|x| x.id == c_plan_dev.id).unwrap();
+    assert_eq!(
+        card_state.stage, "develop",
+        "After analysis finishes, Card automatically moves to Develop"
+    );
+    let dev_req = snap
+        .requests
+        .iter()
+        .rfind(|r| r.card_id == c_plan_dev.id)
+        .unwrap()
+        .clone();
+    assert!(
+        dev_req
+            .workflow_step
+            .as_deref()
+            .is_some_and(|s| s.starts_with("agent:develop:"))
+    );
+
+    finish(&app, &dev_req, "develop-done");
+    let snap = app.snapshot().unwrap();
+    let card_state = snap.cards.iter().find(|x| x.id == c_plan_dev.id).unwrap();
+    assert_eq!(card_state.stage, "review");
+    assert!(
+        card_state.human_gate.is_some(),
+        "Manual Review option must gate Review on human approval"
+    );
+    let run_state = snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == c_plan_dev.id)
+        .unwrap();
+    assert_eq!(run_state.state, "waiting_approval");
+    assert_eq!(run_state.step.as_deref(), Some("approval:review"));
+
+    // Verify custom 4-column layout survived option mutations.
+    let stage_ids: Vec<_> = snap.projects[0]
+        .workflow
+        .stages
+        .iter()
+        .map(|s| s.id.as_str())
+        .collect();
+    assert_eq!(stage_ids, vec!["backlog", "develop", "qa", "review"]);
+
+    // Case B: Disable Backlog Auto-Analyze while keeping Backlog Auto-Start Develop enabled.
+    // Newly created Card immediately moves to Develop and starts @developer without planning.
+    update_doc(&|doc| {
+        canban_workflow_engine::source::set_backlog_options(doc, false, true);
+    });
+
+    let c_direct_dev: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Immediate Develop", "body": "Skip analysis"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let card2_state = snap.cards.iter().find(|x| x.id == c_direct_dev.id).unwrap();
+    assert_eq!(
+        card2_state.stage, "develop",
+        "Card immediately moves from Backlog to Develop when analyze=false, auto_develop=true"
+    );
+    let reqs_for_c2: Vec<_> = snap
+        .requests
+        .iter()
+        .filter(|r| r.card_id == c_direct_dev.id)
+        .collect();
+    assert_eq!(reqs_for_c2.len(), 1);
+    assert!(
+        reqs_for_c2[0]
+            .workflow_step
+            .as_deref()
+            .is_some_and(|s| s.starts_with("agent:develop:"))
+    );
 }

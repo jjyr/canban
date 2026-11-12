@@ -80,7 +80,7 @@ Canban Project -> directory + Board -> Card #42
 External Herdr Space -- optional explicit navigation link -- Canban Project
 ```
 
-The current product model is directory-backed Project -> Board -> stages/cards, as clarified in [Projects/templates](../product/projects-and-workflows.md). Use stable Canban IDs for `project_id`, `card_id`, `run_id`, and `context_snapshot_id`, plus project-local card numbers. Store a `RuntimeConnection` plus the core identity and terminal address; on remote runs also retain the selected machine identity and its observed alias. A displayed alias like `box/t7` is routing information, not a globally permanent ID. Do not use CWD, process name, a card title, or a terminal title as the primary join key.
+The current product model is directory-backed Project -> Board -> stages/cards, as clarified in [Projects/templates](../product/workflow-engine.md). Use stable Canban IDs for `project_id`, `card_id`, `run_id`, and `context_snapshot_id`, plus project-local card numbers. Store a `RuntimeConnection` plus the core identity and terminal address; on remote runs also retain the selected machine identity and its observed alias. A displayed alias like `box/t7` is routing information, not a globally permanent ID. Do not use CWD, process name, a card title, or a terminal title as the primary join key.
 
 Recommended terminal labels, all **Canban conventions** interpreted by Canban:
 

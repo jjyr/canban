@@ -37,7 +37,7 @@ The AppServer crate composes domain modules and owns their transactional and
 runtime boundaries. It has no dependency on NSH, AppKit or UI component handles.
 The accepted next [unified engine](product/workflow-engine.md) interprets entries,
 steps and decisions independently of Board columns, replacing the current stage
-callback progression. It is implemented in the initial slice; see [workflow/event implementation](workflow-implementation.md) for exact coverage.
+callback progression. It is implemented in the initial slice; see [workflow/event implementation](product/workflow-engine.md) for exact coverage.
 Scheduler determines when eligible work starts, using workflow depth and a
 configurable global budget. Herdr owns the programs and their runtime status;
 Canban owns durable context, task outcomes, human decisions and history.

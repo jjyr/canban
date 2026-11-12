@@ -75,7 +75,10 @@ fn validate(
     if let Some(cols) = &declared_columns {
         let col_ids: BTreeSet<_> = cols.iter().map(|c| c.id.as_str()).collect();
         for card in db.list::<Card>()? {
-            if card.project_id == project.id && card.active() && !col_ids.contains(card.stage.as_str()) {
+            if card.project_id == project.id
+                && card.active()
+                && !col_ids.contains(card.stage.as_str())
+            {
                 bail!(
                     "Column '{}' still has active Cards (e.g. #{}); move or archive them before removing the column",
                     card.stage,
@@ -284,7 +287,33 @@ fn publish(
     }
     Ok(())
 }
-/// Convert each Project once, including existing JSON revisions. No running
+/// Initialize a newly created Project with the native default YAML workflow,
+/// or import an explicit JSON stage template when requested by `project.create`.
+pub(super) fn initialize_new(
+    home: &Path,
+    db: Db<'_>,
+    config: &Config,
+    project: &Project,
+    explicit_legacy_workflow: bool,
+) -> Result<()> {
+    if explicit_legacy_workflow {
+        return initialize(home, db, config, project);
+    }
+    let doc = source::default_document(
+        format!("delivery:{}", project.id),
+        project.workflow.workspace.clone(),
+    );
+    let raw = source::encode(&doc)?;
+    publish(
+        home,
+        db,
+        project,
+        config,
+        &[json!({"filename":"development.yaml","source":raw})],
+    )
+}
+
+/// Convert each existing pre-YAML Project once, including existing JSON revisions. No running
 /// assignment or human decision is changed by this source migration.
 pub(super) fn initialize(
     home: &Path,
@@ -313,7 +342,13 @@ pub(super) fn initialize(
             defs.insert(w.workflow_id.clone(), w);
         }
     }
-    let mut default = legacy_definition(&project.workflow, format!("delivery:{}", project.id));
+    // If this Project has no historical revisions/bindings and still holds the uncustomized
+    // default stage list, bootstrap directly from the native default YAML document.
+    if binding.is_none() && defs.is_empty() && project.workflow == Workflow::default() {
+        return initialize_new(home, db, config, project, false);
+    }
+    let mut default =
+        source::migrate_legacy_stages(&project.workflow, format!("delivery:{}", project.id));
     if default.entries.is_empty() {
         default.entries.insert("manual".into(), "__end".into());
         default.steps.insert("__end".into(), WorkflowStep::Complete);
@@ -441,22 +476,62 @@ pub(super) fn import(
                 &canban_context::digest(flow.id.as_bytes())[..12]
             )
         });
-    let rules = existing.map(|f| f.rules).unwrap_or_else(|| {
+    let rules = if let Some(old_source) = existing {
         flow.entries
             .iter()
             .map(|(key, step)| {
+                if let Some(mut r) = old_source.rules.get(key).cloned() {
+                    r.start_at = step.clone();
+                    (key.clone(), r)
+                } else {
+                    let is_col = project.workflow.stages.iter().any(|s| s.id == *key)
+                        || flow.columns.iter().any(|c| c.id == *key);
+                    (
+                        key.clone(),
+                        WorkflowRule {
+                            event: if is_col {
+                                "card.column_entered"
+                            } else {
+                                "manual"
+                            }
+                            .into(),
+                            start_at: step.clone(),
+                            selector: EventSelector {
+                                column: is_col.then(|| key.clone()),
+                                ..Default::default()
+                            },
+                            enabled: true,
+                        },
+                    )
+                }
+            })
+            .collect()
+    } else {
+        flow.entries
+            .iter()
+            .map(|(key, step)| {
+                let is_col = project.workflow.stages.iter().any(|s| s.id == *key)
+                    || flow.columns.iter().any(|c| c.id == *key);
                 (
                     key.clone(),
                     WorkflowRule {
-                        event: "manual".into(),
+                        event: if is_col {
+                            "card.column_entered"
+                        } else {
+                            "manual"
+                        }
+                        .into(),
                         start_at: step.clone(),
-                        selector: Default::default(),
+                        selector: EventSelector {
+                            column: is_col.then(|| key.clone()),
+                            ..Default::default()
+                        },
                         enabled: true,
                     },
                 )
             })
             .collect()
-    });
+    };
     let raw = source::export(flow, rules)?;
     let mut inputs = collection["sources"]
         .as_array()

@@ -1,6 +1,6 @@
 # Unified card timeline and event format
 
-Status: history requirements reconciled 2026-11-11. The accepted next [event/subscription contract](events-and-notifications.md) owns the shared envelope, catalog and delivery; [workflow rules](workflow-engine.md) own run/step progress. See [implementation coverage](../workflow-implementation.md) for the delivered slice and verification. Timeline is the readable Card history projection, not a second event authority. Payload details below remain proposals unless covered by [implementation](../implementation.md).
+Status: history requirements reconciled 2026-11-11. The accepted next [event/subscription contract](events-and-notifications.md) owns the shared envelope, catalog and delivery; [workflow rules](workflow-engine.md) own run/step progress. See [implementation coverage](workflow-engine.md) for the delivered slice and verification. Timeline is the readable Card history projection, not a second event authority. Payload details below remain proposals unless covered by [implementation](../implementation.md).
 
 ## One history surface
 

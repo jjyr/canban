@@ -49,6 +49,8 @@ pub enum WorkflowStep {
     Deliver {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_branch: Option<String>,
+        #[serde(default = "default_sync_upstream", skip_serializing_if = "is_true")]
+        sync_upstream: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -201,71 +203,6 @@ pub struct JournalEvent {
     #[serde(flatten)]
     pub event: Event,
 }
-// Legacy templates are input to the same engine, never another executor.
-pub fn legacy_definition(flow: &Workflow, id: String) -> WorkflowDefinition {
-    let mut steps = BTreeMap::new();
-    let mut entries = BTreeMap::new();
-    for stage in flow.stages.iter().filter(|s| s.execute) {
-        let agent = format!("agent:{}", stage.id);
-        entries.insert(stage.id.clone(), agent.clone());
-        let transition = stage
-            .on_completed
-            .as_ref()
-            .map(|_| format!("move:{}", stage.id));
-        let next = if stage.require_human_review {
-            let key = format!("approval:{}", stage.id);
-            steps.insert(
-                key.clone(),
-                WorkflowStep::Approval {
-                    title: "Agent report ready; human review is required before continuing".into(),
-                    next: transition.clone(),
-                    rework: None,
-                },
-            );
-            Some(key)
-        } else {
-            transition.clone()
-        };
-        steps.insert(
-            agent,
-            WorkflowStep::Agent {
-                profile: stage.profile.clone(),
-                instruction: stage.instruction.clone(),
-                next,
-            },
-        );
-        if let Some(to) = &stage.on_completed {
-            steps.insert(
-                transition.unwrap(),
-                WorkflowStep::Move {
-                    column: to.clone(),
-                    next: flow
-                        .stages
-                        .iter()
-                        .find(|s| s.id == *to && s.execute)
-                        .map(|_| format!("agent:{to}")),
-                },
-            );
-        }
-    }
-    WorkflowDefinition {
-        id,
-        name: flow.name.clone(),
-        columns: flow
-            .stages
-            .iter()
-            .map(|s| WorkflowColumn {
-                id: s.id.clone(),
-                name: s.name.clone(),
-            })
-            .collect(),
-        entries,
-        steps,
-        workspace: flow.workspace.clone(),
-        max_steps: 100,
-    }
-}
-
 /// Active SQL source reference. Original YAML lives on immutable revisions.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WorkflowSource {
@@ -311,6 +248,14 @@ pub struct ConfigurationSession {
 pub struct WorkflowTemplate {
     pub id: String,
     pub workflow: Workflow,
+}
+
+fn default_sync_upstream() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 fn is_false(v: &bool) -> bool {

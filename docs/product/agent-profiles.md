@@ -11,7 +11,7 @@ Status: implemented 2026-11-07; current contract reconciled 2026-11-10. This is 
 
 Profiles are application-wide configurations in `~/.canban/config/agents.json`. Workflow templates reference their IDs and define stage tasks/transitions. A Card retains one provider conversation for each profile ID. Developer and Reviewer may both use Codex but have independent histories. Neither profile definitions nor workflow templates are live Sessions.
 
-Current extension (2026-11-11): [unified YAML Workflows](workflow-engine.md) reference Profiles from Agent steps independently of Board columns. Original YAML and immutable versions are stored only in SQLite. Project Workflows provides manual editing/history and Edit with agent. Its Project + configuration purpose + Profile conversation reuses command expansion, Scheduler admission and Terminal transport without a business Card. Onboarding/default Profile setup and provider authentication remain separate. See [the implementation contract](../workflow-implementation.md).
+Current extension (2026-11-11): [unified YAML Workflows](workflow-engine.md) reference Profiles from Agent steps independently of Board columns. Original YAML and immutable versions are stored only in SQLite. Project Workflows provides manual editing/history and Edit with agent. Its Project + configuration purpose + Profile conversation reuses command expansion, Scheduler admission and Terminal transport without a business Card. Onboarding/default Profile setup and provider authentication remain separate. See [the implementation contract](workflow-engine.md).
 
 ```text
 config/agents.json                 Workflow YAML in SQLite

@@ -1,6 +1,6 @@
 # Events, subscriptions and notifications
 
-Status: user-confirmed direction and initial implementation, 2026-11-11. The [implementation contract](../workflow-implementation.md) records concrete wire compatibility, operations, polling coverage and evidence. Durable journal offsets, subscription delivery and the unified workflow dispatcher now exist; channels remain wake-up/invalidation transport. This document defines the broader semantics, with unimplemented extensions identified.
+Status: user-confirmed direction and initial implementation, 2026-11-11. The [implementation contract](workflow-engine.md) records concrete wire compatibility, operations, polling coverage and evidence. Durable journal offsets, subscription delivery and the unified workflow dispatcher now exist; channels remain wake-up/invalidation transport. This document defines the broader semantics, with unimplemented extensions identified.
 
 ## Facts, subscriptions and execution
 

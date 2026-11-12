@@ -1,194 +1,252 @@
-# Unified workflow engine
+# Unified workflow engine, Studio and implementation
 
-Status: user-confirmed direction with the initial implementation added 2026-11-11. See [concrete operations, supported semantics and evidence](../workflow-implementation.md). There is one interpreter for converted templates and custom definitions. The rules below distinguish the overall contract from still-open richer UX/schema extensions. [Events/subscriptions](events-and-notifications.md) owns trigger delivery.
+Status: implemented and active (reconciled 2026-11-12; SQLite schema 12, desktop API 10). This is the canonical product and engineering contract for Canban Workflows, consolidating the unified engine rules, Project/Board workflow ownership, Visual Studio UX, YAML schema, RPC/CLI operations, workspace lifecycle, and acceptance evidence. [Events and subscriptions](events-and-notifications.md) owns the durable journal envelope and trigger delivery.
 
-## Decisions
+## Core design principles
 
-- Keep Backlog / Develop / Review as the default Board columns. Do not require a Design column by default, while allowing Projects to declare 4 or more columns (`columns` in Workflow YAML) when desired.
-- Separate Board position from workflow progress. Planning and plan approval can happen while a Card remains in Backlog.
-- Separate **built-in policy presets** from low-level flow topology. Common team decisions (Issue planning mode, Human Review vs. Auto-merge Queue, and External PR safety rules) are exposed as built-in UI controls that compile into standard declarative YAML, while non-standard graphs gracefully display as Custom Flow.
-- Provide **per-step default Prompts with inline overrides** in the same Workflow window. Every built-in step (`plan`, `develop`, `review`, `merge`) has a curated default instruction that users can inspect, override per step, or reset to default without hunting through raw YAML.
-- Use one Workflow Engine for current development/review, manual starts, event-triggered automation and controlled automatic delivery (`deliver`). Do not retain a second stage-callback executor.
-- Reuse Agent Profiles, Card/profile Conversations, Requests, Attempts, Scheduler, workspaces and Herdr execution.
-- Agents should author and modify workflow definitions. Users can also adjust built-in policies, edit per-step Prompts in the visual inspector, or edit the declarative YAML source manually. All paths use shared validation and revision handling.
-- Provide one generic visual Pipeline & Stepper UI for any supported workflow: swimlane pipeline map, step prompt inspector, Card step progress stepper, rework feedback input, and pending decisions, alongside a prominent **Edit with agent** guided banner. A drag-and-drop node-wire canvas is not required.
-- Project Workflows owns multiple YAML sources, original text and immutable versions in SQLite. No Workflow files or revision mirrors are generated in ~/.canban; files are only submission/export transport.
-- Edit with agent previews/copies one Project-wide Prompt and launches/continues a Project-owned configuration conversation in Terminal. Column header badges and trigger popovers use a client-side library to describe active rules. Onboarding remains open.
+1. **Single source of truth and one runtime:** Declarative YAML stored in SQLite (`workflow_sources` + immutable `workflow_revisions`) is the sole workflow definition model. There is no secondary `Stage`-callback executor or `legacy_definition` runtime fallback; historical JSON stage templates are converted once during migration or explicit import (`source::migrate_legacy_stages`). Manual YAML edits, Visual Studio option toggles, and **Edit with agent** submissions all pass through the same schema validation, optimistic concurrency revision checks, and transactional publication path.
+2. **Graph-derived, non-destructive UI:** Visual Studio controls and Step Inspectors are **derived directly from the active YAML graph** (`source::derive_options`), never hardcoded to fixed preset templates. Toggling an option (such as Backlog Auto-Analyze, Backlog Auto-Start Develop, Manual Review, or Upstream Sync) applies a surgical graph patch to the relevant trigger/step while preserving custom Board columns (4+ stages), custom steps (such as an optional `@reviewer` step), custom prompts, and unrelated rules.
+3. **Pragmatic default flow (human-controlled intake, automated delivery):** New Projects default to three Board columns (`Backlog -> Develop -> Review`, extensible via YAML `columns`):
+   - **Backlog (quiet intake):** Joining Backlog does **not** automatically analyze or move Cards by default, avoiding unintended compute spend on rough ideas. Teams wanting hands-free pipelines can enable **Backlog Auto-Analyze** (`agent:plan`) and/or **Backlog Auto-Start Develop** (which waits for analysis to finish when both are enabled).
+   - **Develop (automated implementation):** Entering Develop automatically runs `@developer` (`agent:develop`) in an isolated managed worktree and moves the Card to `Review` (`move:develop`).
+   - **Review (Queue Merge & upstream sync):** By default Review omits a redundant `@reviewer` Agent pass (users can add one via YAML or Studio) and enters **Queue Merge (`deliver:review`)**, which commits/merges the clean worktree into the target branch and syncs upstream (`sync_upstream: true` by default). Teams can switch Review to **Manual Review** (`approval:review`) or **Merge Only (No Sync)** (`sync_upstream: false`).
+4. **Safe-by-default delivery and human override:**
+   - **Source-trust branching:** Even when Queue Merge is active, untrusted external PRs (`card.source_trust == "external_pr"`) are routed by `condition:external_pr` to a required human approval gate (`approval:review`) by default.
+   - **Per-Card hold and graceful fallback:** Users can toggle **Hold auto-merge** (`card.hold_auto_merge`) on any Card at any time. Whenever a Card is held, has active/uncertain Agent terminals, encounters a merge conflict/dirty target checkout, or fails upstream remote push (`review.upstream_sync_failed`), `deliver` never forces an unsafe operation—it pauses as an inspectable human decision gate (`waiting_approval`), allowing manual resolution or rework feedback to the Agent.
+5. **Board stage decoupled from workflow progress:** Columns represent business stage position; `WorkflowRun` steps represent execution progress. Planning and approvals can run while a Card stays in `Backlog`. Workflow-owned `card.move` transitions carry causal ancestry (`origin: "workflow"`, `workflow_run_id`) and continue the active `WorkflowRun` without re-triggering duplicate column-entry Agents.
+6. **Deterministic boundaries (Engine vs. Scheduler, explicit completion, frozen revisions):**
+   - **Engine vs. Scheduler:** Workflow Engine determines *what* happens next and enqueues `Request`s; Scheduler owns *when* terminals launch under the global concurrency budget and conversation reuse rules.
+   - **Explicit completion only:** Only an Agent's bound CLI `completed` report advances its owning step. Terminal idle, root `done`, process exit, or `@profile` mention replies never advance workflow steps.
+   - **Frozen run revisions:** Each `WorkflowRun` and queued `EventDelivery` captures the published definition revision at creation. Publishing new YAML takes effect immediately for future events without mutating in-flight runs or pending human gates.
+7. **Agent-native authoring:** Users do not need a complex drag-and-drop node-wire canvas. Everyday adjustments use graph-derived Studio switches and inline Step Inspectors, while multi-column or custom branching designs use **Edit with agent** in a Project-owned configuration conversation in Terminal.
 
-## Model and ownership
+---
 
-| Object | Responsibility |
-| --- | --- |
-| Board / column | Card business position; stable IDs independent of display names |
-| Workflow definition | Versioned entry points, steps/transitions, input/output references, Agent references and workspace policy |
-| Subscription | Select committed events by scope/type/filter and target an internal consumer or workflow entry |
-| WorkflowRun | One invocation with a captured definition revision, initiating event/command, progress, results and decisions |
-| Step execution | One visit to a definition node; rework creates a new execution identity |
-| Request / Attempt | Existing assignment/execution identities for an Agent step |
-| Approval | Decision bound to run, step execution and exact result/input revision |
+## Project, Board and workspace lifecycle
+
+A Project has a stable identity, an execution directory/machine location, and its own Board. Git is common but optional; Project creation never clones or initializes Git implicitly, and directory errors never treat existing user files as disposable rollback data.
 
 ```text
 Project
-  +-- Board: Backlog / Develop / Review
-  +-- workflow definitions / subscriptions
-  +-- Card
-       +-- content / source binding / Timeline
-       +-- WorkflowRun
-            +-- captured definition revision
-            +-- step executions / outputs / decisions
-            +-- Agent step -> Request -> Attempt
-                                  |
-                          Card/profile Conversation
-                                  |
-                         Herdr / provider history
+  +-- directory / execution location
+  +-- Board: Backlog / Develop / Review (or custom YAML `columns`)
+  +-- SQLite workflow sources & immutable revisions
+  +-- durable event subscriptions
+  +-- Cards
+       +-- Board stage (column ID)
+       +-- WorkflowRun (captured revision, step visits, outputs, decisions)
+       +-- Agent step -> Request -> Attempt -> Card/profile Conversation -> Herdr PTY
 ```
 
-WorkflowRun is a product process identity, not a provider Session type. A definition is not a live conversation. Preserve the [Conversation/Request/Attempt contract](sessions.md); a reply cannot complete another assignment or step.
+### Worktrees and base synchronization
 
-AppServer composes operations/transactional IO. Kanban owns Card transitions. Workflow Engine owns definition validation, entry/run/step interpretation and decision progression. Scheduler owns readiness/admission and existing execution lifetimes. Storage owns journals, deliveries and checkpoints. Timeline/Notifications/UI consume shared facts. These boundaries do not require a process/thread per component.
+Worktree lifecycle governs when a task checkout is prepared, reused across stages/rework, and cleaned up on archive—never creating a fresh worktree per step:
 
-## One execution path
+```json
+{
+  "workspace": {
+    "create_worktree": true,
+    "base_branch": "main",
+    "sync_base": true,
+    "remote": "origin"
+  }
+}
+```
 
-Manual invocation, subscribed events and external column entry address named entry points in the same model. An Agent workflow without a Card must resolve/create one through configured intake/product operations. Repository observer subscriptions can exist without a Card.
+- **Preparation:** Planning in `Backlog` can inspect the repository without forcing a branch checkout merely from Card creation. When an executing task prepares a Git worktree (`create_worktree: true`), it optionally fetches and fast-forwards the configured base branch (`sync_base: true`) if clean, then creates `<dir>-<proj4>/<card-number>`. Divergence, dirty checked-out bases, or fetch failures pause safely instead of rebasing or discarding edits. Non-Git projects can disable `create_worktree` and `sync_base`.
+- **Delivery & upstream sync:** Queue Merge (`deliver`) integrates the Card worktree into the target branch. When `sync_upstream: true` (the default) and the repository has a push remote configured, Canban fast-forwards the target branch from upstream before previewing/merging and pushes `refs/heads/<target>:refs/heads/<target>` to the remote after merging (gracefully skipping push when no remote is configured, or holding with `review.upstream_sync_failed` if push fails). Setting `sync_upstream: false` merges locally into the target branch without fetching or pushing upstream.
+- **Archive & restore:** Merged Cards with no active Agent terminals or dirty worktrees auto-archive cleanly. Archiving removes clean managed worktrees after preserving their commit under `refs/canban/cards/<card-id>`; dirty worktrees are retained with a notice. Restoring a Card expands archived artifacts without implicitly re-entering column workflows (`restoration` events are suppressed unless explicitly subscribed).
+
+---
+
+## Visual Studio, Step Inspector and storage
+
+Open **Workflows** in the Project header or **Project Workflows** in Settings. All workflow sources live exclusively in SQLite:
 
 ```text
-manual start ------+
-subscribed event --+--> durable entry intent --> WorkflowRun
-external move -----+                                |
-                                             Workflow Engine
-                                                   |
-                          +------------------------+---------------+
-                          |                        |               |
-                      Card action             wait / branch   Agent request
-                                                                   |
-                                                               Scheduler
-                                                                   |
-                                                            existing runtime
-                                                                   |
-                                                            explicit report
-                                                                   |
-                                                            owning step
+canban.sqlite
+  workflow_templates       SQL bootstrap for legacy compatibility
+  workflow_sources         Project + filename + active revision/hash/columns/rules
+  workflow_revisions       immutable original YAML + compiled WorkflowDefinition
+  workflow_runs            captured revision + visit checkpoints + inputs/outputs
+  event_subscriptions      selectors + target + durable journal cursor
+  event_deliveries         captured definition revision + receipt/backoff state
+  configuration_sessions   Project + workflow-configuration purpose + Profile/history
 ```
 
-Agent steps queue Requests; event handlers do not launch terminals directly. Scheduler retains the global budget, conversation reuse, runtime reconciliation and unknown-launch behavior. Engine decides what should happen; Scheduler decides when Agent execution starts.
+No Workflow YAML mirror or revision file is created under `~/.canban`; external `.yaml` paths are used only when explicitly importing/exporting via CLI.
 
-By default a Card's main delivery process has one active run. Overlapping triggers must resolve to the existing run, be rejected or wait under an explicit policy; they cannot silently create competing development pipelines. Independent observer subscriptions remain possible. The implementation queues competing event receipts without consuming failure retries while an active run/human gate holds the Card; receipts capture their definition revision.
-
-## Definition and progression rules
-
-The vocabulary covers Agent execution, Card movement, conditions, human approval, controlled delivery/merge, internal notification and explicit completion. Input/output references connect results to later steps. The implemented YAML vocabulary uses `agent`, `card.move`, `condition`, `approval`, `deliver`, `notify` and `complete`, compiled into the existing interpreter.
-
-- Stable step IDs identify nodes; each visit has a distinct execution identity. Rework preserves earlier plans/reports/decisions and accepts optional human rework instructions (`feedback`) that are injected into the next Agent step visit.
-- Validate entry points, transition targets, typed parameters, data references, column IDs (including YAML-declared custom `columns`) and Profile references before publishing a revision. Reject unsupported step kinds for execution.
-- Conditions use declared data (`{inputs, outputs, card}`) and a constrained expression model, including `card.source_trust` (`local`, `collaborator`, `external_pr`) so workflows can branch between internal tasks and external PRs. Arbitrary executable callbacks are not required for authoring.
-- Controlled automatic delivery (`deliver` / `card.deliver`) commits and merges the Card's clean worktree into the target branch (or merges an eligible delivery PR) unless the user has placed a hold (`hold_auto_merge`) on the Card or a blocker/conflict exists. When held or blocked, progression pauses as a human decision gate rather than forcing an unsafe merge.
-- Capture the definition revision at run creation and effective Profile/task configuration at assignment creation. Edits affect new runs, not active runs or already captured assignments.
-- Advance an Agent step from its explicit bound result. Terminal idle, root `done`, process exit, unrelated comments and generic replies do not establish completion.
-- Trust the Agent's completion declaration; do not add an independent quality evaluator or process-drain prerequisite. Validation work can be an explicitly configured task.
-- Blocked/failed reports and uncertain execution retain actionable failure/decision state. Retry only under a declared safe policy; unknown launch/write outcomes require reconciliation.
-- Persist accepted results and the resulting step/action intents consistently. Repeated reports/deliveries cannot complete a step twice.
-- Rework is a recorded transition with a new execution/input identity. Human-requested rework can revisit a step; reject unbounded automatic cycles and impose explicit execution/trigger limits.
-
-Parallel branches/joins, arbitrary scripting and reusable subflows are not prerequisites. The first model can express sequences, conditions and explicit rework. The viewer reflects supported semantics rather than implying unsupported execution features.
-
-## Three columns and example entries
+### Studio layout
 
 ```text
-Board position:  Backlog                       Develop           Review
-                    |                            |                 |
-Workflow:      plan -> optional approval -> move -> implement -> move -> review
-                                                                         |
-                                                                   human decision
+Project / Workflows                                                 [Edit with agent]
+-------------------------------------------------------------------------------------
+development.yaml       | [Visual Studio] [YAML Source]                        [History]
+issue-planning.yaml  • | [Development] delivery:... [Active] [Queue Merge · Sync]
+[+ New workflow]       | Entry triggers: [Enter Develop -> Implement] [Enter Review -> ...]
+                       |
+                       | Stage Execution Graph · 3 stages · 5 steps   [New stage] [+ Add]
+                       |   [1 Backlog (0)] -> [2 Develop: Implement, Move] -> [3 Review: ...]
+                       |
+                       | Step Inspector · Queue merge (deliver:review)
+                       |   Upstream sync: [Merge & Sync Upstream] [Merge Only (Local)]
+                       |   Target branch: [Project default]   Rework target: [Implement]
+                       |
+                       | Workflow Automation Options (derived from graph):
+                       |   1. Backlog Auto-Analyze:      [Off] [Auto-Analyze]
+                       |   2. Backlog Auto-Start Develop:[Off] [On / On (After Analysis)]
+                       |   3. Review Mode:               [Queue Merge (Auto)] [Manual Review]
+                       |   4. Upstream Remote Sync:      [Merge & Sync Upstream] [Merge Only]
+                       |   5. External PR Rule:          [Require Human Review] [Same] [Manual]
+                       |                                                        [Save · ⌘S]
 ```
 
-Backlog entry has no built-in Agent action. A separate manual/event entry can run planning on a Backlog Card. This supersedes treating non-executing Backlog as a ban on all Agent work while a Card is there.
+1. **Stage Execution Graph:** Groups steps into swimlanes matching the Project's Board stages (`columns`), showing triggers (`⚡ on:develop`), branching (`✓ Then` / `✕ Else`), rework loops (`↺ Rework`), and inline `+ Add stage` / column removal controls.
+2. **Interactive Step Inspector:** Clicking any node opens its type-specific inspector in the same view:
+   - `agent`: Profile selector (`@developer`, `@reviewer`, `@codex`, etc.) + inline Prompt editor with curated built-in defaults and **Reset to default prompt**.
+   - `deliver`: **Upstream sync** (`Merge & Sync Upstream` vs. `Merge Only (Local)`), **Target branch**, and **Rework target**.
+   - `approval`: **Gate message** (`title`) and **Rework target**.
+   - `card.move`: **Destination stage** selector.
+3. **Workflow Automation Options:** Five graph-derived controls (`source::derive_options`) that surgically patch `on.backlog`, `agent:plan`, `move:backlog`, `on.review`, `condition:external_pr`, `deliver:review`, and `approval:review` without disturbing custom columns or custom steps.
+4. **YAML Source & History:** Syntax-highlighted NSH editor (2-space indent, soft wrap, line numbers), immutable **History** modal (**Load as draft**), concurrent `revision_conflict` comparison view that preserves unsaved local keystrokes, and atomic **Save** (`Command+S`).
 
-Default delivery preserves external move to Develop -> developer -> move to Review -> reviewer -> human decision. An eligible external move directly to Review can enter the review portion. A planning entry adds plan/optional approval before delivery. Whether these are named entries in one definition or separate definitions sharing steps is a schema choice; there is one runtime either way.
+### Board column hints and Card stepper
 
-A workflow-owned move emits the normal Card event with run/step causality. Entry matching continues that run instead of launching another developer. Manual movement away from expected progress must explicitly reconcile/supersede affected steps, cancel stale queued work and retain running work/results as history. Leaving and returning to the same column cannot validate an old completion.
+- **Column headers** display concise client-derived badges (`@developer`, `Queue merge · Sync`, `Queue merge · Local`, `Review`, etc.) via `source::column_summary` and a **workflow-node** icon. Clicking opens a native Popover (`source::column_details`) listing active triggers and flow effects with a **View workflows** link.
+- **Card detail** renders active/recent `WorkflowRun`s as a **Step Progress Stepper** (`✓ Analyze task → ● Implement → ○ Queue merge`), exposing clickable report links, an inline **Hold auto-merge / Resume auto-merge** button when a run includes `deliver`, and a **Request changes** feedback box that injects rework instructions into the next Agent step visit.
 
-Required approval cannot be silently satisfied by dragging, reading notifications or another completion. A user-directed rework/move that changes the process is a recorded decision; the future UI must show its consequences.
+---
 
-```text
-GitHub observation
-       |
-existing configured intake
-       |
-Card created in Backlog, source binding committed
-       |
-subscription: automatic Issue intake after activation baseline
-       |
-planning entry -> read source/code -> plan artifact
-       |
-       +-- configured automatic continuation ----------------+
-       |                                                     |
-       +-- approval -> approve exact plan --------------------+
-                  \-> request changes -> new plan             |
-                                                             v
-                                                       move to Develop
-                                                             |
-                                                       development task
-                                                             |
-                                                       move to Review
-                                                             |
-                                                       review / human decision
+## YAML language and execution semantics
+
+YAML 1.2 parsing uses `serde_yaml_ng` with `deny_unknown_fields`. Duplicate keys, unknown fields, missing step targets, undeclared column/Profile IDs, and automatic cycles fail validation before publication.
+
+```yaml
+schema: 1
+id: delivery:example
+name: Development
+enabled: true
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: condition:external_pr
+    match:
+      column: review
+steps:
+  - id: agent:develop
+    name: Implement
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the card task in the supplied working directory. Explain your changes and validation in your report.
+    next: move:develop
+  - id: move:develop
+    name: Move to Review
+    uses: card.move
+    with:
+      column: review
+    next: condition:external_pr
+  - id: condition:external_pr
+    name: External PR check
+    uses: condition
+    with:
+      pointer: /card/source_trust
+      equals: external_pr
+      then: approval:review
+      otherwise: deliver:review
+  - id: deliver:review
+    name: Queue merge
+    uses: deliver
+    with:
+      sync_upstream: true
+    next: __end
+    on_changes_requested: agent:develop
+  - id: approval:review
+    name: Human approval
+    uses: approval
+    with:
+      title: External PR; human approval is required before merging
+    next: __end
+    on_changes_requested: agent:develop
+  - id: __end
+    uses: complete
+workspace:
+  create_worktree: true
+  sync_base: true
+  remote: origin
+max_steps: 100
 ```
 
-Intake itself creates ownership in Backlog; execution requires an enabled matching subscription. Activation defaults to future events; existing Card/history processing is explicit. Manual start addresses the same entry/run model.
+### Supported step types
 
-The plan is a durable Agent-authored artifact/report. Development receives the selected/approved result, source identities and local context. Remote prose still follows the [GitHub cache contract](../github-workspace.md); reading a source does not silently archive all remote bodies.
-
-## Approval and result validity
-
-Approval binds to run, step execution, exact plan/result and relevant input versions. It survives restart and is consumed once. Required human approval uses user provenance; Agent completion/configuration authoring cannot manufacture a human decision. Configuring automatic continuation is separate from approving an already waiting run.
-
-Record which input fields/versions affect a result. Relevant changes mark the result/approval stale and follow a declared replan/wait policy before progression. Unrelated comments/read acknowledgements must not invalidate every result. Dependency declaration syntax and conflict presentation remain schema/UX work.
-
-Reports keep request/attempt binding and resolve to their owning run/step execution. Old results stay readable but cannot advance a superseding step, a different stage entry or a stopped run. Stopping future progression and terminating a live Agent are distinct effects; canceled workflow state is not proof of process termination.
-
-## Agent authoring and generic display
-
-```text
-manual source edit --------+
-                           +--> same declarative definition
-Agent-assisted edit -------+              |
-                                shared validation / revision handling
-                                          |
-                                    Workflow Engine
-                                          |
-                                generic definition/run viewer
-```
-
-Agent authoring is a primary customization path, not a separate execution language. Provide a machine-readable schema and useful diagnostics. Manual and Agent edits share expected-revision checks. Invalid drafts cannot replace a valid active definition. Save and apply atomically publishes original YAML, active revision references and named trigger subscriptions. It does not start/replay history or approve existing gates. Old runs/captured deliveries remain frozen; future matching events use the new revision.
-
-The generic UI renders entry points, steps/transitions, selected path, progress, Agents, inputs/outputs, decisions, failures and causal history from the shared model. Unsupported types may use a preserved-data fallback for viewing, but cannot execute as understood types. Default delivery and plan-and-develop must not need separately hardcoded workflow screens. Users edit declarative source or ask an Agent to modify it; a graph editor is not required.
-
-Project Workflows and Settings link to Edit with agent. Its configuration conversation is Project + purpose + Profile, without a fake business Card. Full selectable Prompt preview, explicit copy, Start/Continue/Resume, native Terminal and a return link are implemented. Manual editing and history share SQL publication APIs. Onboarding/default Profile setup and provider authentication remain separate. Configuration authoring cannot approve a pending human gate.
-
-## Migration: one runtime
-
-| Current representation | Unified representation |
+| `uses` | `with` arguments and behavior |
 | --- | --- |
-| Stage `execute`, `profile`, `instruction` | Agent step |
-| Stage `on_completed` | Definition transition / Card move |
-| Stage `require_human_review` | Approval step after the result |
-| Stage entry | Named workflow entry with event causality |
-| Workflow workspace settings | Policy inherited by execution steps |
-| Request callback | Owning run/step and captured transition |
-| Existing human gate | Pending workflow decision and Card attention projection |
+| `agent` | optional `profile` (falls back to global `default_agent`), required `instruction`. Enqueues a `Request` bound to `run_id` and `<step_id>:<visit>`. |
+| `card.move` | `column` (must exist in effective columns). Emits `card.stage_changed` with `origin: "workflow"`. |
+| `condition` | JSON `pointer` into `{inputs, outputs, card}` (e.g. `/card/source_trust`), exact `equals`, `then`, and `otherwise` step IDs. |
+| `approval` | `title`, optional `on_changes_requested` rework step ID. Pauses the run in `waiting_approval` and sets `Card.human_gate`. |
+| `deliver` | optional `target_branch`, optional `sync_upstream` (boolean, default `true`), optional `on_changes_requested` rework step ID. Enters `waiting_delivery` for Queue Merge, or pauses at `waiting_approval` when held/blocked. |
+| `notify` | `message`. Appends a `workflow.notification` Timeline event. |
+| `complete` | Terminal node ending the `WorkflowRun` (`completed`). |
 
-Legacy JSON may convert at load/migration time; converted and new definitions execute through the same engine. Remove direct callback progression and duplicate stage-entry enqueueing when the engine takes ownership. Compatibility parsing must not become a second runtime.
+### Overlap, approvals, and rework
 
-Associate queued/running Requests and pending gates with run/step checkpoints without relaunching Agents, recreating worktrees, changing provider IDs or replaying completion. Preserve captured old configuration. Migration must represent the whole active state or roll back, never attach the engine to a partially converted queue. Follow paired transactional database migrations and versioned configuration publication. Historical records keep their meanings.
+- **Single active delivery run per Card:** While a Card has a running or waiting `WorkflowRun`, competing event deliveries wait in `subscription.deliveries` (`pending`) with their captured `definition_revision` without consuming failure retries. Manual starts conflict visibly until the active run finishes or is stopped.
+- **Bound human decisions:** `workflow.decide` binds `run_id`, exact `visit`, and current `Card.revision`, requiring human provenance (Agent execution tokens are rejected). `rework` increments `visit`, records optional human `feedback`, and injects that feedback plus prior outputs into the target Agent step.
+- **External column moves & stop:** Manually dragging/moving a Card to another column cancels stale queued workflow work from the superseded stage while preserving completed reports and history, then triggers any matching `origin: "local"` rule on the destination column. `workflow.stop` halts future workflow progression without killing an interactive PTY.
 
-## Future acceptance requirements
+---
 
-1. Manual/subscribed starts use the same run model; duplicate activation creates no duplicate work.
-2. Planning and approval run in Backlog with exactly three Board columns.
-3. Default Develop/Review uses the engine alone; workflow-owned moves do not duplicate Agents.
-4. Approval/version changes, stop/rework and leave-and-return reject stale progression while preserving history.
-5. Restart resumes durable work once; unknown external effects await reconciliation.
-6. Existing active/queued tasks and human gates migrate without new launches or lost decisions.
-7. Agent-authored/manual definitions share validation and a generic viewer.
+## Edit with agent
 
-These are implementation acceptance requirements, not newly performed checks. Concrete Project authoring and native interaction acceptance is tracked in the implementation reference; onboarding remains open.
+The Project Workflows header provides **Edit with agent**, opening a native modal with:
+
+- Complete selectable Project-wide configuration Prompt (`workflow.prompt`), **Select all**, and explicit **Copy prompt** (opening never mutates the clipboard).
+- Profile picker (`@codex`, `@claude`, custom profiles) and **Start / Continue / Resume in Terminal** or **New conversation**.
+
+Configuration conversations are owned by **Project + `workflows` purpose + Profile** (`ConfigurationSession`). They reuse Profile command expansion, Scheduler admission, Herdr PTYs, and the native Terminal workspace (`Project / Configuration / Workflows · Profile`) with a **Back to Workflows** action, without creating fake business Cards or `Request`s, and cannot approve business human gates.
+
+---
+
+## API and CLI operations
+
+All clients share the same AppServer validation and publication boundary (`canban call <method> '<json>'` or `@/path/to/params.json`):
+
+| Operation | Parameters / purpose |
+| --- | --- |
+| `workflow.schema` | Discover YAML syntax, step types (`deliver.sync_upstream`, etc.), selectors, and operations |
+| `workflow.sources` | `project_id` -> optimistic collection `revision`, `sources`, and active `WorkflowSource` rows |
+| `workflow.check` | `project_id`, `revision`, `sources` -> validate YAML/columns/Profiles/cycles without publishing |
+| `workflow.apply` | Same inputs -> atomically publish YAML revisions, sync `columns` to Project stages, and update subscriptions |
+| `workflow.list` / `workflow.get` | Inspect immutable `WorkflowRevision` history (including `source_yaml`) |
+| `workflow.prompt` / `configuration.open` | Generate Project-wide configuration Prompt and launch/resume configuration Terminal |
+| `workflow.start` | `card_id`, `workflow_id`, `entry` -> explicit manual run start |
+| `workflow.runs` / `workflow.run` | Inspect active and historical `WorkflowRun`s |
+| `workflow.decide` | `run_id`, `visit`, `revision`, `decision: "approve" \| "rework"`, optional `feedback` |
+| `card.hold_auto_merge` | `card_id`, `revision`, optional `hold: bool` -> pause or resume Queue Merge on a Card |
+| `workflow.stop` | `run_id` -> cancel future run progression |
+| `event.list` / `subscription.*` | Durable journal pagination and `save` / `list` / `deliveries` / `ack` / `retry` |
+
+CLI file transport helpers (`canban workflow submit --check` / `submit` / `export`) read or write user-chosen external files against `workflow.sources` collection tokens without creating internal workflow directories.
+
+---
+
+## Migration and verification summary
+
+- **Schema 11–12 migration:** Upgrades legacy Project `Workflow` stage templates, queued/running `Request`s, and pending human gates into SQLite `development.yaml` revisions and `WorkflowRun` checkpoints without relaunching Agents or recreating worktrees. Downgrade refuses to discard user-authored YAML sources or active configuration sessions.
+- **Verification suite:**
+  - `mise run test` & `cargo clippy --workspace --all-targets -- -D warnings`: Unit and integration coverage in `crates/workflow-engine/src/source.rs` and `crates/app-server/src/tests/workflows.rs`, including default `development.yaml` (`Backlog` quiet intake, `Develop` auto-run, `Review` Queue Merge with `sync_upstream: true` against bare Git remotes vs. `sync_upstream: false` local-only merge), Backlog Auto-Analyze + Auto-Start Develop sequencing, Manual Review gates, external PR trust branching, rework feedback, and 4-column custom workflow preservation.
+  - `mise run acceptance` & `mise run acceptance-workflows`: Isolated Herdr Core + real PTY end-to-end execution, restart checkpointing, optimistic `revision_conflict` protection, and CLI export/submit checks.
+  - Native UI & Gallery (`CanbanGallery.app` scenes `workflows`, `workflow-agent`, `workflows-conflict`, `column-automations`, plus isolated `CanbanDev.app`): Verified stage swimlanes, `deliver` / `agent` Step Inspectors, graph-derived Workflow Automation Options, YAML syntax highlighting, modal Escape focus restoration, and click-only Column automation popovers (see dated UI refinement log in [workflow-ui-acceptance-20261111.md](../workflow-ui-acceptance-20261111.md)).

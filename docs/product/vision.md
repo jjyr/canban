@@ -1,6 +1,6 @@
 # Canban: Human Context
 
-Status: product direction reconciled 2026-11-11 for unified workflows, durable subscriptions and Agent authoring. The initial engine/subscription slice is implemented; see [concrete operations and limits](../workflow-implementation.md) for current behavior/evidence. Explicitly open UX/schema choices remain open.
+Status: product direction reconciled 2026-11-11 for unified workflows, durable subscriptions and Agent authoring. The initial engine/subscription slice is implemented; see [concrete operations and limits](workflow-engine.md) for current behavior/evidence. Explicitly open UX/schema choices remain open.
 
 ## Product thesis
 
@@ -93,4 +93,4 @@ The main MVP policy decisions are settled: self-reported completion, no old-proc
 
 Refine small interface details as needed: completion/blockage encoding, deterministic routing defaults, attachment limits, notification display, archive handling of modified managed worktrees, and the actual coordinator lifetime. Do not turn these into an expanded first-release architecture program.
 
-See [product log](product-log.md), [Projects/templates](projects-and-workflows.md), [Scheduler](scheduler.md), [timeline draft](timeline.md), [Session model](sessions.md), [agent interface](agent-interface.md), and [event direction](events-and-notifications.md).
+See [product log](product-log.md), [Projects/templates](workflow-engine.md), [Scheduler](scheduler.md), [timeline draft](timeline.md), [Session model](sessions.md), [agent interface](agent-interface.md), and [event direction](events-and-notifications.md).

@@ -40,9 +40,7 @@ pub(super) fn render(ui: Ui) -> AnyElement {
         }
     };
 
-    let policy = source::detect_policy(&doc);
-    let current_policy = policy.clone().unwrap_or_default();
-    let is_custom = policy.is_none();
+    let options = source::derive_options(&doc);
 
     let effective_columns = if !doc.columns.is_empty() {
         doc.columns.clone()
@@ -89,7 +87,7 @@ pub(super) fn render(ui: Ui) -> AnyElement {
     let overview = overview_header(
         ui,
         &doc,
-        is_custom,
+        &options,
         &active_step_id,
         &col_names,
         &step_titles,
@@ -106,12 +104,12 @@ pub(super) fn render(ui: Ui) -> AnyElement {
     let inspector = step_inspector(
         ui,
         &doc,
+        &effective_columns,
         &visible_steps,
         &active_step_id,
-        &col_names,
         &step_titles,
     );
-    let policies = policy_bar(ui, current_policy, is_custom);
+    let policies = options_bar(ui, options);
 
     scroll()
         .flex_1()
@@ -259,7 +257,7 @@ fn humanize_step_title(step: &source::Step, col_names: &BTreeMap<String, String>
             format!("Move to {cname}")
         }
         (_, "approval") => "Human approval".into(),
-        (_, "deliver" | "card.deliver") => "Auto-merge queue".into(),
+        (_, "deliver" | "card.deliver") => "Queue merge".into(),
         ("condition:external_pr", "condition") => "External PR check".into(),
         _ => step.id.clone(),
     }
@@ -281,7 +279,7 @@ fn short_workflow_id(id: &str) -> String {
 fn overview_header(
     ui: Ui,
     doc: &source::Document,
-    is_custom: bool,
+    options: &source::WorkflowOptions,
     active_step_id: &str,
     col_names: &BTreeMap<String, String>,
     step_titles: &BTreeMap<String, String>,
@@ -394,12 +392,14 @@ fn overview_header(
                             },
                         ))
                         .child(status(
-                            if is_custom {
-                                "Custom Graph"
+                            if options.review_manual {
+                                "Manual Review"
+                            } else if options.sync_upstream {
+                                "Queue Merge · Sync"
                             } else {
-                                "Standard Policy"
+                                "Queue Merge · Local"
                             },
-                            if is_custom {
+                            if options.review_manual {
                                 Tone::Attention
                             } else {
                                 Tone::Info
@@ -735,13 +735,28 @@ fn step_node_card(
             (Icon::Check, ATTENTION, "Human Gate".into(), gate.to_owned())
         }
         "deliver" | "card.deliver" => {
+            let sync = step
+                .with
+                .get("sync_upstream")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
             let branch = step
                 .with
                 .get("target_branch")
                 .and_then(|v| v.as_str())
-                .map(|b| format!("Merge into {b}"))
-                .unwrap_or_else(|| "Preview & merge unless held".into());
-            (Icon::Branch, SUCCESS, "Auto-Merge".into(), branch)
+                .filter(|s| !s.is_empty());
+            let detail = match (branch, sync) {
+                (Some(b), true) => format!("Merge into {b} & sync upstream"),
+                (Some(b), false) => format!("Merge into {b} (local only)"),
+                (None, true) => "Merge & sync upstream remote".into(),
+                (None, false) => "Merge locally only (no upstream sync)".into(),
+            };
+            let badge_txt = if sync {
+                "Queue Merge · Sync"
+            } else {
+                "Queue Merge · Local"
+            };
+            (Icon::Branch, SUCCESS, badge_txt.into(), detail)
         }
         "condition" => {
             let ptr = step
@@ -914,9 +929,9 @@ fn step_node_card(
 fn step_inspector(
     ui: Ui,
     doc: &source::Document,
+    effective_columns: &[canban_types::WorkflowColumn],
     visible_steps: &[source::Step],
     active_step_id: &str,
-    col_names: &BTreeMap<String, String>,
     step_titles: &BTreeMap<String, String>,
 ) -> AnyElement {
     let state = ui.workflows;
@@ -1097,30 +1112,412 @@ fn step_inspector(
                 )
                 .into_element()
         }
+        "deliver" | "card.deliver" => {
+            let sync_upstream = step
+                .with
+                .get("sync_upstream")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let current_target = step
+                .with
+                .get("target_branch")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let branch_sig = signal(current_target.clone());
+            let step_for_branch = step_id.clone();
+            effect(move || {
+                let val = branch_sig.get();
+                if val != current_target {
+                    let target_id = step_for_branch.clone();
+                    let trimmed = val.trim().to_owned();
+                    update_doc(ui, |d| {
+                        if let Some(s) = d.steps.iter_mut().find(|s| s.id == target_id) {
+                            if trimmed.is_empty() {
+                                s.with.remove("target_branch");
+                            } else {
+                                s.with.insert("target_branch".into(), json!(trimmed));
+                            }
+                        }
+                    });
+                }
+            });
+            let step_sync_on = step_id.clone();
+            let step_sync_off = step_id.clone();
+            let current_rework = step.on_changes_requested.clone().unwrap_or_default();
+            let agent_steps: Vec<(String, String)> = visible_steps
+                .iter()
+                .filter(|s| s.uses == "agent")
+                .map(|s| {
+                    let lbl = step_titles
+                        .get(&s.id)
+                        .cloned()
+                        .unwrap_or_else(|| s.id.clone());
+                    (s.id.clone(), lbl)
+                })
+                .collect();
+            let mut rework_seg = segmented().child({
+                let is_none = current_rework.is_empty();
+                let tid = step_id.clone();
+                compact_segment(
+                    "None",
+                    None,
+                    move || is_none,
+                    move |_| {
+                        let target = tid.clone();
+                        update_doc(ui, |d| {
+                            if let Some(s) = d.steps.iter_mut().find(|s| s.id == target) {
+                                s.on_changes_requested = None;
+                            }
+                        });
+                    },
+                )
+            });
+            for (aid, albl) in agent_steps {
+                let is_sel = current_rework == aid;
+                let tid = step_id.clone();
+                let chosen = aid.clone();
+                rework_seg = rework_seg.child(compact_segment(
+                    albl,
+                    None,
+                    move || is_sel,
+                    move |_| {
+                        let target = tid.clone();
+                        let rw = chosen.clone();
+                        update_doc(ui, |d| {
+                            if let Some(s) = d.steps.iter_mut().find(|s| s.id == target) {
+                                s.on_changes_requested = Some(rw);
+                            }
+                        });
+                    },
+                ));
+            }
+
+            panel()
+                .gap_3()
+                .border_1()
+                .border_color(BORDER)
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(icon_tinted(Icon::Branch, SUCCESS).w(px(15.)).h(px(15.)))
+                                .child(
+                                    label(format!("Step Inspector · {step_title} ({step_id})"))
+                                        .font_weight(FontWeight::SEMIBOLD),
+                                )
+                                .child(badge("uses: deliver"))
+                                .child(muted(format!("Next → {next_step_desc}"))),
+                        )
+                        .child(compact_action(
+                            "Edit in YAML Source",
+                            Variant::Secondary,
+                            move |_| state.mode.set("yaml".into()),
+                        )),
+                )
+                .child(muted(
+                    "Queue Merge automatically integrates the Card worktree into the target branch. Clicking 'Hold auto-merge' on a Card pauses this step.",
+                ))
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_4()
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(muted("Upstream sync:"))
+                                .child(
+                                    segmented()
+                                        .child(compact_segment(
+                                            "Merge & Sync Upstream",
+                                            None,
+                                            move || sync_upstream,
+                                            move |_| {
+                                                let tid = step_sync_on.clone();
+                                                update_doc(ui, |d| {
+                                                    if let Some(s) =
+                                                        d.steps.iter_mut().find(|s| s.id == tid)
+                                                    {
+                                                        s.with.insert(
+                                                            "sync_upstream".into(),
+                                                            json!(true),
+                                                        );
+                                                    }
+                                                });
+                                            },
+                                        ))
+                                        .child(compact_segment(
+                                            "Merge Only (Local)",
+                                            None,
+                                            move || !sync_upstream,
+                                            move |_| {
+                                                let tid = step_sync_off.clone();
+                                                update_doc(ui, |d| {
+                                                    if let Some(s) =
+                                                        d.steps.iter_mut().find(|s| s.id == tid)
+                                                    {
+                                                        s.with.insert(
+                                                            "sync_upstream".into(),
+                                                            json!(false),
+                                                        );
+                                                    }
+                                                });
+                                            },
+                                        )),
+                                ),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(muted("Target branch:"))
+                                .child(
+                                    field(branch_sig, "Project default (e.g. main)").w(px(190.)),
+                                ),
+                        ),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(muted("Rework target:"))
+                        .child(rework_seg),
+                )
+                .into_element()
+        }
+        "approval" => {
+            let current_title = step
+                .with
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let title_sig = signal(current_title.clone());
+            let step_for_title = step_id.clone();
+            effect(move || {
+                let val = title_sig.get();
+                if val != current_title {
+                    let target_id = step_for_title.clone();
+                    update_doc(ui, |d| {
+                        if let Some(s) = d.steps.iter_mut().find(|s| s.id == target_id) {
+                            s.with.insert("title".into(), json!(val));
+                        }
+                    });
+                }
+            });
+            let current_rework = step.on_changes_requested.clone().unwrap_or_default();
+            let agent_steps: Vec<(String, String)> = visible_steps
+                .iter()
+                .filter(|s| s.uses == "agent")
+                .map(|s| {
+                    let lbl = step_titles
+                        .get(&s.id)
+                        .cloned()
+                        .unwrap_or_else(|| s.id.clone());
+                    (s.id.clone(), lbl)
+                })
+                .collect();
+            let mut rework_seg = segmented().child({
+                let is_none = current_rework.is_empty();
+                let tid = step_id.clone();
+                compact_segment(
+                    "None",
+                    None,
+                    move || is_none,
+                    move |_| {
+                        let target = tid.clone();
+                        update_doc(ui, |d| {
+                            if let Some(s) = d.steps.iter_mut().find(|s| s.id == target) {
+                                s.on_changes_requested = None;
+                            }
+                        });
+                    },
+                )
+            });
+            for (aid, albl) in agent_steps {
+                let is_sel = current_rework == aid;
+                let tid = step_id.clone();
+                let chosen = aid.clone();
+                rework_seg = rework_seg.child(compact_segment(
+                    albl,
+                    None,
+                    move || is_sel,
+                    move |_| {
+                        let target = tid.clone();
+                        let rw = chosen.clone();
+                        update_doc(ui, |d| {
+                            if let Some(s) = d.steps.iter_mut().find(|s| s.id == target) {
+                                s.on_changes_requested = Some(rw);
+                            }
+                        });
+                    },
+                ));
+            }
+            panel()
+                .gap_3()
+                .border_1()
+                .border_color(BORDER)
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(icon_tinted(Icon::Check, ATTENTION).w(px(15.)).h(px(15.)))
+                                .child(
+                                    label(format!("Step Inspector · {step_title} ({step_id})"))
+                                        .font_weight(FontWeight::SEMIBOLD),
+                                )
+                                .child(badge("uses: approval"))
+                                .child(muted(format!("Next → {next_step_desc}"))),
+                        )
+                        .child(compact_action(
+                            "Edit in YAML Source",
+                            Variant::Secondary,
+                            move |_| state.mode.set("yaml".into()),
+                        )),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(muted("Gate message:"))
+                        .child(
+                            field(title_sig, "Human review is required before continuing")
+                                .flex_1()
+                                .min_w(px(240.)),
+                        ),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(muted("Rework target:"))
+                        .child(rework_seg),
+                )
+                .into_element()
+        }
+        "card.move" => {
+            let current_col = step
+                .with
+                .get("column")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let mut col_seg = segmented();
+            for col in effective_columns {
+                let cid = col.id.clone();
+                let cname = col.name.clone();
+                let is_sel = current_col == cid;
+                let tid = step_id.clone();
+                col_seg = col_seg.child(compact_segment(
+                    cname,
+                    None,
+                    move || is_sel,
+                    move |_| {
+                        let chosen = cid.clone();
+                        let target = tid.clone();
+                        update_doc(ui, |d| {
+                            if let Some(s) = d.steps.iter_mut().find(|s| s.id == target) {
+                                s.with.insert("column".into(), json!(chosen));
+                            }
+                        });
+                    },
+                ));
+            }
+            panel()
+                .gap_3()
+                .border_1()
+                .border_color(BORDER)
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(icon_tinted(Icon::Forward, ACCENT).w(px(15.)).h(px(15.)))
+                                .child(
+                                    label(format!("Step Inspector · {step_title} ({step_id})"))
+                                        .font_weight(FontWeight::SEMIBOLD),
+                                )
+                                .child(badge("uses: card.move"))
+                                .child(muted(format!("Next → {next_step_desc}"))),
+                        )
+                        .child(compact_action(
+                            "Edit in YAML Source",
+                            Variant::Secondary,
+                            move |_| state.mode.set("yaml".into()),
+                        )),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(muted("Destination stage:"))
+                        .child(col_seg),
+                )
+                .into_element()
+        }
         other => {
             let summary = match other {
-                "deliver" | "card.deliver" => "Previews and merges the Card worktree into the target branch after verification succeeds. Clicking 'Hold auto-merge' on a Card pauses this step for manual approval.".to_owned(),
-                "approval" => step
-                    .with
-                    .get("title")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Pauses workflow execution until a human approves or requests changes.")
-                    .to_owned(),
-                "card.move" => {
-                    let col = step
-                        .with
-                        .get("column")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("column");
-                    let cname = col_names.get(col).map(String::as_str).unwrap_or(col);
-                    format!("Moves the Card into the `{cname}` ({col}) Board column before continuing.")
-                }
                 "condition" => format!(
                     "Evaluates JSON pointer `{}` == `{}` and routes to `{}` (then) or `{}` (otherwise).",
-                    step.with.get("pointer").and_then(|v| v.as_str()).unwrap_or(""),
+                    step.with
+                        .get("pointer")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
                     step.with.get("equals").unwrap_or(&Value::Null),
-                    step.with.get("then").and_then(|v| v.as_str()).unwrap_or("end"),
-                    step.with.get("otherwise").and_then(|v| v.as_str()).unwrap_or("end"),
+                    step.with
+                        .get("then")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("end"),
+                    step.with
+                        .get("otherwise")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("end"),
+                ),
+                "notify" => format!(
+                    "Posts a Card attention notification: {}",
+                    step.with
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
                 ),
                 _ => "Structural workflow step.".to_owned(),
             };
@@ -1132,18 +1529,6 @@ fn step_inspector(
                 .child(badge(format!("uses: {other}")));
             if other != "condition" {
                 transition_row = transition_row.child(muted(format!("Next → {next_step_desc}")));
-            }
-            if let Some(rework) = &step.on_changes_requested {
-                let rw_id = rework.clone();
-                let rw_lbl = step_titles
-                    .get(&rw_id)
-                    .cloned()
-                    .unwrap_or_else(|| rw_id.clone());
-                transition_row = transition_row.child(compact_action(
-                    format!("↺ Jump to rework step: {rw_lbl}"),
-                    Variant::Quiet,
-                    move |_| state.selected_step.set(rw_id.clone()),
-                ));
             }
             panel()
                 .gap_2p5()
@@ -1173,15 +1558,15 @@ fn step_inspector(
     }
 }
 
-fn policy_bar(ui: Ui, current_policy: source::BuiltinPolicy, is_custom: bool) -> View {
-    let p_plan1 = current_policy.clone();
-    let p_plan2 = current_policy.clone();
-    let p_plan3 = current_policy.clone();
-    let p_del1 = current_policy.clone();
-    let p_del2 = current_policy.clone();
-    let p_ext1 = current_policy.clone();
-    let p_ext2 = current_policy.clone();
-    let p_ext3 = current_policy.clone();
+fn options_bar(ui: Ui, opts: source::WorkflowOptions) -> View {
+    let analyze = opts.backlog_analyze;
+    let auto_dev = opts.backlog_auto_develop;
+    let review_manual = opts.review_manual;
+    let sync_upstream = opts.sync_upstream;
+    let ext = opts.external_pr;
+    let ext1 = ext.clone();
+    let ext2 = ext.clone();
+    let ext3 = ext;
 
     panel()
         .gap_3()
@@ -1190,9 +1575,9 @@ fn policy_bar(ui: Ui, current_policy: source::BuiltinPolicy, is_custom: bool) ->
         .child(
             view()
                 .gap_0p5()
-                .child(label("Quick Policy Presets").font_weight(FontWeight::SEMIBOLD))
+                .child(label("Workflow Automation Options").font_weight(FontWeight::SEMIBOLD))
                 .child(muted(
-                    "Switch planning, review & external PR rules without editing raw YAML. Custom step prompts are preserved.",
+                    "Derived directly from the workflow graph. Toggling options surgically updates Backlog or Review rules while preserving custom columns, custom steps, and custom prompts.",
                 )),
         )
         .child(
@@ -1200,120 +1585,150 @@ fn policy_bar(ui: Ui, current_policy: source::BuiltinPolicy, is_custom: bool) ->
                 .flex_row()
                 .flex_wrap()
                 .gap_4()
-                .child({
-                    let p_val = current_policy.planning.clone();
-                    let p1 = p_val.clone();
-                    let p2 = p_val.clone();
-                    let p3 = p_val;
+                .child(
                     view()
                         .gap_1()
-                        .child(label("1. Planning (Backlog)"))
+                        .child(label("1. Backlog Auto-Analyze"))
                         .child(
                             segmented()
                                 .child(compact_segment(
-                                    "Manual",
+                                    "Off",
                                     None,
-                                    move || !is_custom && p1 == "manual",
+                                    move || !analyze,
                                     move |_| {
-                                        let mut next = p_plan1.clone();
-                                        next.planning = "manual".into();
-                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                        update_doc(ui, |d| {
+                                            source::set_backlog_options(d, false, auto_dev)
+                                        });
                                     },
                                 ))
                                 .child(compact_segment(
-                                    "Auto-plan (Confirm)",
+                                    "Auto-Analyze",
                                     None,
-                                    move || !is_custom && p2 == "confirm",
+                                    move || analyze,
                                     move |_| {
-                                        let mut next = p_plan2.clone();
-                                        next.planning = "confirm".into();
-                                        update_doc(ui, |d| source::apply_policy(d, &next));
-                                    },
-                                ))
-                                .child(compact_segment(
-                                    "Auto-plan & Develop",
-                                    None,
-                                    move || !is_custom && p3 == "auto",
-                                    move |_| {
-                                        let mut next = p_plan3.clone();
-                                        next.planning = "auto".into();
-                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                        update_doc(ui, |d| {
+                                            source::set_backlog_options(d, true, auto_dev)
+                                        });
                                     },
                                 )),
-                        )
-                })
-                .child({
-                    let d_val = current_policy.delivery.clone();
-                    let d1 = d_val.clone();
-                    let d2 = d_val;
+                        ),
+                )
+                .child(
                     view()
                         .gap_1()
-                        .child(label("2. Review & Delivery"))
+                        .child(label("2. Backlog Auto-Start Develop"))
                         .child(
                             segmented()
                                 .child(compact_segment(
-                                    "Human Review",
+                                    "Off (Stay in Backlog)",
                                     None,
-                                    move || !is_custom && d1 == "human_review",
+                                    move || !auto_dev,
                                     move |_| {
-                                        let mut next = p_del1.clone();
-                                        next.delivery = "human_review".into();
-                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                        update_doc(ui, |d| {
+                                            source::set_backlog_options(d, analyze, false)
+                                        });
                                     },
                                 ))
                                 .child(compact_segment(
-                                    "Auto-merge Queue",
+                                    if analyze {
+                                        "On (After Analysis)"
+                                    } else {
+                                        "On (Move Immediately)"
+                                    },
                                     None,
-                                    move || !is_custom && d2 == "auto_merge",
+                                    move || auto_dev,
                                     move |_| {
-                                        let mut next = p_del2.clone();
-                                        next.delivery = "auto_merge".into();
-                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                        update_doc(ui, |d| {
+                                            source::set_backlog_options(d, analyze, true)
+                                        });
                                     },
                                 )),
-                        )
-                })
-                .child({
-                    let e_val = current_policy.external_pr.clone();
-                    let e1 = e_val.clone();
-                    let e2 = e_val.clone();
-                    let e3 = e_val;
+                        ),
+                )
+                .child(
                     view()
                         .gap_1()
-                        .child(label("3. External PR Rule"))
+                        .child(label("3. Review Mode"))
+                        .child(
+                            segmented()
+                                .child(compact_segment(
+                                    "Queue Merge (Auto)",
+                                    None,
+                                    move || !review_manual,
+                                    move |_| {
+                                        update_doc(ui, |d| source::set_review_manual(d, false));
+                                    },
+                                ))
+                                .child(compact_segment(
+                                    "Manual Review",
+                                    None,
+                                    move || review_manual,
+                                    move |_| {
+                                        update_doc(ui, |d| source::set_review_manual(d, true));
+                                    },
+                                )),
+                        ),
+                )
+                .child(
+                    view()
+                        .gap_1()
+                        .opacity(if review_manual { 0.65 } else { 1.0 })
+                        .child(label("4. Upstream Remote Sync"))
+                        .child(
+                            segmented()
+                                .child(compact_segment(
+                                    "Merge & Sync Upstream",
+                                    None,
+                                    move || !review_manual && sync_upstream,
+                                    move |_| {
+                                        update_doc(ui, |d| source::set_sync_upstream(d, true));
+                                    },
+                                ))
+                                .child(compact_segment(
+                                    "Merge Only (No Sync)",
+                                    None,
+                                    move || !review_manual && !sync_upstream,
+                                    move |_| {
+                                        update_doc(ui, |d| source::set_sync_upstream(d, false));
+                                    },
+                                )),
+                        ),
+                )
+                .child(
+                    view()
+                        .gap_1()
+                        .child(label("5. External PR Rule"))
                         .child(
                             segmented()
                                 .child(compact_segment(
                                     "Require Human Review",
                                     None,
-                                    move || !is_custom && e1 == "require_review",
+                                    move || ext1 == "require_review",
                                     move |_| {
-                                        let mut next = p_ext1.clone();
-                                        next.external_pr = "require_review".into();
-                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                        update_doc(ui, |d| {
+                                            source::set_external_pr_rule(d, "require_review")
+                                        });
                                     },
                                 ))
                                 .child(compact_segment(
                                     "Same as Internal",
                                     None,
-                                    move || !is_custom && e2 == "same",
+                                    move || ext2 == "same",
                                     move |_| {
-                                        let mut next = p_ext2.clone();
-                                        next.external_pr = "same".into();
-                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                        update_doc(ui, |d| source::set_external_pr_rule(d, "same"));
                                     },
                                 ))
                                 .child(compact_segment(
                                     "Manual Only",
                                     None,
-                                    move || !is_custom && e3 == "manual_only",
+                                    move || ext3 == "manual_only",
                                     move |_| {
-                                        let mut next = p_ext3.clone();
-                                        next.external_pr = "manual_only".into();
-                                        update_doc(ui, |d| source::apply_policy(d, &next));
+                                        update_doc(ui, |d| {
+                                            source::set_external_pr_rule(d, "manual_only")
+                                        });
                                     },
                                 )),
-                        )
-                }),
+                        ),
+                ),
         )
 }

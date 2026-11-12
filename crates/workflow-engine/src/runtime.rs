@@ -1,7 +1,6 @@
 //! One durable interpreter for converted stage templates and user definitions.
 use anyhow::{Context, Result, bail, ensure};
 use canban_storage::Db;
-use canban_types::legacy_definition;
 use canban_types::*;
 use serde_json::{Value, json};
 pub type Queue = for<'a> fn(
@@ -80,16 +79,6 @@ fn digest(db: Db<'_>, card: &Card) -> String {
     canban_context::digest(
         &serde_json::to_vec(&json!([card.title, card.body, card.content, source])).unwrap(),
     )
-}
-fn definition(db: Db<'_>, project: &Project) -> Result<(WorkflowDefinition, u64)> {
-    if let Ok(binding) = db.get::<WorkflowBinding>(&project.id) {
-        let w = latest(db, &binding.workflow_id)?;
-        return Ok((w.definition, w.revision));
-    }
-    Ok((
-        legacy_definition(&project.workflow, format!("delivery:{}", project.id)),
-        0,
-    ))
 }
 fn record(db: Db<'_>, run: &WorkflowRun, kind: &str, message: &str) -> Result<()> {
     let card: Card = db.get(&run.card_id)?;
@@ -196,27 +185,6 @@ pub fn start(
     record(db, &run, "workflow.started", entry)?;
     drive(db, config, card, &mut run, queue)?;
     Ok(run)
-}
-pub fn enter(
-    db: Db<'_>,
-    config: &Config,
-    card: &mut Card,
-    entry: &str,
-    queue: Queue,
-) -> Result<()> {
-    let project: Project = db.get(&card.project_id)?;
-    if db
-        .list::<WorkflowSource>()?
-        .iter()
-        .any(|f| f.project_id == project.id)
-    {
-        return Ok(());
-    }
-    let (flow, revision) = definition(db, &project)?;
-    if flow.entries.contains_key(entry) {
-        start(db, config, card, flow, revision, entry, None, true, queue)?;
-    }
-    Ok(())
 }
 fn drive(
     db: Db<'_>,
@@ -361,6 +329,7 @@ fn drive(
             }
             WorkflowStep::Deliver {
                 target_branch,
+                sync_upstream,
                 next: to,
                 ..
             } => {
@@ -379,6 +348,7 @@ fn drive(
                 } else {
                     run.inputs["pending_next"] = json!(to);
                     run.inputs["target_branch"] = json!(target_branch);
+                    run.inputs["sync_upstream"] = json!(sync_upstream);
                     run.state = "waiting_delivery".into();
                 }
             }
@@ -568,6 +538,7 @@ pub fn approve_with_feedback(
         );
         if let WorkflowStep::Deliver {
             target_branch,
+            sync_upstream,
             next: to,
             ..
         } = &run.definition.steps[&key]
@@ -580,6 +551,7 @@ pub fn approve_with_feedback(
             run.input_digest = digest(db, card);
             run.inputs["pending_next"] = json!(to);
             run.inputs["target_branch"] = json!(target_branch);
+            run.inputs["sync_upstream"] = json!(sync_upstream);
             run.state = "waiting_delivery".into();
             run.updated_at = now();
             db.save(run)?;
@@ -691,7 +663,8 @@ pub fn initialize(db: Db<'_>, config: &Config) -> Result<()> {
             stage.on_completed = req.on_completed.clone();
             stage.require_human_review = req.require_human_review;
         }
-        let mut flow = legacy_definition(&captured, format!("delivery:{}", project.id));
+        let mut flow =
+            crate::source::migrate_legacy_stages(&captured, format!("delivery:{}", project.id));
         // The assignment snapshot wins over subsequently edited stage settings.
         let key = format!("agent:{}", req.stage);
         if let Some(WorkflowStep::Agent {

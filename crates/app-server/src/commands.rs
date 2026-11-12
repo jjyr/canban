@@ -217,7 +217,8 @@ impl AppServer {
             "herdr.status" => canban_herdr::Client { config }.status(),
             "herdr.templates" => canban_herdr::Client { config }.call("templates.list", json!({})),
             "project.create" => {
-                let workflow = if p["workflow"].is_object() {
+                let explicit_workflow = p["workflow"].is_object();
+                let workflow = if explicit_workflow {
                     serde_json::from_value(p["workflow"].clone())?
                 } else {
                     self.default_workflow()?
@@ -242,8 +243,15 @@ impl AppServer {
                 };
                 self.mutate(method, &p, |db| {
                     db.save(&project)?;
-                    authoring::initialize(&self.home, db, &config, &project)?;
-                    Ok(serde_json::to_value(project)?)
+                    authoring::initialize_new(
+                        &self.home,
+                        db,
+                        &config,
+                        &project,
+                        explicit_workflow,
+                    )?;
+                    let saved: Project = db.get(&project.id)?;
+                    Ok(serde_json::to_value(saved)?)
                 })
             }
             "card.create" => self.mutate(method, &p, |db| {
@@ -377,8 +385,6 @@ impl AppServer {
                     json!({"from":from,"to":target,"before_card_id":p["before_card_id"]}),
                 )?;
                 workflow::stop_card(db, &c.id, "superseded")?;
-                db.save(&c)?;
-                workflow::enter(db, &config, &mut c, target)?;
                 db.save(&c)?;
                 Ok(serde_json::to_value(c)?)
             }),

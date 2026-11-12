@@ -53,4 +53,4 @@ provider authentication is claimed. The download/bundle-swap release matrix,
 GitHub publication and multi-client upgrade coordination were not rerun here.
 Schema-12 downgrade retains the feature branch's refusal to discard YAML sources
 or active configuration sessions; local activation failure uses its snapshot
-recovery. See [updates](updates.md) and [Workflow implementation](workflow-implementation.md).
+recovery. See [updates](updates.md) and [Workflow implementation](product/workflow-engine.md).

@@ -35,7 +35,7 @@ This Canban API is separate from core's terminal API. Agents should not edit Can
 | Execution | Inspect requests and generic Sessions/Runs, submit scoped progress/results/artifacts/check evidence, request cancellation or retry |
 | Observation | Subscribe to application changes with reconnection and snapshot recovery |
 
-Initial implementation (2026-11-11; see [concrete API and limits](../workflow-implementation.md)): Agents author/modify the same declarative [workflow definitions](workflow-engine.md) that users manually edit. Both paths share validation, expected revisions and published definition identity. A generic viewer displays supported definitions/runs; a graph editor is not required. Schema discovery, definition read/validate/save, subscription configuration and run/decision inspection need shared operations; actual operations are listed in the implementation contract. Saving a definition is distinct from enabling a trigger, starting/replaying a run or approving an existing gate. Card prose is not executable configuration.
+Initial implementation (2026-11-11; see [concrete API and limits](workflow-engine.md)): Agents author/modify the same declarative [workflow definitions](workflow-engine.md) that users manually edit. Both paths share validation, expected revisions and published definition identity. A generic viewer displays supported definitions/runs; a graph editor is not required. Schema discovery, definition read/validate/save, subscription configuration and run/decision inspection need shared operations; actual operations are listed in the implementation contract. Saving a definition is distinct from enabling a trigger, starting/replaying a run or approving an existing gate. Card prose is not executable configuration.
 
 Manual/subscribed/column entries use one engine and the existing execution queue. Convert current stage configuration/callbacks instead of retaining another executor. Active runs capture revisions; authoring must not rewrite their assignments or pending decisions. Settings configuration conversations and onboarding defaults are the next UX/ownership discussion, not yet implemented.
 
@@ -99,7 +99,7 @@ Preserve both agent profile and run identity for attribution. A generic profile 
 - Associate reports with their request/execution and callback. Artifact/check information can enrich context without becoming an independent completion gate. Do not require a full stale-process/resource-handover system for MVP.
 - History and list responses need bounded pagination. Resource upload limits and content handling should be explicit in the eventual schema.
 
-The current CLI and Unix-socket RPC boundary are implemented. The new workflow/authoring and durable subscription operations are implemented in the initial slice; see [concrete operations](../workflow-implementation.md). Use discoverable versioned schemas and the same validation for thin CLI/UI adapters. Durable event consumption differs from ephemeral invalidation and a paginated Timeline reader; see [subscriptions](events-and-notifications.md).
+The current CLI and Unix-socket RPC boundary are implemented. The new workflow/authoring and durable subscription operations are implemented in the initial slice; see [concrete operations](workflow-engine.md). Use discoverable versioned schemas and the same validation for thin CLI/UI adapters. Durable event consumption differs from ephemeral invalidation and a paginated Timeline reader; see [subscriptions](events-and-notifications.md).
 
 ## Completion, blockage, and events
 

@@ -255,11 +255,32 @@ impl AppServer {
             return Ok(());
         }
         let target_branch = run.inputs["target_branch"].as_str();
-        let plan = match self.ops(&project.work_location().machine).review_preview(
-            &project,
-            &card,
-            target_branch,
-        ) {
+        let sync_upstream = run.inputs["sync_upstream"].as_bool().unwrap_or(true);
+        let mut workspace_project = project.clone();
+        workspace_project.workflow.workspace = run.definition.workspace.clone();
+        let ops = self.ops(&project.work_location().machine);
+        if sync_upstream
+            && ops.has_push_remote(&workspace_project)
+            && let Err(e) = ops.sync_target(&workspace_project, target_branch)
+        {
+            let reason = format!("Auto-merge paused (upstream sync): {e:#}");
+            self.store.lock().unwrap().write(|db| {
+                let mut current_card: Card = db.get(&card.id)?;
+                let mut current_run: WorkflowRun = db.get(&run.id)?;
+                if current_run.state == "waiting_delivery" {
+                    canban_workflow_engine::runtime::hold_delivery(
+                        db,
+                        &mut current_card,
+                        &mut current_run,
+                        &reason,
+                    )?;
+                }
+                Ok(())
+            })?;
+            self.emit("review", Some(card.id));
+            return Ok(());
+        }
+        let plan = match ops.review_preview(&workspace_project, &card, target_branch) {
             Ok(plan) => plan,
             Err(e) => {
                 let reason = format!("Auto-merge paused: {e:#}");
@@ -305,14 +326,19 @@ impl AppServer {
         }
         let key = format!("workflow-deliver:{}:{}", run.id, run.visit);
         let message = format!("Canban #{}: {}", card.number, card.title);
-        let result = self.ops(&project.work_location().machine).review_merge(
-            &project,
+        let result = ops.review_merge(
+            &workspace_project,
             &card,
             Some(&plan.target_branch),
             &plan.token,
             &message,
         );
-        let mut merged = false;
+        let push_result = if result.is_ok() && sync_upstream {
+            Some(ops.push_target_branch(&workspace_project, &plan.target_branch))
+        } else {
+            None
+        };
+        let mut merged_and_completed = false;
         self.store.lock().unwrap().write(|db| {
             let mut current_card: Card = db.get(&card.id)?;
             let mut current_run: WorkflowRun = db.get(&run.id)?;
@@ -321,7 +347,6 @@ impl AppServer {
             }
             match result {
                 Ok(commit) => {
-                    merged = true;
                     current_card.delivery_mode = Some(DeliveryMode::Local);
                     current_card.delivery = Some(Delivery {
                         target_branch: plan.target_branch.clone(),
@@ -332,23 +357,95 @@ impl AppServer {
                     current_card.attention = None;
                     current_card.human_gate = None;
                     current_card.revision += 1;
-                    log(
-                        db,
-                        &current_card,
-                        "review.merged",
-                        "system",
-                        &format!("Auto-merged into {}", plan.target_branch),
-                        None,
-                        json!({"commit":commit,"target_branch":plan.target_branch,"request_key":key,"workflow_run_id":run.id}),
-                    )?;
-                    canban_workflow_engine::runtime::complete_delivery(
-                        db,
-                        &config,
-                        &mut current_card,
-                        &mut current_run,
-                        json!({"state":"merged","commit":commit,"target_branch":plan.target_branch}),
-                        enqueue,
-                    )?;
+                    match push_result {
+                        Some(Err(push_err)) => {
+                            let reason = format!(
+                                "Merged locally into {}, but syncing upstream failed: {push_err:#}",
+                                plan.target_branch
+                            );
+                            log(
+                                db,
+                                &current_card,
+                                "review.upstream_sync_failed",
+                                "system",
+                                &reason,
+                                None,
+                                json!({"commit":commit,"target_branch":plan.target_branch,"request_key":key,"workflow_run_id":run.id}),
+                            )?;
+                            canban_workflow_engine::runtime::hold_delivery(
+                                db,
+                                &mut current_card,
+                                &mut current_run,
+                                &reason,
+                            )?;
+                        }
+                        Some(Ok(Some(remote_name))) => {
+                            merged_and_completed = true;
+                            log(
+                                db,
+                                &current_card,
+                                "review.merged",
+                                "system",
+                                &format!(
+                                    "Auto-merged into {} and synced to {remote_name}/{}",
+                                    plan.target_branch, plan.target_branch
+                                ),
+                                None,
+                                json!({"commit":commit,"target_branch":plan.target_branch,"synced_upstream":true,"remote":remote_name,"request_key":key,"workflow_run_id":run.id}),
+                            )?;
+                            canban_workflow_engine::runtime::complete_delivery(
+                                db,
+                                &config,
+                                &mut current_card,
+                                &mut current_run,
+                                json!({"state":"merged","commit":commit,"target_branch":plan.target_branch,"synced_upstream":true,"remote":remote_name}),
+                                enqueue,
+                            )?;
+                        }
+                        Some(Ok(None)) => {
+                            merged_and_completed = true;
+                            log(
+                                db,
+                                &current_card,
+                                "review.merged",
+                                "system",
+                                &format!("Auto-merged into {}", plan.target_branch),
+                                None,
+                                json!({"commit":commit,"target_branch":plan.target_branch,"synced_upstream":false,"reason":"no_remote","request_key":key,"workflow_run_id":run.id}),
+                            )?;
+                            canban_workflow_engine::runtime::complete_delivery(
+                                db,
+                                &config,
+                                &mut current_card,
+                                &mut current_run,
+                                json!({"state":"merged","commit":commit,"target_branch":plan.target_branch,"synced_upstream":false,"reason":"no_remote"}),
+                                enqueue,
+                            )?;
+                        }
+                        None => {
+                            merged_and_completed = true;
+                            log(
+                                db,
+                                &current_card,
+                                "review.merged",
+                                "system",
+                                &format!(
+                                    "Auto-merged into {} (local only, upstream sync disabled)",
+                                    plan.target_branch
+                                ),
+                                None,
+                                json!({"commit":commit,"target_branch":plan.target_branch,"synced_upstream":false,"request_key":key,"workflow_run_id":run.id}),
+                            )?;
+                            canban_workflow_engine::runtime::complete_delivery(
+                                db,
+                                &config,
+                                &mut current_card,
+                                &mut current_run,
+                                json!({"state":"merged","commit":commit,"target_branch":plan.target_branch,"synced_upstream":false}),
+                                enqueue,
+                            )?;
+                        }
+                    }
                 }
                 Err(error) => {
                     let reason = format!("Auto-merge failed: {error:#}");
@@ -373,7 +470,7 @@ impl AppServer {
         })?;
         self.git_changed(&project.work_location().machine);
         drop(_gate);
-        if merged {
+        if merged_and_completed {
             let _ = self.try_auto_archive_merged(&card.id);
         }
         self.emit("review", Some(card.id));

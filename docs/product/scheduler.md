@@ -1,6 +1,6 @@
 # Scheduler, capacity and human approval
 
-Status: current runtime implemented 2026-11-07, with accepted next architecture recorded 2026-11-11 below. Default global limit is eight Agents; earlier unrestricted concurrency is superseded and old `capacity` fields remain ignored. The [unified engine](workflow-engine.md) is implemented in the initial slice; see [workflow/event implementation](../workflow-implementation.md) for exact coverage.
+Status: current runtime implemented 2026-11-07, with accepted next architecture recorded 2026-11-11 below. Default global limit is eight Agents; earlier unrestricted concurrency is superseded and old `capacity` fields remain ignored. The [unified engine](workflow-engine.md) is implemented in the initial slice; see [workflow/event implementation](workflow-engine.md) for exact coverage.
 
 ## Unified workflow admission direction
 

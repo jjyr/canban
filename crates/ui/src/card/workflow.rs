@@ -55,7 +55,13 @@ fn step_badge_label(id: &str, step: &WorkflowStep) -> String {
         }
         WorkflowStep::Move { column, .. } => format!("→ {column}"),
         WorkflowStep::Approval { .. } => "Approval".into(),
-        WorkflowStep::Deliver { .. } => "Auto-merge".into(),
+        WorkflowStep::Deliver { sync_upstream, .. } => {
+            if *sync_upstream {
+                "Queue merge · Sync".into()
+            } else {
+                "Queue merge · Local".into()
+            }
+        }
         WorkflowStep::Condition { .. } => "Rule check".into(),
         WorkflowStep::Notify { .. } => "Notify".into(),
         WorkflowStep::Complete => "Done".into(),

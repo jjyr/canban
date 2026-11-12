@@ -2,7 +2,7 @@
 
 Status: current naming/crate direction and timer placement proposal, 2026-11-06. The user selected AppServer and Workflow Engine, proposed Scheduler for queue/execution/time responsibility, and asked for crate separation. Timer placement below is a proposal; adding this boundary does not automatically add recurring scheduling to MVP.
 
-Accepted architecture update, 2026-11-11: the [unified workflow engine](product/workflow-engine.md) and [durable event/subscription contract](product/events-and-notifications.md) now define entries, steps, checkpoints and delivery. They supersede the event-framework deferral below. They are implemented in the initial slice; see [workflow/event implementation](workflow-implementation.md) for exact coverage; crate boundaries and timer ownership remain applicable.
+Accepted architecture update, 2026-11-11: the [unified workflow engine](product/workflow-engine.md) and [durable event/subscription contract](product/events-and-notifications.md) now define entries, steps, checkpoints and delivery. They supersede the event-framework deferral below. They are implemented in the initial slice; see [workflow/event implementation](product/workflow-engine.md) for exact coverage; crate boundaries and timer ownership remain applicable.
 
 ## Names and responsibilities
 

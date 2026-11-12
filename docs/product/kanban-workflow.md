@@ -1,6 +1,6 @@
 # Kanban card workflow
 
-Status: product requirements reconciled 2026-11-11. Keep Backlog / Develop / Review. The accepted next [unified engine](workflow-engine.md) separates column from progress and replaces callbacks; the initial slice is implemented; see [workflow implementation](../workflow-implementation.md) for coverage. [Implementation](../implementation.md) records runtime evidence. Recommendations/open behavior remain labeled.
+Status: product requirements reconciled 2026-11-11. Keep Backlog / Develop / Review. The accepted next [unified engine](workflow-engine.md) separates column from progress and replaces callbacks; the initial slice is implemented; see [workflow implementation](workflow-engine.md) for coverage. [Implementation](../implementation.md) records runtime evidence. Recommendations/open behavior remain labeled.
 
 ## The card is the coordination point
 
@@ -71,7 +71,7 @@ When an agent reports blockage/needs input, mark the card needs attention and ge
 
 Keep the managed task worktree through development, Review, and rework. Handle it at Archive. A fresh Session need not create a new worktree, and card history/the Project directory are not disposable execution resources.
 
-Definitions are declarative and authored/modified by an Agent or manually, sharing validation/revisions. A generic UI displays any supported definition/run; a graph editor is not required. Existing templates and active work migrate to the one engine without relaunch; see [migration rules](workflow-engine.md#migration-one-runtime). Detailed authoring/onboarding/settings UX remains open.
+Definitions are declarative and authored/modified by an Agent or manually, sharing validation/revisions. A generic UI displays any supported definition/run; a graph editor is not required. Existing templates and active work migrate to the one engine without relaunch; see [migration rules](workflow-engine.md#migration-and-verification-summary). Detailed authoring/onboarding/settings UX remains open.
 
 ## Unified timeline and resources
 
@@ -116,4 +116,4 @@ Keep the earlier direction of declarative layouts: title, stage/status, resource
 11. Edit card/context after queuing or launching: retain the previous input; a deliberate refresh creates the appropriate new request/history.
 12. Call card operations through the agent interface: the same validation and timeline behavior apply as in the UI.
 
-See [Projects and templates](projects-and-workflows.md), [Scheduler](scheduler.md), and [agent interface](agent-interface.md).
+See [Projects and templates](workflow-engine.md), [Scheduler](scheduler.md), and [agent interface](agent-interface.md).
