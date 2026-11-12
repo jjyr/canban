@@ -957,8 +957,11 @@ fn remote_pr_merge_defers_archive_while_agent_live_then_archives_and_handles_pr_
 
     // A PR source card observed merged on GitHub also records delivery and archives.
     let pr_card: Card = serde_json::from_value(
-        app.call("card.create", json!({"project_id":project.id,"title":"PR source"}))
-            .unwrap(),
+        app.call(
+            "card.create",
+            json!({"project_id":project.id,"title":"PR source"}),
+        )
+        .unwrap(),
     )
     .unwrap();
     app.store
@@ -1787,6 +1790,122 @@ fn agent_callbacks_cannot_install_desktop_updates() {
         .unwrap_err();
     assert!(error.to_string().contains("explicit user action"));
     assert!(!app.home.join("updates/install.json").exists());
+}
+
+#[test]
+fn git_refs_compare_and_review_send_agent_work_with_and_without_cards() {
+    let (dir, app, p, c) = setup();
+    let repo = dir.path().join("source");
+    std::fs::create_dir_all(&repo).unwrap();
+    let run_git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    run_git(&["init", "-b", "main"]);
+    run_git(&["config", "user.name", "Tester"]);
+    run_git(&["config", "user.email", "tester@example.invalid"]);
+    run_git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("lib.rs"), "pub fn v1() -> i32 { 1 }\n").unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "initial"]);
+
+    run_git(&["switch", "-c", "feat/compare"]);
+    std::fs::write(
+        repo.join("lib.rs"),
+        "pub fn v1() -> i32 { 2 }\npub fn v2() {}\n",
+    )
+    .unwrap();
+    run_git(&["add", "."]);
+    run_git(&["commit", "-m", "add v2"]);
+
+    let refs = app.call("git.refs", json!({"project_id": p.id})).unwrap();
+    assert_eq!(refs["current_branch"], "feat/compare");
+    assert!(
+        refs["branches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b["name"] == "feat/compare")
+    );
+
+    let cmp = app
+        .call(
+            "git.compare",
+            json!({
+                "project_id": p.id,
+                "base": "main",
+                "compare": "feat/compare",
+                "three_dot": true,
+            }),
+        )
+        .unwrap();
+    assert_eq!(cmp["files"].as_array().unwrap().len(), 1);
+    assert_eq!(cmp["files"][0]["filename"], "lib.rs");
+
+    // Dispatch structured inline comments to an existing Card's @developer locally
+    let sent = app
+        .call(
+            "review.send_agent",
+            json!({
+                "mode": "card",
+                "card_id": c.id,
+                "profile_id": "developer",
+                "move_to_develop": true,
+                "context_label": "main ← feat/compare",
+                "summary": "Please handle edge cases.",
+                "comments": [
+                    {
+                        "path": "lib.rs",
+                        "line": 2,
+                        "side": "RIGHT",
+                        "snippet": "pub fn v2() {}",
+                        "body": "Return a Result here."
+                    }
+                ],
+                "request_key": "review-send-1",
+            }),
+        )
+        .unwrap();
+    assert_eq!(sent["state"], "sent");
+    let snap = app.snapshot().unwrap();
+    let updated_card = snap.cards.iter().find(|x| x.id == c.id).unwrap();
+    assert_eq!(updated_card.stage, "develop");
+    assert!(
+        snap.questions.iter().any(|q| q.card_id == c.id
+            && q.profile_id == "developer"
+            && q.body.contains("lib.rs:2"))
+    );
+
+    // Ad-hoc compare can also create a brand-new Card & assign @developer
+    let created = app
+        .call(
+            "review.send_agent",
+            json!({
+                "mode": "new_card",
+                "project_id": p.id,
+                "profile_id": "developer",
+                "title": "Address compare review",
+                "context_label": "main ← feat/compare",
+                "summary": "Follow up on branch diff.",
+                "comments": [],
+                "request_key": "review-new-card-1",
+            }),
+        )
+        .unwrap();
+    assert_eq!(created["state"], "created");
+    let new_cid = created["card_id"].as_str().unwrap();
+    let snap2 = app.snapshot().unwrap();
+    assert!(
+        snap2
+            .cards
+            .iter()
+            .any(|x| x.id == new_cid && x.title == "Address compare review")
+    );
 }
 
 mod github;

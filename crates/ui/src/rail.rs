@@ -28,7 +28,6 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                     ui.page.get().as_str(),
                     "board"
                         | "card"
-                        | "review"
                         | "new-project"
                         | "new-card"
                         | "drafts"
@@ -47,13 +46,21 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             move || ui.reminder_counts.get().len(),
             move |_| ui.navigate("overview"),
         ));
-    let rail = rail.child(icon_action(
-        Icon::Terminal,
-        "Terminals".into(),
-        move || ui.page.get() == "terminals",
-        || 0,
-        move |_| ui.navigate("terminals"),
-    ));
+    let rail = rail
+        .child(icon_action(
+            Icon::Terminal,
+            "Terminals".into(),
+            move || ui.page.get() == "terminals",
+            || 0,
+            move |_| ui.navigate("terminals"),
+        ))
+        .child(icon_action(
+            Icon::Compare,
+            "Diff & Review".into(),
+            move || ui.page.get() == "review",
+            move || ui.review_state.pending_comments.with(Vec::len),
+            move |_| crate::review::open_compare(ui),
+        ));
     rail.child(icon_action(
         Icon::GitHub,
         "GitHub".into(),

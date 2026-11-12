@@ -505,6 +505,7 @@ mod tests {
     }
 }
 
+pub mod compare;
 pub mod context;
 pub mod review;
 

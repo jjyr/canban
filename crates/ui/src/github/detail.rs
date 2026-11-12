@@ -95,6 +95,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         };
         let open = r.clone();
         let create = r.clone();
+        let r_review = r.clone();
         let r_header = r.clone();
         let r_title = r.clone();
         let d = drafts::document(ui, format!("github-review:{}", r.url), Draft::default());
@@ -152,6 +153,39 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             .font_weight(FontWeight::MEDIUM),
                     )
                     .child(view().flex_1())
+                    .child(when(
+                        {
+                            let is_pr = r_review.kind == "pr";
+                            move || is_pr
+                        },
+                        {
+                            let r_rev = r_review.clone();
+                            move || {
+                                let repo = r_rev.repository.clone();
+                                let num = r_rev.number.unwrap_or(0);
+                                let url = r_rev.url.clone();
+                                compact_action("Diff & Review", Variant::Secondary, move |_| {
+                                    let st = ui.review_state;
+                                    let repo_val = repo.clone();
+                                    let url_val = url.clone();
+                                    batch(move || {
+                                        ui.card.set(String::new());
+                                        ui.review.set(None);
+                                        st.pr_target.set(Some(json!({
+                                            "repository": repo_val,
+                                            "number": num,
+                                            "url": url_val,
+                                        })));
+                                        st.mode.set("github_pr".into());
+                                        st.selected_file.set(String::new());
+                                        st.active_line.set(None);
+                                        ui.navigate("review");
+                                    });
+                                    crate::review::refresh_active_diff(ui, false);
+                                })
+                            }
+                        },
+                    ))
                     .child(card_actions(ui, create))
                     .child(compact_action("GitHub ↗", Variant::Quiet, move |_| {
                         open_url(ui, open.url.clone())

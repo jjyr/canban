@@ -1,12 +1,20 @@
-//! Review is a separate route so Task/Comment drafts survive refreshes.
-//! Contract: an immutable preview is accepted only with its revision and token.
-//! Refresh is asynchronous; changing Card/target invalidates a pending preview.
+//! Unified Diff & Review Workbench:
+//! - Works as a standalone Git compare client from the Left Rail even without any Card or PR.
+//! - Opens directly from Local Cards (worktree/branch) and GitHub PR Cards (zero-clone remote PR diff).
+//! - Supports inline line-by-line review comments + batch dispatch to @Agent (Terminals or Card) or GitHub PR.
+pub mod diff;
+pub mod model;
+pub mod sidebar;
+pub mod submit;
+
+pub use model::{LineTarget, PendingInlineComment, State};
+
 use crate::presenter::*;
-use canban_types::ReviewPreview;
+use canban_types::{Card, DeliveryMode, ReviewPreview};
 use canban_ui_kit::tokens::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FileDiff {
@@ -87,6 +95,7 @@ fn parse_patch(patch: &str, files: &[String]) -> Vec<FileDiff> {
     chunks
 }
 
+/// Retained public component for Gallery `controls` scene compatibility.
 pub fn diff_panel(p: ReviewPreview) -> impl IntoElement {
     let parsed = parse_patch(&p.patch, &p.files);
     let mut body = panel().gap_3().child(
@@ -110,12 +119,6 @@ pub fn diff_panel(p: ReviewPreview) -> impl IntoElement {
     );
     if let Some(reason) = p.reason {
         body = body.child(notice(reason, Tone::Attention));
-    }
-    if p.truncated {
-        body = body.child(notice(
-            "Diff exceeds 2 MiB and is truncated. Inspect the complete checkout in the terminal before accepting.",
-            Tone::Attention,
-        ));
     }
     if parsed.is_empty() {
         return body.child(muted("No file changes between these commits."));
@@ -198,350 +201,451 @@ pub fn diff_panel(p: ReviewPreview) -> impl IntoElement {
     }
     body
 }
-fn refresh_diff(ui: Ui, target: Signal<String>) {
-    let generation = ui.review_request.get_untracked() + 1;
-    ui.review_request.set(generation);
-    ui.review.set(None);
-    ui.status.set("Loading Card diff…".into());
-    let card = ui.card.get_untracked();
-    let branch = target.get_untracked();
-    let Some(app) = crate::APP.get().cloned() else {
-        ui.status
-            .set("Gallery preview: no AppServer connected".into());
+
+pub fn preview_to_compare_json(p: &ReviewPreview) -> Value {
+    let parsed = parse_patch(&p.patch, &p.files);
+    let mut total_add = 0usize;
+    let mut total_del = 0usize;
+    let files: Vec<Value> = parsed
+        .into_iter()
+        .map(|f| {
+            total_add += f.additions;
+            total_del += f.deletions;
+            json!({
+                "filename": f.path,
+                "status": "modified",
+                "additions": f.additions,
+                "deletions": f.deletions,
+                "patch": f.patch,
+            })
+        })
+        .collect();
+    json!({
+        "base_ref": p.target_branch,
+        "compare_ref": "WORKDIR",
+        "base_sha": p.target_head,
+        "compare_sha": p.card_head,
+        "three_dot": true,
+        "files": files,
+        "commits": [],
+        "total_additions": total_add,
+        "total_deletions": total_del,
+        "truncated": p.truncated,
+        "cwd": p.worktree,
+    })
+}
+
+fn card_pr_info(c: &Card) -> Option<(String, u64, String)> {
+    if c.is_github_pr()
+        && let Some(src) = c.github_issue()
+    {
+        return Some((src.repository.clone(), src.number, src.url.clone()));
+    }
+    c.pull_request
+        .as_ref()
+        .map(|pr| (pr.repository.clone(), pr.number, pr.url.clone()))
+}
+
+pub fn open_compare(ui: Ui) {
+    let st = ui.review_state;
+    batch(move || {
+        ui.card.set(String::new());
+        ui.review.set(None);
+        st.card_drawer_open.set(false);
+        st.pr_target.set(None);
+        st.mode.set("git".into());
+        st.selected_file.set(String::new());
+        st.active_line.set(None);
+        st.error.set(String::new());
+        ui.navigate("review");
+    });
+    load_refs_and_compare(ui, true);
+}
+
+pub fn open_card(ui: Ui, card_id: &str) {
+    let Some(card) = ui
+        .snapshot
+        .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned())
+    else {
+        open_compare(ui);
         return;
     };
+    let st = ui.review_state;
+    let project = ui
+        .snapshot
+        .with_untracked(|s| s.projects.iter().find(|p| p.id == card.project_id).cloned());
+    let target_branch = project
+        .as_ref()
+        .and_then(|p| p.target_branch.clone())
+        .unwrap_or_else(|| "main".into());
+    let delivery_default = if card.delivery_mode.clone().unwrap_or_else(|| {
+        project
+            .as_ref()
+            .map(|p| p.delivery_mode.clone())
+            .unwrap_or_default()
+    }) == DeliveryMode::GitHubPr
+    {
+        "github_pr"
+    } else {
+        "local"
+    };
+
+    let pr = card_pr_info(&card);
+    let has_local = card.worktree.is_some() || card.branch.is_some();
+
+    batch(move || {
+        ui.project.set(card.project_id.clone());
+        ui.card.set(card.id.clone());
+        ui.review.set(None);
+        st.selected_file.set(String::new());
+        st.active_line.set(None);
+        st.error.set(String::new());
+        st.delivery_mode.set(delivery_default.into());
+        st.base_ref.set(target_branch.clone());
+        if let Some((repo, num, url)) = pr {
+            st.pr_target.set(Some(json!({
+                "repository": repo,
+                "number": num,
+                "url": url,
+            })));
+            if has_local {
+                st.mode.set("card_local".into());
+                st.compare_ref
+                    .set(card.branch.clone().unwrap_or_else(|| "WORKDIR".into()));
+            } else {
+                st.mode.set("github_pr".into());
+                st.compare_ref.set(format!("PR #{num}"));
+            }
+        } else {
+            st.pr_target.set(None);
+            st.mode.set("card_local".into());
+            st.compare_ref
+                .set(card.branch.clone().unwrap_or_else(|| "WORKDIR".into()));
+        }
+        ui.navigate("review");
+    });
+    load_refs(ui);
+    refresh_active_diff(ui, false);
+}
+
+pub fn load_refs(ui: Ui) {
+    let st = ui.review_state;
+    let Some(project) = ui.current_project() else {
+        return;
+    };
+    let Some(app) = crate::APP.get().cloned() else {
+        return;
+    };
+    let ticket = st.refs_ticket.get_untracked() + 1;
+    st.refs_ticket.set(ticket);
+    st.refs_loading.set(true);
+    let pid = project.id.clone();
     ui.spawn(async move {
-        let expected = card.clone();
-        let expected_branch = branch.clone();
-        let result = blocking(move || {
-            app.call(
-                "review.preview",
-                json!({"card_id":card,"target_branch":branch}),
-            )
-        })
-        .await;
-        if ui.review_request.get_untracked() != generation
-            || ui.page.get_untracked() != "review"
-            || ui.card.get_untracked() != expected
-            || target.try_get().as_deref() != Some(expected_branch.as_str())
-        {
+        let res = blocking(move || app.call("git.refs", json!({ "project_id": pid }))).await;
+        if st.refs_ticket.try_get() != Some(ticket) {
             return;
         }
-        match result {
-            Ok(Ok(value)) => match serde_json::from_value(value) {
-                Ok(p) => {
-                    ui.review.set(Some(p));
-                    ui.status.set("Diff ready · refresh if files change".into());
-                }
-                Err(e) => ui
-                    .operation_error
-                    .set(format!("Invalid review preview: {e}")),
-            },
-            Ok(Err(e)) => ui
-                .operation_error
-                .set(format!("Could not load diff: {e:#}")),
-            Err(e) => ui.operation_error.set(format!("Diff worker: {e}")),
+        st.refs_loading.set(false);
+        if let Ok(Ok(val)) = res {
+            st.refs_data.set(val);
         }
     });
 }
-pub fn screen(ui: Ui) -> impl IntoElement {
-    let card = ui.current_card();
-    let target_initial = ui
-        .snapshot
-        .with_untracked(|s| {
-            card.as_ref()
-                .and_then(|c| s.projects.iter().find(|p| p.id == c.project_id))
-                .and_then(|p| p.target_branch.clone())
-        })
-        .unwrap_or_else(|| "main".into());
-    let message_initial = card
-        .as_ref()
-        .map(|c| format!("Canban #{}: {}", c.number, c.title))
-        .unwrap_or_default();
-    let key = format!("review:{}", ui.card.get_untracked());
-    let d = crate::drafts::document(
-        ui,
-        key,
-        crate::drafts::Draft {
-            title: target_initial,
-            body: message_initial,
-            ..Default::default()
-        },
-    );
-    let target = signal(d.get_untracked().title);
-    let message = signal(d.get_untracked().body);
-    effect(move || {
-        let title = target.get();
-        let body = message.get();
-        d.update(|d| {
-            d.title = title;
-            d.body = body;
-        });
-    });
-    let mode = signal(
-        if card
-            .as_ref()
-            .and_then(|c| c.delivery_mode.as_ref())
-            .cloned()
-            .unwrap_or_else(|| {
-                ui.current_project()
-                    .map(|p| p.delivery_mode)
-                    .unwrap_or_default()
-            })
-            == canban_types::DeliveryMode::GitHubPr
-        {
-            "github_pr"
-        } else {
-            "local"
+
+pub fn load_refs_and_compare(ui: Ui, choose_smart_default: bool) {
+    let st = ui.review_state;
+    let Some(project) = ui.current_project() else {
+        return;
+    };
+    let Some(app) = crate::APP.get().cloned() else {
+        return;
+    };
+    let ticket = st.refs_ticket.get_untracked() + 1;
+    st.refs_ticket.set(ticket);
+    st.refs_loading.set(true);
+    let pid = project.id.clone();
+    ui.spawn(async move {
+        let res = blocking(move || app.call("git.refs", json!({ "project_id": pid }))).await;
+        if st.refs_ticket.try_get() != Some(ticket) {
+            return;
         }
-        .to_owned(),
-    );
-    if ui.review.get_untracked().is_none()
-        && card.as_ref().is_some_and(|c| c.delivery.is_none())
-        && crate::APP.get().is_some()
+        st.refs_loading.set(false);
+        match res {
+            Ok(Ok(val)) => {
+                if choose_smart_default
+                    || st.base_ref.get_untracked().is_empty()
+                    || st.compare_ref.get_untracked().is_empty()
+                {
+                    let dirty = val["dirty"].as_bool().unwrap_or(false);
+                    let current = val["current_branch"].as_str().unwrap_or("").to_owned();
+                    let default_br = val["default_branch"].as_str().unwrap_or("main").to_owned();
+                    if dirty {
+                        st.base_ref.set("HEAD".into());
+                        st.compare_ref.set("WORKDIR".into());
+                    } else if !current.is_empty() && current != default_br {
+                        st.base_ref.set(default_br);
+                        st.compare_ref.set(current);
+                    } else {
+                        st.base_ref.set("HEAD~1".into());
+                        st.compare_ref.set("HEAD".into());
+                    }
+                }
+                st.refs_data.set(val);
+                refresh_active_diff(ui, false);
+            }
+            Ok(Err(e)) => st.error.set(format!("{e:#}")),
+            Err(e) => st.error.set(e.to_string()),
+        }
+    });
+}
+
+pub fn refresh_active_diff(ui: Ui, force_remote_refresh: bool) {
+    let st = ui.review_state;
+    let Some(app) = crate::APP.get().cloned() else {
+        if let Some(p) = ui.review.get_untracked() {
+            st.compare_data.set(preview_to_compare_json(&p));
+        }
+        return;
+    };
+
+    let mode = st.mode.get_untracked();
+    let ticket = st.compare_ticket.get_untracked() + 1;
+    st.compare_ticket.set(ticket);
+    st.compare_loading.set(true);
+    st.error.set(String::new());
+
+    if mode == "github_pr"
+        && let Some(pr) = st.pr_target.get_untracked()
     {
-        refresh_diff(ui, target);
+        let repo = pr["repository"].as_str().unwrap_or("").to_owned();
+        let num = pr["number"].as_u64().unwrap_or(0);
+        ui.spawn(async move {
+            let res = blocking(move || {
+                app.call(
+                    "review.github_pr",
+                    json!({
+                        "repository": repo,
+                        "number": num,
+                        "refresh": force_remote_refresh,
+                    }),
+                )
+            })
+            .await;
+            if st.compare_ticket.try_get() != Some(ticket) {
+                return;
+            }
+            st.compare_loading.set(false);
+            match res {
+                Ok(Ok(val)) => {
+                    if let Some(b) = val["base_ref"].as_str() {
+                        st.base_ref.set(b.to_owned());
+                    }
+                    if let Some(h) = val["compare_ref"].as_str() {
+                        st.compare_ref.set(h.to_owned());
+                    }
+                    st.compare_data.set(val);
+                }
+                Ok(Err(e)) => st.error.set(format!("{e:#}")),
+                Err(e) => st.error.set(e.to_string()),
+            }
+        });
+        return;
     }
-    let customize = signal(false);
-    view().flex_1().min_h(px(0.0)).p_4().gap_3()
+
+    if mode == "card_local"
+        && let Some(card) = ui.current_card()
+    {
+        let cid = card.id.clone();
+        let target_branch = st.base_ref.get_untracked();
+        let three_dot = st.three_dot.get_untracked();
+        ui.spawn(async move {
+            let res = blocking(move || {
+                app.call(
+                    "git.compare",
+                    json!({
+                        "card_id": cid,
+                        "use_card_worktree": true,
+                        "target_branch": target_branch,
+                        "three_dot": three_dot,
+                    }),
+                )
+            })
+            .await;
+            if st.compare_ticket.try_get() != Some(ticket) {
+                return;
+            }
+            st.compare_loading.set(false);
+            match res {
+                Ok(Ok(val)) => {
+                    if let Ok(preview) =
+                        serde_json::from_value::<ReviewPreview>(val["review_preview"].clone())
+                    {
+                        ui.review.set(Some(preview));
+                    } else {
+                        ui.review.set(None);
+                    }
+                    st.compare_data.set(val);
+                }
+                Ok(Err(e)) => st.error.set(format!("{e:#}")),
+                Err(e) => st.error.set(e.to_string()),
+            }
+        });
+        return;
+    }
+
+    let Some(project) = ui.current_project() else {
+        st.compare_loading.set(false);
+        return;
+    };
+    let pid = project.id.clone();
+    let base = {
+        let b = st.base_ref.get_untracked();
+        if b.is_empty() { "HEAD".into() } else { b }
+    };
+    let compare = {
+        let c = st.compare_ref.get_untracked();
+        if c.is_empty() { "WORKDIR".into() } else { c }
+    };
+    let three_dot = st.three_dot.get_untracked();
+
+    ui.spawn(async move {
+        let res = blocking(move || {
+            app.call(
+                "git.compare",
+                json!({
+                    "project_id": pid,
+                    "base": base,
+                    "compare": compare,
+                    "three_dot": three_dot,
+                }),
+            )
+        })
+        .await;
+        if st.compare_ticket.try_get() != Some(ticket) {
+            return;
+        }
+        st.compare_loading.set(false);
+        match res {
+            Ok(Ok(val)) => {
+                ui.review.set(None);
+                st.compare_data.set(val);
+            }
+            Ok(Err(e)) => st.error.set(format!("{e:#}")),
+            Err(e) => st.error.set(e.to_string()),
+        }
+    });
+}
+
+pub(crate) fn select_git_pair(ui: Ui, base: impl Into<String>, compare: impl Into<String>) {
+    let st = ui.review_state;
+    batch(move || {
+        ui.card.set(String::new());
+        ui.review.set(None);
+        st.card_drawer_open.set(false);
+        st.pr_target.set(None);
+        st.mode.set("git".into());
+        st.base_ref.set(base.into());
+        st.compare_ref.set(compare.into());
+        st.selected_file.set(String::new());
+        st.active_line.set(None);
+    });
+    refresh_active_diff(ui, false);
+}
+
+pub fn screen(ui: Ui) -> impl IntoElement {
+    let st = ui.review_state;
+
+    if crate::APP.get().is_some() {
+        let has_card = !ui.card.get_untracked().is_empty();
+        if has_card && st.compare_data.with_untracked(|v| v["files"].is_null()) {
+            let cid = ui.card.get_untracked();
+            open_card(ui, &cid);
+        } else if !has_card && st.base_ref.get_untracked().is_empty() {
+            load_refs_and_compare(ui, true);
+        } else if st.refs_data.with_untracked(|v| v["branches"].is_null()) {
+            load_refs(ui);
+        }
+    } else if let Some(p) = ui.review.get_untracked()
+        && st.compare_data.with_untracked(|v| v["files"].is_null())
+    {
+        st.mode.set("card_local".into());
+        st.base_ref.set(p.target_branch.clone());
+        st.compare_ref.set("WORKDIR".into());
+        st.compare_data.set(preview_to_compare_json(&p));
+    }
+
+    view()
+        .flex_1()
+        .min_h(px(0.))
+        .min_w(px(0.))
+        .flex_row()
+        .bg(BACKGROUND)
+        .child(when(
+            move || st.sidebar_open.get() && !ui.narrow.get(),
+            move || sidebar::render_left_sidebar(ui),
+        ))
         .child(
             view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(heading("Review and deliver"))
-                .child(
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(compact_action("Return to Develop", Variant::Secondary, move |_| {
-                            if let Some(c) = ui.current_card() {
-                                let source = ui.location();
-                                dispatch_then(
-                                    ui,
-                                    "card.move",
-                                    json!({"card_id":c.id,"revision":c.revision,"stage":"develop"}),
-                                    move |_| {
-                                        if ui.location() == source {
-                                            ui.review.set(None);
-                                            ui.page.set("card".into());
-                                        }
-                                    },
-                                );
-                            }
-                        })),
-                ),
-        )
-        .child(crate::github::pr_panel(ui))
-        .child(dynamic(move || {
-            if let Some(c) = ui.current_card()
-                && let Some(d) = c.delivery.clone()
-                && ui.review.get().is_none()
-            {
-                let archive_card = c.clone();
-                let archived = c.archived_at.is_some();
-                let short = &d.commit[..d.commit.len().min(10)];
-                return panel()
-                    .border_1()
-                    .border_color(SUCCESS)
-                    .bg(SUCCESS_SURFACE)
-                    .gap_2()
-                    .child(
-                        label(format!(
-                            "Delivered · merged into {} ({short})",
-                            d.target_branch
-                        ))
-                        .text_color(SUCCESS)
-                        .font_weight(FontWeight::SEMIBOLD),
-                    )
-                    .child(muted(format!("Last accepted delivery: {} · {}", d.target_branch, d.commit)))
-                    .child(
-                        view()
-                            .flex_row()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                action("Archive Card", Variant::Primary, move |_| {
-                                    crate::card_actions::apply(
-                                        ui,
-                                        archive_card.clone(),
-                                        crate::card_actions::Action::Archive,
-                                    );
-                                })
-                                .disabled(move || ui.is_method_pending("card.archive") || archived),
-                            )
-                            .child(chrome_button(Icon::Refresh, "Refresh diff", move |_| {
-                                refresh_diff(ui, target)
-                            })),
-                    )
-                    .into_element();
-            }
-            view().into_element()
-        }))
-        .child(
-            panel()
-                .p_3()
-                .gap_2()
-                .child(
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(
-                            view()
-                                .flex_row()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_2()
-                                .child(crate::github::choice(
-                                    ui,
-                                    mode,
-                                    vec![("local", "Local merge"), ("github_pr", "GitHub PR")],
-                                ))
-                                .child(
-                                    view()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_1()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded(px(5.))
-                                        .bg(INSET)
-                                        .child(icon(Icon::Branch).w(px(12.)).h(px(12.)))
-                                        .child(muted(move || format!("→ {}", target.get()))),
-                                )
-                                .child(compact_action(
-                                    move || {
-                                        if customize.get() {
-                                            "Customize ▴"
-                                        } else {
-                                            "Customize ▾"
-                                        }
-                                    },
-                                    Variant::Quiet,
-                                    move |_| customize.update(|v| *v = !*v),
-                                )),
-                        )
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_1p5()
-                                .child(chrome_button(Icon::Refresh, "Refresh diff", move |_| {
-                                    refresh_diff(ui, target)
-                                }))
-                                .child(
-                                    action(
-                                        move || {
-                                            if mode.get() == "github_pr" {
-                                                "Publish PR"
-                                            } else {
-                                                "Merge"
-                                            }
-                                        },
-                                        Variant::Primary,
-                                        move |_| {
-                                            if let Some(p) = ui.review.get_untracked() {
-                                                let source = ui.location();
-                                                dispatch_then(
-                                                    ui,
-                                                    if mode.get_untracked() == "github_pr" {
-                                                        "github.pr.publish"
-                                                    } else {
-                                                        "review.merge"
-                                                    },
-                                                    json!({"card_id":p.card_id,"revision":p.revision,"token":p.token,"target_branch":p.target_branch,"message":message.get_untracked()}),
-                                                    move |_| {
-                                                        if ui.location() == source {
-                                                            ui.review.set(None);
-                                                        }
-                                                    },
-                                                );
-                                            }
-                                        },
-                                    )
-                                    .disabled(move || {
-                                        ui.is_method_pending("review.merge")
-                                            || ui.is_method_pending("github.pr.publish")
-                                            || ui.review.get().is_none_or(|p| {
-                                                !p.merge_allowed
-                                                    || p.target_branch != target.get()
-                                                    || ui.current_card().is_none_or(|c| {
-                                                        c.revision != p.revision
-                                                            || c.id != p.card_id
-                                                    })
-                                            })
-                                    }),
-                                ),
-                        ),
-                )
-                .child(when(
-                    move || customize.get(),
-                    move || {
-                        view()
-                            .flex_row()
-                            .flex_wrap()
-                            .gap_3()
-                            .pt_1()
-                            .child(
-                                view()
-                                    .w(px(200.))
-                                    .min_w(px(140.))
-                                    .gap_1()
-                                    .child(muted("Target branch"))
-                                    .child(field(target, "Existing local branch")),
-                            )
-                            .child(
-                                view()
-                                    .flex_1()
-                                    .min_w(px(220.))
-                                    .gap_1()
-                                    .child(muted("Commit message"))
-                                    .child(field(message, "Commit message")),
-                            )
-                    },
-                ))
+                .flex_1()
+                .min_w(px(0.))
+                .min_h(px(0.))
+                .child(sidebar::render_top_bar(ui))
+                .child(dynamic(move || sidebar::render_card_delivery_banner(ui)))
                 .child(dynamic(move || {
-                    if let Some(p) = ui.review.get()
-                        && let Some(reason) = p.reason
-                    {
-                        let card_id = p.card_id.clone();
-                        return view()
-                            .flex_row()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .child(notice(reason, Tone::Attention))
-                            .child(compact_action("Terminals ↗", Variant::Quiet, move |_| {
-                                crate::terminals::open_card(ui, &card_id);
-                            }))
-                            .into_element();
-                    }
-                    view().into_element()
-                }))
-                .child(dynamic(move || {
-                    ui.current_card()
-                        .and_then(|c| c.delivery)
-                        .map(|d| {
-                            muted(format!(
-                                "Last accepted delivery: {} · {}",
-                                d.target_branch, d.commit
-                            ))
+                    let err = st.error.get();
+                    if err.is_empty() {
+                        view().into_element()
+                    } else {
+                        view()
+                            .px_3()
+                            .pt_2()
+                            .child(notice(err, Tone::Danger))
                             .into_element()
-                        })
-                        .unwrap_or_else(|| view().into_element())
-                })),
+                    }
+                }))
+                .child(
+                    view()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .min_w(px(0.))
+                        .flex_row()
+                        .child(view().flex_1().min_w(px(0.)).min_h(px(0.)).child(dynamic(
+                            move || {
+                                let data = if crate::APP.get().is_none()
+                                    && let Some(p) = ui.review.get()
+                                {
+                                    preview_to_compare_json(&p)
+                                } else if crate::APP.get().is_none()
+                                    && !ui.card.get().is_empty()
+                                    && ui.current_card().is_some_and(|c| c.delivery.is_some())
+                                {
+                                    json!({ "files": [] })
+                                } else {
+                                    st.compare_data.get()
+                                };
+                                diff::render_diff_workbench(ui, &data, st.compare_loading.get())
+                            },
+                        )))
+                        .child(when(
+                            move || {
+                                st.card_drawer_open.get()
+                                    && !ui.card.get().is_empty()
+                                    && !ui.narrow.get()
+                            },
+                            move || {
+                                view()
+                                    .w(px(380.))
+                                    .flex_shrink_0()
+                                    .min_h(px(0.))
+                                    .border_l_1()
+                                    .border_color(BORDER)
+                                    .bg(SURFACE)
+                                    .child(crate::card::screen(ui))
+                            },
+                        )),
+                )
+                .child(submit::render_bottom_bar(ui)),
         )
-        .child(scroll().flex_1().child(dynamic(move || match ui.review.get() {
-            Some(p) => diff_panel(p).into_element(),
-            None => muted("Refresh diff to preview changes.").into_element(),
-        })))
 }
 
 #[cfg(test)]
@@ -560,5 +664,29 @@ mod tests {
         assert_eq!(parsed[1].path, "src/b.rs");
         assert_eq!(parsed[1].additions, 1);
         assert_eq!(parsed[1].deletions, 1);
+    }
+
+    #[test]
+    fn unified_hunk_parser_tracks_old_and_new_line_numbers() {
+        let patch = "@@ -10,3 +20,4 @@ fn demo()\n context\n-removed\n+added_one\n+added_two";
+        let lines = model::parse_unified_hunk_lines(patch);
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0].kind, '@');
+        assert_eq!(
+            (lines[1].kind, lines[1].old_line, lines[1].new_line),
+            (' ', Some(10), Some(20))
+        );
+        assert_eq!(
+            (lines[2].kind, lines[2].old_line, lines[2].new_line),
+            ('-', Some(11), None)
+        );
+        assert_eq!(
+            (lines[3].kind, lines[3].old_line, lines[3].new_line),
+            ('+', None, Some(21))
+        );
+        assert_eq!(
+            (lines[4].kind, lines[4].old_line, lines[4].new_line),
+            ('+', None, Some(22))
+        );
     }
 }

@@ -121,7 +121,7 @@ impl AppServer {
             _ => return None,
         })
     }
-    pub(super) fn github_read(
+    pub(crate) fn github_read(
         &self,
         path: &str,
         refresh: bool,

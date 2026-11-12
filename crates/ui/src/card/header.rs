@@ -7,11 +7,11 @@ fn close(ui: Ui) {
     ui.page.set("board".into());
 }
 fn review(ui: Ui) {
-    ui.review.set(None);
-    ui.review_request.update(|n| *n += 1);
-    ui.page.set("review".into());
-    ui.expanded.set(false);
-    ui.focused_card.set(false);
+    if let Some(c) = ui.current_card() {
+        crate::review::open_card(ui, &c.id);
+    } else {
+        crate::review::open_compare(ui);
+    }
 }
 fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
     let Some(card) = ui.current_card() else {
@@ -192,12 +192,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 .gap_1()
                 .child(when(
                     move || {
-                        ui.page.get() == "card"
-                            && (ui.narrow.get() || ui.card_standalone.get())
+                        ui.page.get() == "card" && (ui.narrow.get() || ui.card_standalone.get())
                     },
-                    move || {
-                        chrome_button(Icon::Back, "Back to Board", move |_| close(ui))
-                    },
+                    move || chrome_button(Icon::Back, "Back to Board", move |_| close(ui)),
                 ))
                 .child(
                     view()
@@ -231,9 +228,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 }))
                 .child(when(
                     move || ui.page.get() != "review",
-                    move || {
-                        chrome_button(Icon::Close, "Close Card details", move |_| close(ui))
-                    },
+                    move || chrome_button(Icon::Close, "Close Card details", move |_| close(ui)),
                 )),
         )
         .child(dynamic(move || {
@@ -427,11 +422,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         ),
                 );
             }
-            let attachment_count = s
-                .artifacts
-                .iter()
-                .filter(|a| a.card_id == c.id)
-                .count();
+            let attachment_count = s.artifacts.iter().filter(|a| a.card_id == c.id).count();
             if attachment_count > 0 {
                 row = row.child(
                     nsh_base::button()
@@ -456,11 +447,20 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 );
             }
             row = row.child(view().flex_1().min_w(px(0.)));
-            if ui.page.get() != "review"
-                && (c.stage == "review" || stage.is_some_and(|t| t.require_human_review))
-            {
+            let in_review_stage =
+                c.stage == "review" || stage.is_some_and(|t| t.require_human_review);
+            let can_review_diff = in_review_stage
+                || c.worktree.is_some()
+                || c.branch.as_ref().is_some_and(|b| !b.is_empty())
+                || c.is_github_pr()
+                || c.pull_request.is_some();
+            if ui.page.get() != "review" && can_review_diff {
                 row = row.child(compact_action(
-                    "Review",
+                    if in_review_stage || c.is_github_pr() {
+                        "Review"
+                    } else {
+                        "Diff"
+                    },
                     if c.stage == "review" {
                         Variant::Primary
                     } else {
@@ -468,7 +468,8 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     },
                     move |_| review(ui),
                 ));
-            } else if c.human_gate.is_some() {
+            }
+            if !in_review_stage && c.human_gate.is_some() {
                 row = row.child(
                     compact_action("Continue workflow", Variant::Secondary, move |_| {
                         if let Some(c) = ui.current_card() {

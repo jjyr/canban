@@ -23,6 +23,7 @@ pub struct Ui {
     pub owner: Owner,
     pub github: crate::github::Browser,
     pub workflows: crate::workflows::State,
+    pub review_state: crate::review::State,
     /// Optional host adapter for the reusable Board drop intent (Gallery uses local fixtures).
     pub board_move: Stored<Option<crate::board::DropHandler>>,
     pub new_draft: Signal<String>,
@@ -161,6 +162,7 @@ impl Ui {
             owner: Owner::current(),
             github: crate::github::Browser::new(),
             workflows: crate::workflows::State::new(),
+            review_state: crate::review::State::new(),
             board_move: stored(None),
             new_draft: signal(String::new()),
             draft_epoch: signal(0),
@@ -583,7 +585,10 @@ pub fn dispatch_complete(
                         } else {
                             "Host awake disabled"
                         }),
-                        "utilities.configure" | "comment.add" | "card.move" | "project.create"
+                        "utilities.configure"
+                        | "comment.add"
+                        | "card.move"
+                        | "project.create"
                         | "card.create" => ui.status.set("Saved".into()),
                         _ => ui.notify("Saved"),
                     }

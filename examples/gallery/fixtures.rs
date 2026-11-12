@@ -93,6 +93,129 @@ pub fn review() -> ReviewPreview {
     }
 }
 
+pub fn git_refs() -> serde_json::Value {
+    json!({
+        "current_branch": "feat/diff-workbench",
+        "default_branch": "main",
+        "head_sha": "c207c08a91fe001234567890abcdef0123456789",
+        "dirty": true,
+        "dirty_count": 3,
+        "staged_count": 1,
+        "branches": [
+            {
+                "name": "feat/diff-workbench",
+                "kind": "local",
+                "sha": "c207c08a91fe001234567890abcdef0123456789",
+                "short_sha": "c207c08",
+                "relative_time": "2 minutes ago",
+                "subject": "ui: add unified Diff & Review workbench",
+                "is_current": true,
+                "is_default": false,
+            },
+            {
+                "name": "main",
+                "kind": "local",
+                "sha": "1cfcce8111222333444555666777888999000aaa",
+                "short_sha": "1cfcce8",
+                "relative_time": "2 hours ago",
+                "subject": "ui: apply borderless SectionGroup layout",
+                "is_current": false,
+                "is_default": true,
+            },
+            {
+                "name": "canban/gallery/1",
+                "kind": "local",
+                "sha": "abcdef0123456789abcdef0123456789abcdef01",
+                "short_sha": "abcdef0",
+                "relative_time": "yesterday",
+                "subject": "feat(search): preserve user context",
+                "is_current": false,
+                "is_default": false,
+            },
+            {
+                "name": "origin/feat/remote-pr",
+                "kind": "remote",
+                "sha": "99887766554433221100ffeeddccbbaa99887766",
+                "short_sha": "9988776",
+                "relative_time": "3 days ago",
+                "subject": "fix(github): cache PR review threads",
+                "is_current": false,
+                "is_default": false,
+            }
+        ],
+        "tags": [
+            {
+                "name": "v0.3.0",
+                "short_sha": "d93a6a2",
+                "relative_time": "5 days ago",
+                "subject": "Canban v0.3.0",
+            }
+        ],
+        "commits": [
+            {
+                "sha": "c207c08a91fe001234567890abcdef0123456789",
+                "short_sha": "c207c08",
+                "relative_time": "2m ago",
+                "author": "JJy",
+                "subject": "ui: add unified Diff & Review workbench",
+            },
+            {
+                "sha": "1cfcce8111222333444555666777888999000aaa",
+                "short_sha": "1cfcce8",
+                "relative_time": "2h ago",
+                "author": "JJy",
+                "subject": "ui: apply borderless SectionGroup layout across Settings",
+            },
+            {
+                "sha": "d93a6a2999888777666555444333222111000fff",
+                "short_sha": "d93a6a2",
+                "relative_time": "1d ago",
+                "author": "JJy",
+                "subject": "feat(github): unify auth UX around gh CLI",
+            }
+        ]
+    })
+}
+
+pub fn git_compare() -> serde_json::Value {
+    json!({
+        "base_ref": "main",
+        "compare_ref": "feat/diff-workbench",
+        "base_sha": "1cfcce8111222333444555666777888999000aaa",
+        "compare_sha": "c207c08a91fe001234567890abcdef0123456789",
+        "three_dot": true,
+        "total_additions": 14,
+        "total_deletions": 3,
+        "truncated": false,
+        "cwd": "/example/project",
+        "commits": [
+            {
+                "sha": "c207c08a91fe001234567890abcdef0123456789",
+                "short_sha": "c207c08",
+                "relative_time": "2m ago",
+                "author": "JJy",
+                "subject": "ui: add unified Diff & Review workbench",
+            }
+        ],
+        "files": [
+            {
+                "filename": "crates/ui/src/rail.rs",
+                "status": "modified",
+                "additions": 9,
+                "deletions": 2,
+                "patch": "@@ -49,4 +49,11 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {\n     let rail = rail.child(icon_action(\n         Icon::Terminal,\n         \"Terminals\".into(),\n-        move || ui.page.get() == \"terminals\",\n-        || 0,\n+        move || ui.page.get() == \"terminals\",\n+        || 0,\n         move |_| ui.navigate(\"terminals\"),\n+    ))\n+    .child(icon_action(\n+        Icon::Compare,\n+        \"Diff & Review\".into(),\n+        move || ui.page.get() == \"review\",\n+        move || ui.review_state.pending_comments.with(Vec::len),\n+        move |_| crate::review::open_compare(ui),\n     ));"
+            },
+            {
+                "filename": "crates/workspaces/src/compare.rs",
+                "status": "added",
+                "additions": 5,
+                "deletions": 1,
+                "patch": "@@ -0,0 +1,5 @@\n+pub fn git_compare(project: &Project, base: &str, compare: &str) -> Result<Value> {\n+    // Supports arbitrary branch, commit, and Working tree comparison without a Card\n+    Ops::local().git_compare(project, base, compare, None, true)\n+}"
+            }
+        ]
+    })
+}
+
 pub const TERMINAL: &str = concat!(
     "\x1b[1;38;2;110;210;255m╭─ Canban Native Terminal · libghostty-vt ──────────────────────╮\x1b[0m\r\n",
     "\x1b[1;38;2;110;210;255m│\x1b[0m Styles : \x1b[1mBold\x1b[0m · \x1b[3mItalic\x1b[0m · \x1b[2mFaint\x1b[0m · \x1b[9mStrike\x1b[0m · \x1b[4:3;58;2;255;105;97mCurly diagnostic\x1b[0m     \x1b[1;38;2;110;210;255m│\x1b[0m\r\n",

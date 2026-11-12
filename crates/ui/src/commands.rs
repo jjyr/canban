@@ -118,6 +118,13 @@ pub const CATALOG: &[Command] = &[
         context: "Navigation",
     },
     Command {
+        id: "go-review",
+        title: "Go to Diff & Review",
+        key: "",
+        display: "Review",
+        context: "Navigation",
+    },
+    Command {
         id: "go-github",
         title: "Go to GitHub",
         key: "",
@@ -189,6 +196,7 @@ pub fn execute(ui: Ui, id: &str) {
         "go-board" => ui.navigate("board"),
         "go-overview" => ui.navigate("overview"),
         "go-terminals" => ui.navigate("terminals"),
+        "go-review" => crate::review::open_compare(ui),
         "go-github" => ui.navigate("github"),
         "go-workflows" => ui.navigate("workflows"),
         "go-drafts" => ui.navigate("drafts"),

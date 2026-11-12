@@ -615,8 +615,12 @@ impl AppServer {
                 self.note_read(method, &p)
             }
             "note.save" | "note.write" | "note.rename" => self.note_write(method, p),
+            "git.refs" => self.git_refs(p),
+            "git.compare" => self.git_compare(p),
             "review.preview" => self.review_preview(p),
             "review.merge" => self.review_merge(p),
+            "review.github_pr" => self.review_github_pr(p),
+            "review.send_agent" => self.review_send_agent(p),
             "agent.open" => self.open_agent(p),
             "agent.bind" => self.bind_session(p),
             // Old in-flight hook commands can finish, but never drive lifecycle.

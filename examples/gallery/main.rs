@@ -45,7 +45,7 @@ fn controls() -> impl IntoElement {
                     panel()
                         .child(label("Shared Lucide icons · muted / selected / attention"))
                         .child(view().flex_row().flex_wrap().gap_2().children(
-                            [Icon::Search, Icon::Terminal, Icon::Board, Icon::Overview,
+                            [Icon::Search, Icon::Terminal, Icon::Compare, Icon::Board, Icon::Overview,
                              Icon::Archive, Icon::Settings, Icon::Projects, Icon::Agent, Icon::GitHub,
                              Icon::ChevronDown, Icon::Plus, Icon::Check]
                             .into_iter().enumerate().map(|(i, kind)|
@@ -173,6 +173,12 @@ pub fn Gallery() -> impl IntoElement {
     ui.card.set("card-1".into());
     ui.page.set("card".into());
     ui.profiles.set(canban_types::Config::default().profiles);
+    ui.review_state.refs_data.set(fixtures::git_refs());
+    ui.review_state.compare_data.set(fixtures::git_compare());
+    ui.review_state.base_ref.set("main".into());
+    ui.review_state
+        .compare_ref
+        .set("feat/diff-workbench".into());
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
         Ok("board-drafts" | "board-drafts-empty")
@@ -649,10 +655,26 @@ pub fn Gallery() -> impl IntoElement {
                     scene.set("workspace".into()); ui.snapshot.set(fixtures::conversation());
                     ui.card.set("card-1".into()); ui.page.set("card".into());
                 }))
+                .child(action("Git Compare", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::workspace());
+                    ui.select_project("gallery-project".into());
+                    ui.card.set(String::new());
+                    ui.review.set(None);
+                    ui.review_state.mode.set("git".into());
+                    ui.review_state.refs_data.set(fixtures::git_refs());
+                    ui.review_state.compare_data.set(fixtures::git_compare());
+                    ui.review_state.base_ref.set("main".into());
+                    ui.review_state.compare_ref.set("feat/diff-workbench".into());
+                    ui.page.set("review".into());
+                }))
                 .child(action("Review delivery", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
                     ui.snapshot.set(fixtures::workspace());
                     ui.card.set("card-1".into());
+                    ui.review_state.mode.set("card_local".into());
+                    ui.review_state.base_ref.set("main".into());
+                    ui.review_state.compare_ref.set("canban/gallery/1".into());
                     ui.review.set(Some(fixtures::review()));
                     ui.page.set("review".into());
                 }))
@@ -667,6 +689,7 @@ pub fn Gallery() -> impl IntoElement {
                     });
                     ui.snapshot.set(snapshot);
                     ui.card.set("card-1".into());
+                    ui.review_state.mode.set("card_local".into());
                     ui.review.set(None);
                     ui.page.set("review".into());
                 }))

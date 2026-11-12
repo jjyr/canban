@@ -94,7 +94,7 @@ pub fn go(ui: Ui, forward: bool) {
             }
         }
     }
-    if matches!(target.page.as_str(), "card" | "review")
+    if target.page == "card"
         && !ui
             .snapshot
             .with_untracked(|s| s.cards.iter().any(|c| c.id == target.card))
@@ -103,6 +103,14 @@ pub fn go(ui: Ui, forward: bool) {
         target.card.clear();
         target.request.clear();
         target.standalone = false;
+    } else if target.page == "review"
+        && !target.card.is_empty()
+        && !ui
+            .snapshot
+            .with_untracked(|s| s.cards.iter().any(|c| c.id == target.card))
+    {
+        target.card.clear();
+        target.request.clear();
     }
     if target.page == "new-card" && !ui.drafts.with(|all| all.contains_key(&target.new_draft)) {
         target.page = "board".into();
