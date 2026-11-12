@@ -88,11 +88,12 @@ pub fn source(
             // Recompute against the complete inventory as the query grows and
             // refresh the explicit replacement range through the current caret.
             if trigger == '@' { editor.completions(request.id,items,true); return; }
-            let Some(source) = remote_source(&snapshot,&target) else {
+            let gh = ui.github.gh_status.get_untracked();
+            let Some((account, source)) = remote_source(&snapshot, &gh, &target) else {
                 remote_error.set(String::new());
                 editor.completions(request.id,items,true); return;
             };
-            let cache_key = format!("{:?}:{target}:{}:{query}",snapshot.github.login,source.generation);
+            let cache_key = format!("{account}:{target}:{}:{query}",source.generation);
             if let Some(rows) = cache.with(|c| c.get(&cache_key).cloned()) {
                 append_remote(&mut items,rows,&source.repository,range);
                 rank_candidates(&mut items, remote_first);
@@ -102,7 +103,6 @@ pub fn source(
             editor.completions(request.id,items,true);
             let request = request.clone();
             let original = text.get_untracked();
-            let account = snapshot.github.login.clone();
             let source_generation = source.generation.clone();
             let source_project = target.clone();
             set_timeout(std::time::Duration::from_millis(250),move || {
@@ -111,9 +111,18 @@ pub fn source(
                 ui.spawn(async move {
                     let repository = source.repository.clone();
                     let result = blocking(move || app.call("github.reference.search",json!({"project_id":target,"query":query,"source_generation":source.generation}))).await;
-                    if epoch.try_get() != Some(generation) || text.try_get().as_ref() != Some(&original)
-                        || !ui.snapshot.with_untracked(|s| s.github.state == "connected" && s.github.login == account
-                            && s.projects.iter().any(|p|p.id == source_project && p.github.as_ref().is_some_and(|g|g.generation == source_generation))) { return; }
+                    if epoch.try_get() != Some(generation)
+                        || text.try_get().as_ref() != Some(&original)
+                        || crate::github::active_login_untracked(ui).as_deref() != Some(account.as_str())
+                        || !ui.snapshot.with_untracked(|s| {
+                            s.projects.iter().any(|p| {
+                                p.id == source_project
+                                    && p.github.as_ref().is_some_and(|g| g.generation == source_generation)
+                            })
+                        })
+                    {
+                        return;
+                    }
                     match result {
                         Ok(Ok(rows)) => {
                             remote_error.try_set(String::new());
@@ -134,16 +143,16 @@ pub fn source(
 }
 fn remote_source(
     snapshot: &canban_types::Snapshot,
+    gh: &Value,
     project: &str,
-) -> Option<canban_types::GitHubSource> {
-    if snapshot.github.state != "connected" {
-        return None;
-    }
-    snapshot
+) -> Option<(String, canban_types::GitHubSource)> {
+    let login = crate::github::active_login_from(snapshot, gh)?;
+    let source = snapshot
         .projects
         .iter()
         .find(|p| p.id == project)
-        .and_then(|p| p.github.clone())
+        .and_then(|p| p.github.clone())?;
+    Some((login, source))
 }
 fn local_candidates(
     snapshot: &canban_types::Snapshot,
@@ -280,11 +289,16 @@ mod tests {
     #[test]
     fn disconnected_account_never_supplies_a_remote_completion_source() {
         let mut s = snapshot();
-        assert!(remote_source(&s, "p").is_none());
+        let disconnected_gh = serde_json::json!({"state": "signed_out"});
+        let connected_gh = serde_json::json!({"state": "connected", "login": "jjyr"});
+        assert!(remote_source(&s, &disconnected_gh, "p").is_none());
+        assert!(remote_source(&s, &connected_gh, "p").is_some());
         s.github.state = "connected".into();
-        assert!(remote_source(&s, "p").is_some());
+        s.github.login = Some("app-user".into());
+        assert!(remote_source(&s, &disconnected_gh, "p").is_some());
         s.github.state = "disconnected".into();
-        assert!(remote_source(&s, "p").is_none());
+        s.github.login = None;
+        assert!(remote_source(&s, &disconnected_gh, "p").is_none());
     }
     #[test]
     fn triggers_respect_markdown_and_utf16() {

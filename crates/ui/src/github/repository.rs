@@ -1,5 +1,6 @@
 use super::*;
 use serde::{Deserialize, Serialize};
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct Rules {
     intake: String,
@@ -10,6 +11,7 @@ struct Rules {
     paused: bool,
     delivery: String,
 }
+
 impl Default for Rules {
     fn default() -> Self {
         Self {
@@ -23,14 +25,23 @@ impl Default for Rules {
         }
     }
 }
+
 fn rules(d: Signal<Draft>) -> Rules {
     serde_json::from_str(&d.get().body).unwrap_or_default()
 }
-fn edit(d: Signal<Draft>, f: impl FnOnce(&mut Rules)) {
-    let mut r = rules(d);
-    f(&mut r);
-    d.update(|d| d.body = serde_json::to_string(&r).unwrap());
+
+fn rules_untracked(d: Signal<Draft>) -> Rules {
+    serde_json::from_str(&d.get_untracked().body).unwrap_or_default()
 }
+
+fn edit(d: Signal<Draft>, f: impl FnOnce(&mut Rules)) {
+    let mut r = rules_untracked(d);
+    f(&mut r);
+    if serde_json::to_string(&r).ok().as_deref() != Some(d.get_untracked().body.as_str()) {
+        d.update(|d| d.body = serde_json::to_string(&r).unwrap());
+    }
+}
+
 fn enum_name<T: Serialize>(v: &T) -> String {
     serde_json::to_value(v)
         .unwrap()
@@ -38,6 +49,7 @@ fn enum_name<T: Serialize>(v: &T) -> String {
         .unwrap_or("")
         .into()
 }
+
 pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
     let source = id.clone();
     let saved = computed(move || {
@@ -85,20 +97,32 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
         let old = baseline.get_untracked();
         let mut current =
             serde_json::from_str::<Rules>(&d.get_untracked().body).unwrap_or_default();
-        macro_rules! merge{($($field:ident),*)=>{$(if current.$field==old.$field{current.$field=remote.$field.clone();})*}}
+        macro_rules! merge {
+            ($($field:ident),*) => {
+                $(if current.$field == old.$field {
+                    current.$field = remote.$field.clone();
+                })*
+            };
+        }
         merge!(intake, pr_intake, authors, labels, drafts, paused, delivery);
         d.update(|d| {
-            if d.title == d.base_title {
-                d.title = repository.clone();
+            let next_title = if d.title == d.base_title {
+                repository.clone()
+            } else {
+                d.title.clone()
+            };
+            let next_body = serde_json::to_string(&current).unwrap();
+            if d.title != next_title || d.base_title != repository || d.body != next_body {
+                d.title = next_title;
+                d.base_title = repository;
+                d.body = next_body;
             }
-            d.base_title = repository;
-            d.body = serde_json::to_string(&current).unwrap();
         });
         baseline.set(remote);
     });
-    let intake = signal(rules(d).intake);
-    let pr = signal(rules(d).pr_intake);
-    let delivery = signal(rules(d).delivery);
+    let intake = signal(rules_untracked(d).intake);
+    let pr = signal(rules_untracked(d).pr_intake);
+    let delivery = signal(rules_untracked(d).delivery);
     effect(move || {
         let r = rules(d);
         if intake.get_untracked() != r.intake {
@@ -123,8 +147,8 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
         let v = delivery.get();
         untracked(|| edit(d, |r| r.delivery = v));
     });
-    let drafts_flag = signal(rules(d).drafts);
-    let paused_flag = signal(rules(d).paused);
+    let drafts_flag = signal(rules_untracked(d).drafts);
+    let paused_flag = signal(rules_untracked(d).paused);
     effect(move || {
         let r = rules(d);
         if drafts_flag.get_untracked() != r.drafts {
@@ -137,37 +161,208 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
     let save = id.clone();
     let sync = id.clone();
     let disconnect = id.clone();
-    view().max_w(px(760.)).gap_3().key(format!("github-repository:{id}"))
-        .child(label(format!("Project: {name}")))
-        .child(bound_field(move||d.get().title,move|v|d.update(|d|d.title=v.into()),"owner/repository").key("github-repository"))
-        .child(label("Automatically add Open Issues"))
-        .child(choice(ui,intake,vec![("off","Off"),("all","All authors"),("collaborators","Repository collaborators")]))
-        .child(label("Automatically add Open pull requests"))
-        .child(choice(ui,pr,vec![("off","Off"),("all","All authors"),("collaborators","Repository collaborators"),("review_requested","Review requested from me"),("assigned","Assigned to me"),("authored","Created by me")]))
-        .child(bound_field(move||rules(d).authors,move|v|edit(d,|r|r.authors=v.into()),"Authors: comma-separated logins, or empty for everyone").key("github-rule-authors"))
-        .child(bound_field(move||rules(d).labels,move|v|edit(d,|r|r.labels=v.into()),"Labels: match any of these, or empty for all").key("github-rule-labels"))
-        .child(checkbox("Include Draft PRs".into(), drafts_flag, move |enabled| {
-            edit(d, |r| r.drafts = *enabled);
-        }))
-        .child(checkbox("Pause synchronization".into(), paused_flag, move |enabled| {
-            edit(d, |r| r.paused = *enabled);
-        }))
-        .child(label("Default code delivery")).child(choice(ui,delivery,vec![("local","Local merge"),("github_pr","GitHub PR")]))
-        .child(muted("New matches enter Backlog without starting an Agent. Changing rules keeps existing Cards."))
+    let status_id = id.clone();
+
+    view()
+        .max_w(px(780.))
+        .gap_6()
+        .pb_6()
+        .key(format!("github-repository:{id}"))
+        .child(
+            section_group(format!("Repository Binding · {name}"))
+                .description(
+                    "Connect this Project to a GitHub repository so synced Cards and PR deliveries map directly.",
+                )
+                .trailing(dynamic(move || {
+                    let g = ui.snapshot.with(|s| {
+                        s.projects
+                            .iter()
+                            .find(|p| p.id == status_id)
+                            .and_then(|p| p.github.clone())
+                    });
+                    if let Some(g) = g {
+                        status(
+                            if g.paused {
+                                format!("{} · Paused", g.repository)
+                            } else {
+                                format!("Connected · {}", g.repository)
+                            },
+                            if g.paused { Tone::Neutral } else { Tone::Success },
+                        )
+                        .into_element()
+                    } else {
+                        status("Not linked", Tone::Neutral).into_element()
+                    }
+                }))
+                .child(
+                    view()
+                        .gap_2()
+                        .child(
+                            bound_field(
+                                move || d.get().title,
+                                move |v| d.update(|d| d.title = v.into()),
+                                "owner/repository",
+                            )
+                            .key("github-repository"),
+                        )
+                        .child(checkbox(
+                            "Pause synchronization".into(),
+                            paused_flag,
+                            move |enabled| {
+                                edit(d, |r| r.paused = *enabled);
+                            },
+                        )),
+                ),
+        )
+        .child(
+            section_group("Automatic Intake")
+                .description(
+                    "New matches enter Backlog without starting an Agent. Updating rules preserves existing Cards.",
+                )
+                .child(
+                    view()
+                        .gap_3()
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_4()
+                                .child(
+                                    view()
+                                        .gap_1()
+                                        .child(muted("Open Issues"))
+                                        .child(choice(
+                                            ui,
+                                            intake,
+                                            vec![
+                                                ("off", "Off"),
+                                                ("all", "All authors"),
+                                                ("collaborators", "Repository collaborators"),
+                                            ],
+                                        )),
+                                )
+                                .child(
+                                    view()
+                                        .gap_1()
+                                        .child(muted("Open pull requests"))
+                                        .child(choice(
+                                            ui,
+                                            pr,
+                                            vec![
+                                                ("off", "Off"),
+                                                ("all", "All authors"),
+                                                ("collaborators", "Repository collaborators"),
+                                                ("review_requested", "Review requested from me"),
+                                                ("assigned", "Assigned to me"),
+                                                ("authored", "Created by me"),
+                                            ],
+                                        )),
+                                ),
+                        )
+                        .child(
+                            bound_field(
+                                move || rules(d).authors,
+                                move |v| edit(d, |r| r.authors = v.into()),
+                                "Authors filter: comma-separated logins, or empty for everyone",
+                            )
+                            .key("github-rule-authors"),
+                        )
+                        .child(
+                            bound_field(
+                                move || rules(d).labels,
+                                move |v| edit(d, |r| r.labels = v.into()),
+                                "Labels filter: match any of these, or empty for all",
+                            )
+                            .key("github-rule-labels"),
+                        )
+                        .child(checkbox(
+                            "Include Draft PRs".into(),
+                            drafts_flag,
+                            move |enabled| {
+                                edit(d, |r| r.drafts = *enabled);
+                            },
+                        )),
+                ),
+        )
+        .child(
+            section_group("Code Delivery")
+                .description("Choose how completed Card branches are delivered by default.")
+                .child(choice(
+                    ui,
+                    delivery,
+                    vec![("local", "Local merge"), ("github_pr", "GitHub PR")],
+                )),
+        )
         .child(
             view()
                 .flex_row()
+                .flex_wrap()
                 .items_center()
                 .gap_2()
                 .child(
-                    action("Save",Variant::Primary,move |_|{let r=rules(d);let split=|s:String|s.split(',').map(str::trim).filter(|s|!s.is_empty()).map(str::to_owned).collect::<Vec<_>>();dispatch(ui,"project.github",json!({"project_id":save,"repository":d.get_untracked().title.trim(),"intake":r.intake,"pr_intake":r.pr_intake,"authors":split(r.authors),"labels":split(r.labels),"include_drafts":r.drafts,"paused":r.paused,"delivery_mode":r.delivery}));})
-                        .disabled(move||ui.is_method_pending("project.github")||d.get().title.trim().is_empty()),
+                    action("Save repository settings", Variant::Primary, move |_| {
+                        let r = rules_untracked(d);
+                        let split = |s: String| {
+                            s.split(',')
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned)
+                                .collect::<Vec<_>>()
+                        };
+                        dispatch(
+                            ui,
+                            "project.github",
+                            json!({
+                                "project_id": save,
+                                "repository": d.get_untracked().title.trim(),
+                                "intake": r.intake,
+                                "pr_intake": r.pr_intake,
+                                "authors": split(r.authors),
+                                "labels": split(r.labels),
+                                "include_drafts": r.drafts,
+                                "paused": r.paused,
+                                "delivery_mode": r.delivery,
+                            }),
+                        );
+                    })
+                    .disabled(move || {
+                        ui.is_method_pending("project.github") || d.get().title.trim().is_empty()
+                    }),
                 )
-                .child(chrome_button(Icon::Refresh,"Sync now",move |_|dispatch(ui,"github.sync",json!({"project_id":sync}))))
-                .child(compact_action("Disconnect",Variant::Quiet,move |_|dispatch(ui,"github.source.disconnect",json!({"project_id":disconnect})))),
+                .child(chrome_button(Icon::Refresh, "Sync now", move |_| {
+                    dispatch(ui, "github.sync", json!({"project_id": sync}))
+                }))
+                .child(compact_action("Disconnect", Variant::Quiet, move |_| {
+                    dispatch(
+                        ui,
+                        "github.source.disconnect",
+                        json!({"project_id": disconnect}),
+                    )
+                })),
         )
-        .child(dynamic(move||{let g=ui.snapshot.with(|s|s.projects.iter().find(|p|p.id==id).and_then(|p|p.github.clone()));let mut area=view().gap_1();if let Some(g)=g{area=area.child(muted(g.synced_at.map(|t|format!("Last sync: {}s ago",now().saturating_sub(t)/1000)).unwrap_or_else(||"Not synced yet".into())));if let Some(e)=g.error{area=area.child(notice(e,Tone::Attention));}}area.into_element()}))
+        .child(dynamic(move || {
+            let g = ui.snapshot.with(|s| {
+                s.projects
+                    .iter()
+                    .find(|p| p.id == id)
+                    .and_then(|p| p.github.clone())
+            });
+            let mut area = view().gap_1();
+            if let Some(g) = g {
+                area = area.child(muted(
+                    g.synced_at
+                        .map(|t| format!("Last sync: {}s ago", now().saturating_sub(t) / 1000))
+                        .unwrap_or_else(|| "Not synced yet".into()),
+                ));
+                if let Some(e) = g.error {
+                    area = area.child(notice(e, Tone::Attention));
+                }
+            }
+            area.into_element()
+        }))
 }
+
 pub fn screen(ui: Ui) -> impl IntoElement {
     view()
         .flex_1()

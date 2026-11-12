@@ -28,6 +28,8 @@ pub mod directory_field;
 pub use directory_field::{directory_field, directory_input};
 pub mod settings;
 pub use settings::{settings_field, settings_section};
+pub mod section_group;
+pub use section_group::{SectionGroup, collapsible_section_group, section_group};
 pub mod chrome;
 pub use chrome::{chrome_action, chrome_button, chrome_button_disabled, utility_button};
 

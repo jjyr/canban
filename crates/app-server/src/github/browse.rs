@@ -68,12 +68,56 @@ impl AppServer {
             "github.browse" => self.github_browse(p),
             "github.detail" => self.github_detail(p),
             "github.item.add" => self.github_item_add(p),
-            "github.notification.read" | "github.notification.done" => self.github_notification_action(method,p),
-            "github.reference.add" | "github.reference.remove" => self.github_reference(method,p),
-            "github.cli.status" => self.github_cli.identify().map(|u|json!({"state":"connected","login":u.login,"account_matches":self.github.status().login.is_none_or(|login|login.eq_ignore_ascii_case(&u.login))})),
-            "github.cache.status" => Ok(json!({"bytes":self.github.cache.bytes()+self.github_cli.cache.bytes()})),
-            "github.cache.clear" => (|| { self.github.cache.clear()?;self.github_cli.clear()?;let legacy=self.home.join("cache/github/legacy");if legacy.exists(){std::fs::remove_dir_all(legacy)?;}self.emit("github",None);Ok(json!({"cleared":true})) })(),
-            "github.remote.comment" | "github.remote.review" | "github.remote.reply" => self.github_remote_action(method,p),
+            "github.notification.read" | "github.notification.done" => {
+                self.github_notification_action(method, p)
+            }
+            "github.reference.add" | "github.reference.remove" => self.github_reference(method, p),
+            "github.cli.status" => match self.github_cli.identify() {
+                Ok(u) => Ok(json!({
+                    "state": "connected",
+                    "installed": true,
+                    "login": u.login,
+                    "account_matches": self.github.status().login.is_none_or(|login| login.eq_ignore_ascii_case(&u.login))
+                })),
+                Err(e) => {
+                    let installed = canban_github::cli::Service::installed();
+                    Ok(json!({
+                        "state": if installed { "signed_out" } else { "missing" },
+                        "installed": installed,
+                        "message": format!("{e:#}"),
+                    }))
+                }
+            },
+            "github.cli.login" => (|| {
+                ensure!(
+                    canban_github::cli::Service::installed(),
+                    "GitHub CLI (`gh`) is not installed. Install it first (e.g. `brew install gh`), then sign in."
+                );
+                let gh = canban_github::cli::Service::binary_path()
+                    .to_string_lossy()
+                    .into_owned();
+                self.create_terminal(json!({
+                    "machine": "local",
+                    "setup_argv": [gh, "auth", "login", "--hostname", "github.com"],
+                    "request_key": p["request_key"],
+                }))
+            })(),
+            "github.cache.status" => {
+                Ok(json!({"bytes":self.github.cache.bytes()+self.github_cli.cache.bytes()}))
+            }
+            "github.cache.clear" => (|| {
+                self.github.cache.clear()?;
+                self.github_cli.clear()?;
+                let legacy = self.home.join("cache/github/legacy");
+                if legacy.exists() {
+                    std::fs::remove_dir_all(legacy)?;
+                }
+                self.emit("github", None);
+                Ok(json!({"cleared":true}))
+            })(),
+            "github.remote.comment" | "github.remote.review" | "github.remote.reply" => {
+                self.github_remote_action(method, p)
+            }
             _ => return None,
         })
     }
@@ -174,9 +218,10 @@ impl AppServer {
         };
         let items:Vec<_>=values.into_iter().flatten().map(|v| {
             let r=item_reference(v);
-            let cards:Vec<_>=snapshot.cards.iter().filter(|c|r.as_ref().is_some_and(|r|{
-                c.github_issue().is_some_and(|s|s.repository==r.repository && Some(s.number)==r.number && c.source_kind()==r.kind)
-                || c.pull_request.as_ref().is_some_and(|pr|r.kind=="pr" && pr.repository==r.repository && Some(pr.number)==r.number)
+            let cards:Vec<_>=snapshot.cards.iter().filter(|c|c.removed_at.is_none() && r.as_ref().is_some_and(|r|{
+                c.github_issue().is_some_and(|s|s.repository.eq_ignore_ascii_case(&r.repository) && Some(s.number)==r.number && c.source_kind()==r.kind)
+                || c.pull_request.as_ref().is_some_and(|pr|r.kind=="pr" && pr.repository.eq_ignore_ascii_case(&r.repository) && Some(pr.number)==r.number)
+                || c.github_links.iter().any(|l|l.repository.eq_ignore_ascii_case(&r.repository) && l.kind==r.kind && l.number==r.number && l.sha==r.sha)
             })).map(|c|json!({"id":c.id,"number":c.number,"project_id":c.project_id,"archived":c.archived_at.is_some()})).collect();
             json!({"item":v,"reference":r,"cards":cards})
         }).collect();
@@ -413,10 +458,9 @@ impl AppServer {
                 Ok(())
             })?;
             for number in pr_numbers {
-                if let Some(pr_value) = client.cached::<Value>(&format!(
-                    "/repos/{}/pulls/{number}",
-                    source.repository
-                )) && pr_value["merged"] == true
+                if let Some(pr_value) =
+                    client.cached::<Value>(&format!("/repos/{}/pulls/{number}", source.repository))
+                    && pr_value["merged"] == true
                 {
                     let _ = self.reconcile_remote_pr_merge(&source.repository, number, &pr_value);
                 }

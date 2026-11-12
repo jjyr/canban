@@ -659,6 +659,10 @@ pub fn conversation() -> canban_types::Snapshot {
 pub fn github_browser(ui: canban_ui::presenter::Ui, pr: bool) {
     use canban_types::*;
     let mut snapshot = workspace();
+    snapshot.github = GitHubAccount {
+        state: "disconnected".into(),
+        ..Default::default()
+    };
     snapshot.projects[0].github = Some(GitHubSource {
         repository: "fixture/repo".into(),
         repository_id: 1,
@@ -682,14 +686,25 @@ pub fn github_browser(ui: canban_ui::presenter::Ui, pr: bool) {
         },
     };
     snapshot.cards[0].title = "Review the native diff".into();
-    let r = GitHubReference {
+    let pr_ref = GitHubReference {
         repository: "fixture/repo".into(),
         kind: "pr".into(),
         number: Some(2),
         sha: None,
         url: "https://github.com/fixture/repo/pull/2".into(),
     };
+    let issue_ref = GitHubReference {
+        repository: "fixture/repo".into(),
+        kind: "issue".into(),
+        number: Some(18),
+        sha: None,
+        url: "https://github.com/fixture/repo/issues/18".into(),
+    };
     ui.snapshot.set(snapshot);
+    ui.github
+        .gh_status
+        .set(json!({"state":"connected","login":"jjy","account_matches":true}));
+    ui.github.cache_bytes.set(248_832);
     ui.github
         .tab
         .set(if pr { "prs" } else { "notifications" }.into());
@@ -699,12 +714,92 @@ pub fn github_browser(ui: canban_ui::presenter::Ui, pr: bool) {
     ui.github
         .relation
         .set(if pr { "review_requested" } else { "all" }.into());
-    ui.github.list.set(json!({"items":[{"reference":r,"item":{"id":"9","unread":!pr,"title":"Review the native diff","state":"open","html_url":"https://github.com/fixture/repo/pull/2","user":{"login":"fixture"},"updated_at":"2026-11-10T00:00:00Z","labels":[{"name":"bug"}]}}],"page":1,"has_next":true,"validated_at":now()}));
+    ui.github.list.set(json!({
+        "items": [
+            {
+                "reference": pr_ref,
+                "item": {
+                    "id": "901",
+                    "unread": !pr,
+                    "reason": "review_requested",
+                    "title": "Review the native diff",
+                    "subject": {"title": "Review the native diff", "type": "PullRequest"},
+                    "repository": {"full_name": "fixture/repo"},
+                    "state": "open",
+                    "html_url": "https://github.com/fixture/repo/pull/2",
+                    "user": {"login": "octocat"},
+                    "updated_at": "2026-11-12T08:15:00Z",
+                    "labels": [{"name": "ui"}, {"name": "review"}],
+                    "body": "### Summary\n\nUpgrades the **GitHub detail reader** and structured inline diff viewer.\n\n- Clickable `#1` Card references\n- Direct jump to Board Card"
+                }
+            },
+            {
+                "reference": issue_ref,
+                "item": {
+                    "id": "902",
+                    "unread": !pr,
+                    "reason": "mention",
+                    "title": "Borderless section group for Overview & Settings",
+                    "subject": {"title": "Borderless section group for Overview & Settings", "type": "Issue"},
+                    "repository": {"full_name": "fixture/repo"},
+                    "state": "open",
+                    "html_url": "https://github.com/fixture/repo/issues/18",
+                    "user": {"login": "designer"},
+                    "updated_at": "2026-11-11T19:30:00Z",
+                    "labels": [{"name": "design"}],
+                    "body": "Use a clean **title + subtle bottom divider** without outer card borders so hierarchy stays crisp across Overview, GitHub, and Settings."
+                }
+            },
+            {
+                "reference": serde_json::Value::Null,
+                "item": {
+                    "id": "903",
+                    "unread": false,
+                    "reason": "subscribed",
+                    "subject": {"title": "v0.9.0-rc1 desktop release published", "type": "Release"},
+                    "repository": {"full_name": "fixture/repo"},
+                    "updated_at": "2026-11-10T10:00:00Z"
+                }
+            }
+        ],
+        "page": 1,
+        "has_next": true,
+        "validated_at": now()
+    }));
     if pr {
-        ui.github.reference.set(Some(r));
+        ui.github.reference.set(Some(pr_ref));
         ui.github.section.set("files".into());
-        ui.github.overview.set(json!({"number":2,"title":"Review the native diff","state":"open","head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","ref":"feature/cache"},"base":{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","ref":"main"}}));
-        ui.github.detail.set(json!({"data":[{"filename":"src/lib.rs","status":"modified","additions":1,"deletions":1,"patch":"@@ -1 +1 @@\n-old_value\n+new_value"}],"page":1,"has_next":false}));
+        ui.github.overview.set(json!({
+            "number": 2,
+            "title": "Review the native diff",
+            "state": "open",
+            "user": {"login": "octocat"},
+            "updated_at": "2026-11-12T08:15:00Z",
+            "labels": [{"name": "ui"}, {"name": "review"}],
+            "body": "### Summary\n\nUpgrades the **GitHub detail reader** and structured inline diff viewer.",
+            "head": {"sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ref": "feature/github-ux"},
+            "base": {"sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "ref": "main"}
+        }));
+        ui.github.detail.set(json!({
+            "data": [
+                {
+                    "filename": "crates/ui-kit/src/section_group.rs",
+                    "status": "added",
+                    "additions": 4,
+                    "deletions": 0,
+                    "patch": "@@ -0,0 +1,4 @@\n+pub fn section_group(title: impl IntoText) -> SectionGroup {\n+    SectionGroup::new(title)\n+}\n+// Borderless section header + divider"
+                },
+                {
+                    "filename": "crates/ui/src/github/workspace.rs",
+                    "status": "modified",
+                    "additions": 2,
+                    "deletions": 2,
+                    "patch": "@@ -231,3 +231,3 @@\n-action(\"Refresh\", Variant::Secondary, move |_| {})\n+chrome_button_disabled(Icon::Refresh, \"Refresh GitHub\", ...)\n context_line_stays_aligned();"
+                }
+            ],
+            "page": 1,
+            "has_next": false
+        }));
     } else {
         ui.github.reference.set(None);
     }

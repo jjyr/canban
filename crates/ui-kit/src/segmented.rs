@@ -8,7 +8,14 @@ pub fn segment(
     selected: impl Fn() -> bool + 'static,
     press: impl Fn(&()) + 'static,
 ) -> nsh_base::ButtonElement {
-    segment_inner(title.into(), mark, CONTROL_HEIGHT, BODY_SIZE, selected, press)
+    segment_inner(
+        title.into(),
+        mark,
+        CONTROL_HEIGHT,
+        BODY_SIZE,
+        selected,
+        press,
+    )
 }
 
 pub fn compact_segment(

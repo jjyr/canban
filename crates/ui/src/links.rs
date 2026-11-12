@@ -142,18 +142,19 @@ fn local_preview(ui: Ui, url: &str, title: &str) -> Preview {
         }
         Destination::Web(ref web) => {
             if let Some((repo, number, kind)) = github(web) {
+                let connected = crate::github::is_connected_untracked(ui);
                 value.detail = format!("GitHub {kind} · {repo}#{number}");
-                value.excerpt = if s.github.state == "connected"
+                value.excerpt = if connected
                     && s.projects.iter().any(|p| {
                         p.github
                             .as_ref()
                             .is_some_and(|g| g.repository.eq_ignore_ascii_case(&repo))
                     }) {
                     "Hover to load details".into()
-                } else if s.github.state == "connected" {
-                    "Open in browser".into()
+                } else if connected {
+                    "Click to open in Canban".into()
                 } else {
-                    "Open in browser · GitHub is not connected".into()
+                    "Open in browser · Run `gh auth login` to connect GitHub".into()
                 };
                 if let Some(issue) = s.github_issues.iter().find(|i| {
                     i.source.repository.eq_ignore_ascii_case(&repo) && i.source.number == number
@@ -217,9 +218,7 @@ pub fn open(ui: Ui, url: &str) {
                     && u.path().trim_end_matches('/').split('/').count() == 5
             }) && let Ok(reference) = canban_github::parse_reference(&url)
                 && matches!(reference.kind.as_str(), "issue" | "pr")
-                && ui
-                    .snapshot
-                    .with_untracked(|s| s.github.state == "connected")
+                && crate::github::is_connected_untracked(ui)
             {
                 crate::github::open(ui, reference);
                 return;
@@ -246,9 +245,9 @@ fn load(ui: Ui, url: String, title: String, value: Signal<Preview>, loading: Sig
         return;
     };
     let snapshot = ui.snapshot.get_untracked();
-    if snapshot.github.state != "connected" {
+    let Some(login) = crate::github::active_login_untracked(ui) else {
         return;
-    }
+    };
     let Some((project, source)) = snapshot.projects.iter().find_map(|p| {
         p.github
             .as_ref()
@@ -257,8 +256,7 @@ fn load(ui: Ui, url: String, title: String, value: Signal<Preview>, loading: Sig
     }) else {
         return;
     };
-    let login = snapshot.github.login.clone();
-    let key = format!("{:?}:{}:{repository}#{number}", login, source.generation);
+    let key = format!("{login}:{}:{repository}#{number}", source.generation);
     if let Some(cached) = ui.link_previews.with(|m| {
         m.get(&key)
             .filter(|v| canban_types::now().saturating_sub(v.at) < 60_000)
@@ -279,7 +277,19 @@ fn load(ui: Ui, url: String, title: String, value: Signal<Preview>, loading: Sig
     ui.spawn(async move {
         let result = blocking(move ||app.call("github.reference.search",json!({"project_id":project,"source_generation":source.generation,"query":number.to_string()}))).await;
         loading.try_set(false);
-        if value.try_get().is_none() || !ui.snapshot.with_untracked(|s|s.github.state == "connected" && s.github.login == login && s.projects.iter().any(|p|p.id == project_id && p.github.as_ref().is_some_and(|g|g.generation == source_generation))) { return; }
+        if value.try_get().is_none()
+            || crate::github::active_login_untracked(ui).as_deref() != Some(login.as_str())
+            || !ui.snapshot.with_untracked(|s| {
+                s.projects.iter().any(|p| {
+                    p.id == project_id
+                        && p.github
+                            .as_ref()
+                            .is_some_and(|g| g.generation == source_generation)
+                })
+            })
+        {
+            return;
+        }
         match result {
             Ok(Ok(rows)) => if let Some(row) = rows.as_array().and_then(|rows|rows.iter().find(|row|row["number"].as_u64() == Some(number))) {
                 let mut next = local_preview(ui,&url,&title);

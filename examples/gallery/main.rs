@@ -12,6 +12,7 @@ fn controls() -> impl IntoElement {
     let count = signal(0_u32);
     let directory = signal(String::new());
     let markdown = canban_ui_kit::markdown::MarkdownInput::new();
+    let group_open = signal(true);
     view().flex_1().min_h(px(0.0)).p_5().gap_4().bg(BACKGROUND)
     .child(heading("Component Gallery"))
     .child(muted("Production components · local fixtures · no AppServer or Agent required"))
@@ -20,12 +21,26 @@ fn controls() -> impl IntoElement {
             view()
                 .gap_4()
                 .child(
-                    settings_section("Entry and directory field", "Shared production controls; choosing a directory does not create or save anything.")
+                    section_group("Borderless Section Group")
+                        .description("Reusable header + 1px bottom divider without an enclosing card border, shared across Overview, GitHub, and Settings.")
+                        .count(2)
+                        .tone(Tone::Info)
                         .child(entry_card(Icon::Plus, "Create a Project", "One accessible clickable surface.", move |_| {
                             count.set(count.get_untracked() + 1);
                         }))
                         .child(directory_field(directory, |_| {})),
                 )
+                .child(dynamic(move || {
+                    let is_open = group_open.get();
+                    collapsible_section_group(
+                        "Collapsible Section Group",
+                        Some(1),
+                        is_open,
+                        move |_| group_open.update(|v| *v = !*v),
+                        muted("Collapsed/expanded disclosure shares the same borderless divider header."),
+                    )
+                    .into_element()
+                }))
                 .child(
                     panel()
                         .child(label("Shared Lucide icons · muted / selected / attention"))
@@ -747,6 +762,13 @@ pub fn Gallery() -> impl IntoElement {
                     scene.set("workspace".into());ui.snapshot.set(snapshot);ui.new_card();
                 }))
                 .child(action("GitHub inbox",Variant::Quiet,move |_|{scene.set("workspace".into());fixtures::github_browser(ui,false);}))
+                .child(action("GitHub onboarding",Variant::Quiet,move |_|{
+                    scene.set("workspace".into());
+                    fixtures::github_browser(ui,false);
+                    ui.github.gh_status.set(json!({"state":"signed_out","installed":true,"message":"GitHub CLI returned no HTTP response; check gh auth status"}));
+                    ui.github.list.set(json!({"items":[]}));
+                    ui.github.error.set("GitHub CLI returned no HTTP response; check gh auth status".into());
+                }))
                 .child(action("GitHub PR diff",Variant::Quiet,move |_|{scene.set("workspace".into());fixtures::github_browser(ui,true);}))
                 .child(action("GitHub offline cache",Variant::Quiet,move |_|{scene.set("workspace".into());fixtures::github_browser(ui,false);ui.github.error.set("Offline · showing cached GitHub content".into());}))
                 .child(action("GitHub Card",Variant::Quiet,move |_|{

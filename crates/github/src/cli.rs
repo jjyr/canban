@@ -140,6 +140,18 @@ impl Service {
     pub fn clear(&self) -> Result<()> {
         self.cache.clear()
     }
+    pub fn binary_path() -> PathBuf {
+        binary()
+    }
+    pub fn installed() -> bool {
+        Command::new(binary())
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
 }
 fn binary() -> PathBuf {
     std::env::var_os("CANBAN_GH_BIN")

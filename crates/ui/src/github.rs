@@ -15,6 +15,32 @@ pub use repository::screen as repository_screen;
 use serde_json::{Value, json};
 pub use workspace::account;
 pub use workspace::{Browser, init, open, screen};
+
+pub fn active_login_from(snapshot: &Snapshot, gh: &Value) -> Option<String> {
+    snapshot
+        .github
+        .login
+        .as_ref()
+        .filter(|_| snapshot.github.state == "connected")
+        .cloned()
+        .or_else(|| {
+            gh["login"]
+                .as_str()
+                .filter(|_| gh["state"] == "connected")
+                .map(str::to_owned)
+        })
+}
+
+pub fn active_login_untracked(ui: Ui) -> Option<String> {
+    let snapshot = ui.snapshot.get_untracked();
+    let gh = ui.github.gh_status.get_untracked();
+    active_login_from(&snapshot, &gh)
+}
+
+pub fn is_connected_untracked(ui: Ui) -> bool {
+    active_login_untracked(ui).is_some()
+}
+
 pub fn open_url(ui: Ui, url: String) {
     if !url.starts_with("https://github.com/") {
         ui.operation_error.set("Invalid GitHub URL".into());
@@ -64,83 +90,388 @@ pub fn choice(
         })
     })
 }
+pub fn format_timestamp_relative(raw: &str) -> String {
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) else {
+        return raw.to_owned();
+    };
+    let ts_ms = parsed.timestamp_millis();
+    if ts_ms <= 0 {
+        return raw.to_owned();
+    }
+    let elapsed_secs = now().saturating_sub(ts_ms as u64) / 1000;
+    if elapsed_secs < 60 {
+        "just now".into()
+    } else if elapsed_secs < 3600 {
+        format!("{}m ago", elapsed_secs / 60)
+    } else if elapsed_secs < 86_400 {
+        format!("{}h ago", elapsed_secs / 3600)
+    } else if elapsed_secs < 86_400 * 30 {
+        format!("{}d ago", elapsed_secs / 86_400)
+    } else {
+        parsed.format("%b %-d, %Y").to_string()
+    }
+}
+
+pub fn matching_cards(snapshot: &Snapshot, r: &GitHubReference) -> Vec<Card> {
+    snapshot
+        .cards
+        .iter()
+        .filter(|c| {
+            c.removed_at.is_none()
+                && (c.github_issue().is_some_and(|s| {
+                    s.repository.eq_ignore_ascii_case(&r.repository)
+                        && Some(s.number) == r.number
+                        && c.source_kind() == r.kind
+                }) || c.pull_request.as_ref().is_some_and(|p| {
+                    r.kind == "pr"
+                        && p.repository.eq_ignore_ascii_case(&r.repository)
+                        && Some(p.number) == r.number
+                }) || c.github_links.iter().any(|l| {
+                    l.repository.eq_ignore_ascii_case(&r.repository)
+                        && l.kind == r.kind
+                        && l.number == r.number
+                        && l.sha == r.sha
+                }))
+        })
+        .cloned()
+        .collect()
+}
+
+fn create_local_linked_card(
+    ui: Ui,
+    project_id: String,
+    r: GitHubReference,
+    fallback_title: String,
+) {
+    let kind_label = match r.kind.as_str() {
+        "pr" => "PR",
+        "commit" => "Commit",
+        _ => "Issue",
+    };
+    let ref_tag = r
+        .number
+        .map(|n| format!("{}#{n}", r.repository))
+        .or_else(|| {
+            r.sha
+                .as_deref()
+                .map(|s| format!("{}@{}", r.repository, &s[..s.len().min(7)]))
+        })
+        .unwrap_or_else(|| r.repository.clone());
+    let title = if fallback_title.trim().is_empty() {
+        format!("{kind_label} {ref_tag}")
+    } else {
+        fallback_title.trim().to_owned()
+    };
+    let body = format!("Linked from GitHub {kind_label} [{ref_tag}]({}).", r.url);
+    let link_url = r.url.clone();
+    dispatch_complete(
+        ui,
+        "card.create",
+        json!({
+            "project_id": project_id,
+            "title": title,
+            "body": body,
+        }),
+        move |res| {
+            if let Ok(card_val) = res
+                && let (Some(card_id), Some(revision)) =
+                    (card_val["id"].as_str(), card_val["revision"].as_u64())
+            {
+                let cid = card_id.to_owned();
+                dispatch_then(
+                    ui,
+                    "github.reference.add",
+                    json!({
+                        "card_id": cid,
+                        "revision": revision,
+                        "url": link_url,
+                    }),
+                    |_| {},
+                );
+            }
+        },
+    );
+}
+
+pub fn add_to_board(ui: Ui, r: GitHubReference, fallback_title: String) {
+    use nsh_core::element::desktop::{MenuItem, popup_menu};
+    if r.kind == "commit" {
+        let projects = ui.snapshot.with_untracked(|s| s.projects.clone());
+        if projects.is_empty() {
+            ui.navigate("new-project");
+            return;
+        }
+        let current_pid = ui.project.get_untracked();
+        if let Some(p) = projects
+            .iter()
+            .find(|p| p.id == current_pid)
+            .or_else(|| (projects.len() == 1).then(|| &projects[0]))
+        {
+            create_local_linked_card(ui, p.id.clone(), r, fallback_title);
+        } else {
+            ui.spawn(async move {
+                popup_menu(
+                    projects
+                        .into_iter()
+                        .map(|p| {
+                            let r = r.clone();
+                            let title = fallback_title.clone();
+                            let pid = p.id.clone();
+                            MenuItem::new(format!("Add linked Card in {}", p.name)).on_select(
+                                move || {
+                                    create_local_linked_card(
+                                        ui,
+                                        pid.clone(),
+                                        r.clone(),
+                                        title.clone(),
+                                    )
+                                },
+                            )
+                        })
+                        .collect(),
+                )
+                .await;
+            });
+        }
+        return;
+    }
+
+    let (synced_projects, all_projects, current_project_id) = ui.snapshot.with_untracked(|s| {
+        let synced: Vec<_> = s
+            .projects
+            .iter()
+            .filter(|p| {
+                p.github
+                    .as_ref()
+                    .is_some_and(|g| g.repository.eq_ignore_ascii_case(&r.repository))
+            })
+            .cloned()
+            .collect();
+        (synced, s.projects.clone(), ui.project.get_untracked())
+    });
+
+    if synced_projects.len() == 1 {
+        dispatch(
+            ui,
+            "github.item.add",
+            json!({
+                "reference": r,
+                "project_id": synced_projects[0].id,
+            }),
+        );
+    } else if synced_projects.len() > 1 {
+        ui.spawn(async move {
+            popup_menu(
+                synced_projects
+                    .into_iter()
+                    .map(|p| {
+                        let r = r.clone();
+                        let pid = p.id.clone();
+                        MenuItem::new(format!("Add synced Card to {}", p.name)).on_select(
+                            move || {
+                                dispatch(
+                                    ui,
+                                    "github.item.add",
+                                    json!({
+                                        "reference": r.clone(),
+                                        "project_id": pid.clone(),
+                                    }),
+                                )
+                            },
+                        )
+                    })
+                    .collect(),
+            )
+            .await;
+        });
+    } else if all_projects.is_empty() {
+        ui.navigate("new-project");
+    } else if all_projects.len() == 1 {
+        let p = all_projects[0].clone();
+        let pid = p.id.clone();
+        let r_local = r.clone();
+        let title_local = fallback_title.clone();
+        ui.spawn(async move {
+            popup_menu(vec![
+                MenuItem::new(format!("Add linked Card to {}", p.name)).on_select(move || {
+                    create_local_linked_card(ui, pid.clone(), r_local.clone(), title_local.clone());
+                }),
+                MenuItem::new(format!("Connect {} to {}…", p.name, r.repository))
+                    .on_select(move || ui.navigate("github-repository")),
+            ])
+            .await;
+        });
+    } else {
+        let preferred = all_projects
+            .iter()
+            .find(|p| p.id == current_project_id)
+            .cloned();
+        ui.spawn(async move {
+            let mut items = Vec::new();
+            if let Some(cur) = &preferred {
+                let r_cur = r.clone();
+                let title_cur = fallback_title.clone();
+                let pid = cur.id.clone();
+                items.push(
+                    MenuItem::new(format!("Add linked Card to {} (current)", cur.name)).on_select(
+                        move || {
+                            create_local_linked_card(
+                                ui,
+                                pid.clone(),
+                                r_cur.clone(),
+                                title_cur.clone(),
+                            )
+                        },
+                    ),
+                );
+            }
+            for p in all_projects {
+                if preferred.as_ref().is_some_and(|cur| cur.id == p.id) {
+                    continue;
+                }
+                let r_item = r.clone();
+                let title_item = fallback_title.clone();
+                let pid = p.id.clone();
+                items.push(
+                    MenuItem::new(format!("Add linked Card to {}", p.name)).on_select(move || {
+                        create_local_linked_card(
+                            ui,
+                            pid.clone(),
+                            r_item.clone(),
+                            title_item.clone(),
+                        )
+                    }),
+                );
+            }
+            items.push(
+                MenuItem::new(format!("Connect current Project to {}…", r.repository))
+                    .on_select(move || ui.navigate("github-repository")),
+            );
+            popup_menu(items).await;
+        });
+    }
+}
+
 pub fn settings(ui: Ui) -> impl IntoElement {
     let account = computed(move || ui.snapshot.with(|s| s.github.clone()));
-    settings_section(
-        "GitHub",
-        "Connect your account, then choose a repository for the selected Project.",
-    )
-    .child(dynamic(move || {
+    let open = signal(account.with_untracked(|a| {
+        a.state == "connected" || a.state == "authorizing" || a.error.is_some()
+    }));
+    effect(move || {
+        let a = account.get();
+        if a.state == "connected" || a.state == "authorizing" || a.error.is_some() {
+            open.set(true);
+        }
+    });
+
+    dynamic(move || {
+        let is_open = open.get();
         let a = account.get();
         let installation_url = a.installation_url.clone();
-        let mut area = view().gap_2().child(label(
-            a.login
-                .map(|l| format!("Connected as {l}"))
-                .unwrap_or_else(|| {
-                    if a.state == "authorizing" {
-                        "Waiting for GitHub authorization".into()
-                    } else {
-                        "Not connected".into()
-                    }
-                }),
+        let mut area = view().gap_2();
+        area = area.child(muted(
+            "Only needed if you explicitly want repository-scoped GitHub App tokens instead of reusing `gh` CLI.",
         ));
         if a.state == "authorizing" {
+            area = area.child(label("Waiting for browser authorization on GitHub…"));
             if let Some(code) = a.user_code {
-                area = area.child(label(format!("Verification code: {code}")));
+                area = area.child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(muted("Device code:"))
+                        .child(badge(code)),
+                );
             }
+            let mut actions = view().flex_row().flex_wrap().items_center().gap_2();
             if let Some(url) = a.verification_uri {
-                area = area.child(action(
+                actions = actions.child(action(
                     "Open GitHub authorization",
                     Variant::Primary,
                     move |_| open_url(ui, url.clone()),
                 ));
             }
-            area = area.child(action("Cancel sign-in", Variant::Quiet, move |_| {
+            actions = actions.child(action("Cancel sign-in", Variant::Quiet, move |_| {
                 dispatch(ui, "github.auth.cancel", json!({}))
             }));
+            area = area.child(actions);
         } else if a.state == "connected" {
-            area = area.child(
-                view()
-                    .flex_row()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(action(
-                        "Manage repository access",
-                        Variant::Secondary,
-                        move |_| {
-                            if let Some(url) = &installation_url {
-                                open_url(ui, url.clone());
-                            }
-                        },
-                    ))
-                    .child(action("Reconnect", Variant::Quiet, move |_| {
-                        dispatch(ui, "github.auth.begin", json!({}))
-                    }))
-                    .child(action("Disconnect account", Variant::Quiet, move |_| {
-                        dispatch(ui, "github.auth.disconnect", json!({}))
-                    })),
-            );
+            area = area
+                .child(muted(
+                    a.login
+                        .map(|l| {
+                            format!(
+                                "Repository reads and sync override `gh` CLI with GitHub App token (@{l}). Notifications still use `gh` CLI."
+                            )
+                        })
+                        .unwrap_or_else(|| "GitHub App token active.".into()),
+                ))
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(action(
+                            "Manage repository installations",
+                            Variant::Secondary,
+                            move |_| {
+                                if let Some(url) = &installation_url {
+                                    open_url(ui, url.clone());
+                                }
+                            },
+                        ))
+                        .child(action("Reconnect", Variant::Quiet, move |_| {
+                            dispatch(ui, "github.auth.begin", json!({}))
+                        }))
+                        .child(action("Disconnect App", Variant::Quiet, move |_| {
+                            dispatch(ui, "github.auth.disconnect", json!({}))
+                        })),
+                );
         } else {
-            area = area.child(action("Connect GitHub", Variant::Primary, move |_| {
-                dispatch_complete(ui, "github.auth.begin", json!({}), move |r| {
-                    if let Ok(v) = r
-                        && let Some(url) = v["verification_uri"].as_str()
-                    {
-                        open_url(ui, url.into());
-                    }
-                })
-            }));
+            area = area
+                .child(muted(
+                    "If you are already signed into `gh` CLI, you do not need to sign in here. GitHub App tokens cannot read GitHub Notifications.",
+                ))
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(action(
+                            "Sign in with GitHub App",
+                            Variant::Secondary,
+                            move |_| {
+                                dispatch_complete(
+                                    ui,
+                                    "github.auth.begin",
+                                    json!({}),
+                                    move |r| {
+                                        if let Ok(v) = r
+                                            && let Some(url) = v["verification_uri"].as_str()
+                                        {
+                                            open_url(ui, url.into());
+                                        }
+                                    },
+                                )
+                            },
+                        )),
+                );
         }
         if let Some(e) = a.error {
             area = area.child(notice(e, Tone::Attention));
         }
-        area.into_element()
-    }))
-    .child(action(
-        "Configure current Project repository",
-        Variant::Secondary,
-        move |_| ui.navigate("github-repository"),
-    ))
+        collapsible_section_group(
+            "Advanced · GitHub App Token",
+            None,
+            is_open,
+            move |_| open.update(|v| *v = !*v),
+            area,
+        )
+        .into_element()
+    })
 }
 pub fn new_card(ui: Ui) -> impl IntoElement {
     let target = ui.card_target;
@@ -474,9 +805,9 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                                             "Connect this Project to a GitHub repository first.",
                                         ))
                                         .child(action(
-                                            "Open GitHub settings",
+                                            "Connect Project repository",
                                             Variant::Secondary,
-                                            move |_| ui.navigate("github-account"),
+                                            move |_| ui.navigate("github-repository"),
                                         ))
                                         .into_element();
                                 }
