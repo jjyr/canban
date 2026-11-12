@@ -266,13 +266,22 @@ pub fn terminal_settings(ui: Ui) -> impl IntoElement {
 }
 pub fn usage(ui: Ui, machine: String, force: bool) {
     let Some(app) = crate::APP.get().cloned() else {
+        if force {
+            ui.notify("Subscription usage refreshed");
+        }
         return;
     };
-    if ui.usage_loading.get_untracked() && ui.usage.with_untracked(|v| v["machine"] == machine) {
+    if !force
+        && ui.usage_loading.get_untracked()
+        && ui.usage.with_untracked(|v| v["machine"] == machine)
+    {
         return;
     }
     if ui.usage.with_untracked(|v| v["machine"] != machine) {
         ui.usage.set(json!({"machine":machine,"readings":[]}));
+    }
+    if force {
+        ui.notify("Refreshing subscription usage…");
     }
     ui.usage_loading.set(true);
     ui.usage_epoch.update(|n| *n += 1);
@@ -293,10 +302,18 @@ pub fn usage(ui: Ui, machine: String, force: bool) {
             return;
         }
         ui.usage_loading.set(false);
-        if let Ok(Ok(v)) = r
-            && v != ui.usage.get_untracked()
-        {
-            ui.usage.set(v);
+        match r {
+            Ok(Ok(v)) => {
+                if v != ui.usage.get_untracked() {
+                    ui.usage.set(v);
+                }
+                if force {
+                    ui.notify("Subscription usage refreshed");
+                }
+            }
+            Ok(Err(e)) if force => ui.operation_error.set(format!("{e:#}")),
+            Err(e) if force => ui.operation_error.set(e.to_string()),
+            _ => {}
         }
     });
 }
@@ -364,8 +381,7 @@ pub fn bar(ui: Ui) -> impl IntoElement {
                     Icon::Keyboard,
                     "Commands & Shortcuts · ⌘/",
                     move || {
-                        ui.quick_open.get()
-                            && ui.search_query.get().trim_start().starts_with('>')
+                        ui.quick_open.get() && ui.search_query.get().trim_start().starts_with('>')
                     },
                     || false,
                     move |_| crate::commands::execute(ui, "shortcuts"),
@@ -381,6 +397,7 @@ pub fn bar(ui: Ui) -> impl IntoElement {
 }
 fn usage_summary(ui: Ui, now: u64) -> View {
     let v = ui.usage.get();
+    let busy = v["busy"] == true;
     let rows = readings(&v);
     if rows.is_empty() {
         return view();
@@ -396,37 +413,72 @@ fn usage_summary(ui: Ui, now: u64) -> View {
         if values.is_empty() {
             continue;
         }
-        let window = values
+        let provider_name = if provider == "codex" {
+            "Codex"
+        } else {
+            "Claude"
+        };
+        let account = values.iter().find_map(|r| {
+            r["account"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        });
+        let all_windows: Vec<_> = values
             .iter()
             .flat_map(|r| r["windows"].as_array().into_iter().flatten())
             .filter(|w| w["used"].as_f64().is_some())
-            .max_by(|a, b| {
-                a["used"]
-                    .as_f64()
-                    .unwrap()
-                    .total_cmp(&b["used"].as_f64().unwrap())
-            });
+            .collect();
+        let window = all_windows.iter().copied().max_by(|a, b| {
+            a["used"]
+                .as_f64()
+                .unwrap()
+                .total_cmp(&b["used"].as_f64().unwrap())
+        });
         let stale = values
             .iter()
             .any(|r| r["stale"] == true || r["error"].is_string());
         let text = window
             .map(|w| window_summary(w, now, stale))
             .unwrap_or_else(|| "Unavailable".into());
-        let tooltip = window
-            .map(|w| {
-                format!(
-                    "{} · resets {} · click for account details",
-                    w["name"].as_str().unwrap_or("Usage"),
-                    w["resets_at"].as_str().unwrap_or("unknown")
-                )
-            })
-            .unwrap_or_else(|| "Usage unavailable · click for details".into());
+
+        let header = match account {
+            Some(acc) => format!("{provider_name} · {acc}"),
+            None => format!("{provider_name} subscription"),
+        };
+        let mut tip = view()
+            .gap_1()
+            .child(label(header).font_weight(FontWeight::SEMIBOLD));
+        if all_windows.is_empty() {
+            tip = tip.child(muted("Subscription usage unavailable"));
+        } else {
+            for w in &all_windows {
+                let win_name = w["name"].as_str().unwrap_or("Quota");
+                let summary = window_summary(w, now, false);
+                tip = tip.child(label(format!("{win_name}: {summary}")));
+            }
+        }
+        if let Some(err) = values.iter().find_map(|r| r["error"].as_str()) {
+            tip = tip.child(muted(err.to_owned()));
+        }
+        tip = tip.child(muted(if busy {
+            "Refreshing subscription usage…"
+        } else {
+            "Click to refresh usage"
+        }));
+
         area = area.child(
             view()
                 .tooltip(
                     nsh_base::tooltip()
                         .placement(Placement::Top)
-                        .child(label(tooltip)),
+                        .px_3()
+                        .py_2()
+                        .rounded(px(RADIUS))
+                        .bg(SURFACE)
+                        .border_1()
+                        .border_color(BORDER)
+                        .child(tip),
                 )
                 .child(
                     nsh_base::button()
@@ -440,7 +492,7 @@ fn usage_summary(ui: Ui, now: u64) -> View {
                         .hover(|s| s.bg(INSET))
                         .focus(|s| s.border_1().border_color(ACCENT))
                         .accessibility_label(move || {
-                            Some(format!("{provider} subscription usage").into())
+                            Some(format!("Refresh {provider_name} subscription usage").into())
                         })
                         .child(
                             icon(if provider == "codex" {
@@ -452,7 +504,7 @@ fn usage_summary(ui: Ui, now: u64) -> View {
                             .h(px(14.)),
                         )
                         .child(muted(text))
-                        .on_press(move |_: &()| open(ui, "usage")),
+                        .on_press(move |_: &()| usage(ui, machine(ui), true)),
                 ),
         );
     }

@@ -1,5 +1,4 @@
 use crate::presenter::*;
-use nsh_core::prelude::*;
 pub fn diagnostics() -> String {
     format!(
         "Canban {}\nCommit: {}\nPlatform: {} {}",
@@ -28,19 +27,6 @@ pub fn url() -> String {
 }
 pub fn open(ui: Ui) {
     crate::github::open_url(ui, url());
-}
-pub fn external(ui: Ui, url: &'static str) {
-    ui.spawn(async move {
-        let result = blocking(move || {
-            std::process::Command::new("/usr/bin/open")
-                .arg(url)
-                .status()
-        })
-        .await;
-        if !matches!(result,Ok(Ok(s)) if s.success()) {
-            ui.operation_error.set("Could not open usage page".into());
-        }
-    });
 }
 #[cfg(test)]
 mod tests {

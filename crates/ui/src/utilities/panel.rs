@@ -183,11 +183,9 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                     )
                     .into_element();
                 }
-                let title = if popup == "usage" {
-                    "Subscription usage"
-                } else {
-                    "Theme"
-                };
+                if popup != "theme" {
+                    return view().into_element();
+                }
                 on_key_with(
                     "escape",
                     KeyOptions {
@@ -220,7 +218,6 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                 panel()
                                     .w(px(460.))
                                     .max_w(Percentage(0.95))
-                                    .max_h(Percentage(0.76))
                                     .overflow_hidden()
                                     .border_1()
                                     .border_color(BORDER)
@@ -230,22 +227,14 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                             .flex_row()
                                             .justify_between()
                                             .items_center()
-                                            .child(label(title).font_weight(FontWeight::SEMIBOLD))
+                                            .child(label("Theme").font_weight(FontWeight::SEMIBOLD))
                                             .child(chrome_button(
                                                 Icon::Close,
                                                 "Close panel",
                                                 move |_| close(ui),
                                             )),
                                     )
-                                    .child(
-                                        scroll().flex_1().min_h(px(0.)).overflow_hidden().child(
-                                            if popup == "usage" {
-                                                usage_panel(ui).into_element()
-                                            } else {
-                                                theme_panel(ui).into_element()
-                                            },
-                                        ),
-                                    ),
+                                    .child(scroll().max_h(px(460.)).child(theme_panel(ui))),
                             ),
                     )
                     .into_element()
@@ -288,125 +277,4 @@ fn theme_panel(ui: Ui) -> impl IntoElement {
                 .collect::<Vec<_>>(),
         ),
     )
-}
-
-fn machine_menu(ui: Ui) {
-    use nsh_core::element::desktop::{MenuItem, popup_menu};
-    ui.spawn(async move {
-        let mut items = vec![
-            MenuItem::new("Follow current context")
-                .on_select(move || ui.usage_machine.set(String::new())),
-            MenuItem::new("AppServer host").on_select(move || ui.usage_machine.set("local".into())),
-        ];
-        for m in ui
-            .machines
-            .with_untracked(|v| v["machines"].as_array().cloned().unwrap_or_default())
-        {
-            let id = m["id"].as_str().unwrap_or("").to_owned();
-            if id.is_empty() {
-                continue;
-            }
-            items.push(
-                MenuItem::new(m["name"].as_str().unwrap_or(&id))
-                    .on_select(move || ui.usage_machine.set(id.clone())),
-            );
-        }
-        popup_menu(items).await;
-    });
-}
-fn usage_panel(ui: Ui) -> impl IntoElement {
-    view()
-        .gap_3()
-        .child(action(
-            move || {
-                format!(
-                    "Usage machine: {} ▾",
-                    crate::machines::name(ui, &machine(ui))
-                )
-            },
-            Variant::Secondary,
-            move |_| machine_menu(ui),
-        ))
-        .child(dynamic(move || {
-            let v = ui.usage.get();
-            let mut content = view().gap_3();
-            if v["busy"] == true {
-                content = content.child(muted("Refreshing usage…"));
-            }
-            if let Some(error) = v["error"].as_str() {
-                content = content.child(notice(error.to_owned(), Tone::Attention));
-            }
-            for r in readings(&v) {
-                let provider = r["provider"].as_str().unwrap_or("");
-                let mut account = view().gap_2().child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(icon(if provider == "codex" {
-                            Icon::Codex
-                        } else {
-                            Icon::Claude
-                        }))
-                        .child(label(format!(
-                            "{} · {}",
-                            if provider == "codex" {
-                                "Codex"
-                            } else {
-                                "Claude"
-                            },
-                            r["account"].as_str().unwrap_or("Current account")
-                        ))),
-                );
-                if r["stale"] == true {
-                    account = account.child(status("Last known reading", Tone::Attention));
-                }
-                for w in r["windows"].as_array().into_iter().flatten() {
-                    let used = w["used"].as_f64().unwrap_or(0.);
-                    account = account
-                        .child(label(format!(
-                            "{} · {used:.0}% used",
-                            w["name"].as_str().unwrap_or("Usage")
-                        )))
-                        .child(
-                            view().h(px(4.)).rounded(px(2.)).bg(INSET).child(
-                                view()
-                                    .h_full()
-                                    .w(Percentage((used / 100.) as f32))
-                                    .rounded(px(2.))
-                                    .bg(if used >= 90. { ATTENTION } else { ACCENT }),
-                            ),
-                        );
-                    if let Some(reset) = w["resets_at"].as_str() {
-                        account = account.child(muted(format!("Resets {reset}")));
-                    }
-                }
-                if let Some(error) = r["error"].as_str() {
-                    account = account.child(notice(error.to_owned(), Tone::Attention));
-                }
-                let url = if provider == "codex" {
-                    "https://chatgpt.com/codex/settings/usage"
-                } else {
-                    "https://claude.ai/settings/usage"
-                };
-                content = content.child(account.child(action(
-                    "Open usage page",
-                    Variant::Quiet,
-                    move |_| report::external(ui, url),
-                )));
-            }
-            if let Some(at) = v["updated_at"].as_u64() {
-                content = content.child(muted(format!(
-                    "Updated {}",
-                    crate::components::activity::age(at)
-                )));
-            }
-            content
-        }))
-        .child(
-            action("Refresh usage", Variant::Secondary, move |_| {
-                usage(ui, machine(ui), true)
-            })
-            .disabled(move || ui.usage_loading.get() || ui.usage.with(|v| v["busy"] == true)),
-        )
 }

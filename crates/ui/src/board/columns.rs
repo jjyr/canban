@@ -48,7 +48,11 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
                         .items_center()
                         .gap_1p5()
                         .min_w(px(0.))
-                        .child(label(stage.name).font_weight(FontWeight::SEMIBOLD).truncate())
+                        .child(
+                            label(stage.name)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .truncate(),
+                        )
                         .child(
                             view()
                                 .px_1p5()
@@ -65,19 +69,10 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
                                 })),
                         ),
                 )
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .child(crate::workflows::column_trigger(ui, stage.id.clone()))
-                        .child(when(
-                            move || is_backlog,
-                            move || {
-                                chrome_button(Icon::Plus, "Add Card", move |_| ui.new_card())
-                            },
-                        )),
-                ),
+                .child(when(
+                    move || is_backlog,
+                    move || chrome_button(Icon::Plus, "Add Card", move |_| ui.new_card()),
+                )),
         )
         .child(
             view()
