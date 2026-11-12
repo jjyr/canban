@@ -190,6 +190,7 @@ impl Ops {
             token,
             merge_allowed: reason.is_none(),
             reason,
+            warning: None,
         })
     }
 

@@ -1,43 +1,39 @@
 use super::*;
-pub(super) fn blocker(db: Db<'_>, card: &Card) -> Result<Option<String>> {
+pub(super) fn activity_warning(db: Db<'_>, card: &Card) -> Result<Option<String>> {
     if db.list::<Attempt>()?.iter().any(|a| {
         // Continued assignments retain their last observation, but runtime
         // ownership has moved to the next assignment in the conversation.
-        a.card_id == card.id && a.terminal.is_some() && !a.finished()
+        a.card_id == card.id && a.terminal.is_some() && !a.agent_stopped()
     }) {
         return Ok(Some(
-            "End active Card Agent terminals before accepting code".into(),
+            "Card Agent is still running; merging now only includes current worktree changes"
+                .into(),
         ));
     }
     if db.list::<Request>()?.iter().any(|r| {
         r.card_id == card.id && matches!(r.state.as_str(), "queued" | "starting" | "unknown")
     }) {
-        return Ok(Some(
-            "Card has queued or uncertain work; resolve it before accepting code".into(),
-        ));
+        return Ok(Some("Card still has queued or uncertain Agent work".into()));
     }
     Ok(None)
 }
 impl AppServer {
     pub(super) fn review_preview(&self, p: Value) -> Result<Value> {
-        let (card, project, reason) = {
+        let (card, project, warning) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
             let c: Card = db.get(strp(&p, "card_id")?)?;
             let project: Project = db.get(&c.project_id)?;
             let project = self.bound_project(&project, &c);
-            let reason = blocker(db, &c)?;
-            (c, project, reason)
+            let warning = activity_warning(db, &c)?;
+            (c, project, warning)
         };
         let mut plan = self.ops(&project.work_location().machine).review_preview(
             &project,
             &card,
             p["target_branch"].as_str(),
         )?;
-        if reason.is_some() {
-            plan.merge_allowed = false;
-            plan.reason = reason;
-        }
+        plan.warning = warning;
         Ok(serde_json::to_value(plan)?)
     }
     pub(super) fn review_merge(&self, p: Value) -> Result<Value> {
@@ -57,7 +53,6 @@ impl AppServer {
             let card:Card=db.get(strp(&p,"card_id")?)?;revise(&card,&p)?;
             ensure!(card.active(),"Restore the Card before accepting");
             ensure!(card.pull_request.as_ref().is_none_or(|pr|pr.merged),"Resolve the existing PR delivery before local merge");
-            if let Some(reason)=blocker(db,&card)? {bail!("{reason}");}
             let project:Project=db.get(&card.project_id)?;let project=self.bound_project(&project,&card);
             let plan=self.ops(&project.work_location().machine).review_preview(&project,&card,p["target_branch"].as_str())?;
             ensure!(plan.token==strp(&p,"token")?,"Review is stale; refresh the diff before accepting");
@@ -89,9 +84,34 @@ impl AppServer {
                     current.delivery_mode=Some(DeliveryMode::Local);
                     current.delivery=Some(Delivery{target_branch:plan.target_branch.clone(),commit:commit.clone(),request_key:key.clone(),merged_at:now()});
                     current.attention=None;
-                    if let Some(gate)=current.human_gate.take() && let Some(request)=gate.request_id {
-                        let request:Request=db.get(&request)?;
-                        if request.state=="completed" { crate::workflow::advance(db,&self.config(),&mut current,&request)?; }
+                    let gate = current.human_gate.take();
+                    let mut completed_deliver = false;
+                    for mut active_run in db.list::<WorkflowRun>()? {
+                        if active_run.card_id == current.id
+                            && active_run.active()
+                            && active_run.step.as_ref().is_some_and(|k| {
+                                matches!(active_run.definition.steps.get(k), Some(WorkflowStep::Deliver { .. }))
+                            })
+                        {
+                            completed_deliver = true;
+                            canban_workflow_engine::runtime::complete_delivery(
+                                db,
+                                &self.config(),
+                                &mut current,
+                                &mut active_run,
+                                json!({"state":"merged","commit":commit,"target_branch":plan.target_branch,"manual":true}),
+                                enqueue,
+                            )?;
+                        }
+                    }
+                    if !completed_deliver
+                        && let Some(gate) = gate
+                        && let Some(request) = gate.request_id
+                    {
+                        let request: Request = db.get(&request)?;
+                        if request.state == "completed" {
+                            crate::workflow::advance(db, &self.config(), &mut current, &request)?;
+                        }
                     }
                     log(db,&current,"review.merged","user",&format!("Merged into {}",plan.target_branch),None,json!({"commit":commit,"target_branch":plan.target_branch,"request_key":key}))?;
                     json!({"state":"merged","commit":commit,"target_branch":plan.target_branch,"card_id":card.id})
@@ -126,7 +146,7 @@ impl AppServer {
                     && !card.pull_request.as_ref().is_some_and(|p| p.merged))
                 || card.attention.is_some()
                 || card.human_gate.is_some()
-                || blocker(db, &card)?.is_some()
+                || activity_warning(db, &card)?.is_some()
             {
                 return Ok(false);
             }
@@ -193,7 +213,7 @@ impl AppServer {
         let Ok(_gate) = self.review_gate.try_lock() else {
             return Ok(());
         };
-        let (card, project, run, blocker_reason) = {
+        let (card, project, run, has_pending_requests) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
             let Ok(run) = db.get::<WorkflowRun>(run_id) else {
@@ -208,8 +228,11 @@ impl AppServer {
             }
             let project: Project = db.get(&card.project_id)?;
             let project = self.bound_project(&project, &card);
-            let blocker_reason = blocker(db, &card)?;
-            (card, project, run, blocker_reason)
+            let has_pending_requests = db.list::<Request>()?.iter().any(|r| {
+                r.card_id == card.id
+                    && matches!(r.state.as_str(), "queued" | "starting" | "unknown")
+            });
+            (card, project, run, has_pending_requests)
         };
         let config = self.config();
         if card.hold_auto_merge {
@@ -250,8 +273,7 @@ impl AppServer {
             self.emit("application", Some(card.id));
             return Ok(());
         }
-        if blocker_reason.is_some() {
-            // An Agent terminal may still be closing right after reporting; retry on the next tick.
+        if has_pending_requests {
             return Ok(());
         }
         let target_branch = run.inputs["target_branch"].as_str();
@@ -496,8 +518,8 @@ impl AppServer {
                 let c: Card = db.get(card_id)?;
                 let proj: Project = db.get(&c.project_id)?;
                 let proj = self.bound_project(&proj, &c);
-                let reason = blocker(db, &c)?;
-                (proj, Some((c, reason)))
+                let warning = activity_warning(db, &c)?;
+                (proj, Some((c, warning)))
             } else {
                 let proj: Project = db.get(strp(&p, "project_id")?)?;
                 (proj, None)
@@ -507,14 +529,11 @@ impl AppServer {
         let three_dot = p["three_dot"].as_bool().unwrap_or(true);
 
         if p["use_card_worktree"].as_bool().unwrap_or(false)
-            && let Some((ref card, ref blocker_reason)) = card_ctx
+            && let Some((ref card, ref warning)) = card_ctx
         {
             if card.worktree.is_some() {
                 let mut plan = ops.review_preview(&project, card, p["target_branch"].as_str())?;
-                if blocker_reason.is_some() {
-                    plan.merge_allowed = false;
-                    plan.reason = blocker_reason.clone();
-                }
+                plan.warning = warning.clone();
                 let (files, total_additions, total_deletions) =
                     canban_workspaces::compare::split_unified_patch(&plan.patch);
                 let commits = ops

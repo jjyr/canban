@@ -380,6 +380,8 @@ pub struct ReviewPreview {
     pub token: String,
     pub merge_allowed: bool,
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Event {
@@ -490,6 +492,24 @@ impl Attempt {
                 .observed
                 .as_ref()
                 .is_some_and(|v| v["state"] == "finished")
+    }
+    /// True when the terminal exited or Herdr reports the Agent has stopped its turn.
+    pub fn agent_stopped(&self) -> bool {
+        if self.finished() {
+            return true;
+        }
+        if self.connection_state != "connected" {
+            return false;
+        }
+        match self
+            .observed
+            .as_ref()
+            .and_then(|v| v["status"]["state"].as_str())
+        {
+            Some("idle" | "done") => true,
+            Some(_) => false,
+            None => self.state == "completed",
+        }
     }
     /// A stale or disconnected status must not release scheduling capacity.
     pub fn runtime_status(&self) -> &str {

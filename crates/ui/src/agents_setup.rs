@@ -279,7 +279,6 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
     let per_role_open = signal(false);
     let show_uninstalled = signal(false);
     let role_engines = signal(BTreeMap::<String, String>::new());
-    let default_interactive = signal(ui.default_agent.get_untracked());
     let seeded = stored(false);
 
     effect(move || {
@@ -347,7 +346,6 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
         enabled_set.set(chosen);
         primary_engine.set(current_dev_engine);
         role_engines.set(map);
-        default_interactive.set(ui.default_agent.get_untracked());
         seeded.replace(true);
     });
 
@@ -629,7 +627,6 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                                         enabled_set.get_untracked().into_iter().collect();
                                     let primary = primary_engine.get_untracked();
                                     let roles = role_engines.get_untracked();
-                                    let def_agent = default_interactive.get_untracked();
                                     dispatch_then(
                                         ui,
                                         "agent.setup",
@@ -637,7 +634,6 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                                             "enabled_agents": enabled,
                                             "default_engine": primary,
                                             "identity_engines": roles,
-                                            "default_agent": if def_agent.is_empty() { "developer" } else { &def_agent },
                                         }),
                                         move |_| {
                                             refresh_catalog(ui, "local");
@@ -705,9 +701,9 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
             .child(
                 view()
                     .gap_0p5()
-                    .child(label("Default interactive Agent").font_weight(FontWeight::MEDIUM))
+                    .child(label("Default Agent").font_weight(FontWeight::MEDIUM))
                     .child(
-                        muted("Pre-selected when sending reviews, editing Workflows, or typing @.")
+                        muted("Used when a Workflow step omits profile, and pre-selected for reviews, Workflows, and @.")
                             .text_size(px(12.)),
                     ),
             )
