@@ -1004,7 +1004,11 @@ fn finish_closed(app: &AppServer, req: &Request, key: &str) {
         .unwrap()
         .write(|db| {
             let mut run: Attempt = db.get(&a.id)?;
-            run.terminal = None;
+            // Simulate a real retained interactive Herdr terminal whose Agent is still live
+            // at the moment it invokes `canban execution report` via tool call.
+            run.terminal = Some("t-retained".into());
+            run.connection_state = "connected".into();
+            run.observed = Some(json!({"state": "live", "status": {"state": "working"}}));
             db.save(&run)
         })
         .unwrap();

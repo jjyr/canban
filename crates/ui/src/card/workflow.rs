@@ -80,7 +80,10 @@ pub fn render(ui: Ui) -> impl IntoElement {
                 .filter(|r| {
                     r.card_id == card_id
                         && r.active()
-                        && matches!(r.state.as_str(), "waiting_approval" | "stale")
+                        && matches!(
+                            r.state.as_str(),
+                            "waiting_approval" | "waiting_delivery" | "stale"
+                        )
                 })
                 .cloned()
                 .collect::<Vec<_>>()
@@ -165,10 +168,20 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         }
                         if run.state == "waiting_approval" || run.state == "stale" {
                             if run.state == "waiting_approval" {
+                                let is_deliver_step = run.step.as_ref().is_some_and(|k| {
+                                    matches!(
+                                        run.definition.steps.get(k),
+                                        Some(WorkflowStep::Deliver { .. })
+                                    )
+                                });
                                 let id = run.id.clone();
                                 let visit = run.visit;
                                 actions = actions.child(compact_action(
-                                    "Approve and continue",
+                                    if is_deliver_step {
+                                        "Retry auto-merge"
+                                    } else {
+                                        "Approve and continue"
+                                    },
                                     Variant::Primary,
                                     move |_| {
                                         if let Some(card) = ui.current_card() {
@@ -253,10 +266,10 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         }
                     }
 
-                    let state_label = if run.state == "stale" {
-                        "Changes required"
-                    } else {
-                        "Review required"
+                    let state_label = match run.state.as_str() {
+                        "stale" => "Changes required",
+                        "waiting_delivery" => "Merging…",
+                        _ => "Review required",
                     };
                     let mut body = view()
                         .p_2()

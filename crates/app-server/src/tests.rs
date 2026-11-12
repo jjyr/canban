@@ -1045,8 +1045,62 @@ fn remote_pr_merge_defers_archive_while_agent_live_then_archives_and_handles_pr_
 }
 
 #[test]
-fn review_still_blocks_live_disconnected_and_queued_work_after_handoff() {
-    let (_dir, app, _project, card) = setup();
+fn review_clears_warning_when_herdr_reports_agent_stopped_and_never_blocks_merge() {
+    let (dir, app, mut project, mut card) = setup();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&source)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    git(&["init", "-b", "main"]);
+    for (k, v) in [
+        ("user.name", "Acceptance"),
+        ("user.email", "acceptance@example.invalid"),
+        ("core.hooksPath", "/dev/null"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&["config", k, v]);
+    }
+    std::fs::write(source.join("seed"), "seed").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-m", "seed"]);
+    project.target_branch = Some("main".into());
+    project.workflow.workspace.sync_base = false;
+    card.stage = "review".into();
+    card.worktree = Some(
+        canban_workspaces::prepare(&app.home, &project, &card)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    );
+    card.branch = canban_workspaces::Ops::local().current_branch(card.worktree.as_ref().unwrap());
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.save(&project)?;
+            db.save(&card)
+        })
+        .unwrap();
+    std::fs::write(
+        Path::new(card.worktree.as_ref().unwrap()).join("delivered"),
+        "code",
+    )
+    .unwrap();
+
     app.call(
         "comment.add",
         json!({"card_id":card.id,"body":"@codex review"}),
@@ -1068,25 +1122,82 @@ fn review_still_blocks_live_disconnected_and_queued_work_after_handoff() {
             current.id = Attempt::key(&run.request_id, 2);
             current.number = 2;
             current.state = "completed".into();
-            // A completion report or disconnected observation does not prove exit.
-            for connection in ["connected", "unavailable", "replaced"] {
+            // Connected terminals whose Agent turn stopped (idle/done) emit no warning at all.
+            current.connection_state = "connected".into();
+            for stopped_state in ["idle", "done"] {
+                current.observed = Some(json!({"state":"live","status":{"state":stopped_state}}));
+                db.save(&current)?;
+                assert!(
+                    super::review::activity_warning(db, &card)?.is_none(),
+                    "expected no warning when Herdr reports {stopped_state}"
+                );
+            }
+            // Disconnected or actively working terminals surface an advisory warning.
+            for connection in ["unavailable", "replaced"] {
                 current.connection_state = connection.into();
                 current.observed = Some(json!({"state":"live","status":{"state":"done"}}));
                 db.save(&current)?;
                 assert!(
-                    super::review::blocker(db, &card)?
+                    super::review::activity_warning(db, &card)?
                         .unwrap()
-                        .contains("End active")
+                        .contains("still running")
                 );
             }
-            current.observed = Some(json!({"state":"finished"}));
+            current.connection_state = "connected".into();
+            current.observed = Some(json!({"state":"live","status":{"state":"working"}}));
             db.save(&current)?;
-            assert!(super::review::blocker(db, &card)?.is_none());
+            assert!(
+                super::review::activity_warning(db, &card)?
+                    .unwrap()
+                    .contains("still running")
+            );
+            Ok(())
+        })
+        .unwrap();
+
+    // Even when an Agent is actively working, preview keeps merge_allowed=true with a warning,
+    // and review.merge is NOT blocked.
+    let working_preview = app
+        .call("review.preview", json!({"card_id":card.id}))
+        .unwrap();
+    assert_eq!(working_preview["merge_allowed"], true, "{working_preview}");
+    assert!(working_preview["reason"].is_null(), "{working_preview}");
+    assert!(
+        working_preview["warning"]
+            .as_str()
+            .unwrap()
+            .contains("still running"),
+        "{working_preview}"
+    );
+
+    // When Herdr reports the Agent is idle at its TUI prompt, warning disappears completely.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut current: Attempt = db.get(&Attempt::key(&run.request_id, 2))?;
+            current.observed = Some(json!({"state":"live","status":{"state":"idle"}}));
+            db.save(&current)
+        })
+        .unwrap();
+    let idle_preview = app
+        .call("review.preview", json!({"card_id":card.id}))
+        .unwrap();
+    assert_eq!(idle_preview["merge_allowed"], true, "{idle_preview}");
+    assert!(idle_preview["reason"].is_null(), "{idle_preview}");
+    assert!(idle_preview["warning"].is_null(), "{idle_preview}");
+
+    // Queued/starting/unknown requests also only warn and never block human merge.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut request: Request = db.get(&run.request_id)?;
             for state in ["queued", "starting", "unknown"] {
                 request.state = state.into();
                 db.save(&request)?;
                 assert!(
-                    super::review::blocker(db, &card)?
+                    super::review::activity_warning(db, &card)?
                         .unwrap()
                         .contains("queued or uncertain")
                 );
@@ -1094,6 +1205,36 @@ fn review_still_blocks_live_disconnected_and_queued_work_after_handoff() {
             Ok(())
         })
         .unwrap();
+    let queued_preview = app
+        .call("review.preview", json!({"card_id":card.id}))
+        .unwrap();
+    assert_eq!(queued_preview["merge_allowed"], true, "{queued_preview}");
+    assert!(
+        queued_preview["warning"]
+            .as_str()
+            .unwrap()
+            .contains("queued or uncertain"),
+        "{queued_preview}"
+    );
+    card = app
+        .snapshot()
+        .unwrap()
+        .cards
+        .into_iter()
+        .find(|c| c.id == card.id)
+        .unwrap();
+    let merged = app
+        .call(
+            "review.merge",
+            json!({
+                "card_id": card.id,
+                "revision": card.revision,
+                "token": queued_preview["token"],
+                "request_key": "merge-with-warning-allowed"
+            }),
+        )
+        .unwrap();
+    assert_eq!(merged["state"], "merged", "{merged}");
 }
 
 #[test]
@@ -2141,6 +2282,70 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
             .command()[0],
         "agy",
         "Global @developer remains agy for other projects"
+    );
+
+    // 6. Workflow YAML steps that omit `profile` (or specify `profile: null`) strictly route
+    // through `config.default_agent` (converged to `@developer` by `agent.setup`, without any
+    // step-ID string inference)! Also verify re-running `agent.setup` without `default_agent`
+    // migrates a legacy raw `default_agent: "codex"` to `"developer"`.
+    app.call(
+        "config.agents.save",
+        json!({"op": "set_default", "default_agent": "codex"}),
+    )
+    .unwrap();
+    assert_eq!(app.config().default_agent, "codex");
+    app.call(
+        "agent.setup",
+        json!({
+            "enabled_agents": ["codex", "agy"],
+            "default_engine": "agy",
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        app.config().default_agent,
+        "developer",
+        "Re-running Setup without explicit default_agent converges raw CLI default_agent to @developer"
+    );
+
+    let second_proj: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "NullProfileWorkflow",
+                "directory": dir.path().join("null-prof"),
+                "workspace": {"create_worktree": false, "sync_base": false},
+                "workflow_yaml": "schema: 1\nid: delivery:null-prof\nname: Development\non:\n  develop:\n    event: card.column_entered\n    start_at: custom_step_name\n    match:\n      column: develop\nsteps:\n  - id: custom_step_name\n    uses: agent\n    with:\n      instruction: Run default agent.\n      profile: null\n    next: __end\n  - id: __end\n    uses: complete\nworkspace:\n  create_worktree: false\n  sync_base: false\n",
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let second_card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": second_proj.id, "title": "Drag to Develop"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": second_card.id, "revision": second_card.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let null_prof_req = app
+        .snapshot()
+        .unwrap()
+        .requests
+        .into_iter()
+        .rfind(|r| r.card_id == second_card.id)
+        .expect("workflow request queued on drag to develop");
+    assert_eq!(null_prof_req.profile.id, "developer");
+    assert_eq!(
+        null_prof_req.profile.command()[0],
+        "agy",
+        "Omitted profile must use default_agent (@developer -> agy)"
     );
 }
 

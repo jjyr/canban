@@ -44,20 +44,9 @@ Human accepts -> persist unknown delivery intent / request key
                                          Archive separately
 ```
 
-Active Card terminals and queued/uncertain work block acceptance. Preview exposes the blocker, and merge rechecks it. Git hooks remain active; a hook changing the committed tree or leaving checkout edits stops delivery for inspection. Divergent non-conflicting target changes are integrated in the Card worktree first. Conflicts stay there; the Project source checkout is not left in a half-merged state. Resolve/abort them in the Card terminal, rerun validation and refresh the diff before another acceptance.
+Git readiness (`merge_allowed` and `reason`) governs whether a diff can be accepted. Active Card Agent work or queued/uncertain requests never disable `Merge` or `Publish PR`: `review.preview` exposes an informational `warning` only when Herdr reports the Agent is still running/disconnected or when a Request is `queued`/`starting`/`unknown`. When a retained interactive Agent terminal is connected and Herdr reports `status.state` as `idle` or `done` (or the PTY has `finished`), no warning is shown at all. Git hooks remain active; a hook changing the committed tree or leaving checkout edits stops delivery for inspection. Divergent non-conflicting target changes are integrated in the Card worktree first. Conflicts stay there; the Project source checkout is not left in a half-merged state. Resolve/abort them in the Card terminal, rerun validation and refresh the diff before another acceptance.
 
-Runtime eligibility uses the shared Attempt lifecycle. A `continued` assignment
-is historical: its terminal belongs to the subsequent assignment, so its retained
-`live` observation cannot block delivery after that terminal exits. The current
-assignment still blocks while live or disconnected, even after a completion
-report. Queued, starting and unknown requests remain blockers independently.
-
-The 2026-11-11 regression reproduces the retained Develop `live` snapshot plus
-an exited Review assignment, then exercises preview, commit/merge, retry and
-restart. The original check failed this reproduction; the shared lifecycle check
-passes it. Full workspace tests and `mise run acceptance` passed with a disposable
-home/Core (`/private/tmp/cb-egcgh2zd/home`). Separate assertions retain live,
-disconnected, queued, starting and unknown blockers.
+Runtime activity advisories use the shared Attempt lifecycle (`Attempt::agent_stopped`). A `continued` assignment is historical: its terminal belongs to the subsequent assignment. Connected retained sessions sitting at their TUI prompt (`idle` or `done` in Herdr) are treated as stopped. Actively working/blocked sessions, disconnected terminals, and `queued`/`starting`/`unknown` requests surface a non-blocking `warning` in Review while still permitting explicit human merge; preview token verification continues to reject stale diffs if files change concurrently.
 
 Card and target changes are checked again, but Canban does not lock arbitrary external editors/Git commands. Profiles on one Card still share a worktree. Keep that checkout quiescent during acceptance. External Git hooks, permissions, identity/signing failures and concurrent source changes surface as attention; any created Card commit remains available for inspection. A global delivery mutex prevents two Canban merges from updating checkouts concurrently; it is not an Agent concurrency cap.
 
@@ -68,7 +57,7 @@ canban call review.preview '{"card_id":"CARD_ID","target_branch":"main"}'
 canban call review.merge '{"card_id":"CARD_ID","revision":7,"target_branch":"main","token":"PREVIEW_TOKEN","message":"Implement the reviewed task","request_key":"unique-acceptance-id"}'
 ```
 
-`review.preview` is read-only. It returns revision, heads, target/source branch, worktree, file paths, patch, truncation/dirty/conflict flags, token, merge_allowed and reason. The token fingerprints full content/status/heads even if the displayed patch is truncated. A stale token or revision rejects acceptance before staging/committing.
+`review.preview` is read-only. It returns revision, heads, target/source branch, worktree, file paths, patch, truncation/dirty/conflict flags, token, merge_allowed, reason and optional non-blocking warning. The token fingerprints full content/status/heads even if the displayed patch is truncated. A stale token or revision rejects acceptance before staging/committing.
 
 `review.merge` requires the request key, revision and preview token. It returns `state: merged`, `failed` or `unknown`. Reusing a key with the identical payload returns its stored receipt before any Git action; changing its payload is a conflict. The intent is saved before Git effects. A crash/lost result can leave unknown; inspect the target and Card Git heads and Timeline before a new acceptance. There is no blind replay of an uncertain physical operation. The native UI clears the preview after a returned result, requiring a fresh inspection.
 
