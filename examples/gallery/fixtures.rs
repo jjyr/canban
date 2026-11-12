@@ -90,6 +90,7 @@ pub fn review() -> ReviewPreview {
         token: "gallery-token".into(),
         merge_allowed: true,
         reason: None,
+        warning: None,
     }
 }
 

@@ -11,6 +11,17 @@ pub enum Action {
     Remove,
     Restore,
 }
+/// Board lifecycle actions preserve the Project workspace, including its detail pane.
+pub(crate) fn after_archive(ui: Ui) {
+    let page = ui.page.get_untracked();
+    if page == "board" || (page == "card" && !ui.card_standalone.get_untracked()) {
+        ui.card.set(String::new());
+        ui.page.set("board".into());
+    } else {
+        ui.page.set("archive".into());
+    }
+}
+
 pub fn apply(ui: Ui, card: Card, action: Action) {
     let card = ui
         .snapshot
@@ -32,7 +43,7 @@ pub fn apply(ui: Ui, card: Card, action: Action) {
             }
         });
         match action {
-            Action::Archive => ui.page.set("archive".into()),
+            Action::Archive => after_archive(ui),
             Action::Remove => {
                 ui.card.set(String::new());
                 ui.page.set("board".into());

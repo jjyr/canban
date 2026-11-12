@@ -36,7 +36,7 @@ Archived Cards come from the App snapshot. Archive performs no separate removed-
 
 ## Card lifecycle actions
 
-Local Card menus offer **Archive Card** while active and **Restore Card** while archived. There is no Delete Card action or Deleted Cards recovery group. Archive retains history; it does not mean deletion.
+Local Card menus offer **Archive Card** while active and **Restore Card** while archived. There is no Delete Card action or Deleted Cards recovery group. Archive retains history; it does not mean deletion. Archiving from the Board (including its Card detail pane) keeps the current Board and Project visible and closes the detail pane; the archived Card leaves the active columns. Open Archive explicitly from the Board header to browse archived Cards.
 
 GitHub source Cards retain **Remove from Board** as a separate local sync-exclusion operation (see [GitHub Cards](product/github-cards.md#local-removal-and-restoration)). Existing removed data and the compatibility removal/restoration API remain intact; this UI change neither purges nor automatically restores records.
 

@@ -113,7 +113,6 @@ impl AppServer {
         let mut execute = false;
         let receipt=self.mutate("github.pr.publish",&p,|db|{
             let mut c:Card=db.get(&card.id)?;revise(&c,&p)?;
-            if let Some(reason)=crate::review::blocker(db,&c)?{bail!("{reason}")}
             if let Some(previous)=c.pull_request.take() && card.pull_request.as_ref().is_some_and(|p|p.merged||p.state=="closed") {c.pull_request_history.push(previous);}
             c.delivery_mode=Some(DeliveryMode::GitHubPr);c.pull_request=Some(pending.clone());c.revision+=1;db.save(&c)?;
             log(db,&c,"github.pr_publish_started","user","Accepted reviewed changes for PR publication",None,json!({"request_key":key,"head":plan.card_head,"target":plan.target_branch}))?;
@@ -526,7 +525,6 @@ impl AppServer {
         let mut saved_pr = None;
         let receipt=self.mutate("github.pr.merge",&p,|db|{
             let c:Card=db.get(strp(&p,"card_id")?)?;revise(&c,&p)?;
-            if let Some(reason)=crate::review::blocker(db,&c)?{bail!("{reason}")}
             ensure!(c.pull_request.as_ref().is_some_and(|binding|binding.repository_id==pr.repository_id && binding.number==pr.number),"PR binding changed; refresh before merging");saved_pr=Some(pr.clone());execute=true;
             log(db,&c,"github.pr_merge_started","user","Accepted delivery PR for GitHub merge",None,json!({"head":pr.head,"request_key":key}))?;
             Ok(json!({"state":"unknown","message":"Merge intent saved; refresh remote PR before retrying","request_key":key}))

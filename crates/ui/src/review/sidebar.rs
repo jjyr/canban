@@ -1065,20 +1065,31 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
             },
         ))
         .child(dynamic(move || {
-            if let Some(p) = ui.review.get()
-                && let Some(reason) = p.reason
-            {
-                let cid = p.card_id.clone();
-                return view()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_2()
-                    .child(notice(reason, Tone::Attention))
-                    .child(compact_action("Terminals ↗", Variant::Quiet, move |_| {
-                        crate::terminals::open_card(ui, &cid);
-                    }))
-                    .into_element();
+            if let Some(p) = ui.review.get() {
+                let mut col = view().flex_col().gap_1p5();
+                let mut any = false;
+                if let Some(reason) = p.reason {
+                    any = true;
+                    col = col.child(notice(reason, Tone::Attention));
+                }
+                if let Some(warning) = p.warning {
+                    any = true;
+                    let cid = p.card_id.clone();
+                    col = col.child(
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(notice(warning, Tone::Info))
+                            .child(compact_action("Terminals ↗", Variant::Quiet, move |_| {
+                                crate::terminals::open_card(ui, &cid);
+                            })),
+                    );
+                }
+                if any {
+                    return col.into_element();
+                }
             }
             view().into_element()
         }))

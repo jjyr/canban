@@ -120,6 +120,9 @@ pub fn diff_panel(p: ReviewPreview) -> impl IntoElement {
     if let Some(reason) = p.reason {
         body = body.child(notice(reason, Tone::Attention));
     }
+    if let Some(warning) = p.warning {
+        body = body.child(notice(warning, Tone::Info));
+    }
     if parsed.is_empty() {
         return body.child(muted("No file changes between these commits."));
     }

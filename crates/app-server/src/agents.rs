@@ -351,10 +351,11 @@ impl AppServer {
             .filter(|s| !s.is_empty())
         {
             raw.default_agent = def.to_owned();
-        } else if !raw
-            .profiles
-            .iter()
-            .any(|prof| prof.id == raw.default_agent && prof.enabled)
+        } else if !raw.onboarded
+            || !raw
+                .profiles
+                .iter()
+                .any(|prof| prof.id == raw.default_agent && prof.enabled && prof.is_identity())
         {
             raw.default_agent = "developer".into();
         }

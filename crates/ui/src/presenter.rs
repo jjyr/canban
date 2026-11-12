@@ -641,7 +641,7 @@ pub fn dispatch_complete(
                             ui.open_card(id.into());
                         }
                     }
-                    "card.archive" if active => ui.page.set("archive".into()),
+                    "card.archive" if active => crate::card_actions::after_archive(ui),
                     "review.merge" | "github.pr.merge" | "github.pr.refresh"
                         if active && ui.current_card().is_some_and(|c| c.archived_at.is_some()) =>
                     {
