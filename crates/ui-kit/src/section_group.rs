@@ -1,5 +1,5 @@
 //! Borderless section group: title header + bottom divider + content body.
-//! Reused across Overview, GitHub Account/Repository pages, and future Settings screens.
+//! Reused across Overview, GitHub Account/Repository pages, and Settings screens.
 use super::{Icon, Tone, badge, icon, label, muted, status, tokens::*};
 use nsh_core::prelude::*;
 
@@ -8,6 +8,8 @@ pub struct SectionGroup {
     description: Option<SharedString>,
     count: Option<usize>,
     tone: Tone,
+    body_gap: f32,
+    max_w: Option<Length>,
     trailing: Option<AnyElement>,
     children: Vec<AnyElement>,
 }
@@ -19,6 +21,8 @@ impl SectionGroup {
             description: None,
             count: None,
             tone: Tone::Neutral,
+            body_gap: 4.0,
+            max_w: None,
             trailing: None,
             children: Vec::new(),
         }
@@ -39,6 +43,16 @@ impl SectionGroup {
 
     pub fn tone(mut self, tone: Tone) -> Self {
         self.tone = tone;
+        self
+    }
+
+    pub fn body_gap(mut self, gap: f32) -> Self {
+        self.body_gap = gap;
+        self
+    }
+
+    pub fn max_w(mut self, max_w: impl Into<Length>) -> Self {
+        self.max_w = Some(max_w.into());
         self
     }
 
@@ -114,12 +128,16 @@ impl IntoElement for SectionGroup {
             header = header.child(muted(desc));
         }
 
-        view()
-            .gap_2p5()
-            .min_w(px(0.))
-            .child(header)
-            .child(view().gap_1().min_w(px(0.)).children(self.children))
-            .into_element()
+        let mut root = view().gap_3().min_w(px(0.)).child(header).child(
+            view()
+                .gap(px(self.body_gap))
+                .min_w(px(0.))
+                .children(self.children),
+        );
+        if let Some(mw) = self.max_w {
+            root = root.max_w(mw);
+        }
+        root.into_element()
     }
 }
 

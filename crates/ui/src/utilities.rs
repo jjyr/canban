@@ -158,6 +158,19 @@ pub fn terminal_settings(ui: Ui) -> impl IntoElement {
         "Terminal",
         "Font family and size apply immediately to open Terminals without reconnecting.",
     )
+    .trailing(badge(move || {
+        ui.utility.with(|v| {
+            let fam = v["preferences"]["terminal_font_family"]
+                .as_str()
+                .unwrap_or("")
+                .trim();
+            let sz = v["preferences"]["terminal_font_size"]
+                .as_u64()
+                .unwrap_or(u64::from(DEFAULT_TERMINAL_FONT_SIZE));
+            let name = if fam.is_empty() { "System Mono" } else { fam };
+            format!("{name} · {sz} pt")
+        })
+    }))
     .child(settings_field(
         "Font family",
         &format!(
@@ -544,6 +557,17 @@ pub fn settings(ui: Ui) -> impl IntoElement {
         "Theme and support",
         "Theme and power controls are also available from the bottom bar.",
     )
+    .trailing(badge(move || {
+        ui.utility.with(|v| {
+            canban_themes::resolve(
+                v["preferences"]["theme"]
+                    .as_str()
+                    .unwrap_or(canban_themes::DEFAULT),
+            )
+            .name
+            .to_owned()
+        })
+    }))
     .child(
         checkbox("Notification sounds".into(), sounds, move |enabled| {
             let enabled = *enabled;

@@ -1,7 +1,7 @@
 //! Shared machine picker, server-side directory browser and Project location form.
 use crate::presenter::*;
 use canban_types::*;
-use canban_ui_kit::*;
+use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
 pub fn refresh_catalog(ui: Ui) {
@@ -57,7 +57,9 @@ pub fn picker(ui: Ui, machine: Signal<String>, directory: Signal<String>) -> imp
                     let mut rows = vec![("local".to_owned(), "AppServer host".to_owned())];
                     rows.extend(
                         ui.machines
-                            .with_untracked(|v| v["machines"].as_array().cloned().unwrap_or_default())
+                            .with_untracked(|v| {
+                                v["machines"].as_array().cloned().unwrap_or_default()
+                            })
                             .iter()
                             .filter_map(|m| {
                                 Some((
@@ -77,7 +79,8 @@ pub fn picker(ui: Ui, machine: Signal<String>, directory: Signal<String>) -> imp
                     }
                     items.push(MenuItem::separator());
                     items.push(
-                        MenuItem::new("Manage machines…").on_select(move || ui.navigate("machines")),
+                        MenuItem::new("Manage machines…")
+                            .on_select(move || ui.navigate("machines")),
                     );
                     popup_menu(items).await;
                 });
@@ -230,16 +233,19 @@ pub fn location_fields(
     machine: Signal<String>,
     directory: Signal<String>,
 ) -> impl IntoElement {
-    settings_field(
-        "Execution machine",
-        "New work uses this machine. Existing Agents retain their original environment.",
-        picker(ui, machine, directory),
-    )
-    .child(settings_field(
-        "Directory",
-        "Enter an absolute path on the selected machine. New directories are created on save.",
-        directory_picker(ui, machine, directory),
-    ))
+    view()
+        .min_w(px(0.))
+        .gap_3p5()
+        .child(settings_field(
+            "Execution machine",
+            "New work uses this machine. Existing Agents retain their original environment.",
+            picker(ui, machine, directory),
+        ))
+        .child(settings_field(
+            "Directory",
+            "Enter an absolute path on the selected machine. New directories are created on save.",
+            directory_picker(ui, machine, directory),
+        ))
 }
 
 pub fn project_location(ui: Ui) -> impl IntoElement {
@@ -321,20 +327,221 @@ pub fn settings(ui: Ui) -> impl IntoElement {
     let alias = signal(String::new());
     let session = signal(String::new());
     let remove = signal(String::new());
-    settings_section("Machines","Connections use AppServer's SSH configuration. Remote programs and history remain when a connection is removed.")
-        .child(muted("AppServer host · Local execution"))
-        .child(settings_field("Default Terminal machine","Used when no Terminal is selected. An unavailable target never falls back silently.",view().flex_row().items_center().gap_2().child(picker(ui,default_machine,unused)).child(action("Save default",Variant::Quiet,move |_|dispatch(ui,"machine.default",json!({"machine":default_machine.get_untracked()}))))))
-        .child(dynamic(move||{let v=ui.machines.get();let mut list=view().gap_2();
-            if let Some(error)=v["error"].as_str(){list=list.child(notice(error.to_owned(),Tone::Attention));}
-            for row in v["machines"].as_array().cloned().unwrap_or_default(){let id=row["id"].as_str().unwrap_or("").to_owned();let confirmed=remove.get()==id;let display=format!("{} · {}",row["name"].as_str().unwrap_or("Machine"),row["state"].as_str().unwrap_or("unknown"));
-                let choose=id.clone();let refs=ui.snapshot.with(|s|s.projects.iter().filter(|p|p.work_location().machine==id).count());
-                list=list.child(panel().child(label(display)).child(muted(format!("{} · {refs} Project references",row["target"].as_str().unwrap_or(""))))
-                    .child(action(if confirmed{"Confirm disconnect · retain programs"}else{"Disconnect…"},Variant::Quiet,move |_|{if confirmed{dispatch_then(ui,"machine.remove",json!({"machine":choose,"confirmed":true}),move |_|refresh_catalog(ui));remove.set(String::new());}else{remove.set(choose.clone());}}).self_start()));
-            }list}))
-        .child(settings_field("Add an SSH machine","Login, host-key and installation prompts open in a setup Terminal on the AppServer host.",view().gap_2()
-            .child(field(alias,"Display name (optional)").label("Machine name"))
-            .child(field(target,"SSH target, for example user@host").label("SSH target"))
-            .child(field(session,"Remote Core session (optional)").label("Remote Core session"))
-            .child(action("Connect machine…",Variant::Secondary,move |_|dispatch_then(ui,"machine.add",json!({"name":alias.get_untracked(),"target":target.get_untracked().trim(),"session":session.get_untracked()}),move |v|{if let Some(id)=v["id"].as_str(){ui.open_terminal(id.into());}})).self_start().disabled(move||ui.is_method_pending("machine.add")||target.get().trim().is_empty()))))
-        .child(action("Refresh machines",Variant::Quiet,move |_|refresh_catalog(ui)).self_start())
+    let add_open = signal(ui.page.get_untracked() == "machines");
+
+    settings_section(
+        "Machines",
+        "Connections use AppServer's SSH configuration. Remote programs and history remain when a connection is removed.",
+    )
+    .trailing(compact_action(
+        "Refresh machines",
+        Variant::Quiet,
+        move |_| refresh_catalog(ui),
+    ))
+    .child(dynamic(move || {
+        let v = ui.machines.get();
+        let mut list = view().min_w(px(0.)).gap_1p5();
+        if let Some(error) = v["error"].as_str() {
+            list = list.child(notice(error.to_owned(), Tone::Attention));
+        }
+        let local_refs = ui.snapshot.with(|s| {
+            s.projects
+                .iter()
+                .filter(|p| p.work_location().machine == "local")
+                .count()
+        });
+        list = list.child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .py_2()
+                .px_2p5()
+                .rounded(px(RADIUS))
+                .bg(INSET)
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .min_w(px(0.))
+                        .child(label("AppServer host").font_weight(FontWeight::MEDIUM))
+                        .child(status("Local", Tone::Success))
+                        .child(muted(format!(
+                            "Local execution · {local_refs} Project{}",
+                            if local_refs == 1 { "" } else { "s" }
+                        ))),
+                ),
+        );
+        for row in v["machines"].as_array().cloned().unwrap_or_default() {
+            let id = row["id"].as_str().unwrap_or("").to_owned();
+            let confirmed = remove.get() == id;
+            let machine_name = row["name"].as_str().unwrap_or("Machine").to_owned();
+            let state_str = row["state"].as_str().unwrap_or("unknown").to_owned();
+            let state_tone = match state_str.as_str() {
+                "connected" => Tone::Success,
+                "unreachable" | "error" => Tone::Attention,
+                _ => Tone::Neutral,
+            };
+            let choose = id.clone();
+            let refs = ui.snapshot.with(|s| {
+                s.projects
+                    .iter()
+                    .filter(|p| p.work_location().machine == id)
+                    .count()
+            });
+            list = list.child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .py_2()
+                    .px_2p5()
+                    .rounded(px(RADIUS))
+                    .bg(INSET)
+                    .child(
+                        view()
+                            .min_w(px(0.))
+                            .flex_1()
+                            .gap_0p5()
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(label(machine_name).font_weight(FontWeight::MEDIUM))
+                                    .child(status(state_str, state_tone)),
+                            )
+                            .child(muted(format!(
+                                "{} · {refs} Project reference{}",
+                                row["target"].as_str().unwrap_or(""),
+                                if refs == 1 { "" } else { "s" }
+                            ))),
+                    )
+                    .child(compact_action(
+                        if confirmed {
+                            "Confirm disconnect · retain programs"
+                        } else {
+                            "Disconnect…"
+                        },
+                        if confirmed {
+                            Variant::Danger
+                        } else {
+                            Variant::Quiet
+                        },
+                        move |_| {
+                            if confirmed {
+                                dispatch_then(
+                                    ui,
+                                    "machine.remove",
+                                    json!({"machine":choose,"confirmed":true}),
+                                    move |_| refresh_catalog(ui),
+                                );
+                                remove.set(String::new());
+                            } else {
+                                remove.set(choose.clone());
+                            }
+                        },
+                    )),
+            );
+        }
+        list
+    }))
+    .child(settings_field(
+        "Default Terminal machine",
+        "Used when no Terminal is selected. An unavailable target never falls back silently.",
+        view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(picker(ui, default_machine, unused))
+            .child(action(
+                "Save default",
+                Variant::Secondary,
+                move |_| {
+                    dispatch(
+                        ui,
+                        "machine.default",
+                        json!({"machine":default_machine.get_untracked()}),
+                    )
+                },
+            )),
+    ))
+    .child(dynamic(move || {
+        let is_open = add_open.get();
+        collapsible_section_group(
+            "Add an SSH machine",
+            None,
+            is_open,
+            move |_| add_open.update(|v| *v = !*v),
+            view()
+                .gap_2p5()
+                .pt_1()
+                .child(muted(
+                    "Login, host-key and installation prompts open in a setup Terminal on the AppServer host.",
+                ))
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap_2p5()
+                        .child(
+                            view()
+                                .flex_1()
+                                .min_w(px(200.))
+                                .gap_1()
+                                .child(muted("Display name"))
+                                .child(field(alias, "Optional alias").label("Machine name")),
+                        )
+                        .child(
+                            view()
+                                .flex_1()
+                                .min_w(px(220.))
+                                .gap_1()
+                                .child(muted("SSH target"))
+                                .child(field(target, "user@host").label("SSH target")),
+                        )
+                        .child(
+                            view()
+                                .flex_1()
+                                .min_w(px(200.))
+                                .gap_1()
+                                .child(muted("Remote Core session"))
+                                .child(
+                                    field(session, "Optional session").label("Remote Core session"),
+                                ),
+                        ),
+                )
+                .child(
+                    action("Connect machine…", Variant::Secondary, move |_| {
+                        dispatch_then(
+                            ui,
+                            "machine.add",
+                            json!({
+                                "name": alias.get_untracked(),
+                                "target": target.get_untracked().trim(),
+                                "session": session.get_untracked()
+                            }),
+                            move |v| {
+                                if let Some(id) = v["id"].as_str() {
+                                    ui.open_terminal(id.into());
+                                }
+                            },
+                        )
+                    })
+                    .self_start()
+                    .disabled(move || {
+                        ui.is_method_pending("machine.add") || target.get().trim().is_empty()
+                    }),
+                ),
+        )
+        .into_element()
+    }))
 }

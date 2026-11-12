@@ -1,6 +1,6 @@
 //! Registry projections reused by Settings and the Card mention composer.
 use canban_types::Profile;
-use canban_ui_kit::*;
+use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 
 fn strip_inline_code(line: &str) -> String {
@@ -58,7 +58,8 @@ pub fn addressed(body: &str, profiles: &[Profile]) -> Vec<String> {
                 true
             } else {
                 let prev = clean[..at].chars().next_back().unwrap_or(' ');
-                prev.is_whitespace() || matches!(prev, '(' | '[' | '{' | '"' | '\'' | ',' | ';' | ':')
+                prev.is_whitespace()
+                    || matches!(prev, '(' | '[' | '{' | '"' | '\'' | ',' | ';' | ':')
             };
             let rest = &clean[at + 1..];
             let name_len = rest
@@ -121,7 +122,7 @@ pub fn remove_address(body: &str, id: &str, profiles: &[Profile]) -> String {
     next.join(" ")
 }
 
-pub fn registry(profiles: Signal<Vec<Profile>>) -> View {
+pub fn registry(profiles: Signal<Vec<Profile>>) -> SectionGroup {
     settings_section(
         "Agent profiles",
         "Workflow stages and @mentions select a profile from agents.json.",
@@ -131,15 +132,33 @@ pub fn registry(profiles: Signal<Vec<Profile>>) -> View {
 /// Content-only projection for composition inside the screen's settings group.
 pub fn registry_items(profiles: Signal<Vec<Profile>>) -> impl IntoElement {
     dynamic(move || {
-        view().min_w(px(0.)).gap_3().children(
+        view().min_w(px(0.)).gap_2().children(
             profiles
                 .get()
                 .into_iter()
                 .map(|profile| {
+                    let (provider_icon, provider_name) = provider(&profile);
                     view()
                         .min_w(px(0.))
+                        .py_2()
+                        .px_2p5()
+                        .rounded(px(RADIUS))
+                        .bg(INSET)
                         .gap_1()
-                        .child(label(format!("@{}", profile.id)).font_weight(FontWeight::MEDIUM))
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .min_w(px(0.))
+                                .child(icon(provider_icon).w(px(14.)).h(px(14.)).flex_shrink_0())
+                                .child(
+                                    label(format!("@{}", profile.id))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .truncate(),
+                                )
+                                .child(badge(provider_name)),
+                        )
                         .child(muted(if profile.role_instruction.is_empty() {
                             "No fixed role instruction".into()
                         } else {

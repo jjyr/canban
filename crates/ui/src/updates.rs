@@ -309,40 +309,90 @@ pub fn rail(ui: Ui) -> impl IntoElement {
 }
 pub fn settings(ui: Ui) -> impl IntoElement {
     settings_section("Updates", "Internal releases from main.")
-        .child(when(move || ui.update.get()["disabled"] == true, || muted("Channel updates are disabled for this development instance. Rebuild with mise run dev.")))
+        .trailing(dynamic(move || {
+            let value = ui.update.get();
+            if value["disabled"] == true {
+                return status("Dev instance", Tone::Neutral).into_element();
+            }
+            if let Some(ver) = value["state"]["available"]["manifest"]["version"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+            {
+                return status(format!("Update · {ver}"), Tone::Info).into_element();
+            }
+            match value["state"]["phase"].as_str() {
+                Some("current") => status("Up to date", Tone::Success).into_element(),
+                Some("manual_recovery") => {
+                    status("Recovery needed", Tone::Attention).into_element()
+                }
+                Some("checking") => status("Checking…", Tone::Neutral).into_element(),
+                _ => badge(
+                    value["build"]["version"]
+                        .as_str()
+                        .unwrap_or("development")
+                        .to_owned(),
+                )
+                .into_element(),
+            }
+        }))
+        .child(when(
+            move || ui.update.get()["disabled"] == true,
+            || muted("Channel updates are disabled for this development instance. Rebuild with mise run dev."),
+        ))
         .child(when(
             move || {
                 matches!(
                     ui.update.get()["state"]["phase"].as_str(),
-                    Some("current" | "checking" | "downloading" | "installing")
+                    Some("checking" | "downloading" | "installing")
                 )
             },
             move || {
                 muted(move || {
                     let value = ui.update.get();
                     match value["state"]["phase"].as_str().unwrap_or("") {
-                        "current" => "Up to date".into(),
                         "checking" => "Checking for updates…".into(),
                         _ => hint(&value),
                     }
                 })
             },
         ))
-        .child(settings_field(
-            "Current version",
-            "",
-            label(move || {
-                ui.update.get()["build"]["version"]
-                    .as_str()
-                    .unwrap_or("development")
-                    .to_owned()
-            }),
-        ))
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(settings_field(
+                    "Current version",
+                    "",
+                    label(move || {
+                        ui.update.get()["build"]["version"]
+                            .as_str()
+                            .unwrap_or("development")
+                            .to_owned()
+                    })
+                    .font_family("Menlo")
+                    .text_size(px(12.)),
+                ))
+                .child(
+                    action("Check for updates", Variant::Secondary, move |_| check(ui))
+                        .disabled(move || busy(ui) || ui.update.get()["disabled"] == true),
+                ),
+        )
         .child(when(
             move || ui.update.get()["disabled"] != true && !ui.update.get()["state"]["available"].is_null(),
             move || {
                 view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
                     .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded(px(RADIUS))
+                    .bg(INSET)
                     .child(label(move || {
                         format!(
                             "Available · {}",
@@ -373,12 +423,6 @@ pub fn settings(ui: Ui) -> impl IntoElement {
                 )
             },
         ))
-        .child(
-            view().items_start().child(
-                action("Check for updates", Variant::Secondary, move |_| check(ui))
-                    .disabled(move || busy(ui) || ui.update.get()["disabled"] == true),
-            ),
-        )
 }
 
 /// Standalone recovery UI reads only the updater journal, never application data.

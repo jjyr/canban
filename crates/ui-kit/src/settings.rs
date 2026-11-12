@@ -1,28 +1,23 @@
-//! Shared settings section/field geometry. The screen owns one outer scroll.
-use super::{label, muted, panel, tokens::*};
+//! Shared settings section/field geometry built on borderless `SectionGroup`.
+//! The screen owns one outer scroll.
+use super::{SectionGroup, label, muted, section_group};
 use nsh_core::prelude::*;
-pub fn settings_section(title: &str, description: &str) -> View {
-    panel()
-        .min_w(px(0.))
-        .gap_4()
-        .border_1()
-        .border_color(BORDER)
-        .child(
-            view()
-                .gap_1()
-                .child(
-                    label(title.to_owned())
-                        .text_size(px(16.))
-                        .font_weight(FontWeight::SEMIBOLD),
-                )
-                .child(muted(description.to_owned())),
-        )
+
+pub fn settings_section(
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+) -> SectionGroup {
+    section_group(title).description(description).body_gap(14.0)
 }
+
 pub fn settings_field(title: &str, description: &str, control: impl IntoElement) -> View {
-    view()
+    let mut field = view()
         .min_w(px(0.))
-        .gap_2()
-        .child(label(title.to_owned()))
-        .child(control)
-        .child(muted(description.to_owned()))
+        .gap_1p5()
+        .child(label(title.to_owned()).font_weight(FontWeight::MEDIUM))
+        .child(control);
+    if !description.trim().is_empty() {
+        field = field.child(muted(description.to_owned()));
+    }
+    field
 }
