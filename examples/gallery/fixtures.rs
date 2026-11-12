@@ -309,6 +309,16 @@ pub fn overflowing_board() -> canban_types::Snapshot {
     s
 }
 
+/// Lift regression: uneven rows make the bottom Card's missing transform obvious.
+/// Drag #4 by its body or grip; it must stay under the grab point at lift/release.
+pub fn bottom_card_drag() -> canban_types::Snapshot {
+    let mut s = overflowing_board();
+    s.cards.retain(|c| c.number <= 4);
+    s.cards[1].title = "A taller Card with a deliberately long title that wraps across several lines before the next row".into();
+    s.cards[3].title = "Drag this bottom Card without jumping to the top".into();
+    s
+}
+
 /// Board-only project switching: human gates, unbadged work and quiet projects,
 /// long Unicode names and overflow. Uses the production Overview classification.
 pub fn project_activity() -> canban_types::Snapshot {

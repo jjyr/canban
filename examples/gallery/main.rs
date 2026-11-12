@@ -576,6 +576,11 @@ pub fn Gallery() -> impl IntoElement {
         ui.page.set("board".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("board-bottom-drag") {
+        ui.snapshot.set(fixtures::bottom_card_drag());
+        ui.page.set("board".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("board-overflow") {
         ui.snapshot.set(fixtures::overflowing_board());
         ui.page.set("board".into());

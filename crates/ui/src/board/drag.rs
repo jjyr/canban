@@ -316,7 +316,7 @@ impl BoardDrag {
             end: None,
         }));
         spawn(async move {
-            let Some(source) = reference.measure().await else {
+            let Some(mut source) = reference.measure().await else {
                 self.clear();
                 return;
             };
@@ -326,6 +326,11 @@ impl BoardDrag {
             }
             let root = self.metrics.with(|m| m.root);
             let mut session = self.session.get().unwrap();
+            // NSH Measurement::page includes scrolling but excludes transforms.
+            // Rows are laid out at top: 0 and positioned by bind_translate_y;
+            // include that resting offset exactly once before lifting the row.
+            // phase 0 sets row positions directly, and lifted freezes this row.
+            source.page.y.0 += session.original_y;
             session.source = Rect {
                 x: source.page.x.0,
                 y: source.page.y.0,

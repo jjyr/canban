@@ -70,3 +70,35 @@ Native application checks used the packaged development binaries in a separately
 The final production-component Gallery used the 72-Card overflow scene at 1200 × 760 logical points. After scrolling Backlog, dragging visible Card #6 from its body inserted it between Develop #25/#26; counts changed from 24/24/24 to 23/25/24 without opening details. Earlier Gallery checks also exercised same-column movement. The final drag trace recorded two layout-target changes; native animation values handled pointer movement.
 
 Automation supplies an atomic drag and cannot hold the pointer while observing intermediate frames. Sustained vertical/horizontal edge-hold scrolling, Escape during a held gesture, reduced-motion system settings and hover across Themes still need manual native checks. Placeholder geometry and motion ownership were checked in source/tests; synthetic drag timings do not establish display frame rate or end-to-end input latency. The isolated app and Gallery were closed after checks, and their test Core was stopped.
+
+### Bottom-Card lift regression — 2026-11-12
+
+NSH `Measurement::page` includes ancestor scrolling but excludes transforms.
+Board rows have layout `top: 0` and receive their resting Y position through
+`bind_translate_y`. The lifted overlay must add the captured resting row offset
+once to the measured page Y before deriving both its Board-local origin and
+its landing/cancellation displacement. Using the measured page Y alone makes
+lower Cards jump upward by their row offset (including in scrolled columns).
+The row is frozen while lifted; idle layout sets its transform directly.
+
+Run `CANBAN_GALLERY_SCENE=board-bottom-drag mise run gallery` for four Cards with
+uneven heights. Drag the last Card by its body and grip, first a small distance,
+then into an empty column, and release outside the Board to cancel. The grabbed
+point must remain under the pointer and the Card must land without an extra
+vertical jump. Also use `CANBAN_GALLERY_SCENE=board-overflow mise run gallery`,
+scroll to the last Card, and repeat to check that scrolling is not counted twice.
+
+Executed checks: `mise run build`, `mise run test` (257 passed),
+`mise run acceptance`, Rust formatting and `git diff --check` passed. The native
+`board-bottom-drag` Gallery exercised body-start small movement, a drop into an
+empty Develop column, and outside-column cancellation. A mid-gesture capture
+showed the lower Card next to its original placeholder, with no upward jump.
+The packaged application was also exercised using `mise run acceptance-native`
+with a disposable home and isolated Herdr Core. After scrolling to the bottom,
+Card #13 moved before #12; snapshot comparison confirmed only #13 changed,
+its revision advanced once and the request count stayed at one. A subsequent
+small drag of bottom Card #12 retained its revision/order; a mid-gesture capture
+confirmed its lifted origin remained at the scrolled row. The native app needed
+foreground input for these drags; background events produced no persistent
+change. Evidence was saved with Card #20's development report. These checks do
+not cover reduced-motion settings, horizontal scrolling or sustained edge holds.
