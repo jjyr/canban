@@ -74,7 +74,7 @@ UI rail / Settings         |                         |
 - `update.state {}` returns build, discovery/progress/error state and the current install token/phase.
 - `update.check {}` starts a background check. Concurrent check/install operations share an operation lock.
 - `update.install { version, ui_pid, app_id }` requires the exact currently offered version and the owning packaged UI process. Agent-bound requests cannot install. The manifest/candidate API is allowed to advance; the new App's matching UI and CLI are verified together.
-- `canban build-info` returns `{ version, commit, schema, api, platform }`. The current desktop API is 10 and schema is 12. Local unversioned builds identify themselves as `development` / `unknown`.
+- `canban build-info` returns `{ version, commit, schema, api, platform }`. The current desktop API is 11 and schema is 12. Local unversioned builds identify themselves as `development` / `unknown`.
 
 Update state is under `~/.canban/updates/`: `state.json`, `install.json`, `updater.log`, `operation.lock`, `upgrade.lock`, `jobs/<token>/canban-updater`, `outbox/` and temporary staging/session files. Successful replacement retains the previous whole App bundle beside the installed App. There is no automatic cleanup of previous bundles in this first version.
 
@@ -86,13 +86,13 @@ The in-app updater remains the release installation path. A newer App installed
 externally can also activate its bundled backend through the explicit startup
 action below. Opening an App never silently replaces an answering backend.
 
-`mise run build` packages UI, CLI and updater together. `mise run build-release` produces optimized, ad-hoc-signed binaries; it does not publish. `.github/workflows/release.yml` builds the triggering SHA on a macOS arm64 runner, uploads `Canban-macos-aarch64.tar.zst` plus `manifest-macos-aarch64.json`, and publishes the completed draft as a prerelease. Packaging includes existing third-party notices. Developer ID signing/notarization is not implemented.
+`mise run build` packages UI, CLI and updater together. `mise run build-release` produces optimized, ad-hoc-signed binaries; it does not publish. `mise run install-app` (alias `mise run install`) builds the release bundle and atomically installs it into `/Applications/Canban.app`. `.github/workflows/release.yml` builds the triggering SHA on a macOS arm64 runner, uploads `Canban-macos-aarch64.tar.zst` plus `manifest-macos-aarch64.json`, and publishes the completed draft as a prerelease. Packaging includes existing third-party notices. Developer ID signing/notarization is not implemented.
 
 Development uses `mise run dev`, which derives an isolated checkout/branch home
 and disables channel updates; it does not replace the installed `~/.canban`
 service. For an ordinary installed App, startup compares the backend and App:
 
-- **Older backend:** show **Update backend** before entering the workspace.
+- **Older backend:** automatically starts **local backend activation** (`Updating local backend…`) using the bundled CLI/updater before entering the workspace, exposing a manual retry/quit prompt only if activation fails or rolled back.
 - **Equal version:** enter normally.
 - **Newer backend:** enter normally with **Please use a newer Canban App**. Never downgrade the backend.
 

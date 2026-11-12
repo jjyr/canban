@@ -228,7 +228,7 @@ pub(super) fn run(j: &mut Journal, recover: bool) -> Result<()> {
             j.save()?;
             state(j, "error")?;
             // Reopen the startup prompt; no database or installed files changed.
-            if j.ui.as_ref().is_some_and(|ui| process(ui.pid).is_err()) {
+            if j.ui.is_none() || j.ui.as_ref().is_some_and(|ui| process(ui.pid).is_err()) {
                 show_recovery(j);
             }
             return Err(error);

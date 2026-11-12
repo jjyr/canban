@@ -99,24 +99,30 @@ fn StartupError() -> impl IntoElement {
         .unwrap_or_else(|_| "Unavailable".into());
     if let Some(old) = OLDER.get() {
         let old = old.clone();
-        return backend_update_screen(home, ERROR.get().cloned().unwrap_or_default(), move || {
-            let old = old.clone();
-            async move {
-                let cli = std::env::current_exe()?.with_file_name("canban");
-                let app_id = app_id()?;
-                let result = blocking(move || {
-                    canban_updater::worker::local::prepare(
-                        &old.home,
-                        &cli,
-                        &old.ping,
-                        std::process::id(),
-                        app_id,
-                    )
-                })
-                .await;
-                result.context("Backend updater could not be started")?
-            }
-        })
+        let auto_start = std::env::var_os("CANBAN_UPGRADE_TOKEN").is_none();
+        return backend_update_screen_auto(
+            home,
+            ERROR.get().cloned().unwrap_or_default(),
+            auto_start,
+            move || {
+                let old = old.clone();
+                async move {
+                    let cli = std::env::current_exe()?.with_file_name("canban");
+                    let app_id = app_id()?;
+                    let result = blocking(move || {
+                        canban_updater::worker::local::prepare(
+                            &old.home,
+                            &cli,
+                            &old.ping,
+                            std::process::id(),
+                            app_id,
+                        )
+                    })
+                    .await;
+                    result.context("Backend updater could not be started")?
+                }
+            },
+        )
         .into_element();
     }
     error_screen(home, ERROR.get().cloned().unwrap_or_default()).into_element()
@@ -127,8 +133,34 @@ where
     F: Fn() -> Fut + 'static,
     Fut: std::future::Future<Output = Result<()>> + 'static,
 {
-    let pending = signal(false);
+    backend_update_screen_auto(home, detail, false, update)
+}
+
+pub fn backend_update_screen_auto<F, Fut>(
+    home: String,
+    detail: String,
+    auto_start: bool,
+    update: F,
+) -> impl IntoElement
+where
+    F: Fn() -> Fut + 'static,
+    Fut: std::future::Future<Output = Result<()>> + 'static,
+{
+    let pending = signal(auto_start);
     let error = signal(String::new());
+    let update = std::rc::Rc::new(update);
+    if auto_start {
+        let auto_update = update.clone();
+        request_animation_frame(move |_| {
+            let future = auto_update();
+            spawn(async move {
+                if let Err(e) = future.await {
+                    error.set(format!("{e:#}"));
+                    pending.set(false);
+                }
+            });
+        });
+    }
     view()
         .flex_1()
         .bg(BACKGROUND)
@@ -140,31 +172,53 @@ where
                 .w_full()
                 .max_w(px(720.))
                 .gap_4()
-                .child(heading("Update backend"))
-                .child(muted(
-                    "Use the backend included in this installed App. No update download is needed.",
-                ))
+                .child(heading(move || {
+                    if pending.get() {
+                        "Updating local backend…"
+                    } else {
+                        "Update backend"
+                    }
+                }))
+                .child(muted(move || {
+                    if pending.get() {
+                        "Activating the backend included in this App. Your workspace will open automatically."
+                    } else {
+                        "Use the backend included in this installed App. No update download is needed."
+                    }
+                }))
                 .child(label(format!("Home: {home}")))
                 .child(notice(detail, Tone::Attention))
                 .child(when(
                     move || !error.get().is_empty(),
-                    move || notice(move || error.get(), Tone::Attention),
+                    move || notice(move || error.get(), Tone::Danger),
                 ))
                 .child(
-                    action("Update backend", Variant::Primary, move |_| {
-                        if pending.get_untracked() {
-                            return;
-                        }
-                        pending.set(true);
-                        error.set(String::new());
-                        let future = update();
-                        spawn(async move {
-                            if let Err(e) = future.await {
-                                error.set(format!("{e:#}"));
-                                pending.set(false);
+                    action(
+                        move || {
+                            if pending.get() {
+                                "Updating…"
+                            } else if !error.get().is_empty() {
+                                "Retry backend update"
+                            } else {
+                                "Update backend"
                             }
-                        });
-                    })
+                        },
+                        Variant::Primary,
+                        move |_| {
+                            if pending.get_untracked() {
+                                return;
+                            }
+                            pending.set(true);
+                            error.set(String::new());
+                            let future = update();
+                            spawn(async move {
+                                if let Err(e) = future.await {
+                                    error.set(format!("{e:#}"));
+                                    pending.set(false);
+                                }
+                            });
+                        },
+                    )
                     .disabled(move || pending.get()),
                 )
                 .child(action("Quit", Variant::Quiet, |_| {

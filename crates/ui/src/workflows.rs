@@ -54,6 +54,7 @@ impl Draft {
         self.base = value;
     }
 }
+type SourceStamp = Vec<(String, u64, String)>;
 #[derive(Clone, Copy)]
 pub struct State {
     pub drafts: Signal<BTreeMap<String, Draft>>,
@@ -61,6 +62,10 @@ pub struct State {
     pub mode: Signal<String>,
     pub selected_step: Signal<String>,
     pub new_column_name: Signal<String>,
+    pub studio_doc: Signal<Option<canban_workflow_engine::source::Document>>,
+    pub studio_error: Signal<String>,
+    studio_synced: Stored<(String, String, String)>,
+    stamps: Stored<BTreeMap<String, SourceStamp>>,
     pub error: Signal<String>,
     pub latest: Signal<Value>,
     pub agent: Signal<bool>,
@@ -82,6 +87,10 @@ impl State {
             mode: signal("visual".into()),
             selected_step: signal(String::new()),
             new_column_name: signal(String::new()),
+            studio_doc: signal(None),
+            studio_error: signal(String::new()),
+            studio_synced: stored((String::new(), String::new(), String::new())),
+            stamps: stored(BTreeMap::new()),
             error: signal(String::new()),
             latest: signal(Value::Null),
             agent: signal(false),
@@ -102,15 +111,35 @@ impl Default for State {
         Self::new()
     }
 }
+fn project_source_stamp(ui: Ui, project: &str) -> SourceStamp {
+    ui.snapshot.with_untracked(|s| {
+        s.workflow_sources
+            .iter()
+            .filter(|f| f.project_id == project)
+            .map(|f| (f.id.clone(), f.revision, f.hash.clone()))
+            .collect()
+    })
+}
 fn load(ui: Ui, discard: bool) {
     let Some(app) = crate::APP.get().cloned() else {
         return;
     };
     let project = ui.project.get_untracked();
     let state = ui.workflows;
+    let stamp = project_source_stamp(ui, &project);
+    let has_draft = state.drafts.with_untracked(|d| d.contains_key(&project));
+    if !discard
+        && has_draft
+        && state.stamps.with(|m| m.get(&project) == Some(&stamp))
+        && state.latest.with_untracked(Value::is_null)
+    {
+        return;
+    }
     let ticket = state.epoch.get_untracked() + 1;
     state.epoch.set(ticket);
-    state.loading.set(true);
+    if discard || !has_draft {
+        state.loading.set(true);
+    }
     ui.spawn(async move {
         let id = project.clone();
         let result = blocking(move || app.call("workflow.sources", json!({"project_id":id}))).await;
@@ -136,6 +165,10 @@ fn load(ui: Ui, discard: bool) {
                     state.latest.set(Value::Null);
                     state.error.set(String::new());
                 }
+                let latest_stamp = project_source_stamp(ui, &project);
+                state.stamps.with(|m| {
+                    m.insert(project.clone(), latest_stamp);
+                });
                 if ui.project.get_untracked() == project {
                     state.selected.set(state.drafts.with_untracked(|d| {
                         d.get(&project)
@@ -298,6 +331,40 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         let _ = changed.get();
         load(ui, false);
     });
+    effect(move || {
+        let project = ui.project.get();
+        let name = state.selected.get();
+        let raw = state
+            .drafts
+            .with(|d| d.get(&project).and_then(|d| d.sources.get(&name)).cloned());
+        if name.is_empty() {
+            state
+                .studio_synced
+                .replace((project, String::new(), String::new()));
+            state.studio_error.set(String::new());
+            state.studio_doc.set(None);
+            return;
+        }
+        let raw = raw.unwrap_or_default();
+        if state
+            .studio_synced
+            .with(|s| s.0 == project && s.1 == name && s.2 == raw)
+        {
+            return;
+        }
+        state.studio_synced.replace((project, name, raw.clone()));
+        match canban_workflow_engine::source::parse(&raw) {
+            Ok(doc) => {
+                state.studio_error.set(String::new());
+                state.studio_doc.set(Some(doc));
+            }
+            Err(err) => {
+                state.studio_error.set(err.to_string());
+                state.studio_doc.set(None);
+            }
+        }
+    });
+    let show_yaml = computed(move || state.mode.get() == "yaml" || !state.latest.get().is_null());
     let names = computed(move || {
         let project = ui.project.get();
         state.drafts.with(|d| {
@@ -394,10 +461,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         nsh_base::editor().value(move || Some(state.latest.with(|v| v["sources"].as_array().into_iter().flatten().find(|f| f["filename"] == state.selected.get()).and_then(|f| f["source"].as_str()).unwrap_or("# This source is absent from the latest saved collection.").to_owned()).into()))
                             .language(Some("yaml".into())).read_only(true).soft_wrap(true).line_numbers(false).folding(false).accessibility_label("Latest saved Workflow YAML").size_full()))))
                 .child(dynamic(move || {
-                    if state.mode.get() == "yaml" || !state.latest.get().is_null() {
+                    if show_yaml.get() {
                         source_editor(ui)
                     } else {
-                        visual_studio(ui)
+                        untracked(|| visual_studio(ui))
                     }
                 }))
                 .child(
@@ -474,17 +541,30 @@ fn update_doc(ui: Ui, mutate: impl FnOnce(&mut canban_workflow_engine::source::D
     let state = ui.workflows;
     let project = ui.project.get_untracked();
     let name = state.selected.get_untracked();
-    let Some(raw) = state
-        .drafts
-        .with_untracked(|d| d.get(&project).and_then(|d| d.sources.get(&name)).cloned())
-    else {
+    if name.is_empty() {
         return;
-    };
-    let Ok(mut doc) = canban_workflow_engine::source::parse(&raw) else {
-        return;
+    }
+    let mut doc = if let Some(existing) = state.studio_doc.get_untracked() {
+        existing
+    } else {
+        let Some(raw) = state
+            .drafts
+            .with_untracked(|d| d.get(&project).and_then(|d| d.sources.get(&name)).cloned())
+        else {
+            return;
+        };
+        let Ok(parsed) = canban_workflow_engine::source::parse(&raw) else {
+            return;
+        };
+        parsed
     };
     mutate(&mut doc);
     if let Ok(encoded) = canban_workflow_engine::source::encode(&doc) {
+        state
+            .studio_synced
+            .replace((project.clone(), name.clone(), encoded.clone()));
+        state.studio_error.set(String::new());
+        state.studio_doc.set(Some(doc));
         state.drafts.update(|d| {
             if let Some(d) = d.get_mut(&project) {
                 d.sources.insert(name, encoded);

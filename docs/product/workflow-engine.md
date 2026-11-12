@@ -82,32 +82,33 @@ No Workflow YAML mirror or revision file is created under `~/.canban`; external 
 Project / Workflows                                                 [Edit with agent]
 -------------------------------------------------------------------------------------
 development.yaml       | [Visual Studio] [YAML Source]                        [History]
-issue-planning.yaml  • | [Development] delivery:... [Active] [Queue Merge · Sync]
-[+ New workflow]       | Entry triggers: [Enter Develop -> Implement] [Enter Review -> ...]
-                       |
-                       | Stage Execution Graph · 3 stages · 5 steps   [New stage] [+ Add]
-                       |   [1 Backlog (0)] -> [2 Develop: Implement, Move] -> [3 Review: ...]
+issue-planning.yaml  • |
+[+ New workflow]       | Stage Execution Graph · Development [Active]   [New stage] [+ Add]
+                       | +-------------------+-------------------+------------------------+
+                       | | [1] Backlog       | [2] Develop       | [3] Review             |
+                       | | Analyze:[Off|Auto]|                   | Delivery:[Queue|Manual]|
+                       | | Start:[Stay|Auto] |                   | Sync:[Sync | Local]    |
+                       | |                   |                   | Ext.PR:[Human|Same|Man]|
+                       | | ----------------- | ----------------- | ---------------------- |
+                       | | Quiet intake      | ⚡ on:develop      | ⚡ on:review            |
+                       | |                   | Implement (@dev)  | External PR check      |
+                       | |                   |        ↓          |           ↓            |
+                       | |                   | Move to Review    | Queue merge (Sync)     |
+                       | +-------------------+-------------------+------------------------+
                        |
                        | Step Inspector · Queue merge (deliver:review)
                        |   Upstream sync: [Merge & Sync Upstream] [Merge Only (Local)]
                        |   Target branch: [Project default]   Rework target: [Implement]
-                       |
-                       | Workflow Automation Options (derived from graph):
-                       |   1. Backlog Auto-Analyze:      [Off] [Auto-Analyze]
-                       |   2. Backlog Auto-Start Develop:[Off] [On / On (After Analysis)]
-                       |   3. Review Mode:               [Queue Merge (Auto)] [Manual Review]
-                       |   4. Upstream Remote Sync:      [Merge & Sync Upstream] [Merge Only]
-                       |   5. External PR Rule:          [Require Human Review] [Same] [Manual]
                        |                                                        [Save · ⌘S]
 ```
 
-1. **Stage Execution Graph:** Groups steps into swimlanes matching the Project's Board stages (`columns`), showing triggers (`⚡ on:develop`), branching (`✓ Then` / `✕ Else`), rework loops (`↺ Rework`), and inline `+ Add stage` / column removal controls.
-2. **Interactive Step Inspector:** Clicking any node opens its type-specific inspector in the same view:
-   - `agent`: Profile selector (`@developer`, `@reviewer`, `@codex`, etc.) + inline Prompt editor with curated built-in defaults and **Reset to default prompt**.
+1. **Stage Execution Graph (layout-only reactive updates):** Groups steps into swimlanes matching the Project's Board stages (`columns`), showing triggers (`⚡ on:develop`), branching (`✓ Then` / `✕ Else`), rework loops (`↺ Rework`), and inline `+ Add stage` / column removal controls. Stage lanes, inline policy switches, keyed step cards, and the Step Inspector stay mounted across clicks, policy toggles, and prompt typing without global view regeneration.
+2. **Inline Stage Automation Controls:** Graph-derived stage controls (`source::derive_options`) live directly inside the **Backlog** (`New Card analyze`, `Auto-start Develop`) and **Review** (`Review delivery`, `Upstream sync`, `External PR`) lanes, surgically updating `on.backlog`, `agent:plan`, `move:backlog`, `on.review`, `condition:external_pr`, `deliver:review`, and `approval:review` in memory while preserving custom columns, custom steps, and custom prompts.
+3. **Interactive Step Inspector:** Clicking any node binds the persistent Step Inspector below the graph:
+   - `agent`: Profile selector (`@developer`, `@reviewer`, `@codex`, etc.) + persistent NSH Prompt editor with curated built-in defaults and **Reset to default prompt**.
    - `deliver`: **Upstream sync** (`Merge & Sync Upstream` vs. `Merge Only (Local)`), **Target branch**, and **Rework target**.
    - `approval`: **Gate message** (`title`) and **Rework target**.
    - `card.move`: **Destination stage** selector.
-3. **Workflow Automation Options:** Five graph-derived controls (`source::derive_options`) that surgically patch `on.backlog`, `agent:plan`, `move:backlog`, `on.review`, `condition:external_pr`, `deliver:review`, and `approval:review` without disturbing custom columns or custom steps.
 4. **YAML Source & History:** Syntax-highlighted NSH editor (2-space indent, soft wrap, line numbers), immutable **History** modal (**Load as draft**), concurrent `revision_conflict` comparison view that preserves unsaved local keystrokes, and atomic **Save** (`Command+S`).
 
 ### Board column hints and Card stepper

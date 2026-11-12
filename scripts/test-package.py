@@ -29,6 +29,7 @@ class Packaging(unittest.TestCase):
         self.root = Path(directory.name).resolve()
         (self.root / "scripts").mkdir()
         shutil.copy2(REPO / "scripts/package.py", self.root / "scripts/package.py")
+        shutil.copy2(REPO / "scripts/install-app.py", self.root / "scripts/install-app.py")
         (self.root / "crates/ui").mkdir(parents=True)
         (self.root / "crates/ui/assets").symlink_to(REPO / "crates/ui/assets")
         (self.root / "third_party").symlink_to(REPO / "third_party")
@@ -97,6 +98,54 @@ class Packaging(unittest.TestCase):
                        check=True, capture_output=True)
         info = plistlib.loads((relocated / "Contents/Info.plist").read_bytes())
         subprocess.run([str(relocated / "Contents/MacOS" / info["CFBundleExecutable"])], check=True)
+
+    def test_install_app_atomically_installs_and_replaces_existing_bundle(self):
+        self.package("--release")
+        dest = self.root / "Applications/Canban.app"
+        subprocess.run(
+            [sys.executable, str(self.root / "scripts/install-app.py"), "--dest", str(dest)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(dest)],
+            check=True,
+            capture_output=True,
+        )
+        marker = dest / "Contents/Resources/old-marker.txt"
+        marker.write_text("old\n")
+        subprocess.run(
+            [sys.executable, str(self.root / "scripts/install-app.py"), "--dest", str(dest)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertFalse(marker.exists())
+        subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(dest)],
+            check=True,
+            capture_output=True,
+        )
+
+    def test_install_app_refuses_bound_development_bundle(self):
+        self.package("--dev")
+        dev_bundle = self.root / ".local/dev/test/CanbanDev.app"
+        dest = self.root / "Applications/Canban.app"
+        res = subprocess.run(
+            [
+                sys.executable,
+                str(self.root / "scripts/install-app.py"),
+                "--source",
+                str(dev_bundle),
+                "--dest",
+                str(dest),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertFalse(dest.exists())
 
 
 if __name__ == "__main__":
