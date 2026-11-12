@@ -232,9 +232,11 @@ fn edit_agent(ui: Ui) {
     let project = ui.project.get_untracked();
     state.copy_status.set(String::new());
     if state.profile.get_untracked().is_empty() {
+        let def = ui.default_agent.get_untracked();
         state.profile.set(ui.profiles.with_untracked(|p| {
             p.iter()
-                .find(|p| p.id == "codex")
+                .find(|p| p.id == def)
+                .or_else(|| p.iter().find(|p| p.id == "developer"))
                 .or_else(|| p.first())
                 .map(|p| p.id.clone())
                 .unwrap_or_default()
@@ -404,6 +406,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .child(view().flex_row().items_center().gap_3()
             .child(chrome_button(Icon::Back, "Back to Board", move |_| ui.navigate("board")))
             .child(heading(move || format!("{} / Workflows", ui.current_project().map(|p| p.name).unwrap_or_default())).truncate().min_w(px(0.)).flex_1())
+            .child(action("Project Agents", Variant::Quiet, move |_| ui.navigate("project-agents")).flex_shrink_0())
             .child(action_with_icon(Icon::Agent, "Edit with agent", Variant::Primary, move |_| edit_agent(ui)).flex_shrink_0().disabled(move || ui.pending.get() || state.loading.get())))
         .child(when(move || !state.error.get().is_empty(), move || notice(move || state.error.get(), Tone::Attention)))
         .child(view().flex_1().min_h(px(0.)).flex_row().gap_4()
@@ -706,7 +709,7 @@ pub fn agent_panel(ui: Ui) -> impl IntoElement {
     workflow_dialog(view().flex_1().min_h(px(0.)).gap_3()
         .child(view().flex_row().items_center().gap_3().child(icon(Icon::Agent)).child(heading("Edit with agent")).child(view().flex_1()).child(chrome_button(Icon::Close,"Close agent editor",move|_|state.agent.set(false))))
         .child(muted("Review this Project-wide Prompt, then copy it or start a configuration conversation in Terminal."))
-        .child(view().flex_row().flex_wrap().gap_2().child(each(move||ui.profiles.get(),|p|p.id.clone(),move|p,_|{let p=p.get_untracked();let id=p.id.clone();let selected=p.id.clone();action(format!("@{}",p.id),Variant::Secondary,move|_|state.profile.set(id.clone())).bg(move||if state.profile.get()==selected{SELECTED}else{INSET})})))
+        .child(segmented().child(each(move||ui.profiles.get(),|p|p.id.clone(),move|p,_|{let p=p.get_untracked();let id=p.id.clone();let selected=p.id.clone();let (mark, prov, overridden)=crate::profiles::effective_provider(&p, ui.current_project().as_ref());let text=if p.is_identity(){if overridden{format!("@{} · {} ★",p.id,prov)}else{format!("@{} · {}",p.id,prov)}}else{format!("@{}",p.id)};compact_segment(text,Some(mark),move||state.profile.get()==selected,move|_|state.profile.set(id.clone()))})))
         .child(view().flex_1().min_h(px(0.)).bg(INSET).p_2().child(nsh_base::editor().value(move||Some(state.prompt.get().into())).read_only(true).soft_wrap(true).line_numbers(false).component_ref(&prompt_editor).accessibility_label("Project Workflow configuration Prompt").size_full()))
         .child(when(move || !state.error.get().is_empty(), move || notice(move || state.error.get(), Tone::Attention)))
         .child(muted(move||state.copy_status.get()))

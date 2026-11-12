@@ -791,19 +791,20 @@ impl AppServer {
     fn launch_review_terminal(&self, p: &Value, formatted_review: &str) -> Result<Value> {
         let _gate = self.terminal_gate.lock().unwrap();
         let config = self.config();
-        let profile = canban_scheduler::select(
-            &config,
-            p["profile_id"]
-                .as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty()),
-        )?;
         let project: Project = self
             .store
             .lock()
             .unwrap()
             .db()
             .get(strp(p, "project_id")?)?;
+        let profile = canban_scheduler::select_in_project(
+            &config,
+            Some(&project),
+            p["profile_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
+        )?;
         let machine = project.work_location().machine;
         let compare_ref = p["compare_ref"].as_str().unwrap_or("WORKDIR");
         let isolate = p["create_worktree"].as_bool().unwrap_or(false);
@@ -889,7 +890,11 @@ impl AppServer {
                     ("prompt", &prompt),
                 ],
             )?;
-            if machine == "local" && !argv.is_empty() {
+            let is_herdr_template = profile
+                .preset
+                .as_deref()
+                .is_some_and(|s| s.starts_with("herdr:"));
+            if machine == "local" && !argv.is_empty() && !is_herdr_template {
                 argv[0] = canban_profiles::executable(&argv[0]);
             }
             let env = std::collections::BTreeMap::from([

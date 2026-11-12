@@ -178,10 +178,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     area.into_element()
                 }))
                 .child(dynamic(move || {
-                    let body_text = ui
-                        .current_card()
-                        .map(|c| c.body)
-                        .unwrap_or_default();
+                    let body_text = ui.current_card().map(|c| c.body).unwrap_or_default();
                     let has_github_issue = ui
                         .current_card()
                         .is_some_and(|c| c.github_issue().is_some());

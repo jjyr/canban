@@ -167,4 +167,51 @@ impl Host {
     pub fn write(&self, p: &str, text: &str) -> Result<()> {
         self.write_bytes(p, text.as_bytes())
     }
+    /// Batch-probe executable availability on `local` or a remote Herdr machine.
+    pub fn probe_binaries(&self, binaries: &[&str]) -> Result<BTreeMap<String, String>> {
+        if !self.remote() {
+            let mut found = BTreeMap::new();
+            let mut dirs = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                .collect::<Vec<_>>();
+            if let Some(home) = std::env::var_os("HOME") {
+                let home = PathBuf::from(home);
+                dirs.push(home.join(".local/bin"));
+                dirs.push(home.join(".cargo/bin"));
+                dirs.push(home.join(".bun/bin"));
+                dirs.push(home.join("bin"));
+            }
+            dirs.extend(["/opt/homebrew/bin".into(), "/usr/local/bin".into()]);
+            for &bin in binaries {
+                if Path::new(bin).components().count() != 1 {
+                    let p = Path::new(bin);
+                    if p.is_file() {
+                        found.insert(bin.to_owned(), bin.to_owned());
+                    }
+                    continue;
+                }
+                if let Some(hit) = dirs.iter().map(|d| d.join(bin)).find(|p| p.is_file()) {
+                    found.insert(bin.to_owned(), hit.to_string_lossy().into_owned());
+                }
+            }
+            return Ok(found);
+        }
+        let script = concat!(
+            "import os,shutil,json,sys;",
+            "h=os.path.expanduser('~');",
+            "extra=[os.path.join(h,'.local/bin'),os.path.join(h,'.cargo/bin'),os.path.join(h,'.bun/bin'),os.path.join(h,'bin'),'/opt/homebrew/bin','/usr/local/bin'];",
+            "p=os.environ.get('PATH','')+os.pathsep+os.pathsep.join(extra);",
+            "out={b:w for b in sys.argv[1:] if (w:=shutil.which(b,path=p))};",
+            "print(json.dumps(out))"
+        );
+        let value = self.python(script, binaries)?;
+        let mut found = BTreeMap::new();
+        if let Some(obj) = value.as_object() {
+            for (k, v) in obj {
+                if let Some(path) = v.as_str() {
+                    found.insert(k.clone(), path.to_owned());
+                }
+            }
+        }
+        Ok(found)
+    }
 }

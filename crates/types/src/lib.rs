@@ -109,9 +109,21 @@ pub enum ExitAction {
         text: String,
     },
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+fn is_true(v: &bool) -> bool {
+    *v
+}
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Profile {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub identity: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
     #[serde(default)]
@@ -125,7 +137,28 @@ pub struct Profile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_instruction: Option<String>,
 }
+impl Default for Profile {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: None,
+            enabled: true,
+            identity: false,
+            preset: None,
+            role_instruction: String::new(),
+            argv: None,
+            resume_argv: None,
+            exit: None,
+            session_instruction: None,
+        }
+    }
+}
 impl Profile {
+    pub fn is_identity(&self) -> bool {
+        self.identity
+            || !self.role_instruction.trim().is_empty()
+            || matches!(self.id.as_str(), "planner" | "developer" | "reviewer")
+    }
     pub fn command(&self) -> &[String] {
         self.argv.as_deref().unwrap_or_default()
     }
@@ -179,13 +212,16 @@ pub struct Config {
     pub hc_session: String,
     #[serde(default)]
     pub hc_env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub onboarded: bool,
     pub default_agent: String,
     pub profiles: Vec<Profile>,
 }
 impl Default for Config {
     fn default() -> Self {
-        let profile = |id: &str, preset: &str, role: &str| Profile {
+        let profile = |id: &str, preset: &str, identity: bool, role: &str| Profile {
             id: id.into(),
+            identity,
             preset: Some(preset.into()),
             role_instruction: role.into(),
             ..Default::default()
@@ -197,19 +233,28 @@ impl Default for Config {
             hc: "hc".into(),
             hc_session: "default".into(),
             hc_env: BTreeMap::new(),
+            onboarded: false,
             default_agent: "developer".into(),
             profiles: vec![
-                profile("codex", "codex", ""),
-                profile("claude", "claude", ""),
+                profile("codex", "codex", false, ""),
+                profile("claude", "claude", false, ""),
                 profile(
                     "developer",
                     "codex",
+                    true,
                     "You are the Card's development Agent. Implement the agreed task, preserve relevant project conventions, and explain your changes and validation.",
                 ),
                 profile(
                     "reviewer",
                     "codex",
+                    true,
                     "You are the Card's independent review Agent. Inspect the actual changes critically, identify correctness issues and missing validation, and report findings. Do not implement changes unless explicitly asked.",
+                ),
+                profile(
+                    "planner",
+                    "codex",
+                    true,
+                    "You are the Card's planning Agent. Analyze the task and relevant repository files in read-only mode, identify risks, and write a concise implementation plan without modifying source files.",
                 ),
             ],
         }
@@ -221,6 +266,8 @@ pub struct Project {
     pub github: Option<GitHubSource>,
     #[serde(default)]
     pub delivery_mode: DeliveryMode,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agent_overrides: BTreeMap<String, String>,
     pub id: String,
     pub name: String,
     pub directory: String,

@@ -163,17 +163,22 @@ fn local_candidates(
     range: EditorRange,
 ) -> Vec<EditorCompletionItem> {
     if trigger == '@' {
+        let project = snapshot.projects.iter().find(|p| p.id == target);
         return profiles
             .iter()
             .enumerate()
             .map(|(i, p)| {
-                item(
-                    p.id.clone(),
-                    format!("Profile · {}", crate::profiles::provider(p).1),
-                    format!("@{} ", p.id),
-                    range,
-                    i,
-                )
+                let (prov, overridden) = crate::profiles::effective_provider_name(p, project);
+                let detail = if p.is_identity() {
+                    if overridden {
+                        format!("Role · {prov} (Project override)")
+                    } else {
+                        format!("Role · {prov}")
+                    }
+                } else {
+                    format!("Agent · {prov}")
+                };
+                item(p.id.clone(), detail, format!("@{} ", p.id), range, i)
             })
             .collect();
     }

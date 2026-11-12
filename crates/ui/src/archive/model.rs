@@ -115,6 +115,7 @@ mod tests {
                 workflow: Workflow::default(),
                 github: None,
                 delivery_mode: Default::default(),
+                agent_overrides: Default::default(),
                 location: None,
                 target_branch: None,
                 created_at: 1,

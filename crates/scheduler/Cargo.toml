@@ -7,4 +7,8 @@ authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+canban-profiles.workspace = true
 canban-types.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

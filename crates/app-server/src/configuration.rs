@@ -70,7 +70,7 @@ Canban endpoint: {}
             }),
             "configuration.open" => self.mutate(method,&p,|db| {
                 let project:Project=db.get(strp(&p,"project_id")?)?;
-                let profile=canban_scheduler::select(&self.config(),Some(strp(&p,"profile_id")?))?;
+                let profile=canban_scheduler::select_in_project(&self.config(),Some(&project),Some(strp(&p,"profile_id")?))?;
                 let key=format!("configuration:{}:workflows:{}",project.id,profile.id);
                 let old=db.get::<ConfigurationSession>(&key).ok();
                 if let Some(old)=&old {
@@ -131,7 +131,15 @@ Canban endpoint: {}
             {
                 continue;
             }
-            let profile = canban_scheduler::select(&self.config(), Some(&session.profile_id))?;
+            let project = snapshot
+                .projects
+                .iter()
+                .find(|p| p.id == session.project_id);
+            let profile = canban_scheduler::select_in_project(
+                &self.config(),
+                project,
+                Some(&session.profile_id),
+            )?;
             let mut terminal: TerminalEntry = self.store.lock().unwrap().db().get(&session.id)?;
             session.state = "starting".into();
             let fresh = session.provider_session_id.is_none();
@@ -174,7 +182,13 @@ Canban endpoint: {}
                         ("prompt", &prompt),
                     ],
                 )?;
-                argv[0] = canban_profiles::executable(&argv[0]);
+                let is_herdr_template = profile
+                    .preset
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("herdr:"));
+                if !is_herdr_template {
+                    argv[0] = canban_profiles::executable(&argv[0]);
+                }
                 let cwd = self.home.join("projects").join(&session.project_id);
                 std::fs::create_dir_all(&cwd)?;
                 let env = std::collections::BTreeMap::from([

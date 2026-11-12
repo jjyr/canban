@@ -74,6 +74,11 @@ pub struct Ui {
     pub notification_delivery: Stored<canban_notifications::DeliveryTracker>,
     pub notification_resync: Stored<bool>,
     pub profiles: Signal<Vec<Profile>>,
+    pub all_profiles: Signal<Vec<Profile>>,
+    pub default_agent: Signal<String>,
+    pub onboarded: Signal<bool>,
+    pub agent_catalog: Signal<Value>,
+    pub agent_catalog_loading: Signal<bool>,
     pub machines: Signal<Value>,
     pub machines_loading: Signal<bool>,
     pub max_agents: Signal<usize>,
@@ -117,7 +122,31 @@ impl Default for Ui {
         Self::new()
     }
 }
+fn ordered_enabled_profiles(all: &[Profile], default_agent: &str) -> Vec<Profile> {
+    let mut enabled: Vec<Profile> = all.iter().filter(|p| p.enabled).cloned().collect();
+    enabled.sort_by_key(|p| {
+        let rank = if p.id == default_agent {
+            0usize
+        } else if p.is_identity() {
+            1
+        } else {
+            2
+        };
+        (rank, p.id.clone())
+    });
+    enabled
+}
+
 impl Ui {
+    pub fn apply_config(self, cfg: &Config) {
+        self.default_agent.set(cfg.default_agent.clone());
+        self.onboarded.set(cfg.onboarded);
+        self.all_profiles.set(cfg.profiles.clone());
+        self.profiles
+            .set(ordered_enabled_profiles(&cfg.profiles, &cfg.default_agent));
+        self.max_agents.set(cfg.scheduler.max_agents);
+        self.idle_minutes.set(cfg.scheduler.idle_minutes);
+    }
     pub fn spawn<T: 'static>(self, future: impl std::future::Future<Output = T> + 'static) {
         self.owner.run(|| {
             spawn(future);
@@ -231,12 +260,30 @@ impl Ui {
                     .map(|a| a.config().scheduler.max_agents)
                     .unwrap_or(8),
             ),
-            profiles: signal(
+            profiles: signal({
+                let cfg = crate::APP.get().map(|app| app.config()).unwrap_or_default();
+                ordered_enabled_profiles(&cfg.profiles, &cfg.default_agent)
+            }),
+            all_profiles: signal(
                 crate::APP
                     .get()
                     .map(|app| app.config().profiles)
                     .unwrap_or_default(),
             ),
+            default_agent: signal(
+                crate::APP
+                    .get()
+                    .map(|app| app.config().default_agent)
+                    .unwrap_or_else(|| "developer".into()),
+            ),
+            onboarded: signal(
+                crate::APP
+                    .get()
+                    .map(|app| app.config().onboarded)
+                    .unwrap_or(false),
+            ),
+            agent_catalog: signal(Value::Null),
+            agent_catalog_loading: signal(false),
             project: signal(String::new()),
             archive_query: signal(String::new()),
             archive_folds: signal(BTreeSet::new()),
@@ -450,13 +497,7 @@ pub fn refresh(ui: Ui) {
             } else {
                 None
             };
-            Ok::<_, anyhow::Error>((
-                snapshot,
-                app.config().profiles,
-                app.config().scheduler.max_agents,
-                app.config().scheduler.idle_minutes,
-                saved_project,
-            ))
+            Ok::<_, anyhow::Error>((snapshot, app.config(), saved_project))
         })
         .await;
         if ui.snapshot_epoch.get_untracked() != epoch {
@@ -464,14 +505,12 @@ pub fn refresh(ui: Ui) {
             return;
         }
         match result {
-            Ok(Ok((snapshot, profiles, max_agents, idle_minutes, saved_project))) => {
+            Ok(Ok((snapshot, config, saved_project))) => {
                 if ui.notification_resync.replace(false) {
                     ui.notification_delivery
                         .with(|t| t.baseline(&canban_notifications::reminders(&snapshot)));
                 }
-                ui.profiles.set(profiles);
-                ui.max_agents.set(max_agents);
-                ui.idle_minutes.set(idle_minutes);
+                ui.apply_config(&config);
                 if ui.project.get_untracked().is_empty()
                     && let Some(id) = crate::projects::selection::restore(
                         &snapshot.projects,
@@ -538,13 +577,7 @@ pub fn dispatch_complete(
     ui.spawn(async move {
         let result = blocking(move || {
             let value = app.call(method, params)?;
-            Ok::<_, anyhow::Error>((
-                value,
-                app.snapshot()?,
-                app.config().profiles,
-                app.config().scheduler.max_agents,
-                app.config().scheduler.idle_minutes,
-            ))
+            Ok::<_, anyhow::Error>((value, app.snapshot()?, app.config()))
         })
         .await;
         ui.pending_methods.update(|s| {
@@ -553,11 +586,9 @@ pub fn dispatch_complete(
         ui.pending
             .set(!ui.pending_methods.with_untracked(BTreeSet::is_empty));
         match result {
-            Ok(Ok((value, snapshot, profiles, max_agents, idle_minutes))) => {
+            Ok(Ok((value, snapshot, config))) => {
                 ui.snapshot_epoch.update(|v| *v += 1);
-                ui.profiles.set(profiles);
-                ui.max_agents.set(max_agents);
-                ui.idle_minutes.set(idle_minutes);
+                ui.apply_config(&config);
                 ui.snapshot.set(snapshot);
                 let failed = matches!(value["state"].as_str(), Some("failed" | "unknown"));
                 if failed {
@@ -577,6 +608,9 @@ pub fn dispatch_complete(
                             value["core"]["id"].as_str().unwrap_or("")
                         )),
                         "config.reload" => ui.notify("Configuration reloaded"),
+                        "agent.setup" => ui.notify("Agent setup saved"),
+                        "config.agents.save" => ui.notify("Agent settings saved"),
+                        "project.agents" => ui.notify("Project Agent overrides saved"),
                         "scheduler.configure" => ui.notify("Scheduling settings saved"),
                         "project.location" => ui.notify("Work location updated"),
                         "workflow.save" => ui.notify("Workflow saved"),

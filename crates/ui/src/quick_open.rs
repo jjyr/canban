@@ -5,6 +5,35 @@ use canban_ui_kit::*;
 pub use model::{Candidate, Target, candidates, ranked};
 use nsh_core::{keymap::When, prelude::*};
 
+pub fn matching_commands(raw_query: &str) -> Vec<&'static crate::commands::Command> {
+    let trimmed = raw_query.trim_start();
+    let cmd_query = trimmed
+        .strip_prefix('>')
+        .or_else(|| trimmed.strip_prefix('/'))
+        .unwrap_or(trimmed)
+        .trim();
+    let mut scored = crate::commands::CATALOG
+        .iter()
+        .filter_map(|c| {
+            let fields = vec![
+                c.title.to_owned(),
+                c.context.to_owned(),
+                c.display.to_owned(),
+                c.keywords.to_owned(),
+            ];
+            let score = canban_ui_kit::search::score(&fields, cmd_query)?;
+            Some((score, c))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.title.cmp(b.1.title)));
+    scored.into_iter().map(|(_, c)| c).collect()
+}
+
+pub fn is_command_query(raw_query: &str) -> bool {
+    let trimmed = raw_query.trim_start();
+    trimmed.starts_with('>') || trimmed.starts_with('/')
+}
+
 pub fn bindings(ui: Ui) {
     on_key_with(
         "mod+o",
@@ -77,25 +106,11 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
             let choices = computed(move || {
                 let raw_query = ui.search_query.get();
                 let trimmed = raw_query.trim_start();
-                let command_mode = !ui.project_picker.get() && trimmed.starts_with('>');
-                let cmd_query = trimmed.strip_prefix('>').unwrap_or(trimmed).trim();
-                let matching_commands = || {
-                    let mut scored = crate::commands::CATALOG
-                        .iter()
-                        .filter_map(|c| {
-                            let fields = vec![
-                                c.title.to_owned(),
-                                c.context.to_owned(),
-                                c.display.to_owned(),
-                            ];
-                            let score = canban_ui_kit::search::score(&fields, cmd_query)?;
-                            Some((score, c))
-                        })
-                        .collect::<Vec<_>>();
-                    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.title.cmp(b.1.title)));
-                    scored
+                let command_mode = !ui.project_picker.get() && is_command_query(&raw_query);
+                let command_choices = || {
+                    matching_commands(&raw_query)
                         .into_iter()
-                        .map(|(_, c)| SearchChoice {
+                        .map(|c| SearchChoice {
                             attention: 0,
                             selected: false,
                             id: format!("cmd:{}", c.id),
@@ -105,12 +120,16 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                             } else {
                                 format!("{} · {}", c.display, c.context)
                             },
-                            icon: Icon::Keyboard,
+                            icon: if c.id.contains("agent") {
+                                Icon::Agent
+                            } else {
+                                Icon::Keyboard
+                            },
                         })
                         .collect::<Vec<_>>()
                 };
                 if command_mode {
-                    return matching_commands();
+                    return command_choices();
                 }
                 let mut list: Vec<SearchChoice> = rows
                     .get()
@@ -143,8 +162,12 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                         },
                     })
                     .collect();
-                if list.is_empty() && !ui.project_picker.get() && !trimmed.is_empty() {
-                    list = matching_commands();
+                if !ui.project_picker.get() && !trimmed.is_empty() {
+                    for cmd in command_choices() {
+                        if !list.iter().any(|existing| existing.id == cmd.id) {
+                            list.push(cmd);
+                        }
+                    }
                 }
                 list
             });
@@ -152,7 +175,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                 move || {
                     if ui.project_picker.get() {
                         "Switch Project".into()
-                    } else if ui.search_query.get().trim_start().starts_with('>') {
+                    } else if is_command_query(&ui.search_query.get()) {
                         "Commands & Shortcuts".into()
                     } else {
                         "Quick Open".into()
@@ -181,14 +204,14 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                     if ui.project_picker.get() {
                         "Search projects…".into()
                     } else {
-                        "Search projects, cards, agents… or type > for commands".into()
+                        "Search projects, cards, agents… or type / for commands".into()
                     }
                 },
                 view()
                     .gap_2()
                     .child(muted(move || {
                         format!(
-                            "{} results · ↑ ↓ choose · Enter run · > commands · Esc close",
+                            "{} results · ↑ ↓ choose · Enter run · / commands · Esc close",
                             choices.get().len()
                         )
                     }))

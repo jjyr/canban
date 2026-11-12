@@ -6,6 +6,7 @@ fn fixture() -> Snapshot {
         s.projects.push(Project {
             github: None,
             delivery_mode: Default::default(),
+            agent_overrides: Default::default(),
             location: None,
             id: id.into(),
             name: name.into(),
@@ -167,4 +168,20 @@ fn card_numbers_use_numeric_order_and_unarchived_before_archived() {
     let matched = ranked(&rows, "Task", &[], false);
     let matched_ids: Vec<_> = matched.iter().map(|r| r.id.as_str()).collect();
     assert_eq!(matched_ids, vec!["c1", "c2", "c10", "c11"]);
+}
+
+#[test]
+fn slash_and_plain_queries_match_agent_setup_commands() {
+    assert!(crate::quick_open::is_command_query("/"));
+    assert!(crate::quick_open::is_command_query("/agent"));
+    assert!(crate::quick_open::is_command_query(">agent"));
+    assert!(!crate::quick_open::is_command_query("agent"));
+
+    let slash_setup = crate::quick_open::matching_commands("/setup agent");
+    assert!(!slash_setup.is_empty());
+    assert_eq!(slash_setup[0].id, "go-agent-setup");
+
+    let plain_setup = crate::quick_open::matching_commands("agent setup");
+    assert!(plain_setup.iter().any(|c| c.id == "go-agent-setup"));
+    assert!(plain_setup.iter().any(|c| c.id == "go-project-agents"));
 }

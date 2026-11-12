@@ -15,6 +15,7 @@ impl AppServer {
                     | "usage.status"
                     | "config.get"
                     | "profile.presets"
+                    | "agent.catalog"
                     | "draft.list"
             )
         {
@@ -86,6 +87,10 @@ impl AppServer {
             "machine.remove" => self.remove_machine(p),
             "directory.list" => self.browse_directory(p),
             "project.location" => self.update_location(p),
+            "project.agents" => self.update_project_agents(p),
+            "agent.catalog" => self.agent_catalog(p),
+            "agent.setup" => self.agent_setup(p),
+            "config.agents.save" => self.save_agents_config(p),
             "terminal.create" => self.create_terminal(p),
             "terminal.rename" => self.rename_terminal(p),
             "terminal.interrupt" => self.control_terminal(p, false),
@@ -225,11 +230,14 @@ impl AppServer {
                 };
                 Self::validate_workflow(&config, &workflow)?;
                 let location = self.work_location(&p)?;
+                let agent_overrides =
+                    self.parse_agent_overrides(&config, p.get("agent_overrides"))?;
                 let name = strp(&p, "name")?.trim();
                 ensure!(!name.is_empty(), "Project name is required");
                 let project = Project {
                     github: None,
                     delivery_mode: Default::default(),
+                    agent_overrides,
                     id: id(),
                     name: name.into(),
                     directory: location.directory.clone(),
@@ -521,7 +529,7 @@ impl AppServer {
                             let name = name.trim_end_matches(|ch: char| {
                                 !ch.is_alphanumeric() && ch != '-' && ch != '_'
                             });
-                            if config.profiles.iter().any(|a| a.id == name) {
+                            if config.profiles.iter().any(|a| a.id == name && a.enabled) {
                                 mentions.push(name.into());
                             }
                         }
@@ -530,7 +538,8 @@ impl AppServer {
                 mentions.sort();
                 mentions.dedup();
                 for agent in mentions {
-                    let profile = canban_scheduler::select(&config, Some(&agent))?;
+                    let profile =
+                        canban_scheduler::select_in_project(&config, Some(&project), Some(&agent))?;
                     let _context = crate::sessions::conversation(db, &c, &profile)?;
                     let attempts = db.list::<Attempt>()?;
                     let active = db.list::<Request>()?.into_iter().rev().find(|r| {

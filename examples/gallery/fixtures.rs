@@ -231,6 +231,7 @@ pub fn workspace() -> canban_types::Snapshot {
     s.projects.push(Project {
         github: None,
         delivery_mode: Default::default(),
+        agent_overrides: Default::default(),
         location: None,
         id: "gallery-project".into(),
         name: "Canban workspace".into(),
@@ -989,4 +990,71 @@ pub fn automation_board() -> canban_types::Snapshot {
         });
     }
     snapshot
+}
+
+pub fn agent_config() -> canban_types::Config {
+    use canban_types::*;
+    let mut cfg = Config {
+        onboarded: true,
+        default_agent: "developer".into(),
+        ..Default::default()
+    };
+    // Enable Antigravity (`agy`) alongside Codex and keep Claude disabled so Gallery
+    // demonstrates enabled-agent gating + custom identities (`@qa`).
+    let mut agy = canban_profiles::builtin_catalog()
+        .into_iter()
+        .find(|e| e.id == "agy")
+        .unwrap()
+        .to_preset_profile();
+    agy.enabled = true;
+    cfg.profiles.push(agy);
+    if let Some(claude) = cfg.profiles.iter_mut().find(|p| p.id == "claude") {
+        claude.enabled = false;
+    }
+    if let Some(rev) = cfg.profiles.iter_mut().find(|p| p.id == "reviewer") {
+        rev.preset = Some("agy".into());
+    }
+    cfg.profiles.push(Profile {
+        id: "qa".into(),
+        name: None,
+        enabled: true,
+        identity: true,
+        preset: Some("codex".into()),
+        argv: None,
+        resume_argv: None,
+        exit: None,
+        session_instruction: None,
+        role_instruction: "Run end-to-end acceptance checks and verify edge cases.".into(),
+    });
+    cfg
+}
+
+pub fn agent_catalog() -> serde_json::Value {
+    let installed_bins = ["codex", "claude", "agy", "gemini"];
+    let enabled_ids = ["codex", "agy"];
+    let agents: Vec<serde_json::Value> = canban_profiles::builtin_catalog()
+        .into_iter()
+        .map(|entry| {
+            let inst = installed_bins.contains(&entry.id.as_str());
+            let en = enabled_ids.contains(&entry.id.as_str());
+            json!({
+                "id": entry.id,
+                "display_name": entry.display_name,
+                "binary": entry.binary,
+                "kind": "builtin",
+                "resumable": entry.resumable,
+                "installed": inst,
+                "path": if inst { json!(format!("/opt/homebrew/bin/{}", entry.binary)) } else { serde_json::Value::Null },
+                "configured": inst,
+                "enabled": en,
+            })
+        })
+        .collect();
+    json!({
+        "machine": "local",
+        "onboarded": true,
+        "default_agent": "developer",
+        "agents": agents,
+        "herdr_templates": ["codex", "claude", "agy", "gemini", "opencode"],
+    })
 }

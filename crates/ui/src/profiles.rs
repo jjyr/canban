@@ -171,18 +171,90 @@ pub fn registry_items(profiles: Signal<Vec<Profile>>) -> impl IntoElement {
     })
 }
 
+/// Canonical icon for any Herdr built-in agent / binary / template key.
+pub fn agent_icon(key: &str) -> Icon {
+    let clean = key.strip_prefix("herdr:").unwrap_or(key);
+    match clean {
+        "codex" => Icon::Codex,
+        "claude" => Icon::Claude,
+        "agy" | "antigravity" => Icon::Agy,
+        "gemini" => Icon::Gemini,
+        "opencode" => Icon::OpenCode,
+        "cursor" | "cursor-agent" => Icon::Cursor,
+        "pi" => Icon::Pi,
+        "omp" => Icon::Omp,
+        "copilot" => Icon::Copilot,
+        "droid" => Icon::Droid,
+        "amp" => Icon::Amp,
+        "kimi" => Icon::Kimi,
+        "kiro" | "kiro-cli" => Icon::Kiro,
+        "qwen" => Icon::Qwen,
+        "devin" => Icon::Devin,
+        "cline" => Icon::Cline,
+        "grok" => Icon::Grok,
+        "hermes" => Icon::Hermes,
+        "kilo" => Icon::Kilo,
+        "qodercli" | "qoder" => Icon::Qoder,
+        "letta" => Icon::Letta,
+        "mastracode" | "mastra" => Icon::Mastra,
+        "maki" => Icon::Maki,
+        "muse" => Icon::Muse,
+        _ => Icon::Agent,
+    }
+}
+
 /// Same provider identity on Cards, Terminal inventory and tabs.
 pub fn provider(profile: &Profile) -> (Icon, String) {
     let command = profile.command_name();
-    let provider = match command.as_str() {
+    let provider_key = match command.as_str() {
         "codex" | "claude" => command.as_str(),
         _ => profile.preset.as_deref().unwrap_or(&command),
     };
-    match provider {
+    if let Some(tpl) = provider_key.strip_prefix("herdr:") {
+        return (agent_icon(tpl), format!("Herdr · {tpl}"));
+    }
+    match provider_key {
         "codex" => (Icon::Codex, "Codex".into()),
         "claude" => (Icon::Claude, "Claude".into()),
-        other => (Icon::Agent, other.into()),
+        other => (
+            agent_icon(other),
+            canban_profiles::display_name(other)
+                .map(str::to_owned)
+                .or_else(|| profile.name.clone())
+                .unwrap_or_else(|| other.to_owned()),
+        ),
     }
+}
+
+/// Effective provider display for a profile in an optional Project context (respecting `agent_overrides`).
+pub fn effective_provider(
+    profile: &Profile,
+    project: Option<&canban_types::Project>,
+) -> (Icon, String, bool) {
+    if let Some(proj) = project
+        && let Some(override_id) = proj
+            .agent_overrides
+            .get(&profile.id)
+            .filter(|s| !s.trim().is_empty())
+    {
+        let label = override_id
+            .strip_prefix("herdr:")
+            .map(|t| format!("Herdr · {t}"))
+            .or_else(|| canban_profiles::display_name(override_id).map(str::to_owned))
+            .unwrap_or_else(|| override_id.clone());
+        return (agent_icon(override_id), label, true);
+    }
+    let (mark, label) = provider(profile);
+    (mark, label, false)
+}
+
+/// Effective provider display name for a profile in an optional Project context (respecting `agent_overrides`).
+pub fn effective_provider_name(
+    profile: &Profile,
+    project: Option<&canban_types::Project>,
+) -> (String, bool) {
+    let (_, label, overridden) = effective_provider(profile, project);
+    (label, overridden)
 }
 
 #[cfg(test)]

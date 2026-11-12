@@ -32,7 +32,10 @@ config/agents.json                 Workflow YAML in SQLite
 | Field | Meaning |
 | --- | --- |
 | `id` | Required identity for mentions, workflow references and Card conversation reuse |
-| `preset` | Optional preset name; omitted fields inherit its defaults |
+| `name` | Optional human-readable display name (e.g. `Antigravity`, `Gemini CLI`) |
+| `enabled` | Boolean (default `true`); disabled Profiles are hidden from `@mention` autocomplete/pickers, ignored in prose `@` scans, and rejected on dispatch while preserving historical records |
+| `identity` | Boolean marking semantic role identities (`@planner`, `@developer`, `@reviewer`, or custom identities such as `@qa`) |
+| `preset` | Optional preset name (any of the 24 built-in Herdr CLI agents, `herdr:<template>`, or custom `config/presets/<name>.json`); omitted fields inherit its defaults |
 | `role_instruction` | Role text included separately from the current task; empty by default |
 | `argv` | First-launch argument array; must resolve to a nonempty array |
 | `resume_argv` | Exact-history command array; absent inherits, `[]` explicitly disables Resume |
@@ -88,9 +91,17 @@ Selection order is explicit `@profile`, stage `profile`, then global `default_ag
 
 Recognized legacy provider/batch configuration is converted once. Canban first saves the exact original bytes as `config/agents.legacy-<uuid>.json`, then atomically publishes validated JSON. Known provider launch/resume defaults are supplied through presets. Historical Request snapshots and conversations are not rewritten. A legacy opaque Herdr `template` is rejected with instructions to supply explicit commands; the original config stays intact. Herdr launch-template mode is no longer a Profile execution path. Kanban workflow templates are unaffected.
 
+## Herdr catalog, onboarding, custom identities, and Project overrides (2026-11-12)
+
+- **Built-in Herdr Agent catalog & host probing (`agent.catalog`)**: `canban-profiles::builtin_catalog()` ships interactive CLI presets for all 24 Herdr built-in agents (`codex`, `claude`, `agy`, `gemini`, `opencode`, `cursor` [`cursor-agent`], `pi`, `omp`, `copilot`, `droid`, `amp`, `kimi`, `kiro` [`kiro-cli`], `qwen`, `devin`, `cline`, `grok`, `hermes`, `kilo`, `qodercli`, `letta`, `mastracode`, `maki`, `muse`), plus dynamic `herdr:<template>` entries from `templates.list`, user preset files (`config/presets/*.json`), and custom `argv` CLI agents. `Host::probe_binaries` detects installed executables on `local` or any remote SSH `machine`.
+- **Onboarding Wizard (`agent-setup`, `agent.setup`)**: Shown as a setup card on an empty un-onboarded Board (`!config.onboarded`) and re-runnable anytime from `Settings -> Agents & Identities -> Run Agent Setup…`. Users choose which Agents are enabled (`enabled: true`), pick a Primary Agent or per-role mapping for `@planner`, `@developer`, and `@reviewer`, and persist `onboarded: true` while preserving custom identities and custom `role_instruction`s.
+- **Enabled-Agent gating & `@mention` isolation**: `ui.profiles` contains only `enabled` profiles ordered `(default_agent, identities, direct_agents)`. Disabled profiles do not appear in `@` completion, Card/Review/Workflow pickers, or prose `@mention` addressing, and explicit dispatch returns `Agent @<id> is disabled`.
+- **Default interactive identity (`@developer`) & Custom Identities (`config.agents.save`)**: `config.default_agent` defaults to `"developer"` and pre-selects the interactive recipient in Card `@`, Diff & Review, and `Edit with agent`. Users can create, edit (`engine` / `role_instruction` / `enabled`), and delete custom identities (such as `@qa` or `@architect`) directly in `Settings -> Agents & Identities`.
+- **Per-Project identity overrides (`Project.agent_overrides`, `project.agents`, `project-agents`)**: Each Project can override any identity's backing Agent (`BTreeMap<role_id, engine_id>`) from the Board header (`Agents`), Project `⋯` menu (`Project Agents…`), Workflow Studio header (`Project Agents`), or `New Project` (`▸ Project Agents`), keeping the identity's `id` and `role_instruction` without editing Workflow YAML. Desktop API version is bumped to `12` (`DESKTOP_API = 12`).
+
 ## UI
 
-Settings shows resolved profiles and reload controls; Board headers show stage names/counts with automatic roles in their tooltip; Card comments offer the same configured mentions. Clicking a live Card Agent attaches to its terminal. Clicking an exited Agent resumes its exact conversation in a new terminal. Missing history is visible, with a separate **Start with retained Card context** action. Leaving the page/hiding the viewer only detaches it. X, Command+W and Close terminal instead invoke the unified AppServer close-and-terminate lifecycle. Exited entries leave the Terminal list/tabs; Card and Overview retain history and explicit Resume.
+Settings (`Agents & Identities`) manages default interactive Agent, role identities, Herdr CLI agent enablement, custom CLI agents, and `Run Agent Setup…`; Board headers expose `Agents` (`project-agents`) alongside `Workflows`; Card comments offer enabled mentions ordered with `default_agent` first. Clicking a live Card Agent attaches to its terminal. Clicking an exited Agent resumes its exact conversation in a new terminal. Missing history is visible, with a separate **Start with retained Card context** action. Leaving the page/hiding the viewer only detaches it. X, Command+W and Close terminal instead invoke the unified AppServer close-and-terminate lifecycle. Exited entries leave the Terminal list/tabs; Card and Overview retain history and explicit Resume.
 
 ## Profile-only selection acceptance (2026-11-10)
 

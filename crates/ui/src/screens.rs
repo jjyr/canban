@@ -16,6 +16,8 @@ fn layout(
 }
 pub fn screen(ui: Ui, page: &str) -> AnyElement {
     match page {
+        "agent-setup" => crate::agents_setup::onboarding_screen(ui).into_element(),
+        "project-agents" => crate::agents_setup::project_agents_screen(ui).into_element(),
         "workflows" => crate::workflows::screen(ui).into_element(),
         "machines" => view()
             .flex_1()
@@ -59,7 +61,6 @@ fn settings(ui: Ui) -> impl IntoElement {
         .unwrap_or_else(|| "/preview/.canban".into());
     let home_for_copy = home.clone();
     let config_path = format!("{home}/config/agents.json");
-    let config_for_copy = config_path.clone();
     let runtime = crate::APP.get().map(|app| app.config()).unwrap_or_default();
     layout("Settings", "Application preferences and Agent configuration.")
         .child(
@@ -75,37 +76,10 @@ fn settings(ui: Ui) -> impl IntoElement {
                     .child(crate::updates::settings(ui))
                     .child(crate::components::scheduling::settings(ui))
                     .child(crate::machines::settings(ui))
-                    .child(
-                        settings_section(
-                            "Agent profiles",
-                            "Define Agents once; workflow stages and @mentions reference these profiles.",
-                        )
-                        .trailing(compact_action(
-                            "Reload configuration",
-                            Variant::Secondary,
-                            move |_| dispatch(ui, "config.reload", json!({})),
-                        ))
-                        .child(crate::profiles::registry_items(ui.profiles))
-                        .child(settings_field(
-                            "Configuration",
-                            "Command and profile changes apply after reloading, to newly queued work.",
-                            view()
-                                .flex_row()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    label(config_path)
-                                        .font_family("Menlo")
-                                        .text_size(px(12.)),
-                                )
-                                .child(compact_action(
-                                    "Copy path",
-                                    Variant::Quiet,
-                                    move |_| copy_text(ui, config_for_copy.clone()),
-                                )),
-                        )),
-                    )
+                    .child(crate::agents_setup::global_settings_section(
+                        ui,
+                        config_path,
+                    ))
                     .child(
                         settings_section(
                             "Herdr",

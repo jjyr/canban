@@ -1,14 +1,27 @@
 use anyhow::Result;
-use canban_types::{Config, Profile, Request, id, now};
+use canban_types::{Config, Profile, Project, Request, id, now};
 /// Resolve an explicit profile ID, otherwise the global default.
 pub fn select(config: &Config, explicit: Option<&str>) -> Result<Profile> {
+    select_in_project(config, None, explicit)
+}
+/// Resolve a profile ID in an optional Project context (checking `enabled` and `agent_overrides`).
+pub fn select_in_project(
+    config: &Config,
+    project: Option<&Project>,
+    explicit: Option<&str>,
+) -> Result<Profile> {
     let id = explicit.unwrap_or(&config.default_agent);
-    config
+    let profile = config
         .profiles
         .iter()
         .find(|p| p.id == id)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Unknown agent @{id}"))
+        .ok_or_else(|| anyhow::anyhow!("Unknown agent @{id}"))?;
+    if !profile.enabled {
+        anyhow::bail!("Agent @{id} is disabled; enable it in Settings before dispatching");
+    }
+    Ok(canban_profiles::apply_project_override(
+        config, project, profile,
+    ))
 }
 /// Mentions select their profile; automatic stages use their reference or default.
 pub fn select_for_stage(
@@ -16,7 +29,15 @@ pub fn select_for_stage(
     stage_profile: Option<&str>,
     explicit: Option<&str>,
 ) -> Result<Profile> {
-    select(config, explicit.or(stage_profile))
+    select_for_stage_in_project(config, None, stage_profile, explicit)
+}
+pub fn select_for_stage_in_project(
+    config: &Config,
+    project: Option<&Project>,
+    stage_profile: Option<&str>,
+    explicit: Option<&str>,
+) -> Result<Profile> {
+    select_in_project(config, project, explicit.or(stage_profile))
 }
 pub fn request(
     project: &str,
@@ -205,5 +226,35 @@ mod tests {
         );
         assert!(select_for_stage(&config, Some("missing"), None).is_err());
         assert!(select_for_stage(&config, Some("reviewer"), Some("missing")).is_err());
+
+        let mut disabled = config.clone();
+        disabled
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == "claude")
+            .unwrap()
+            .enabled = false;
+        assert!(select_for_stage(&disabled, None, Some("claude")).is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let resolved = canban_profiles::resolve(config, dir.path()).unwrap();
+        let mut proj = Project {
+            github: None,
+            delivery_mode: Default::default(),
+            agent_overrides: std::collections::BTreeMap::from([("developer".into(), "agy".into())]),
+            id: "p".into(),
+            name: "P".into(),
+            directory: "/tmp".into(),
+            location: None,
+            workflow: Default::default(),
+            target_branch: None,
+            created_at: 0,
+        };
+        let selected = select_in_project(&resolved, Some(&proj), Some("developer")).unwrap();
+        assert_eq!(selected.id, "developer");
+        assert_eq!(selected.command()[0], "agy");
+        proj.agent_overrides.clear();
+        let fallback = select_in_project(&resolved, Some(&proj), Some("developer")).unwrap();
+        assert_eq!(fallback.command()[0], "codex");
     }
 }

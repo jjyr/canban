@@ -270,6 +270,7 @@ mod tests {
         let project = Project {
             github: None,
             delivery_mode: Default::default(),
+            agent_overrides: Default::default(),
             id: "p".into(),
             name: "Project".into(),
             location: None,
@@ -352,6 +353,7 @@ mod cache_tests {
         s.projects.push(Project {
             github: None,
             delivery_mode: Default::default(),
+            agent_overrides: Default::default(),
             location: None,
             id: "p".into(),
             name: "p".into(),

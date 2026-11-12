@@ -149,23 +149,27 @@ fn enqueue(
     if !stage.execute && explicit.is_none() {
         return Ok(None);
     }
-    let profile =
-        match canban_scheduler::select_for_stage(config, stage.profile.as_deref(), explicit) {
-            Ok(p) => p,
-            Err(e) => {
-                attention(db, card, &e.to_string())?;
-                log(
-                    db,
-                    card,
-                    "scheduler.blocked",
-                    "system",
-                    &e.to_string(),
-                    None,
-                    json!({}),
-                )?;
-                return Ok(None);
-            }
-        };
+    let profile = match canban_scheduler::select_for_stage_in_project(
+        config,
+        Some(project),
+        stage.profile.as_deref(),
+        explicit,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            attention(db, card, &e.to_string())?;
+            log(
+                db,
+                card,
+                "scheduler.blocked",
+                "system",
+                &e.to_string(),
+                None,
+                json!({}),
+            )?;
+            return Ok(None);
+        }
+    };
     let mut req = canban_scheduler::request(
         &project.id,
         &card.id,
@@ -310,17 +314,10 @@ impl AppServer {
             canban_context::atomic(&path, &serde_json::to_vec_pretty(&Config::default())?)?;
         }
         let (config, migration) = Self::read_config(&home)?;
-        // Import an existing pre-YAML template once. New homes never create a
-        // Workflow file; the bootstrap template is also held in SQLite.
         let template = if let Ok(saved) = store.db().get::<WorkflowTemplate>("default") {
             saved.workflow
         } else {
-            let legacy = home.join("config/workflows/default.json");
-            let mut initial: Workflow = if legacy.exists() {
-                serde_json::from_slice(&std::fs::read(legacy)?)?
-            } else {
-                Workflow::default()
-            };
+            let mut initial = Workflow::default();
             for stage in &mut initial.stages {
                 if stage
                     .profile
@@ -602,6 +599,7 @@ mod commands;
 mod drafts;
 mod github;
 pub use client::{AppClient, BackendOlder};
+mod agents;
 mod authoring;
 mod configuration;
 mod events;

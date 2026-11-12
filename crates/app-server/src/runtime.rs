@@ -819,11 +819,18 @@ impl AppServer {
                 ("cli", &cli.to_string_lossy()),
             ],
         )?;
-        if !remote {
-            argv[0] = canban_profiles::executable(&argv[0]);
-        } else if Path::new(&argv[0]).components().count() == 1 {
-            let program=ops.host.python("import os,shutil,json,sys;h=os.path.expanduser('~');p=os.environ.get('PATH','')+os.pathsep+os.path.join(h,'.local/bin')+os.pathsep+os.path.join(h,'.cargo/bin');print(json.dumps(shutil.which(sys.argv[1],path=p) or sys.argv[1]))",&[&argv[0]])?;
-            argv[0] = program.as_str().context("No remote executable")?.into();
+        let is_herdr_template = req
+            .profile
+            .preset
+            .as_deref()
+            .is_some_and(|s| s.starts_with("herdr:"));
+        if !is_herdr_template {
+            if !remote {
+                argv[0] = canban_profiles::executable(&argv[0]);
+            } else if Path::new(&argv[0]).components().count() == 1 {
+                let program=ops.host.python("import os,shutil,json,sys;h=os.path.expanduser('~');p=os.environ.get('PATH','')+os.pathsep+os.path.join(h,'.local/bin')+os.pathsep+os.path.join(h,'.cargo/bin');print(json.dumps(shutil.which(sys.argv[1],path=p) or sys.argv[1]))",&[&argv[0]])?;
+                argv[0] = program.as_str().context("No remote executable")?.into();
+            }
         }
         let terminal = client.launch_on(&location.machine, argv, &run.cwd, env, labels)?;
         run.owner_core_id = if remote {

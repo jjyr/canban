@@ -10,8 +10,9 @@ use nsh_core::prelude::*;
 
 pub fn screen(ui: Ui) -> impl IntoElement {
     let query = input::debounced(ui.archive_query, std::time::Duration::from_millis(120));
-    let archived =
-        computed(move || model::project_entries(&ui.snapshot.get(), &ui.project.get(), &query.get()));
+    let archived = computed(move || {
+        model::project_entries(&ui.snapshot.get(), &ui.project.get(), &query.get())
+    });
     let searching = computed(move || !query.get().trim().is_empty());
     let scroll_key = format!("archive:list:{}", ui.project.get_untracked());
     let scroll_capture_key = scroll_key.clone();
@@ -61,9 +62,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .flex_1()
                 .min_h(px(0.))
                 .content_offset(scroll_position(ui, &scroll_key))
-                .on_scroll(move |e: &ScrollEvent| {
-                    capture_scroll(ui, scroll_capture_key.clone(), e)
-                })
+                .on_scroll(move |e: &ScrollEvent| capture_scroll(ui, scroll_capture_key.clone(), e))
                 .child(
                     view()
                         .w_full()

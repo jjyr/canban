@@ -144,9 +144,8 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         .flex_shrink_0()
         .child(when(
             move || {
-                ui.current_card().is_some_and(|c| {
-                    c.github_issue().is_some() || c.pull_request.is_some()
-                })
+                ui.current_card()
+                    .is_some_and(|c| c.github_issue().is_some() || c.pull_request.is_some())
             },
             || muted("Local discussion · not posted to GitHub"),
         ))
@@ -180,11 +179,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                                 &id,
                                 &ui.profiles.get_untracked(),
                             );
-                            let still_in_prose = crate::profiles::addressed(
-                                &updated,
-                                &ui.profiles.get_untracked(),
-                            )
-                            .contains(&id);
+                            let still_in_prose =
+                                crate::profiles::addressed(&updated, &ui.profiles.get_untracked())
+                                    .contains(&id);
                             draft.update(|d| {
                                 d.recipients.retain(|p| p != &id);
                                 if still_in_prose && !d.suppressed_recipients.contains(&id) {

@@ -1,11 +1,20 @@
 //! Resolve editable presets and explicit overrides; no provider dispatch at runtime.
+pub mod catalog;
+pub use catalog::{CatalogEntry, builtin_catalog, display_name, herdr_template_profile};
+
 use anyhow::{Context, Result, bail, ensure};
-use canban_types::{Config, ExitAction, Profile};
+use canban_types::{Config, ExitAction, Profile, Project};
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 pub fn presets(home: &Path) -> Result<BTreeMap<String, Profile>> {
     let mut presets = BTreeMap::new();
+    for entry in builtin_catalog() {
+        presets.insert(entry.id.clone(), entry.to_preset_profile());
+    }
     for data in [
         include_str!("../presets/codex.json"),
         include_str!("../presets/claude.json"),
@@ -40,22 +49,62 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
     let presets = presets(home)?;
     let mut config = config;
     config.hc = executable(&config.hc);
+    let snapshot_profiles = config.profiles.clone();
     for profile in &mut config.profiles {
         if let Some(name) = &profile.preset {
-            let preset = presets
-                .get(name)
-                .with_context(|| format!("Unknown preset {name} for @{}", profile.id))?;
-            if profile.argv.is_none() {
-                profile.argv = preset.argv.clone();
-            }
-            if profile.resume_argv.is_none() {
-                profile.resume_argv = preset.resume_argv.clone();
-            }
-            if profile.exit.is_none() {
-                profile.exit = preset.exit.clone();
-            }
-            if profile.session_instruction.is_none() {
-                profile.session_instruction = preset.session_instruction.clone();
+            if let Some(tpl) = name.strip_prefix("herdr:") {
+                ensure!(
+                    !tpl.trim().is_empty(),
+                    "Empty Herdr template name for @{}",
+                    profile.id
+                );
+                if profile.argv.is_none() {
+                    profile.argv = Some(vec![tpl.to_owned(), "{prompt}".into()]);
+                }
+            } else if let Some(preset) = presets.get(name) {
+                if profile.argv.is_none() {
+                    profile.argv = preset.argv.clone();
+                }
+                if profile.resume_argv.is_none() {
+                    profile.resume_argv = preset.resume_argv.clone();
+                }
+                if profile.exit.is_none() {
+                    profile.exit = preset.exit.clone();
+                }
+                if profile.session_instruction.is_none() {
+                    profile.session_instruction = preset.session_instruction.clone();
+                }
+            } else if let Some(peer) = snapshot_profiles
+                .iter()
+                .find(|p| p.id == *name && !p.is_identity())
+            {
+                let peer_preset = peer.preset.as_deref().and_then(|pn| presets.get(pn));
+                if profile.argv.is_none() {
+                    profile.argv = peer
+                        .argv
+                        .clone()
+                        .or_else(|| peer_preset.and_then(|pp| pp.argv.clone()));
+                }
+                if profile.resume_argv.is_none() {
+                    profile.resume_argv = peer
+                        .resume_argv
+                        .clone()
+                        .or_else(|| peer_preset.and_then(|pp| pp.resume_argv.clone()));
+                }
+                if profile.exit.is_none() {
+                    profile.exit = peer
+                        .exit
+                        .clone()
+                        .or_else(|| peer_preset.and_then(|pp| pp.exit.clone()));
+                }
+                if profile.session_instruction.is_none() {
+                    profile.session_instruction = peer
+                        .session_instruction
+                        .clone()
+                        .or_else(|| peer_preset.and_then(|pp| pp.session_instruction.clone()));
+                }
+            } else {
+                bail!("Unknown preset {name} for @{}", profile.id);
             }
         }
         ensure!(
@@ -75,20 +124,94 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
     Ok(config)
 }
 
-pub fn executable(program: &str) -> String {
+/// Resolve an execution engine profile by ID from configured non-identity profiles,
+/// built-in presets, or `herdr:<template>`.
+pub fn resolve_engine(config: &Config, engine_id: &str, home: Option<&Path>) -> Result<Profile> {
+    if let Some(peer) = config
+        .profiles
+        .iter()
+        .find(|p| p.id == engine_id && !p.is_identity())
+    {
+        return Ok(peer.clone());
+    }
+    if let Some(tpl) = engine_id.strip_prefix("herdr:") {
+        ensure!(!tpl.trim().is_empty(), "Empty Herdr template");
+        return Ok(herdr_template_profile(tpl));
+    }
+    if let Some(entry) = builtin_catalog().into_iter().find(|e| e.id == engine_id) {
+        return Ok(entry.to_preset_profile());
+    }
+    if let Some(home) = home
+        && let Ok(map) = presets(home)
+        && let Some(p) = map.get(engine_id)
+    {
+        return Ok(p.clone());
+    }
+    bail!("Unknown Agent backend '{engine_id}'")
+}
+
+/// Apply optional Project-level identity backend override (`project.agent_overrides`)
+/// while preserving the identity's `id` and `role_instruction`.
+pub fn apply_project_override(
+    config: &Config,
+    project: Option<&Project>,
+    profile: &Profile,
+) -> Profile {
+    let Some(project) = project else {
+        return profile.clone();
+    };
+    let Some(target) = project
+        .agent_overrides
+        .get(&profile.id)
+        .map(String::as_str)
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return profile.clone();
+    };
+    // Only apply an override if the target backend isn't explicitly disabled in global config.
+    if config
+        .profiles
+        .iter()
+        .any(|p| p.id == target && !p.is_identity() && !p.enabled)
+    {
+        return profile.clone();
+    }
+    let Ok(engine) = resolve_engine(config, target, None) else {
+        return profile.clone();
+    };
+    let mut out = profile.clone();
+    out.preset = engine.preset.or_else(|| Some(target.to_owned()));
+    out.argv = engine.argv;
+    out.resume_argv = engine.resume_argv;
+    out.exit = Some(engine.exit.unwrap_or(ExitAction::Manual));
+    out.session_instruction = engine.session_instruction;
+    out
+}
+
+/// Find an executable path on the local host if installed; returns `None` when missing.
+pub fn find_local_executable(program: &str) -> Option<PathBuf> {
     if Path::new(program).components().count() != 1 {
-        return program.into();
+        let p = PathBuf::from(program);
+        return p.is_file().then_some(p);
     }
     let mut paths =
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
     if let Some(home) = std::env::var_os("HOME") {
-        paths.push(std::path::PathBuf::from(home).join(".local/bin"));
+        let home = PathBuf::from(home);
+        paths.push(home.join(".local/bin"));
+        paths.push(home.join(".cargo/bin"));
+        paths.push(home.join(".bun/bin"));
+        paths.push(home.join("bin"));
     }
     paths.extend(["/opt/homebrew/bin".into(), "/usr/local/bin".into()]);
     paths
         .into_iter()
         .map(|p| p.join(program))
         .find(|p| p.is_file())
+}
+
+pub fn executable(program: &str) -> String {
+    find_local_executable(program)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| program.into())
 }
@@ -291,6 +414,78 @@ mod tests {
         assert_eq!(args.last().unwrap(), "literal {home} {session_id} {cli}");
         let mut custom = json!({"profiles":[{"id":"custom","argv":["own-command","-p","value"]}]});
         assert!(!migrate(&mut custom).unwrap());
+    }
+
+    #[test]
+    fn builtin_herdr_catalog_and_project_overrides_resolve_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let catalog = builtin_catalog();
+        assert_eq!(catalog.len(), 24);
+        assert!(catalog.iter().any(|e| e.id == "agy" && e.binary == "agy"));
+        assert!(
+            catalog
+                .iter()
+                .any(|e| e.id == "cursor" && e.binary == "cursor-agent")
+        );
+        assert!(
+            catalog
+                .iter()
+                .any(|e| e.id == "kiro" && e.binary == "kiro-cli")
+        );
+
+        let mut c = Config::default();
+        c.profiles.push(Profile {
+            id: "qa".into(),
+            identity: true,
+            preset: Some("agy".into()),
+            role_instruction: "Verify edge cases.".into(),
+            ..Default::default()
+        });
+        c.profiles.push(Profile {
+            id: "agy".into(),
+            preset: Some("agy".into()),
+            ..Default::default()
+        });
+        c.profiles.push(Profile {
+            id: "gemini".into(),
+            preset: Some("gemini".into()),
+            enabled: false,
+            ..Default::default()
+        });
+        let c = resolve(c, dir.path()).unwrap();
+        let qa = c.profiles.iter().find(|p| p.id == "qa").unwrap();
+        assert_eq!(qa.command()[0], "agy");
+        assert!(qa.is_identity());
+
+        let mut proj = Project {
+            github: None,
+            delivery_mode: Default::default(),
+            agent_overrides: BTreeMap::from([
+                ("developer".into(), "agy".into()),
+                ("reviewer".into(), "gemini".into()), // disabled globally -> ignored!
+            ]),
+            id: "p1".into(),
+            name: "Demo".into(),
+            directory: "/tmp".into(),
+            location: None,
+            workflow: Default::default(),
+            target_branch: None,
+            created_at: 0,
+        };
+        let dev = c.profiles.iter().find(|p| p.id == "developer").unwrap();
+        let overridden = apply_project_override(&c, Some(&proj), dev);
+        assert_eq!(overridden.id, "developer");
+        assert_eq!(overridden.role_instruction, dev.role_instruction);
+        assert_eq!(overridden.command()[0], "agy");
+
+        let rev = c.profiles.iter().find(|p| p.id == "reviewer").unwrap();
+        let disabled_ignored = apply_project_override(&c, Some(&proj), rev);
+        assert_eq!(disabled_ignored.command()[0], "codex");
+
+        proj.agent_overrides
+            .insert("developer".into(), "herdr:my-tpl".into());
+        let tpl_override = apply_project_override(&c, Some(&proj), dev);
+        assert_eq!(tpl_override.command()[0], "my-tpl");
     }
 }
 

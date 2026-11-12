@@ -439,7 +439,12 @@ impl AppServer {
                 let request_key = format!("github:{repo_id}:{number}");
                 let base_branch = pr_data["base"]["ref"]
                     .as_str()
-                    .or_else(|| current.pull_request.as_ref().map(|p| p.base_branch.as_str()))
+                    .or_else(|| {
+                        current
+                            .pull_request
+                            .as_ref()
+                            .map(|p| p.base_branch.as_str())
+                    })
                     .unwrap_or("main")
                     .to_owned();
                 let commit = pr_data["merge_commit_sha"]

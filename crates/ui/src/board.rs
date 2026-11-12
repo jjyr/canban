@@ -65,6 +65,24 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .child(when(
                     move || project.get().is_some(),
                     move || {
+                        action(
+                            move || {
+                                let n = project.get().map(|p| p.agent_overrides.len()).unwrap_or(0);
+                                if n == 0 {
+                                    "Agents".into()
+                                } else {
+                                    format!("Agents ({n})")
+                                }
+                            },
+                            Variant::Quiet,
+                            move |_| ui.navigate("project-agents"),
+                        )
+                        .flex_shrink_0()
+                    },
+                ))
+                .child(when(
+                    move || project.get().is_some(),
+                    move || {
                         action("Workflows", Variant::Quiet, move |_| {
                             ui.navigate("workflows")
                         })
@@ -110,6 +128,8 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                         vec![
                                             MenuItem::new("Archive")
                                                 .on_select(move || ui.navigate("archive")),
+                                            MenuItem::new("Project Agents…")
+                                                .on_select(move || ui.navigate("project-agents")),
                                             MenuItem::new("Work location…")
                                                 .on_select(move || ui.navigate("project-location")),
                                             MenuItem::new("GitHub repository…").on_select(
@@ -140,13 +160,20 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         ))
         .child(dynamic(move || {
             let Some(project) = project.get() else {
-                return entry_card(
+                let create = entry_card(
                     Icon::Plus,
                     "Create a Project",
                     "Organize Cards and Agent work around a source directory.",
                     move |_| ui.navigate("new-project"),
-                )
-                .into_element();
+                );
+                if !ui.onboarded.get() {
+                    return view()
+                        .gap_3()
+                        .child(crate::agents_setup::onboarding_banner(ui))
+                        .child(create)
+                        .into_element();
+                }
+                return create.into_element();
             };
             untracked(|| {
                 let state = drag::BoardDrag::new(ui, project.clone());

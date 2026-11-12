@@ -21,6 +21,7 @@ nsh-core.workspace = true
 nsh-base = { workspace = true, features = ["highlight"] }
 nsh-platform-macos.workspace = true
 canban-types.workspace = true
+canban-profiles.workspace = true
 canban-context.workspace = true
 canban-scheduler.workspace = true
 canban-notifications.workspace = true

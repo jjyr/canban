@@ -42,15 +42,23 @@ fn summary_editor(value: Signal<String>) -> View {
 }
 
 fn default_profile_id(ui: Ui) -> String {
+    let def = ui.default_agent.get_untracked();
     ui.profiles
         .with_untracked(|profiles| {
             profiles
                 .iter()
-                .find(|p| p.id == "developer")
+                .find(|p| p.id == def)
+                .or_else(|| profiles.iter().find(|p| p.id == "developer"))
                 .or_else(|| profiles.first())
                 .map(|p| p.id.clone())
         })
-        .unwrap_or_else(|| "developer".into())
+        .unwrap_or_else(|| {
+            if def.is_empty() {
+                "developer".into()
+            } else {
+                def
+            }
+        })
 }
 
 pub fn context_label_untracked(ui: Ui) -> String {
@@ -477,28 +485,47 @@ fn profile_picker(ui: Ui, selected: Signal<String>) -> impl IntoElement {
         } else {
             current.clone()
         };
-        action(format!("@{display} ▾"), Variant::Secondary, move |_| {
-            let list = profiles.clone();
-            ui.spawn(async move {
-                let items: Vec<MenuItem> = if list.is_empty() {
-                    vec![MenuItem::new("@developer").on_select(move || {
-                        selected.try_set("developer".into());
-                    })]
-                } else {
-                    list.into_iter()
-                        .map(|p| {
-                            let pid = p.id.clone();
-                            MenuItem::new(format!("@{} ({})", p.id, p.command_name())).on_select(
-                                move || {
-                                    selected.try_set(pid.clone());
-                                },
-                            )
-                        })
-                        .collect()
-                };
-                popup_menu(items).await;
-            });
-        })
+        let proj_for_icon = ui.current_project();
+        let mark = profiles
+            .iter()
+            .find(|p| p.id == display)
+            .map(|p| crate::profiles::effective_provider(p, proj_for_icon.as_ref()).0)
+            .unwrap_or(Icon::Agent);
+        action_with_icon(
+            mark,
+            format!("@{display} ▾"),
+            Variant::Secondary,
+            move |_| {
+                let list = profiles.clone();
+                ui.spawn(async move {
+                    let items: Vec<MenuItem> = if list.is_empty() {
+                        vec![MenuItem::new("@developer").on_select(move || {
+                            selected.try_set("developer".into());
+                        })]
+                    } else {
+                        let proj = ui.current_project();
+                        list.into_iter()
+                            .map(|p| {
+                                let pid = p.id.clone();
+                                let (prov, overridden) =
+                                    crate::profiles::effective_provider_name(&p, proj.as_ref());
+                                let suffix = if overridden {
+                                    format!("{prov} · Project override")
+                                } else {
+                                    prov
+                                };
+                                MenuItem::new(format!("@{} ({suffix})", p.id)).on_select(
+                                    move || {
+                                        selected.try_set(pid.clone());
+                                    },
+                                )
+                            })
+                            .collect()
+                    };
+                    popup_menu(items).await;
+                });
+            },
+        )
     })
 }
 

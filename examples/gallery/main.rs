@@ -172,7 +172,8 @@ pub fn Gallery() -> impl IntoElement {
     ui.project.set("gallery-project".into());
     ui.card.set("card-1".into());
     ui.page.set("card".into());
-    ui.profiles.set(canban_types::Config::default().profiles);
+    ui.apply_config(&fixtures::agent_config());
+    ui.agent_catalog.set(fixtures::agent_catalog());
     ui.review_state.refs_data.set(fixtures::git_refs());
     ui.review_state.compare_data.set(fixtures::git_compare());
     ui.review_state.base_ref.set("main".into());
@@ -586,6 +587,24 @@ pub fn Gallery() -> impl IntoElement {
         ui.open_terminal("gallery-manual".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("agent-setup") {
+        ui.onboarded.set(false);
+        ui.page.set("agent-setup".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("project-agents") {
+        let mut snapshot = fixtures::workspace();
+        snapshot.projects[0]
+            .agent_overrides
+            .insert("developer".into(), "agy".into());
+        ui.snapshot.set(snapshot);
+        ui.page.set("project-agents".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("settings") {
+        ui.page.set("settings".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("motion") {
         ui.page.set("board".into());
         return view()
@@ -820,6 +839,20 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Settings", Variant::Quiet, move |_| {
                     scene.set("workspace".into());
                     ui.navigate("settings");
+                }))
+                .child(action("Agent Setup", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    ui.navigate("agent-setup");
+                }))
+                .child(action("Project Agents", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    let mut snapshot = fixtures::workspace();
+                    snapshot.projects[0]
+                        .agent_overrides
+                        .insert("developer".into(), "agy".into());
+                    ui.snapshot.set(snapshot);
+                    ui.select_project("gallery-project".into());
+                    ui.navigate("project-agents");
                 }))
                 .child(action("Workflows", Variant::Quiet, move |_| {
                     scene.set("workspace".into());

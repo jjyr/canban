@@ -8,6 +8,7 @@ pub struct Command {
     pub key: &'static str,
     pub display: &'static str,
     pub context: &'static str,
+    pub keywords: &'static str,
 }
 pub const CREATE_CARD: Command = Command {
     id: "create-card",
@@ -15,6 +16,7 @@ pub const CREATE_CARD: Command = Command {
     key: "mod+enter",
     display: "⌘Enter",
     context: "New Card",
+    keywords: "",
 };
 pub const SEND_COMMENT: Command = Command {
     id: "send-comment",
@@ -22,6 +24,7 @@ pub const SEND_COMMENT: Command = Command {
     key: "mod+enter",
     display: "⌘Enter",
     context: "Card comment",
+    keywords: "",
 };
 pub const CATALOG: &[Command] = &[
     Command {
@@ -30,6 +33,7 @@ pub const CATALOG: &[Command] = &[
         key: "mod+n",
         display: "⌘N",
         context: "Global",
+        keywords: "",
     },
     Command {
         id: "quick-open",
@@ -37,6 +41,7 @@ pub const CATALOG: &[Command] = &[
         key: "mod+o",
         display: "⌘O",
         context: "Global",
+        keywords: "search jump",
     },
     Command {
         id: "shortcuts",
@@ -44,6 +49,7 @@ pub const CATALOG: &[Command] = &[
         key: "mod+/",
         display: "⌘/",
         context: "Global",
+        keywords: "commands palette /",
     },
     Command {
         id: "new-terminal",
@@ -51,6 +57,7 @@ pub const CATALOG: &[Command] = &[
         key: "mod+t",
         display: "⌘T",
         context: "Terminals",
+        keywords: "shell",
     },
     Command {
         id: "close-terminal",
@@ -58,6 +65,7 @@ pub const CATALOG: &[Command] = &[
         key: "mod+w",
         display: "⌘W",
         context: "Terminals",
+        keywords: "",
     },
     Command {
         id: "next-tab",
@@ -65,6 +73,7 @@ pub const CATALOG: &[Command] = &[
         key: "mod+shift+]",
         display: "⌘⇧]",
         context: "Terminals",
+        keywords: "",
     },
     Command {
         id: "previous-tab",
@@ -72,6 +81,7 @@ pub const CATALOG: &[Command] = &[
         key: "mod+shift+[",
         display: "⌘⇧[",
         context: "Terminals",
+        keywords: "",
     },
     CREATE_CARD,
     SEND_COMMENT,
@@ -81,6 +91,7 @@ pub const CATALOG: &[Command] = &[
         key: "mod+enter",
         display: "⌘Enter",
         context: "Card editor",
+        keywords: "",
     },
     Command {
         id: "back",
@@ -88,6 +99,7 @@ pub const CATALOG: &[Command] = &[
         key: "mod+[",
         display: "⌘[",
         context: "Global",
+        keywords: "",
     },
     Command {
         id: "forward",
@@ -95,6 +107,7 @@ pub const CATALOG: &[Command] = &[
         key: "mod+]",
         display: "⌘]",
         context: "Global",
+        keywords: "",
     },
     Command {
         id: "go-board",
@@ -102,6 +115,7 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "Board",
         context: "Navigation",
+        keywords: "kanban cards",
     },
     Command {
         id: "go-overview",
@@ -109,6 +123,7 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "Overview",
         context: "Navigation",
+        keywords: "activity",
     },
     Command {
         id: "go-terminals",
@@ -116,6 +131,7 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "Terminals",
         context: "Navigation",
+        keywords: "shell cli",
     },
     Command {
         id: "go-review",
@@ -123,6 +139,7 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "Review",
         context: "Navigation",
+        keywords: "git compare patch",
     },
     Command {
         id: "go-github",
@@ -130,6 +147,7 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "GitHub",
         context: "Navigation",
+        keywords: "issues pull requests pr",
     },
     Command {
         id: "go-workflows",
@@ -137,6 +155,23 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "Project",
         context: "Navigation",
+        keywords: "studio stages yaml",
+    },
+    Command {
+        id: "go-project-agents",
+        title: "Configure Project Agents",
+        key: "",
+        display: "Project",
+        context: "Preferences",
+        keywords: "project-agents setup agent identity override roles",
+    },
+    Command {
+        id: "go-agent-setup",
+        title: "Set up Agents",
+        key: "",
+        display: "Agents",
+        context: "Preferences",
+        keywords: "agent-setup setup agent onboard enable disable herdr identities default",
     },
     Command {
         id: "go-drafts",
@@ -144,6 +179,7 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "Workspace",
         context: "Navigation",
+        keywords: "",
     },
     Command {
         id: "go-archive",
@@ -151,6 +187,7 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "Project",
         context: "Navigation",
+        keywords: "",
     },
     Command {
         id: "go-settings",
@@ -158,6 +195,7 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "App",
         context: "Navigation",
+        keywords: "preferences config agents identities",
     },
     Command {
         id: "choose-theme",
@@ -165,6 +203,7 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "Appearance",
         context: "Preferences",
+        keywords: "dark light color",
     },
     Command {
         id: "switch-project",
@@ -172,6 +211,7 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "Workspace",
         context: "Navigation",
+        keywords: "choose project",
     },
 ];
 pub fn execute(ui: Ui, id: &str) {
@@ -190,7 +230,7 @@ pub fn execute(ui: Ui, id: &str) {
         "shortcuts" => {
             ui.utility_popup.set(String::new());
             ui.project_picker.set(false);
-            ui.search_query.set(">".into());
+            ui.search_query.set("/".into());
             ui.quick_open.set(true);
         }
         "go-board" => ui.navigate("board"),
@@ -199,6 +239,14 @@ pub fn execute(ui: Ui, id: &str) {
         "go-review" => crate::review::open_compare(ui),
         "go-github" => ui.navigate("github"),
         "go-workflows" => ui.navigate("workflows"),
+        "go-project-agents" => {
+            if ui.current_project().is_some() {
+                ui.navigate("project-agents");
+            } else {
+                ui.navigate("agent-setup");
+            }
+        }
+        "go-agent-setup" => ui.navigate("agent-setup"),
         "go-drafts" => ui.navigate("drafts"),
         "go-archive" => ui.navigate("archive"),
         "go-settings" => ui.navigate("settings"),
@@ -247,4 +295,22 @@ pub fn bindings(ui: Ui) {
             move |_| execute(ui, command.id),
         );
     }
+    // Plain `/` opens the command palette whenever focus is not in a text input or hosted terminal.
+    on_key_with(
+        "/",
+        KeyOptions {
+            when: When::NotEditing,
+            ..Default::default()
+        },
+        move |_| {
+            if !ui.quick_open.get_untracked()
+                && ui.utility_popup.get_untracked().is_empty()
+                && !ui.native_modal.get_untracked()
+            {
+                ui.project_picker.set(false);
+                ui.search_query.set("/".into());
+                ui.quick_open.set(true);
+            }
+        },
+    );
 }

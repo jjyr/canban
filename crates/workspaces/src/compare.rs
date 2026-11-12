@@ -750,6 +750,7 @@ mod tests {
         let project = Project {
             github: None,
             delivery_mode: Default::default(),
+            agent_overrides: Default::default(),
             id: "proj1".into(),
             name: "Demo".into(),
             location: None,

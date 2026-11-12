@@ -445,7 +445,7 @@ fn build_node_model(
                 gate.to_owned(),
             )
         }
-        "deliver" | "card.deliver" => {
+        "deliver" => {
             let sync = step
                 .with
                 .get("sync_upstream")
@@ -807,7 +807,7 @@ fn humanize_step_title(step: &source::Step, col_names: &BTreeMap<String, String>
             format!("Move to {cname}")
         }
         (_, "approval") => "Human approval".into(),
-        (_, "deliver" | "card.deliver") => "Queue merge".into(),
+        (_, "deliver") => "Queue merge".into(),
         ("condition:external_pr", "condition") => "External PR check".into(),
         _ => step.id.clone(),
     }
@@ -1461,8 +1461,7 @@ fn step_inspector(
             return;
         };
         let trimmed = val.trim().to_owned();
-        if matches!(step.uses.as_str(), "deliver" | "card.deliver") && trimmed != step.target_branch
-        {
+        if step.uses == "deliver" && trimmed != step.target_branch {
             let target_id = step.id;
             update_doc(ui, |d| {
                 if let Some(s) = d.steps.iter_mut().find(|s| s.id == target_id) {
@@ -1690,15 +1689,46 @@ fn step_inspector(
                                     .gap_2()
                                     .child(muted("Agent Profile:"))
                                     .child(segmented().child(each(
-                                        move || ui.profiles.get(),
+                                        move || {
+                                            let mut list = ui.profiles.get();
+                                            if let Some(cur) =
+                                                active_step.with(|s| s.as_ref().map(|st| st.profile.clone()))
+                                                && !cur.is_empty()
+                                                && !list.iter().any(|p| p.id == cur)
+                                            {
+                                                list.push(canban_types::Profile {
+                                                    id: cur,
+                                                    name: None,
+                                                    enabled: false,
+                                                    identity: false,
+                                                    preset: None,
+                                                    argv: Some(vec!["disabled".into()]),
+                                                    resume_argv: None,
+                                                    exit: None,
+                                                    session_instruction: None,
+                                                    role_instruction: String::new(),
+                                                });
+                                            }
+                                            list
+                                        },
                                         |p| p.id.clone(),
                                         move |p, _| {
-                                            let pid = p.get_untracked().id;
+                                            let prof = p.get_untracked();
+                                            let pid = prof.id.clone();
                                             let sel_pid = pid.clone();
                                             let click_pid = pid.clone();
+                                            let label_str = if !prof.enabled {
+                                                format!("@{pid} (disabled)")
+                                            } else {
+                                                format!("@{pid}")
+                                            };
+                                            let (mark, _, _) = crate::profiles::effective_provider(
+                                                &prof,
+                                                ui.current_project().as_ref(),
+                                            );
                                             compact_segment(
-                                                format!("@{pid}"),
-                                                None,
+                                                label_str,
+                                                Some(mark),
                                                 move || {
                                                     active_step.with(|s| {
                                                         s.as_ref()
@@ -1726,7 +1756,36 @@ fn step_inspector(
                                                 },
                                             )
                                         },
-                                    ))),
+                                    )))
+                                    .child(dynamic(move || {
+                                        let Some(step) = active_step.get() else {
+                                            return view().into_element();
+                                        };
+                                        let proj = ui.current_project();
+                                        let Some(prof) = ui
+                                            .all_profiles
+                                            .with(|all| all.iter().find(|p| p.id == step.profile).cloned())
+                                        else {
+                                            return view().into_element();
+                                        };
+                                        if !prof.enabled {
+                                            return status("Disabled in Settings", Tone::Attention)
+                                                .into_element();
+                                        }
+                                        let (prov, overridden) =
+                                            crate::profiles::effective_provider_name(&prof, proj.as_ref());
+                                        if overridden {
+                                            status(
+                                                format!("Runs via {prov} (Project override)"),
+                                                Tone::Info,
+                                            )
+                                            .into_element()
+                                        } else if prof.is_identity() {
+                                            muted(format!("→ {prov}")).text_size(px(11.5)).into_element()
+                                        } else {
+                                            view().into_element()
+                                        }
+                                    })),
                             )
                             .child(
                                 view()
@@ -1747,7 +1806,7 @@ fn step_inspector(
                     },
                 ))
                 .child(when(
-                    move || matches!(active_uses.get().as_str(), "deliver" | "card.deliver"),
+                    move || active_uses.get() == "deliver",
                     move || {
                         view()
                             .gap_2p5()
@@ -1916,7 +1975,7 @@ fn step_inspector(
                     move || {
                         !matches!(
                             active_uses.get().as_str(),
-                            "" | "agent" | "deliver" | "card.deliver" | "approval" | "card.move"
+                            "" | "agent" | "deliver" | "approval" | "card.move"
                         )
                     },
                     move || {

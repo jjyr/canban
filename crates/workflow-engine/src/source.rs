@@ -71,7 +71,7 @@ impl Document {
                 "agent" => "agent",
                 "card.move" => "move",
                 "approval" => "approval",
-                "deliver" | "card.deliver" => "deliver",
+                "deliver" => "deliver",
                 "condition" => "condition",
                 "notify" => "notify",
                 "complete" => "complete",
@@ -672,7 +672,7 @@ pub fn derive_options(doc: &Document) -> WorkflowOptions {
             };
             let step = &doc.steps[idx];
             match step.uses.as_str() {
-                "deliver" | "card.deliver" => {
+                "deliver" => {
                     internal_has_deliver = true;
                     break;
                 }
@@ -698,16 +698,13 @@ pub fn derive_options(doc: &Document) -> WorkflowOptions {
             }
         }
     } else {
-        internal_has_deliver = doc
-            .steps
-            .iter()
-            .any(|s| matches!(s.uses.as_str(), "deliver" | "card.deliver"));
+        internal_has_deliver = doc.steps.iter().any(|s| s.uses == "deliver");
     }
 
     let sync_upstream = doc
         .steps
         .iter()
-        .find(|s| matches!(s.uses.as_str(), "deliver" | "card.deliver"))
+        .find(|s| s.uses == "deliver")
         .and_then(|s| s.with.get("sync_upstream"))
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
@@ -1062,7 +1059,7 @@ pub fn set_review_manual(doc: &mut Document, manual: bool) {
         let deliver_ids: Vec<String> = doc
             .steps
             .iter()
-            .filter(|s| matches!(s.uses.as_str(), "deliver" | "card.deliver"))
+            .filter(|s| s.uses == "deliver")
             .map(|s| s.id.clone())
             .collect();
         let mut ignore: Vec<&str> = vec!["condition:external_pr"];
@@ -1082,7 +1079,7 @@ pub fn set_review_manual(doc: &mut Document, manual: bool) {
         let deliver_id = doc
             .steps
             .iter()
-            .find(|s| matches!(s.uses.as_str(), "deliver" | "card.deliver"))
+            .find(|s| s.uses == "deliver")
             .map(|s| s.id.clone())
             .unwrap_or_else(|| "deliver:review".into());
 
@@ -1232,7 +1229,7 @@ pub fn set_review_manual(doc: &mut Document, manual: bool) {
 pub fn set_sync_upstream(doc: &mut Document, sync_upstream: bool) {
     let mut updated_any = false;
     for step in &mut doc.steps {
-        if matches!(step.uses.as_str(), "deliver" | "card.deliver") {
+        if step.uses == "deliver" {
             step.with
                 .insert("sync_upstream".into(), json!(sync_upstream));
             updated_any = true;
@@ -1242,7 +1239,7 @@ pub fn set_sync_upstream(doc: &mut Document, sync_upstream: bool) {
         // If user toggled upstream sync while in manual mode, switch Review to Queue Merge with the chosen sync setting.
         set_review_manual(doc, false);
         for step in &mut doc.steps {
-            if matches!(step.uses.as_str(), "deliver" | "card.deliver") {
+            if step.uses == "deliver" {
                 step.with
                     .insert("sync_upstream".into(), json!(sync_upstream));
             }

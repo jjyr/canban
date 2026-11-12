@@ -1951,6 +1951,156 @@ mod github;
 
 mod workflows;
 
+#[test]
+fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_end_to_end() {
+    let (dir, app, project, card) = setup();
+    let _ = dir;
+
+    // 1. agent.catalog returns all 24 built-in Herdr agents + current config.
+    let catalog = app.call("agent.catalog", json!({})).unwrap();
+    let agents = catalog["agents"].as_array().unwrap();
+    assert!(agents.len() >= 24);
+    assert!(
+        agents
+            .iter()
+            .any(|a| a["id"] == "agy" && a["binary"] == "agy")
+    );
+    assert!(
+        agents
+            .iter()
+            .any(|a| a["id"] == "gemini" && a["binary"] == "gemini")
+    );
+
+    // 2. Run Onboarding (`agent.setup`): enable `codex` + `agy` (disabling `claude`),
+    // set `agy` as the primary engine for `@planner`, `@developer`, `@reviewer`.
+    let setup_res = app
+        .call(
+            "agent.setup",
+            json!({
+                "enabled_agents": ["codex", "agy"],
+                "default_engine": "agy",
+                "default_agent": "developer",
+            }),
+        )
+        .unwrap();
+    assert_eq!(setup_res["onboarded"], true);
+    assert_eq!(setup_res["default_agent"], "developer");
+
+    let cfg = app.config();
+    assert!(cfg.onboarded);
+    let claude = cfg.profiles.iter().find(|p| p.id == "claude").unwrap();
+    assert!(!claude.enabled, "unchecked claude should be disabled");
+    let agy = cfg.profiles.iter().find(|p| p.id == "agy").unwrap();
+    assert!(agy.enabled, "checked agy should be created and enabled");
+    let dev = cfg.profiles.iter().find(|p| p.id == "developer").unwrap();
+    assert_eq!(dev.command()[0], "agy");
+    let planner = cfg.profiles.iter().find(|p| p.id == "planner").unwrap();
+    assert_eq!(planner.command()[0], "agy");
+
+    // 3. Disabled `@claude` is ignored in prose mentions and rejected when explicitly mentioned!
+    app.call(
+        "comment.add",
+        json!({
+            "card_id": card.id,
+            "body": "Hey @claude should not trigger because claude is disabled",
+        }),
+    )
+    .unwrap();
+    assert!(
+        !app.snapshot()
+            .unwrap()
+            .questions
+            .iter()
+            .any(|q| q.card_id == card.id && q.profile_id == "claude"),
+        "disabled @claude must not queue from prose mentions"
+    );
+    let err = app
+        .call(
+            "comment.add",
+            json!({
+                "card_id": card.id,
+                "body": "Explicit @claude",
+                "mentions": ["claude"],
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("disabled"));
+
+    // 4. Create a custom identity `@qa` backed by `codex`, verify it works in comments,
+    // and verify re-running `agent.setup` preserves `@qa` and its custom role_instruction!
+    app.call(
+        "config.agents.save",
+        json!({
+            "op": "upsert_identity",
+            "id": "qa",
+            "engine": "codex",
+            "role_instruction": "Run edge-case QA checks thoroughly.",
+        }),
+    )
+    .unwrap();
+    app.call(
+        "agent.setup",
+        json!({
+            "enabled_agents": ["codex", "agy"],
+            "default_engine": "agy",
+        }),
+    )
+    .unwrap();
+    let cfg_after = app.config();
+    let qa = cfg_after.profiles.iter().find(|p| p.id == "qa").unwrap();
+    assert!(qa.is_identity() && qa.enabled);
+    assert_eq!(qa.role_instruction, "Run edge-case QA checks thoroughly.");
+    assert_eq!(qa.command()[0], "codex");
+
+    // 5. Project-level identity override: override `@developer` -> `codex` ONLY for `project`,
+    // while global `@developer` remains `agy`!
+    app.call(
+        "project.agents",
+        json!({
+            "project_id": project.id,
+            "agent_overrides": {
+                "developer": "codex"
+            }
+        }),
+    )
+    .unwrap();
+    app.call(
+        "comment.add",
+        json!({
+            "card_id": card.id,
+            "body": "@developer check project override",
+            "mentions": ["developer"],
+        }),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let req = snap
+        .requests
+        .iter()
+        .rfind(|r| r.card_id == card.id && r.profile.id == "developer")
+        .expect("developer request queued");
+    assert_eq!(
+        req.profile.command()[0],
+        "codex",
+        "Project override must route @developer to codex without altering global agy"
+    );
+    assert!(
+        req.profile.role_instruction.contains("development Agent"),
+        "Project override must preserve @developer's role instruction"
+    );
+    assert_eq!(
+        app.config()
+            .profiles
+            .iter()
+            .find(|p| p.id == "developer")
+            .unwrap()
+            .command()[0],
+        "agy",
+        "Global @developer remains agy for other projects"
+    );
+}
+
 // Fixtures changing a historical Project template explicitly republish its YAML.
 fn republish_template(app: &AppServer, db: Db<'_>, project: &Project) -> Result<()> {
     let flow = canban_workflow_engine::source::migrate_legacy_stages(

@@ -333,6 +333,7 @@ mod tests {
             let project = Project {
                 github: None,
                 delivery_mode: Default::default(),
+                agent_overrides: Default::default(),
                 id: "p".into(),
                 name: "Test".into(),
                 location: None,

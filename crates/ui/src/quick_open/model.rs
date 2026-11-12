@@ -159,18 +159,22 @@ pub fn ranked(
                     std::cmp::Ordering::Equal
                 }
             })
-            .then_with(|| match (card_number(&a.3.title), card_number(&b.3.title)) {
-                (Some((na, ta)), Some((nb, tb))) if a.3.kind == "Card" && b.3.kind == "Card" => {
-                    if empty_query {
-                        nb.cmp(&na)
-                            .then_with(|| ta.to_lowercase().cmp(&tb.to_lowercase()))
-                    } else {
-                        na.cmp(&nb)
-                            .then_with(|| ta.to_lowercase().cmp(&tb.to_lowercase()))
+            .then_with(
+                || match (card_number(&a.3.title), card_number(&b.3.title)) {
+                    (Some((na, ta)), Some((nb, tb)))
+                        if a.3.kind == "Card" && b.3.kind == "Card" =>
+                    {
+                        if empty_query {
+                            nb.cmp(&na)
+                                .then_with(|| ta.to_lowercase().cmp(&tb.to_lowercase()))
+                        } else {
+                            na.cmp(&nb)
+                                .then_with(|| ta.to_lowercase().cmp(&tb.to_lowercase()))
+                        }
                     }
-                }
-                _ => a.3.title.to_lowercase().cmp(&b.3.title.to_lowercase()),
-            })
+                    _ => a.3.title.to_lowercase().cmp(&b.3.title.to_lowercase()),
+                },
+            )
             .then(a.3.detail.to_lowercase().cmp(&b.3.detail.to_lowercase()))
             .then(a.3.id.cmp(&b.3.id))
     });

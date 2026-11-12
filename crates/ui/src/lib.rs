@@ -1,6 +1,7 @@
 //! Production UI components and desktop host, shared with standalone examples.
 use anyhow::Result;
 use std::sync::Arc;
+pub mod agents_setup;
 pub mod archive;
 pub mod board;
 pub mod card;
