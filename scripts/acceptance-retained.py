@@ -44,10 +44,52 @@ try:
  for p in config['profiles']:
   p.update(preset=None,exit={'type':'input','text':'/exit'},session_instruction='',argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'{prompt}'],resume_argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'--resume','{session_id}','{prompt}'])
  (home/'config/agents.json').write_text(json.dumps(config));call('config.reload');call('scheduler.configure',{'idle_minutes':1})
- workflow=call('workflow.template');workflow['workspace'].update(create_worktree=False,sync_base=False)
- for stage in workflow['stages']:
-  if stage['id']=='review':stage['profile']='developer'
- project=call('project.create',{'name':'Retained','directory':str(base/'source'),'workflow':workflow})
+ retained_yaml="""schema: 1
+id: delivery:retained
+name: Development
+workspace:
+  create_worktree: false
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: agent:review
+    match:
+      column: review
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the card task in the supplied working directory.
+    next: move:develop
+  - id: move:develop
+    uses: card.move
+    with:
+      column: review
+    next: agent:review
+  - id: agent:review
+    uses: agent
+    with:
+      profile: developer
+      instruction: Review the changes in the same retained session.
+    next: __end
+  - id: __end
+    uses: complete
+"""
+ project=call('project.create',{'name':'Retained','directory':str(base/'source'),'workflow_yaml':retained_yaml})
  card=call('card.create',{'project_id':project['id'],'title':'Retained workflow'})
  call('card.move',{'card_id':card['id'],'revision':card['revision'],'stage':'develop'})
  s=wait(lambda s:s['attempts'] and s['attempts'][0].get('provider_session_id'),'Agent bound');first=s['attempts'][0];terminal=first['terminal'];sid=first['provider_session_id']

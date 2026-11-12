@@ -32,9 +32,7 @@ try:
  (home/'config/agents.json').write_text(json.dumps(config,indent=2));call('config.reload')
  source=base/'source';source.mkdir();(source/'hello.txt').write_text('original\n')
  for args in [['init','-b','main'],['config','user.name','Acceptance'],['config','user.email','acceptance@example.invalid'],['config','core.hooksPath','/dev/null'],['config','commit.gpgsign','false'],['add','.'],['commit','-m','Seed']]:subprocess.run(['git','-C',str(source),*args],check=True,capture_output=True)
- local_workflow = call('workflow.template')
- local_workflow['workspace']['sync_base'] = False  # Fixture repositories have no remote.
- project=call('project.create',{'workflow':local_workflow,'name':'Native acceptance','directory':str(source)})
+ project=call('project.create',{'workspace':{'sync_base':False},'name':'Native acceptance','directory':str(source)})
  card=call('card.create',{'project_id':project['id'],'title':'Terminal · 中文与 recovery','body':'Disposable native terminal acceptance. Type text; finish advances into Review.'})
  for i in range(12):call('card.create',{'project_id':project['id'],'title':'Planned work '+str(i+1),'body':'Board scroll retention fixture.'})
  call('card.move',{'card_id':card['id'],'revision':card['revision'],'stage':'develop'})

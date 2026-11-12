@@ -397,18 +397,12 @@ fn legacy_capacity_fields_do_not_survive_config_or_request_loading() {
 
 #[test]
 fn template_profiles_and_mentions_select_independent_roles_and_callbacks() {
-    let (_dir, app, mut project, card) = setup();
-    project.workflow.stages[2].execute = true;
-    project.workflow.stages[2].profile = Some("reviewer".into());
-    project.workflow.stages[2].instruction = "Review changes".into();
-    app.store
-        .lock()
-        .unwrap()
-        .write(|db| {
-            db.save(&project)?;
-            republish_template(&app, db, &project)
-        })
-        .unwrap();
+    let (_dir, app, project, card) = setup();
+    apply_project_yaml(
+        &app,
+        &project.id,
+        &develop_and_review_yaml(&project.id, false, true, true),
+    );
     app.call(
         "card.move",
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
@@ -454,12 +448,29 @@ fn template_profiles_and_mentions_select_independent_roles_and_callbacks() {
 #[test]
 fn unknown_stage_profiles_fail_before_project_creation() {
     let (dir, app, _project, _card) = setup();
-    let mut workflow = Workflow::default();
-    workflow.stages[2].profile = Some("missing-reviewer".into());
+    let invalid_yaml = r#"schema: 1
+id: delivery:invalid
+name: Invalid
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: missing-reviewer
+      instruction: Implement
+    next: __end
+  - id: __end
+    uses: complete
+"#;
     assert!(
         app.call(
             "project.create",
-            json!({"name":"Invalid","directory":dir.path().join("invalid"),"workflow":workflow})
+            json!({"name":"Invalid","directory":dir.path().join("invalid"),"workflow_yaml":invalid_yaml})
         )
         .is_err()
     );
@@ -469,18 +480,12 @@ fn unknown_stage_profiles_fail_before_project_creation() {
 
 #[test]
 fn referenced_profile_removal_is_rejected_without_replacing_active_config() {
-    let (_dir, app, mut project, _card) = setup();
-    project.workflow.stages[2].execute = true;
-    project.workflow.stages[2].profile = Some("reviewer".into());
-    project.workflow.stages[2].instruction = "Review".into();
-    app.store
-        .lock()
-        .unwrap()
-        .write(|db| {
-            db.save(&project)?;
-            republish_template(&app, db, &project)
-        })
-        .unwrap();
+    let (_dir, app, project, _card) = setup();
+    apply_project_yaml(
+        &app,
+        &project.id,
+        &develop_and_review_yaml(&project.id, false, true, true),
+    );
     let mut changed = app.config();
     changed.profiles.retain(|p| p.id != "reviewer");
     std::fs::write(
@@ -576,26 +581,35 @@ fn legacy_registry_and_workflow_are_preserved_without_starter_role_injection() {
         std::fs::read(home.join("config/agents.json")).unwrap(),
         original
     );
-    let flow = app.default_workflow().unwrap();
     assert!(!home.join("config/workflows").exists());
-    assert!(flow.stages.iter().all(|s| s.profile.is_none()));
     assert_eq!(app.config().profiles.len(), 1);
+    let created: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name":"SingleProfile","directory":dir.path().join("single")}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let sources = app
+        .call("workflow.sources", json!({"project_id":created.id}))
+        .unwrap();
+    assert!(
+        !sources["sources"][0]["source"]
+            .as_str()
+            .unwrap()
+            .contains("profile: developer")
+    );
 }
 
 #[test]
 fn live_replies_preserve_task_callback_and_require_current_invocation() {
-    let (_dir, app, mut project, card) = setup();
-    project.workflow.stages[2].execute = true;
-    project.workflow.stages[2].profile = Some("reviewer".into());
-    project.workflow.stages[2].instruction = "Review".into();
-    app.store
-        .lock()
-        .unwrap()
-        .write(|db| {
-            db.save(&project)?;
-            republish_template(&app, db, &project)
-        })
-        .unwrap();
+    let (_dir, app, project, card) = setup();
+    apply_project_yaml(
+        &app,
+        &project.id,
+        &develop_and_review_yaml(&project.id, false, true, true),
+    );
     app.call(
         "card.move",
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
@@ -1344,30 +1358,66 @@ fn global_slots_include_closing_and_unknown_agents_and_resume_after_exit() {
 
 #[test]
 fn later_template_stages_win_across_boards_and_human_cards_are_skipped() {
-    let (_dir, app, mut project, card) = setup();
+    let (dir, app, _project, card) = setup();
     app.call(
         "card.move",
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    project.id = "second-board".into();
-    project.workflow.stages[2].id = "custom-final-check".into();
-    project.workflow.stages[2].execute = true;
-    project.workflow.stages[2].profile = Some("reviewer".into());
-    project.workflow.stages[2].instruction = "Final check".into();
-    project.workflow.stages[1].on_completed = Some("custom-final-check".into());
-    app.store
-        .lock()
-        .unwrap()
-        .write(|db| {
-            db.save(&project)?;
-            republish_template(&app, db, &project)
-        })
-        .unwrap();
+    let custom_yaml = r#"schema: 1
+id: delivery:second-board
+name: Second Board
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: custom-final-check
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  custom-final-check:
+    event: card.column_entered
+    start_at: agent:custom-final-check
+    match:
+      column: custom-final-check
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement
+    next: move:develop
+  - id: move:develop
+    uses: card.move
+    with:
+      column: custom-final-check
+    next: agent:custom-final-check
+  - id: agent:custom-final-check
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Final check
+    next: __end
+  - id: __end
+    uses: complete
+"#;
+    let second_project: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name":"Second","directory":dir.path().join("second-source"),"workflow_yaml":custom_yaml}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let second: Card = serde_json::from_value(
         app.call(
             "card.create",
-            json!({"project_id":project.id,"title":"Later stage"}),
+            json!({"project_id":second_project.id,"title":"Later stage"}),
         )
         .unwrap(),
     )
@@ -1425,19 +1475,12 @@ fn later_template_stages_win_across_boards_and_human_cards_are_skipped() {
 
 #[test]
 fn human_review_gate_survives_reports_acknowledgement_restart_and_requires_explicit_approval() {
-    let (dir, app, mut project, card) = setup();
-    project.workflow.stages[1].require_human_review = true;
-    project.workflow.stages[2].execute = true;
-    project.workflow.stages[2].profile = Some("reviewer".into());
-    project.workflow.stages[2].instruction = "Review".into();
-    app.store
-        .lock()
-        .unwrap()
-        .write(|db| {
-            db.save(&project)?;
-            republish_template(&app, db, &project)
-        })
-        .unwrap();
+    let (dir, app, project, card) = setup();
+    apply_project_yaml(
+        &app,
+        &project.id,
+        &develop_and_review_yaml(&project.id, true, true, true),
+    );
     app.call(
         "card.move",
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
@@ -2101,16 +2144,87 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
     );
 }
 
-// Fixtures changing a historical Project template explicitly republish its YAML.
-fn republish_template(app: &AppServer, db: Db<'_>, project: &Project) -> Result<()> {
-    let flow = canban_workflow_engine::source::migrate_legacy_stages(
-        &project.workflow,
-        format!("delivery:{}", project.id),
-    );
-    if workflow::published(db, &flow.id).is_err() {
-        return authoring::initialize(&app.home, db, &app.config(), project);
-    }
-    let revision = workflow::published(db, &flow.id)?.revision;
-    authoring::import(&app.home, db, &app.config(), project, &flow, revision)?;
-    Ok(())
+pub(super) fn apply_project_yaml(app: &AppServer, project_id: &str, yaml: &str) {
+    let sources = app
+        .call("workflow.sources", json!({"project_id": project_id}))
+        .unwrap();
+    app.call(
+        "workflow.apply",
+        json!({
+            "project_id": project_id,
+            "revision": sources["revision"],
+            "sources": [{"filename": "development.yaml", "source": yaml}],
+        }),
+    )
+    .unwrap();
+}
+
+pub(super) fn develop_and_review_yaml(
+    project_id: &str,
+    develop_human_review: bool,
+    create_worktree: bool,
+    sync_base: bool,
+) -> String {
+    let develop_next = if develop_human_review {
+        "approval:develop"
+    } else {
+        "move:develop"
+    };
+    let approval_step = if develop_human_review {
+        r#"  - id: approval:develop
+    uses: approval
+    with:
+      title: Agent report ready; human review is required before continuing
+    next: move:develop
+"#
+    } else {
+        ""
+    };
+    format!(
+        r#"schema: 1
+id: delivery:{project_id}
+name: Development
+workspace:
+  create_worktree: {create_worktree}
+  sync_base: {sync_base}
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: agent:review
+    match:
+      column: review
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the card task in the supplied working directory. Explain your changes and validation in your report.
+    next: {develop_next}
+{approval_step}  - id: move:develop
+    uses: card.move
+    with:
+      column: review
+    next: agent:review
+  - id: agent:review
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Review changes
+    next: __end
+  - id: __end
+    uses: complete
+"#
+    )
 }

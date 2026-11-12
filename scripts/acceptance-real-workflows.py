@@ -82,9 +82,52 @@ def project(name, files):
     git(source, 'config', 'commit.gpgsign', 'false')
     git(source, 'add', '.')
     git(source, 'commit', '-m', 'Seed acceptance repository')
-    workflow = call('workflow.template')
-    workflow['workspace']['sync_base'] = False
-    return call('project.create', {'name': name, 'directory': str(source),'workflow':workflow}), source
+    real_workflows_yaml = f"""schema: 1
+id: delivery:{name}
+name: Development
+workspace:
+  create_worktree: true
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: agent:review
+    match:
+      column: review
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the card task in the supplied working directory. Explain your changes and validation in your report.
+    next: move:develop
+  - id: move:develop
+    uses: card.move
+    with:
+      column: review
+    next: agent:review
+  - id: agent:review
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Review the work for this card. Inspect the code and earlier results, then write an ordinary Markdown review report.
+    next: __end
+  - id: __end
+    uses: complete
+"""
+    return call('project.create', {'name': name, 'directory': str(source), 'workflow_yaml': real_workflows_yaml}), source
 
 def reviewed(snapshot, card_id):
     requests = [r for r in snapshot['requests'] if r['card_id'] == card_id]

@@ -222,13 +222,35 @@ impl AppServer {
             "herdr.status" => canban_herdr::Client { config }.status(),
             "herdr.templates" => canban_herdr::Client { config }.call("templates.list", json!({})),
             "project.create" => {
-                let explicit_workflow = p["workflow"].is_object();
-                let workflow = if explicit_workflow {
-                    serde_json::from_value(p["workflow"].clone())?
-                } else {
-                    self.default_workflow()?
+                ensure!(
+                    p.get("workflow").is_none(),
+                    "JSON workflow templates have been removed; pass workspace and/or workflow_yaml, or publish YAML via workflow.apply"
+                );
+                let mut workflow = Workflow::default();
+                if let Some(ws) = p.get("workspace") {
+                    workflow.workspace = serde_json::from_value(ws.clone())?;
+                }
+                canban_workflow_engine::validate(&workflow)?;
+                let workflow_yaml = match p.get("workflow_yaml") {
+                    Some(v) => Some(
+                        v.as_str()
+                            .context("workflow_yaml must be a YAML string")?
+                            .to_owned(),
+                    ),
+                    None => None,
                 };
-                Self::validate_workflow(&config, &workflow)?;
+                if let Some(yaml) = &workflow_yaml {
+                    let doc = canban_workflow_engine::source::parse(yaml)?;
+                    let compiled = doc.compile()?;
+                    let cols: Vec<String> = if doc.columns.is_empty() {
+                        workflow.stages.iter().map(|s| s.id.clone()).collect()
+                    } else {
+                        doc.columns.iter().map(|c| c.id.clone()).collect()
+                    };
+                    let profiles: Vec<String> =
+                        config.profiles.iter().map(|a| a.id.clone()).collect();
+                    canban_workflow_engine::validate_definition(&compiled, &cols, &profiles)?;
+                }
                 let location = self.work_location(&p)?;
                 let agent_overrides =
                     self.parse_agent_overrides(&config, p.get("agent_overrides"))?;
@@ -256,7 +278,7 @@ impl AppServer {
                         db,
                         &config,
                         &project,
-                        explicit_workflow,
+                        workflow_yaml.as_deref(),
                     )?;
                     let saved: Project = db.get(&project.id)?;
                     Ok(serde_json::to_value(saved)?)

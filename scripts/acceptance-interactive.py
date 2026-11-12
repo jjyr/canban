@@ -28,9 +28,52 @@ try:
  for p in config['profiles']:
   p.update(preset=None,exit={'type':'input','text':'/exit'},session_instruction='',argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'{prompt}'],resume_argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'--resume','{session_id}','{prompt}'])
  (home/'config/agents.json').write_text(json.dumps(config,indent=2));call('config.reload')
- local_workflow = call('workflow.template')
- local_workflow['workspace']['sync_base'] = False  # Fixture repositories have no remote.
- project=call('project.create',{'workflow':local_workflow,'name':'Interactive acceptance','directory':str(base/'source')})
+ interactive_yaml="""schema: 1
+id: delivery:interactive
+name: Development
+workspace:
+  create_worktree: true
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: agent:review
+    match:
+      column: review
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the card task in the supplied working directory.
+    next: move:develop
+  - id: move:develop
+    uses: card.move
+    with:
+      column: review
+    next: agent:review
+  - id: agent:review
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Review the work for this card.
+    next: __end
+  - id: __end
+    uses: complete
+"""
+ project=call('project.create',{'workflow_yaml':interactive_yaml,'name':'Interactive acceptance','directory':str(base/'source')})
  note=call('note.save',{'project_id':project['id'],'title':'Context.md','body':'Original captured context'})
  ref=call('note.save',{'project_id':project['id'],'title':'Reference.md','body':'[Context](note:'+note['id']+')'})
  card=call('card.create',{'project_id':project['id'],'title':'Exercise interactive task','source_note_id':note['id']})

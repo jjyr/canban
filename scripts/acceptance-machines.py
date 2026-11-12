@@ -58,8 +58,57 @@ for prof in config['profiles']:
 (a.home/'config/agents.json').write_text(json.dumps(config));call('config.reload');call('scheduler.configure',{'idle_minutes':0})
 source=root+'/source'
 run("import os,subprocess,sys;os.makedirs(sys.argv[1]);p=sys.argv[1];\nfor args in [['init','-b','main'],['config','user.name','Acceptance'],['config','user.email','acceptance@example.invalid'],['config','core.hooksPath','/dev/null'],['config','commit.gpgsign','false'],['commit','--allow-empty','-m','seed']]:subprocess.run(['git','-C',p]+args,check=True,stdout=subprocess.DEVNULL)\nprint('ready')",source)
-flow=call('workflow.template');flow['workspace']['sync_base']=False
-project=call('project.create',{'name':'Remote acceptance','location':{'machine':machine,'directory':source},'workflow':flow})
+remote_yaml="""schema: 1
+id: delivery:remote
+name: Development
+workspace:
+  create_worktree: true
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: agent:review
+    match:
+      column: review
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the card task in the supplied working directory.
+    next: move:develop
+  - id: move:develop
+    uses: card.move
+    with:
+      column: review
+    next: agent:review
+  - id: agent:review
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Review the work for this card.
+    next: approval:review
+  - id: approval:review
+    uses: approval
+    with:
+      title: Agent report ready; human review is required before continuing
+    next: __end
+  - id: __end
+    uses: complete
+"""
+project=call('project.create',{'name':'Remote acceptance','location':{'machine':machine,'directory':source},'workflow_yaml':remote_yaml})
 card=call('card.create',{'project_id':project['id'],'title':'Remote develop, review and resume','body':'Disposable multi-machine acceptance.'})
 tracked.append(card['id'])
 note=call('note.save',{'project_id':project['id'],'title':'Remote context.md','body':'# Remote context'})

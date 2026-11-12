@@ -76,9 +76,9 @@ try:
                        resume_argv=['/usr/bin/python3',str(repo/'scripts/interactive-fixture.py'),'--resume','{session_id}','{prompt}'])
     config_path.write_text(json.dumps(config))
     call('config.reload')
-    workflow=call('workflow.template');workflow['workspace']['sync_base']=False
-    project = call('project.create', {'workflow':workflow,'name':'Notifications','directory':str(base/'source')})
-    other = call('project.create', {'workflow':workflow,'name':'Another Project','directory':str(base/'other')})
+    workspace={'sync_base':False}
+    project = call('project.create', {'workspace':workspace,'name':'Notifications','directory':str(base/'source')})
+    other = call('project.create', {'workspace':workspace,'name':'Another Project','directory':str(base/'other')})
     for directory in [base/'source',base/'other']:
         (directory/'README.md').write_text('# Disposable notification acceptance\n')
         for command in [['init','-b','main'],['config','user.name','Acceptance'],['config','user.email','acceptance@example.invalid'],['config','core.hooksPath','/dev/null'],['config','commit.gpgsign','false'],['add','.'],['commit','-m','Seed']]:

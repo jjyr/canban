@@ -2,7 +2,7 @@
 //! revisions, active references and subscriptions commit in one transaction.
 use super::*;
 use canban_workflow_engine::source;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 fn filename(name: &str) -> Result<()> {
     ensure!(
@@ -242,68 +242,93 @@ fn publish(
         db.conn
             .execute("DELETE FROM workflow_sources WHERE id=?1", [&f.id])?;
     }
-    // Synchronize declared YAML columns to Project stages when provided.
+    // Synchronize declared YAML columns and primary workspace settings to Project.
     let active_sources: Vec<_> = db
         .list::<WorkflowSource>()?
         .into_iter()
-        .filter(|f| f.project_id == project.id && !f.columns.is_empty())
+        .filter(|f| f.project_id == project.id)
         .collect();
     if let Some(primary) = active_sources
         .iter()
         .find(|f| f.filename == "development.yaml")
+        .or_else(|| active_sources.iter().find(|f| !f.columns.is_empty()))
         .or_else(|| active_sources.first())
     {
         let mut updated: Project = db.get(&project.id)?;
-        let new_stages: Vec<Stage> = primary
-            .columns
-            .iter()
-            .map(|col| {
-                if let Some(mut existing) = updated
-                    .workflow
-                    .stages
-                    .iter()
-                    .find(|s| s.id == col.id)
-                    .cloned()
-                {
-                    existing.name = col.name.clone();
-                    existing
-                } else {
-                    Stage {
-                        id: col.id.clone(),
-                        name: col.name.clone(),
-                        execute: false,
-                        profile: None,
-                        instruction: String::new(),
-                        on_completed: None,
-                        require_human_review: false,
+        let mut changed = false;
+        if let Ok(rev) = db.get::<WorkflowRevision>(&primary.revision_id)
+            && updated.workflow.workspace != rev.definition.workspace
+        {
+            updated.workflow.workspace = rev.definition.workspace;
+            changed = true;
+        }
+        if !primary.columns.is_empty() {
+            let new_stages: Vec<Stage> = primary
+                .columns
+                .iter()
+                .map(|col| {
+                    if let Some(mut existing) = updated
+                        .workflow
+                        .stages
+                        .iter()
+                        .find(|s| s.id == col.id)
+                        .cloned()
+                    {
+                        existing.name = col.name.clone();
+                        existing
+                    } else {
+                        Stage {
+                            id: col.id.clone(),
+                            name: col.name.clone(),
+                            execute: false,
+                            profile: None,
+                            instruction: String::new(),
+                            on_completed: None,
+                            require_human_review: false,
+                        }
                     }
-                }
-            })
-            .collect();
-        if updated.workflow.stages != new_stages {
-            updated.workflow.stages = new_stages;
+                })
+                .collect();
+            if updated.workflow.stages != new_stages {
+                updated.workflow.stages = new_stages;
+                changed = true;
+            }
+        }
+        if changed {
             db.save(&updated)?;
         }
     }
     Ok(())
 }
-/// Initialize a newly created Project with the native default YAML workflow,
-/// or import an explicit JSON stage template when requested by `project.create`.
+/// Initialize a newly created Project with either an explicit YAML source document
+/// or the native default `development.yaml` workflow.
 pub(super) fn initialize_new(
     home: &Path,
     db: Db<'_>,
     config: &Config,
     project: &Project,
-    explicit_legacy_workflow: bool,
+    workflow_yaml: Option<&str>,
 ) -> Result<()> {
-    if explicit_legacy_workflow {
-        return initialize(home, db, config, project);
-    }
-    let doc = source::default_document(
-        format!("delivery:{}", project.id),
-        project.workflow.workspace.clone(),
-    );
-    let raw = source::encode(&doc)?;
+    let raw = if let Some(yaml) = workflow_yaml {
+        yaml.to_owned()
+    } else {
+        let mut doc = source::default_document(
+            format!("delivery:{}", project.id),
+            project.workflow.workspace.clone(),
+        );
+        for step in &mut doc.steps {
+            if step.uses == "agent"
+                && step
+                    .with
+                    .get("profile")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| !config.profiles.iter().any(|p| p.id == id))
+            {
+                step.with.remove("profile");
+            }
+        }
+        source::encode(&doc)?
+    };
     publish(
         home,
         db,
@@ -313,8 +338,7 @@ pub(super) fn initialize_new(
     )
 }
 
-/// Convert each existing pre-YAML Project once, including existing JSON revisions. No running
-/// assignment or human decision is changed by this source migration.
+/// Ensure every Project has an initialized SQL YAML workflow collection.
 pub(super) fn initialize(
     home: &Path,
     db: Db<'_>,
@@ -328,85 +352,7 @@ pub(super) fn initialize(
     {
         return Ok(());
     }
-    let binding = db.get::<WorkflowBinding>(&project.id).ok();
-    let mut defs: BTreeMap<String, WorkflowRevision> = BTreeMap::new();
-    for w in db
-        .list::<WorkflowRevision>()?
-        .into_iter()
-        .filter(|w| w.project_id == project.id)
-    {
-        if defs
-            .get(&w.workflow_id)
-            .is_none_or(|v| v.revision < w.revision)
-        {
-            defs.insert(w.workflow_id.clone(), w);
-        }
-    }
-    // If this Project has no historical revisions/bindings and still holds the uncustomized
-    // default stage list, bootstrap directly from the native default YAML document.
-    if binding.is_none() && defs.is_empty() && project.workflow == Workflow::default() {
-        return initialize_new(home, db, config, project, false);
-    }
-    let mut default =
-        source::migrate_legacy_stages(&project.workflow, format!("delivery:{}", project.id));
-    if default.entries.is_empty() {
-        default.entries.insert("manual".into(), "__end".into());
-        default.steps.insert("__end".into(), WorkflowStep::Complete);
-    }
-    let default_id = binding
-        .as_ref()
-        .map(|b| b.workflow_id.clone())
-        .unwrap_or(default.id.clone());
-    if binding.is_none() {
-        defs.entry(default.id.clone()).or_insert(WorkflowRevision {
-            source_yaml: None,
-            id: format!("{}:0", default.id),
-            project_id: project.id.clone(),
-            workflow_id: default.id.clone(),
-            revision: 0,
-            definition: default,
-            created_at: now(),
-        });
-    }
-    let mut inputs = Vec::new();
-    for (index, w) in defs.into_values().enumerate() {
-        let mut rules = BTreeMap::new();
-        for (entry, step) in &w.definition.entries {
-            let column = w.workflow_id == default_id
-                && project.workflow.stages.iter().any(|s| s.id == *entry);
-            rules.insert(
-                entry.clone(),
-                WorkflowRule {
-                    event: if column {
-                        "card.column_entered"
-                    } else {
-                        "manual"
-                    }
-                    .into(),
-                    start_at: step.clone(),
-                    selector: EventSelector {
-                        column: column.then(|| entry.clone()),
-                        ..Default::default()
-                    },
-                    enabled: true,
-                },
-            );
-        }
-        let name = if w.workflow_id == default_id {
-            "development.yaml".into()
-        } else {
-            format!("imported-{index}.yaml")
-        };
-        let raw = w
-            .source_yaml
-            .clone()
-            .unwrap_or(source::export(&w.definition, rules)?);
-        inputs.push(json!({"filename":name,"source":raw}));
-    }
-    if !inputs.is_empty() {
-        publish(home, db, project, config, &inputs)?;
-    }
-    Ok(())
+    initialize_new(home, db, config, project, None)
 }
 impl AppServer {
     pub(super) fn authoring_call(&self, method: &str, p: Value) -> Result<Value> {
@@ -445,147 +391,4 @@ impl AppServer {
             files(&self.home, db, &project)
         })
     }
-}
-
-/// JSON compatibility is an import into the same file collection, not a second
-/// editable source of truth. Require the current publication revision.
-pub(super) fn import(
-    home: &Path,
-    db: Db<'_>,
-    config: &Config,
-    project: &Project,
-    flow: &WorkflowDefinition,
-    expected: u64,
-) -> Result<WorkflowRevision> {
-    let current = super::workflow::published(db, &flow.id).ok();
-    ensure!(
-        current.as_ref().map_or(0, |w| w.revision) == expected,
-        "revision_conflict"
-    );
-    let collection = files(home, db, project)?;
-    let existing = db
-        .list::<WorkflowSource>()?
-        .into_iter()
-        .find(|f| f.workflow_id == flow.id && f.project_id == project.id);
-    let name = existing
-        .as_ref()
-        .map(|f| f.filename.clone())
-        .unwrap_or_else(|| {
-            format!(
-                "imported-{}.yaml",
-                &canban_context::digest(flow.id.as_bytes())[..12]
-            )
-        });
-    let rules = if let Some(old_source) = existing {
-        flow.entries
-            .iter()
-            .map(|(key, step)| {
-                if let Some(mut r) = old_source.rules.get(key).cloned() {
-                    r.start_at = step.clone();
-                    (key.clone(), r)
-                } else {
-                    let is_col = project.workflow.stages.iter().any(|s| s.id == *key)
-                        || flow.columns.iter().any(|c| c.id == *key);
-                    (
-                        key.clone(),
-                        WorkflowRule {
-                            event: if is_col {
-                                "card.column_entered"
-                            } else {
-                                "manual"
-                            }
-                            .into(),
-                            start_at: step.clone(),
-                            selector: EventSelector {
-                                column: is_col.then(|| key.clone()),
-                                ..Default::default()
-                            },
-                            enabled: true,
-                        },
-                    )
-                }
-            })
-            .collect()
-    } else {
-        flow.entries
-            .iter()
-            .map(|(key, step)| {
-                let is_col = project.workflow.stages.iter().any(|s| s.id == *key)
-                    || flow.columns.iter().any(|c| c.id == *key);
-                (
-                    key.clone(),
-                    WorkflowRule {
-                        event: if is_col {
-                            "card.column_entered"
-                        } else {
-                            "manual"
-                        }
-                        .into(),
-                        start_at: step.clone(),
-                        selector: EventSelector {
-                            column: is_col.then(|| key.clone()),
-                            ..Default::default()
-                        },
-                        enabled: true,
-                    },
-                )
-            })
-            .collect()
-    };
-    let raw = source::export(flow, rules)?;
-    let mut inputs = collection["sources"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|v| v["filename"] != name)
-        .map(|v| json!({"filename":v["filename"],"source":v["source"]}))
-        .collect::<Vec<_>>();
-    inputs.push(json!({"filename":name,"source":raw}));
-    publish(home, db, project, config, &inputs)?;
-    super::workflow::published(db, &flow.id)
-}
-
-/// Legacy bind translates to visible named trigger rules in SQL YAML sources.
-pub(super) fn bind(
-    home: &Path,
-    db: Db<'_>,
-    config: &Config,
-    project: &Project,
-    workflow_id: &str,
-) -> Result<()> {
-    let current = files(home, db, project)?;
-    let old = db
-        .get::<WorkflowBinding>(&project.id)
-        .ok()
-        .map(|b| b.workflow_id)
-        .unwrap_or_else(|| format!("delivery:{}", project.id));
-    let mut inputs = Vec::new();
-    for item in current["sources"].as_array().unwrap() {
-        let mut doc = source::parse(item["source"].as_str().unwrap())?;
-        if doc.id == workflow_id {
-            for (key, rule) in &mut doc.on {
-                if project.workflow.stages.iter().any(|s| s.id == *key) {
-                    rule.event = "card.column_entered".into();
-                    rule.selector.column = Some(key.clone());
-                    rule.enabled = true;
-                }
-            }
-            doc.enabled = true;
-        } else if doc.id == old {
-            for rule in doc
-                .on
-                .values_mut()
-                .filter(|r| r.event == "card.column_entered")
-            {
-                rule.enabled = false;
-            }
-        }
-        let raw = if doc.id == workflow_id || doc.id == old {
-            source::encode(&doc)?
-        } else {
-            item["source"].as_str().unwrap().into()
-        };
-        inputs.push(json!({"filename":item["filename"],"source":raw}));
-    }
-    publish(home, db, project, config, &inputs)
 }

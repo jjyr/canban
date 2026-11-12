@@ -39,20 +39,11 @@ fn remote_reports_wait_through_handoff_without_consuming_or_duplicating_completi
 fn location_edits_retarget_queued_work_but_not_existing_attempts_or_resumes() {
     let (dir, app, p, c) = setup();
     super::terminal_cases::core(&app, dir.path());
-    app.store
-        .lock()
-        .unwrap()
-        .write(|db| {
-            let mut p: Project = db.get(&p.id)?;
-            p.workflow.workspace.create_worktree = false;
-            p.workflow.workspace.sync_base = false;
-            p.workflow.stages[2].execute = true;
-            p.workflow.stages[2].profile = Some("reviewer".into());
-            p.workflow.stages[2].instruction = "Review".into();
-            db.save(&p)?;
-            republish_template(&app, db, &p)
-        })
-        .unwrap();
+    apply_project_yaml(
+        &app,
+        &p.id,
+        &develop_and_review_yaml(&p.id, false, false, false),
+    );
     app.call(
         "card.move",
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
@@ -121,20 +112,11 @@ fn location_edits_retarget_queued_work_but_not_existing_attempts_or_resumes() {
 fn changed_environment_never_reviews_an_unrelated_checkout() {
     let (dir, app, p, c) = setup();
     super::terminal_cases::core(&app, dir.path());
-    app.store
-        .lock()
-        .unwrap()
-        .write(|db| {
-            let mut p: Project = db.get(&p.id)?;
-            p.workflow.workspace.create_worktree = false;
-            p.workflow.workspace.sync_base = false;
-            p.workflow.stages[2].execute = true;
-            p.workflow.stages[2].profile = Some("reviewer".into());
-            p.workflow.stages[2].instruction = "Review".into();
-            db.save(&p)?;
-            republish_template(&app, db, &p)
-        })
-        .unwrap();
+    apply_project_yaml(
+        &app,
+        &p.id,
+        &develop_and_review_yaml(&p.id, false, false, false),
+    );
     app.call(
         "card.move",
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
@@ -208,13 +190,10 @@ fn offline_work_does_not_starve_local_boards_or_fall_back_for_terminals() {
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let mut flow = Workflow::default();
-    flow.workspace.create_worktree = false;
-    flow.workspace.sync_base = false;
     let p2 = app
         .call(
             "project.create",
-            json!({"name":"Local","directory":dir.path().join("local"),"workflow":flow}),
+            json!({"name":"Local","directory":dir.path().join("local"),"workspace":{"create_worktree":false,"sync_base":false}}),
         )
         .unwrap();
     let c2 = app

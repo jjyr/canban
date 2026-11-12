@@ -60,11 +60,9 @@ macro_rules! record {
     };
 }
 record!(Project, "projects");
-record!(WorkflowTemplate, "workflow_templates");
 record!(WorkflowSource, "workflow_sources", project);
 record!(ConfigurationSession, "configuration_sessions", project);
 record!(WorkflowRevision, "workflow_revisions", project);
-record!(WorkflowBinding, "workflow_bindings", project);
 record!(WorkflowRun, "workflow_runs", card);
 record!(EventSubscription, "event_subscriptions");
 record!(EventDelivery, "event_deliveries");

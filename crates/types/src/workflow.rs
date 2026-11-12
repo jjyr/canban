@@ -1,5 +1,5 @@
 //! Shared declarative workflow and durable subscription contracts.
-use crate::{Event, Workflow, WorkspaceSettings};
+use crate::{Event, WorkspaceSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -90,13 +90,6 @@ pub struct WorkflowRevision {
     pub revision: u64,
     pub definition: WorkflowDefinition,
     pub created_at: u64,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct WorkflowBinding {
-    pub id: String,
-    pub project_id: String,
-    pub workflow_id: String,
-    pub revision: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WorkflowRun {
@@ -242,12 +235,6 @@ pub struct ConfigurationSession {
     pub state: String,
     pub prompt: String,
     pub error: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct WorkflowTemplate {
-    pub id: String,
-    pub workflow: Workflow,
 }
 
 fn default_sync_upstream() -> bool {

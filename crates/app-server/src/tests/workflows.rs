@@ -1,13 +1,67 @@
 use super::*;
-fn plan(id: &str, instruction: &str) -> Value {
-    json!({"id":id,"name":"Plan and deliver","workspace":{"create_worktree":false,"sync_base":false},"entries":{"start":"plan","develop":"build"},"steps":{"plan":{"type":"agent","profile":"codex","instruction":instruction,"next":"approve"},"approve":{"type":"approval","title":"Approve this exact plan","next":"move","rework":"plan"},"move":{"type":"move","column":"develop","next":"build"},"build":{"type":"agent","profile":"developer","instruction":"Implement the approved plan","next":"finish"},"finish":{"type":"complete"}}})
-}
-fn publish(app: &AppServer, p: &Project, id: &str, instruction: &str, revision: u64) {
-    app.call(
-        "workflow.publish",
-        json!({"project_id":p.id,"revision":revision,"definition":plan(id,instruction)}),
+fn plan_yaml(id: &str, instruction: &str) -> String {
+    format!(
+        r#"schema: 1
+id: {id}
+name: Plan and deliver
+workspace:
+  create_worktree: false
+  sync_base: false
+on:
+  start:
+    event: manual
+    start_at: plan
+  develop:
+    event: card.column_entered
+    start_at: build
+    match:
+      column: develop
+steps:
+  - id: plan
+    uses: agent
+    with:
+      profile: codex
+      instruction: {instruction}
+    next: approve
+  - id: approve
+    uses: approval
+    with:
+      title: Approve this exact plan
+    next: move
+    on_changes_requested: plan
+  - id: move
+    uses: card.move
+    with:
+      column: develop
+    next: build
+  - id: build
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the approved plan
+    next: finish
+  - id: finish
+    uses: complete
+"#
     )
-    .unwrap();
+}
+fn upsert_yaml(app: &AppServer, p: &Project, filename: &str, source: &str) -> Result<Value> {
+    let c = app.call("workflow.sources", json!({"project_id":p.id}))?;
+    let mut files = c["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["filename"] != filename)
+        .map(|f| json!({"filename":f["filename"],"source":f["source"]}))
+        .collect::<Vec<_>>();
+    files.push(json!({"filename":filename,"source":source}));
+    app.call(
+        "workflow.apply",
+        json!({"project_id":p.id,"revision":c["revision"],"sources":files}),
+    )
+}
+fn publish(app: &AppServer, p: &Project, id: &str, instruction: &str) {
+    upsert_yaml(app, p, &format!("{id}.yaml"), &plan_yaml(id, instruction)).unwrap();
 }
 fn finish(app: &AppServer, req: &Request, key: &str) {
     let a = admit(app, req);
@@ -16,7 +70,10 @@ fn finish(app: &AppServer, req: &Request, key: &str) {
 #[test]
 fn published_revision_is_immediate_for_new_runs_and_frozen_for_active_runs() {
     let (_dir, app, p, c) = setup();
-    publish(&app, &p, "plan", "FIRST", 0);
+    let stale_collection = app
+        .call("workflow.sources", json!({"project_id":p.id}))
+        .unwrap();
+    publish(&app, &p, "plan", "FIRST");
     let run = app
         .call(
             "workflow.start",
@@ -30,7 +87,7 @@ fn published_revision_is_immediate_for_new_runs_and_frozen_for_active_runs() {
         )
         .unwrap();
     assert_eq!(run["id"], again["id"]);
-    publish(&app, &p, "plan", "SECOND", 1);
+    publish(&app, &p, "plan", "SECOND");
     let req = app.snapshot().unwrap().requests[0].clone();
     assert!(req.instruction.contains("FIRST"));
     finish(&app, &req, "plan-result");
@@ -69,8 +126,8 @@ fn published_revision_is_immediate_for_new_runs_and_frozen_for_active_runs() {
     );
     assert!(
         app.call(
-            "workflow.publish",
-            json!({"project_id":p.id,"revision":1,"definition":plan("plan","bad")})
+            "workflow.apply",
+            json!({"project_id":p.id,"revision":stale_collection["revision"],"sources":[{"filename":"plan.yaml","source":plan_yaml("plan","bad")}]})
         )
         .is_err()
     );
@@ -114,7 +171,7 @@ fn subscription_progress_survives_restart_and_consumers_ack_independently() {
 #[test]
 fn event_workflows_use_final_card_binding_and_failures_do_not_rollback_source_commands() {
     let (_dir, app, p, _) = setup();
-    publish(&app, &p, "plan", "Plan", 0);
+    publish(&app, &p, "plan", "Plan");
     let sub=app.call("subscription.save",json!({"revision":0,"enabled":true,"selector":{"project_id":p.id,"types":["card.created"]},"target":{"type":"workflow","workflow_id":"plan","entry":"start"}})).unwrap();
     let c = app
         .call(
@@ -153,7 +210,7 @@ fn event_workflows_use_final_card_binding_and_failures_do_not_rollback_source_co
 #[test]
 fn stale_plan_cannot_approve_and_rework_gets_new_step_identity() {
     let (_dir, app, p, c) = setup();
-    publish(&app, &p, "plan", "Plan", 0);
+    publish(&app, &p, "plan", "Plan");
     app.call(
         "workflow.start",
         json!({"workflow_id":"plan","card_id":c.id,"entry":"start"}),
@@ -177,37 +234,17 @@ fn stale_plan_cannot_approve_and_rework_gets_new_step_identity() {
     assert_ne!(s.requests[0].workflow_step, s.requests[1].workflow_step);
 }
 #[test]
-fn invalid_graph_cannot_publish_and_old_assignment_survives_engine_adoption() {
+fn invalid_graph_cannot_publish_and_active_run_survives_service_restart() {
     let (dir, app, p, c) = setup();
-    let mut def = plan("bad", "Plan");
-    def["steps"]["build"]["next"] = json!("plan");
-    assert!(
-        app.call(
-            "workflow.publish",
-            json!({"project_id":p.id,"revision":0,"definition":def})
-        )
-        .is_err()
-    );
+    let bad_yaml = plan_yaml("bad", "Plan").replace("next: finish", "next: plan");
+    assert!(upsert_yaml(&app, &p, "bad.yaml", &bad_yaml).is_err());
     app.call(
         "card.move",
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
     let request = app.snapshot().unwrap().requests[0].clone();
-    app.store
-        .lock()
-        .unwrap()
-        .write(|db| {
-            let mut req = request.clone();
-            req.workflow_run_id = None;
-            req.workflow_step = None;
-            db.save(&req)?;
-            db.conn.execute_batch("DELETE FROM workflow_runs; DELETE FROM workflow_sources; DELETE FROM workflow_revisions; DELETE FROM event_subscriptions; DELETE FROM event_deliveries;")?;
-            Ok(())
-        })
-        .unwrap();
     drop(app);
-    canban_storage::migrations::migrate(&dir.path().join("home"), 10).unwrap();
     let mut opened = None;
     for _ in 0..100 {
         match AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")) {
@@ -255,12 +292,33 @@ fn remote_metadata_deduplication_survives_cache_clear_and_has_source_scope() {
 #[test]
 fn conditions_notifications_and_column_views_use_one_canonical_event() {
     let (_dir, app, p, c) = setup();
-    let flow = json!({"id":"conditional","name":"Conditional observer","entries":{"start":"choose"},"steps":{"choose":{"type":"condition","pointer":"/card/title","equals":c.title,"then":"notify","otherwise":"done"},"notify":{"type":"notify","message":"Condition selected","next":"done"},"done":{"type":"complete"}}});
-    app.call(
-        "workflow.publish",
-        json!({"project_id":p.id,"revision":0,"definition":flow}),
-    )
-    .unwrap();
+    let conditional_yaml = format!(
+        r#"schema: 1
+id: conditional
+name: Conditional observer
+on:
+  start:
+    event: manual
+    start_at: choose
+steps:
+  - id: choose
+    uses: condition
+    with:
+      pointer: /card/title
+      equals: {:?}
+      then: notify
+      otherwise: done
+  - id: notify
+    uses: notify
+    with:
+      message: Condition selected
+    next: done
+  - id: done
+    uses: complete
+"#,
+        c.title
+    );
+    upsert_yaml(&app, &p, "conditional.yaml", &conditional_yaml).unwrap();
     let run = app
         .call(
             "workflow.start",
@@ -331,7 +389,7 @@ fn complete_remote_collection_detects_removal_without_persisting_bodies() {
 #[test]
 fn downgrade_cannot_discard_user_workflow_definitions() {
     let (dir, app, p, _) = setup();
-    publish(&app, &p, "retained", "Keep this definition", 0);
+    publish(&app, &p, "retained", "Keep this definition");
     drop(app);
     let home = dir.path().join("home");
     let error = canban_storage::migrations::migrate(&home, 10).unwrap_err();
@@ -355,7 +413,18 @@ fn downgrade_cannot_discard_user_workflow_definitions() {
 #[test]
 fn restoring_a_card_does_not_implicitly_reenter_its_workflow() {
     let (_dir, app, p, c) = setup();
-    app.call("workflow.publish",json!({"project_id":p.id,"revision":0,"definition":{"id":"restore-safe","name":"Restore safe","entries":{"start":"done"},"steps":{"done":{"type":"complete"}}}})).unwrap();
+    let restore_yaml = r#"schema: 1
+id: restore-safe
+name: Restore safe
+on:
+  start:
+    event: manual
+    start_at: done
+steps:
+  - id: done
+    uses: complete
+"#;
+    upsert_yaml(&app, &p, "restore-safe.yaml", restore_yaml).unwrap();
     app.call("subscription.save",json!({"revision":0,"enabled":true,"selector":{"card_id":c.id,"types":["card.column_entered"],"column":"backlog"},"target":{"type":"workflow","workflow_id":"restore-safe","entry":"start"}})).unwrap();
     app.call(
         "card.archive",
@@ -690,31 +759,52 @@ fn closing_a_queued_configuration_agent_cancels_launch_without_creating_a_card()
 #[test]
 fn edited_default_yaml_owns_callback_snapshots_instead_of_historical_stage_fields() {
     let (_dir, app, p, c) = setup();
-    let mut legacy = p.workflow.clone();
-    legacy.stages[2].execute = true;
-    legacy.stages[2].profile = Some("reviewer".into());
-    legacy.stages[2].instruction = "Review".into();
-    legacy.stages[2].require_human_review = true;
-    let mut definition = canban_workflow_engine::source::migrate_legacy_stages(
-        &legacy,
-        format!("delivery:{}", p.id),
+    let review_yaml = format!(
+        r#"schema: 1
+id: delivery:{}
+name: Development
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: agent:review
+    match:
+      column: review
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Develop
+    next: move:develop
+  - id: move:develop
+    uses: card.move
+    with:
+      column: review
+    next: agent:review
+  - id: agent:review
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Review
+    next: __end
+  - id: __end
+    uses: complete
+"#,
+        p.id
     );
-    if let Some(WorkflowStep::Agent { next, .. }) = definition.steps.get_mut("agent:review") {
-        *next = None;
-    }
-    definition.steps.remove("approval:review");
-    let current = app
-        .store
-        .lock()
-        .unwrap()
-        .db()
-        .get::<WorkflowSource>(&format!("{}:development.yaml", p.id))
-        .unwrap();
-    app.call(
-        "workflow.publish",
-        json!({"project_id":p.id,"revision":current.revision,"definition":definition}),
-    )
-    .unwrap();
+    upsert_yaml(&app, &p, "development.yaml", &review_yaml).unwrap();
     app.call(
         "card.move",
         json!({"card_id":c.id,"revision":1,"stage":"review"}),

@@ -81,14 +81,52 @@ try:
     core = call("herdr.status")
     assert core["core"]["id"]
     print(f"HERDR_CONNECTED {core['version']} core={core['core']['id']}", flush=True)
-    local_workflow = call('workflow.template')
-    local_workflow['workspace']['sync_base'] = False  # Fixture repositories have no remote.
-    for stage in local_workflow['stages']:
-        if stage['id'] == 'review':
-            stage['execute'] = True
-            stage['profile'] = 'reviewer'
-            stage['instruction'] = 'Review the changes and report the result.'
-    project = call("project.create", {"workflow":local_workflow,"name": "MVP Acceptance", "directory": str(source)})
+    review_workflow_yaml = """schema: 1
+id: delivery:{id}
+name: Development
+workspace:
+  create_worktree: true
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: agent:review
+    match:
+      column: review
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the card task in the supplied working directory. Explain your changes and validation in your report.
+    next: move:develop
+  - id: move:develop
+    uses: card.move
+    with:
+      column: review
+    next: agent:review
+  - id: agent:review
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Review the changes and report the result.
+    next: __end
+  - id: __end
+    uses: complete
+"""
+    project = call("project.create", {"workflow_yaml": review_workflow_yaml.format(id="mvp"), "name": "MVP Acceptance", "directory": str(source)})
     note = call("note.save", {"project_id": project["id"], "title": "Human Context", "body": "Only modify the disposable acceptance project."})
     card = call("card.create", {"project_id": project["id"], "title": "Verify automatic development and review", "body": "Create the acceptance deliverable and report the result."})
     call("attachment.add", {"card_id": card["id"], "name": "sample.txt", "bytes": list(b"pasted resource")})
@@ -141,7 +179,7 @@ try:
     print("RESTART_OK", flush=True)
     cards = []
     for index in range(3):
-        project = call("project.create", {"workflow":local_workflow,"name": f"Concurrent {index}", "directory": str(base / f"concurrent-{index}")})
+        project = call("project.create", {"workspace":{"sync_base":False},"name": f"Concurrent {index}", "directory": str(base / f"concurrent-{index}")})
         card = call("card.create", {"project_id": project["id"], "title": "Concurrent Agent"})
         cards.append(card["id"])
         call("comment.add", {"card_id": card["id"], "body": "@fixture concurrency-barrier"})

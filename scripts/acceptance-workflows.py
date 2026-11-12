@@ -34,27 +34,77 @@ def wait(predicate,label):
   if predicate(s):return s
   time.sleep(.15)
  raise RuntimeError('Timeout: '+label+'\n'+(base/'server.log').read_text())
-def publish(definition,revision):return call('workflow.publish',{'project_id':project['id'],'revision':revision,'definition':definition})
+def plan_yaml(instruction):
+ return f"""schema: 1
+id: plan-deliver
+name: Plan and deliver
+workspace:
+  create_worktree: false
+  sync_base: false
+on:
+  start:
+    event: manual
+    start_at: plan
+  develop:
+    event: card.column_entered
+    start_at: build
+    match:
+      column: develop
+steps:
+  - id: plan
+    uses: agent
+    with:
+      profile: codex
+      instruction: {instruction}
+    next: approve
+  - id: approve
+    uses: approval
+    with:
+      title: Approve the recorded plan
+    next: move
+    on_changes_requested: plan
+  - id: move
+    uses: card.move
+    with:
+      column: develop
+    next: build
+  - id: build
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the approved plan
+    next: review_move
+  - id: review_move
+    uses: card.move
+    with:
+      column: review
+    next: review
+  - id: review
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Review code and approved plan
+    next: finish
+  - id: finish
+    uses: complete
+"""
+def upsert_yaml(filename,raw,check=False):
+ c=call('workflow.sources',{'project_id':project['id']})
+ sources=[{'filename':f['filename'],'source':f['source']} for f in c['sources'] if f['filename']!=filename]
+ sources.append({'filename':filename,'source':raw})
+ return call('workflow.check' if check else 'workflow.apply',{'project_id':project['id'],'revision':c['revision'],'sources':sources})
 try:
  start()
- flow=call('workflow.template');flow['workspace']={'create_worktree':False,'sync_base':False}
- project=call('project.create',{'name':'Workflow acceptance','directory':str(source),'workflow':flow})
- definition={'id':'plan-deliver','name':'Plan and deliver','workspace':{'create_worktree':False,'sync_base':False},'entries':{'start':'plan','develop':'build'},'steps':{
-  'plan':{'type':'agent','profile':'codex','instruction':'Produce plan FIRST_VERSION','next':'approve'},
-  'approve':{'type':'approval','title':'Approve the recorded plan','next':'move','rework':'plan'},
-  'move':{'type':'move','column':'develop','next':'build'},
-  'build':{'type':'agent','profile':'developer','instruction':'Implement the approved plan','next':'review_move'},
-  'review_move':{'type':'move','column':'review','next':'review'},
-  'review':{'type':'agent','profile':'reviewer','instruction':'Review code and approved plan','next':'finish'},
-  'finish':{'type':'complete'}}}
- assert call('workflow.validate',{'project_id':project['id'],'definition':definition})['valid']
- publish(definition,0)
+ project=call('project.create',{'name':'Workflow acceptance','directory':str(source),'workspace':{'create_worktree':False,'sync_base':False}})
+ first_yaml=plan_yaml('Produce plan FIRST_VERSION')
+ assert upsert_yaml('plan-deliver.yaml',first_yaml,check=True)['valid']
+ upsert_yaml('plan-deliver.yaml',first_yaml)
  subscriber=call('subscription.save',{'revision':0,'enabled':True,'selector':{'project_id':project['id'],'types':['card.created']},'target':{'type':'workflow','workflow_id':'plan-deliver','entry':'start'}})
  observer=call('subscription.save',{'revision':0,'enabled':True,'selector':{'project_id':project['id'],'types':['*']},'target':{'type':'consumer'}})
  card=call('card.create',{'project_id':project['id'],'title':'Plan in Backlog','body':'Preserve three columns and exact plan approval.'})
  s=wait(lambda s:any(r['state']=='waiting_approval' for r in s['workflow_runs']),'planning completes')
  run=s['workflow_runs'][0];assert s['cards'][0]['stage']=='backlog';assert len(s['requests'])==1
- definition['steps']['plan']['instruction']='Produce plan SECOND_VERSION';publish(definition,1)
+ upsert_yaml('plan-deliver.yaml',plan_yaml('Produce plan SECOND_VERSION'))
  assert call('workflow.run',{'run_id':run['id']})['definition_revision']==1
  before=len(s['requests']);server.terminate();server.wait(timeout=10);start()
  s=call('app.snapshot');assert len(s['requests'])==before and s['workflow_runs'][0]['state']=='waiting_approval'

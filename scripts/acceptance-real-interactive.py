@@ -36,9 +36,52 @@ try:
  (source/'test_greeting.py').write_text('import unittest\nfrom greeting import greet\nclass Tests(unittest.TestCase):\n    def test_ascii(self):self.assertEqual(greet("Ada"),"Hello, Ada!")\n    def test_unicode(self):self.assertEqual(greet("世界"),"Hello, 世界!")\n')
  (source/'.gitignore').write_text('__pycache__/\n')
  for args in [['init'],['add','.'],['-c','user.name=Acceptance','-c','user.email=acceptance@example.invalid','-c','core.hooksPath=/dev/null','commit','-m','Seed']]:subprocess.run(['git','-C',str(source),*args],check=True,capture_output=True)
- local_workflow = call('workflow.template')
- local_workflow['workspace']['sync_base'] = False  # Fixture repositories have no remote.
- project=call('project.create',{'workflow':local_workflow,'name':'Real interactive','directory':str(source)})
+ real_interactive_yaml="""schema: 1
+id: delivery:real-interactive
+name: Development
+workspace:
+  create_worktree: true
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: agent:review
+    match:
+      column: review
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the card task in the supplied working directory. Explain your changes and validation in your report.
+    next: move:develop
+  - id: move:develop
+    uses: card.move
+    with:
+      column: review
+    next: agent:review
+  - id: agent:review
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Review the work for this card. Inspect the code and earlier results, then write an ordinary Markdown review report.
+    next: __end
+  - id: __end
+    uses: complete
+"""
+ project=call('project.create',{'workflow_yaml':real_interactive_yaml,'name':'Real interactive','directory':str(source)})
  marker='MARKER_'+base.name.replace('-','_')
  card=call('card.create',{'project_id':project['id'],'title':'Implement Unicode greeting','body':'Isolation marker: '+marker+'. Implement greet(name) to return exactly "Hello, {name}!" including Unicode. Keep tests unchanged; run /usr/bin/python3 -m unittest -v. For the Develop stage ONLY: bind your session first and report working; read the context, then wait for a Canban question before implementing/reporting completed. Do not use a blocking shell wait; the UI will deliver a follow-up shortly. In Review, inspect changes/tests and report immediately. Use current reporting instructions and do not commit.'})
  print('REAL_INTERACTIVE_HOME='+str(home),flush=True)

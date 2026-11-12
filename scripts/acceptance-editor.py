@@ -38,11 +38,9 @@ try:
     config.update(hc_env=core_env,hc_session=core_env['HC_SESSION'])
     (home / 'config/agents.json').write_text(json.dumps(config))
     call('config.reload')
-    workflow = call('workflow.template')
-    workflow['workspace'].update(create_worktree=False, sync_base=False)
     source = base / 'source'
     source.mkdir()
-    project = call('project.create', {'name':'Editor acceptance','directory':str(source),'workflow':workflow})
+    project = call('project.create', {'name':'Editor acceptance','directory':str(source),'workspace':{'create_worktree':False,'sync_base':False}})
     cards = [call('card.create', {'project_id':project['id'],'title':title,'body':'## Task context\n\n- [ ] Verify native Markdown editing\n\n```rust\nlet value = 42;\n```'}) for title in ['Editor baseline', 'Related task', 'Background refresh task']]
     call('utilities.configure', {'last_project':project['id']})
     metadata = dict(base=str(base), home=str(home), bundle=str(bundle), app_id=app_id, project_id=project['id'], card_ids=[c['id'] for c in cards], server_pid=server.pid)

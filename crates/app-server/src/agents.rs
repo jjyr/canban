@@ -166,7 +166,7 @@ impl AppServer {
     fn save_raw_config(&self, mut raw: Config) -> Result<Config> {
         let resolved = canban_profiles::resolve(raw.clone(), &self.home)?;
         Self::validate_config(&resolved)?;
-        self.validate_active_workflow_references(&resolved)?;
+        self.validate_references(&resolved)?;
         // Persist concise `raw` JSON while publishing resolved in-memory `Config`.
         for prof in &mut raw.profiles {
             if prof.preset.is_some()
@@ -183,41 +183,6 @@ impl AppServer {
         *self.config.write().unwrap() = resolved.clone();
         self.emit("configuration", None);
         Ok(resolved)
-    }
-
-    fn validate_active_workflow_references(&self, config: &Config) -> Result<()> {
-        let workflow = self.default_workflow()?;
-        Self::validate_workflow(config, &workflow)?;
-        let snapshot = self.snapshot()?;
-        for project in &snapshot.projects {
-            Self::validate_workflow(config, &project.workflow)
-                .with_context(|| format!("Project {} workflow", project.name))?;
-        }
-        let valid_ids: Vec<String> = config.profiles.iter().map(|p| p.id.clone()).collect();
-        for source in &snapshot.workflow_sources {
-            let project = snapshot
-                .projects
-                .iter()
-                .find(|p| p.id == source.project_id)
-                .context("Workflow Project missing")?;
-            let rev = snapshot
-                .workflow_revisions
-                .iter()
-                .find(|r| r.id == source.revision_id)
-                .context("Active Workflow revision missing")?;
-            canban_workflow_engine::validate_definition(
-                &rev.definition,
-                &project
-                    .workflow
-                    .stages
-                    .iter()
-                    .map(|s| s.id.clone())
-                    .collect::<Vec<_>>(),
-                &valid_ids,
-            )
-            .with_context(|| format!("Project '{}' ({})", project.name, source.filename))?;
-        }
-        Ok(())
     }
 
     fn load_unmigrated_config(&self) -> Result<Config> {

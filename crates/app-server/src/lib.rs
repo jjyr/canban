@@ -314,30 +314,27 @@ impl AppServer {
             canban_context::atomic(&path, &serde_json::to_vec_pretty(&Config::default())?)?;
         }
         let (config, migration) = Self::read_config(&home)?;
-        let template = if let Ok(saved) = store.db().get::<WorkflowTemplate>("default") {
-            saved.workflow
-        } else {
-            let mut initial = Workflow::default();
-            for stage in &mut initial.stages {
-                if stage
-                    .profile
-                    .as_ref()
-                    .is_some_and(|id| !config.profiles.iter().any(|p| &p.id == id))
+        for mut project in store.db().list::<Project>()? {
+            let mut cleared = false;
+            for stage in &mut project.workflow.stages {
+                if stage.execute
+                    || stage.profile.is_some()
+                    || !stage.instruction.is_empty()
+                    || stage.on_completed.is_some()
+                    || stage.require_human_review
                 {
+                    stage.execute = false;
                     stage.profile = None;
+                    stage.instruction.clear();
+                    stage.on_completed = None;
+                    stage.require_human_review = false;
+                    cleared = true;
                 }
             }
-            store.write(|db| {
-                db.save(&WorkflowTemplate {
-                    id: "default".into(),
-                    workflow: initial.clone(),
-                })
-            })?;
-            initial
-        };
-        Self::validate_workflow(&config, &template)?;
-        for project in store.db().list::<Project>()? {
-            Self::validate_workflow(&config, &project.workflow)?;
+            if cleared {
+                store.write(|db| db.save(&project))?;
+            }
+            canban_workflow_engine::validate(&project.workflow)?;
         }
         Self::publish_migration(&home, migration)?;
         store.write(|db| {
@@ -442,56 +439,35 @@ impl AppServer {
         );
         Ok(())
     }
-    fn validate_workflow(config: &Config, workflow: &Workflow) -> Result<()> {
-        canban_workflow_engine::validate(workflow)?;
-        for stage in &workflow.stages {
-            if let Some(profile) = &stage.profile {
-                ensure!(
-                    config.profiles.iter().any(|p| &p.id == profile),
-                    "Stage {} references unknown Agent profile @{profile}",
-                    stage.id
-                );
-            }
-        }
-        Ok(())
-    }
-    fn default_workflow(&self) -> Result<Workflow> {
-        Ok(self
-            .store
-            .lock()
-            .unwrap()
-            .db()
-            .get::<WorkflowTemplate>("default")?
-            .workflow)
-    }
-    fn validate_references(&self, config: &Config) -> Result<()> {
-        let workflow = self.default_workflow()?;
-        Self::validate_workflow(config, &workflow)?;
-        for project in &self.snapshot()?.projects {
-            Self::validate_workflow(config, &project.workflow)
+    pub(crate) fn validate_references(&self, config: &Config) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        for project in &snapshot.projects {
+            canban_workflow_engine::validate(&project.workflow)
                 .with_context(|| format!("Project {} workflow", project.name))?;
         }
-        let snapshot = self.snapshot()?;
-        for w in snapshot.workflow_revisions {
+        let valid_ids: Vec<String> = config.profiles.iter().map(|p| p.id.clone()).collect();
+        for source in &snapshot.workflow_sources {
             let project = snapshot
                 .projects
                 .iter()
-                .find(|p| p.id == w.project_id)
+                .find(|p| p.id == source.project_id)
                 .context("Workflow Project missing")?;
+            let rev = snapshot
+                .workflow_revisions
+                .iter()
+                .find(|r| r.id == source.revision_id)
+                .context("Active Workflow revision missing")?;
             canban_workflow_engine::validate_definition(
-                &w.definition,
+                &rev.definition,
                 &project
                     .workflow
                     .stages
                     .iter()
                     .map(|s| s.id.clone())
                     .collect::<Vec<_>>(),
-                &config
-                    .profiles
-                    .iter()
-                    .map(|p| p.id.clone())
-                    .collect::<Vec<_>>(),
-            )?;
+                &valid_ids,
+            )
+            .with_context(|| format!("Project '{}' ({})", project.name, source.filename))?;
         }
         Ok(())
     }

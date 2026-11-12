@@ -83,9 +83,8 @@ pub(super) fn reconcile(db: Db<'_>) -> Result<()> {
 impl AppServer {
     pub(super) fn workflow_call(&self, method: &str, p: Value) -> Result<Value> {
         match method {
-            "workflow.template" => Ok(json!(self.default_workflow()?)),
             "workflow.schema" => Ok(
-                json!({"schema_version":1,"authoring_format":"YAML 1.2","yaml":{"schema":1,"id":"Workflow ID","name":"Display name","enabled":"optional boolean, default true","columns":[{"id":"column ID (e.g. backlog, design, develop, qa, review)","name":"Column display name"}],"on":{"rule_id":{"event":"manual | card.created | card.column_entered | card.column_left | ...","match":"EventSelector without types; Project scope implicit","start_at":"step ID","enabled":"optional boolean"}},"steps":[{"id":"stable step ID","name":"optional display name","uses":"agent | card.move | approval | deliver | condition | notify | complete","with":"arguments as described in step_types below","next":"optional explicit successor; defaults to next item","on_changes_requested":"optional approval/deliver rework target"}]},"source_operations":{"workflow.sources":{"project_id":"Project ID"},"workflow.check / workflow.apply":{"project_id":"Project ID","revision":"collection revision from workflow.sources","sources":[{"filename":"name.yaml","source":"original YAML"}]},"workflow.prompt":{"project_id":"Project ID"},"configuration.open":{"project_id":"Project ID","profile_id":"Profile ID","prompt":"reviewed Prompt","fresh":"explicit new conversation"}},"definition":{"id":"string","name":"string","columns":[{"id":"string","name":"string"}],"entries":{"entry":"step_id"},"steps":{"step_id":{"type":"agent|move|approval|deliver|condition|notify|complete"}},"max_steps":"1..1000"},"step_types":{"agent":{"profile":"optional Profile ID","instruction":"string","next":"optional step ID"},"move":{"column":"column ID","next":"optional step ID"},"approval":{"title":"string","next":"optional step ID","rework":"optional step ID"},"deliver":{"target_branch":"optional target branch","sync_upstream":"optional boolean, default true (false merges locally without pushing upstream)","next":"optional step ID","rework":"optional step ID"},"condition":{"pointer":"JSON pointer into inputs/outputs/card (e.g. /card/source_trust)","equals":"JSON value (e.g. external_pr | collaborator | local)","then":"step ID","otherwise":"step ID"},"notify":{"message":"string","next":"optional step ID"},"complete":{}},"operations":["workflow.list","workflow.get","workflow.validate","workflow.publish","workflow.bind","workflow.start","workflow.runs","workflow.run","workflow.decide","workflow.stop","card.hold_auto_merge","event.list","subscription.save","subscription.list","subscription.deliveries","subscription.ack"],"parameters":{"workflow.validate":{"project_id":"Project ID","definition":"WorkflowDefinition"},"workflow.publish":{"project_id":"Project ID","definition":"WorkflowDefinition","revision":"current definition revision; 0 creates","request_key":"optional idempotency key"},"workflow.bind":{"project_id":"Project ID","workflow_id":"published ID","revision":"current binding revision; 0 creates"},"workflow.start":{"card_id":"Card ID","workflow_id":"published ID","entry":"entry name","request_key":"optional idempotency key"},"workflow.get":{"workflow_id":"published ID","revision":"optional historical revision"},"workflow.run":{"run_id":"WorkflowRun ID"},"workflow.runs":{"card_id":"optional Card ID"},"workflow.decide":{"run_id":"WorkflowRun ID","visit":"current run.visit","revision":"current Card.revision","decision":"approve | rework","feedback":"optional rework instructions","request_key":"optional idempotency key"},"workflow.stop":{"run_id":"WorkflowRun ID"},"card.hold_auto_merge":{"card_id":"Card ID","revision":"current Card.revision","hold":"optional boolean; toggles when omitted"},"subscription.save":{"subscription_id":"omit for creation","revision":"current revision; 0 creates","enabled":"boolean; default false","selector":"EventSelector","target":"SubscriptionTarget"},"subscription.deliveries":{"subscription_id":"optional subscription ID"},"subscription.ack":{"delivery_id":"consumer receipt ID"},"subscription.retry":{"delivery_id":"failed receipt ID"},"event.list":{"after":"journal offset; default 0","limit":"1..500","selector":"optional EventSelector"}},"selector_fields":["project_id","card_id","repository","subject","types","column","changed_fields","actor","origin","source_kind","reason","reply_to","include_related","include_initial"],"subscription_targets":[{"type":"consumer"},{"type":"workflow","workflow_id":"published ID","entry":"entry name","card_id":"optional fixed Card ID"}],"workspace":{"create_worktree":"boolean","sync_base":"boolean","base_branch":"optional branch","remote":"remote name"},"activation":"YAML apply atomically publishes sources, optional Board columns, and named triggers. Future receipts/runs use the new revision. Existing runs and captured receipts retain theirs; independent subscriptions and manual starts remain explicit."}),
+                json!({"schema_version":1,"authoring_format":"YAML 1.2","yaml":{"schema":1,"id":"Workflow ID","name":"Display name","enabled":"optional boolean, default true","columns":[{"id":"column ID (e.g. backlog, design, develop, qa, review)","name":"Column display name"}],"on":{"rule_id":{"event":"manual | card.created | card.column_entered | card.column_left | ...","match":"EventSelector without types; Project scope implicit","start_at":"step ID","enabled":"optional boolean"}},"steps":[{"id":"stable step ID","name":"optional display name","uses":"agent | card.move | approval | deliver | condition | notify | complete","with":"arguments as described in step_types below","next":"optional explicit successor; defaults to next item","on_changes_requested":"optional approval/deliver rework target"}]},"source_operations":{"workflow.sources":{"project_id":"Project ID"},"workflow.check / workflow.apply":{"project_id":"Project ID","revision":"collection revision from workflow.sources","sources":[{"filename":"name.yaml","source":"original YAML"}]},"workflow.prompt":{"project_id":"Project ID"},"configuration.open":{"project_id":"Project ID","profile_id":"Profile ID","prompt":"reviewed Prompt","fresh":"explicit new conversation"}},"step_types":{"agent":{"profile":"optional Profile ID","instruction":"string","next":"optional step ID"},"card.move":{"column":"column ID","next":"optional step ID"},"approval":{"title":"string","next":"optional step ID","rework":"optional step ID"},"deliver":{"target_branch":"optional target branch","sync_upstream":"optional boolean, default true (false merges locally without pushing upstream)","next":"optional step ID","rework":"optional step ID"},"condition":{"pointer":"JSON pointer into inputs/outputs/card (e.g. /card/source_trust)","equals":"JSON value (e.g. external_pr | collaborator | local)","then":"step ID","otherwise":"step ID"},"notify":{"message":"string","next":"optional step ID"},"complete":{}},"operations":["workflow.sources","workflow.check","workflow.apply","workflow.prompt","workflow.list","workflow.get","workflow.start","workflow.runs","workflow.run","workflow.decide","workflow.stop","card.hold_auto_merge","event.list","subscription.save","subscription.list","subscription.deliveries","subscription.ack"],"parameters":{"workflow.sources":{"project_id":"Project ID"},"workflow.check":{"project_id":"Project ID","revision":"collection revision from workflow.sources","sources":[{"filename":"name.yaml","source":"original YAML"}]},"workflow.apply":{"project_id":"Project ID","revision":"collection revision from workflow.sources","sources":[{"filename":"name.yaml","source":"original YAML"}],"request_key":"optional idempotency key"},"workflow.start":{"card_id":"Card ID","workflow_id":"published ID","entry":"entry name","request_key":"optional idempotency key"},"workflow.get":{"workflow_id":"published ID","revision":"optional historical revision"},"workflow.run":{"run_id":"WorkflowRun ID"},"workflow.runs":{"card_id":"optional Card ID"},"workflow.decide":{"run_id":"WorkflowRun ID","visit":"current run.visit","revision":"current Card.revision","decision":"approve | rework","feedback":"optional rework instructions","request_key":"optional idempotency key"},"workflow.stop":{"run_id":"WorkflowRun ID"},"card.hold_auto_merge":{"card_id":"Card ID","revision":"current Card.revision","hold":"optional boolean; toggles when omitted"},"subscription.save":{"subscription_id":"omit for creation","revision":"current revision; 0 creates","enabled":"boolean; default false","selector":"EventSelector","target":"SubscriptionTarget"},"subscription.deliveries":{"subscription_id":"optional subscription ID"},"subscription.ack":{"delivery_id":"consumer receipt ID"},"subscription.retry":{"delivery_id":"failed receipt ID"},"event.list":{"after":"journal offset; default 0","limit":"1..500","selector":"optional EventSelector"}},"selector_fields":["project_id","card_id","repository","subject","types","column","changed_fields","actor","origin","source_kind","reason","reply_to","include_related","include_initial"],"subscription_targets":[{"type":"consumer"},{"type":"workflow","workflow_id":"published ID","entry":"entry name","card_id":"optional fixed Card ID"}],"workspace":{"create_worktree":"boolean","sync_base":"boolean","base_branch":"optional branch","remote":"remote name"},"activation":"YAML apply atomically publishes sources, optional Board columns, and named triggers. Future receipts/runs use the new revision. Existing runs and captured receipts retain theirs; independent subscriptions and manual starts remain explicit."}),
             ),
             "workflow.list" => Ok(json!(
                 self.store
@@ -130,79 +129,6 @@ impl AppServer {
                     .db()
                     .get::<WorkflowRun>(strp(&p, "run_id")?)?
             )),
-            "workflow.validate" | "workflow.publish" => {
-                let flow: WorkflowDefinition = serde_json::from_value(p["definition"].clone())?;
-                let project: Project = self
-                    .store
-                    .lock()
-                    .unwrap()
-                    .db()
-                    .get(strp(&p, "project_id")?)?;
-                canban_workflow_engine::validate_definition(
-                    &flow,
-                    &project
-                        .workflow
-                        .stages
-                        .iter()
-                        .map(|s| s.id.clone())
-                        .collect::<Vec<_>>(),
-                    &self
-                        .config()
-                        .profiles
-                        .iter()
-                        .map(|a| a.id.clone())
-                        .collect::<Vec<_>>(),
-                )?;
-                if method == "workflow.validate" {
-                    return Ok(json!({"valid":true}));
-                }
-                self.mutate(method, &p, |db| {
-                    let old = latest(db, &flow.id).ok();
-                    ensure!(
-                        old.as_ref().is_none_or(|w| w.project_id == project.id),
-                        "Workflow belongs to another Project"
-                    );
-                    let revision = old.as_ref().map_or(0, |w| w.revision);
-                    ensure!(
-                        p["revision"].as_u64() == Some(revision),
-                        "revision_conflict: supply current workflow revision (0 for creation)"
-                    );
-                    let w = super::authoring::import(
-                        &self.home,
-                        db,
-                        &self.config(),
-                        &project,
-                        &flow,
-                        revision,
-                    )?;
-                    Ok(json!(w))
-                })
-            }
-            "workflow.bind" => self.mutate(method, &p, |db| {
-                let project: Project = db.get(strp(&p, "project_id")?)?;
-                let flow = latest(db, strp(&p, "workflow_id")?)?;
-                ensure!(flow.project_id == project.id, "Wrong Project");
-                let old = db.get::<WorkflowBinding>(&project.id).ok();
-                ensure!(
-                    p["revision"].as_u64() == Some(old.as_ref().map_or(0, |v| v.revision)),
-                    "revision_conflict"
-                );
-                super::authoring::bind(
-                    &self.home,
-                    db,
-                    &self.config(),
-                    &project,
-                    &flow.workflow_id,
-                )?;
-                let b = WorkflowBinding {
-                    id: project.id.clone(),
-                    project_id: project.id,
-                    workflow_id: flow.workflow_id,
-                    revision: old.map_or(1, |b| b.revision + 1),
-                };
-                db.save(&b)?;
-                Ok(json!(b))
-            }),
             "workflow.start" => self.mutate(method, &p, |db| {
                 let mut card: Card = db.get(strp(&p, "card_id")?)?;
                 let w = latest(db, strp(&p, "workflow_id")?)?;

@@ -102,9 +102,52 @@ try:
         git(source, "init")
         git(source, "add", ".")
         git(source, "-c", "user.name=Canban Acceptance", "-c", "user.email=acceptance@example.invalid", "-c", "core.hooksPath=/dev/null", "commit", "-m", "Seed real Agent acceptance task")
-        local_workflow = call('workflow.template')
-        local_workflow['workspace']['sync_base'] = False  # Fixture repositories have no remote.
-        project = call("project.create", {"workflow":local_workflow,"name": "Real Board " + fixture["name"], "directory": str(source)})
+        real_yaml = f"""schema: 1
+id: delivery:{fixture["name"]}
+name: Development
+workspace:
+  create_worktree: true
+  sync_base: false
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: agent:review
+    match:
+      column: review
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the card task in the supplied working directory. Explain your changes and validation in your report.
+    next: move:develop
+  - id: move:develop
+    uses: card.move
+    with:
+      column: review
+    next: agent:review
+  - id: agent:review
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Review the work for this card. Inspect the code and earlier results, then write an ordinary Markdown review report.
+    next: __end
+  - id: __end
+    uses: complete
+"""
+        project = call("project.create", {"workflow_yaml": real_yaml, "name": "Real Board " + fixture["name"], "directory": str(source)})
         marker = "CANBAN_" + fixture["name"].upper() + "_" + base.name
         body = fixture["task"] + "\nRun /usr/bin/python3 -m unittest -v. Keep test_task.py unchanged. Do not modify any other Project or the source repository. No need to commit. Write a meaningful Markdown report inside the Canban run directory, including the Board isolation marker, task result and validation, then explicitly call the supplied CLI to report your outcome."
         body += f"\nBoard isolation marker: {marker}. Include this exact marker in every report."
