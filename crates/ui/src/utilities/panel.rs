@@ -128,19 +128,22 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                     .collect()
                             });
                         }
-                        crate::commands::CATALOG
-                            .iter()
-                            .filter(|c| {
-                                format!("{} {} {}", c.title, c.context, c.display)
-                                    .to_lowercase()
-                                    .contains(&query)
-                            })
+                        crate::quick_open::matching_commands(&query)
+                            .into_iter()
                             .map(|c| SearchChoice {
                                 attention: 0,
                                 id: c.id.into(),
                                 title: c.title.into(),
-                                detail: format!("{} · {}", c.display, c.context),
-                                icon: Icon::Keyboard,
+                                detail: if c.display.is_empty() {
+                                    c.context.into()
+                                } else {
+                                    format!("{} · {}", c.display, c.context)
+                                },
+                                icon: if c.id.contains("agent") {
+                                    Icon::Agent
+                                } else {
+                                    Icon::Keyboard
+                                },
                                 selected: false,
                             })
                             .collect()

@@ -49,7 +49,7 @@ pub const CATALOG: &[Command] = &[
         key: "mod+/",
         display: "⌘/",
         context: "Global",
-        keywords: "commands palette /",
+        keywords: "commands palette >",
     },
     Command {
         id: "new-terminal",
@@ -158,20 +158,20 @@ pub const CATALOG: &[Command] = &[
         keywords: "studio stages yaml",
     },
     Command {
-        id: "go-project-agents",
-        title: "Configure Project Agents",
-        key: "",
-        display: "Project",
-        context: "Preferences",
-        keywords: "project-agents setup agent identity override roles",
-    },
-    Command {
         id: "go-agent-setup",
-        title: "Set up Agents",
+        title: "Agents · Setup & Enabled Providers",
         key: "",
         display: "Agents",
         context: "Preferences",
         keywords: "agent-setup setup agent onboard enable disable herdr identities default",
+    },
+    Command {
+        id: "go-project-agents",
+        title: "Agents · Project Identities & Overrides",
+        key: "",
+        display: "Project",
+        context: "Preferences",
+        keywords: "project-agents setup agent identity override roles",
     },
     Command {
         id: "go-drafts",
@@ -230,7 +230,7 @@ pub fn execute(ui: Ui, id: &str) {
         "shortcuts" => {
             ui.utility_popup.set(String::new());
             ui.project_picker.set(false);
-            ui.search_query.set("/".into());
+            ui.search_query.set(">".into());
             ui.quick_open.set(true);
         }
         "go-board" => ui.navigate("board"),
@@ -295,7 +295,7 @@ pub fn bindings(ui: Ui) {
             move |_| execute(ui, command.id),
         );
     }
-    // Plain `/` opens the command palette whenever focus is not in a text input or hosted terminal.
+    // Plain `/` opens the command palette (`>` prefix) whenever focus is not in a text input or hosted terminal.
     on_key_with(
         "/",
         KeyOptions {
@@ -308,7 +308,7 @@ pub fn bindings(ui: Ui) {
                 && !ui.native_modal.get_untracked()
             {
                 ui.project_picker.set(false);
-                ui.search_query.set("/".into());
+                ui.search_query.set(">".into());
                 ui.quick_open.set(true);
             }
         },

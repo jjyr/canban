@@ -5,16 +5,15 @@ use canban_ui_kit::*;
 pub use model::{Candidate, Target, candidates, ranked};
 use nsh_core::{keymap::When, prelude::*};
 
-pub fn matching_commands(raw_query: &str) -> Vec<&'static crate::commands::Command> {
+pub fn matching_commands_with_scores(
+    raw_query: &str,
+) -> Vec<(usize, &'static crate::commands::Command)> {
     let trimmed = raw_query.trim_start();
-    let cmd_query = trimmed
-        .strip_prefix('>')
-        .or_else(|| trimmed.strip_prefix('/'))
-        .unwrap_or(trimmed)
-        .trim();
+    let cmd_query = trimmed.strip_prefix('>').unwrap_or(trimmed).trim();
     let mut scored = crate::commands::CATALOG
         .iter()
-        .filter_map(|c| {
+        .enumerate()
+        .filter_map(|(idx, c)| {
             let fields = vec![
                 c.title.to_owned(),
                 c.context.to_owned(),
@@ -22,16 +21,22 @@ pub fn matching_commands(raw_query: &str) -> Vec<&'static crate::commands::Comma
                 c.keywords.to_owned(),
             ];
             let score = canban_ui_kit::search::score(&fields, cmd_query)?;
-            Some((score, c))
+            Some((score, idx, c))
         })
         .collect::<Vec<_>>();
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.title.cmp(b.1.title)));
-    scored.into_iter().map(|(_, c)| c).collect()
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    scored.into_iter().map(|(score, _, c)| (score, c)).collect()
+}
+
+pub fn matching_commands(raw_query: &str) -> Vec<&'static crate::commands::Command> {
+    matching_commands_with_scores(raw_query)
+        .into_iter()
+        .map(|(_, c)| c)
+        .collect()
 }
 
 pub fn is_command_query(raw_query: &str) -> bool {
-    let trimmed = raw_query.trim_start();
-    trimmed.starts_with('>') || trimmed.starts_with('/')
+    raw_query.trim_start().starts_with('>')
 }
 
 pub fn bindings(ui: Ui) {
@@ -105,10 +110,9 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
             });
             let choices = computed(move || {
                 let raw_query = ui.search_query.get();
-                let trimmed = raw_query.trim_start();
                 let command_mode = !ui.project_picker.get() && is_command_query(&raw_query);
-                let command_choices = || {
-                    matching_commands(&raw_query)
+                if command_mode {
+                    return matching_commands(&raw_query)
                         .into_iter()
                         .map(|c| SearchChoice {
                             attention: 0,
@@ -126,13 +130,9 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                 Icon::Keyboard
                             },
                         })
-                        .collect::<Vec<_>>()
-                };
-                if command_mode {
-                    return command_choices();
+                        .collect();
                 }
-                let mut list: Vec<SearchChoice> = rows
-                    .get()
+                rows.get()
                     .into_iter()
                     .map(|r| SearchChoice {
                         attention: if ui.project_picker.get() {
@@ -161,15 +161,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                             _ => Icon::Agent,
                         },
                     })
-                    .collect();
-                if !ui.project_picker.get() && !trimmed.is_empty() {
-                    for cmd in command_choices() {
-                        if !list.iter().any(|existing| existing.id == cmd.id) {
-                            list.push(cmd);
-                        }
-                    }
-                }
-                list
+                    .collect()
             });
             search_dialog(
                 move || {
@@ -204,14 +196,14 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                     if ui.project_picker.get() {
                         "Search projects…".into()
                     } else {
-                        "Search projects, cards, agents… or type / for commands".into()
+                        "Search projects, cards, agents… or type > for commands".into()
                     }
                 },
                 view()
                     .gap_2()
                     .child(muted(move || {
                         format!(
-                            "{} results · ↑ ↓ choose · Enter run · / commands · Esc close",
+                            "{} results · ↑ ↓ choose · Enter run · > commands · Esc close",
                             choices.get().len()
                         )
                     }))

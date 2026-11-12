@@ -171,17 +171,19 @@ fn card_numbers_use_numeric_order_and_unarchived_before_archived() {
 }
 
 #[test]
-fn slash_and_plain_queries_match_agent_setup_commands() {
-    assert!(crate::quick_open::is_command_query("/"));
-    assert!(crate::quick_open::is_command_query("/agent"));
-    assert!(crate::quick_open::is_command_query(">agent"));
+fn command_queries_require_gt_prefix_and_match_agent_setup_commands() {
+    assert!(crate::quick_open::is_command_query(">"));
+    assert!(crate::quick_open::is_command_query(" >agent"));
+    assert!(!crate::quick_open::is_command_query("/"));
+    assert!(!crate::quick_open::is_command_query("/agent"));
     assert!(!crate::quick_open::is_command_query("agent"));
 
-    let slash_setup = crate::quick_open::matching_commands("/setup agent");
-    assert!(!slash_setup.is_empty());
-    assert_eq!(slash_setup[0].id, "go-agent-setup");
+    let gt_agent = crate::quick_open::matching_commands(">agent");
+    assert!(gt_agent.len() >= 2);
+    assert_eq!(gt_agent[0].id, "go-agent-setup");
+    assert_eq!(gt_agent[1].id, "go-project-agents");
 
-    let plain_setup = crate::quick_open::matching_commands("agent setup");
-    assert!(plain_setup.iter().any(|c| c.id == "go-agent-setup"));
-    assert!(plain_setup.iter().any(|c| c.id == "go-project-agents"));
+    let gt_setup = crate::quick_open::matching_commands(">setup agent");
+    assert!(!gt_setup.is_empty());
+    assert_eq!(gt_setup[0].id, "go-agent-setup");
 }

@@ -394,11 +394,8 @@ pub fn bar(ui: Ui) -> impl IntoElement {
                     Icon::Keyboard,
                     "Commands & Shortcuts · / or ⌘/",
                     move || {
-                        ui.quick_open.get() && {
-                            let q = ui.search_query.get();
-                            let t = q.trim_start();
-                            t.starts_with('>') || t.starts_with('/')
-                        }
+                        ui.quick_open.get()
+                            && crate::quick_open::is_command_query(&ui.search_query.get())
                     },
                     || false,
                     move |_| crate::commands::execute(ui, "shortcuts"),
