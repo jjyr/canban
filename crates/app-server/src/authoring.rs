@@ -56,10 +56,13 @@ fn validate(
         ensure!(names.insert(name), "Duplicate filename {name}");
         let raw = strp(input, "source")?;
         let doc = source::parse(raw).with_context(|| name.to_owned())?;
+        let canonical = canban_workflow_engine::migrations::upgrade_yaml(raw)
+            .with_context(|| name.to_owned())?
+            .unwrap_or_else(|| raw.to_owned());
         if !doc.columns.is_empty() && (declared_columns.is_none() || name == "development.yaml") {
             declared_columns = Some(doc.columns.clone());
         }
-        parsed_docs.push((name.to_owned(), raw.to_owned(), doc));
+        parsed_docs.push((name.to_owned(), canonical, doc));
     }
     let effective_columns: Vec<String> = declared_columns
         .as_ref()
@@ -72,21 +75,7 @@ fn validate(
                 .map(|s| s.id.clone())
                 .collect()
         });
-    if let Some(cols) = &declared_columns {
-        let col_ids: BTreeSet<_> = cols.iter().map(|c| c.id.as_str()).collect();
-        for card in db.list::<Card>()? {
-            if card.project_id == project.id
-                && card.active()
-                && !col_ids.contains(card.stage.as_str())
-            {
-                bail!(
-                    "Column '{}' still has active Cards (e.g. #{}); move or archive them before removing the column",
-                    card.stage,
-                    card.number
-                );
-            }
-        }
-    }
+    // Removed columns are allowed: their active Cards return to the first column on publish.
     let mut out = Vec::new();
     for (name, raw, doc) in parsed_docs {
         let parsed = (|| -> Result<_> {
@@ -165,6 +154,28 @@ fn publish(
         db.save(&sub)?;
     }
     for (name, raw, doc, definition) in compiled {
+        // Runs currently at a step deleted from the source finish it, then stop.
+        let existing_ids: BTreeSet<&str> = doc.steps.iter().map(|s| s.id.as_str()).collect();
+        for mut run in db.list::<WorkflowRun>()?.into_iter().filter(|r| {
+            r.active()
+                && r.workflow_id == definition.id
+                && r.step.as_deref().is_some_and(|s| !existing_ids.contains(s))
+                && r.inputs["stop_after_step"].is_null()
+        }) {
+            run.inputs["stop_after_step"] = json!(run.step);
+            run.updated_at = now();
+            db.save(&run)?;
+            let card: Card = db.get(&run.card_id)?;
+            log(
+                db,
+                &card,
+                "workflow.stop_scheduled",
+                "system",
+                "Current step was removed; the run stops after it finishes",
+                run.request_id.clone(),
+                json!({"workflow_run_id":run.id,"step":run.step}),
+            )?;
+        }
         let hash = canban_context::digest(raw.as_bytes());
         let existing = old
             .iter()
@@ -297,6 +308,28 @@ fn publish(
         if changed {
             db.save(&updated)?;
         }
+        // Cards in removed columns return to the first column.
+        if let Some(first) = primary.columns.first() {
+            let ids: BTreeSet<_> = primary.columns.iter().map(|c| c.id.as_str()).collect();
+            for mut card in db.list::<Card>()?.into_iter().filter(|c| {
+                c.project_id == project.id && c.active() && !ids.contains(c.stage.as_str())
+            }) {
+                let from = std::mem::replace(&mut card.stage, first.id.clone());
+                card.board_order = None;
+                canban_kanban::order::place(db, &mut card, None)?;
+                card.revision += 1;
+                db.save(&card)?;
+                log(
+                    db,
+                    &card,
+                    "card.stage_changed",
+                    "system",
+                    &format!("{from} → {} (column removed)", card.stage),
+                    None,
+                    json!({"from":from,"to":card.stage,"reason":"column_removed"}),
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -338,21 +371,39 @@ pub(super) fn initialize_new(
     )
 }
 
-/// Ensure every Project has an initialized SQL YAML workflow collection.
+/// Ensure every Project has an initialized SQL YAML workflow collection,
+/// and migrate any active workflow sources on older schema versions to `CURRENT`.
 pub(super) fn initialize(
     home: &Path,
     db: Db<'_>,
     config: &Config,
     project: &Project,
 ) -> Result<()> {
-    if db
+    let mut existing: Vec<_> = db
         .list::<WorkflowSource>()?
-        .iter()
-        .any(|f| f.project_id == project.id)
-    {
-        return Ok(());
+        .into_iter()
+        .filter(|f| f.project_id == project.id)
+        .collect();
+    if existing.is_empty() {
+        return initialize_new(home, db, config, project, None);
     }
-    initialize_new(home, db, config, project, None)
+    existing.sort_by(|a, b| a.filename.cmp(&b.filename));
+    let mut needs_upgrade = false;
+    let mut inputs = Vec::with_capacity(existing.len());
+    for item in &existing {
+        let rev: WorkflowRevision = db.get(&item.revision_id)?;
+        let raw = rev.source_yaml.context("Published YAML is missing")?;
+        if let Some(upgraded) = canban_workflow_engine::migrations::upgrade_yaml(&raw)? {
+            needs_upgrade = true;
+            inputs.push(json!({"filename": item.filename, "source": upgraded}));
+        } else {
+            inputs.push(json!({"filename": item.filename, "source": raw}));
+        }
+    }
+    if needs_upgrade {
+        publish(home, db, project, config, &inputs)?;
+    }
+    Ok(())
 }
 impl AppServer {
     pub(super) fn authoring_call(&self, method: &str, p: Value) -> Result<Value> {

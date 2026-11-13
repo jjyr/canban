@@ -90,6 +90,20 @@ pub fn validate_definition(
             } => {
                 ensure!(flow.steps.contains_key(to), "Unknown rework target {to}");
             }
+            WorkflowStep::Admit {
+                agent_slot,
+                max_ready,
+                ..
+            } => {
+                ensure!(
+                    max_ready.is_none_or(|k| (1..=100).contains(&k)),
+                    "max_ready must be between 1 and 100 at {id}"
+                );
+                ensure!(
+                    *agent_slot || max_ready.is_some(),
+                    "Admit needs agent_slot or max_ready at {id}"
+                );
+            }
             WorkflowStep::Condition {
                 pointer,
                 then,

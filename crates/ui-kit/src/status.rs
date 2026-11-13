@@ -96,3 +96,29 @@ pub fn notice(message: impl IntoReactive<SharedString>, tone: Tone) -> impl Into
         .rounded(px(RADIUS))
         .child(text(message).text_size(px(BODY_SIZE)).text_color(color))
 }
+/// Looping "work in progress" mark: a steady dot with a ping halo. Reduced
+/// motion keeps the steady dot so the state stays visible without movement.
+pub fn live_dot(color: ThemeColor) -> View {
+    const SIZE: f32 = 8.0;
+    let dot = || {
+        view()
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .w(px(SIZE))
+            .h(px(SIZE))
+            .rounded(px(SIZE / 2.))
+            .bg(color)
+    };
+    let mark = view()
+        .relative()
+        .flex_shrink_0()
+        .w(px(SIZE))
+        .h(px(SIZE))
+        .pointer_events(PointerEvents::None);
+    if crate::motion::reduced() {
+        mark.child(dot())
+    } else {
+        mark.child(dot().opacity(0.6).animate_ping()).child(dot())
+    }
+}

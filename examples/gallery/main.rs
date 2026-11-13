@@ -317,6 +317,8 @@ pub fn Gallery() -> impl IntoElement {
             "execution.started",
             "comment.replied",
             "execution.failed",
+            // Bookkeeping that Card Activity hides (Card #16 regression).
+            "card.updated",
         ]
         .iter()
         .enumerate()
@@ -326,12 +328,12 @@ pub fn Gallery() -> impl IntoElement {
             event.card_id = "card-1".into();
             event.sequence = index as u64 + 1;
             event.kind = (*kind).into();
-            event.actor = if index == 0 {
-                "JJy".into()
+            event.actor = if index == 0 || index == 5 {
+                "user".into()
             } else {
                 "agent:developer".into()
             };
-            event.request_id = if index == 0 {
+            event.request_id = if index == 0 || index == 5 {
                 None
             } else {
                 Some("card-fixture-request".into())
@@ -581,9 +583,41 @@ pub fn Gallery() -> impl IntoElement {
         ui.page.set("board".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    // Card tile states (running Agent pulse, gates, branch); `-open` keeps a
+    // Card pane open so a narrow Board switches to one stage with stage tabs.
+    if let Ok(scene @ ("board-cards" | "board-cards-open")) =
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref()
+    {
+        ui.snapshot.set(fixtures::board_cards());
+        if scene == "board-cards-open" {
+            ui.card.set("card-2".into());
+            ui.page.set("card".into());
+        } else {
+            ui.card.set(String::new());
+            ui.page.set("board".into());
+        }
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("board-overflow") {
         ui.snapshot.set(fixtures::overflowing_board());
         ui.page.set("board".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    // Card header quick merge: `card-quick-merge` shows the header Merge action;
+    // `card-quick-merge-warning` opens the running-Agent confirmation it raises.
+    if matches!(
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
+        Ok("card-quick-merge" | "card-quick-merge-warning")
+    ) {
+        ui.card_standalone.set(true);
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("card-quick-merge-warning") {
+            let mut preview = fixtures::review();
+            preview.warning = Some(
+                "Card Agent is still running; merging now only includes current worktree changes"
+                    .into(),
+            );
+            ui.quick_merge.set(Some(preview));
+        }
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminals") {
@@ -809,6 +843,9 @@ pub fn Gallery() -> impl IntoElement {
                 }))
                 .child(action("Card states", Variant::Quiet, move |_| {
                     scene.set("workspace".into());ui.snapshot.set(fixtures::board_cards());ui.card.set(String::new());ui.page.set("board".into());
+                }))
+                .child(action("Card states · Card open", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());ui.snapshot.set(fixtures::board_cards());ui.card.set("card-2".into());ui.page.set("card".into());
                 }))
                 .child(action("Usage fixtures", Variant::Quiet, move |_| {
                     ui.usage.set(json!({"machine":"local","updated_at":canban_types::now(),"readings":[{"provider":"codex","auth":"present","account":"demo@example.invalid","windows":[{"name":"Session","used":22,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+5*86400) as i64,0).unwrap().to_rfc3339()}]},{"provider":"claude","auth":"present","account":"other@example.invalid","stale":true,"error":"HTTP 429","windows":[{"name":"Weekly","used":68,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+7*86400) as i64,0).unwrap().to_rfc3339()}]}]}));

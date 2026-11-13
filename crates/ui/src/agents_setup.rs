@@ -52,10 +52,18 @@ fn fallback_catalog_entries(all_profiles: &[Profile]) -> Vec<Value> {
             "path": Value::Null,
             "configured": existing.is_some(),
             "enabled": existing.is_some_and(|p| p.enabled),
+            "models": entry.default_models,
+            "supported_efforts": entry.supported_efforts,
+            "supports_model": !entry.model_args.is_empty(),
+            "supports_effort": !entry.effort_args.is_empty(),
         }));
     }
     for prof in all_profiles {
         if !prof.is_identity() && !builtin.iter().any(|b| b.id == prof.id) {
+            let is_herdr = prof
+                .preset
+                .as_deref()
+                .is_some_and(|s| s.starts_with("herdr:"));
             rows.push(json!({
                 "id": prof.id,
                 "display_name": prof.name.clone().unwrap_or_else(|| prof.id.clone()),
@@ -66,6 +74,10 @@ fn fallback_catalog_entries(all_profiles: &[Profile]) -> Vec<Value> {
                 "path": Value::Null,
                 "configured": true,
                 "enabled": prof.enabled,
+                "models": [],
+                "supported_efforts": [],
+                "supports_model": !is_herdr,
+                "supports_effort": !is_herdr && prof.command().iter().any(|a| a.contains("{effort}")),
             }));
         }
     }
@@ -78,6 +90,389 @@ fn catalog_agents(ui: Ui) -> Vec<Value> {
         return arr.clone();
     }
     fallback_catalog_entries(&ui.all_profiles.get())
+}
+
+#[derive(Clone, Default)]
+struct EngineCatalogCaps {
+    models: Vec<(String, String)>,
+    efforts: Vec<String>,
+    supports_model: bool,
+    supports_effort: bool,
+}
+
+fn engine_key_for_profile(profile: &Profile) -> String {
+    if let Some(preset) = profile.preset.as_deref() {
+        return preset.to_owned();
+    }
+    if profile.is_identity() {
+        return profile.command_name();
+    }
+    profile.id.clone()
+}
+
+fn catalog_caps_for_engine(rows: &[Value], engine_key: &str) -> EngineCatalogCaps {
+    if engine_key.starts_with("herdr:") {
+        return EngineCatalogCaps::default();
+    }
+    if let Some(row) = rows
+        .iter()
+        .find(|r| r["id"].as_str() == Some(engine_key) || r["binary"].as_str() == Some(engine_key))
+    {
+        let models: Vec<(String, String)> = row["models"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| {
+                        let id = v["id"].as_str()?.trim();
+                        if id.is_empty() {
+                            return None;
+                        }
+                        let label = v["label"].as_str().unwrap_or(id).trim();
+                        Some((
+                            id.to_owned(),
+                            if label.is_empty() {
+                                id.to_owned()
+                            } else {
+                                label.to_owned()
+                            },
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let efforts: Vec<String> = row["supported_efforts"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::trim))
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let supports_model = row["supports_model"].as_bool().unwrap_or(true);
+        let supports_effort = row["supports_effort"]
+            .as_bool()
+            .unwrap_or(!efforts.is_empty());
+        return EngineCatalogCaps {
+            models,
+            efforts,
+            supports_model,
+            supports_effort,
+        };
+    }
+    EngineCatalogCaps {
+        models: Vec::new(),
+        efforts: vec!["low".into(), "medium".into(), "high".into()],
+        supports_model: true,
+        supports_effort: false,
+    }
+}
+
+fn raw_profile_options(
+    catalog_val: &Value,
+    profile_id: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    let arr = catalog_val["raw_profiles"].as_array()?;
+    let item = arr.iter().find(|v| v["id"].as_str() == Some(profile_id))?;
+    let m = item["model"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let e = item["effort"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    Some((m, e))
+}
+
+fn short_model_badge(model_id: &str) -> String {
+    if model_id.chars().count() > 24 {
+        format!("{}…", model_id.chars().take(23).collect::<String>())
+    } else {
+        model_id.to_owned()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn profile_model_effort_buttons(
+    ui: Ui,
+    profile_id: String,
+    effective_model: Option<String>,
+    explicit_model: Option<String>,
+    effective_effort: Option<String>,
+    explicit_effort: Option<String>,
+    is_identity: bool,
+    caps: EngineCatalogCaps,
+    custom_model_target: Signal<Option<String>>,
+    custom_model_draft: Signal<String>,
+) -> AnyElement {
+    if !caps.supports_model && !caps.supports_effort {
+        return view().into_element();
+    }
+
+    let model_btn = if caps.supports_model {
+        let btn_label = match (&explicit_model, &effective_model) {
+            (Some(m), _) => format!("{} ▾", short_model_badge(m)),
+            (None, Some(inherited)) if is_identity => {
+                format!("{} (auto) ▾", short_model_badge(inherited))
+            }
+            _ => "Model: Default ▾".into(),
+        };
+        let pid_m = profile_id.clone();
+        let models_list = caps.models.clone();
+        let cur_explicit_m = explicit_model.clone();
+        let cur_effective_m = effective_model.clone();
+        compact_action(
+            btn_label,
+            if explicit_model.is_some() {
+                Variant::Secondary
+            } else {
+                Variant::Quiet
+            },
+            move |_| {
+                if models_list.is_empty() {
+                    let seed = cur_explicit_m
+                        .clone()
+                        .or_else(|| cur_effective_m.clone())
+                        .unwrap_or_default();
+                    if custom_model_target.get_untracked().as_deref() == Some(pid_m.as_str()) {
+                        custom_model_target.set(None);
+                    } else {
+                        custom_model_draft.set(seed);
+                        custom_model_target.set(Some(pid_m.clone()));
+                    }
+                    return;
+                }
+                use nsh_core::element::desktop::{MenuItem, popup_menu};
+                let opts = models_list.clone();
+                let p_id = pid_m.clone();
+                let exp_m = cur_explicit_m.clone();
+                let eff_m = cur_effective_m.clone();
+                ui.spawn(async move {
+                    let mut items = Vec::new();
+                    let def_label = if exp_m.is_none() {
+                        if is_identity {
+                            "✓ Default (Inherit from Agent)"
+                        } else {
+                            "✓ Default (CLI default)"
+                        }
+                    } else if is_identity {
+                        "Default (Inherit from Agent)"
+                    } else {
+                        "Default (CLI default)"
+                    };
+                    let clear_id = p_id.clone();
+                    items.push(MenuItem::new(def_label).on_select(move || {
+                        custom_model_target.set(None);
+                        dispatch_then(
+                            ui,
+                            "config.agents.save",
+                            json!({
+                                "op": "set_profile_options",
+                                "id": clear_id,
+                                "model": Value::Null,
+                            }),
+                            move |_| refresh_catalog(ui, "local"),
+                        );
+                    }));
+                    items.push(MenuItem::separator());
+                    for (mid, mlabel) in opts {
+                        let checked = exp_m.as_deref() == Some(mid.as_str());
+                        let prefix = if checked { "✓ " } else { "" };
+                        let title = if mlabel == mid {
+                            format!("{prefix}{mid}")
+                        } else {
+                            format!("{prefix}{mlabel} ({mid})")
+                        };
+                        let set_id = p_id.clone();
+                        let chosen = mid.clone();
+                        items.push(MenuItem::new(title).on_select(move || {
+                            custom_model_target.set(None);
+                            dispatch_then(
+                                ui,
+                                "config.agents.save",
+                                json!({
+                                    "op": "set_profile_options",
+                                    "id": set_id,
+                                    "model": chosen,
+                                }),
+                                move |_| refresh_catalog(ui, "local"),
+                            );
+                        }));
+                    }
+                    items.push(MenuItem::separator());
+                    let custom_id = p_id.clone();
+                    let seed = exp_m.or(eff_m).unwrap_or_default();
+                    items.push(MenuItem::new("Custom model ID…").on_select(move || {
+                        custom_model_draft.set(seed.clone());
+                        custom_model_target.set(Some(custom_id.clone()));
+                    }));
+                    popup_menu(items).await;
+                });
+            },
+        )
+        .into_element()
+    } else {
+        view().into_element()
+    };
+
+    let effort_btn = if caps.supports_effort {
+        let eff_label = match (&explicit_effort, &effective_effort) {
+            (Some(e), _) => format!("Effort: {e} ▾"),
+            (None, Some(inherited)) if is_identity => format!("Effort: {inherited} (auto) ▾"),
+            _ => "Effort: Default ▾".into(),
+        };
+        let pid_e = profile_id;
+        let efforts_list = if caps.efforts.is_empty() {
+            vec!["low".into(), "medium".into(), "high".into()]
+        } else {
+            caps.efforts
+        };
+        let cur_explicit_e = explicit_effort.clone();
+        compact_action(
+            eff_label,
+            if explicit_effort.is_some() {
+                Variant::Secondary
+            } else {
+                Variant::Quiet
+            },
+            move |_| {
+                use nsh_core::element::desktop::{MenuItem, popup_menu};
+                let opts = efforts_list.clone();
+                let p_id = pid_e.clone();
+                let exp_e = cur_explicit_e.clone();
+                ui.spawn(async move {
+                    let mut items = Vec::new();
+                    let def_label = if exp_e.is_none() {
+                        if is_identity {
+                            "✓ Default (Inherit from Agent)"
+                        } else {
+                            "✓ Default (CLI default)"
+                        }
+                    } else if is_identity {
+                        "Default (Inherit from Agent)"
+                    } else {
+                        "Default (CLI default)"
+                    };
+                    let clear_id = p_id.clone();
+                    items.push(MenuItem::new(def_label).on_select(move || {
+                        dispatch_then(
+                            ui,
+                            "config.agents.save",
+                            json!({
+                                "op": "set_profile_options",
+                                "id": clear_id,
+                                "effort": Value::Null,
+                            }),
+                            move |_| refresh_catalog(ui, "local"),
+                        );
+                    }));
+                    items.push(MenuItem::separator());
+                    for eff in opts {
+                        let checked = exp_e.as_deref() == Some(eff.as_str());
+                        let title = if checked {
+                            format!("✓ {eff}")
+                        } else {
+                            eff.clone()
+                        };
+                        let set_id = p_id.clone();
+                        let chosen = eff.clone();
+                        items.push(MenuItem::new(title).on_select(move || {
+                            dispatch_then(
+                                ui,
+                                "config.agents.save",
+                                json!({
+                                    "op": "set_profile_options",
+                                    "id": set_id,
+                                    "effort": chosen,
+                                }),
+                                move |_| refresh_catalog(ui, "local"),
+                            );
+                        }));
+                    }
+                    popup_menu(items).await;
+                });
+            },
+        )
+        .into_element()
+    } else {
+        view().into_element()
+    };
+
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .child(model_btn)
+        .child(effort_btn)
+        .into_element()
+}
+
+fn custom_model_inline_editor(
+    ui: Ui,
+    profile_id: String,
+    custom_model_target: Signal<Option<String>>,
+    custom_model_draft: Signal<String>,
+) -> AnyElement {
+    let save_id = profile_id.clone();
+    let clear_id = profile_id;
+    view()
+        .flex_row()
+        .flex_wrap()
+        .items_end()
+        .gap_2()
+        .pt_1()
+        .child(
+            view().flex_1().min_w(px(220.)).child(
+                bound_field(
+                    move || custom_model_draft.get(),
+                    move |v| custom_model_draft.set(v.to_owned()),
+                    "e.g. gemini-4-carbon-high, gpt-6.1-sol, claude-opus-4-6…",
+                )
+                .label("Custom model ID"),
+            ),
+        )
+        .child(compact_action("Save model", Variant::Primary, move |_| {
+            let val = custom_model_draft.get_untracked();
+            let trimmed = val.trim().to_owned();
+            let id_c = save_id.clone();
+            dispatch_then(
+                ui,
+                "config.agents.save",
+                json!({
+                    "op": "set_profile_options",
+                    "id": id_c,
+                    "model": if trimmed.is_empty() { Value::Null } else { json!(trimmed) },
+                }),
+                move |_| {
+                    custom_model_target.set(None);
+                    refresh_catalog(ui, "local");
+                },
+            );
+        }))
+        .child(compact_action("Reset default", Variant::Quiet, move |_| {
+            let id_c = clear_id.clone();
+            dispatch_then(
+                ui,
+                "config.agents.save",
+                json!({
+                    "op": "set_profile_options",
+                    "id": id_c,
+                    "model": Value::Null,
+                }),
+                move |_| {
+                    custom_model_target.set(None);
+                    refresh_catalog(ui, "local");
+                },
+            );
+        }))
+        .child(compact_action("Cancel", Variant::Quiet, move |_| {
+            custom_model_target.set(None);
+        }))
+        .into_element()
 }
 
 fn engine_display_name(ui: Ui, id: &str) -> String {
@@ -667,6 +1062,8 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
     let adding_custom_agent = signal(false);
     let custom_agent_id = signal(String::new());
     let custom_agent_cmd = signal(String::new());
+    let custom_model_target = signal(Option::<String>::None);
+    let custom_model_draft = signal(String::new());
 
     let copy_path = config_path.clone();
 
@@ -862,10 +1259,13 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
             ))
             .child(dynamic(move || {
                 let all = ui.all_profiles.get();
+                let cat_val = ui.agent_catalog.get();
+                let cat_rows = catalog_agents(ui);
                 let engines = enabled_engine_options(ui);
                 let identities: Vec<Profile> =
                     all.into_iter().filter(|p| p.is_identity()).collect();
                 let active_edit = editing_role.get();
+                let active_custom_model = custom_model_target.get();
                 view()
                     .border_t_1()
                     .border_color(BORDER)
@@ -875,6 +1275,13 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                         let is_builtin_role =
                             matches!(pid.as_str(), "planner" | "developer" | "reviewer");
                         let is_editing = active_edit.as_deref() == Some(pid.as_str());
+                        let is_editing_custom_model =
+                            active_custom_model.as_deref() == Some(pid.as_str());
+                        let eng_key = engine_key_for_profile(&prof);
+                        let caps = catalog_caps_for_engine(&cat_rows, &eng_key);
+                        let (explicit_model, explicit_effort) =
+                            raw_profile_options(&cat_val, &pid)
+                                .unwrap_or_else(|| (prof.model.clone(), prof.effort.clone()));
                         let engines_for_menu = engines.clone();
                         let switch_pid = pid.clone();
                         let role_text = prof.role_instruction.clone();
@@ -936,6 +1343,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                     .child(
                                         view()
                                             .flex_row()
+                                            .flex_wrap()
                                             .items_center()
                                             .gap_1p5()
                                             .child(compact_action(
@@ -956,7 +1364,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                                     "{ename} (@{eid})"
                                                                 ))
                                                                 .on_select(move || {
-                                                                    dispatch(
+                                                                    dispatch_then(
                                                                         ui,
                                                                         "config.agents.save",
                                                                         json!({
@@ -965,6 +1373,11 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                                             "engine": eid,
                                                                             "enabled": true,
                                                                         }),
+                                                                        move |_| {
+                                                                            refresh_catalog(
+                                                                                ui, "local",
+                                                                            )
+                                                                        },
                                                                     );
                                                                 })
                                                             })
@@ -974,6 +1387,18 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                         }
                                                     });
                                                 },
+                                            ))
+                                            .child(profile_model_effort_buttons(
+                                                ui,
+                                                pid.clone(),
+                                                prof.model.clone(),
+                                                explicit_model,
+                                                prof.effort.clone(),
+                                                explicit_effort,
+                                                true,
+                                                caps,
+                                                custom_model_target,
+                                                custom_model_draft,
                                             ))
                                             .child(compact_action(
                                                 if is_editing { "Done" } else { "Prompt" },
@@ -993,7 +1418,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                 if prof_enabled { "Disable" } else { "Enable" },
                                                 Variant::Quiet,
                                                 move |_| {
-                                                    dispatch(
+                                                    dispatch_then(
                                                         ui,
                                                         "config.agents.save",
                                                         json!({
@@ -1001,6 +1426,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                             "id": toggle_pid,
                                                             "enabled": !prof_enabled,
                                                         }),
+                                                        move |_| refresh_catalog(ui, "local"),
                                                     );
                                                 },
                                             ))
@@ -1012,13 +1438,16 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                         "Delete",
                                                         Variant::Danger,
                                                         move |_| {
-                                                            dispatch(
+                                                            dispatch_then(
                                                                 ui,
                                                                 "config.agents.save",
                                                                 json!({
                                                                     "op": "delete_profile",
                                                                     "id": d,
                                                                 }),
+                                                                move |_| {
+                                                                    refresh_catalog(ui, "local")
+                                                                },
                                                             );
                                                         },
                                                     )
@@ -1026,6 +1455,16 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                             )),
                                     ),
                             )
+                            .child(if is_editing_custom_model {
+                                custom_model_inline_editor(
+                                    ui,
+                                    pid.clone(),
+                                    custom_model_target,
+                                    custom_model_draft,
+                                )
+                            } else {
+                                view().into_element()
+                            })
                             .child(if is_editing {
                                 let save_id = pid.clone();
                                 let cur_engine =
@@ -1058,7 +1497,10 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                     "role_instruction": next_prompt,
                                                     "enabled": prof_enabled,
                                                 }),
-                                                move |_| editing_role.set(None),
+                                                move |_| {
+                                                    editing_role.set(None);
+                                                    refresh_catalog(ui, "local");
+                                                },
                                             );
                                         },
                                     )))
@@ -1145,6 +1587,14 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
             ))
             .child(dynamic(move || {
                 let rows = catalog_agents(ui);
+                let all_profs = ui.all_profiles.get();
+                let cat_val = ui.agent_catalog.get();
+                let active_custom_model = custom_model_target.get();
+                let enabled_direct: Vec<Profile> = all_profs
+                    .into_iter()
+                    .filter(|p| !p.is_identity() && p.enabled)
+                    .collect();
+
                 let primary_rows: Vec<Value> = rows
                     .iter()
                     .filter(|r| r["installed"] == true || r["enabled"] == true)
@@ -1179,7 +1629,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                 let count = extra_rows.len();
                 let show_extra = show_all_catalog.get();
                 view()
-                    .gap_2()
+                    .gap_3()
                     .child(
                         view()
                             .flex_row()
@@ -1214,6 +1664,89 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                             .into_element()
                     } else {
                         view().into_element()
+                    })
+                    .child(if enabled_direct.is_empty() {
+                        view().into_element()
+                    } else {
+                        view()
+                            .gap_1()
+                            .pt_1()
+                            .child(
+                                muted("Agent defaults (inherited by @identities unless overridden above):")
+                                    .text_size(px(12.)),
+                            )
+                            .child(
+                                view()
+                                    .border_t_1()
+                                    .border_color(BORDER)
+                                    .children(enabled_direct.into_iter().map(|prof| {
+                                        let pid = prof.id.clone();
+                                        let (mark, prov_name) = crate::profiles::provider(&prof);
+                                        let eng_key = engine_key_for_profile(&prof);
+                                        let caps = catalog_caps_for_engine(&rows, &eng_key);
+                                        let (explicit_model, explicit_effort) =
+                                            raw_profile_options(&cat_val, &pid).unwrap_or_else(
+                                                || (prof.model.clone(), prof.effort.clone()),
+                                            );
+                                        let is_editing_custom =
+                                            active_custom_model.as_deref() == Some(pid.as_str());
+                                        view()
+                                            .py_2()
+                                            .border_b_1()
+                                            .border_color(BORDER)
+                                            .gap_1p5()
+                                            .child(
+                                                view()
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .justify_between()
+                                                    .flex_wrap()
+                                                    .gap_2()
+                                                    .child(
+                                                        view()
+                                                            .flex_row()
+                                                            .items_center()
+                                                            .gap_2()
+                                                            .child(
+                                                                icon_tinted(mark, TEXT)
+                                                                    .w(px(15.))
+                                                                    .h(px(15.)),
+                                                            )
+                                                            .child(
+                                                                label(format!("@{pid}"))
+                                                                    .font_weight(FontWeight::MEDIUM),
+                                                            )
+                                                            .child(
+                                                                muted(prov_name).text_size(px(12.)),
+                                                            ),
+                                                    )
+                                                    .child(profile_model_effort_buttons(
+                                                        ui,
+                                                        pid.clone(),
+                                                        prof.model.clone(),
+                                                        explicit_model,
+                                                        prof.effort.clone(),
+                                                        explicit_effort,
+                                                        false,
+                                                        caps,
+                                                        custom_model_target,
+                                                        custom_model_draft,
+                                                    )),
+                                            )
+                                            .child(if is_editing_custom {
+                                                custom_model_inline_editor(
+                                                    ui,
+                                                    pid,
+                                                    custom_model_target,
+                                                    custom_model_draft,
+                                                )
+                                            } else {
+                                                view().into_element()
+                                            })
+                                            .into_element()
+                                    })),
+                            )
+                            .into_element()
                     })
                     .into_element()
             })),

@@ -102,16 +102,41 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
                     .on_select(move || dispatch(ui, "workflow.stop", json!({"run_id":run.id}))),
             );
         }
-        let has_deliver_in_project = ui.snapshot.with_untracked(|s| {
-            s.workflow_revisions.iter().any(|w| {
+        let (has_deliver_in_project, active_non_deliver) = ui.snapshot.with_untracked(|s| {
+            let has_deliver = s.workflow_revisions.iter().any(|w| {
                 w.project_id == card.project_id
                     && w.definition
                         .steps
                         .values()
                         .any(|st| matches!(st, canban_types::WorkflowStep::Deliver { .. }))
-            })
+            });
+            let non_deliver = s.workflow_runs.iter().any(|r| {
+                r.card_id == card.id
+                    && r.active()
+                    && !r.step.as_ref().is_some_and(|k| {
+                        matches!(
+                            r.definition.steps.get(k),
+                            Some(canban_types::WorkflowStep::Deliver { .. })
+                        )
+                    })
+            });
+            (has_deliver, non_deliver)
         });
         if has_deliver_in_project && card.active() {
+            if card.worktree.is_some()
+                && card.delivery.is_none()
+                && !card.pull_request.as_ref().is_some_and(|p| p.merged)
+            {
+                let cid = card.id.clone();
+                let rev = card.revision;
+                items.push(
+                    MenuItem::new("Retry auto-merge")
+                        .disabled(active_non_deliver)
+                        .on_select(move || {
+                            dispatch(ui, "workflow.deliver", json!({"card_id":cid,"revision":rev}))
+                        }),
+                );
+            }
             let held = card.hold_auto_merge;
             let cid = card.id.clone();
             let rev = card.revision;
@@ -214,12 +239,13 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     move || ui.page.get() != "review",
                     move || crate::editor::expand(ui),
                 ))
-                .child(chrome_button(
-                    Icon::Terminal,
-                    "Open Card Terminals",
+                .child(chrome_button_disabled(
+                    Icon::Agent,
+                    "Send to Agent",
+                    move || !ui.current_card().is_some_and(|c| c.active()),
                     move |_| {
                         if let Some(c) = ui.current_card() {
-                            crate::terminals::open_card(ui, &c.id);
+                            crate::sessions::send_card(ui, &c.id);
                         }
                     },
                 ))
@@ -469,6 +495,35 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     move |_| review(ui),
                 ));
             }
+            let project = s.projects.iter().find(|p| p.id == c.project_id);
+            if ui.page.get() != "review" && quick_merge::eligible(&c, project) {
+                let target = project
+                    .and_then(|p| p.target_branch.clone())
+                    .unwrap_or_else(|| "main".into());
+                let card = c.clone();
+                let a11y = format!("Quick merge into {target}");
+                row = row.child(
+                    view()
+                        .tooltip(nsh_base::tooltip().child(label(format!(
+                            "Merge into {target} with the default commit message, without opening the diff"
+                        ))))
+                        .child(
+                            compact_action(
+                                move || {
+                                    if quick_merge::busy(ui) {
+                                        "Merging…"
+                                    } else {
+                                        "Merge"
+                                    }
+                                },
+                                Variant::Secondary,
+                                move |_| quick_merge::start(ui, card.clone()),
+                            )
+                            .accessibility_label(move || Some(a11y.clone().into()))
+                            .disabled(move || quick_merge::busy(ui)),
+                        ),
+                );
+            }
             if !in_review_stage && c.human_gate.is_some() {
                 row = row.child(
                     compact_action("Continue workflow", Variant::Secondary, move |_| {
@@ -500,4 +555,5 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             }
             row
         }))
+        .child(quick_merge::confirm_dialog(ui))
 }

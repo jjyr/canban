@@ -177,13 +177,25 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             };
             untracked(|| {
                 let state = drag::BoardDrag::new(ui, project.clone());
+                let stages = project.workflow.stages.clone();
+                let width = signal(0f32);
+                let compact = compact_mode(ui, width, stages.len());
+                let focus = focus_stage(ui, &stages);
                 view()
                     .flex_1()
                     .min_h(px(0.))
                     .min_w(px(0.))
+                    .gap_3()
                     .relative()
                     .element_ref(&state.root)
-                    .on_layout(move |_: &Bounds<Points>| state.dirty())
+                    .on_layout(move |b: &Bounds<Points>| {
+                        width.set(b.size.width.0);
+                        state.dirty()
+                    })
+                    .child(when(move || compact.get(), {
+                        let stages = stages.clone();
+                        move || stage_tabs(state, stages.clone(), focus)
+                    }))
                     .child(
                         scroll()
                             .horizontal()
@@ -200,22 +212,108 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     .on_layout(move |b: &Bounds<Points>| {
                                         state.content_width(b.size.width.0)
                                     })
-                                    .children(
-                                        project
-                                            .workflow
-                                            .stages
-                                            .into_iter()
-                                            .map(|stage| {
-                                                columns::column(ui, state, stage).into_element()
-                                            })
-                                            .collect::<Vec<_>>(),
-                                    ),
+                                    .child(dynamic(move || {
+                                        let compact = compact.get();
+                                        let focus = focus.get();
+                                        let shown: Vec<_> = stages
+                                            .iter()
+                                            .filter(|s| !compact || s.id == focus)
+                                            .cloned()
+                                            .collect();
+                                        untracked(|| {
+                                            state.retain(
+                                                &shown
+                                                    .iter()
+                                                    .map(|s| s.id.clone())
+                                                    .collect::<Vec<_>>(),
+                                            );
+                                            view()
+                                                .flex_row()
+                                                .gap_3()
+                                                .flex_1()
+                                                .min_h(px(0.))
+                                                .children(
+                                                    shown
+                                                        .into_iter()
+                                                        .map(|stage| {
+                                                            columns::column(
+                                                                ui, state, stage, compact,
+                                                            )
+                                                            .into_element()
+                                                        })
+                                                        .collect::<Vec<_>>(),
+                                                )
+                                                .into_element()
+                                        })
+                                    })),
                             ),
                     )
                     .child(state.overlay())
                     .into_element()
             })
         }))
+}
+
+/// With the Card pane open beside the Board and too little room for every
+/// column, show one stage at a time (stage tabs) instead of clipped columns.
+fn compact_mode(ui: Ui, width: Signal<f32>, stages: usize) -> Memo<bool> {
+    computed(move || {
+        let page = ui.page.get();
+        let pane = (page == "new-card" || page == "card" && !ui.card.get().is_empty())
+            && !ui.narrow.get()
+            && !ui.card_standalone.get();
+        let needed = stages as f32 * columns::COLUMN_MIN + stages.saturating_sub(1) as f32 * 12.;
+        let width = width.get();
+        pane && stages > 1 && width > 0. && width < needed
+    })
+}
+
+/// The compact stage follows the opened Card; tabs can switch it explicitly.
+fn focus_stage(ui: Ui, stages: &[canban_types::Stage]) -> Signal<String> {
+    let first = stages.first().map(|s| s.id.clone()).unwrap_or_default();
+    let ids: Vec<_> = stages.iter().map(|s| s.id.clone()).collect();
+    let focus = signal(first);
+    effect(move || {
+        let id = ui.card.get();
+        let stage = ui
+            .snapshot
+            .with_untracked(|s| s.cards.iter().find(|c| c.id == id).map(|c| c.stage.clone()));
+        if let Some(stage) = stage.filter(|s| ids.contains(s)) {
+            focus.set(stage);
+        }
+    });
+    focus
+}
+
+fn stage_tabs(
+    state: drag::BoardDrag,
+    stages: Vec<canban_types::Stage>,
+    focus: Signal<String>,
+) -> impl IntoElement {
+    dynamic(move || {
+        let cards = state.cards.get();
+        segmented().children(
+            stages
+                .iter()
+                .map(|stage| {
+                    let id = stage.id.clone();
+                    let selected = id.clone();
+                    let count = id.clone();
+                    compact_segment(
+                        format!(
+                            "{} {}",
+                            stage.name,
+                            cards.iter().filter(|c| c.stage == count).count()
+                        ),
+                        None,
+                        move || focus.get() == selected,
+                        move |_| focus.set(id.clone()),
+                    )
+                    .into_element()
+                })
+                .collect::<Vec<_>>(),
+        )
+    })
 }
 
 /// Board owns Project selection/creation; the rail only navigates surfaces.

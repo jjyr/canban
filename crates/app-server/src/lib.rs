@@ -565,6 +565,7 @@ impl AppServer {
             Ok(result)
         })?;
         let _ = self.pump_deliveries();
+        let _ = self.pump_admissions();
         self.emit("application", p["card_id"].as_str().map(str::to_owned));
         Ok(result)
     }

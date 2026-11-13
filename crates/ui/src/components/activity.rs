@@ -66,34 +66,32 @@ pub fn empty(title: &str, description: &str) -> impl IntoElement {
         .child(muted(description.to_owned()))
 }
 
-/// Quiet Cards have no placeholder status; current work and human gates remain visible.
-pub fn card_activity(snapshot: &canban_types::Snapshot, card: &canban_types::Card) -> Option<View> {
-    let mut row = view()
-        .flex_row()
-        .flex_wrap()
-        .items_center()
-        .gap_2()
-        .min_w(px(0.));
-    let mut visible = false;
+/// Quiet Cards have no placeholder status; delivery, human gates and failed
+/// Agents remain visible as compact chips.
+pub fn card_status(
+    snapshot: &canban_types::Snapshot,
+    card: &canban_types::Card,
+) -> Vec<AnyElement> {
+    let mut chips = Vec::new();
     if card.delivery.is_some() || card.pull_request.as_ref().is_some_and(|p| p.merged) {
-        row = row.child(status("Merged", Tone::Success));
-        visible = true;
+        chips.push(status("Merged", Tone::Success).into_element());
     }
     if card.human_gate.is_some() || card.attention.is_some() {
-        row = row.child(status(
-            if card.hold_auto_merge {
-                "Merge held"
-            } else if card.human_gate.is_some() && card.stage == "review" {
-                "Needs review"
-            } else {
-                "Needs attention"
-            },
-            Tone::Attention,
-        ));
-        visible = true;
+        chips.push(
+            status(
+                if card.hold_auto_merge {
+                    "Merge held"
+                } else if card.human_gate.is_some() && card.stage == "review" {
+                    "Needs review"
+                } else {
+                    "Needs attention"
+                },
+                Tone::Attention,
+            )
+            .into_element(),
+        );
     } else if card.hold_auto_merge {
-        row = row.child(status("Merge held", Tone::Neutral));
-        visible = true;
+        chips.push(status("Merge held", Tone::Neutral).into_element());
     }
     let mut latest = std::collections::BTreeMap::new();
     for request in snapshot
@@ -107,34 +105,67 @@ pub fn card_activity(snapshot: &canban_types::Snapshot, card: &canban_types::Car
         }
     }
     for request in latest.values().filter(|r| r.state == "failed") {
-        row = row.child(status(
-            format!("@{} failed", request.profile.id),
-            Tone::Danger,
-        ));
-        visible = true;
+        chips.push(status(format!("@{} failed", request.profile.id), Tone::Danger).into_element());
     }
+    chips
+}
+
+/// Agents currently executing for this Card: newest request per profile.
+pub fn running_agents(
+    snapshot: &canban_types::Snapshot,
+    card: &canban_types::Card,
+) -> Vec<canban_types::Request> {
     let mut profiles = std::collections::BTreeSet::new();
-    for request in snapshot.requests.iter().rev().filter(|r| {
-        r.card_id == card.id && matches!(r.state.as_str(), "starting" | "running" | "working")
-    }) {
-        if !profiles.insert(&request.profile.id) {
-            continue;
-        }
-        let (mark, provider) = crate::profiles::provider(&request.profile);
-        row = row.child(
-            view()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .min_w(px(0.))
-                .tooltip(
-                    nsh_base::tooltip()
-                        .child(label(format!("{provider} · @{}", request.profile.id))),
-                )
-                .child(icon(mark).w(px(14.)).h(px(14.)))
-                .child(muted(request.profile.id.clone()).truncate().min_w(px(0.))),
-        );
-        visible = true;
+    let mut running: Vec<_> = snapshot
+        .requests
+        .iter()
+        .filter(|r| {
+            r.card_id == card.id && matches!(r.state.as_str(), "starting" | "running" | "working")
+        })
+        .collect();
+    running.sort_by_key(|r| std::cmp::Reverse(r.created_at));
+    running
+        .into_iter()
+        .filter(|r| profiles.insert(r.profile.id.clone()))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn running_agents_keep_the_newest_live_request_per_profile() {
+        let mut snapshot = canban_types::Snapshot::default();
+        let card: canban_types::Card = serde_json::from_value(serde_json::json!({"id":"c","project_id":"p","number":1,"title":"T","body":"","stage":"develop","revision":1,"created_at":1})).unwrap();
+        let make = |id: &str, profile: &str, state: &str, at: u64| {
+            let mut r = canban_scheduler::request(
+                "p",
+                "c",
+                "develop",
+                "interactive",
+                canban_types::Config::default().profiles[0].clone(),
+                "task".into(),
+                None,
+            );
+            r.id = id.into();
+            r.state = state.into();
+            r.created_at = at;
+            r.profile.id = profile.into();
+            r
+        };
+        snapshot.requests = vec![
+            make("old", "developer", "running", 1),
+            make("new", "developer", "working", 2),
+            make("done", "reviewer", "completed", 3),
+            make("rev", "reviewer", "starting", 1),
+            make("other", "tester", "running", 5),
+        ];
+        snapshot.requests[4].card_id = "elsewhere".into();
+        let ids: Vec<_> = running_agents(&snapshot, &card)
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(ids, vec!["new", "rev"]);
     }
-    visible.then_some(row)
 }

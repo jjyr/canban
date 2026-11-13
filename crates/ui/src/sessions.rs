@@ -35,3 +35,31 @@ pub fn open(ui: Ui, card: String, profile: String) {
         },
     );
 }
+
+/// The configured default Agent, falling back to `developer` and then the first
+/// enabled profile. Shared by every "Send to Agent" entry and review submission.
+pub fn default_profile(ui: Ui) -> String {
+    let def = ui.default_agent.get_untracked();
+    ui.profiles
+        .with_untracked(|profiles| {
+            profiles
+                .iter()
+                .find(|p| p.id == def)
+                .or_else(|| profiles.iter().find(|p| p.id == "developer"))
+                .or_else(|| profiles.first())
+                .map(|p| p.id.clone())
+        })
+        .unwrap_or_else(|| {
+            if def.is_empty() {
+                "developer".into()
+            } else {
+                def
+            }
+        })
+}
+
+/// "Send to Agent": open (or resume/start) the default Agent's conversation for
+/// this Card. A new conversation receives the Card context manifest.
+pub fn send_card(ui: Ui, card: &str) {
+    open(ui, card.to_owned(), default_profile(ui));
+}
