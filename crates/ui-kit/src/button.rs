@@ -50,6 +50,14 @@ pub fn action_with_icon(
         )
         .on_press(on_press)
 }
+/// Unstyled press target for every clickable surface: NSH button behavior plus
+/// the shared pointer convention (pointing hand while enabled, arrow while
+/// disabled). Product and UI Kit code use this instead of `nsh_base::button()`.
+pub fn press_target() -> nsh_base::ButtonElement {
+    nsh_base::button()
+        .cursor_pointer()
+        .disabled_style(|s| s.cursor(Cursor::Default))
+}
 fn foreground(variant: Variant) -> ThemeColor {
     match variant {
         Variant::Primary => ON_ACCENT,
@@ -70,7 +78,7 @@ fn base(variant: Variant) -> nsh_base::ButtonElement {
         Variant::Danger | Variant::Secondary => SURFACE,
         Variant::Quiet => CLEAR,
     };
-    nsh_base::button()
+    press_target()
         .min_h(px(CONTROL_HEIGHT))
         .px_3()
         .justify_center()
@@ -93,4 +101,38 @@ fn base(variant: Variant) -> nsh_base::ButtonElement {
         .active(|s| s.opacity(0.6))
         .focus(|s| s.border_color(ACCENT))
         .disabled_style(|s| s.opacity(0.4))
+}
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Clickable surfaces get the pointing hand from `press_target()`; a bare
+    /// NSH button would silently fall back to the arrow cursor.
+    #[test]
+    fn press_targets_use_the_shared_pointer_cursor_constructor() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut files = Vec::new();
+        for crate_dir in ["ui-kit/src", "ui/src"] {
+            rust_sources(&root.join(crate_dir), &mut files);
+        }
+        let this = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/button.rs");
+        let needle = concat!("nsh_base::", "button()");
+        let offenders: Vec<_> = files
+            .iter()
+            .filter(|f| f.canonicalize().unwrap() != this.canonicalize().unwrap())
+            .filter(|f| std::fs::read_to_string(f).unwrap().contains(needle))
+            .collect();
+        assert!(offenders.is_empty(), "use press_target(): {offenders:?}");
+    }
 }

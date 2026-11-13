@@ -9,6 +9,8 @@ pub fn checkbox(
     nsh_base::checkbox()
         .checked(move || checked.get())
         .on_change(change)
+        .cursor_pointer()
+        .disabled_style(|s| s.cursor(Cursor::Default))
         .min_h(px(CONTROL_HEIGHT))
         .px_2()
         .rounded(px(RADIUS))

@@ -320,7 +320,7 @@ fn create_modal(ui: Ui) -> impl IntoElement {
                                         .gap_1p5()
                                         .child(label("Project"))
                                         .child(
-                                            nsh_base::button()
+                                            canban_ui_kit::press_target()
                                                 .element_ref(&proj_anchor)
                                                 .h(px(32.))
                                                 .px_2p5()

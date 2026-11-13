@@ -259,6 +259,7 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
         })
         .pan_values(Some(&state.x), Some(&state.y))
         .pan_enabled(move || state.phase.get() != 3)
+        .cursor_pointer()
         .on_layout(move |b: &Bounds<Points>| state.height(&layout_id, b.size.height.0))
         .on_press_down(move |e: &PressEvent| state.down(e))
         .on_pan_start(move |_: &PanEvent| state.start(card.get_untracked(), reference))

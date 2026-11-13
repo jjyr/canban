@@ -15,6 +15,7 @@ pub fn reference_link(
         .label(title)
         .text_color(ACCENT)
         .underline()
+        .cursor_pointer()
         .on_press(move |_: &PressEvent| navigate())
         .tooltip(
             nsh_base::tooltip()

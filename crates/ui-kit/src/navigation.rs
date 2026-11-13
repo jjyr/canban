@@ -6,7 +6,7 @@ pub fn navigation(
     selected: impl Fn() -> bool + 'static,
     press: impl Fn(&()) + 'static,
 ) -> nsh_base::ButtonElement {
-    nsh_base::button()
+    crate::press_target()
         .min_h(px(CONTROL_HEIGHT))
         .px_3()
         .py_2()

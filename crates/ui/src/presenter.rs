@@ -685,8 +685,14 @@ pub fn dispatch_complete(
                         | "notifications.read_all"
                         | "comment.add"
                         | "card.move"
-                        | "project.create"
-                        | "card.create" => ui.status.set("Saved".into()),
+                        | "project.create" => ui.status.set("Saved".into()),
+                        "card.create" | "github.issue.add" => {
+                            if let Some(number) = value["number"].as_u64() {
+                                ui.notify(format!("Created Card #{number}"));
+                            } else {
+                                ui.notify("Card created");
+                            }
+                        }
                         "worktree.create" => ui.notify("Managed worktree created"),
                         "worktree.promote" => ui.notify("Promoted worktree to Card"),
                         "worktree.remove" => ui.notify("Worktree deleted"),
@@ -702,7 +708,9 @@ pub fn dispatch_complete(
                             ui.page.set("board".into());
                         }
                     }
-                    "card.create" | "github.issue.add" | "github.item.add" if active => {
+                    "card.create" | "github.issue.add" | "github.item.add"
+                        if should_open_created_card(active, &source) =>
+                    {
                         if let Some(id) = value["id"].as_str() {
                             ui.open_card(id.into());
                         }
@@ -849,4 +857,39 @@ pub fn copy_text(ui: Ui, value: String) {
             Err(e) => ui.operation_error.set(e.to_string()),
         }
     });
+}
+
+/// New Card form submissions remain on a fresh New Card draft for consecutive
+/// creation; other active surfaces (e.g. GitHub `+ Add to Board`) open the Card.
+pub(crate) fn should_open_created_card(active: bool, source: &Location) -> bool {
+    active && source.page != "new-card"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn location(page: &str, new_draft: &str) -> Location {
+        Location {
+            new_draft: new_draft.into(),
+            page: page.into(),
+            project: "proj-1".into(),
+            card: String::new(),
+            request: String::new(),
+            terminal: String::new(),
+            standalone: false,
+            terminal_card: String::new(),
+        }
+    }
+
+    #[test]
+    fn new_card_submission_stays_on_new_card_for_consecutive_creation() {
+        let new_card = location("new-card", "new-card:first");
+        assert!(!should_open_created_card(true, &new_card));
+        assert!(!should_open_created_card(false, &new_card));
+
+        let github = location("github", "");
+        assert!(should_open_created_card(true, &github));
+        assert!(!should_open_created_card(false, &github));
+    }
 }

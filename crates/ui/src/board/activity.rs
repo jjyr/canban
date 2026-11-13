@@ -54,7 +54,7 @@ pub fn strip(ui: Ui) -> impl IntoElement {
             move || rows.get().len() > visible.get(),
             move || {
                 view().window_drag(false).child(
-                    nsh_base::button()
+                    canban_ui_kit::press_target()
                         .h(px(28.))
                         .w(move || {
                             px(if visible.get() == 0 {
@@ -98,7 +98,7 @@ pub fn strip(ui: Ui) -> impl IntoElement {
 }
 fn chip(ui: Ui, row: ReadSignal<Summary>) -> impl IntoElement {
     view().window_drag(false).flex_shrink_0().child(
-        nsh_base::button()
+        canban_ui_kit::press_target()
             .h(px(26.))
             .w(move || px(model::chip_width(&row.get())))
             .min_w(px(0.))

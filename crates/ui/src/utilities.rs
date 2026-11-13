@@ -494,7 +494,7 @@ fn usage_summary(ui: Ui, now: u64) -> View {
                         .child(tip),
                 )
                 .child(
-                    nsh_base::button()
+                    canban_ui_kit::press_target()
                         .min_h(px(28.))
                         .px_2()
                         .rounded(px(5.))

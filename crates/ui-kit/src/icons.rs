@@ -171,7 +171,7 @@ pub fn icon_action(
                 .child(label(hint)),
         )
         .child(
-            nsh_base::button()
+            crate::press_target()
                 .w(px(40.))
                 .h(px(40.))
                 .items_center()

@@ -216,7 +216,7 @@ fn agent_pill(ui: Ui, request: Request) -> impl IntoElement {
         .flex_shrink_0()
         .tooltip(nsh_base::tooltip().child(label(hint)))
         .child(
-            nsh_base::button()
+            press_target()
                 .h(px(22.))
                 .px_2()
                 .flex_row()
