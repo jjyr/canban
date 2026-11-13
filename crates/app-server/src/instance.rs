@@ -90,6 +90,10 @@ pub fn bundled() -> Result<Option<Development>> {
     read(&std::env::current_exe()?)
 }
 
+pub fn read_executable(executable: &Path) -> Result<Option<Development>> {
+    read(executable)
+}
+
 fn read(executable: &Path) -> Result<Option<Development>> {
     let Some(bundle) = executable
         .parent()

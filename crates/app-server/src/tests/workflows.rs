@@ -1941,13 +1941,11 @@ fn report_auto_commits_card_worktree_and_workflow_deliver_retries_paused_or_stop
         "dirty main checkout pauses auto-merge"
     );
     let card1 = snap.cards.iter().find(|c| c.id == c1.id).unwrap();
+    let gate_reason = &card1.human_gate.as_ref().unwrap().reason;
     assert!(
-        card1
-            .human_gate
-            .as_ref()
-            .unwrap()
-            .reason
-            .contains("Project checkout has local changes")
+        gate_reason.contains("Main repository checkout")
+            && gate_reason.contains("untracked_local.tmp"),
+        "expected path and dirty filename in gate reason, got: {gate_reason}"
     );
 
     // Clean main checkout and manually trigger retry via workflow.deliver.
