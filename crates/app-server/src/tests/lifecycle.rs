@@ -282,7 +282,24 @@ fn a_closing_idle_terminal_cannot_receive_a_new_assignment_and_reserves_its_slot
     let mut next = request;
     next.id = "next-assignment".into();
     next.state = "queued".into();
+    if !s.workflow_runs.is_empty() {
+        s.workflow_runs[0].request_id = Some(next.id.clone());
+        s.workflow_runs[0].state = "waiting_agent".into();
+    }
     assert!(canban_scheduler::retained(&s, &next).is_some());
+    // Evolving preset flags on the same executable (`codex` / `agy`) still reuses the idle session
+    // instead of deadlocking `eligible()`, while changing the underlying CLI binary does not.
+    next.profile.argv = Some(vec![
+        s.requests[0].profile.command()[0].clone(),
+        "--settings".into(),
+        "{agy_trusted_settings}".into(),
+        "{prompt}".into(),
+    ]);
+    assert!(canban_scheduler::retained(&s, &next).is_some());
+    assert!(canban_scheduler::eligible(&s, &next));
+    let mut switched_bin = next.clone();
+    switched_bin.profile.argv = Some(vec!["different-agent-cli".into(), "{prompt}".into()]);
+    assert!(canban_scheduler::retained(&s, &switched_bin).is_none());
     s.attempts[0].close_state = "closing".into();
     assert!(canban_scheduler::retained(&s, &next).is_none());
     assert!(!canban_scheduler::eligible(&s, &next));

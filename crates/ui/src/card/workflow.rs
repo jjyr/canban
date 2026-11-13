@@ -90,16 +90,10 @@ pub fn render(ui: Ui) -> impl IntoElement {
                     .collect();
                 let active_visible = card_runs
                     .iter()
-                    .filter(|r| {
-                        r.active()
-                            && matches!(
-                                r.state.as_str(),
-                                "waiting_approval" | "waiting_delivery" | "stale"
-                            )
-                    })
+                    .filter(|r| r.active())
                     .map(|r| (*r).clone())
                     .collect::<Vec<_>>();
-                let any_active = card_runs.iter().any(|r| r.active());
+                let any_active = !active_visible.is_empty();
                 let had_prev = !card_runs.is_empty();
                 let idle_deliver = if !any_active
                     && let Some(c) = &card_opt
@@ -464,6 +458,15 @@ pub fn render(ui: Ui) -> impl IntoElement {
                     let state_label = match run.state.as_str() {
                         "stale" => "Changes required",
                         "waiting_delivery" => "Merging…",
+                        "waiting_capacity" => "Waiting for Agent slot…",
+                        "waiting_agent" | "running" => {
+                            if run.inputs["conflict_attempts"].as_u64().unwrap_or(0) > 0 {
+                                "Resolving merge conflict…"
+                            } else {
+                                "Agent running…"
+                            }
+                        }
+                        "blocked" => "Blocked",
                         _ if is_deliver_step => {
                             if card_opt.as_ref().is_some_and(|c| c.hold_auto_merge) {
                                 "Auto-merge held"
