@@ -565,8 +565,8 @@ pub fn Gallery() -> impl IntoElement {
         ui.workflows.drafts.update(|d| {
             d.insert(ui.project.get_untracked(), draft);
         });
-        ui.workflows.prompt.set("你是当前 Canban 项目的 Workflow 配置助手。\n本次范围是整个项目的 Workflows，而非某个选中的文件。\n\n请先只读分析全部 Workflow YAML，用 ASCII 展示事件、Agent、审批及三列的影响。\n等待用户提出具体修改要求，再校验和发布。".repeat(4));
-        ui.workflows.profile.set("codex".into());
+        ui.workflows.prompt.set("You are the Workflow Configuration Assistant for the current Canban Project.\nYour scope covers all Workflows in this Project, not just a single file.\n\nFirst, perform a read-only analysis of all Workflow YAML sources, present an ASCII overview of triggers, Agents, approvals, and Board columns, and wait for the user's specific modification instructions before validating and publishing.\n".repeat(4));
+        ui.workflows.profile.set(ui.default_agent.get_untracked());
         ui.page.set("workflows".into());
         if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("workflows-conflict") {
             ui.workflows.drafts.update(|drafts| {

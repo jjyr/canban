@@ -649,6 +649,17 @@ fn configuration_sessions_have_project_ownership_reuse_and_exact_history_resume(
         .call("workflow.prompt", json!({"project_id":p.id}))
         .unwrap()["prompt"]
         .clone();
+    let prompt_str = prompt.as_str().unwrap();
+    assert!(
+        prompt_str.contains("Workflow Configuration Assistant"),
+        "workflow.prompt must use English instructions"
+    );
+    assert!(
+        !prompt_str
+            .chars()
+            .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)),
+        "workflow.prompt must not contain Chinese characters"
+    );
     let params = json!({"project_id":p.id,"profile_id":"codex","prompt":prompt});
     let first = app.call("configuration.open", params.clone()).unwrap();
     let again = app.call("configuration.open", params.clone()).unwrap();
@@ -659,7 +670,7 @@ fn configuration_sessions_have_project_ownership_reuse_and_exact_history_resume(
     assert_eq!(s.cards.len(), 1);
     assert_eq!(s.configuration_sessions.len(), 1);
     let mut c = s.configuration_sessions[0].clone();
-    assert_eq!(c.prompt, prompt.as_str().unwrap());
+    assert_eq!(c.prompt, prompt_str);
     c.provider_session_id = Some("exact-history".into());
     c.state = "finished".into();
     app.store
@@ -694,6 +705,69 @@ fn configuration_sessions_have_project_ownership_reuse_and_exact_history_resume(
         )
         .is_err()
     );
+}
+
+#[test]
+fn configuration_open_uses_configured_default_agent_and_auto_fresh_fallback() {
+    let (_dir, app, p, _) = setup();
+    assert_eq!(app.config().default_agent, "developer");
+    let opened = app
+        .call(
+            "configuration.open",
+            json!({"project_id": p.id, "auto_fresh": true}),
+        )
+        .unwrap();
+    let expected_key = format!("configuration:{}:workflows:developer", p.id);
+    assert_eq!(opened["terminal_id"], expected_key);
+    assert_eq!(opened["reused"], false);
+
+    // Simulate an ended session where exact provider history was never captured:
+    // strict open still guards history, whereas direct `auto_fresh` starts cleanly.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut s: ConfigurationSession = db.get(&expected_key)?;
+            s.provider_session_id = None;
+            s.state = "finished".into();
+            db.save(&s)?;
+            let mut t: TerminalEntry = db.get(&expected_key)?;
+            t.runtime = Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("isolated".into()),
+                terminal: Some("local/closed".into()),
+                state: "finished".into(),
+                connection: "connected".into(),
+                error: None,
+            });
+            db.save(&t)
+        })
+        .unwrap();
+
+    assert!(
+        app.call("configuration.open", json!({"project_id": p.id}))
+            .is_err(),
+        "Without auto_fresh or fresh, missing provider history must still error"
+    );
+    let restarted = app
+        .call(
+            "configuration.open",
+            json!({"project_id": p.id, "auto_fresh": true}),
+        )
+        .unwrap();
+    assert_eq!(restarted["terminal_id"], expected_key);
+    assert_eq!(restarted["reused"], false);
+    let session = app
+        .snapshot()
+        .unwrap()
+        .configuration_sessions
+        .into_iter()
+        .find(|c| c.id == expected_key)
+        .unwrap();
+    assert_eq!(session.profile_id, "developer");
+    assert_eq!(session.generation, 2);
+    assert!(session.provider_session_id.is_none());
 }
 
 #[test]

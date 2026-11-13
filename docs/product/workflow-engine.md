@@ -226,10 +226,11 @@ Studio UI: Stage lanes are generated from the graph (no column-specific panels).
 
 ## Edit with agent
 
-The Project Workflows header provides **Edit with agent**, opening a native modal with:
+The Project Workflows header (and Command Palette `Edit Workflows with Default Agent`) provides **Edit with agent**, which directly opens (or continues/resumes) a configuration conversation in Terminal using the configured default Agent (`config.default_agent`, respecting Project overrides via `Project.agent_overrides`) without showing a secondary Agent picker.
 
-- Complete selectable Project-wide configuration Prompt (`workflow.prompt`), **Select all**, and explicit **Copy prompt** (opening never mutates the clipboard).
-- Profile picker (`@codex`, `@claude`, custom profiles) and **Start / Continue / Resume in Terminal** or **New conversation**.
+- Generated Project-wide configuration Prompt (`workflow.prompt`) is written completely in English, instructing the Agent to inspect the current Workflow schema, Profiles, and all Project YAML sources, present a read-only ASCII overview, wait for user modification instructions, and validate/publish via `workflow.check` / `workflow.apply`.
+- If an ended session for the default Agent has exact provider history and a resume command, `Edit with agent` resumes it automatically; if exact resume is unavailable (`auto_fresh: true`), it starts a fresh conversation cleanly.
+- `workflow.prompt` and the read-only Prompt preview (`workflow-agent` Gallery scene) remain available without any profile switcher.
 
 Configuration conversations are owned by **Project + `workflows` purpose + Profile** (`ConfigurationSession`). They reuse Profile command expansion, Scheduler admission, Herdr PTYs, and the native Terminal workspace (`Project / Configuration / Workflows · Profile`) with a **Back to Workflows** action, without creating fake business Cards or `Request`s, and cannot approve business human gates.
 

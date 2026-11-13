@@ -191,6 +191,14 @@ pub const CATALOG: &[Command] = &[
         keywords: "studio stages yaml",
     },
     Command {
+        id: "edit-workflow-agent",
+        title: "Edit Workflows with Default Agent",
+        key: "",
+        display: "Workflows",
+        context: "Project",
+        keywords: "edit with agent configuration assistant yaml terminal",
+    },
+    Command {
         id: "go-agent-setup",
         title: "Agents · Setup & Enabled Providers",
         key: "",
@@ -505,6 +513,7 @@ pub fn execute(ui: Ui, id: &str) {
         "go-review" => crate::review::open_compare(ui),
         "go-github" => ui.navigate("github"),
         "go-workflows" => ui.navigate("workflows"),
+        "edit-workflow-agent" => crate::workflows::edit_agent(ui),
         "go-project-agents" => {
             if ui.current_project().is_some() {
                 ui.navigate("project-agents");

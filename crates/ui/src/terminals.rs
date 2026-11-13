@@ -285,14 +285,28 @@ pub fn machine_menu(ui: Ui) {
     });
 }
 pub fn reopen(ui: Ui, id: String) {
-    if let Some(project) = ui.snapshot.with_untracked(|s| {
+    if let Some((project, profile)) = ui.snapshot.with_untracked(|s| {
         s.configuration_sessions
             .iter()
             .find(|c| c.id == id)
-            .map(|c| c.project_id.clone())
+            .map(|c| (c.project_id.clone(), c.profile_id.clone()))
     }) {
-        ui.project.set(project);
-        ui.navigate("workflows");
+        dispatch_complete(
+            ui,
+            "configuration.open",
+            json!({
+                "project_id": project,
+                "profile_id": profile,
+                "auto_fresh": true,
+            }),
+            move |result| {
+                if let Ok(value) = result
+                    && let Some(tid) = value["terminal_id"].as_str()
+                {
+                    ui.open_terminal(tid.into());
+                }
+            },
+        );
         return;
     }
 

@@ -127,7 +127,8 @@ try:
  collection=json.loads(subprocess.check_output([str(cli),'call','workflow.sources','@'+str(params_file)],env=env,text=True))
  assert len(collection['sources'])==2
  custom=next(f for f in collection['sources'] if f['active']['workflow_id']=='plan-deliver')
- assert custom['source'].startswith('schema: 2')
+ schema_ver=call('workflow.schema')['schema_version']
+ assert custom['source'].startswith(f'schema: {schema_ver}')
  assert call('workflow.get',{'workflow_id':custom['active']['workflow_id'],'revision':custom['active']['revision']})['source_yaml']==custom['source']
  assert not (home/'projects'/project['id']/'workflows').exists() and not (home/'config/workflows').exists()
  changed=[{'filename':f['filename'],'source':f['source']} for f in collection['sources']]
@@ -149,17 +150,18 @@ try:
  subprocess.run(submit_args,env=env,text=True,capture_output=True,check=True)
  assert not (home/'config/workflows').exists() and not (home/'projects'/project['id']/'workflows').exists()
  prompt=call('workflow.prompt',{'project_id':project['id']})['prompt']
- assert 'Project directory: '+str(source) in prompt and 'Workflow directory:' not in prompt
- before=call('app.snapshot');session=call('configuration.open',{'project_id':project['id'],'profile_id':'codex','prompt':prompt})
+ assert 'Project directory: '+str(source) in prompt and 'Workflow directory:' not in prompt and 'Workflow Configuration Assistant' in prompt
+ before=call('app.snapshot');session=call('configuration.open',{'project_id':project['id'],'auto_fresh':True})
+ assert session['terminal_id']==f"configuration:{project['id']}:workflows:developer"
  s=wait(lambda s:(home/'configuration-evidence/1.json').exists(),'configuration Agent starts')
  payload=json.loads((home/'configuration-evidence/1.json').read_text());assert payload['prompt']==prompt
  assert len(s['requests'])==len(before['requests']) and len(s['cards'])==len(before['cards'])
- reused=call('configuration.open',{'project_id':project['id'],'profile_id':'codex','prompt':prompt});assert reused['reused'] and reused['terminal_id']==session['terminal_id']
+ reused=call('configuration.open',{'project_id':project['id'],'auto_fresh':True});assert reused['reused'] and reused['terminal_id']==session['terminal_id']
  assert len(list((home/'configuration-evidence').glob('*.json')))==1
  history=s['configuration_sessions'][0]['provider_session_id'];assert history
  call('terminal.close',{'terminal_id':session['terminal_id']})
  wait(lambda s:next(t for t in s['terminals'] if t['id']==session['terminal_id'])['runtime']['state']=='finished','configuration exit observed')
- call('configuration.open',{'project_id':project['id'],'profile_id':'codex','prompt':prompt})
+ call('configuration.open',{'project_id':project['id'],'auto_fresh':True})
  s=wait(lambda s:(home/'configuration-evidence/2.json').exists(),'exact configuration history resumes')
  assert s['configuration_sessions'][0]['provider_session_id']==history
  assert '--resume' in json.loads((home/'configuration-evidence/2.json').read_text())['argv']

@@ -204,7 +204,7 @@ Executed acceptance: wide and narrow native Gallery layouts passed title expansi
 
 ## Project Workflow configuration Agents
 
-Project-owned configuration Agents are an additional stable owner, independent of Card assignments or inferred directories. The tree groups these entries under **Project / Configuration / Workflows · Profile**. They reuse the native viewer and terminal lifecycle controls; **Back to Workflows** returns to the Project editor. Starting/continuing/resuming is explicit in **Edit with agent**. Continue only focuses a retained binding; Resume uses exact provider history. Closing a queued entry cancels admission. See [the configuration contract](product/workflow-engine.md#edit-with-agent).
+Project-owned configuration Agents are an additional stable owner, independent of Card assignments or inferred directories. The tree groups these entries under **Project / Configuration / Workflows · Profile**. They reuse the native viewer and terminal lifecycle controls; **Back to Workflows** returns to the Project editor. **Edit with agent** directly starts, continues, or resumes the configured default Agent's configuration Terminal without a secondary profile picker. Continue only focuses a retained binding; Resume uses exact provider history (falling back to a fresh conversation when exact history or resume support is unavailable). Closing a queued entry cancels admission. See [the configuration contract](product/workflow-engine.md#edit-with-agent).
 
 ## Standalone Managed Branch Worktrees (2026-11-13)
 
