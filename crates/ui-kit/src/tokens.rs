@@ -9,7 +9,7 @@ pub fn install_theme() {
     set_color_scheme(Appearance::Dark);
     THEME.with(|p| *p.borrow_mut() = Some(signal(canban_themes::DEFAULT.into())));
     sync_nsh_tokens();
-    super::scrollbar::install(canban_themes::resolve(canban_themes::DEFAULT));
+    super::scrollbar::install();
 }
 pub fn set_theme(name: &str) {
     let name = canban_themes::resolve(name).id;
@@ -19,7 +19,6 @@ pub fn set_theme(name: &str) {
         {
             s.set(name.into());
             sync_nsh_tokens();
-            super::scrollbar::install(canban_themes::resolve(name));
         }
     });
 }

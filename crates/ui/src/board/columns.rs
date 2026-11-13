@@ -92,6 +92,7 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
             .child(
                 scroll()
                     .element_ref(&scroll_ref)
+                    .scrollbar(false)
                     .flex_1()
                     .on_scroll(move |e: &ScrollEvent| {
                         state.scrolled(&id, e.offset.y.0);
@@ -191,7 +192,14 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
                         .justify_center()
                         .child(muted("No cards"))
                 },
-            )),
+            ))
+            .child(
+                vertical_scrollbar(scroll_ref)
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(px(-8.)),
+            ),
     )
 }
 fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {

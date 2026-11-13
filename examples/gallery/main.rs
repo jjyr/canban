@@ -13,6 +13,7 @@ fn controls() -> impl IntoElement {
     let directory = signal(String::new());
     let markdown = canban_ui_kit::markdown::MarkdownInput::new();
     let group_open = signal(true);
+    let gutter_scroll = element_ref();
     view().flex_1().min_h(px(0.0)).p_5().gap_4().bg(BACKGROUND)
     .child(heading("Component Gallery"))
     .child(muted("Production components · local fixtures · no AppServer or Agent required"))
@@ -107,6 +108,74 @@ fn controls() -> impl IntoElement {
                                 ),
                         )
                         .child(muted(move || format!("Press count: {}", count.get()))),
+                )
+                .child(
+                    panel()
+                        .child(label("Custom scrollbars · built-in overlay & outer-gutter rail"))
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap_5()
+                                .child(
+                                    view()
+                                        .w(px(260.))
+                                        .gap_1p5()
+                                        .child(muted("Built-in scroll() indicator"))
+                                        .child(
+                                            scroll()
+                                                .h(px(136.))
+                                                .rounded(px(RADIUS))
+                                                .border_1()
+                                                .border_color(BORDER)
+                                                .bg(INSET)
+                                                .p_2p5()
+                                                .child(view().gap_1p5().children((1..=10).map(
+                                                    |i| {
+                                                        muted(format!(
+                                                            "Row #{i} · theme-reactive subtle pill"
+                                                        ))
+                                                    },
+                                                ))),
+                                        ),
+                                )
+                                .child(
+                                    view()
+                                        .w(px(260.))
+                                        .gap_1p5()
+                                        .child(muted("Board outer-gutter vertical_scrollbar"))
+                                        .child(
+                                            view()
+                                                .relative()
+                                                .h(px(136.))
+                                                .child(
+                                                    scroll()
+                                                        .element_ref(&gutter_scroll)
+                                                        .scrollbar(false)
+                                                        .flex_1()
+                                                        .child(view().gap_2().children(
+                                                            (1..=8).map(|i| {
+                                                                panel()
+                                                                    .py_2()
+                                                                    .px_3()
+                                                                    .border_1()
+                                                                    .border_color(BORDER)
+                                                                    .child(label(format!(
+                                                                        "Card #{i} · crisp border"
+                                                                    )))
+                                                            }),
+                                                        )),
+                                                )
+                                                .child(
+                                                    vertical_scrollbar(gutter_scroll)
+                                                        .absolute()
+                                                        .top_0()
+                                                        .bottom_0()
+                                                        .right(px(-8.)),
+                                                ),
+                                        ),
+                                ),
+                        ),
                 )
                 .child(
                     panel()

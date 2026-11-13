@@ -2,12 +2,13 @@
 pub mod button;
 pub mod checkbox;
 pub mod input;
-mod scrollbar;
+pub mod scrollbar;
 pub mod surface;
 pub mod tokens;
 pub use button::{Variant, action, action_with_icon, compact_action, press_target};
 pub use checkbox::checkbox;
 pub use input::{bound_field, field};
+pub use scrollbar::vertical_scrollbar;
 pub use surface::{badge, heading, label, muted, panel, read_text};
 
 pub mod navigation;

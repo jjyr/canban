@@ -231,6 +231,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 view()
                                     .flex_row()
                                     .gap_3()
+                                    .pr_2()
                                     .min_h(px(0.))
                                     .flex_1()
                                     .on_layout(move |b: &Bounds<Points>| {
@@ -286,7 +287,8 @@ fn compact_mode(ui: Ui, width: Signal<f32>, stages: usize) -> Memo<bool> {
         let pane = (page == "new-card" || page == "card" && !ui.card.get().is_empty())
             && !ui.narrow.get()
             && !ui.card_standalone.get();
-        let needed = stages as f32 * columns::COLUMN_MIN + stages.saturating_sub(1) as f32 * 12.;
+        let needed =
+            stages as f32 * columns::COLUMN_MIN + stages.saturating_sub(1) as f32 * 12. + 8.;
         let width = width.get();
         pane && stages > 1 && width > 0. && width < needed
     })
