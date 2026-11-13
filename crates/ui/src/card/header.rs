@@ -469,6 +469,35 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     move |_| review(ui),
                 ));
             }
+            let project = s.projects.iter().find(|p| p.id == c.project_id);
+            if ui.page.get() != "review" && quick_merge::eligible(&c, project) {
+                let target = project
+                    .and_then(|p| p.target_branch.clone())
+                    .unwrap_or_else(|| "main".into());
+                let card = c.clone();
+                let a11y = format!("Quick merge into {target}");
+                row = row.child(
+                    view()
+                        .tooltip(nsh_base::tooltip().child(label(format!(
+                            "Merge into {target} with the default commit message, without opening the diff"
+                        ))))
+                        .child(
+                            compact_action(
+                                move || {
+                                    if quick_merge::busy(ui) {
+                                        "Merging…"
+                                    } else {
+                                        "Merge"
+                                    }
+                                },
+                                Variant::Secondary,
+                                move |_| quick_merge::start(ui, card.clone()),
+                            )
+                            .accessibility_label(move || Some(a11y.clone().into()))
+                            .disabled(move || quick_merge::busy(ui)),
+                        ),
+                );
+            }
             if !in_review_stage && c.human_gate.is_some() {
                 row = row.child(
                     compact_action("Continue workflow", Variant::Secondary, move |_| {
@@ -500,4 +529,5 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             }
             row
         }))
+        .child(quick_merge::confirm_dialog(ui))
 }

@@ -3,6 +3,7 @@ pub(crate) mod attachments;
 mod composer;
 mod details;
 mod header;
+mod quick_merge;
 mod task;
 mod timeline;
 mod workflow;

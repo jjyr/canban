@@ -109,6 +109,8 @@ pub struct Ui {
     pub output_request: Signal<u64>,
     pub review: Signal<Option<ReviewPreview>>,
     pub review_request: Signal<u64>,
+    /// Card header quick merge awaiting confirmation of a preview warning.
+    pub quick_merge: Signal<Option<ReviewPreview>>,
     pub drafts: Stored<BTreeMap<String, Draft>>,
     pub scrolls: Stored<BTreeMap<String, Point<Points>>>,
     pub narrow: Signal<bool>,
@@ -303,6 +305,7 @@ impl Ui {
             output_request: signal(0),
             review: signal(None),
             review_request: signal(0),
+            quick_merge: signal(None),
             drafts: stored(crate::drafts::persistence::initial()),
             scrolls: stored(BTreeMap::new()),
             narrow: signal(false),
@@ -614,6 +617,10 @@ pub fn dispatch_complete(
                         "scheduler.configure" => ui.notify("Scheduling settings saved"),
                         "project.location" => ui.notify("Work location updated"),
                         "workflow.save" => ui.notify("Workflow saved"),
+                        "review.merge" if value["state"] == "merged" => ui.notify(format!(
+                            "Merged into {}",
+                            value["target_branch"].as_str().unwrap_or("target branch")
+                        )),
                         "utilities.awake" => ui.notify(if value["awake"] == true {
                             "Host awake enabled"
                         } else {
