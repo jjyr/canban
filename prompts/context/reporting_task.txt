@@ -1,0 +1,7 @@
+## Reporting
+Report your outcome via CLI (never edit `canban.sqlite` or move/archive the Card directly):
+CANBAN_ENDPOINT={{endpoint}} CANBAN_REQUEST_ID={{request_id}} CANBAN_ATTEMPT={{attempt}} {{cli}} report --state <completed|backlog|blocked|failed> --message 'Concise summary' [--file "$CANBAN_RUN_DIR/report.md"]
+- `completed`: task finished (stage and `git commit` deliverable repository changes on the Card branch first; do not push unless instructed).
+- `backlog`: Card is already implemented, obsolete, or not actionable right now — returns the Card to Backlog and posts your `--message` / `--file` explanation on the Card.
+- `blocked`: waiting on human clarification or decision (`working` is also accepted for interim progress; `failed` for unrecoverable errors).
+Keep temporary or report files under `$CANBAN_RUN_DIR`, outside the repository worktree.

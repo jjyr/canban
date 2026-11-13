@@ -1,0 +1,5 @@
+## Reporting
+This is an interactive Card discussion session (never edit `canban.sqlite` or move/archive the Card directly).
+Do not run `report` for the initial greeting/summary — reply in the terminal first and wait for the user's concrete instruction. When the user later asks you to complete a task, report its outcome via CLI:
+CANBAN_ENDPOINT={{endpoint}} CANBAN_REQUEST_ID={{request_id}} CANBAN_ATTEMPT={{attempt}} {{cli}} report --state <completed|backlog|blocked|failed> --message 'Concise summary' [--file "$CANBAN_RUN_DIR/report.md"]
+Keep temporary or report files under `$CANBAN_RUN_DIR`, outside the repository worktree.

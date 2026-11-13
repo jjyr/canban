@@ -127,7 +127,7 @@ try:
  collection=json.loads(subprocess.check_output([str(cli),'call','workflow.sources','@'+str(params_file)],env=env,text=True))
  assert len(collection['sources'])==2
  custom=next(f for f in collection['sources'] if f['active']['workflow_id']=='plan-deliver')
- assert custom['source'].startswith('schema: 2')
+ assert custom['source'].startswith('schema: 3')
  assert call('workflow.get',{'workflow_id':custom['active']['workflow_id'],'revision':custom['active']['revision']})['source_yaml']==custom['source']
  assert not (home/'projects'/project['id']/'workflows').exists() and not (home/'config/workflows').exists()
  changed=[{'filename':f['filename'],'source':f['source']} for f in collection['sources']]

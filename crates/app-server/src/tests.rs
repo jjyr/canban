@@ -420,7 +420,7 @@ fn template_profiles_and_mentions_select_independent_roles_and_callbacks() {
         .unwrap()
         .requests
         .into_iter()
-        .find(|r| r.trigger.starts_with("comment:"))
+        .find(|r| r.trigger.is_comment())
         .unwrap();
     assert_eq!(mention.profile.id, "reviewer");
     assert!(mention.on_completed.is_none());
@@ -430,7 +430,7 @@ fn template_profiles_and_mentions_select_independent_roles_and_callbacks() {
     let review = snapshot
         .requests
         .iter()
-        .find(|r| r.trigger == "stage_entry" && r.stage == "review")
+        .find(|r| r.trigger == RequestTrigger::StageEntry && r.stage == "review")
         .unwrap();
     assert_eq!(review.profile.id, "reviewer");
     assert_ne!(
@@ -1697,7 +1697,7 @@ fn human_review_gate_survives_reports_acknowledgement_restart_and_requires_expli
         after
             .requests
             .iter()
-            .filter(|r| r.trigger == "stage_entry" && r.stage == "review")
+            .filter(|r| r.trigger == RequestTrigger::StageEntry && r.stage == "review")
             .count(),
         1
     );
@@ -2566,4 +2566,197 @@ steps:
     uses: complete
 "#
     )
+}
+
+#[test]
+fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completion_after_reply() {
+    let (_dir, app, project, card) = setup();
+
+    // 1. Comment-triggered request uses `RequestTrigger::Comment` and `reporting_comment.txt`
+    // without rendering a separate `## Pending questions` / `reply --to` instruction.
+    let comment_ev: Event = serde_json::from_value(
+        app.call(
+            "comment.add",
+            json!({"card_id": card.id, "body": "@developer What should we name the merger role?"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let comment_req = snap
+        .requests
+        .iter()
+        .find(|r| r.card_id == card.id && r.trigger.is_comment())
+        .expect("comment request queued")
+        .clone();
+    assert_eq!(
+        comment_req.trigger,
+        RequestTrigger::Comment {
+            comment_id: comment_ev.id.clone()
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(&comment_req.trigger).unwrap(),
+        json!(format!("comment:{}", comment_ev.id))
+    );
+
+    let capture_prompt = |card: &Card, req: &Request, attempt: u32| -> String {
+        let s = app.snapshot().unwrap();
+        let rel = canban_context::capture(
+            &app.home,
+            &project,
+            card,
+            req,
+            attempt,
+            &s,
+            "/tmp/test.sock",
+            Path::new("/bin/canban"),
+        )
+        .unwrap();
+        std::fs::read_to_string(app.home.join(rel)).unwrap()
+    };
+
+    let comment_attempt = admit(&app, &comment_req);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            for mut q in db
+                .list::<Question>()?
+                .into_iter()
+                .filter(|q| q.request_id == comment_req.id)
+            {
+                q.attempt = comment_attempt.number;
+                db.save(&q)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let comment_prompt = capture_prompt(&card, &comment_req, comment_attempt.number);
+    assert!(
+        comment_prompt.contains(
+            "Publish your answer and complete this comment assignment in a single CLI call"
+        ),
+        "comment prompt should use reporting_comment.txt"
+    );
+    assert!(
+        !comment_prompt.contains("## Pending questions") && !comment_prompt.contains("reply --to"),
+        "comment prompt must not instruct Agent to run both `reply` and `report`"
+    );
+
+    // Fallback safety: even if an Agent explicitly called `agent.reply` first and then `execution.report`,
+    // `execution.reported` is marked `comment_replied: true` and does not create a second unread item.
+    let q = snap
+        .questions
+        .iter()
+        .find(|q| q.request_id == comment_req.id)
+        .unwrap();
+    app.call(
+        "agent.reply",
+        json!({
+            "request_key": "explicit-reply-first",
+            "request_id": comment_req.id,
+            "attempt": comment_attempt.number,
+            "question_id": q.id,
+            "body": "Recommend `@merger`."
+        }),
+    )
+    .unwrap();
+    app.call(
+        "execution.report",
+        json!({
+            "request_key": "followup-report",
+            "execution": {"request_id": comment_req.id, "attempt_number": comment_attempt.number},
+            "state": "completed",
+            "message": "Answered naming question"
+        }),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    assert_eq!(
+        snap.events
+            .iter()
+            .filter(
+                |e| e.request_id.as_deref() == Some(&comment_req.id) && e.kind == "comment.replied"
+            )
+            .count(),
+        1
+    );
+    let reported_ev = snap
+        .events
+        .iter()
+        .find(|e| {
+            e.request_id.as_deref() == Some(&comment_req.id) && e.kind == "execution.reported"
+        })
+        .unwrap();
+    assert_eq!(reported_ev.data["comment_replied"], json!(true));
+    let counts = canban_notifications::counts(&canban_notifications::reminders(&snap));
+    assert_eq!(
+        counts[&card.id].unread, 1,
+        "explicit reply + completed report on a comment request must count as a single unread reply"
+    );
+
+    // 2. Interactive request uses `RequestTrigger::Interactive` and `reporting_interactive.txt`.
+    let c2: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": project.id, "title": "Interactive Card", "body": "Discuss"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "agent.open",
+        json!({"card_id": c2.id, "profile_id": "developer"}),
+    )
+    .unwrap();
+    let interactive_req = app
+        .snapshot()
+        .unwrap()
+        .requests
+        .into_iter()
+        .find(|r| r.card_id == c2.id)
+        .unwrap();
+    assert_eq!(interactive_req.trigger, RequestTrigger::Interactive);
+    let interactive_attempt = admit(&app, &interactive_req);
+    let interactive_prompt = capture_prompt(&c2, &interactive_req, interactive_attempt.number);
+    assert!(
+        interactive_prompt.contains("This is an interactive Card discussion session"),
+        "interactive prompt should use reporting_interactive.txt"
+    );
+
+    // 3. Workflow/stage task with an injected pending question DOES include `## Pending questions`.
+    let c3: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": project.id, "title": "Task Card", "body": "Build"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c3.id, "revision": c3.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    app.call(
+        "comment.add",
+        json!({"card_id": c3.id, "body": "@developer Please also check Windows paths"}),
+    )
+    .unwrap();
+    let task_req = app
+        .snapshot()
+        .unwrap()
+        .requests
+        .into_iter()
+        .find(|r| r.card_id == c3.id && r.trigger.is_automatic())
+        .unwrap();
+    let task_attempt = admit(&app, &task_req);
+    let task_prompt = capture_prompt(&c3, &task_req, task_attempt.number);
+    assert!(
+        task_prompt.contains("Report your outcome via CLI")
+            && task_prompt.contains("## Pending questions")
+            && task_prompt.contains("reply --to"),
+        "non-comment task with a concurrent question retains `## Pending questions` + `reply --to`"
+    );
 }

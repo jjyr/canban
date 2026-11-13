@@ -1005,8 +1005,8 @@ fn finish_closed(app: &AppServer, req: &Request, key: &str) {
         .unwrap()
         .write(|db| {
             let mut run: Attempt = db.get(&a.id)?;
-            // Simulate a real retained interactive Herdr terminal whose Agent is still live
-            // at the moment it invokes `canban execution report` via tool call.
+            // Simulate a real retained interactive Herdr terminal whose Agent is still mid-turn
+            // when invoking `canban report`, then finishes its turn (`done`) right after.
             run.terminal = Some("t-retained".into());
             run.connection_state = "connected".into();
             run.observed = Some(json!({"state": "live", "status": {"state": "working"}}));
@@ -1014,6 +1014,15 @@ fn finish_closed(app: &AppServer, req: &Request, key: &str) {
         })
         .unwrap();
     app.call("execution.report",json!({"execution":{"request_id":req.id,"attempt_number":a.number},"request_key":key,"state":"completed","message":"Plan ready","body":"Exact plan artifact"})).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut run: Attempt = db.get(&a.id)?;
+            run.observed = Some(json!({"state": "live", "status": {"state": "done"}}));
+            db.save(&run)
+        })
+        .unwrap();
 }
 
 #[test]
@@ -1932,13 +1941,11 @@ fn report_auto_commits_card_worktree_and_workflow_deliver_retries_paused_or_stop
         "dirty main checkout pauses auto-merge"
     );
     let card1 = snap.cards.iter().find(|c| c.id == c1.id).unwrap();
+    let gate_reason = &card1.human_gate.as_ref().unwrap().reason;
     assert!(
-        card1
-            .human_gate
-            .as_ref()
-            .unwrap()
-            .reason
-            .contains("Project checkout has local changes")
+        gate_reason.contains("Main repository checkout")
+            && gate_reason.contains("untracked_local.tmp"),
+        "expected path and dirty filename in gate reason, got: {gate_reason}"
     );
 
     // Clean main checkout and manually trigger retry via workflow.deliver.
@@ -2513,4 +2520,247 @@ fn snapshot_exposes_merging_cards_while_merge_is_in_flight_and_clears_afterward(
         .unwrap();
     assert!(app.snapshot().unwrap().merging_cards.is_empty());
     drop(guard);
+}
+
+#[test]
+fn queue_merge_waits_for_connected_agent_turn_wrapup_and_falls_back_after_settle_grace() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "init"]);
+    let remote = dir.path().join("remote.git");
+    std::fs::create_dir_all(&remote).unwrap();
+    git_in(&remote, &["init", "--bare", "-b", "main"]);
+    git_in(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git_in(&source, &["push", "-u", "origin", "main"]);
+
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Settle Grace", "directory": source}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Case 1: Agent reports `completed` via tool call while Herdr still reports `status.state == "working"`.
+    // Queue merge stays in `waiting_delivery` until the Agent finishes its turn (`done` / `idle`),
+    // including any post-report worktree changes before merging!
+    let c1: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Wrap-up Wait", "body": "Wait for turn end"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let req1 = snap
+        .requests
+        .iter()
+        .find(|r| r.card_id == c1.id)
+        .unwrap()
+        .clone();
+    let ops = canban_workspaces::Ops::local();
+    let wt1 = ops
+        .prepare(
+            &app.home,
+            &p,
+            snap.cards.iter().find(|c| c.id == c1.id).unwrap(),
+        )
+        .unwrap();
+    let branch1 = ops.current_branch(wt1.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c1.id)?;
+            card.worktree = Some(wt1.to_str().unwrap().into());
+            card.branch = Some(branch1);
+            db.save(&card)
+        })
+        .unwrap();
+    git_identity(&wt1);
+    std::fs::write(wt1.join("part1.txt"), "committed before report\n").unwrap();
+    git_in(&wt1, &["add", "."]);
+    git_in(&wt1, &["commit", "-m", "feat: part 1"]);
+
+    let a1 = admit(&app, &req1);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut run: Attempt = db.get(&a1.id)?;
+            run.terminal = Some("t-wrapup-1".into());
+            run.connection_state = "connected".into();
+            run.observed = Some(json!({"state": "live", "status": {"state": "working"}}));
+            db.save(&run)
+        })
+        .unwrap();
+    app.call(
+        "execution.report",
+        json!({
+            "execution": {"request_id": req1.id, "attempt_number": a1.number},
+            "request_key": "c1-report",
+            "state": "completed",
+            "message": "Implemented feature"
+        }),
+    )
+    .unwrap();
+
+    // Immediately after `execution.report` (and even on `pump_deliveries`), the Card moved to
+    // `review` and entered `waiting_delivery`, but has NOT merged yet while Agent is `working`!
+    app.pump_deliveries().unwrap();
+    let snap = app.snapshot().unwrap();
+    let card1 = snap.cards.iter().find(|c| c.id == c1.id).unwrap();
+    assert_eq!(card1.stage, "review");
+    assert!(
+        card1.delivery.is_none(),
+        "Queue merge must not merge while the connected Agent is still wrapping up its turn"
+    );
+    let run1 = snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == c1.id)
+        .unwrap();
+    assert_eq!(run1.state, "waiting_delivery");
+
+    // Agent writes a cleanup/followup edit before finishing its turn, then transitions to `done`.
+    std::fs::write(wt1.join("wrapup.txt"), "added during wrapup\n").unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut run: Attempt = db.get(&a1.id)?;
+            run.observed = Some(json!({"state": "live", "status": {"state": "done"}}));
+            db.save(&run)
+        })
+        .unwrap();
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let card1 = snap.cards.iter().find(|c| c.id == c1.id).unwrap();
+    assert!(
+        card1.delivery.is_some(),
+        "Queue merge completes once Agent turn transitions to done/idle"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("wrapup.txt")).unwrap(),
+        "added during wrapup\n"
+    );
+
+    // Case 2: If a provider's status stays stuck at `"working"` past `DELIVERY_AGENT_SETTLE_MS`,
+    // Queue merge falls back and delivers instead of wedging forever.
+    let c2: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Settle Timeout Fallback", "body": "Stuck status"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c2.id, "revision": c2.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let req2 = snap
+        .requests
+        .iter()
+        .find(|r| r.card_id == c2.id)
+        .unwrap()
+        .clone();
+    let wt2 = ops
+        .prepare(
+            &app.home,
+            &p,
+            snap.cards.iter().find(|c| c.id == c2.id).unwrap(),
+        )
+        .unwrap();
+    let branch2 = ops.current_branch(wt2.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c2.id)?;
+            card.worktree = Some(wt2.to_str().unwrap().into());
+            card.branch = Some(branch2);
+            db.save(&card)
+        })
+        .unwrap();
+    git_identity(&wt2);
+    std::fs::write(wt2.join("part2.txt"), "timeout fallback\n").unwrap();
+
+    let a2 = admit(&app, &req2);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut run: Attempt = db.get(&a2.id)?;
+            run.terminal = Some("t-wrapup-2".into());
+            run.connection_state = "connected".into();
+            run.observed = Some(json!({"state": "live", "status": {"state": "working"}}));
+            db.save(&run)
+        })
+        .unwrap();
+    app.call(
+        "execution.report",
+        json!({
+            "execution": {"request_id": req2.id, "attempt_number": a2.number},
+            "request_key": "c2-report",
+            "state": "completed",
+            "message": "Done"
+        }),
+    )
+    .unwrap();
+    assert!(
+        app.snapshot()
+            .unwrap()
+            .cards
+            .iter()
+            .find(|c| c.id == c2.id)
+            .unwrap()
+            .delivery
+            .is_none()
+    );
+
+    // Age `completed_at` and `run.updated_at` past the settle grace window.
+    let expired = now().saturating_sub(AppServer::DELIVERY_AGENT_SETTLE_MS + 1_000);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut att: Attempt = db.get(&a2.id)?;
+            att.completed_at = Some(expired);
+            db.save(&att)?;
+            let mut wf: WorkflowRun = db
+                .list::<WorkflowRun>()?
+                .into_iter()
+                .find(|r| r.card_id == c2.id)
+                .unwrap();
+            wf.updated_at = expired;
+            db.save(&wf)
+        })
+        .unwrap();
+    app.pump_deliveries().unwrap();
+    let snap = app.snapshot().unwrap();
+    let card2 = snap.cards.iter().find(|c| c.id == c2.id).unwrap();
+    assert!(
+        card2.delivery.is_some(),
+        "Queue merge must proceed once settle grace expires"
+    );
 }

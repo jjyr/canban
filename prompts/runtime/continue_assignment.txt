@@ -1,0 +1,4 @@
+New Canban assignment (use these explicit values instead of earlier terminal env vars):
+CANBAN_REQUEST_ID={{request_id}} CANBAN_ATTEMPT={{attempt}} CANBAN_RUN_DIR={{run_dir}}
+
+{{prompt}}

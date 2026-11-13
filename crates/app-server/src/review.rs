@@ -254,11 +254,15 @@ impl AppServer {
         Ok(())
     }
 
+    /// Maximum grace window for a connected Agent that already reported `completed` to
+    /// finish wrapping up its interactive turn before Queue Merge integrates the worktree.
+    pub(crate) const DELIVERY_AGENT_SETTLE_MS: u64 = 180_000;
+
     fn execute_workflow_delivery(&self, run_id: &str) -> Result<()> {
         let Ok(_gate) = self.review_gate.try_lock() else {
             return Ok(());
         };
-        let (card, project, run, has_pending_requests) = {
+        let (card, project, run, has_pending_requests, settling_agent) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
             let Ok(run) = db.get::<WorkflowRun>(run_id) else {
@@ -273,11 +277,29 @@ impl AppServer {
             }
             let project: Project = db.get(&card.project_id)?;
             let project = self.bound_project(&project, &card);
-            let has_pending_requests = db.list::<Request>()?.iter().any(|r| {
+            let requests = db.list::<Request>()?;
+            let has_pending_requests = requests.iter().any(|r| {
                 r.card_id == card.id
-                    && matches!(r.state.as_str(), "queued" | "starting" | "unknown")
+                    && matches!(
+                        r.state.as_str(),
+                        "queued" | "starting" | "running" | "working" | "unknown"
+                    )
             });
-            (card, project, run, has_pending_requests)
+            let now_ms = now();
+            let settling_agent = db.list::<Attempt>()?.into_iter().any(|a| {
+                if a.card_id != card.id || a.terminal.is_none() || a.agent_stopped() {
+                    return false;
+                }
+                if a.connection_state != "connected" {
+                    return false;
+                }
+                let anchor = a
+                    .completed_at
+                    .max(Some(run.updated_at))
+                    .unwrap_or(a.created_at);
+                now_ms.saturating_sub(anchor) < Self::DELIVERY_AGENT_SETTLE_MS
+            });
+            (card, project, run, has_pending_requests, settling_agent)
         };
         let config = self.config();
         if card.hold_auto_merge {
@@ -318,7 +340,7 @@ impl AppServer {
             self.emit("application", Some(card.id));
             return Ok(());
         }
-        if has_pending_requests {
+        if has_pending_requests || settling_agent {
             return Ok(());
         }
         let _merging = self.track_merging(&card.id);
@@ -988,9 +1010,17 @@ impl AppServer {
             return Ok(saved);
         };
 
-        let prompt = format!(
-            "You are assisting with a code review in repository `{}` (directory: `{}`).\n\nPlease inspect the relevant files, address or respond to each review item below, and summarize your changes.\n\n{}",
-            project.name, cwd, formatted_review
+        let prompt = canban_context::render_template(
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../prompts/runtime/review_assist.txt"
+            ))
+            .trim_end(),
+            &[
+                ("project_name", &project.name),
+                ("cwd", &cwd),
+                ("formatted_review", formatted_review),
+            ],
         );
         let client = canban_herdr::Client {
             config: self.config(),

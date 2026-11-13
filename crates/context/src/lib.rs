@@ -1,10 +1,56 @@
 use anyhow::{Result, ensure};
-use canban_types::{Artifact, Card, Project, Request, Snapshot, id};
+use canban_types::{Artifact, Card, Project, Request, RequestTrigger, Snapshot, id};
 use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+
+const REPORTING_TASK_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../prompts/context/reporting_task.txt"
+));
+const REPORTING_COMMENT_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../prompts/context/reporting_comment.txt"
+));
+const REPORTING_INTERACTIVE_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../prompts/context/reporting_interactive.txt"
+));
+const PENDING_QUESTION_ITEM_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../prompts/context/pending_question_item.txt"
+));
+const GITHUB_SOURCE_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../prompts/context/github_source.txt"
+));
+
+pub fn render_template(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len() + 64);
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + 2..];
+        if let Some(end) = after_open.find("}}") {
+            let key = &after_open[..end];
+            if let Some((_, val)) = vars.iter().find(|(k, _)| *k == key) {
+                out.push_str(val);
+            } else {
+                out.push_str("{{");
+                out.push_str(key);
+                out.push_str("}}");
+            }
+            rest = &after_open[end + 2..];
+        } else {
+            out.push_str(&rest[start..]);
+            rest = "";
+        }
+    }
+    out.push_str(rest);
+    out
+}
 pub fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -184,23 +230,42 @@ pub fn capture_for(
         }
     }
 
+    let cli_quoted = shell_quote(&cli.to_string_lossy());
     if let Some(source) = github_source {
-        prompt.push_str(&format!(
-            "\n## GitHub source ({}#{})\n{}\nFetch remote details on demand with: {} call github.context {}\n",
-            source.repository,
-            source.number,
-            source.url,
-            shell_quote(&cli.to_string_lossy()),
-            shell_quote(&serde_json::json!({"card_id": card.id}).to_string())
+        let number = source.number.to_string();
+        let params = shell_quote(&serde_json::json!({"card_id": card.id}).to_string());
+        prompt.push('\n');
+        prompt.push_str(&render_template(
+            GITHUB_SOURCE_TEMPLATE,
+            &[
+                ("repository", &source.repository),
+                ("number", &number),
+                ("url", &source.url),
+                ("cli", &cli_quoted),
+                ("params", &params),
+            ],
         ));
     }
 
-    prompt.push_str(&format!(
-        "\n## Reporting\nReport your outcome via CLI (never edit `canban.sqlite` or move/archive the Card directly):\nCANBAN_ENDPOINT={} CANBAN_REQUEST_ID={} CANBAN_ATTEMPT={} {} report --state <completed|backlog|blocked|failed> --message 'Concise summary' [--file \"$CANBAN_RUN_DIR/report.md\"]\n- `completed`: task finished (stage and `git commit` deliverable repository changes on the Card branch first; do not push unless instructed).\n- `backlog`: Card is already implemented, obsolete, or not actionable right now — returns the Card to Backlog and posts your `--message` / `--file` explanation on the Card.\n- `blocked`: waiting on human clarification or decision (`working` is also accepted for interim progress; `failed` for unrecoverable errors).\nKeep temporary or report files under `$CANBAN_RUN_DIR`, outside the repository worktree.\n",
-        shell_quote(endpoint),
-        shell_quote(&req.id),
-        attempt,
-        shell_quote(&cli.to_string_lossy())
+    let reporting_template = match &req.trigger {
+        RequestTrigger::Comment { .. } => REPORTING_COMMENT_TEMPLATE,
+        RequestTrigger::Interactive => REPORTING_INTERACTIVE_TEMPLATE,
+        RequestTrigger::Workflow | RequestTrigger::StageEntry | RequestTrigger::Custom(_) => {
+            REPORTING_TASK_TEMPLATE
+        }
+    };
+    let endpoint_quoted = shell_quote(endpoint);
+    let req_quoted = shell_quote(&req.id);
+    let attempt_str = attempt.to_string();
+    prompt.push('\n');
+    prompt.push_str(&render_template(
+        reporting_template,
+        &[
+            ("endpoint", &endpoint_quoted),
+            ("request_id", &req_quoted),
+            ("attempt", &attempt_str),
+            ("cli", &cli_quoted),
+        ],
     ));
 
     if let Some(instruction) = req
@@ -214,15 +279,20 @@ pub fn capture_for(
         prompt.push_str(instruction);
         prompt.push('\n');
     }
-    if !questions.is_empty() {
+    // Comment-triggered requests exist solely to answer the comment via a single `report`
+    // call; only non-comment assignments render separate `canban reply` items.
+    if !req.trigger.is_comment() && !questions.is_empty() {
         prompt.push_str("\n## Pending questions\n");
         for q in questions {
-            prompt.push_str(&format!(
-                "- Question ID `{}`: {}\n  Reply with: {} reply --to {} --file \"$CANBAN_RUN_DIR/answer.md\" (a reply does not complete the assignment).\n",
-                q.id,
-                q.body.trim(),
-                shell_quote(&cli.to_string_lossy()),
-                shell_quote(&q.id)
+            let qid_quoted = shell_quote(&q.id);
+            prompt.push_str(&render_template(
+                PENDING_QUESTION_ITEM_TEMPLATE,
+                &[
+                    ("question_id", &q.id),
+                    ("question_body", q.body.trim()),
+                    ("cli", &cli_quoted),
+                    ("question_id_quoted", &qid_quoted),
+                ],
             ));
         }
     }

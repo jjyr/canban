@@ -1,0 +1,1 @@
+Run pre-merge checks and tests in the working directory, verify there are no blockers or unintended changes, and summarize readiness in your report.

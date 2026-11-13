@@ -1,0 +1,3 @@
+## GitHub source ({{repository}}#{{number}})
+{{url}}
+Fetch remote details on demand with: {{cli}} call github.context {{params}}
