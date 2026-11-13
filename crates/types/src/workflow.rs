@@ -48,6 +48,8 @@ pub enum WorkflowStep {
     },
     Deliver {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         target_branch: Option<String>,
         #[serde(default = "default_sync_upstream", skip_serializing_if = "is_true")]
         sync_upstream: bool,
@@ -55,8 +57,8 @@ pub enum WorkflowStep {
         next: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rework: Option<String>,
-        /// Automatic merge-conflict hand-offs to `rework` per run before pausing for a human.
-        /// `0` disables automatic conflict rework.
+        /// Automatic merge-conflict hand-offs to `@merger` (or `profile`) per run before
+        /// pausing for a human. `0` disables automatic conflict resolution.
         #[serde(
             default = "default_max_conflict_attempts",
             skip_serializing_if = "is_default_max_conflict_attempts"

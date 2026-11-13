@@ -86,9 +86,17 @@ pub fn validate_definition(
                 }
             }
             WorkflowStep::Deliver {
-                rework: Some(to), ..
+                profile, rework, ..
             } => {
-                ensure!(flow.steps.contains_key(to), "Unknown rework target {to}");
+                if let Some(profile) = profile {
+                    ensure!(
+                        profiles.contains(profile),
+                        "Unknown agent @{profile} at {id}"
+                    );
+                }
+                if let Some(to) = rework {
+                    ensure!(flow.steps.contains_key(to), "Unknown rework target {to}");
+                }
             }
             WorkflowStep::Admit {
                 agent_slot,

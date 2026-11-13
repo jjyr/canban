@@ -288,15 +288,27 @@ pub fn migrate(value: &mut Value) -> Result<bool> {
         if let Some((old_role, new_role)) = match p["id"].as_str() {
             Some("developer") => Some((
                 "You are the Card's development Agent. Implement the agreed task, preserve relevant project conventions, and explain your changes and validation.",
-                "You are the Card's development Agent. Follow repository conventions and verify changes before finishing.",
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../prompts/profiles/role_developer.txt"
+                ))
+                .trim_end(),
             )),
             Some("reviewer") => Some((
                 "You are the Card's independent review Agent. Inspect the actual changes critically, identify correctness issues and missing validation, and report findings. Do not implement changes unless explicitly asked.",
-                "You are the Card's independent review Agent. Critically inspect changes and test coverage without making unrequested edits.",
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../prompts/profiles/role_reviewer.txt"
+                ))
+                .trim_end(),
             )),
             Some("planner") => Some((
                 "You are the Card's planning Agent. Analyze the task and relevant repository files in read-only mode, identify risks, and write a concise implementation plan without modifying source files.",
-                "You are the Card's planning Agent. Inspect repository files in read-only mode without modifying source files.",
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../prompts/profiles/role_planner.txt"
+                ))
+                .trim_end(),
             )),
             _ => None,
         } && p["role_instruction"].as_str().map(str::trim) == Some(old_role)
@@ -357,6 +369,44 @@ pub fn migrate(value: &mut Value) -> Result<bool> {
         }
         p.as_object_mut().unwrap().remove("provider");
         p.as_object_mut().unwrap().remove("template");
+        changed = true;
+    }
+
+    // Upgrade pre-@merger configs that already have the three built-in role identities
+    // (`developer`, `reviewer`, `planner`) so `@merger` appears automatically in Agent settings,
+    // Project Agent overrides, and Queue Merge conflict resolution without losing the user's
+    // configured engine.
+    let profiles = value["profiles"]
+        .as_array_mut()
+        .context("profiles must be an array")?;
+    let has_merger = profiles.iter().any(|p| p["id"].as_str() == Some("merger"));
+    let has_legacy_builtin_roles = ["developer", "reviewer", "planner"]
+        .iter()
+        .all(|id| profiles.iter().any(|p| p["id"].as_str() == Some(*id)));
+    if !has_merger && has_legacy_builtin_roles {
+        let dev = profiles
+            .iter()
+            .find(|p| p["id"].as_str() == Some("developer"));
+        let preset = dev
+            .and_then(|p| p["preset"].as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("codex")
+            .to_owned();
+        let enabled = dev.and_then(|p| p["enabled"].as_bool()).unwrap_or(true);
+        let mut merger = json!({
+            "id": "merger",
+            "identity": true,
+            "preset": preset,
+            "role_instruction": include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../prompts/profiles/role_merger.txt"
+            ))
+            .trim_end(),
+        });
+        if !enabled {
+            merger["enabled"] = json!(false);
+        }
+        profiles.push(merger);
         changed = true;
     }
     Ok(changed)
@@ -530,6 +580,43 @@ pub fn command(
         i += 1;
     }
     Ok(final_args)
+}
+
+fn strip_prompt_args(raw: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if i > 0 {
+            if matches!(
+                raw[i].as_str(),
+                "-i" | "--prompt" | "--prompt-interactive" | "-p" | "--print"
+            ) && i + 1 < raw.len()
+                && raw[i + 1].contains("{prompt}")
+            {
+                i += 2;
+                continue;
+            }
+            if raw[i].contains("{prompt}") {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(raw[i].clone());
+        i += 1;
+    }
+    out
+}
+
+/// Expand an interactive CLI Agent command with no initial prompt and no Resume binding.
+pub fn interactive_command(
+    profile: &Profile,
+    session: Option<&str>,
+    vars: &[(&str, &str)],
+) -> Result<Vec<String>> {
+    let mut clean = profile.clone();
+    clean.argv = Some(strip_prompt_args(profile.command()));
+    clean.resume_argv = None;
+    command(&clean, session, true, vars)
 }
 
 #[cfg(test)]
@@ -856,6 +943,114 @@ mod tests {
         assert_eq!(dev_on_agy.model.as_deref(), Some("gemini-4-carbon-high"));
         assert_eq!(dev_on_agy.effort.as_deref(), Some("high"));
     }
+    #[test]
+    fn interactive_command_strips_prompt_flags_and_never_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.profiles.push(Profile {
+            id: "agy".into(),
+            preset: Some("agy".into()),
+            model: Some("gemini-4-carbon-high".into()),
+            effort: Some("high".into()),
+            ..Default::default()
+        });
+        cfg.profiles.push(Profile {
+            id: "gemini".into(),
+            preset: Some("gemini".into()),
+            ..Default::default()
+        });
+        cfg.profiles.push(Profile {
+            id: "opencode".into(),
+            preset: Some("opencode".into()),
+            ..Default::default()
+        });
+        cfg.profiles.push(Profile {
+            id: "copilot".into(),
+            preset: Some("copilot".into()),
+            ..Default::default()
+        });
+        cfg.profiles.push(Profile {
+            id: "tpl".into(),
+            preset: Some("herdr:my-tpl".into()),
+            ..Default::default()
+        });
+        let cfg = resolve(cfg, dir.path()).unwrap();
+
+        let dev = cfg.profiles.iter().find(|p| p.id == "developer").unwrap();
+        let codex_args = interactive_command(
+            dev,
+            Some("ignored-resume-id"),
+            &[("home", "/tmp/home"), ("cwd", "/tmp/worktree")],
+        )
+        .unwrap();
+        assert_eq!(codex_args[0], "codex");
+        assert!(
+            !codex_args
+                .iter()
+                .any(|a| a == "resume" || a.is_empty() || a.contains("{prompt}"))
+        );
+
+        let claude = cfg.profiles.iter().find(|p| p.id == "claude").unwrap();
+        let claude_args = interactive_command(
+            claude,
+            Some("11111111-2222-3333-4444-555555555555"),
+            &[("home", "/tmp/home")],
+        )
+        .unwrap();
+        assert_eq!(
+            claude_args,
+            vec![
+                "claude",
+                "--session-id",
+                "11111111-2222-3333-4444-555555555555"
+            ]
+        );
+
+        let agy = cfg.profiles.iter().find(|p| p.id == "agy").unwrap();
+        let agy_args = interactive_command(
+            agy,
+            Some("conv-1"),
+            &[
+                ("home", "/tmp/home"),
+                ("cwd", "/tmp/wt"),
+                ("project_dir", "/tmp/repo"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(agy_args[0], "agy");
+        assert!(
+            !agy_args
+                .iter()
+                .any(|a| a == "-i" || a == "--conversation" || a.contains("{prompt}"))
+        );
+        assert!(agy_args.iter().any(|a| a == "--settings"));
+        assert!(
+            agy_args
+                .windows(2)
+                .any(|w| w == ["--model", "gemini-4-carbon-high"])
+        );
+
+        for (id, forbidden) in [
+            ("gemini", "-i"),
+            ("opencode", "--prompt"),
+            ("copilot", "-i"),
+        ] {
+            let p = cfg.profiles.iter().find(|p| p.id == id).unwrap();
+            let args = interactive_command(p, Some("sess-1"), &[("home", "/tmp/home")]).unwrap();
+            assert!(!args.iter().any(|a| a == forbidden
+                || a == "--resume"
+                || a == "--session"
+                || a.contains("{prompt}")));
+        }
+
+        let tpl = cfg.profiles.iter().find(|p| p.id == id_or("tpl")).unwrap();
+        let tpl_args = interactive_command(tpl, None, &[]).unwrap();
+        assert_eq!(tpl_args, vec!["my-tpl"]);
+    }
+
+    fn id_or(s: &str) -> &str {
+        s
+    }
 
     #[test]
     fn migrate_upgrades_unmodified_builtin_role_instructions_and_preserves_custom_ones() {
@@ -893,6 +1088,36 @@ mod tests {
             Some("Custom security-focused reviewer prompt.")
         );
         assert!(!migrate(&mut legacy).unwrap());
+    }
+
+    #[test]
+    fn migrate_adds_builtin_merger_role_inheriting_developer_engine_for_existing_configs() {
+        let mut onboarded = json!({
+            "onboarded": true,
+            "default_agent": "developer",
+            "profiles": [
+                { "id": "agy", "preset": "agy", "enabled": true },
+                { "id": "developer", "preset": "agy", "identity": true, "role_instruction": "Dev" },
+                { "id": "reviewer", "preset": "agy", "identity": true, "role_instruction": "Rev" },
+                { "id": "planner", "preset": "agy", "identity": true, "role_instruction": "Plan" }
+            ]
+        });
+        assert!(migrate(&mut onboarded).unwrap());
+        let profiles = onboarded["profiles"].as_array().unwrap();
+        let merger = profiles
+            .iter()
+            .find(|p| p["id"].as_str() == Some("merger"))
+            .expect("@merger added by migration");
+        assert_eq!(merger["identity"], json!(true));
+        assert_eq!(merger["preset"], json!("agy"));
+        assert!(
+            merger["role_instruction"]
+                .as_str()
+                .unwrap()
+                .contains("merge queue Agent")
+        );
+        // Idempotent on second pass.
+        assert!(!migrate(&mut onboarded).unwrap());
     }
 }
 

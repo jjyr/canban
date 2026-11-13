@@ -3,12 +3,12 @@ use super::*;
 ///
 /// Layout (rows appear only when they have content):
 /// ```text
-/// #16  Title wraps beside the number            (3) [bot]
+/// #16  Title wraps beside the number            (3) [>_]
 /// GitHub Issue #12 · open · by author
 /// First body line, truncated
 /// Needs review  ⎇ branch            [((●)) ✦ @developer]
 /// ```
-/// The hover robot sends the Card to the default Agent; a running Agent pill
+/// The hover terminal button opens this Card's quick terminal; a running Agent pill
 /// pulses and opens that Agent's live terminal.
 pub fn card_tile(ui: Ui, card: Card) -> View {
     let reminder_id = card.id.clone();
@@ -17,9 +17,11 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
             .with(|all| all.get(&reminder_id).copied().unwrap_or_default())
     });
     let selected_id = card.id.clone();
-    let agent_card = card.id.clone();
+    let terminal_card = card.id.clone();
+    let card_number = card.number;
     let archive_card = card.clone();
     let snapshot = ui.snapshot.get_untracked();
+    let has_terminal = !crate::terminals::card_live_entries(&snapshot, &card.id).is_empty();
     let hovered = signal(false);
     let active = card.active();
     let merged = card.merged();
@@ -86,10 +88,17 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
                     ))
                     // Space stays reserved so hovering never rewraps the title.
                     .child(when(
-                        move || active,
+                        move || active || has_terminal,
                         move || {
-                            send_button(ui, agent_card.clone())
-                                .opacity(move || if hovered.get() { 1.0_f32 } else { 0.0_f32 })
+                            terminal_button(ui, terminal_card.clone(), card_number).opacity(
+                                move || {
+                                    if has_terminal || hovered.get() {
+                                        1.0_f32
+                                    } else {
+                                        0.0_f32
+                                    }
+                                },
+                            )
                         },
                     )),
             ),
@@ -196,11 +205,13 @@ fn archive_button(ui: Ui, card: Card) -> View {
     .h(px(22.))
 }
 
-/// Hover entry: open the default Agent's conversation with this Card.
-fn send_button(ui: Ui, card: String) -> View {
-    chrome_button(Icon::Agent, "Send to Agent", move |_| {
-        crate::sessions::send_card(ui, &card)
-    })
+/// Hover entry: open this Card's quick terminal view directly.
+fn terminal_button(ui: Ui, card: String, number: u64) -> View {
+    chrome_button(
+        Icon::Terminal,
+        format!("Open Terminal for Card #{number}"),
+        move |_| crate::terminals::open_card_quick(ui, &card),
+    )
     .w(px(22.))
     .h(px(22.))
 }

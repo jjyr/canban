@@ -1,9 +1,8 @@
-//! One reusable Card/profile entry and native terminal screen.
+//! Shared default Agent profile lookup and Card session helpers.
 use crate::presenter::*;
 use serde_json::json;
 
-/// Explicit Start/Resume intent shared by Card components. A late operation
-/// receipt updates saved state without redirecting a user who has navigated away.
+/// Explicit Start/Resume intent for a specific Card/profile conversation.
 pub fn open(ui: Ui, card: String, profile: String) {
     if ui.pending.get_untracked() {
         return;
@@ -49,7 +48,7 @@ pub fn open(ui: Ui, card: String, profile: String) {
 }
 
 /// The configured default Agent, falling back to `developer` and then the first
-/// enabled profile. Shared by every "Send to Agent" entry and review submission.
+/// enabled profile. Shared by standalone worktree launches and review submission.
 pub fn default_profile(ui: Ui) -> String {
     let def = ui.default_agent.get_untracked();
     ui.profiles
@@ -70,8 +69,17 @@ pub fn default_profile(ui: Ui) -> String {
         })
 }
 
-/// "Send to Agent": open (or resume/start) the default Agent's conversation for
-/// this Card. A new conversation receives the Card context manifest.
+/// Open a clean ephemeral interactive Agent CLI on this Card without injecting
+/// a workflow prompt or resuming a historical session.
 pub fn send_card(ui: Ui, card: &str) {
-    open(ui, card.to_owned(), default_profile(ui));
+    let Some(c) = ui
+        .snapshot
+        .with_untracked(|s| s.cards.iter().find(|c| c.id == card).cloned())
+    else {
+        return;
+    };
+    if ui.page.get_untracked() != "card" || ui.card.get_untracked() != c.id {
+        ui.open_card(c.id.clone());
+    }
+    crate::terminals::create_in_card(ui, c.project_id, c.id, true);
 }

@@ -101,23 +101,40 @@ pub fn tab(e: &Entry) -> View {
             .min_w(px(0.))
             .child(label(e.title()).w_full().truncate())
     };
-    let mut content = view()
-        .flex_1()
-        .min_w(px(0.))
-        .overflow_hidden()
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .child(title);
     if e.agent.is_some() {
-        content = content
+        view()
+            .flex_1()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(title)
             .child(
                 muted(e.stage.clone().unwrap_or_default())
                     .w(px(stage_width(e)))
                     .flex_shrink_0()
                     .truncate(),
             )
-            .child(provider(e).w(px(profile_width(e))).flex_shrink_0());
+            .child(provider(e).w(px(profile_width(e))).flex_shrink_0())
+    } else if let Some((mark, _)) = e.provider() {
+        view()
+            .flex_1()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0())
+            .child(title)
+    } else {
+        view()
+            .flex_1()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(title)
     }
-    content
 }

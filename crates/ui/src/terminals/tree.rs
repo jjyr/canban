@@ -34,7 +34,23 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
         .flex_row()
         .items_start()
         .gap_2()
-        .child(title);
+        .child(
+            if e.agent.is_none()
+                && let Some((mark, _)) = e.provider()
+            {
+                view()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0())
+                    .child(title)
+                    .into_element()
+            } else {
+                title.into_element()
+            },
+        );
     if e.agent.is_some() {
         let stage = muted(e.stage.clone().unwrap_or_default())
             .w(px(super::labels::stage_width(&e)))

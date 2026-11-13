@@ -138,7 +138,10 @@ fn step_model(
     titles: &BTreeMap<String, String>,
     _col_names: &BTreeMap<String, String>,
 ) -> StepModel {
-    let title = titles.get(&step.id).cloned().unwrap_or_else(|| step.id.clone());
+    let title = titles
+        .get(&step.id)
+        .cloned()
+        .unwrap_or_else(|| step.id.clone());
     let profile = with_str(step, "profile").unwrap_or("").to_owned();
     let raw_instruction = with_str(step, "instruction").unwrap_or("");
     let is_default = is_default_step_prompt(&step.id, Some(&profile), raw_instruction);
@@ -174,7 +177,10 @@ fn step_model(
         with_str(step, "pointer").unwrap_or("/input"),
         step.with
             .get("equals")
-            .map(|v| v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string()))
+            .map(|v| v
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| v.to_string()))
             .unwrap_or_default()
     );
     let (icon, tint, badge, summary) = match step.uses.as_str() {
@@ -185,7 +191,11 @@ fn step_model(
                 Tint::Accent,
                 format!(
                     "@{}{}",
-                    if profile.is_empty() { "default" } else { &profile },
+                    if profile.is_empty() {
+                        "default"
+                    } else {
+                        &profile
+                    },
                     if custom { " · custom" } else { "" }
                 ),
                 instruction
@@ -216,20 +226,41 @@ fn step_model(
                 .unwrap_or("Pause for human approval")
                 .to_owned(),
         ),
-        "deliver" => (
-            Icon::Branch,
-            Tint::Success,
-            if sync_upstream { "Merge · Sync" } else { "Merge · Local" }.into(),
-            format!(
-                "{}{} · conflicts → Agent ×{max_conflict}",
-                if target_branch.is_empty() {
-                    "Project branch".to_owned()
+        "deliver" => {
+            let conflict_agent = if profile.is_empty() {
+                "merger"
+            } else {
+                profile.as_str()
+            };
+            let conflict_summary = if max_conflict == 0 {
+                "conflicts → human".to_owned()
+            } else {
+                format!("conflicts → @{conflict_agent} ×{max_conflict}")
+            };
+            (
+                Icon::Branch,
+                Tint::Success,
+                if sync_upstream {
+                    "Merge · Sync"
                 } else {
-                    target_branch.clone()
-                },
-                if sync_upstream { " + upstream" } else { " (local)" }
-            ),
-        ),
+                    "Merge · Local"
+                }
+                .into(),
+                format!(
+                    "{}{} · {conflict_summary}",
+                    if target_branch.is_empty() {
+                        "Project branch".to_owned()
+                    } else {
+                        target_branch.clone()
+                    },
+                    if sync_upstream {
+                        " + upstream"
+                    } else {
+                        " (local)"
+                    }
+                ),
+            )
+        }
         "condition" => (
             Icon::Trigger,
             Tint::Attention,
@@ -242,19 +273,22 @@ fn step_model(
             "Notify".into(),
             with_str(step, "message").unwrap_or("").to_owned(),
         ),
-        "card.move" => (
-            Icon::Forward,
-            Tint::Accent,
-            "Move".into(),
-            title.clone(),
+        "card.move" => (Icon::Forward, Tint::Accent, "Move".into(), title.clone()),
+        other => (
+            Icon::Info,
+            Tint::Muted,
+            other.to_owned(),
+            "Workflow step".into(),
         ),
-        other => (Icon::Info, Tint::Muted, other.to_owned(), "Workflow step".into()),
     };
     let mut pills = Vec::new();
     if let Some(rework) = &step.on_changes_requested {
         pills.push(format!(
             "↺ Rework → {}",
-            titles.get(rework).cloned().unwrap_or_else(|| rework.clone())
+            titles
+                .get(rework)
+                .cloned()
+                .unwrap_or_else(|| rework.clone())
         ));
     }
     if step.uses == "condition" {
@@ -384,13 +418,17 @@ fn build_model(doc: &Document) -> GraphModel {
 }
 
 fn default_columns() -> Vec<WorkflowColumn> {
-    [("backlog", "Backlog"), ("develop", "Develop"), ("review", "Review")]
-        .into_iter()
-        .map(|(id, name)| WorkflowColumn {
-            id: id.into(),
-            name: name.into(),
-        })
-        .collect()
+    [
+        ("backlog", "Backlog"),
+        ("develop", "Develop"),
+        ("review", "Review"),
+    ]
+    .into_iter()
+    .map(|(id, name)| WorkflowColumn {
+        id: id.into(),
+        name: name.into(),
+    })
+    .collect()
 }
 
 fn short_workflow_id(id: &str) -> String {
@@ -661,24 +699,34 @@ fn stage_canvas(ctx: Ctx) -> AnyElement {
         .items_center()
         .gap_2()
         .child(field(state.new_column_name, "New stage (e.g. QA)…").w(px(170.)))
-        .child(compact_action("+ Add stage", Variant::Secondary, move |_| {
-            let name = state.new_column_name.get_untracked();
-            if name.trim().is_empty() {
-                return;
-            }
-            state.new_column_name.set(String::new());
-            ctx.edit(move |d| {
-                // New stages go before the last column (usually Review).
-                let before = (d.columns.len() > 1).then(|| d.columns.last().unwrap().id.clone());
-                stages::add_column(d, &name, before.as_deref()).map(|_| ())
-            });
-        }));
+        .child(compact_action(
+            "+ Add stage",
+            Variant::Secondary,
+            move |_| {
+                let name = state.new_column_name.get_untracked();
+                if name.trim().is_empty() {
+                    return;
+                }
+                state.new_column_name.set(String::new());
+                ctx.edit(move |d| {
+                    // New stages go before the last column (usually Review).
+                    let before =
+                        (d.columns.len() > 1).then(|| d.columns.last().unwrap().id.clone());
+                    stages::add_column(d, &name, before.as_deref()).map(|_| ())
+                });
+            },
+        ));
 
-    let lanes_row = view().flex_row().items_stretch().gap_2p5().flex_1().child(each(
-        move || graph.with(|g| g.lanes.clone()),
-        |lane| lane.id.clone(),
-        move |lane, _| stage_lane(ctx, lane),
-    ));
+    let lanes_row = view()
+        .flex_row()
+        .items_stretch()
+        .gap_2p5()
+        .flex_1()
+        .child(each(
+            move || graph.with(|g| g.lanes.clone()),
+            |lane| lane.id.clone(),
+            move |lane, _| stage_lane(ctx, lane),
+        ));
 
     panel()
         .gap_3()
@@ -753,9 +801,7 @@ fn drop_line(ctx: Ctx, lane: String, after: Option<String>) -> impl IntoElement 
 fn stage_lane(ctx: Ctx, lane: ReadSignal<LaneModel>) -> impl IntoElement {
     let lane_id = lane.with_untracked(|l| l.id.clone());
     let lane_ref = element_ref();
-    ctx.drag
-        .lanes
-        .with(|m| m.insert(lane_id.clone(), lane_ref));
+    ctx.drag.lanes.with(|m| m.insert(lane_id.clone(), lane_ref));
 
     let (id_rename, id_confirm, id_left, id_right, id_del, id_add) = (
         lane_id.clone(),
@@ -792,7 +838,10 @@ fn stage_lane(ctx: Ctx, lane: ReadSignal<LaneModel>) -> impl IntoElement {
                         .bg(SURFACE)
                         .border_1()
                         .border_color(BORDER)
-                        .child(muted(move || format!("{}", lane.with(|l| l.index) + 1)).text_size(px(11.))),
+                        .child(
+                            muted(move || format!("{}", lane.with(|l| l.index) + 1))
+                                .text_size(px(11.)),
+                        ),
                 )
                 .child(when(
                     move || !renaming.get(),
@@ -826,14 +875,10 @@ fn stage_lane(ctx: Ctx, lane: ReadSignal<LaneModel>) -> impl IntoElement {
                             .flex_row()
                             .items_center()
                             .gap_1()
-                            .child(
-                                field(ctx.rename_text, "Stage name")
-                                    .w(px(130.))
-                                    .on_submit({
-                                        let commit = commit.clone();
-                                        move |_: &str| commit()
-                                    }),
-                            )
+                            .child(field(ctx.rename_text, "Stage name").w(px(130.)).on_submit({
+                                let commit = commit.clone();
+                                move |_: &str| commit()
+                            }))
                             .child(compact_action("Save", Variant::Primary, move |_| commit()))
                     },
                 )),
@@ -1125,9 +1170,11 @@ fn step_card(ctx: Ctx, node: ReadSignal<StepModel>, lane_id: String) -> impl Int
                 .gap_1p5()
                 .min_w(px(0.))
                 .child(
-                    icon_tinted(node.with_untracked(|n| n.icon), move || node.with(|n| n.tint.color()))
-                        .w(px(14.))
-                        .h(px(14.)),
+                    icon_tinted(node.with_untracked(|n| n.icon), move || {
+                        node.with(|n| n.tint.color())
+                    })
+                    .w(px(14.))
+                    .h(px(14.)),
                 )
                 .child(
                     label(move || node.with(|n| n.title.clone()))
@@ -1140,7 +1187,13 @@ fn step_card(ctx: Ctx, node: ReadSignal<StepModel>, lane_id: String) -> impl Int
         );
 
     let toggle = compact_action(
-        move || if node.with(|n| n.enabled) { "On" } else { "Off" },
+        move || {
+            if node.with(|n| n.enabled) {
+                "On"
+            } else {
+                "Off"
+            }
+        },
         Variant::Quiet,
         move |_| {
             let id = id_toggle.clone();
@@ -1214,12 +1267,19 @@ fn step_card(ctx: Ctx, node: ReadSignal<StepModel>, lane_id: String) -> impl Int
                             .bg(INSET)
                             .border_1()
                             .border_color(BORDER)
-                            .child(label(move || pill.get()).text_size(px(11.)).text_color(MUTED))
+                            .child(
+                                label(move || pill.get())
+                                    .text_size(px(11.))
+                                    .text_color(MUTED),
+                            )
                     },
                 ))
             },
         ))
-        .child(when(move || expanded.get(), move || step_settings(ctx, node)));
+        .child(when(
+            move || expanded.get(),
+            move || step_settings(ctx, node),
+        ));
 
     view()
         .w_full()
@@ -1288,18 +1348,20 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
     let ui = ctx.ui;
     let model = node.get_untracked();
     let id = model.id.clone();
-    let mut form = view()
-        .gap_2()
-        .pt_1p5()
-        .border_t_1()
-        .border_color(BORDER);
+    let mut form = view().gap_2().pt_1p5().border_t_1().border_color(BORDER);
 
     form = form.child(setting_row(
         "Name",
-        text_setting(ctx, id.clone(), model.name.clone(), "Display name", |ctx, id, v| {
-            let id = id.to_owned();
-            ctx.edit(move |d| stages::set_step_name(d, &id, Some(v)));
-        }),
+        text_setting(
+            ctx,
+            id.clone(),
+            model.name.clone(),
+            "Display name",
+            |ctx, id, v| {
+                let id = id.to_owned();
+                ctx.edit(move |d| stages::set_step_name(d, &id, Some(v)));
+            },
+        ),
     ));
 
     let rework = {
@@ -1312,11 +1374,17 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                 options.extend(targets.into_iter().map(|(tid, title)| (title, tid)));
                 let id = id.clone();
                 setting_row(
-                    "Rework / conflicts →",
-                    choice(options, move || node.with(|n| n.rework.clone()), move |t: String| {
-                        let id = id.clone();
-                        ctx.edit(move |d| stages::set_rework(d, &id, Some(t).filter(|t| !t.is_empty())));
-                    }),
+                    "Rework →",
+                    choice(
+                        options,
+                        move || node.with(|n| n.rework.clone()),
+                        move |t: String| {
+                            let id = id.clone();
+                            ctx.edit(move |d| {
+                                stages::set_rework(d, &id, Some(t).filter(|t| !t.is_empty()))
+                            });
+                        },
+                    ),
                 )
             })
         }
@@ -1331,8 +1399,10 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                     let mut seg = view().flex_row().flex_wrap().gap_1();
                     for prof in profiles {
                         let (sel, chosen) = (prof.id.clone(), prof.id.clone());
-                        let (mark, _, _) =
-                            crate::profiles::effective_provider(&prof, ui.current_project().as_ref());
+                        let (mark, _, _) = crate::profiles::effective_provider(
+                            &prof,
+                            ui.current_project().as_ref(),
+                        );
                         let pid = pid.clone();
                         seg = seg.child(compact_segment(
                             format!("@{}", prof.id),
@@ -1341,21 +1411,20 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                             move |_| ctx.set_with(&pid, "profile", Some(json!(chosen.clone()))),
                         ));
                     }
-                    view().gap_1().child(muted("Agent").text_size(px(12.))).child(seg)
+                    view()
+                        .gap_1()
+                        .child(muted("Agent").text_size(px(12.)))
+                        .child(seg)
                 }))
                 .child(
-                    view()
-                        .p_2()
-                        .rounded(px(RADIUS))
-                        .bg(INSET)
-                        .child(
-                            muted(move || {
-                                node.with(|n| {
-                                    n.instruction.lines().take(4).collect::<Vec<_>>().join("\n")
-                                })
+                    view().p_2().rounded(px(RADIUS)).bg(INSET).child(
+                        muted(move || {
+                            node.with(|n| {
+                                n.instruction.lines().take(4).collect::<Vec<_>>().join("\n")
                             })
-                            .text_size(px(12.)),
-                        ),
+                        })
+                        .text_size(px(12.)),
+                    ),
                 )
                 .child({
                     let (open_id, reset_id) = (id.clone(), id.clone());
@@ -1363,9 +1432,11 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                         .flex_row()
                         .flex_wrap()
                         .gap_1()
-                        .child(compact_action("Edit prompt…", Variant::Primary, move |_| {
-                            ctx.prompt.set(open_id.clone())
-                        }))
+                        .child(compact_action(
+                            "Edit prompt…",
+                            Variant::Primary,
+                            move |_| ctx.prompt.set(open_id.clone()),
+                        ))
                         .child(when(
                             move || node.with(|n| !n.default_prompt),
                             move || {
@@ -1393,7 +1464,12 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                             let id = slot_id.clone();
                             let ready = node.with_untracked(|n| n.max_ready);
                             ctx.edit(move |d| {
-                                stages::set_step_with(d, &id, "agent_slot", (!on).then_some(json!(false)))?;
+                                stages::set_step_with(
+                                    d,
+                                    &id,
+                                    "agent_slot",
+                                    (!on).then_some(json!(false)),
+                                )?;
                                 // A gate needs at least one condition.
                                 if !on && ready.is_none() {
                                     stages::set_step_with(
@@ -1422,22 +1498,31 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                     let id = ready_id.clone();
                     setting_row(
                         "Keep ≤K ready in stage",
-                        choice(options, move || node.with(|n| n.max_ready), move |k: Option<u32>| {
-                            let id = id.clone();
-                            let slot = node.with_untracked(|n| n.agent_slot);
-                            ctx.edit(move |d| {
-                                stages::set_step_with(d, &id, "max_ready", k.map(|k| json!(k)))?;
-                                if k.is_none() && !slot {
-                                    stages::set_step_with(d, &id, "agent_slot", None)?;
-                                }
-                                Ok(())
-                            });
-                        }),
+                        choice(
+                            options,
+                            move || node.with(|n| n.max_ready),
+                            move |k: Option<u32>| {
+                                let id = id.clone();
+                                let slot = node.with_untracked(|n| n.agent_slot);
+                                ctx.edit(move |d| {
+                                    stages::set_step_with(
+                                        d,
+                                        &id,
+                                        "max_ready",
+                                        k.map(|k| json!(k)),
+                                    )?;
+                                    if k.is_none() && !slot {
+                                        stages::set_step_with(d, &id, "agent_slot", None)?;
+                                    }
+                                    Ok(())
+                                });
+                            },
+                        ),
                     )
                 }));
         }
         "deliver" => {
-            let (sync_id, conflict_id) = (id.clone(), id.clone());
+            let (sync_id, conflict_id, pid) = (id.clone(), id.clone(), id.clone());
             form = form
                 .child(setting_row(
                     "Upstream",
@@ -1461,7 +1546,7 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                     ),
                 ))
                 .child(setting_row(
-                    "Conflicts → Agent",
+                    "Conflict retries",
                     choice(
                         vec![
                             ("Off".into(), 0u32),
@@ -1474,11 +1559,53 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                             ctx.set_with(
                                 &conflict_id,
                                 "max_conflict_attempts",
-                                (k != canban_types::DEFAULT_MAX_CONFLICT_ATTEMPTS).then(|| json!(k)),
+                                (k != canban_types::DEFAULT_MAX_CONFLICT_ATTEMPTS)
+                                    .then(|| json!(k)),
                             )
                         },
                     ),
                 ))
+                .child(dynamic(move || {
+                    if node.with(|n| n.max_conflict == 0) {
+                        return view().into_element();
+                    }
+                    let profiles = ui.profiles.get();
+                    let mut seg = view().flex_row().flex_wrap().gap_1();
+                    for prof in profiles {
+                        let (sel, chosen) = (prof.id.clone(), prof.id.clone());
+                        let (mark, _, _) = crate::profiles::effective_provider(
+                            &prof,
+                            ui.current_project().as_ref(),
+                        );
+                        let pid = pid.clone();
+                        seg = seg.child(compact_segment(
+                            format!("@{}", prof.id),
+                            Some(mark),
+                            move || {
+                                node.with(|n| {
+                                    let active = if n.profile.is_empty() {
+                                        "merger"
+                                    } else {
+                                        n.profile.as_str()
+                                    };
+                                    active == sel
+                                })
+                            },
+                            move |_| {
+                                ctx.set_with(
+                                    &pid,
+                                    "profile",
+                                    (chosen != "merger").then(|| json!(chosen.clone())),
+                                )
+                            },
+                        ));
+                    }
+                    view()
+                        .gap_1()
+                        .child(muted("Conflict Agent").text_size(px(12.)))
+                        .child(seg)
+                        .into_element()
+                }))
                 .child(rework());
         }
         "approval" => {
@@ -1498,9 +1625,13 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
         "notify" => {
             form = form.child(setting_row(
                 "Message",
-                text_setting(ctx, id.clone(), model.message.clone(), "Notification text", |ctx, id, v| {
-                    ctx.set_with(id, "message", Some(json!(v)))
-                }),
+                text_setting(
+                    ctx,
+                    id.clone(),
+                    model.message.clone(),
+                    "Notification text",
+                    |ctx, id, v| ctx.set_with(id, "message", Some(json!(v))),
+                ),
             ));
         }
         "card.move" => {
@@ -1516,9 +1647,11 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                 let mid = mid.clone();
                 setting_row(
                     "Move to",
-                    choice(options, move || node.with(|n| n.move_column.clone()), move |c: String| {
-                        ctx.set_with(&mid, "column", Some(json!(c)))
-                    }),
+                    choice(
+                        options,
+                        move || node.with(|n| n.move_column.clone()),
+                        move |c: String| ctx.set_with(&mid, "column", Some(json!(c))),
+                    ),
                 )
             }));
         }
@@ -1579,9 +1712,20 @@ fn prompt_dialog(ctx: Ctx) -> impl IntoElement {
                     .gap_3()
                     .child(icon(Icon::Agent))
                     .child(heading(format!("Prompt · {}", model.title)))
-                    .child(badge(format!("@{}", if model.profile.is_empty() { "default" } else { &model.profile })))
+                    .child(badge(format!(
+                        "@{}",
+                        if model.profile.is_empty() {
+                            "default"
+                        } else {
+                            &model.profile
+                        }
+                    )))
                     .child(view().flex_1())
-                    .child(chrome_button(Icon::Close, "Close prompt editor", move |_| close())),
+                    .child(chrome_button(
+                        Icon::Close,
+                        "Close prompt editor",
+                        move |_| close(),
+                    )),
             )
             .child(
                 view()
@@ -1592,7 +1736,11 @@ fn prompt_dialog(ctx: Ctx) -> impl IntoElement {
                     .p_2()
                     .child(
                         editor
-                            .source(text, "Step Prompt", "Write the step instruction for the Agent…")
+                            .source(
+                                text,
+                                "Step Prompt",
+                                "Write the step instruction for the Agent…",
+                            )
                             .size_full(),
                     ),
             )
@@ -1608,12 +1756,9 @@ fn prompt_dialog(ctx: Ctx) -> impl IntoElement {
                     .child(action("Cancel", Variant::Quiet, move |_| close()))
                     .child(action("Apply", Variant::Primary, move |_| {
                         let value = text.get_untracked();
-                        let next_val = (!is_default_step_prompt(
-                            &save_id,
-                            Some(&apply_profile),
-                            &value,
-                        ))
-                        .then(|| json!(value));
+                        let next_val =
+                            (!is_default_step_prompt(&save_id, Some(&apply_profile), &value))
+                                .then(|| json!(value));
                         ctx.set_with(&save_id, "instruction", next_val);
                         close();
                     })),
@@ -1649,7 +1794,10 @@ mod tests {
         assert_eq!(g.lanes[1].exit_label, "Next stage · Review");
         let review: Vec<_> = g.lanes[2].nodes.iter().map(|n| n.uses.as_str()).collect();
         assert_eq!(review, ["condition", "approval", "deliver"]);
-        assert_eq!(g.lanes[2].nodes[1].branch.as_deref(), Some("If External PR check"));
+        assert_eq!(
+            g.lanes[2].nodes[1].branch.as_deref(),
+            Some("If External PR check")
+        );
         assert_eq!(g.lanes[2].nodes[2].branch.as_deref(), Some("Otherwise"));
         assert!(g.lanes[2].last);
     }
@@ -1658,7 +1806,8 @@ mod tests {
     fn custom_columns_and_disabled_steps_render_without_special_cases() {
         let g = model(|d| {
             stages::add_column(d, "QA", Some("review")).unwrap();
-            let id = stages::insert_step(d, "qa", None, stages::template("review").unwrap()).unwrap();
+            let id =
+                stages::insert_step(d, "qa", None, stages::template("review").unwrap()).unwrap();
             stages::set_exit(d, "qa", Exit::Next).unwrap();
             stages::set_step_enabled(d, &id, false).unwrap();
         });

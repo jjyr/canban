@@ -81,10 +81,15 @@ impl Ops {
                     .find_map(|l| l.strip_prefix("worktree "))
                     .context("Base checkout path missing")?;
                 let cwd = Path::new(path);
+                let base_status = self.r_checked(
+                    cwd,
+                    &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+                )?;
                 ensure!(
-                    self.checked(cwd, &["status", "--porcelain", "--untracked-files=all"])?
-                        .is_empty(),
-                    "Base checkout has local changes; preserve them before synchronizing"
+                    base_status.is_empty(),
+                    "Main repository checkout ({}) has uncommitted local changes ({}); commit or stash them before synchronizing",
+                    cwd.display(),
+                    review::summarize_porcelain_z(&base_status, 4)
                 );
                 ensure!(
                     self.checked(cwd, &["rev-parse", "HEAD"])? == old,

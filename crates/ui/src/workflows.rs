@@ -276,52 +276,29 @@ fn save(ui: Ui) {
         },
     );
 }
-fn edit_agent(ui: Ui) {
+pub fn edit_agent(ui: Ui) {
     let state = ui.workflows;
-    let Some(app) = crate::APP.get().cloned() else {
+    let profile = crate::sessions::default_profile(ui);
+    state.profile.set(profile.clone());
+    if crate::APP.get().is_none() {
         state.agent.set(true);
         return;
-    };
+    }
     let origin = ui.location();
     let project = ui.project.get_untracked();
-    state.copy_status.set(String::new());
-    if state.profile.get_untracked().is_empty() {
-        let def = ui.default_agent.get_untracked();
-        state.profile.set(ui.profiles.with_untracked(|p| {
-            p.iter()
-                .find(|p| p.id == def)
-                .or_else(|| p.iter().find(|p| p.id == "developer"))
-                .or_else(|| p.first())
-                .map(|p| p.id.clone())
-                .unwrap_or_default()
-        }));
+    if project.is_empty() {
+        ui.navigate("new-project");
+        return;
     }
-    ui.spawn(async move {
-        let result =
-            blocking(move || app.call("workflow.prompt", json!({"project_id":project}))).await;
-        if ui.location() != origin {
-            return;
-        }
-        match result {
-            Ok(Ok(v)) => {
-                state
-                    .prompt
-                    .set(v["prompt"].as_str().unwrap_or_default().into());
-                state.agent.set(true);
-            }
-            Ok(Err(e)) => state.error.set(format!("{e:#}")),
-            Err(e) => state.error.set(e.to_string()),
-        }
-    });
-}
-fn launch(ui: Ui, fresh: bool) {
-    let origin = ui.location();
-    let state = ui.workflows;
     state.error.set(String::new());
     dispatch_complete(
         ui,
         "configuration.open",
-        json!({"project_id":ui.project.get_untracked(),"profile_id":state.profile.get_untracked(),"prompt":state.prompt.get_untracked(),"fresh":fresh}),
+        json!({
+            "project_id": project,
+            "profile_id": profile,
+            "auto_fresh": true,
+        }),
         move |result| {
             if ui.location() != origin {
                 return;
@@ -341,6 +318,41 @@ fn launch(ui: Ui, fresh: bool) {
             }
         },
     );
+}
+fn launch(ui: Ui, fresh: bool) {
+    let origin = ui.location();
+    let state = ui.workflows;
+    let profile = crate::sessions::default_profile(ui);
+    state.profile.set(profile.clone());
+    state.error.set(String::new());
+    let mut params = json!({
+        "project_id": ui.project.get_untracked(),
+        "profile_id": profile,
+        "fresh": fresh,
+        "auto_fresh": !fresh,
+    });
+    let prompt = state.prompt.get_untracked();
+    if !prompt.is_empty() {
+        params["prompt"] = json!(prompt);
+    }
+    dispatch_complete(ui, "configuration.open", params, move |result| {
+        if ui.location() != origin {
+            return;
+        }
+        match result {
+            Ok(value) => {
+                if let Some(id) = value["terminal_id"].as_str() {
+                    state.agent.set(false);
+                    state.history_open.set(false);
+                    ui.open_terminal(id.into());
+                }
+            }
+            Err(error) => {
+                state.error.set(error);
+                ui.operation_error.set(String::new());
+            }
+        }
+    });
 }
 fn copy_prompt(ui: Ui) {
     let state = ui.workflows;
@@ -747,6 +759,10 @@ fn workflow_dialog(
 pub fn agent_panel(ui: Ui) -> impl IntoElement {
     let state = ui.workflows;
     let prompt_editor = component_ref::<nsh_base::Editor>();
+    let default_prof = computed(move || {
+        let _ = (ui.default_agent.get(), ui.profiles.get());
+        crate::sessions::default_profile(ui)
+    });
     spawn(async move {
         next_frame().await;
         if state.agent.try_get() == Some(true)
@@ -756,15 +772,15 @@ pub fn agent_panel(ui: Ui) -> impl IntoElement {
         }
     });
     workflow_dialog(view().flex_1().min_h(px(0.)).gap_3()
-        .child(view().flex_row().items_center().gap_3().child(icon(Icon::Agent)).child(heading("Edit with agent")).child(view().flex_1()).child(chrome_button(Icon::Close,"Close agent editor",move|_|state.agent.set(false))))
-        .child(muted("Review this Project-wide Prompt, then copy it or start a configuration conversation in Terminal."))
-        .child(segmented().child(each(move||ui.profiles.get(),|p|p.id.clone(),move|p,_|{let p=p.get_untracked();let id=p.id.clone();let selected=p.id.clone();let (mark, prov, overridden)=crate::profiles::effective_provider(&p, ui.current_project().as_ref());let text=if p.is_identity(){if overridden{format!("@{} · {} ★",p.id,prov)}else{format!("@{} · {}",p.id,prov)}}else{format!("@{}",p.id)};compact_segment(text,Some(mark),move||state.profile.get()==selected,move|_|state.profile.set(id.clone()))})))
+        .child(view().flex_row().items_center().gap_3().child(icon(Icon::Agent)).child(heading("Edit with agent")).child(badge(move || format!("@{}", default_prof.get()))).child(view().flex_1()).child(chrome_button(Icon::Close,"Close agent editor",move|_|state.agent.set(false))))
+        .child(muted("Review this Project-wide Prompt, then copy it or start a configuration conversation in Terminal with your default Agent."))
         .child(view().flex_1().min_h(px(0.)).bg(INSET).p_2().child(nsh_base::editor().value(move||Some(state.prompt.get().into())).read_only(true).soft_wrap(true).line_numbers(false).component_ref(&prompt_editor).accessibility_label("Project Workflow configuration Prompt").size_full()))
         .child(when(move || !state.error.get().is_empty(), move || notice(move || state.error.get(), Tone::Attention)))
         .child(muted(move||state.copy_status.get()))
         .child(view().flex_row().flex_wrap().gap_2().child(action("Select all",Variant::Secondary,move|_|{if let Some(api)=prompt_editor.api::<nsh_base::EditorApi>(){api.focus();api.run(nsh_base::EditorCommand::SelectAll);}})).child(action("Copy prompt",Variant::Secondary,move|_|copy_prompt(ui))).child(view().flex_1()).child(action(move||{
-            let key=format!("configuration:{}:workflows:{}",ui.project.get(),state.profile.get());ui.snapshot.with(|s|{if let Some(c)=s.configuration_sessions.iter().find(|c|c.id==key){if c.state=="finished"{"Resume and open Terminal"}else{"Continue in Terminal"}}else{"Start and open Terminal"}})
-        },Variant::Primary,move|_|launch(ui,false)).disabled(move||ui.pending.get()||state.profile.get().is_empty())).child(action("New conversation",Variant::Quiet,move|_|launch(ui,true)).disabled(move||ui.pending.get()||state.profile.get().is_empty()))), move || state.agent.set(false))
+            let prof=default_prof.get();
+            let key=format!("configuration:{}:workflows:{prof}",ui.project.get());ui.snapshot.with(|s|{if let Some(c)=s.configuration_sessions.iter().find(|c|c.id==key){if c.state=="finished"{"Resume and open Terminal"}else{"Continue in Terminal"}}else{"Start and open Terminal"}})
+        },Variant::Primary,move|_|launch(ui,false)).disabled(move||ui.pending.get()||default_prof.get().is_empty())).child(action("New conversation",Variant::Quiet,move|_|launch(ui,true)).disabled(move||ui.pending.get()||default_prof.get().is_empty()))), move || state.agent.set(false))
 }
 fn show_history(ui: Ui) {
     let origin = ui.location();

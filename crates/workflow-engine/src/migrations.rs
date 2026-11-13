@@ -7,7 +7,7 @@ use crate::source::Document;
 use anyhow::{Result, ensure};
 
 pub const BASELINE: u32 = 1;
-pub const CURRENT: u32 = 3;
+pub const CURRENT: u32 = 4;
 
 pub struct Migration {
     pub version: u32,
@@ -22,6 +22,10 @@ const STEPS: &[Migration] = &[
     Migration {
         version: 3,
         up: v3_decision_aware_default_prompts,
+    },
+    Migration {
+        version: 4,
+        up: v4_deliver_merger_role,
     },
 ];
 
@@ -119,6 +123,24 @@ fn v2_omit_builtin_default_prompts(doc: &mut Document) -> Result<()> {
 /// `WorkflowRevision`s on startup and strips any materialized v2 default prompt strings.
 fn v3_decision_aware_default_prompts(doc: &mut Document) -> Result<()> {
     v2_omit_builtin_default_prompts(doc)
+}
+
+/// Schema 4: `deliver` steps gain dedicated `@merger` conflict resolution (`with.profile`,
+/// defaulting to `@merger` at runtime while keeping `on_changes_requested` for human rework).
+/// Strips explicit `profile: merger` on `deliver` steps so the built-in default stays clean.
+fn v4_deliver_merger_role(doc: &mut Document) -> Result<()> {
+    for step in &mut doc.steps {
+        if step.uses == "deliver"
+            && step
+                .with
+                .get("profile")
+                .and_then(|v| v.as_str())
+                .is_some_and(|p| p.trim().is_empty() || p.trim() == "merger")
+        {
+            step.with.remove("profile");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
