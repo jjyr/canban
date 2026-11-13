@@ -132,7 +132,10 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
     if !excerpt.is_empty() {
         tile = tile.child(muted(excerpt.to_owned()).truncate().min_w(px(0.)));
     }
-    let chips = crate::components::activity::card_status(&snapshot, &card);
+    let ui_merging = ui
+        .merging_cards
+        .with_untracked(|ids| ids.contains(&card.id));
+    let chips = crate::components::activity::card_status_with_merging(&snapshot, &card, ui_merging);
     let running = crate::components::activity::running_agents(&snapshot, &card);
     let branch = card.branch.clone().filter(|b| !b.is_empty());
     if !chips.is_empty() || !running.is_empty() || branch.is_some() {

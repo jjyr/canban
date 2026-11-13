@@ -112,7 +112,11 @@ impl BoardDrag {
             ghost: signal(None),
         };
         effect(move || {
-            let _ = (ui.snapshot.get(), ui.github.filters.get());
+            let _ = (
+                ui.snapshot.get(),
+                ui.github.filters.get(),
+                ui.merging_cards.get(),
+            );
             if this.phase.get_untracked() == 0 {
                 this.sync();
             } else if this.trace {

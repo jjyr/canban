@@ -739,6 +739,9 @@ pub struct Snapshot {
     /// Ephemeral Herdr observations, never persisted as Terminal ownership.
     #[serde(default)]
     pub terminal_contexts: Vec<TerminalContext>,
+    /// Cards currently executing a merge or delivery step in AppServer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merging_cards: Vec<String>,
     pub projects: Vec<Project>,
     pub cards: Vec<Card>,
     pub events: Vec<Event>,

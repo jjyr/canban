@@ -1,7 +1,7 @@
 //! Semantic status; consumers map product state to a generic visual tone.
 use super::tokens::*;
 use nsh_core::prelude::*;
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
     Neutral,
     Info,
@@ -57,6 +57,12 @@ pub fn reminder_count(
     )
 }
 pub fn status(value: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoElement {
+    status_chip(value, tone, false)
+}
+pub fn live_status(value: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoElement {
+    status_chip(value, tone, true)
+}
+fn status_chip(value: impl IntoReactive<SharedString>, tone: Tone, live: bool) -> impl IntoElement {
     let (bg, fg) = match tone {
         Tone::Neutral => (INSET, MUTED),
         Tone::Info => (SELECTED, ACCENT),
@@ -64,20 +70,24 @@ pub fn status(value: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoEl
         Tone::Attention => (ATTENTION_SURFACE, ATTENTION),
         Tone::Danger => (DANGER_SURFACE, DANGER),
     };
-    view()
+    let mut chip = view()
         .self_start()
         .flex_row()
         .items_center()
+        .gap_1p5()
         .px_2()
         .py_1()
         .rounded(px(5.0))
-        .bg(bg)
-        .child(
-            text(value)
-                .text_size(px(CAPTION_SIZE))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(fg),
-        )
+        .bg(bg);
+    if live {
+        chip = chip.child(live_dot(fg));
+    }
+    chip.child(
+        text(value)
+            .text_size(px(CAPTION_SIZE))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(fg),
+    )
 }
 pub fn notice(message: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoElement {
     let (bg, border, color) = match tone {

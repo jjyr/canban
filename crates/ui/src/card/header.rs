@@ -386,6 +386,8 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 );
             if c.merged() {
                 row = row.child(status("Merged", Tone::Success));
+            } else if ui.is_card_merging(&s, &c) {
+                row = row.child(live_status("Merging", Tone::Info));
             }
             if let Some(c_active) = Some(&c).filter(|c| c.active() && !c.merged()) {
                 let has_deliver_in_project = s.workflow_revisions.iter().any(|w| {

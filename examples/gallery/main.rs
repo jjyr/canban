@@ -62,6 +62,16 @@ fn controls() -> impl IntoElement {
                         ))
                         .child(badge("Needs attention"))
                         .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(live_status("Merging", Tone::Info))
+                                .child(status("Merged", Tone::Success))
+                                .child(status("Needs review", Tone::Attention))
+                                .child(status("Merge held", Tone::Neutral)),
+                        )
+                        .child(
                             action("Disabled action", Variant::Secondary, |_| {}).disabled(true),
                         ),
                 )

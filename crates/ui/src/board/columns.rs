@@ -233,20 +233,22 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
         .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
         .label(move || {
             let c = card.get();
+            let merging = ui.snapshot.with(|s| ui.is_card_merging(s, &c));
             let count = ui
                 .reminder_counts
                 .with(|all| all.get(&c.id).map(|n| n.total).unwrap_or(0));
+            let mut label = format!("Card #{} {}", c.number, c.title);
+            if merging {
+                label.push_str(" · Merging");
+            }
             if count > 0 {
-                format!(
-                    "Card #{} {} · {} notification{}",
-                    c.number,
-                    c.title,
+                label.push_str(&format!(
+                    " · {} notification{}",
                     count,
                     if count == 1 { "" } else { "s" }
-                )
-            } else {
-                format!("Card #{} {}", c.number, c.title)
+                ));
             }
+            label
         })
         .opacity(move || {
             if state.lifted.get() == hidden_id {
