@@ -86,7 +86,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
     let mut file_list = view().gap_0p5().p_1p5();
     let all_selected = selected.is_empty();
     file_list = file_list.child(
-        nsh_base::button()
+        canban_ui_kit::press_target()
             .w_full()
             .min_h(px(28.))
             .px_2()
@@ -153,7 +153,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
             view()
                 .tooltip(nsh_base::tooltip().child(label(fname.clone())))
                 .child(
-                    nsh_base::button()
+                    canban_ui_kit::press_target()
                         .w_full()
                         .min_h(px(27.))
                         .px_2()
@@ -373,7 +373,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                     '-' => DANGER,
                     _ => TEXT,
                 };
-                let mut line_btn = nsh_base::button()
+                let mut line_btn = canban_ui_kit::press_target()
                     .w_full()
                     .px_2()
                     .py_0p5()

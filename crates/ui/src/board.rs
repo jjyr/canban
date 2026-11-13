@@ -236,7 +236,7 @@ fn project_picker(ui: Ui) -> impl IntoElement {
         )
     });
     view().min_w(px(80.)).max_w(px(560.)).child(
-        nsh_base::button()
+        canban_ui_kit::press_target()
             .min_h(px(40.))
             .min_w(px(80.))
             .max_w(px(560.))

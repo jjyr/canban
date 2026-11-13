@@ -257,7 +257,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 .gap_2()
                 .min_w(px(0.))
                 .child(
-                    nsh_base::button()
+                    canban_ui_kit::press_target()
                         .element_ref(&stage_anchor)
                         .h(px(24.))
                         .px_2()
@@ -324,7 +324,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         .max_w(px(150.))
                         .tooltip(nsh_base::tooltip().child(label(branch.clone())))
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .min_w(px(0.))
                                 .h(px(24.))
                                 .flex_row()
@@ -391,7 +391,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             hint
                         })))
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .min_w(px(0.))
                                 .h(px(24.))
                                 .flex_row()
@@ -425,7 +425,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             let attachment_count = s.artifacts.iter().filter(|a| a.card_id == c.id).count();
             if attachment_count > 0 {
                 row = row.child(
-                    nsh_base::button()
+                    canban_ui_kit::press_target()
                         .h(px(24.))
                         .px_2()
                         .rounded(px(5.))

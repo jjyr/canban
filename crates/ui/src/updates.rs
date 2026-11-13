@@ -274,7 +274,7 @@ pub fn rail(ui: Ui) -> impl IntoElement {
                         .child(label(move || hint(&ui.update.get()))),
                 )
                 .child(
-                    nsh_base::button()
+                    canban_ui_kit::press_target()
                         .w_full()
                         .h_full()
                         .items_center()

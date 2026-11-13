@@ -284,7 +284,7 @@ fn render_submit_drawer(ui: Ui) -> impl IntoElement {
                         .map(|(id, text)| {
                             let target_id = id.to_owned();
                             let check_id = id.to_owned();
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .h(px(28.))
                                 .px_2p5()
                                 .rounded(px(RADIUS))
@@ -394,7 +394,7 @@ fn render_submit_drawer(ui: Ui) -> impl IntoElement {
                                 .gap_3()
                                 .child(profile_picker(ui, st.submit_profile))
                                 .child(if can_isolate {
-                                    nsh_base::button()
+                                    canban_ui_kit::press_target()
                                         .h(px(26.))
                                         .px_2()
                                         .rounded(px(5.))
@@ -440,7 +440,7 @@ fn render_submit_drawer(ui: Ui) -> impl IntoElement {
                                 .gap_3()
                                 .child(profile_picker(ui, st.submit_profile))
                                 .child(
-                                    nsh_base::button()
+                                    canban_ui_kit::press_target()
                                         .h(px(26.))
                                         .px_2()
                                         .rounded(px(5.))

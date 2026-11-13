@@ -229,7 +229,7 @@ fn sidebar_row(
     on_click: impl Fn() + 'static,
 ) -> impl IntoElement {
     let title_str = title.into();
-    nsh_base::button()
+    canban_ui_kit::press_target()
         .w_full()
         .min_h(px(28.))
         .px_2()
@@ -267,7 +267,7 @@ fn sidebar_branch_row(
     view()
         .tooltip(nsh_base::tooltip().child(label(name.clone())))
         .child(
-            nsh_base::button()
+            canban_ui_kit::press_target()
                 .w_full()
                 .min_h(px(26.))
                 .px_2()
@@ -321,7 +321,7 @@ fn sidebar_commit_row(
     view()
         .tooltip(nsh_base::tooltip().child(label(format!("{short_sha} · {subject} ({rel_time})"))))
         .child(
-            nsh_base::button()
+            canban_ui_kit::press_target()
                 .w_full()
                 .min_h(px(27.))
                 .px_2()
@@ -390,7 +390,7 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                             },
                         ))
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .element_ref(&project_anchor)
                                 .h(px(28.))
                                 .px_2p5()
@@ -451,7 +451,7 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                                 }),
                         )
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .element_ref(&base_anchor)
                                 .h(px(28.))
                                 .px_2p5()
@@ -485,7 +485,7 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                         )
                         .child(muted("←").text_size(px(12.)))
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .element_ref(&cmp_anchor)
                                 .h(px(28.))
                                 .px_2p5()

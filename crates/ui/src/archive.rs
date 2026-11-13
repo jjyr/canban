@@ -132,7 +132,7 @@ fn row(ui: Ui, entry: model::Entry) -> impl IntoElement {
         .gap_1()
         .child(header)
         .child(muted(meta).truncate().min_w(px(0.)));
-    let main = nsh_base::button()
+    let main = canban_ui_kit::press_target()
         .flex_1()
         .min_w(px(0.))
         .items_start()

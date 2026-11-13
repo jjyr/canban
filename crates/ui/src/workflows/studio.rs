@@ -1295,7 +1295,7 @@ fn step_node_card(
     let border_id = step_id.clone();
     let initial_icon = node.with_untracked(|n| n.icon);
 
-    nsh_base::button()
+    canban_ui_kit::press_target()
         .w_full()
         .p_2p5()
         .gap_1p5()

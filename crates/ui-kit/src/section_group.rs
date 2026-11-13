@@ -184,7 +184,7 @@ pub fn collapsible_section_group(
         left = left.child(badge(c.to_string()));
     }
 
-    let header_btn = nsh_base::button()
+    let header_btn = crate::press_target()
         .w_full()
         .min_w(px(0.))
         .py_1p5()

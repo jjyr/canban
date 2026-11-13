@@ -156,6 +156,7 @@ fn tab(ui: Ui, e: Entry, capacity: f32) -> impl IntoElement {
                 .items_center()
                 .justify_center()
                 .role(AccessibilityRole::Tab)
+                .cursor_pointer()
                 .accessibility_state(move || nsh_core::AccessibilityState {
                     selected,
                     ..Default::default()
@@ -356,7 +357,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                             }
                         ))))
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .w_full()
                                 .min_w(px(0.))
                                 .h(px(30.))
@@ -375,7 +376,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                 );
             } else if let Some(project) = e.project_id.clone() {
                 context = context.child(
-                    nsh_base::button()
+                    canban_ui_kit::press_target()
                         .flex_1()
                         .min_w(px(0.))
                         .h(px(30.))
@@ -452,7 +453,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                                 .child(label(full)),
                         )
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .h(px(30.))
                                 .w_full()
                                 .min_w(px(0.))

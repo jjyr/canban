@@ -17,6 +17,7 @@ pub fn tree_group(
             view()
                 .role(nsh_core::AccessibilityRole::Button)
                 .focusable(true)
+                .cursor_pointer()
                 .w_full()
                 .min_w(px(0.))
                 .min_h(px(36.))

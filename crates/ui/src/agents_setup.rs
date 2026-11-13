@@ -141,7 +141,7 @@ fn agent_tile(
     on_toggle: impl Fn() + 'static,
 ) -> AnyElement {
     let mark = engine_icon(&id);
-    nsh_base::button()
+    canban_ui_kit::press_target()
         .w(px(192.))
         .min_h(px(44.))
         .px_3()
