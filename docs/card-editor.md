@@ -27,12 +27,18 @@ Explicit discard removes the draft. Existing optimistic Card revisions prevent
 overwriting concurrent edits.
 
 At-sign completion references configured Profiles. Hash completion searches
-local Cards and, only while the GitHub account is connected, the Project's
-configured GitHub repository (Issues and PRs),
-with type, owner and number visible. References remain ordinary Markdown links;
-adding a reference does not change the Card's source or delivery identity or
-start an Agent. GitHub Issue Cards retain read-only source content and editable
-local instructions. The comment composer retains explicit recipient behavior.
+registered `#tag` indexing tags, local Cards and, only while the GitHub account
+is connected, the Project's configured GitHub repository (Issues and PRs),
+with type, owner and number visible. When a typed `#name` query is a valid
+non-numeric tag name (`1..=48` alphanumeric, `_` or `-` characters) that is not
+yet registered, hash completion also offers **New tag · Create** (`#name`),
+persisting the tag on the Project (`tag.create`) without blocking draft or
+submission flow. Tags index Cards for Quick Open search and Board filtering;
+they never route or launch Agents. References remain ordinary Markdown links or
+`#tag` tokens; adding a reference or tag does not change the Card's source or
+delivery identity or start an Agent. GitHub Issue Cards retain read-only source
+content and editable local instructions. The comment composer retains explicit
+recipient behavior.
 
 UI Kit owns native editing, formatting, preview and keyboard policy. Product UI
 owns candidates, Card forms and draft projection. AppServer owns durable draft
@@ -88,6 +94,11 @@ GitHub-owned Cards rank remote candidates before local Cards once available.
 
 - Local Card links show title, Project/number, stage and a short description;
   clicking opens the Card inside Canban, including archived Cards.
+- Registered `#tag` tokens (and explicit `[...](tag:name)` links) render as
+  clickable references in descriptions, previews, comments, replies and reports
+  while ignoring code literals, blockquotes, URLs and unknown `#words` (such as
+  hex colors). Hovering shows the matching Card count; clicking opens Quick Open
+  pre-filled with `#tag` so matching Cards appear immediately.
 - Known `@Profile` references show provider/role details and open local Settings.
   Reading or opening a reference never starts an Agent. Comment completion still
   adds an explicit recipient chip, independently of link navigation.

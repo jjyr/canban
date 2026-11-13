@@ -43,7 +43,7 @@ pub fn body(
         text,
         project,
         "Task description",
-        "Describe the task in Markdown…",
+        "Describe the task in Markdown… @Agent, #Card or #tag",
     );
     let body = editor.render_with_preview(text, source, false, height, move || {
         reader(ui, move || text.get()).into_element()

@@ -43,6 +43,7 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
         root = root.max_w(px(COLUMN_MAX));
     }
     // Compact mode shows the stage tabs above the column instead.
+    let pill_stage = id.clone();
     root.children((!compact).then(move || {
         view()
             .flex_row()
@@ -63,6 +64,7 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
                     )
                     .child(
                         view()
+                            .flex_shrink_0()
                             .px_1p5()
                             .py_0p5()
                             .rounded(px(10.))
@@ -77,10 +79,18 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
                             })),
                     ),
             )
-            .child(when(
-                move || is_backlog,
-                move || chrome_button(Icon::Plus, "Add Card", move |_| ui.new_card()),
-            ))
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .min_w(px(0.))
+                    .child(crate::workflows::column_automation_pill(ui, pill_stage))
+                    .child(when(
+                        move || is_backlog,
+                        move || chrome_button(Icon::Plus, "Add Card", move |_| ui.new_card()),
+                    )),
+            )
     }))
     .child(
         view()

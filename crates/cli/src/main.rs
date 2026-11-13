@@ -14,13 +14,18 @@ struct Args {
     home: Option<PathBuf>,
     #[arg(long, env = "CANBAN_ENDPOINT")]
     endpoint: Option<PathBuf>,
+    /// Print the bundled Canban CLI SKILL.md to stdout and exit.
+    #[arg(long)]
+    skill: bool,
     #[command(subcommand)]
-    command: Cmd,
+    command: Option<Cmd>,
 }
 #[derive(Subcommand)]
 enum Cmd {
     /// Show immutable release identity without opening application data.
     BuildInfo,
+    /// Print the bundled Canban CLI SKILL.md without opening application data.
+    Skill,
     /// Submit/export YAML; SQLite remains the only configuration source.
     Workflow {
         #[command(subcommand)]
@@ -206,23 +211,33 @@ enum WorkflowCmd {
 
 fn run() -> Result<()> {
     let args = Args::parse();
+    if args.skill || matches!(args.command, Some(Cmd::Skill)) {
+        print!("{}", canban_context::SKILL_MD);
+        return Ok(());
+    }
+    let Some(command) = args.command else {
+        use clap::CommandFactory;
+        Args::command().print_help()?;
+        println!();
+        return Ok(());
+    };
     let home = args.home.unwrap_or(canban_app_server::default_home()?);
     let endpoint = args.endpoint.unwrap_or_else(|| home.join("app.sock"));
-    if matches!(args.command, Cmd::BuildInfo) {
+    if matches!(command, Cmd::BuildInfo) {
         println!(
             "{}",
             serde_json::to_string(&canban_updater::Build::current())?
         );
         return Ok(());
     }
-    if let Cmd::Database { target } = args.command {
+    if let Cmd::Database { target } = command {
         let _startup = canban_updater::handoff::startup_guard(&home)?;
         let _service = canban_updater::service_lock(&home)?;
         let version = canban_storage::migrations::migrate(&home, target)?;
         println!("{}", json!({"schema":version}));
         return Ok(());
     }
-    if matches!(args.command, Cmd::Serve) {
+    if matches!(command, Cmd::Serve) {
         let app = canban_app_server::AppServer::open(home, std::env::current_exe()?)?;
         let _runtime = app.start()?;
         println!("Canban AppServer listening at {}", app.endpoint().display());
@@ -231,7 +246,7 @@ fn run() -> Result<()> {
         }
         return Ok(());
     }
-    if let Cmd::Workflow { command } = &args.command {
+    if let Cmd::Workflow { command } = &command {
         match command {
             WorkflowCmd::Submit {
                 project_id,
@@ -313,12 +328,12 @@ fn run() -> Result<()> {
         return Ok(());
     }
     let raw_note = matches!(
-        &args.command,
+        &command,
         Cmd::Note {
             command: NoteCmd::Read { json: false, .. }
         }
     );
-    let (method, mut p) = match args.command {
+    let (method, mut p) = match command {
         Cmd::Workflow { .. } => unreachable!(),
         Cmd::Card { command } => match command {
             CardCmd::Update {
@@ -461,7 +476,7 @@ fn run() -> Result<()> {
                 json!({"request_key":key,"execution":{"request_id":request_id,"attempt_number":attempt},"state":state,"message":message,"body":body}),
             )
         }
-        Cmd::Serve | Cmd::BuildInfo | Cmd::Database { .. } => unreachable!(),
+        Cmd::Serve | Cmd::BuildInfo | Cmd::Skill | Cmd::Database { .. } => unreachable!(),
     };
     anyhow::ensure!(p.is_object(), "Parameters must be an object");
     if !matches!(
@@ -539,4 +554,19 @@ fn run() -> Result<()> {
     }
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_skill_flag_and_subcommand() {
+        let by_flag = Args::try_parse_from(["canban", "--skill"]).unwrap();
+        assert!(by_flag.skill);
+        assert!(by_flag.command.is_none());
+
+        let by_cmd = Args::try_parse_from(["canban", "skill"]).unwrap();
+        assert!(matches!(by_cmd.command, Some(Cmd::Skill)));
+    }
 }

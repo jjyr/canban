@@ -23,6 +23,7 @@ pub struct CachedPreview {
 enum Destination {
     Card(String),
     Profile(String),
+    Tag(String),
     Attachment(String),
     Web(String),
     Other,
@@ -33,6 +34,12 @@ fn destination(raw: &str) -> Destination {
     }
     if let Some(id) = raw.strip_prefix("profile:").filter(|id| !id.is_empty()) {
         return Destination::Profile(id.into());
+    }
+    if let Some(tag) = raw
+        .strip_prefix("tag:")
+        .and_then(canban_types::normalize_tag)
+    {
+        return Destination::Tag(tag);
     }
     if let Some(id) = raw.strip_prefix("attachment:").filter(|id| !id.is_empty()) {
         return Destination::Attachment(id.into());
@@ -134,6 +141,17 @@ fn local_preview(ui: Ui, url: &str, title: &str) -> Preview {
                 };
             }
         }
+        Destination::Tag(tag) => {
+            let known = crate::tags::known_map(&s, &ui.local_tags.get_untracked(), None);
+            let canonical = known
+                .get(&tag.to_lowercase())
+                .cloned()
+                .unwrap_or_else(|| tag.clone());
+            let count = crate::tags::matching_card_count(&s, &known, &canonical);
+            value.title = format!("#{canonical}");
+            value.detail = format!("Tag · {count} Card{}", if count == 1 { "" } else { "s" });
+            value.excerpt = "Click to search Cards with this tag".into();
+        }
         Destination::Attachment(id) => {
             if let Some(a) = s.artifacts.iter().find(|a| a.id == id) {
                 value.title = a.name.clone();
@@ -202,6 +220,7 @@ pub fn open(ui: Ui, url: &str) {
                 ui.open_settings_section("agents");
             }
         }
+        Destination::Tag(tag) => ui.open_tag_search(&tag),
         Destination::Attachment(id) => {
             if let Some(a) = ui
                 .snapshot
@@ -342,6 +361,7 @@ impl MarkdownPlugin for ReferencePlugin {
 }
 /// Install once on the native root so TextView component owners inherit it.
 pub fn install(ui: Ui) {
+    canban_ui_kit::markdown::install_editor_language();
     provide_context(MarkdownPlugins::new().with(ReferencePlugin(ui)));
 }
 pub fn reader(ui: Ui, body: impl Fn() -> String + 'static) -> nsh_base::TextViewElement {
@@ -351,12 +371,14 @@ pub fn reader(ui: Ui, body: impl Fn() -> String + 'static) -> nsh_base::TextView
         let mut document = parsed.get();
         let snapshot = ui.snapshot.get();
         let profiles = ui.profiles.get();
+        let local_tags = ui.local_tags.get();
         let project = if ui.page.get() == "new-card" {
             ui.card_target.get()
         } else {
             current_project(ui)
         };
-        document::decorate(&mut document, &snapshot, &profiles, &project);
+        let known_tags = crate::tags::known_map(&snapshot, &local_tags, Some(&project));
+        document::decorate(&mut document, &snapshot, &profiles, &known_tags, &project);
         document
     });
     // The root-installed plugin returns styled spans directly, preserving
@@ -379,6 +401,10 @@ mod tests {
             destination("profile:developer"),
             Destination::Profile("developer".into())
         );
+        assert_eq!(destination("tag:ui-kit"), Destination::Tag("ui-kit".into()));
+        assert_eq!(destination("tag:#前端"), Destination::Tag("前端".into()));
+        assert_eq!(destination("tag:123"), Destination::Other);
+        assert_eq!(destination("tag:"), Destination::Other);
         assert_eq!(
             destination("attachment:file"),
             Destination::Attachment("file".into())

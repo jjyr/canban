@@ -252,6 +252,7 @@ fn controls() -> impl IntoElement {
                         }))
                 })
                 .child(canban_ui::components::scheduling::settings(ui))
+                .child(canban_ui::agents_setup::canban_skill_onboarding_section(ui))
                 .child(profiles::registry(profile_fixture))
                 .child(canban_ui::components::workflow::run_view(fixtures::workflow()))
                 .child(review::diff_panel(fixtures::review()))
@@ -487,6 +488,18 @@ pub fn Gallery() -> impl IntoElement {
     }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
+        Ok("agent-setup" | "settings-agents")
+    ) {
+        ui.card.set(String::new());
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("agent-setup") {
+            ui.page.set("agent-setup".into());
+        } else {
+            ui.open_settings_section("agents");
+        }
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if matches!(
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
         Ok("card-local" | "card-issue" | "card-pr")
     ) {
         let mut snapshot = fixtures::workspace();
@@ -580,14 +593,14 @@ pub fn Gallery() -> impl IntoElement {
             card.stage = "backlog".into();
             snapshot.cards.push(card);
         }
-        snapshot.cards[0].body = "## Body Markdown\n\n**Bold body** and *italic body*.\n\nLocal: [Related Card](card:card-2)\n\nProfile: @developer\n\n[Example website](https://example.com/) and [GitHub Issue](https://github.com/jjyr/canban/issues/1)\n\nLiteral: `@developer #2`".into();
+        snapshot.cards[0].body = "## Body Markdown\n\n**Bold body** and *italic body*.\n\nLocal: [Related Card](card:card-2) · Tag: #search\n\nProfile: @developer\n\n[Example website](https://example.com/) and [GitHub Issue](https://github.com/jjyr/canban/issues/1)\n\nLiteral: `@developer #2 #search`".into();
         let mut comment = fixtures::timeline();
         comment.id = "reference-comment".into();
         comment.card_id = "card-1".into();
         comment.kind = "comment.created".into();
         comment.actor = "user".into();
         comment.request_id = None;
-        comment.message = "### Comment Markdown\n\n**Bold comment** and *italic comment*.\n\n[Comment local](card:card-2) · @developer · [Comment website](https://example.com/)".into();
+        comment.message = "### Comment Markdown\n\n**Bold comment** and *italic comment*.\n\n[Comment local](card:card-2) · @developer · #ux · [Comment website](https://example.com/)".into();
         comment.data = json!({"body":comment.message});
         snapshot.events.retain(|e| e.card_id != "card-1");
         snapshot.events.push(comment);
@@ -731,6 +744,52 @@ pub fn Gallery() -> impl IntoElement {
                             e.message = "completed: Stage completed automatically".into();
                             e.data = json!({"report_id": format!("auto-{seq}"), "state": "completed"});
                             s.events.push(e);
+                        });
+                    }))
+                    .child(action("Silent idle #1", Variant::Quiet, move |_| {
+                        ui.snapshot.update(|s| {
+                            let turn = s
+                                .attempts
+                                .iter()
+                                .find(|a| a.id == "idle-attempt-1")
+                                .and_then(|a| a.observed.as_ref())
+                                .and_then(|v| v["turn"].as_u64())
+                                .unwrap_or(0)
+                                + 1;
+                            if !s.requests.iter().any(|r| r.id == "idle-req-1") {
+                                let req: canban_types::Request = serde_json::from_value(json!({
+                                    "id": "idle-req-1",
+                                    "project_id": "gallery-project",
+                                    "card_id": "card-1",
+                                    "stage": "develop",
+                                    "trigger": "interactive",
+                                    "profile": canban_types::Config::default().profiles[0],
+                                    "instruction": "Interactive check",
+                                    "state": "running",
+                                    "attempt": 1,
+                                    "created_at": 1
+                                }))
+                                .unwrap();
+                                s.requests.push(req);
+                            }
+                            s.attempts.retain(|a| a.id != "idle-attempt-1");
+                            let attempt: canban_types::Attempt = serde_json::from_value(json!({
+                                "id": "idle-attempt-1",
+                                "request_id": "idle-req-1",
+                                "project_id": "gallery-project",
+                                "card_id": "card-1",
+                                "number": 1,
+                                "state": "running",
+                                "terminal": "pty-idle-1",
+                                "cwd": "/tmp",
+                                "input_path": "in",
+                                "connection_state": "connected",
+                                "observed": {"state": "live", "turn": turn, "status": {"state": "idle"}},
+                                "lifecycle": {"observed_at": canban_types::now(), "idle_since": canban_types::now()},
+                                "created_at": 1
+                            }))
+                            .unwrap();
+                            s.attempts.push(attempt);
                         });
                     }))
                     .child(action("Return #1 to Backlog", Variant::Quiet, move |_| {
@@ -1195,6 +1254,12 @@ pub fn Gallery() -> impl IntoElement {
                 }))
                 .child(action("Card states · Card open", Variant::Quiet, move |_| {
                     scene.set("workspace".into());ui.snapshot.set(fixtures::board_cards());ui.card.set("card-2".into());ui.page.set("card".into());
+                }))
+                .child(action("Column automations", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::automation_board());
+                    ui.card.set(String::new());
+                    ui.page.set("board".into());
                 }))
                 .child(action("Usage fixtures", Variant::Quiet, move |_| {
                     ui.usage.set(json!({"machine":"local","updated_at":canban_types::now(),"readings":[{"provider":"codex","auth":"present","account":"demo@example.invalid","windows":[{"name":"Session","used":22,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+5*86400) as i64,0).unwrap().to_rfc3339()}]},{"provider":"claude","auth":"present","account":"other@example.invalid","stale":true,"error":"HTTP 429","windows":[{"name":"Weekly","used":68,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+7*86400) as i64,0).unwrap().to_rfc3339()}]}]}));

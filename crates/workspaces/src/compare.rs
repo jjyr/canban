@@ -751,6 +751,7 @@ mod tests {
             github: None,
             delivery_mode: Default::default(),
             agent_overrides: Default::default(),
+            tags: Default::default(),
             id: "proj1".into(),
             name: "Demo".into(),
             location: None,
