@@ -183,7 +183,7 @@ impl AppServer {
             .lock()
             .unwrap()
             .write(|db| events::pump(db, &self.config()))?;
-        let _ = self.pump_deliveries();
+        self.request_deliveries();
         let _ = self.pump_merged_archives();
         self.observe_terminals()?;
         self.pump_configuration()?;
@@ -329,7 +329,7 @@ impl AppServer {
                         )
                         || observed["status"]["state"].is_null();
                     if agent_stopped {
-                        let _ = self.pump_deliveries();
+                        self.request_deliveries();
                     }
                     if finished {
                         let _ = self.try_auto_archive_merged(&run.card_id);

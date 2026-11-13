@@ -666,7 +666,7 @@ impl AppServer {
                     db.save(&c)?;
                     Ok(serde_json::to_value(c)?)
                 })?;
-                let _ = self.pump_deliveries();
+                self.request_deliveries();
                 Ok(res)
             }
             "card.workspace" => {

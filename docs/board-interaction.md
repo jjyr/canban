@@ -113,3 +113,23 @@ confirmed its lifted origin remained at the scrolled row. The native app needed
 foreground input for these drags; background events produced no persistent
 change. Evidence was saved with Card #20's development report. These checks do
 not cover reduced-motion settings, horizontal scrolling or sustained edge holds.
+
+### Asynchronous Review delivery and Board gesture ownership — 2026-11-13 (Card #37)
+
+Live `AppServer` mutations (`card.move`, `card.hold_auto_merge`, `workflow.decide`,
+`workflow.deliver`, `review.merge`, and `continue_card`) and runtime ticks wake a
+dedicated background delivery worker (`request_deliveries` / `start_delivery_worker`)
+instead of running `pump_deliveries()` (`git fetch` + `git merge` + `git push`)
+synchronously before returning the RPC response. Dropping a Card with a branch
+directly from `Backlog` into `Review` therefore returns its `card.move` receipt in
+milliseconds, lands the Card immediately with the live `Merging` status chip
+(`Snapshot.merging_cards`), and keeps peer Cards clickable and draggable while
+upstream `git push` runs in the background. In-process unit tests constructed via
+`AppServer::open` without `start()` retain synchronous `pump_deliveries()` behavior.
+
+`BoardDrag` scopes drag eligibility to in-flight `"card.move"` requests rather than
+global `ui.pending`, keeps NSH `pan_enabled` mounted on the lifted row across active
+gesture phases (`1` and `2`) so `EventKind::PanEnd` fires on mouse release while
+disabling pan on peer rows and during landing (`3`), runs its spawned tasks and
+receipt signals under `BoardDrag`'s Board-scoped reactive `Owner`, bounds spring
+settlement waits, and aborts an active gesture if the lifted row unmounts.

@@ -3,7 +3,7 @@ pub mod feed;
 pub mod handoff;
 mod quarantine;
 pub mod worker;
-pub const DESKTOP_API: u32 = 30;
+pub const DESKTOP_API: u32 = 31;
 pub const AUTOMATIC_CHECK_INTERVAL: u64 = 24 * 60 * 60;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};

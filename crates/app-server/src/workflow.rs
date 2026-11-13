@@ -282,7 +282,7 @@ impl AppServer {
                     Ok(json!(run))
                 })?;
                 if res["state"] == "waiting_delivery" {
-                    let _ = self.pump_deliveries();
+                    self.request_deliveries();
                     if let Some(id) = res["id"].as_str() {
                         let store = self.store.lock().unwrap();
                         if let Ok(updated) = store.db().get::<WorkflowRun>(id) {
@@ -389,7 +389,7 @@ impl AppServer {
                     )?;
                     Ok(json!(run))
                 })?;
-                let _ = self.pump_deliveries();
+                self.request_deliveries();
                 if let Some(id) = res["id"].as_str() {
                     let store = self.store.lock().unwrap();
                     if let Ok(updated) = store.db().get::<WorkflowRun>(id) {
@@ -508,7 +508,7 @@ impl AppServer {
             db.save(&card)?;
             Ok(json!(card))
         })?;
-        let _ = self.pump_deliveries();
+        self.request_deliveries();
         if let Some(id) = res["id"].as_str() {
             let store = self.store.lock().unwrap();
             if let Ok(updated) = store.db().get::<Card>(id) {

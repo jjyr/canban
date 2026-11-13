@@ -210,6 +210,9 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
     let hidden_id = id.clone();
     let press_id = id.clone();
     let layout_id = id.clone();
+    let pan_id = id.clone();
+    let cleanup_id = id.clone();
+    cleanup(move || state.row_unmounted(&cleanup_id));
     let last_target = stored(None::<f32>);
     effect(move || {
         let target = state.layout.with(|l| l.rows.get(&position_id).copied());
@@ -266,7 +269,13 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
             }
         })
         .pan_values(Some(&state.x), Some(&state.y))
-        .pan_enabled(move || state.phase.get() != 3)
+        .pan_enabled(move || {
+            let phase = state.phase.get();
+            let pending = ui.is_method_pending("card.move");
+            state
+                .lifted
+                .with(|lifted| super::drag::is_row_pan_enabled(phase, lifted, &pan_id, pending))
+        })
         .cursor_pointer()
         .on_layout(move |b: &Bounds<Points>| state.height(&layout_id, b.size.height.0))
         .on_press_down(move |e: &PressEvent| state.down(e))
