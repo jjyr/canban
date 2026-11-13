@@ -679,6 +679,27 @@ pub fn search() -> canban_types::Snapshot {
         c.attention = None;
         s.cards.push(c);
     }
+    let mut archived = base.clone();
+    archived.id = "search-archived".into();
+    archived.number = 900;
+    archived.title = "Archived fixture · hidden from Quick Open".into();
+    archived.archived_at = Some(canban_types::now());
+    archived.human_gate = None;
+    archived.attention = None;
+    s.cards.push(archived);
+    let mut merged = base;
+    merged.id = "search-merged".into();
+    merged.number = 901;
+    merged.title = "Merged fixture · hidden from Quick Open".into();
+    merged.human_gate = None;
+    merged.attention = None;
+    merged.delivery = Some(canban_types::Delivery {
+        target_branch: "main".into(),
+        commit: "abc1234".into(),
+        request_key: "gallery-search-merged".into(),
+        merged_at: canban_types::now(),
+    });
+    s.cards.push(merged);
     s
 }
 

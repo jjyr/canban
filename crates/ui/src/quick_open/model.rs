@@ -36,27 +36,22 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
             fields: vec![p.name.clone(), p.directory.clone()],
         });
     }
-    for c in &s.cards {
+    for c in s.cards.iter().filter(|c| c.active() && !c.merged()) {
         let title = format!("#{} {}", c.number, c.title);
         let owner = project(&c.project_id);
         rows.push(Candidate {
             id: format!("card:{}", c.id),
             title: title.clone(),
-            detail: format!(
-                "Card · {owner} · {}{}",
-                c.stage,
-                if c.archived_at.is_some() {
-                    " · Archived"
-                } else {
-                    ""
-                }
-            ),
+            detail: format!("Card · {owner} · {}", c.stage),
             kind: "Card",
             target: Target::Card(c.id.clone()),
             fields: vec![title, owner, c.branch.clone().unwrap_or_default()],
         });
     }
-    for row in canban_notifications::overview(s) {
+    for row in canban_notifications::overview(s)
+        .into_iter()
+        .filter(|row| row.card.active() && !row.card.merged())
+    {
         let Some(req) = &row.request else {
             continue;
         };
@@ -87,10 +82,11 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
             ],
         });
     }
-    for e in crate::terminals::entries(s)
-        .into_iter()
-        .filter(|e| e.saved.conversation_id.is_none())
-    {
+    for e in crate::terminals::entries(s).into_iter().filter(|e| {
+        e.saved.conversation_id.is_none()
+            && !e.ended()
+            && e.card.as_ref().is_none_or(|c| c.active() && !c.merged())
+    }) {
         rows.push(Candidate {
             id: format!("terminal:{}", e.saved.id),
             title: e.saved.title(),
@@ -162,25 +158,23 @@ pub fn ranked(
                 .iter()
                 .position(|id| id == &row.id)
                 .unwrap_or(usize::MAX);
-            let archived = row.detail.ends_with(" · Archived");
-            Some((total, visit, archived, row))
+            Some((total, visit, row))
         })
         .collect::<Vec<_>>();
     scored.sort_by(|a, b| {
         a.0.cmp(&b.0)
             .then(a.1.cmp(&b.1))
-            .then(a.2.cmp(&b.2))
             .then_with(|| {
                 if empty_query {
-                    kind_rank(a.3.kind).cmp(&kind_rank(b.3.kind))
+                    kind_rank(a.2.kind).cmp(&kind_rank(b.2.kind))
                 } else {
                     std::cmp::Ordering::Equal
                 }
             })
             .then_with(
-                || match (card_number(&a.3.title), card_number(&b.3.title)) {
+                || match (card_number(&a.2.title), card_number(&b.2.title)) {
                     (Some((na, ta)), Some((nb, tb)))
-                        if a.3.kind == "Card" && b.3.kind == "Card" =>
+                        if a.2.kind == "Card" && b.2.kind == "Card" =>
                     {
                         if empty_query {
                             nb.cmp(&na)
@@ -190,13 +184,13 @@ pub fn ranked(
                                 .then_with(|| ta.to_lowercase().cmp(&tb.to_lowercase()))
                         }
                     }
-                    _ => a.3.title.to_lowercase().cmp(&b.3.title.to_lowercase()),
+                    _ => a.2.title.to_lowercase().cmp(&b.2.title.to_lowercase()),
                 },
             )
-            .then(a.3.detail.to_lowercase().cmp(&b.3.detail.to_lowercase()))
-            .then(a.3.id.cmp(&b.3.id))
+            .then(a.2.detail.to_lowercase().cmp(&b.2.detail.to_lowercase()))
+            .then(a.2.id.cmp(&b.2.id))
     });
-    scored.into_iter().map(|(_, _, _, r)| r.clone()).collect()
+    scored.into_iter().map(|(_, _, r)| r.clone()).collect()
 }
 #[cfg(test)]
 mod tests;
