@@ -39,7 +39,7 @@ pub fn init(ui: Ui) {
     let pending = stored(BTreeSet::<String>::new());
     let scheduled = stored(false);
     effect(move || {
-        let items = ui.reminders.get();
+        let items = ui.sound_items.get();
         let new = ui.notification_delivery.with(|t| t.observe(&items));
         if new.is_empty() {
             return;
@@ -57,8 +57,8 @@ pub fn init(ui: Ui) {
                 scheduled.replace(false);
                 let ids = pending.replace(BTreeSet::new());
                 let remains = ui
-                    .reminders
-                    .with_untracked(|items| items.iter().any(|i| ids.contains(&i.id)));
+                    .sound_items
+                    .with_untracked(|items| items.iter().any(|id| ids.contains(id)));
                 if remains && sound_enabled(ui) {
                     sound.with(|s| {
                         if let Some(s) = s {
@@ -130,7 +130,8 @@ impl Reader {
                 if !foreground()
                     || !matches!(ui.page.get_untracked().as_str(), "card" | "review")
                     || (ui.page.get_untracked() == "card"
-                        && !ui.card_tab.get_untracked().is_empty())
+                        && ui.narrow.get_untracked()
+                        && ui.card_terminal_open.get_untracked())
                     || untracked(|| ui.card_id()) != ui.card.get_untracked()
                     || ui.quick_open.get_untracked()
                     || !ui.utility_popup.get_untracked().is_empty()

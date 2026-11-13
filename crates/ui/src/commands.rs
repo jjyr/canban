@@ -239,6 +239,14 @@ pub const CATALOG: &[Command] = &[
         keywords: "preferences config identities",
     },
     Command {
+        id: "go-acknowledgements",
+        title: "Open Acknowledgements & Licenses",
+        key: "",
+        display: "Settings",
+        context: "Preferences",
+        keywords: "about credits open source licenses apache mit herdr sheprd herdr-gpui nsh ghostty",
+    },
+    Command {
         id: "go-machines",
         title: "Open Execution Machines",
         key: "",
@@ -525,6 +533,7 @@ pub fn execute(ui: Ui, id: &str) {
         "go-drafts" => ui.navigate("drafts"),
         "go-archive" => ui.navigate("archive"),
         "go-settings" => ui.navigate("settings"),
+        "go-acknowledgements" => ui.open_settings_section("acknowledgements"),
         "go-machines" => ui.navigate("machines"),
         "go-project-location" => {
             if ui.current_project().is_some() {
@@ -634,7 +643,7 @@ pub fn execute(ui: Ui, id: &str) {
         }
         "new-terminal" => {
             if ui.page.get_untracked() == "card"
-                && !ui.card_tab.get_untracked().is_empty()
+                && ui.card_terminal_open.get_untracked()
                 && let Some(c) = ui.current_card()
             {
                 crate::terminals::create_in_card(ui, c.project_id, c.id, false);
@@ -663,12 +672,15 @@ pub fn execute(ui: Ui, id: &str) {
             crate::terminals::close_tab(ui, &ui.terminal_selection.get_untracked())
         }
         "close-terminal"
-            if ui.page.get_untracked() == "card" && !ui.card_tab.get_untracked().is_empty() =>
+            if ui.page.get_untracked() == "card" && ui.card_terminal_open.get_untracked() =>
         {
-            crate::terminals::close_entry(ui, &ui.card_tab.get_untracked())
+            let cid = ui.card_id();
+            if let Some(entry) = crate::card::terminal::select_entry_for_card(ui, &cid) {
+                crate::terminals::close_entry(ui, &entry.saved.id);
+            }
         }
         "next-tab" => {
-            if ui.page.get_untracked() == "card" && !ui.card_tab.get_untracked().is_empty() {
+            if ui.page.get_untracked() == "card" && ui.card_terminal_open.get_untracked() {
                 crate::terminals::cycle(ui, true);
             } else {
                 ui.navigate("terminals");
@@ -676,7 +688,7 @@ pub fn execute(ui: Ui, id: &str) {
             }
         }
         "previous-tab" => {
-            if ui.page.get_untracked() == "card" && !ui.card_tab.get_untracked().is_empty() {
+            if ui.page.get_untracked() == "card" && ui.card_terminal_open.get_untracked() {
                 crate::terminals::cycle(ui, false);
             } else {
                 ui.navigate("terminals");
@@ -692,8 +704,11 @@ pub fn execute(ui: Ui, id: &str) {
             ui.terminal_inactive.update(|v| *v = !*v);
         }
         "rename-terminal" => {
-            if ui.page.get_untracked() == "card" && !ui.card_tab.get_untracked().is_empty() {
-                ui.terminal_rename.set(Some(ui.card_tab.get_untracked()));
+            if ui.page.get_untracked() == "card" && ui.card_terminal_open.get_untracked() {
+                let cid = ui.card_id();
+                if let Some(entry) = crate::card::terminal::select_entry_for_card(ui, &cid) {
+                    ui.terminal_rename.set(Some(entry.saved.id));
+                }
             } else {
                 let sel = ui.terminal_selection.get_untracked();
                 if !sel.is_empty() {
@@ -703,21 +718,13 @@ pub fn execute(ui: Ui, id: &str) {
             }
         }
         "interrupt-terminal" => {
-            let entry = if ui.page.get_untracked() == "card" {
-                if ui.card_terminal_open.get_untracked() {
+            let entry =
+                if ui.page.get_untracked() == "card" && ui.card_terminal_open.get_untracked() {
                     let cid = ui.card_id();
                     crate::card::terminal::select_entry_for_card(ui, &cid)
-                } else if !ui.card_tab.get_untracked().is_empty() {
-                    let sel = ui.card_tab.get_untracked();
-                    crate::terminals::entries(&ui.snapshot.get_untracked())
-                        .into_iter()
-                        .find(|e| e.saved.id == sel)
                 } else {
-                    None
-                }
-            } else {
-                crate::terminals::current(ui)
-            };
+                    crate::terminals::current(ui)
+                };
             if let Some(e) = entry {
                 if let Some(attempt) = e
                     .agent

@@ -85,12 +85,16 @@ impl Ops {
                     cwd,
                     &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
                 )?;
-                ensure!(
-                    base_status.is_empty(),
-                    "Main repository checkout ({}) has uncommitted local changes ({}); commit or stash them before synchronizing",
-                    cwd.display(),
-                    review::summarize_porcelain_z(&base_status, 4)
-                );
+                if !base_status.is_empty() {
+                    return Err(review::DeliveryError::MainCheckoutBusy {
+                        reason: format!(
+                            "Main repository checkout ({}) has uncommitted local changes ({}); commit or stash them before synchronizing",
+                            cwd.display(),
+                            review::summarize_porcelain_z(&base_status, 4)
+                        ),
+                    }
+                    .into());
+                }
                 ensure!(
                     self.checked(cwd, &["rev-parse", "HEAD"])? == old,
                     "Base changed during synchronization; retry after inspection"

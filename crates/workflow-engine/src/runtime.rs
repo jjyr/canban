@@ -522,9 +522,19 @@ fn drive(
                     });
                     card.revision += 1;
                     db.save(card)?;
+                    if let Some(obj) = run.inputs.as_object_mut() {
+                        obj.remove("queued_at");
+                        obj.remove("queue_pause_reason");
+                    }
                     run.state = "waiting_approval".into();
                     record(db, run, "workflow.waiting_for_human", title)?;
                 } else {
+                    if run.inputs["queued_at"].as_u64().is_none() {
+                        run.inputs["queued_at"] = json!(now());
+                    }
+                    if let Some(obj) = run.inputs.as_object_mut() {
+                        obj.remove("queue_pause_reason");
+                    }
                     run.inputs["pending_next"] = json!(to);
                     run.inputs["target_branch"] = json!(target_branch);
                     run.inputs["sync_upstream"] = json!(sync_upstream);
@@ -772,6 +782,10 @@ pub fn approve_with_feedback(
             card.hold_auto_merge = false;
             card.revision += 1;
             run.input_digest = digest(db, card);
+            if let Some(obj) = run.inputs.as_object_mut() {
+                obj.remove("queue_pause_reason");
+            }
+            run.inputs["queued_at"] = json!(now());
             run.inputs["pending_next"] = json!(to);
             run.inputs["target_branch"] = json!(target_branch);
             run.inputs["sync_upstream"] = json!(sync_upstream);
@@ -787,6 +801,10 @@ pub fn approve_with_feedback(
     let clean_feedback = feedback.map(str::trim).filter(|s| !s.is_empty());
     if rework && let Some(note) = clean_feedback {
         run.inputs["rework_feedback"] = json!(note);
+    }
+    if rework && let Some(obj) = run.inputs.as_object_mut() {
+        obj.remove("queued_at");
+        obj.remove("queue_pause_reason");
     }
     run.history.push(json!({"step":key,"visit":run.visit,"decision":if rework{"rework"}else{"approved"},"feedback":clean_feedback,"outputs":run.outputs,"at":now()}));
     card.human_gate = None;
@@ -819,6 +837,10 @@ pub fn complete_delivery(
     queue: Queue,
 ) -> Result<()> {
     let key = run.step.clone().context("Missing Deliver step")?;
+    if let Some(obj) = run.inputs.as_object_mut() {
+        obj.remove("queued_at");
+        obj.remove("queue_pause_reason");
+    }
     run.outputs.insert(key.clone(), output);
     let to = run.inputs["pending_next"].as_str().map(str::to_owned);
     next(run, to);
@@ -954,6 +976,9 @@ pub fn rework_conflict(
         [req.id.as_str(), run.id.as_str(), step_ref.as_str()],
     )?;
     let agent_id = req.profile.id.clone();
+    if let Some(obj) = run.inputs.as_object_mut() {
+        obj.remove("queue_pause_reason");
+    }
     run.inputs["conflict_attempts"] = json!(attempts + 1);
     run.inputs["title"] = json!(card.title);
     run.inputs["body"] = json!(card.body);
@@ -1003,6 +1028,10 @@ pub fn hold_delivery(
         next_stage: None,
     });
     card.revision += 1;
+    if let Some(obj) = run.inputs.as_object_mut() {
+        obj.remove("queued_at");
+        obj.remove("queue_pause_reason");
+    }
     run.state = "waiting_approval".into();
     run.updated_at = now();
     db.save(run)?;

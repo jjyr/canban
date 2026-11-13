@@ -28,7 +28,7 @@ pub use entry_card::entry_card;
 pub mod directory_field;
 pub use directory_field::{directory_field, directory_input};
 pub mod settings;
-pub use settings::{settings_field, settings_section};
+pub use settings::{settings_field, settings_nav_heading, settings_nav_item, settings_section};
 pub mod section_group;
 pub use section_group::{SectionGroup, collapsible_section_group, section_group};
 pub mod chrome;

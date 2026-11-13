@@ -51,10 +51,18 @@ pub fn watch(ui: Ui) {
         let active_card_tab = ui.card_tab.get();
         if !active_card_tab.is_empty() && !ids.contains(&active_card_tab) {
             let cid = ui.card.get_untracked();
-            let live = card_live_entries(&ui.snapshot.get_untracked(), &cid);
-            let next = live.last().map(|e| e.saved.id.clone()).unwrap_or_default();
-            ui.card_tab.set(next);
-            ui.terminal_focus.update(|v| *v += 1);
+            let recent = ui.terminal_recent.with(|m| m.get(&cid).cloned());
+            let next = default_card_terminal(&ui.snapshot.get_untracked(), &cid, recent.as_deref())
+                .unwrap_or_default();
+            if next.is_empty() {
+                ui.card_tab.set(String::new());
+                if !ui.is_method_pending("terminal.create") && !ui.is_method_pending("agent.open") {
+                    ui.card_terminal_open.set(false);
+                    ui.card_terminal_focused.set(false);
+                }
+            } else {
+                select_card_tab(ui, &cid, next);
+            }
         }
         let tabs = ui.terminal_tabs.get();
         let kept: Vec<_> = tabs.iter().filter(|id| ids.contains(id)).cloned().collect();
@@ -134,12 +142,28 @@ pub fn card_live_entries(snapshot: &canban_types::Snapshot, card_id: &str) -> Ve
         .filter(|e| {
             e.card.as_ref().is_some_and(|c| c.id == card_id)
                 && e.listed()
-                && (e.agent.is_none() || e.binding().is_some())
+                && (e.agent.is_none()
+                    || e.binding().is_some()
+                    || matches!(e.status().as_str(), "queued" | "starting"))
         })
         .collect()
 }
 
-fn select_card_tab(ui: Ui, card_id: &str, terminal_id: String) {
+/// Resolve the active Terminal/Agent tab for a Card: prefer the Card's last-selected
+/// live entry when still active, otherwise select the first active entry (`live.first()`).
+pub fn default_card_terminal(
+    snapshot: &canban_types::Snapshot,
+    card_id: &str,
+    recent: Option<&str>,
+) -> Option<String> {
+    let live = card_live_entries(snapshot, card_id);
+    recent
+        .filter(|rid| live.iter().any(|e| e.saved.id.as_str() == *rid))
+        .map(str::to_owned)
+        .or_else(|| live.first().map(|e| e.saved.id.clone()))
+}
+
+pub(crate) fn select_card_tab(ui: Ui, card_id: &str, terminal_id: String) {
     if !card_id.is_empty() && !terminal_id.is_empty() {
         ui.terminal_recent.with(|m| {
             m.insert(card_id.to_owned(), terminal_id.clone());
@@ -243,7 +267,7 @@ fn gallery_create_entry(
     id
 }
 
-/// Open the Card's quick terminal view directly (selecting an active tab or spawning a shell).
+/// Open the Card's side-by-side terminal split directly (selecting the active tab or spawning a shell).
 pub fn open_card_quick(ui: Ui, card_id: &str) {
     let Some(card) = ui
         .snapshot
@@ -251,8 +275,13 @@ pub fn open_card_quick(ui: Ui, card_id: &str) {
     else {
         return;
     };
-    ui.open_card(card.id.clone());
+    if ui.page.get_untracked() != "card" || ui.card.get_untracked() != card.id {
+        ui.open_card(card.id.clone());
+    }
     if !ui.card_tab.get_untracked().is_empty() {
+        ui.card_terminal_open.set(true);
+        ui.card_terminal_focused.set(true);
+        ui.terminal_focus.update(|v| *v += 1);
         return;
     }
     if card.archived_at.is_some() {
@@ -278,10 +307,21 @@ pub fn create_in_card(ui: Ui, project_id: String, card_id: String, agent: bool) 
         });
         return;
     }
+    let source_page = ui.page.get_untracked();
+    let in_card_workspace = !matches!(source_page.as_str(), "terminals" | "review");
+    if in_card_workspace {
+        if source_page != "card" || ui.card.get_untracked() != card_id {
+            ui.open_card(card_id.clone());
+        }
+        ui.card_terminal_open.set(true);
+        ui.card_terminal_focused.set(true);
+    }
     if crate::APP.get().is_none() {
         let id = gallery_create_entry(ui, Some(project_id), Some(card_id.clone()), agent);
         if ui.page.get_untracked() == "card" && ui.card.get_untracked() == card_id {
             select_card_tab(ui, &card_id, id);
+            ui.card_terminal_open.set(true);
+            ui.card_terminal_focused.set(true);
         } else {
             ui.open_terminal(id);
         }
@@ -291,7 +331,6 @@ pub fn create_in_card(ui: Ui, project_id: String, card_id: String, agent: bool) 
     if agent {
         params["agent"] = json!(true);
     }
-    let source_page = ui.page.get_untracked();
     let target_card = card_id;
     dispatch_then(ui, "terminal.create", params, move |v| {
         let Some(id) = v["id"].as_str().map(str::to_owned) else {
@@ -299,6 +338,8 @@ pub fn create_in_card(ui: Ui, project_id: String, card_id: String, agent: bool) 
         };
         if ui.page.get_untracked() == "card" && ui.card.get_untracked() == target_card {
             select_card_tab(ui, &target_card, id);
+            ui.card_terminal_open.set(true);
+            ui.card_terminal_focused.set(true);
         } else if source_page == "terminals" || source_page == "review" {
             ui.open_terminal(id);
         }
@@ -373,11 +414,7 @@ fn launch(ui: Ui, params: serde_json::Value) {
             && let Some(id) = v["id"].as_str()
         {
             if ui.page.get_untracked() == "card" && !ui.card.get_untracked().is_empty() {
-                if ui.card_terminal_open.get_untracked() {
-                    ui.open_card_with_terminal(ui.card.get_untracked(), Some(id.into()));
-                } else {
-                    select_card_tab(ui, &ui.card.get_untracked(), id.into());
-                }
+                ui.open_card_with_terminal(ui.card.get_untracked(), Some(id.into()));
             } else if ui.terminal_selection.get_untracked() == selection {
                 ui.open_terminal(id.into());
             }
@@ -528,14 +565,16 @@ fn remove_tab(ui: Ui, id: &str) {
 }
 pub fn cycle(ui: Ui, forward: bool) {
     if ui.page.get_untracked() == "card"
+        && ui.card_terminal_open.get_untracked()
         && let Some(c) = ui.current_card()
     {
-        let live = card_live_entries(&ui.snapshot.get_untracked(), &c.id);
-        if live.is_empty() {
+        let slots: Vec<_> = card_live_entries(&ui.snapshot.get_untracked(), &c.id)
+            .into_iter()
+            .map(|e| e.saved.id)
+            .collect();
+        if slots.is_empty() {
             return;
         }
-        let mut slots = vec![String::new()];
-        slots.extend(live.into_iter().map(|e| e.saved.id));
         let cur = ui.card_tab.get_untracked();
         let old = slots.iter().position(|s| *s == cur).unwrap_or(0);
         let next = if forward {
@@ -571,7 +610,7 @@ pub fn bindings(ui: Ui) {
     use nsh_core::keymap::When;
     effect(move || {
         let on_terminals = ui.page.get() == "terminals";
-        let on_card_terminal = ui.page.get() == "card" && !ui.card_tab.get().is_empty();
+        let on_card_terminal = ui.page.get() == "card" && ui.card_terminal_open.get();
         if (!on_terminals && !on_card_terminal)
             || ui.quick_open.get()
             || ui.terminal_rename.get().is_some()
@@ -602,7 +641,12 @@ pub fn bindings(ui: Ui) {
                         }
                         1 => {
                             if ui.page.get_untracked() == "card" {
-                                close_entry(ui, &ui.card_tab.get_untracked());
+                                let cid = ui.card_id();
+                                if let Some(entry) =
+                                    crate::card::terminal::select_entry_for_card(ui, &cid)
+                                {
+                                    close_entry(ui, &entry.saved.id);
+                                }
                             } else {
                                 close_tab(ui, &ui.terminal_selection.get_untracked());
                             }

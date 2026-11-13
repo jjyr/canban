@@ -89,7 +89,32 @@ pub fn items(ui: Ui, card: Card) -> Vec<MenuItem> {
         MenuItem::new("Open Agent")
             .disabled(inactive || ui.pending.get_untracked())
             .on_select(move || {
-                crate::terminals::create_in_card(ui, project_id.clone(), agent_card.clone(), true)
+                let s = ui.snapshot.get_untracked();
+                let live = crate::terminals::card_live_entries(&s, &agent_card);
+                let recent = ui.terminal_recent.with(|m| m.get(&agent_card).cloned());
+                let existing_agent = recent
+                    .as_deref()
+                    .and_then(|rid| {
+                        live.iter().find(|e| {
+                            e.saved.id == rid
+                                && (e.agent.is_some() || e.saved.agent_engine.is_some())
+                        })
+                    })
+                    .or_else(|| {
+                        live.iter()
+                            .find(|e| e.agent.is_some() || e.saved.agent_engine.is_some())
+                    })
+                    .map(|e| e.saved.id.clone());
+                if let Some(id) = existing_agent {
+                    ui.open_card_with_terminal(agent_card.clone(), Some(id));
+                } else {
+                    crate::terminals::create_in_card(
+                        ui,
+                        project_id.clone(),
+                        agent_card.clone(),
+                        true,
+                    );
+                }
             }),
     );
     items.insert(

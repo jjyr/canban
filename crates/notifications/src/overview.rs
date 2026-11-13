@@ -121,8 +121,14 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                     message: msg,
                 });
             }
+            let awaiting_first_status = a.connection_state == "connected"
+                && a.observed
+                    .as_ref()
+                    .is_some_and(|v| v["status"]["state"].as_str().is_none())
+                && now().saturating_sub(a.created_at) < 3_000;
             if !a.finished()
-                && (runtime == "unknown" && a.state != "starting" || a.close_state == "error")
+                && (runtime == "unknown" && a.state != "starting" && !awaiting_first_status
+                    || a.close_state == "error")
             {
                 reasons.push(OverviewReason {
                     source: "recovery".into(),

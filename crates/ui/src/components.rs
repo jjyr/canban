@@ -39,6 +39,7 @@ pub fn run_panel(ui: Ui, req: Request) -> impl IntoElement {
     if let Some(row) = current {
         if crate::terminals::model::binding(&row).is_some() {
             let id = row.id.clone();
+            let card_id = req.card_id.clone();
             panel = panel.child(action(
                 if row.request.as_ref().is_some_and(|r| r.id == req.id) {
                     "Open Terminal"
@@ -46,7 +47,13 @@ pub fn run_panel(ui: Ui, req: Request) -> impl IntoElement {
                     "Open current conversation"
                 },
                 Variant::Secondary,
-                move |_| ui.open_terminal(id.clone()),
+                move |_| {
+                    if ui.page.get_untracked() == "card" {
+                        ui.open_card_with_terminal(card_id.clone(), Some(id.clone()));
+                    } else {
+                        ui.open_terminal(id.clone());
+                    }
+                },
             ));
         } else if crate::terminals::model::can_resume(&row, &ui.profiles.get_untracked()) {
             let id = row.id.clone();

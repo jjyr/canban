@@ -1,49 +1,55 @@
-//! Embedded Live Terminal pane inside the side-by-side Card workspace (`⌘J`).
+//! Embedded Live Terminal & Agent pane inside the side-by-side Card workspace (`⌘J`).
 //!
 //! Shares the same native `canban/terminal` viewer and Herdr PTY attachment as
 //! `Terminals`, while guaranteeing at most one mounted viewer at a time (`page == "card"`).
-//! Hiding or closing this pane detaches the viewer without terminating the PTY.
+//! Hiding this pane detaches the viewer without terminating any PTY.
 use super::*;
-use crate::terminals::{Entry, entries, model};
-use nsh_core::element::desktop::{MenuItem, popup_menu, popup_menu_at};
+use crate::terminals::{Entry, card_live_entries, default_card_terminal, select_card_tab};
 use serde_json::json;
 
 pub fn select_entry_for_card(ui: Ui, card_id: &str) -> Option<Entry> {
     let s = ui.snapshot.get();
-    let all: Vec<_> = entries(&s)
-        .into_iter()
-        .filter(|e| e.card.as_ref().is_some_and(|c| c.id == card_id))
-        .collect();
-    if all.is_empty() {
+    let live = card_live_entries(&s, card_id);
+    if live.is_empty() {
         return None;
     }
+    let selected = ui.card_tab.get();
+    if !selected.is_empty()
+        && let Some(e) = live.iter().find(|e| e.saved.id == selected)
+    {
+        return Some(e.clone());
+    }
     let recent = ui.terminal_recent.with(|m| m.get(card_id).cloned());
-    if let Some(rec) = &recent
-        && let Some(e) = all.iter().find(|e| &e.saved.id == rec && !e.ended())
-    {
-        return Some(e.clone());
-    }
-    if let Some(e) = all.iter().find(|e| !e.ended() && e.binding().is_some()) {
-        return Some(e.clone());
-    }
-    if let Some(rec) = &recent
-        && let Some(e) = all.iter().find(|e| &e.saved.id == rec)
-    {
-        return Some(e.clone());
-    }
-    all.into_iter().next()
+    let fallback = default_card_terminal(&s, card_id, recent.as_deref())?;
+    live.into_iter().find(|e| e.saved.id == fallback)
 }
 
 pub fn toggle(ui: Ui) {
     if ui.page.get_untracked() != "card" || ui.card.get_untracked().is_empty() {
         return;
     }
-    let next = !ui.card_terminal_open.get_untracked();
-    ui.card_terminal_open.set(next);
-    ui.card_terminal_focused.set(next);
-    if next {
-        ui.terminal_focus.update(|v| *v += 1);
+    if ui.card_terminal_open.get_untracked() {
+        ui.card_terminal_open.set(false);
+        ui.card_terminal_focused.set(false);
+        return;
     }
+    let Some(card) = ui.current_card() else {
+        return;
+    };
+    let s = ui.snapshot.get_untracked();
+    let recent = ui.terminal_recent.with(|m| m.get(&card.id).cloned());
+    if let Some(id) = default_card_terminal(&s, &card.id, recent.as_deref()) {
+        select_card_tab(ui, &card.id, id);
+        ui.card_terminal_open.set(true);
+        ui.card_terminal_focused.set(true);
+        return;
+    }
+    if card.archived_at.is_some() {
+        ui.operation_error
+            .set("Restore this Card before opening a new terminal.".into());
+        return;
+    }
+    crate::terminals::create_in_card(ui, card.project_id, card.id, false);
 }
 
 pub fn pop_out(ui: Ui) {
@@ -56,94 +62,24 @@ pub fn pop_out(ui: Ui) {
         && entry.binding().is_some()
     {
         ui.card_terminal_open.set(false);
+        ui.card_terminal_focused.set(false);
         ui.open_terminal(entry.saved.id);
     } else {
         ui.card_terminal_open.set(false);
+        ui.card_terminal_focused.set(false);
         crate::terminals::open_card(ui, &cid);
     }
 }
 
-fn selector_menu(ui: Ui, card_id: String, anchor: ElementRef) {
-    ui.spawn(async move {
-        let s = ui.snapshot.get_untracked();
-        let card = s.cards.iter().find(|c| c.id == card_id).cloned();
-        let card_entries: Vec<_> = entries(&s)
-            .into_iter()
-            .filter(|e| e.card.as_ref().is_some_and(|c| c.id == card_id))
-            .collect();
-        let mut items = Vec::new();
-        for e in &card_entries {
-            let eid = e.saved.id.clone();
-            let cid = card_id.clone();
-            let label_str = if let Some(prof) = e.profile() {
-                format!("@{} · {}", prof, e.display_status())
-            } else {
-                format!("{} · {}", e.title(), e.display_status())
-            };
-            if !e.ended() {
-                items.push(MenuItem::new(label_str).on_select(move || {
-                    ui.open_card_with_terminal(cid.clone(), Some(eid.clone()));
-                }));
-            } else if let Some(agent) = &e.agent
-                && model::can_resume(agent, &ui.profiles.get_untracked())
-            {
-                let resume_id = agent.id.clone();
-                items.push(
-                    MenuItem::new(format!("Resume @{}", e.profile().unwrap_or("agent")))
-                        .on_select(move || crate::terminals::navigation::resume(ui, &resume_id)),
-                );
-            }
-        }
-        if let Some(c) = &card
-            && c.active()
-        {
-            if !items.is_empty() {
-                items.push(MenuItem::separator());
-            }
-            for p in ui.profiles.get_untracked() {
-                let exists = card_entries
-                    .iter()
-                    .any(|e| e.profile() == Some(p.id.as_str()) && !e.ended());
-                if !exists {
-                    let cid = c.id.clone();
-                    let pid = p.id.clone();
-                    let has_closed = card_entries
-                        .iter()
-                        .any(|e| e.profile() == Some(p.id.as_str()));
-                    let verb = if has_closed {
-                        "Resume / Start"
-                    } else {
-                        "Start"
-                    };
-                    items.push(
-                        MenuItem::new(format!("{verb} @{}", p.id)).on_select(move || {
-                            crate::sessions::open(ui, cid.clone(), pid.clone());
-                        }),
-                    );
-                }
-            }
-            items.push(MenuItem::separator());
-            let pid = c.project_id.clone();
-            let cid = c.id.clone();
-            items.push(
-                MenuItem::new("Open Shell in Card Worktree").on_select(move || {
-                    crate::terminals::launch_custom(ui, json!({"project_id": pid, "card_id": cid}));
-                }),
-            );
-        }
-        if items.is_empty() {
-            return;
-        }
-        if let Some(bounds) = anchor.measure().await {
-            popup_menu_at(
-                items,
-                point(bounds.page.x, bounds.page.y + bounds.frame.size.height),
-            )
-            .await;
-        } else {
-            popup_menu(items).await;
-        }
-    });
+fn card_tab_title(e: &Entry) -> String {
+    if let Some(name) = &e.saved.name {
+        return name.clone();
+    }
+    if let Some(profile) = e.profile() {
+        format!("@{profile} · {}", e.display_status())
+    } else {
+        e.title()
+    }
 }
 
 pub fn pane(ui: Ui) -> impl IntoElement {
@@ -168,7 +104,6 @@ pub fn pane(ui: Ui) -> impl IntoElement {
             ))
         })
     });
-    let anchor = element_ref();
 
     view()
         .flex_1()
@@ -184,92 +119,201 @@ pub fn pane(ui: Ui) -> impl IntoElement {
         .child(
             view()
                 .h(px(38.))
-                .px_2p5()
                 .flex_shrink_0()
                 .flex_row()
                 .items_center()
-                .justify_between()
-                .gap_2()
-                .bg(SURFACE)
+                .gap_0()
+                .bg(INSET)
                 .border_b_1()
                 .border_color(BORDER)
+                .child(when(
+                    move || ui.narrow.get(),
+                    move || {
+                        view()
+                            .px_1p5()
+                            .h_full()
+                            .flex_row()
+                            .items_center()
+                            .border_r_1()
+                            .border_color(BORDER)
+                            .child(compact_action("← Card", Variant::Quiet, move |_| {
+                                ui.card_terminal_open.set(false);
+                                ui.card_terminal_focused.set(false);
+                            }))
+                    },
+                ))
                 .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .min_w(px(0.))
+                    scroll()
+                        .horizontal()
+                        .scrollbar(false)
                         .flex_1()
-                        .child(when(
-                            move || ui.narrow.get(),
-                            move || {
-                                compact_action("← Card", Variant::Quiet, move |_| {
-                                    ui.card_terminal_open.set(false);
-                                    ui.card_terminal_focused.set(false);
-                                })
-                            },
-                        ))
-                        .child(
-                            canban_ui_kit::press_target()
-                                .element_ref(&anchor)
-                                .h(px(26.))
-                                .px_2()
-                                .rounded(px(RADIUS))
-                                .border_1()
-                                .border_color(BORDER)
-                                .bg(INSET)
-                                .hover(|s| s.bg(CARD_HOVER))
-                                .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
-                                .flex_row()
-                                .items_center()
-                                .gap_1p5()
-                                .min_w(px(0.))
-                                .accessibility_label("Select Card Agent or Shell")
-                                .on_press(move |_: &()| {
-                                    let cid = card_id.get_untracked();
-                                    if !cid.is_empty() {
-                                        selector_menu(ui, cid, anchor);
-                                    }
-                                })
-                                .child(icon(Icon::Terminal).w(px(12.5)).h(px(12.5)))
-                                .child(
-                                    label(move || {
-                                        if let Some(e) = active_entry.get() {
-                                            if let Some(prof) = e.profile() {
-                                                format!("@{prof} ▾")
-                                            } else {
-                                                format!("{} ▾", e.title())
-                                            }
-                                        } else {
-                                            "Start Agent ▾".into()
-                                        }
-                                    })
-                                    .text_size(px(12.))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .truncate(),
-                                ),
-                        )
+                        .min_w(px(0.))
+                        .h_full()
                         .child(dynamic(move || {
-                            if let Some(e) = active_entry.get() {
-                                let tone = if e.needs_attention() {
-                                    Tone::Attention
-                                } else if e.ended() {
-                                    Tone::Neutral
-                                } else {
-                                    Tone::Success
-                                };
-                                status(e.display_status(), tone).into_element()
-                            } else {
-                                view().into_element()
+                            let cid = card_id.get();
+                            if cid.is_empty() {
+                                return view();
                             }
+                            let s = ui.snapshot.get();
+                            let live = card_live_entries(&s, &cid);
+                            let selected_id = active_entry
+                                .get()
+                                .map(|e| e.saved.id)
+                                .unwrap_or_default();
+                            let mut strip = view().h_full().flex_row().items_center().gap_0();
+                            for e in live {
+                                let id = e.saved.id.clone();
+                                let close_id = id.clone();
+                                let menu_id = id.clone();
+                                let rename_id = id.clone();
+                                let tab_cid = cid.clone();
+                                let is_sel = selected_id == id;
+                                let text = card_tab_title(&e);
+                                let hint = e.hint();
+                                let mark =
+                                    e.provider().map(|(ic, _)| ic).unwrap_or(Icon::Terminal);
+                                let dot_color = if e.needs_attention() {
+                                    ATTENTION
+                                } else if e.ended() || e.inactive() {
+                                    MUTED
+                                } else {
+                                    SUCCESS
+                                };
+                                strip = strip.child(
+                                    view()
+                                        .h_full()
+                                        .max_w(px(230.))
+                                        .flex_shrink_0()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_0()
+                                        .pr_0p5()
+                                        .bg(if is_sel { SURFACE } else { CLEAR })
+                                        .hover(move |st| {
+                                            st.bg(if is_sel { SURFACE } else { CARD_HOVER })
+                                        })
+                                        .border_r_1()
+                                        .border_color(BORDER)
+                                        .tooltip(
+                                            hint_tooltip(hint.clone())
+                                                .placement(Placement::Bottom),
+                                        )
+                                        .child(
+                                            view()
+                                                .h_full()
+                                                .focusable(true)
+                                                .cursor_pointer()
+                                                .flex_1()
+                                                .min_w(px(0.))
+                                                .overflow_hidden()
+                                                .px_2p5()
+                                                .bg(CLEAR)
+                                                .flex_row()
+                                                .items_center()
+                                                .gap_1p5()
+                                                .role(AccessibilityRole::Tab)
+                                                .accessibility_state(move || {
+                                                    nsh_core::AccessibilityState {
+                                                        selected: is_sel,
+                                                        ..Default::default()
+                                                    }
+                                                })
+                                                .label(format!("Tab {text}"))
+                                                .child(
+                                                    view()
+                                                        .w(px(5.))
+                                                        .h(px(5.))
+                                                        .rounded(px(3.))
+                                                        .bg(dot_color)
+                                                        .flex_shrink_0()
+                                                        .pointer_events(PointerEvents::None),
+                                                )
+                                                .child(
+                                                    icon(mark)
+                                                        .w(px(13.))
+                                                        .h(px(13.))
+                                                        .flex_shrink_0(),
+                                                )
+                                                .child(
+                                                    label(text.clone())
+                                                        .font_weight(if is_sel {
+                                                            FontWeight::SEMIBOLD
+                                                        } else {
+                                                            FontWeight::NORMAL
+                                                        })
+                                                        .truncate()
+                                                        .min_w(px(0.)),
+                                                )
+                                                .on_press_down(
+                                                    move |event: &nsh_core::PressEvent| {
+                                                        if event.clicks >= 2 {
+                                                            ui.terminal_rename
+                                                                .set(Some(rename_id.clone()));
+                                                        }
+                                                    },
+                                                )
+                                                .on_context_menu(
+                                                    move |event: &nsh_core::ContextMenuEvent| {
+                                                        ui.spawn(crate::terminals::tabs::menu(
+                                                            ui,
+                                                            menu_id.clone(),
+                                                            Some(event.page_position),
+                                                        ));
+                                                    },
+                                                )
+                                                .on_press(move |_: &nsh_core::PressEvent| {
+                                                    select_card_tab(ui, &tab_cid, id.clone());
+                                                    ui.card_terminal_focused.set(true);
+                                                }),
+                                        )
+                                        .child(chrome_button(
+                                            Icon::Close,
+                                            format!("Close terminal {}", e.title()),
+                                            move |_| crate::terminals::close_entry(ui, &close_id),
+                                        )),
+                                );
+                            }
+                            strip
                         })),
                 )
                 .child(
                     view()
+                        .px_1p5()
+                        .flex_shrink_0()
                         .flex_row()
                         .items_center()
-                        .gap_1()
-                        .flex_shrink_0()
+                        .gap_0p5()
+                        .child(chrome_button_disabled(
+                            Icon::Plus,
+                            "New terminal · ⌘T",
+                            move || {
+                                ui.pending.get()
+                                    || ui.current_card().is_none_or(|c| c.archived_at.is_some())
+                            },
+                            move |_| {
+                                if let Some(c) = ui.current_card() {
+                                    crate::terminals::create_in_card(
+                                        ui,
+                                        c.project_id,
+                                        c.id,
+                                        false,
+                                    );
+                                }
+                            },
+                        ))
+                        .child(chrome_button_disabled(
+                            Icon::Agent,
+                            "New Agent",
+                            move || {
+                                ui.pending.get()
+                                    || ui.current_card().is_none_or(|c| c.archived_at.is_some())
+                            },
+                            move |_| {
+                                if let Some(c) = ui.current_card() {
+                                    crate::terminals::create_in_card(ui, c.project_id, c.id, true);
+                                }
+                            },
+                        ))
                         .child(dynamic(move || {
                             let Some(e) = active_entry.get() else {
                                 return view().into_element();
@@ -295,13 +339,11 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                         .child(
                             view()
                                 .tooltip(hint_tooltip("Open in full-screen Terminals workspace"))
-                                .child(compact_action("Pop out ↗", Variant::Quiet, move |_| {
-                                    pop_out(ui)
-                                })),
+                                .child(compact_action("↗", Variant::Quiet, move |_| pop_out(ui))),
                         )
                         .child(chrome_button(
                             Icon::Close,
-                            "Hide Card Terminal · ⌘J (keeps Agent running)",
+                            "Hide Terminal pane · ⌘J (keeps Agent & Shell running)",
                             move |_| {
                                 ui.card_terminal_open.set(false);
                                 ui.card_terminal_focused.set(false);
@@ -318,6 +360,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                             && !ui.quick_open.get()
                             && ui.utility_popup.get().is_empty()
                             && !ui.native_modal.get()
+                            && ui.terminal_rename.get().is_none()
                             && ui.worktree_modal.get().is_none()
                             && ui.worktree_promote.get().is_none()
                             && ui.worktree_remove_confirm.get().is_none()
@@ -366,73 +409,17 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                     .into_element();
             }
 
-            // Empty / queued / ended state
-            let cid = card_id.get();
-            let card = ui.current_card();
-            let entry = active_entry.get();
-            let mut body = view().flex_1().min_h(px(0.)).p_5().gap_3().items_start();
-            if let Some(e) = entry {
-                if matches!(e.status().as_str(), "queued" | "starting") {
-                    body = body
-                        .child(status(format!("{}…", e.display_status()), Tone::Info))
-                        .child(muted(
-                            "Waiting for scheduler admission and PTY attachment. Terminal will appear automatically.",
-                        ));
-                } else if let Some(agent) = &e.agent
-                    && model::can_resume(agent, &ui.profiles.get())
-                {
-                    let resume_id = agent.id.clone();
-                    let prof = e.profile().unwrap_or("agent").to_owned();
-                    body = body
-                        .child(label(format!("@{prof} conversation ended")).font_weight(FontWeight::SEMIBOLD))
-                        .child(muted("Resume the saved session right beside this Card to continue discussing."))
-                        .child(
-                            action(format!("Resume @{prof}"), Variant::Primary, move |_| {
-                                crate::terminals::navigation::resume(ui, &resume_id)
-                            })
-                            .disabled(move || ui.pending.get()),
-                        );
-                } else {
-                    body = body.child(muted("Previous terminal session has ended."));
-                }
-            } else {
-                body = body
-                    .child(label("Discuss with an Agent live").font_weight(FontWeight::SEMIBOLD))
-                    .child(muted(
-                        "Launch an interactive Agent CLI in this Card's workspace without leaving the Card context.",
-                    ));
-            }
-            if let Some(c) = card
-                && c.active()
-            {
-                let def = crate::sessions::default_profile(ui);
-                let cid_start = cid.clone();
-                let cid_shell = cid;
-                let pid_shell = c.project_id;
-                body = body.child(
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            action(
-                                format!("Start @{def}"),
-                                Variant::Primary,
-                                move |_| crate::sessions::open(ui, cid_start.clone(), def.clone()),
-                            )
-                            .disabled(move || ui.pending.get()),
-                        )
-                        .child(
-                            action("Open Shell", Variant::Secondary, move |_| {
-                                crate::terminals::launch_custom(
-                                    ui,
-                                    json!({"project_id": pid_shell, "card_id": cid_shell}),
-                                );
-                            })
-                            .disabled(move || ui.pending.get()),
-                        ),
-                );
-            }
-            body.into_element()
+            let status_label = active_entry
+                .get()
+                .map(|e| format!("{}…", e.display_status()))
+                .unwrap_or_else(|| "Starting…".into());
+            view()
+                .flex_1()
+                .min_h(px(0.))
+                .p_5()
+                .gap_2()
+                .items_start()
+                .child(live_status(status_label, Tone::Info))
+                .into_element()
         }))
 }

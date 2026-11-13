@@ -59,7 +59,7 @@ Agent CLI reply / final report       Herdr / task / Review state
 
 `canban-notifications::reminders` owns classification, stable identities and
 deduplication, without UI/runtime IO. Explicit `comment.replied` Agent events and
-final `execution.reported` events (completed/blocked/failed) qualify as messages.
+final `execution.reported` events (completed/backlog/blocked/failed) qualify as messages.
 Progress, user comments, ordinary runtime changes and terminal output do not.
 
 A report and its generated question replies share the report ID, including when
@@ -105,8 +105,31 @@ The UI loads a bundled original 240ms chime through NSH's native audio API. Audi
 is local to the viewing computer, independent of the Agent's execution machine.
 It requests no notification permission and does not call macOS notification APIs.
 
-New item identities enter one 650ms delivery batch. Immediately before playback,
-the UI rechecks whether any batch item remains unread/pending and whether sounds
+Audible notifications (`canban-notifications::sound_items`, updated 2026-11-13)
+are decoupled from visual unread badges so automated multi-step pipelines do not
+chime on routine stage transitions. Sounds play only for four categories:
+
+1. **Human intervention and `@agent` replies:** runtime permission/input waits
+   (`wait:*`), workflow approval/human gates and stale-input holds, Agent
+   `blocked` or `backlog` reports, and explicit `comment.replied` answers to
+   `@agent` questions. Routine automated `completed` stage reports without a
+   human gate or `@agent` question remain unread badges without playing a sound.
+2. **Agent failures:** `failed` reports, unreported exits (`execution.failed`),
+   missing terminals (`execution.missing`), runtime errors, recovery states and
+   uncertain question deliveries.
+3. **Merge failures / paused deliveries:** `review.merge_failed`,
+   `review.upstream_sync_failed`, `github.pr_merge_attention`, and deliveries
+   held for a human after exhausting `max_conflict_attempts` or encountering
+   non-reworkable conflicts. Automatic in-budget `review.merge_conflict` rework
+   routed back to an Agent stays silent.
+4. **Completed merges:** background Queue merge deliveries (`review.merged` by
+   `system`) and remote GitHub PR merge reconciliation (`github.pr_delivered` /
+   non-user `github.pr_merged`). Synchronous manual merges initiated directly by
+   the user (`actor == "user"`) rely on immediate UI toast feedback without a
+   redundant notification chime.
+
+New audible item identities enter one 650ms delivery batch. Immediately before playback,
+the UI rechecks whether any batch item remains active in `sound_items` and whether sounds
 are enabled. Thus promptly read visible replies and already-resolved waits need
 no sound. Repeated snapshots or message edits do not replay a delivered item.
 Initial connection and reconnect establish a silent baseline. Re-enabling sounds

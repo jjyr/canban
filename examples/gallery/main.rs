@@ -13,6 +13,7 @@ fn controls() -> impl IntoElement {
     let directory = signal(String::new());
     let markdown = canban_ui_kit::markdown::MarkdownInput::new();
     let group_open = signal(true);
+    let nav_selected = signal(0_usize);
     let gutter_scroll = element_ref();
     view().flex_1().min_h(px(0.0)).p_5().gap_4().bg(BACKGROUND)
     .child(heading("Component Gallery"))
@@ -193,6 +194,38 @@ fn controls() -> impl IntoElement {
                 .child(canban_ui::components::workflow::run_view(fixtures::workflow()))
                 .child(review::diff_panel(fixtures::review()))
                 .child(canban_ui::utilities::terminal_settings(ui))
+                .child(
+                    panel()
+                        .child(label("Settings jump column controls"))
+                        .child(
+                            view()
+                                .w(px(208.))
+                                .p_2()
+                                .rounded(px(RADIUS))
+                                .border_1()
+                                .border_color(BORDER)
+                                .bg(SURFACE)
+                                .gap_0p5()
+                                .child(settings_nav_heading("INTERFACE"))
+                                .child(settings_nav_item(
+                                    "Theme & support",
+                                    move || nav_selected.get() == 0,
+                                    move |_| nav_selected.set(0),
+                                ))
+                                .child(settings_nav_item(
+                                    "Terminal",
+                                    move || nav_selected.get() == 1,
+                                    move |_| nav_selected.set(1),
+                                ))
+                                .child(view().my_1p5().mx_2().h(px(1.)).bg(BORDER))
+                                .child(settings_nav_item(
+                                    "Acknowledgements",
+                                    move || nav_selected.get() == 2,
+                                    move |_| nav_selected.set(2),
+                                )),
+                        ),
+                )
+                .child(canban_ui::settings::acknowledgements_section(ui))
                 .child(
                     panel().child(label("Native libghostty terminal")).child(
                         native("canban/terminal")
@@ -586,6 +619,90 @@ pub fn Gallery() -> impl IntoElement {
                             append("card-1", 1)
                         });
                     }))
+                    .child(action("Silent stage done #1", Variant::Quiet, move |_| {
+                        ui.snapshot.update(|s| {
+                            let seq = s
+                                .events
+                                .iter()
+                                .filter(|e| e.card_id == "card-1")
+                                .map(|e| e.sequence)
+                                .max()
+                                .unwrap_or(0)
+                                + 1;
+                            let mut e = fixtures::timeline();
+                            e.id = format!("auto-completed-{seq}");
+                            e.card_id = "card-1".into();
+                            e.sequence = seq;
+                            e.actor = "agent:developer".into();
+                            e.kind = "execution.reported".into();
+                            e.message = "completed: Stage completed automatically".into();
+                            e.data = json!({"report_id": format!("auto-{seq}"), "state": "completed"});
+                            s.events.push(e);
+                        });
+                    }))
+                    .child(action("Return #1 to Backlog", Variant::Quiet, move |_| {
+                        ui.snapshot.update(|s| {
+                            let seq = s
+                                .events
+                                .iter()
+                                .filter(|e| e.card_id == "card-1")
+                                .map(|e| e.sequence)
+                                .max()
+                                .unwrap_or(0)
+                                + 1;
+                            let mut e = fixtures::timeline();
+                            e.id = format!("backlog-{seq}");
+                            e.card_id = "card-1".into();
+                            e.sequence = seq;
+                            e.actor = "agent:developer".into();
+                            e.kind = "execution.reported".into();
+                            e.message = "Returned to Backlog: Already implemented".into();
+                            e.data = json!({"report_id": format!("backlog-{seq}"), "state": "backlog"});
+                            s.events.push(e);
+                        });
+                    }))
+                    .child(action("Auto-merge #1", Variant::Quiet, move |_| {
+                        ui.snapshot.update(|s| {
+                            let seq = s
+                                .events
+                                .iter()
+                                .filter(|e| e.card_id == "card-1")
+                                .map(|e| e.sequence)
+                                .max()
+                                .unwrap_or(0)
+                                + 1;
+                            let mut e = fixtures::timeline();
+                            e.id = format!("merged-{seq}");
+                            e.card_id = "card-1".into();
+                            e.sequence = seq;
+                            e.actor = "system".into();
+                            e.kind = "review.merged".into();
+                            e.message = "Auto-merged into main".into();
+                            e.data = json!({"target_branch": "main", "request_key": format!("auto-merge-{seq}")});
+                            s.events.push(e);
+                        });
+                    }))
+                    .child(action("Merge failed #1", Variant::Quiet, move |_| {
+                        ui.snapshot.update(|s| {
+                            let seq = s
+                                .events
+                                .iter()
+                                .filter(|e| e.card_id == "card-1")
+                                .map(|e| e.sequence)
+                                .max()
+                                .unwrap_or(0)
+                                + 1;
+                            let mut e = fixtures::timeline();
+                            e.id = format!("merge-failed-{seq}");
+                            e.card_id = "card-1".into();
+                            e.sequence = seq;
+                            e.actor = "system".into();
+                            e.kind = "review.merge_failed".into();
+                            e.message = "Auto-merge failed: dirty target branch".into();
+                            e.data = json!({"target_branch": "main"});
+                            s.events.push(e);
+                        });
+                    }))
                     .child(action("Board", Variant::Quiet, move |_| {
                         ui.navigate("board")
                     }))
@@ -741,6 +858,10 @@ pub fn Gallery() -> impl IntoElement {
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("settings") {
         ui.page.set("settings".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("acknowledgements") {
+        ui.open_settings_section("acknowledgements");
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("notifications") {
@@ -1008,6 +1129,10 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Settings", Variant::Quiet, move |_| {
                     scene.set("workspace".into());
                     ui.navigate("settings");
+                }))
+                .child(action("Acknowledgements", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    ui.open_settings_section("acknowledgements");
                 }))
                 .child(action("Agent Setup", Variant::Quiet, move |_| {
                     scene.set("workspace".into());

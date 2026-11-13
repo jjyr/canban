@@ -19,6 +19,10 @@ pub enum DeliveryError {
     },
     /// The Project target branch moved while delivery was being prepared; retrying is safe.
     TargetAdvanced,
+    /// The main repository checkout temporarily has uncommitted local changes or is checked out
+    /// on another branch; Queue Merge pauses non-destructively at the head of the queue and
+    /// automatically resumes once the checkout is clean and on the target branch.
+    MainCheckoutBusy { reason: String },
 }
 impl std::fmt::Display for DeliveryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -36,10 +40,17 @@ impl std::fmt::Display for DeliveryError {
             Self::TargetAdvanced => {
                 f.write_str("Target branch advanced; refresh the review. Card commit is retained.")
             }
+            Self::MainCheckoutBusy { reason } => f.write_str(reason),
         }
     }
 }
 impl std::error::Error for DeliveryError {}
+
+/// Returns `true` when a `ReviewPreview` rejection reason is purely a transient main-checkout
+/// condition (uncommitted changes or another branch checked out) rather than a Card-level blocker.
+pub fn is_main_checkout_busy_reason(reason: &str) -> bool {
+    reason.starts_with("Main repository checkout (")
+}
 
 impl Ops {
     pub(crate) fn r_checked(&self, dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
@@ -387,10 +398,17 @@ impl Ops {
             "Git hooks left Card changes after commit/merge; inspect and refresh before delivery"
         );
         let head = self.r_text(cwd, &["rev-parse", "HEAD"])?;
-        ensure!(
-            self.current_branch(&project.directory).as_deref() == Some(&plan.target_branch),
-            "Project branch changed while preparing the merge; Card commit is retained"
-        );
+        let current_source_branch = self.current_branch(&project.directory).unwrap_or_default();
+        if current_source_branch != plan.target_branch {
+            return Err(DeliveryError::MainCheckoutBusy {
+                reason: format!(
+                    "Main repository checkout ({}) switched to branch `{current_source_branch}` while preparing the merge; switch it back to `{}` (Card commit is retained).",
+                    source.display(),
+                    plan.target_branch
+                ),
+            }
+            .into());
+        }
         if self.r_text(source, &["rev-parse", "HEAD"])? != plan.target_head {
             return Err(DeliveryError::TargetAdvanced.into());
         }
@@ -398,12 +416,16 @@ impl Ops {
             source,
             &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
         )?;
-        ensure!(
-            latest_source_status.is_empty(),
-            "Main repository checkout ({}) has uncommitted local changes ({}); Card commit is retained",
-            source.display(),
-            summarize_porcelain_z(&latest_source_status, 4)
-        );
+        if !latest_source_status.is_empty() {
+            return Err(DeliveryError::MainCheckoutBusy {
+                reason: format!(
+                    "Main repository checkout ({}) has uncommitted local changes ({}); commit or stash them before merging (Card commit is retained).",
+                    source.display(),
+                    summarize_porcelain_z(&latest_source_status, 4)
+                ),
+            }
+            .into());
+        }
         self.r_checked(
             source,
             &["merge", "--ff-only", "--no-overwrite-ignore", &head],

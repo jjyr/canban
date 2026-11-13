@@ -301,7 +301,7 @@ pub fn rail(ui: Ui) -> impl IntoElement {
                         }))
                         .on_press(move |_: &()| {
                             if ui.update.get()["state"]["phase"] == "manual_recovery" {
-                                ui.navigate("settings");
+                                ui.open_settings_section("updates");
                             } else {
                                 install(ui);
                             }

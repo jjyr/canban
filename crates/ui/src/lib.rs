@@ -30,6 +30,7 @@ pub use screens::screen;
 pub mod quick_open;
 pub mod reminders;
 pub mod sessions;
+pub mod settings;
 pub mod startup;
 pub mod terminals;
 pub mod workflows;

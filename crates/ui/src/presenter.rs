@@ -71,6 +71,7 @@ pub struct Ui {
     pub snapshot: Signal<Snapshot>,
     pub snapshot_ready: Signal<bool>,
     pub reminders: Memo<Vec<canban_notifications::Reminder>>,
+    pub sound_items: Memo<Vec<String>>,
     pub reminder_counts: Memo<BTreeMap<String, canban_notifications::ReminderCount>>,
     pub notification_delivery: Stored<canban_notifications::DeliveryTracker>,
     pub notification_resync: Stored<bool>,
@@ -98,6 +99,7 @@ pub struct Ui {
     pub card_view: Option<Signal<String>>,
     pub request: Signal<String>,
     pub page: Signal<String>,
+    pub settings_section: Signal<String>,
     pub status: Signal<String>,
     pub toast: Signal<String>,
     pub toast_epoch: Signal<u64>,
@@ -211,6 +213,10 @@ impl Ui {
             .set(self.review_request.get_untracked() + 1);
         self.page.set(page.into());
     }
+    pub fn open_settings_section(self, section: &str) {
+        self.settings_section.set(section.into());
+        self.navigate("settings");
+    }
     pub fn has_blocking_overlay(self) -> bool {
         self.quick_open.get_untracked()
             || !self.utility_popup.get_untracked().is_empty()
@@ -240,6 +246,9 @@ impl Ui {
     pub fn new() -> Self {
         let snapshot = signal(Snapshot::default());
         let reminders = computed(move || canban_notifications::reminders(&snapshot.get()));
+        let sound_items = computed(move || {
+            canban_notifications::sound_items_with_reminders(&snapshot.get(), &reminders.get())
+        });
         let reminder_counts = computed(move || canban_notifications::counts(&reminders.get()));
         Self {
             owner: Owner::current(),
@@ -289,6 +298,7 @@ impl Ui {
             snapshot,
             snapshot_ready: signal(false),
             reminders,
+            sound_items,
             reminder_counts,
             notification_delivery: stored(Default::default()),
             notification_resync: stored(true),
@@ -346,6 +356,7 @@ impl Ui {
             card_view: None,
             request: signal(String::new()),
             page: signal("board".into()),
+            settings_section: signal(String::new()),
             status: signal(String::new()),
             toast: signal(String::new()),
             toast_epoch: signal(0),
@@ -438,7 +449,6 @@ impl Ui {
     }
     pub fn terminal_card(self, card: String) {
         self.open_card(card);
-        self.card_tab.set(String::new());
         self.card_standalone.set(true);
     }
     pub fn show_search(self, projects: bool) {
@@ -487,7 +497,6 @@ impl Ui {
     pub fn open_card(self, id: String) {
         self.request.set(String::new());
         self.card_event.set(None);
-        self.card_terminal_open.set(false);
         self.card_terminal_focused.set(false);
         self.card_standalone.set(
             matches!(
@@ -507,21 +516,21 @@ impl Ui {
         }) {
             self.project.set(project);
         }
-        let default_tab = {
-            let live = crate::terminals::card_live_entries(&self.snapshot.get_untracked(), &id);
-            let recent = self.terminal_recent.with(|m| m.get(&id).cloned());
-            recent
-                .filter(|rid| live.iter().any(|e| &e.saved.id == rid))
-                .or_else(|| live.last().map(|e| e.saved.id.clone()))
-                .unwrap_or_default()
-        };
-        if !default_tab.is_empty() {
+        let recent = self.terminal_recent.with(|m| m.get(&id).cloned());
+        let default_tab = crate::terminals::default_card_terminal(
+            &self.snapshot.get_untracked(),
+            &id,
+            recent.as_deref(),
+        )
+        .unwrap_or_default();
+        let has_live = !default_tab.is_empty();
+        if has_live {
             self.terminal_recent.with(|m| {
                 m.insert(id.clone(), default_tab.clone());
             });
-            self.terminal_focus.update(|v| *v += 1);
         }
         self.card_tab.set(default_tab);
+        self.card_terminal_open.set(has_live);
         self.card.set(id);
         self.expanded.set(false);
         self.focused_card.set(false);
@@ -542,10 +551,23 @@ impl Ui {
                 }
             });
         }
-        self.open_card(card_id);
-        self.card_terminal_open.set(true);
-        self.card_terminal_focused.set(true);
-        self.terminal_focus.update(|v| *v += 1);
+        self.open_card(card_id.clone());
+        if let Some(conv) = conversation {
+            self.card_tab.set(conv);
+        }
+        if !self.card_tab.get_untracked().is_empty() {
+            self.card_terminal_open.set(true);
+            self.card_terminal_focused.set(true);
+            self.terminal_focus.update(|v| *v += 1);
+            return;
+        }
+        if let Some(c) = self
+            .snapshot
+            .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned())
+            .filter(|c| c.archived_at.is_none())
+        {
+            crate::terminals::create_in_card(self, c.project_id, c.id, true);
+        }
     }
     pub fn back(self) {
         crate::navigation::go(self, false);
@@ -611,7 +633,7 @@ pub fn refresh(ui: Ui) {
             Ok(Ok((snapshot, config, saved_project))) => {
                 if ui.notification_resync.replace(false) {
                     ui.notification_delivery
-                        .with(|t| t.baseline(&canban_notifications::reminders(&snapshot)));
+                        .with(|t| t.baseline(&canban_notifications::sound_items(&snapshot)));
                 }
                 ui.apply_config(&config);
                 if ui.project.get_untracked().is_empty()
