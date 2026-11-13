@@ -153,7 +153,8 @@ pub fn eligible(snapshot: &canban_types::Snapshot, request: &Request) -> bool {
     if card.removed_at.is_some()
         || card.archived_at.is_some()
         || (automatic(request)
-            && (card.human_gate.is_some()
+            && (card.merged()
+                || card.human_gate.is_some()
                 || card.attention.is_some()
                 || card.stage != request.stage))
     {
@@ -241,7 +242,7 @@ pub fn admissions(snapshot: &canban_types::Snapshot, max_agents: usize) -> Vec<S
         .filter(|r| r.active() && r.state == "waiting_capacity")
         .filter_map(|run| {
             let c = card(&run.card_id)?;
-            if !c.active() || c.human_gate.is_some() || c.attention.is_some() {
+            if !c.active() || c.merged() || c.human_gate.is_some() || c.attention.is_some() {
                 return None;
             }
             let Some(WorkflowStep::Admit {

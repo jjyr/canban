@@ -184,6 +184,7 @@ impl AppServer {
             .unwrap()
             .write(|db| events::pump(db, &self.config()))?;
         let _ = self.pump_deliveries();
+        let _ = self.pump_merged_archives();
         self.observe_terminals()?;
         self.pump_configuration()?;
         let client = canban_herdr::Client {

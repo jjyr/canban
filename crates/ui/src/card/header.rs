@@ -85,7 +85,9 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
                     json!({"workflow_id":workflow.workflow_id,"card_id":card.id,"entry":entry});
                 items.push(
                     MenuItem::new(format!("Run {} · {}", workflow.definition.name, entry))
-                        .disabled(active || !card.active() || card.human_gate.is_some())
+                        .disabled(
+                            active || !card.active() || card.merged() || card.human_gate.is_some(),
+                        )
                         .on_select(move || dispatch(ui, "workflow.start", params.clone())),
                 );
             }
@@ -122,11 +124,8 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
             });
             (has_deliver, non_deliver)
         });
-        if has_deliver_in_project && card.active() {
-            if card.worktree.is_some()
-                && card.delivery.is_none()
-                && !card.pull_request.as_ref().is_some_and(|p| p.merged)
-            {
+        if has_deliver_in_project && card.active() && !card.merged() {
+            if card.worktree.is_some() {
                 let cid = card.id.clone();
                 let rev = card.revision;
                 items.push(
@@ -239,6 +238,25 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     move || ui.page.get() != "review",
                     move || crate::editor::expand(ui),
                 ))
+                .child(when(
+                    move || ui.current_card().is_some_and(|c| c.active() && c.merged()),
+                    move || {
+                        chrome_button_disabled(
+                            Icon::Archive,
+                            "Archive Card",
+                            move || ui.pending.get(),
+                            move |_| {
+                                if let Some(c) = ui.current_card() {
+                                    crate::card_actions::apply(
+                                        ui,
+                                        c,
+                                        crate::card_actions::Action::Archive,
+                                    );
+                                }
+                            },
+                        )
+                    },
+                ))
                 .child(chrome_button_disabled(
                     Icon::Agent,
                     "Send to Agent",
@@ -328,10 +346,10 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             });
                         }),
                 );
-            if c.delivery.is_some() || c.pull_request.as_ref().is_some_and(|p| p.merged) {
+            if c.merged() {
                 row = row.child(status("Merged", Tone::Success));
             }
-            if let Some(c_active) = Some(&c).filter(|c| c.active()) {
+            if let Some(c_active) = Some(&c).filter(|c| c.active() && !c.merged()) {
                 let has_deliver_in_project = s.workflow_revisions.iter().any(|w| {
                     w.project_id == c_active.project_id
                         && w.definition

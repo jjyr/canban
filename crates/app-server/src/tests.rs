@@ -880,9 +880,11 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
         accepted["commit"].as_str().unwrap()
     );
     let snap = app.snapshot().unwrap();
-    assert!(snap.cards[0].archived_at.is_some());
-    assert!(snap.cards[0].archive.is_some());
+    // Merged Cards remain visible on the Board on the day of delivery and archive the next day.
+    assert!(snap.cards[0].archived_at.is_none());
+    assert!(snap.cards[0].archive.is_none());
     assert!(snap.cards[0].delivery.is_some());
+    assert!(snap.cards[0].merged());
     assert_eq!(app.call("review.merge", request.clone()).unwrap(), accepted);
     assert_eq!(
         app.snapshot()
@@ -914,8 +916,13 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
         "unknown"
     );
     assert_eq!(git(&["rev-parse", "HEAD"]), head);
+    // Same-day auto-archive stays deferred; next-day sweep archives cleanly.
+    assert!(!app.try_auto_archive_merged(&card.id).unwrap());
+    let next_day = now() + 36 * 60 * 60 * 1000;
+    assert!(app.try_auto_archive_merged_at(&card.id, next_day).unwrap());
     let archived = app.snapshot().unwrap().cards[0].clone();
     assert!(archived.archived_at.is_some());
+    assert!(archived.archive.is_some());
     std::fs::write(source.join("later-project-change"), "later").unwrap();
     git(&["add", "."]);
     git(&["commit", "-m", "Advance source after archive"]);
@@ -983,7 +990,9 @@ fn remote_pr_merge_defers_archive_while_agent_live_then_archives_and_handles_pr_
     let after_remote_merge = app.snapshot().unwrap().cards[0].clone();
     assert!(after_remote_merge.delivery.is_some());
     assert!(after_remote_merge.pull_request.as_ref().unwrap().merged);
-    // Active terminal prevents immediate archive so local work is not interrupted.
+    let next_day = now() + 36 * 60 * 60 * 1000;
+    // Active terminal prevents archive even on the next day so local work is not interrupted.
+    assert!(!app.try_auto_archive_merged_at(&card.id, next_day).unwrap());
     assert!(after_remote_merge.archived_at.is_none());
 
     app.store
@@ -999,10 +1008,12 @@ fn remote_pr_merge_defers_archive_while_agent_live_then_archives_and_handles_pr_
             db.save(&r)
         })
         .unwrap();
-    assert!(app.try_auto_archive_merged(&card.id).unwrap());
+    // Same-day remains visible; next-day archives once the Agent has finished.
+    assert!(!app.try_auto_archive_merged(&card.id).unwrap());
+    assert!(app.try_auto_archive_merged_at(&card.id, next_day).unwrap());
     assert!(app.snapshot().unwrap().cards[0].archived_at.is_some());
 
-    // A PR source card observed merged on GitHub also records delivery and archives.
+    // A PR source card observed merged on GitHub records delivery today and archives the next day.
     let pr_card: Card = serde_json::from_value(
         app.call(
             "card.create",
@@ -1041,7 +1052,16 @@ fn remote_pr_merge_defers_archive_while_agent_live_then_archives_and_handles_pr_
         .find(|c| c.id == pr_card.id)
         .unwrap();
     assert_eq!(pr_updated.delivery.as_ref().unwrap().commit, "feedface");
-    assert!(pr_updated.archived_at.is_some());
+    assert!(pr_updated.archived_at.is_none());
+    assert!(app.try_auto_archive_merged_at(&pr_card.id, next_day).unwrap());
+    let pr_archived = app
+        .snapshot()
+        .unwrap()
+        .cards
+        .into_iter()
+        .find(|c| c.id == pr_card.id)
+        .unwrap();
+    assert!(pr_archived.archived_at.is_some());
 }
 
 #[test]

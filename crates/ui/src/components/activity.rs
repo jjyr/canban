@@ -73,13 +73,13 @@ pub fn card_status(
     card: &canban_types::Card,
 ) -> Vec<AnyElement> {
     let mut chips = Vec::new();
-    if card.delivery.is_some() || card.pull_request.as_ref().is_some_and(|p| p.merged) {
+    if card.merged() {
         chips.push(status("Merged", Tone::Success).into_element());
     }
     if card.human_gate.is_some() || card.attention.is_some() {
         chips.push(
             status(
-                if card.hold_auto_merge {
+                if card.hold_auto_merge && !card.merged() {
                     "Merge held"
                 } else if card.human_gate.is_some() && card.stage == "review" {
                     "Needs review"
@@ -90,7 +90,7 @@ pub fn card_status(
             )
             .into_element(),
         );
-    } else if card.hold_auto_merge {
+    } else if card.hold_auto_merge && !card.merged() {
         chips.push(status("Merge held", Tone::Neutral).into_element());
     }
     let mut latest = std::collections::BTreeMap::new();

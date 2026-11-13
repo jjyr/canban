@@ -146,6 +146,7 @@ pub fn start(
     queue: Queue,
 ) -> Result<WorkflowRun> {
     ensure!(card.active(), "Restore the Card before starting a workflow");
+    ensure!(!card.merged(), "Merged Cards do not start new workflows");
     ensure!(
         card.human_gate.is_none(),
         "Resolve the existing human decision first"

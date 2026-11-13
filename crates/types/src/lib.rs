@@ -901,10 +901,14 @@ impl Card {
         })
     }
     pub fn board_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.board_rank()
-            .cmp(&other.board_rank())
+        self.merged()
+            .cmp(&other.merged())
+            .then_with(|| self.board_rank().cmp(&other.board_rank()))
             .then_with(|| self.number.cmp(&other.number))
             .then_with(|| self.id.cmp(&other.id))
+    }
+    pub fn merged(&self) -> bool {
+        self.delivery.is_some() || self.pull_request.as_ref().is_some_and(|p| p.merged)
     }
     pub fn github_issue(&self) -> Option<&GitHubIssueRef> {
         match &self.content {
@@ -1034,5 +1038,44 @@ mod tests {
             attempts[0].observed = Some(json!({"state": "live"}));
             assert_eq!(agent_activity_warning("card-1", &attempts, &requests), None);
         }
+    }
+
+    #[test]
+    fn merged_cards_sink_below_unmerged_peers_in_board_order() {
+        let mut merged: Card = serde_json::from_value(json!({
+            "id": "card-1",
+            "project_id": "proj",
+            "number": 1,
+            "board_order": 0,
+            "title": "Merged earlier",
+            "body": "",
+            "stage": "review",
+            "revision": 1,
+            "created_at": 1,
+            "delivery": {
+                "target_branch": "main",
+                "commit": "abc1234",
+                "request_key": "k1",
+                "merged_at": 100
+            }
+        }))
+        .unwrap();
+        let open: Card = serde_json::from_value(json!({
+            "id": "card-2",
+            "project_id": "proj",
+            "number": 2,
+            "board_order": 1024,
+            "title": "Open peer",
+            "body": "",
+            "stage": "review",
+            "revision": 1,
+            "created_at": 2
+        }))
+        .unwrap();
+        assert!(merged.merged());
+        assert!(!open.merged());
+        assert_eq!(open.board_cmp(&merged), std::cmp::Ordering::Less);
+        merged.delivery = None;
+        assert_eq!(merged.board_cmp(&open), std::cmp::Ordering::Less);
     }
 }
