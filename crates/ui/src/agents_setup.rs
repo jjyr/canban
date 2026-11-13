@@ -5,7 +5,128 @@ use canban_types::*;
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
+
+fn active_home_path() -> PathBuf {
+    crate::APP
+        .get()
+        .map(|app| app.home.clone())
+        .unwrap_or_else(|| PathBuf::from("/preview/.canban"))
+}
+
+pub fn skill_install_command() -> String {
+    canban_context::skill_install_command(&active_home_path())
+}
+
+pub fn copy_skill_command(ui: Ui) {
+    copy_text(ui, skill_install_command());
+}
+
+fn canban_skill_box(ui: Ui) -> View {
+    let copied = signal(false);
+    let command = skill_install_command();
+    let command_for_copy = command.clone();
+
+    view()
+        .gap_2()
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .flex_wrap()
+                .gap_2()
+                .px_3()
+                .py_2()
+                .rounded(px(RADIUS))
+                .border_1()
+                .border_color(BORDER)
+                .bg(INSET)
+                .child(
+                    label(command)
+                        .font_family("Menlo")
+                        .text_size(px(12.))
+                        .min_w(px(0.))
+                        .flex_1(),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .flex_wrap()
+                        .gap_1p5()
+                        .child(compact_action(
+                            move || if copied.get() { "✓ Copied" } else { "Copy" },
+                            Variant::Secondary,
+                            move |_| {
+                                copy_text(ui, command_for_copy.clone());
+                                copied.set(true);
+                            },
+                        ))
+                        .child(compact_action(
+                            "Open Terminal  ⌘T",
+                            Variant::Secondary,
+                            move |_| crate::commands::execute(ui, "new-terminal"),
+                        )),
+                ),
+        )
+        .child(
+            muted(
+                "Tip: Copy the command first, then press ⌘T to open a standalone Terminal and paste it to install or update.",
+            )
+            .text_size(px(11.5)),
+        )
+}
+
+pub fn canban_skill_onboarding_section(ui: Ui) -> SectionGroup {
+    settings_section(
+        "Canban CLI Skill",
+        "Optional · Teach your enabled Agents how to operate Cards, comments, reviews, and workflows via $CANBAN_CLI.",
+    )
+    .trailing(badge("Optional"))
+    .child(canban_skill_box(ui))
+}
+
+fn canban_skill_settings_block(ui: Ui) -> View {
+    view()
+        .gap_2()
+        .py_2()
+        .border_t_1()
+        .border_b_1()
+        .border_color(BORDER)
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    view()
+                        .gap_0p5()
+                        .min_w(px(0.))
+                        .flex_1()
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(label("Canban CLI Skill").font_weight(FontWeight::MEDIUM))
+                                .child(badge("Optional")),
+                        )
+                        .child(
+                            muted(
+                                "Teach your enabled Agents how to operate Cards, comments, reviews, and workflows via $CANBAN_CLI.",
+                            )
+                            .text_size(px(12.)),
+                        ),
+                ),
+        )
+        .child(canban_skill_box(ui))
+}
 
 /// Refresh `ui.agent_catalog` for a given machine (`"local"` or remote Core ID).
 pub fn refresh_catalog(ui: Ui, machine: &str) {
@@ -1013,6 +1134,7 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                                 .into_element()
                         })),
                     )
+                    .child(canban_skill_onboarding_section(ui))
                     .child(
                         view()
                             .flex_row()
@@ -1149,6 +1271,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                 )
             })),
     )
+    .child(canban_skill_settings_block(ui))
     .child(
         view()
             .gap_2()

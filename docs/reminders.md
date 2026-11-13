@@ -105,18 +105,23 @@ The UI loads a bundled original 240ms chime through NSH's native audio API. Audi
 is local to the viewing computer, independent of the Agent's execution machine.
 It requests no notification permission and does not call macOS notification APIs.
 
-Audible notifications (`canban-notifications::sound_items`, updated 2026-11-13)
+Audible notifications (`canban-notifications::sound_items`, updated 2026-11-14)
 are decoupled from visual unread badges so automated multi-step pipelines do not
-chime on routine stage transitions. Sounds play only for four categories:
+chime on routine stage transitions, and runtime `idle` / `done` status transitions
+stay silent so transient Agent pauses do not trigger false notification chimes.
+Sounds play only for four categories:
 
 1. **Human intervention and `@agent` replies:** runtime permission/input waits
-   (`wait:*`), workflow approval/human gates and stale-input holds, Agent
-   `blocked` or `backlog` reports, and explicit `comment.replied` answers to
-   `@agent` questions. Routine automated `completed` stage reports without a
-   human gate or `@agent` question remain unread badges without playing a sound.
+   (`wait:*`), independent CLI terminal `blocked` waits (`terminal-attn:*:blocked`),
+   workflow approval/human gates and stale-input holds, Agent `blocked` or
+   `backlog` reports, and explicit `comment.replied` answers to `@agent`
+   questions. Routine automated `completed` stage reports without a human gate or
+   `@agent` question remain unread badges without playing a sound; runtime
+   `idle` / `done` turns (`idle:*` and CLI terminal `idle`/`done`) keep their
+   visual reminder/attention indicator without playing a sound.
 2. **Agent failures:** `failed` reports, unreported exits (`execution.failed`),
-   missing terminals (`execution.missing`), runtime errors, recovery states and
-   uncertain question deliveries.
+   missing terminals (`execution.missing`), runtime errors (`terminal-attn:*:error`),
+   recovery states and uncertain question deliveries.
 3. **Merge failures / paused deliveries:** `review.merge_failed`,
    `review.upstream_sync_failed`, `github.pr_merge_attention`, and deliveries
    held for a human after exhausting `max_conflict_attempts` or encountering

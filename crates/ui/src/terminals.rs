@@ -637,12 +637,7 @@ pub fn cycle(ui: Ui, forward: bool) {
     };
     ui.open_terminal(tabs[next].clone());
 }
-pub(crate) const TAB_KEYS: [(&str, u8); 4] = [
-    ("mod+t", 0),
-    ("mod+w", 1),
-    ("mod+shift+]", 2),
-    ("mod+shift+[", 3),
-];
+pub(crate) const TAB_KEYS: [(&str, u8); 3] = [("mod+w", 1), ("mod+shift+]", 2), ("mod+shift+[", 3)];
 pub fn bindings(ui: Ui) {
     use nsh_core::keymap::When;
     effect(move || {
@@ -667,15 +662,6 @@ pub fn bindings(ui: Ui) {
                 },
                 move |_| {
                     match action {
-                        0 => {
-                            if ui.page.get_untracked() == "card"
-                                && let Some(c) = ui.current_card()
-                            {
-                                create_in_card(ui, c.project_id, c.id, false);
-                            } else {
-                                new_tab(ui);
-                            }
-                        }
                         1 => {
                             if ui.page.get_untracked() == "card" {
                                 let cid = ui.card_id();
@@ -748,20 +734,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .min_h(px(0.))
                 .min_w(px(0.))
                 .child(
-                    nsh_base::h_resizable()
-                        .flex_1()
-                        .min_h(px(0.))
-                        .handle_accessibility_label("Resize Terminal sidebar")
-                        .render_handle(|_: &nsh_base::ResizeHandleContext| {
-                            view()
-                                .w(px(5.))
-                                .h_full()
-                                .items_center()
-                                .justify_center()
-                                .hover(|s| s.bg(ACCENT))
-                                .active(|s| s.bg(ACCENT))
-                                .child(view().w(px(1.)).h_full().bg(BORDER))
-                        })
+                    canban_ui_kit::split::horizontal_group("Resize Terminal sidebar")
                         .on_resize(move |sizes: &Vec<Points>| {
                             if !ui.narrow.get_untracked()
                                 && ui.terminal_sidebar.get_untracked()

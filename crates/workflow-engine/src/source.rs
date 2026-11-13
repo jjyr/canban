@@ -1708,76 +1708,338 @@ pub fn set_external_pr_rule(doc: &mut Document, mode: &str) {
     }
 }
 
-pub fn column_summary(
+/// Concise Board column-header automation summary + hover tooltip text derived from
+/// active Project workflow sources, revisions, and column-scoped subscriptions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnAutomation {
+    /// Short pill label (e.g. `"Auto develop"`, `"Auto merge"`, `"Auto plan"`).
+    pub label: String,
+    /// Multi-line plain-text summary shown in the hover tooltip.
+    pub tooltip: String,
+}
+
+fn rule_targets_column(key: &str, rule: &WorkflowRule, column: &str) -> bool {
+    rule.enabled
+        && rule.event != "manual"
+        && (rule.selector.column.as_deref() == Some(column)
+            || (rule.event == "card.column_entered"
+                && rule.selector.column.is_none()
+                && key == column))
+}
+
+fn column_display_name<'a>(column: &'a str, def: &'a WorkflowDefinition) -> &'a str {
+    def.columns
+        .iter()
+        .find(|c| c.id == column)
+        .map(|c| c.name.as_str())
+        .unwrap_or(column)
+}
+
+fn agent_auto_phrase(step_id: &str, profile: Option<&str>, column: &str) -> String {
+    let lower_step = step_id.to_ascii_lowercase();
+    let lower_col = column.to_ascii_lowercase();
+    let prof = profile.map(str::trim).filter(|p| !p.is_empty());
+    if prof == Some("planner")
+        || lower_step.contains("plan")
+        || lower_step.contains("analyze")
+        || lower_step.contains("design")
+        || lower_col == "backlog"
+        || lower_col == "design"
+        || lower_col == "plan"
+    {
+        "Auto plan".into()
+    } else if prof == Some("developer")
+        || lower_step.contains("develop")
+        || lower_step.contains("implement")
+        || lower_step.contains("build")
+        || lower_col == "develop"
+    {
+        "Auto develop".into()
+    } else if prof == Some("reviewer")
+        || lower_step.contains("review")
+        || lower_col == "review"
+    {
+        "Auto review".into()
+    } else if let Some(p) = prof {
+        format!("Auto @{p}")
+    } else {
+        "Auto run".into()
+    }
+}
+
+fn walk_stage_summary(
+    column: &str,
+    start_id: &str,
+    def: &WorkflowDefinition,
+) -> (Option<String>, Vec<String>) {
+    let mut cur = Some(start_id);
+    let mut seen = BTreeSet::new();
+    let mut has_deliver = false;
+    let mut first_agent: Option<(String, Option<String>)> = None;
+    let mut moves_to: Option<String> = None;
+    let mut has_notify = false;
+    let mut details = Vec::new();
+
+    while let Some(step_id) = cur {
+        if !seen.insert(step_id) {
+            break;
+        }
+        let Some(step) = def.steps.get(step_id) else {
+            break;
+        };
+        match step {
+            WorkflowStep::Complete => break,
+            WorkflowStep::Condition {
+                pointer,
+                equals,
+                then,
+                otherwise,
+            } => {
+                if pointer == "/card/source_trust" && equals == "external_pr" {
+                    if let Some(WorkflowStep::Approval { .. }) = def.steps.get(then) {
+                        details.push("• External PR → Requires human approval".into());
+                    } else {
+                        details.push(format!("• External PR → {then}"));
+                    }
+                    cur = Some(otherwise.as_str());
+                } else {
+                    details.push(format!("• Condition ({pointer}) → {otherwise}"));
+                    cur = Some(otherwise.as_str());
+                }
+            }
+            WorkflowStep::Admit {
+                agent_slot,
+                max_ready,
+                next,
+            } => {
+                let gate = match (*agent_slot, *max_ready) {
+                    (true, Some(k)) => {
+                        format!("Waits for a free Agent slot (keeps ≤{k} ready)")
+                    }
+                    (true, None) => "Waits for a free Agent slot".into(),
+                    (false, Some(k)) => format!("Plans ahead (keeps ≤{k} ready)"),
+                    (false, None) => "Waits for admission".into(),
+                };
+                details.push(format!("• {gate}"));
+                cur = next.as_deref();
+            }
+            WorkflowStep::Agent { profile, next, .. } => {
+                if first_agent.is_none() {
+                    first_agent = Some((step_id.to_owned(), profile.clone()));
+                }
+                let who = profile
+                    .as_deref()
+                    .filter(|p| !p.is_empty())
+                    .map(|p| format!("@{p}"))
+                    .unwrap_or_else(|| "default Agent".into());
+                details.push(format!("• Runs {who}"));
+                cur = next.as_deref();
+            }
+            WorkflowStep::Deliver {
+                profile,
+                target_branch,
+                sync_upstream,
+                max_conflict_attempts,
+                ..
+            } => {
+                has_deliver = true;
+                let branch = target_branch
+                    .as_deref()
+                    .filter(|b| !b.is_empty())
+                    .unwrap_or("target branch");
+                let sync_desc = if *sync_upstream {
+                    " + syncs upstream"
+                } else {
+                    " (local only)"
+                };
+                details.push(format!("• Queue merge into {branch}{sync_desc}"));
+                if *max_conflict_attempts > 0 {
+                    let merger = profile
+                        .as_deref()
+                        .filter(|p| !p.is_empty())
+                        .unwrap_or("merger");
+                    details.push(format!(
+                        "• Merge conflicts → @{merger} (up to {max_conflict_attempts}×)"
+                    ));
+                }
+                break;
+            }
+            WorkflowStep::Move { column: to, .. } => {
+                if to != column && !to.is_empty() {
+                    moves_to = Some(to.clone());
+                    let dest = column_display_name(to, def);
+                    details.push(format!("• Moves Card to {dest}"));
+                }
+                break;
+            }
+            WorkflowStep::Approval { title, .. } => {
+                if has_deliver || first_agent.is_some() || moves_to.is_some() || has_notify {
+                    details.push(format!("• Pauses for approval: {title}"));
+                }
+                break;
+            }
+            WorkflowStep::Notify { message, next } => {
+                has_notify = true;
+                details.push(format!("• Posts notification: {message}"));
+                cur = next.as_deref();
+            }
+        }
+    }
+
+    let label = if has_deliver {
+        Some("Auto merge".into())
+    } else if let Some((step_id, profile)) = first_agent {
+        Some(agent_auto_phrase(&step_id, profile.as_deref(), column))
+    } else if moves_to.is_some() {
+        Some(if column == "backlog" {
+            "Auto start".into()
+        } else {
+            "Auto move".into()
+        })
+    } else if has_notify {
+        Some("Auto notify".into())
+    } else {
+        None
+    };
+
+    if label.is_none() {
+        details.clear();
+    }
+    (label, details)
+}
+
+pub fn column_automation(
     column: &str,
     files: &[WorkflowSource],
     revisions: &[WorkflowRevision],
-) -> Option<String> {
-    for f in files.iter().filter(|f| f.enabled) {
+    subscriptions: &[EventSubscription],
+) -> Option<ColumnAutomation> {
+    let mut ordered: Vec<&WorkflowSource> = files.iter().filter(|f| f.enabled).collect();
+    ordered.sort_by_key(|f| {
+        (
+            f.filename != "development.yaml",
+            f.columns.is_empty(),
+            f.filename.as_str(),
+        )
+    });
+
+    let mut primary_label: Option<String> = None;
+    let mut extra_count: usize = 0;
+    let mut blocks: Vec<String> = Vec::new();
+
+    for f in ordered {
         let Some(w) = revisions
             .iter()
             .find(|w| w.workflow_id == f.workflow_id && w.revision == f.revision)
         else {
             continue;
         };
-        for rule in f.rules.values().filter(|r| r.enabled) {
-            if rule.selector.column.as_deref() != Some(column) {
-                continue;
-            }
-            let Some(first) = w.definition.steps.get(&rule.start_at) else {
-                continue;
-            };
-            let has_deliver = w
-                .definition
-                .steps
-                .values()
-                .any(|s| matches!(s, WorkflowStep::Deliver { .. }));
-            match first {
-                WorkflowStep::Agent { profile, next, .. } => {
-                    let agent = profile
-                        .as_deref()
-                        .map(|p| format!("@{p}"))
-                        .unwrap_or_else(|| "Agent".into());
-                    let following = next.as_deref().and_then(|n| w.definition.steps.get(n));
-                    return Some(match following {
-                        Some(WorkflowStep::Deliver { .. }) => format!("{agent} → Auto-merge"),
-                        Some(WorkflowStep::Approval { .. }) => format!("{agent} · Review"),
-                        _ => agent,
-                    });
+        let def = &w.definition;
+        let mut wf_lines: Vec<String> = Vec::new();
+        let mut wf_has_auto = false;
+
+        // Prioritize `card.column_entered` rules first.
+        let mut rules: Vec<(&String, &WorkflowRule)> = f
+            .rules
+            .iter()
+            .filter(|(k, r)| rule_targets_column(k, r, column))
+            .collect();
+        rules.sort_by_key(|(k, r)| (r.event != "card.column_entered", k.as_str()));
+
+        for (key, rule) in rules {
+            let start_id = def
+                .entries
+                .get(key.as_str())
+                .map(String::as_str)
+                .unwrap_or(rule.start_at.as_str());
+            if rule.event == "card.column_entered" {
+                let (lbl, mut step_lines) = walk_stage_summary(column, start_id, def);
+                if let Some(lbl) = lbl {
+                    if primary_label.is_none() {
+                        primary_label = Some(lbl);
+                    } else if wf_lines.is_empty() {
+                        extra_count += 1;
+                    }
+                    wf_has_auto = true;
+                    if let Some(kind) = &rule.selector.source_kind {
+                        wf_lines.push(format!("• Only for source: {kind}"));
+                    }
+                    wf_lines.append(&mut step_lines);
                 }
-                WorkflowStep::Condition { .. } if has_deliver => {
-                    return Some(if sync_label(w) {
-                        "Queue merge · Sync".into()
-                    } else {
-                        "Queue merge · Local".into()
-                    });
+            } else {
+                let (lbl, _) = walk_stage_summary(column, start_id, def);
+                if lbl.is_some() {
+                    if primary_label.is_none() {
+                        primary_label = lbl;
+                    } else if wf_lines.is_empty() {
+                        extra_count += 1;
+                    }
+                    wf_has_auto = true;
+                    let ev = match rule.event.as_str() {
+                        "card.column_left" => "Leaving column",
+                        other => other,
+                    };
+                    wf_lines.push(format!("• On {ev} → {start_id}"));
                 }
-                WorkflowStep::Deliver { sync_upstream, .. } => {
-                    return Some(if *sync_upstream {
-                        "Queue merge · Sync".into()
-                    } else {
-                        "Queue merge · Local".into()
-                    });
-                }
-                WorkflowStep::Approval { .. } => {
-                    return Some("Approval".into());
-                }
-                _ => return Some("Automated".into()),
             }
         }
+
+        for sub in subscriptions
+            .iter()
+            .filter(|s| s.enabled && s.selector.column.as_deref() == Some(column))
+        {
+            if let SubscriptionTarget::Workflow {
+                workflow_id, entry, ..
+            } = &sub.target
+                && workflow_id == &f.workflow_id
+                && !sub.id.starts_with("source:")
+            {
+                let start_id = def
+                    .entries
+                    .get(entry.as_str())
+                    .map(String::as_str)
+                    .unwrap_or(entry.as_str());
+                let (lbl, _) = walk_stage_summary(column, start_id, def);
+                let fallback = lbl.unwrap_or_else(|| "Auto".into());
+                if primary_label.is_none() {
+                    primary_label = Some(fallback);
+                } else if !wf_has_auto {
+                    extra_count += 1;
+                }
+                wf_has_auto = true;
+                wf_lines.push(format!(
+                    "• On {} → {entry}",
+                    sub.selector.types.join(", ")
+                ));
+            }
+        }
+
+        if wf_has_auto && !wf_lines.is_empty() {
+            blocks.push(format!(
+                "{} ({})\n{}",
+                def.name,
+                f.filename,
+                wf_lines.join("\n")
+            ));
+        }
     }
-    None
+
+    let mut label = primary_label?;
+    if extra_count > 0 {
+        label.push_str(&format!(" +{extra_count}"));
+    }
+    Some(ColumnAutomation {
+        label,
+        tooltip: blocks.join("\n\n"),
+    })
 }
 
-fn sync_label(w: &WorkflowRevision) -> bool {
-    w.definition
-        .steps
-        .values()
-        .find_map(|s| match s {
-            WorkflowStep::Deliver { sync_upstream, .. } => Some(*sync_upstream),
-            _ => None,
-        })
-        .unwrap_or(true)
+pub fn column_summary(
+    column: &str,
+    files: &[WorkflowSource],
+    revisions: &[WorkflowRevision],
+) -> Option<String> {
+    column_automation(column, files, revisions, &[]).map(|a| a.label)
 }
 
 #[cfg(test)]
@@ -1998,5 +2260,169 @@ steps:
         set_backlog_admission(&mut doc, true, Some(2));
         let o = derive_options(&doc);
         assert!(o.backlog_auto_develop && o.backlog_wait_for_agent);
+    }
+
+    #[test]
+    fn column_automation_derives_concise_labels_tooltips_and_hides_manual_columns() {
+        let make_pair = |filename: &str, doc: &Document| -> (WorkflowSource, WorkflowRevision) {
+            let def = doc.compile().unwrap();
+            let rev_id = format!("{}:1", def.id);
+            let src = WorkflowSource {
+                id: format!("proj:{filename}"),
+                project_id: "proj".into(),
+                filename: filename.into(),
+                workflow_id: def.id.clone(),
+                revision: 1,
+                hash: "h".into(),
+                revision_id: rev_id.clone(),
+                enabled: doc.enabled,
+                columns: doc.columns.clone(),
+                rules: doc.on.clone(),
+            };
+            let rev = WorkflowRevision {
+                source_yaml: Some(encode(doc).unwrap()),
+                id: rev_id,
+                project_id: "proj".into(),
+                workflow_id: def.id.clone(),
+                revision: 1,
+                definition: def,
+                created_at: 0,
+            };
+            (src, rev)
+        };
+
+        // 1. Default workflow: Backlog quiet (`None`), Develop -> `Auto develop`, Review -> `Auto merge`.
+        let mut doc = default_document("delivery:test", WorkspaceSettings::default());
+        let (s0, r0) = make_pair("development.yaml", &doc);
+        let srcs0 = [s0];
+        let revs0 = [r0];
+        assert_eq!(column_automation("backlog", &srcs0, &revs0, &[]), None);
+        let dev = column_automation("develop", &srcs0, &revs0, &[]).unwrap();
+        assert_eq!(dev.label, "Auto develop");
+        assert!(dev.tooltip.contains("Development (development.yaml)"));
+        assert!(dev.tooltip.contains("Runs @developer"));
+        assert!(dev.tooltip.contains("Moves Card to Review"));
+        let rev = column_automation("review", &srcs0, &revs0, &[]).unwrap();
+        assert_eq!(rev.label, "Auto merge");
+        assert!(rev.tooltip.contains("External PR → Requires human approval"));
+        assert!(rev.tooltip.contains("Queue merge into target branch + syncs upstream"));
+        assert!(rev.tooltip.contains("Merge conflicts → @merger (up to 3×)"));
+
+        // 2. Backlog auto-plan + admission gate, and Review switched to manual approval (must hide!).
+        set_backlog_options(&mut doc, true, true);
+        set_backlog_admission(&mut doc, true, Some(2));
+        set_review_manual(&mut doc, true);
+        let (s1, r1) = make_pair("development.yaml", &doc);
+        let srcs1 = [s1];
+        let revs1 = [r1];
+        let backlog = column_automation("backlog", &srcs1, &revs1, &[]).unwrap();
+        assert_eq!(backlog.label, "Auto plan");
+        assert!(backlog.tooltip.contains("Plans ahead (keeps ≤2 ready)"));
+        assert!(backlog.tooltip.contains("Runs @developer"));
+        assert!(backlog.tooltip.contains("Waits for a free Agent slot"));
+        assert!(backlog.tooltip.contains("Moves Card to Develop"));
+        assert_eq!(
+            column_automation("review", &srcs1, &revs1, &[]),
+            None,
+            "approval-only manual review columns must stay blank"
+        );
+
+        // 3. Backlog auto-start without planning (`Auto start`), and local-only merge (`Auto merge`).
+        set_backlog_options(&mut doc, false, true);
+        set_review_manual(&mut doc, false);
+        set_sync_upstream(&mut doc, false);
+        let (s2, r2) = make_pair("development.yaml", &doc);
+        let srcs2 = [s2];
+        let revs2 = [r2];
+        let backlog_start = column_automation("backlog", &srcs2, &revs2, &[]).unwrap();
+        assert_eq!(backlog_start.label, "Auto start");
+        let rev_local = column_automation("review", &srcs2, &revs2, &[]).unwrap();
+        assert_eq!(rev_local.label, "Auto merge");
+        assert!(rev_local.tooltip.contains("(local only)"));
+
+        // 4. Custom QA column (`@qa` -> `Auto @qa`), review agent without deliver (`Auto review`),
+        // disabled steps skipped, and multiple workflows (`+1` suffix + combined tooltip).
+        let custom = parse(
+            r#"schema: 2
+id: custom
+name: Custom Pipeline
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: qa
+    name: QA
+  - id: review
+    name: Review
+on:
+  qa:
+    event: card.column_entered
+    start_at: skip_me
+    match:
+      column: qa
+  review:
+    event: card.column_entered
+    start_at: agent:review
+    match:
+      column: review
+steps:
+  - id: skip_me
+    uses: approval
+    enabled: false
+    with:
+      title: Disabled gate
+    next: qa_run
+  - id: qa_run
+    uses: agent
+    with:
+      profile: qa
+      instruction: Run QA checks
+    next: move_review
+  - id: move_review
+    uses: card.move
+    with:
+      column: review
+    next: $entry
+  - id: agent:review
+    uses: agent
+    with:
+      profile: reviewer
+    next: final_gate
+  - id: final_gate
+    uses: approval
+    with:
+      title: Final sign-off
+"#,
+        )
+        .unwrap();
+        let extra = parse(
+            r#"schema: 2
+id: extra-qa
+name: Extra QA Notifier
+on:
+  qa_ping:
+    event: card.column_entered
+    start_at: ping
+    match:
+      column: qa
+steps:
+  - id: ping
+    uses: notify
+    with:
+      message: Entered QA
+"#,
+        )
+        .unwrap();
+        let (sc, rc) = make_pair("development.yaml", &custom);
+        let (se, re) = make_pair("extra.yaml", &extra);
+        let qa = column_automation("qa", &[se, sc.clone()], &[re, rc.clone()], &[]).unwrap();
+        assert_eq!(qa.label, "Auto @qa +1");
+        assert!(qa.tooltip.contains("Custom Pipeline (development.yaml)"));
+        assert!(qa.tooltip.contains("Extra QA Notifier (extra.yaml)"));
+        let rev_agent = column_automation("review", &[sc], &[rc], &[]).unwrap();
+        assert_eq!(rev_agent.label, "Auto review");
+        assert!(rev_agent.tooltip.contains("Runs @reviewer"));
+        assert!(rev_agent.tooltip.contains("Pauses for approval: Final sign-off"));
     }
 }

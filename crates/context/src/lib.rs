@@ -26,6 +26,49 @@ const GITHUB_SOURCE_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../prompts/context/github_source.txt"
 ));
+pub const SKILL_MD: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../skills/canban/SKILL.md"
+));
+
+pub fn skill_path(home: &Path) -> PathBuf {
+    home.join("skills").join("canban").join("SKILL.md")
+}
+
+pub fn materialize_skill(home: &Path) -> Result<PathBuf> {
+    let path = skill_path(home);
+    if std::fs::read_to_string(&path).ok().as_deref() != Some(SKILL_MD) {
+        atomic(&path, SKILL_MD.as_bytes())?;
+    }
+    Ok(path)
+}
+
+pub fn skill_install_command(home: &Path) -> String {
+    skill_install_command_with_user_home(home, std::env::var_os("HOME").as_deref().map(Path::new))
+}
+
+pub fn skill_install_command_with_user_home(home: &Path, user_home: Option<&Path>) -> String {
+    let skills_dir = home.join("skills");
+    let raw = skills_dir.to_string_lossy();
+    let arg = if let Some(uh) = user_home
+        && let Ok(rel) = skills_dir.strip_prefix(uh)
+        && !rel.as_os_str().is_empty()
+        && rel
+            .to_str()
+            .is_some_and(|s| s.bytes().all(is_shell_safe_byte))
+    {
+        format!("~/{}", rel.to_string_lossy())
+    } else if raw.bytes().all(is_shell_safe_byte) {
+        raw.into_owned()
+    } else {
+        shell_quote(&raw)
+    };
+    format!("npx skills add {arg} --skill canban -g")
+}
+
+fn is_shell_safe_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-')
+}
 
 pub fn render_template(template: &str, vars: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(template.len() + 64);
@@ -466,4 +509,66 @@ pub fn compact_files(home: &Path, card: &Card, path: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_frontmatter_is_valid_and_within_agent_skills_limits() {
+        let rest = SKILL_MD
+            .strip_prefix("---\n")
+            .expect("SKILL.md starts with YAML frontmatter");
+        let (frontmatter, body) = rest
+            .split_once("\n---\n")
+            .expect("SKILL.md closes YAML frontmatter");
+        assert!(frontmatter.lines().any(|l| l.trim() == "name: canban"));
+        let desc_line = frontmatter
+            .lines()
+            .find_map(|l| l.strip_prefix("description: "))
+            .expect("SKILL.md declares description");
+        let unquoted = desc_line
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .expect("description is double-quoted YAML scalar");
+        assert!(!unquoted.is_empty());
+        assert!(unquoted.chars().count() <= 1024);
+        assert!(!unquoted.contains('"'));
+        assert!(body.contains("CANBAN_CLI"));
+        assert!(body.contains("CANBAN_RUN_DIR"));
+    }
+
+    #[test]
+    fn skill_materializes_idempotently_and_formats_install_command() {
+        let dir = std::env::temp_dir().join(format!("canban-skill-test-{}", id()));
+        let path = materialize_skill(&dir).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), SKILL_MD);
+        // Second call succeeds without rewriting identical bytes.
+        let path2 = materialize_skill(&dir).unwrap();
+        assert_eq!(path, path2);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            skill_install_command_with_user_home(
+                Path::new("/Users/alice/.canban"),
+                Some(Path::new("/Users/alice"))
+            ),
+            "npx skills add ~/.canban/skills --skill canban -g"
+        );
+        assert_eq!(
+            skill_install_command_with_user_home(
+                Path::new("/preview/.canban"),
+                Some(Path::new("/Users/alice"))
+            ),
+            "npx skills add /preview/.canban/skills --skill canban -g"
+        );
+        assert_eq!(
+            skill_install_command_with_user_home(
+                Path::new("/Users/alice/My Home/.canban"),
+                Some(Path::new("/Users/alice"))
+            ),
+            "npx skills add '/Users/alice/My Home/.canban/skills' --skill canban -g"
+        );
+    }
 }

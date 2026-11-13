@@ -367,12 +367,14 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
 }
 
 #[test]
-fn unfinished_idle_turns_and_ephemeral_cli_agents_notify_per_turn_without_false_launch_chime() {
+fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_while_blocked_chimes()
+ {
     let mut s = fixture();
     let mut delivery = DeliveryTracker::default();
     assert!(delivery.observe(&sound_items(&s)).is_empty());
 
-    // Interactive Card Agent finishes Turn 1 without closing -> notifies with `idle:r-int:1:1`.
+    // Interactive Card Agent finishes Turn 1 without closing -> creates pending visual
+    // reminder (`idle:r-int:1:1`), but MUST NOT play a notification sound.
     let req: Request = serde_json::from_value(json!({
         "id":"r-int","project_id":"p","card_id":"c","stage":"develop","trigger":"interactive",
         "profile":Config::default().profiles[0],"instruction":"Chat","state":"running","attempt":1,"created_at":1
@@ -389,18 +391,39 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_notify_per_turn_without_false_
     s.requests.push(req);
     s.attempts.push(attempt);
     assert_eq!(counts_count(&s).pending, 1);
-    assert_eq!(delivery.observe(&sound_items(&s)), vec!["idle:r-int:1:1"]);
-    // Repeated polls on the same turn do not re-chime.
-    assert!(delivery.observe(&sound_items(&s)).is_empty());
+    assert_eq!(reminders(&s)[0].id, "idle:r-int:1:1");
+    assert!(sound_items(&s).is_empty());
+
+    // Automatic stage Agent transiently entering `idle` before reporting also stays silent.
+    s.requests[0].trigger = RequestTrigger::parse("stage_entry");
+    assert_eq!(counts_count(&s).pending, 1);
+    assert!(sound_items(&s).is_empty());
+    s.requests[0].trigger = RequestTrigger::parse("interactive");
 
     // User replies -> Agent resumes working -> pending clears.
     s.attempts[0].observed = Some(json!({"state":"live","turn":2,"status":{"state":"working"}}));
     assert!(reminders(&s).is_empty());
     assert!(sound_items(&s).is_empty());
 
-    // Turn 2 finishes -> new turn ID chimes again!
+    // Turn 2 finishes (`done`) -> visual pending reminder updates, still silent!
     s.attempts[0].observed = Some(json!({"state":"live","turn":2,"status":{"state":"done"}}));
-    assert_eq!(delivery.observe(&sound_items(&s)), vec!["idle:r-int:1:2"]);
+    assert_eq!(counts_count(&s).pending, 1);
+    assert_eq!(reminders(&s)[0].id, "idle:r-int:1:2");
+    assert!(sound_items(&s).is_empty());
+
+    // If the same idle Card also has an unread `@agent` reply, the reply still chimes!
+    reply(&mut s, "q-while-idle", 1);
+    assert_eq!(
+        delivery.observe(&sound_items(&s)),
+        vec!["reply:q-while-idle"]
+    );
+    s.card_reads.push(CardRead {
+        id: "c".into(),
+        project_id: "p".into(),
+        card_id: "c".into(),
+        sequence: 1,
+    });
+    assert!(sound_items(&s).is_empty());
 
     // Once reported `completed`, the live idle terminal becomes quiet (no pending reminder or sound).
     s.requests[0].state = "completed".into();
@@ -408,7 +431,7 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_notify_per_turn_without_false_
     assert!(sound_items(&s).is_empty());
 
     // Ephemeral CLI Agent (`agent_engine = Some("agy")`):
-    // Turn 0 at fresh launch does NOT chime; Turn 1 completion and `blocked` DO chime!
+    // Both Turn 0 launch and Turn 1 `idle`/`done` stay silent; `blocked` and `error` DO chime!
     s.terminals.push(TerminalEntry {
         id: "ephemeral-agy".into(),
         conversation_id: None,
@@ -430,17 +453,23 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_notify_per_turn_without_false_
         }),
         created_at: 2,
     });
-    assert!(delivery.observe(&sound_items(&s)).is_empty());
+    assert!(sound_items(&s).is_empty());
 
     s.terminals[0].runtime.as_mut().unwrap().agent_turn = Some(1);
-    assert_eq!(
-        delivery.observe(&sound_items(&s)),
-        vec!["terminal-idle:ephemeral-agy:1"]
-    );
+    assert!(sound_items(&s).is_empty());
+
+    s.terminals[0].runtime.as_mut().unwrap().agent_status = Some("done".into());
+    assert!(sound_items(&s).is_empty());
 
     s.terminals[0].runtime.as_mut().unwrap().agent_status = Some("blocked".into());
     assert_eq!(
         delivery.observe(&sound_items(&s)),
         vec!["terminal-attn:ephemeral-agy:blocked"]
+    );
+
+    s.terminals[0].runtime.as_mut().unwrap().agent_status = Some("error".into());
+    assert_eq!(
+        delivery.observe(&sound_items(&s)),
+        vec!["terminal-attn:ephemeral-agy:error"]
     );
 }

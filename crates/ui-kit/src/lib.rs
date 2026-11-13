@@ -16,7 +16,10 @@ pub mod split;
 pub mod status;
 pub use navigation::{navigation, subpage_header};
 pub use split::split;
-pub use status::{Tone, attention_count, live_dot, live_status, notice, reminder_count, status};
+pub use status::{
+    Tone, attention_count, live_dot, live_status, notice, reminder_count, status, tone_colors,
+    tone_icon_badge,
+};
 
 pub mod icons;
 pub use icons::{Icon, icon, icon_action, icon_colored, icon_tinted};

@@ -104,6 +104,9 @@ run = "/usr/bin/python3 scripts/acceptance-events.py"
 depends = ["terminal-deps"]
 run = ["cargo build --release --locked -p canban-ui -p canban-cli -p canban-updater", "/usr/bin/python3 scripts/package.py --release"]
 
+[tasks.release]
+run = "/usr/bin/python3 scripts/release.py dispatch"
+
 [tasks.install-app]
 depends = ["build-release"]
 run = "/usr/bin/python3 scripts/install-app.py"

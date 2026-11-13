@@ -856,6 +856,71 @@ fn history_panel(ui: Ui) -> impl IntoElement {
         }))), move || state.history_open.set(false))
 }
 
+/// Read-only Board column header pill displaying the column's active automation
+/// intent (`⚡ Auto develop`, `⚡ Auto merge`, etc.) with a hover tooltip summary.
+/// Quiet/manual columns (`None`) render nothing.
+pub fn column_automation_pill(ui: Ui, column: String) -> impl IntoElement {
+    let info = computed(move || {
+        let project = ui.project.get();
+        ui.snapshot.with(|s| {
+            let files: Vec<_> = s
+                .workflow_sources
+                .iter()
+                .filter(|f| f.project_id == project)
+                .cloned()
+                .collect();
+            canban_workflow_engine::source::column_automation(
+                &column,
+                &files,
+                &s.workflow_revisions,
+                &s.event_subscriptions,
+            )
+        })
+    });
+    when(
+        move || info.get().is_some(),
+        move || {
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .min_w(px(0.))
+                .max_w(px(148.))
+                .px_1p5()
+                .py_0p5()
+                .rounded(px(10.))
+                .bg(INSET)
+                .label(move || {
+                    info.get()
+                        .map(|a| format!("Column automation · {}", a.label))
+                        .unwrap_or_default()
+                })
+                .tooltip(
+                    tooltip_box()
+                        .placement(Placement::Bottom)
+                        .max_w(px(320.))
+                        .child(
+                            text(move || {
+                                info.get()
+                                    .map(|a| a.tooltip)
+                                    .unwrap_or_default()
+                            })
+                            .text_size(px(CAPTION_SIZE))
+                            .text_color(TEXT),
+                        ),
+                )
+                .child(icon_tinted(Icon::Zap, ACCENT).w(px(11.)).h(px(11.)))
+                .child(
+                    text(move || info.get().map(|a| a.label).unwrap_or_default())
+                        .text_size(px(CAPTION_SIZE))
+                        .text_color(MUTED)
+                        .truncate()
+                        .min_w(px(0.)),
+                )
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

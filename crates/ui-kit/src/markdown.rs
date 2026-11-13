@@ -1,8 +1,18 @@
 //! Shared Markdown reading and source editing. NSH owns the rope, selections,
 //! undo stack and caret completion; changing height/preview never remounts it.
 use super::tokens::*;
-use nsh_base::{Editor, EditorApi, EditorElement, TextViewElement};
+use nsh_base::{Editor, EditorApi, EditorElement, TextViewElement, editor::EditorLanguage};
 use nsh_core::prelude::*;
+
+static PROSE_MARKDOWN: EditorLanguage = EditorLanguage::new("canban-markdown")
+    .word_chars("-")
+    .auto_close(&[('(', ')'), ('[', ']'), ('{', '}'), ('"', '"'), ('`', '`')])
+    .string_quotes("")
+    .tab_size(2);
+
+pub fn install_editor_language() {
+    nsh_base::editor::register_language(&PROSE_MARKDOWN);
+}
 
 pub fn reader(body: impl Fn() -> String + 'static) -> TextViewElement {
     nsh_base::text_view()
@@ -183,6 +193,7 @@ impl MarkdownInput {
     }
     pub fn source(self, value: Signal<String>, name: &str, placeholder: &str) -> EditorElement {
         nsh_base::editor()
+            .language("canban-markdown")
             .value(move || Some(value.get().into()))
             .on_change(move |v: &SharedString| value.set(v.to_string()))
             .on_focus(move |_: &()| {

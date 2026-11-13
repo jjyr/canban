@@ -274,6 +274,13 @@ pub fn workspace() -> canban_types::Snapshot {
         github: None,
         delivery_mode: Default::default(),
         agent_overrides: Default::default(),
+        tags: vec![
+            "search".into(),
+            "ux".into(),
+            "agent".into(),
+            "terminal".into(),
+            "bug".into(),
+        ],
         location: None,
         id: "gallery-project".into(),
         name: "Canban workspace".into(),
@@ -309,7 +316,13 @@ pub fn workspace() -> canban_types::Snapshot {
             request_key: "gallery-merged-today".into(),
             merged_at: now(),
         });
-        s.cards.push(Card{source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:"## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.".into(),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery,created_at:now()});
+        let tag_suffix = match i {
+            1 => "\n\nTags: #search #ux #agent #bug",
+            2 => "\n\nTags: #agent #terminal",
+            3 => "\n\nTags: #ux",
+            _ => "",
+        };
+        s.cards.push(Card{source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery,created_at:now()});
     }
     s.notes.push(Note{id:"note-1".into(),project_id:"gallery-project".into(),title:"Search ideas.md".into(),body:"# Search experience\n\nFind a Card without remembering its number.\n\nSee [Architecture](note:note-2).".into(),revision:1,created_at:now(),updated_at:now(),links:vec!["note-2".into()],card_ids:vec!["card-1".into()]});
     s.notes.push(Note {
@@ -341,6 +354,33 @@ pub fn workspace() -> canban_types::Snapshot {
         revision: 1,
         data: json!({}),
         created_at: now(),
+    });
+    let default_doc = canban_workflow_engine::source::default_document(
+        "delivery:gallery-project",
+        WorkspaceSettings::default(),
+    );
+    let default_yaml = canban_workflow_engine::source::encode(&default_doc).unwrap();
+    let default_def = default_doc.compile().unwrap();
+    s.workflow_revisions.push(WorkflowRevision {
+        source_yaml: Some(default_yaml),
+        id: "delivery:gallery-project:1".into(),
+        project_id: "gallery-project".into(),
+        workflow_id: "delivery:gallery-project".into(),
+        revision: 1,
+        definition: default_def,
+        created_at: now(),
+    });
+    s.workflow_sources.push(WorkflowSource {
+        id: "gallery-project:development.yaml".into(),
+        project_id: "gallery-project".into(),
+        filename: "development.yaml".into(),
+        workflow_id: "delivery:gallery-project".into(),
+        revision: 1,
+        hash: "gallery-default".into(),
+        revision_id: "delivery:gallery-project:1".into(),
+        enabled: true,
+        columns: default_doc.columns,
+        rules: default_doc.on,
     });
     s
 }
@@ -605,6 +645,19 @@ pub fn overview() -> canban_types::Snapshot {
                 request_id: Some(req.id.clone()),
                 next_stage: None,
             });
+            s.reports.push(Report {
+                id: format!("overview-report-{i}"),
+                request_id: req.id.clone(),
+                project_id: card.project_id.clone(),
+                card_id: card.id.clone(),
+                attempt: 1,
+                state: "completed".into(),
+                message: "Completed changes and verified all workspace tests".into(),
+                path: None,
+                request_key: format!("key-{i}"),
+                fingerprint: format!("fp-{i}"),
+                created_at: now() - 60_000,
+            });
         }
         if *state != "queued" {
             let mut run:Attempt=serde_json::from_value(json!({"id":Attempt::key(&req.id,1),"request_id":req.id,"project_id":card.project_id,"card_id":card.id,"number":1,"state":req.state,"core_id":"gallery-core","terminal":format!("t{}",i+1),"cwd":"/example/card-worktree","input_path":"input.md","output_path":null,"observed":{"state":if matches!(*state,"closed"|"exited") {"finished"} else {"live"},"status":{"state":if *state=="review" {"done"} else {state},"kind":"permission","title":"Allow repository command?","msg":"Agent requests permission to run git status in the Card worktree."}},"error":null,"created_at":now()-180_000,"provider_session_id":format!("session-{i}"),"connection_state":if *state=="unknown" {"unavailable"} else {"connected"}})).unwrap();
@@ -678,6 +731,29 @@ pub fn overview() -> canban_types::Snapshot {
         s.events.push(event);
     }
     s.cards[2].body=(0..20).map(|i|format!("### Context {i}\n\nLong task context tests direct navigation to an unread reply.\n\n")).collect();
+    let mut stage_done = timeline();
+    stage_done.id = "overview-unread-stage".into();
+    stage_done.sequence = 10;
+    stage_done.card_id = s.cards[3].id.clone();
+    stage_done.project_id = s.cards[3].project_id.clone();
+    stage_done.kind = "execution.reported".into();
+    stage_done.actor = "agent:developer".into();
+    stage_done.message = "completed: Unit tests passed; queued for next stage".into();
+    stage_done.data = json!({"report_id": "overview-stage-rep", "state": "completed"});
+    s.events.push(stage_done);
+
+    let mut merge_card = base.clone();
+    merge_card.id = "overview-merge-conflict".into();
+    merge_card.number = 9;
+    merge_card.title = "Refactor event bus".into();
+    merge_card.stage = "review".into();
+    merge_card.human_gate = Some(HumanGate {
+        reason: "Merge conflict with main; auto-merge paused".into(),
+        request_id: None,
+        next_stage: None,
+    });
+    s.cards.push(merge_card);
+
     let mut recovery = base;
     recovery.id = "workspace-recovery".into();
     recovery.title = "Reconnect the execution machine".into();
@@ -1443,50 +1519,70 @@ pub fn workflow() -> canban_types::WorkflowRun {
     })).unwrap()
 }
 
-/// Active column rules over real Card text, including the first/last columns.
-/// Exercises popover stacking, clipping, dismissal and overflow with production UI.
+/// Active column rules across all columns (including Backlog next to `+` and custom `+N`
+/// multi-workflow tooltips) over real Card text.
 pub fn automation_board() -> canban_types::Snapshot {
     use canban_types::*;
     let mut snapshot = workspace();
+    snapshot.workflow_sources.clear();
+    snapshot.workflow_revisions.clear();
+    let mut primary = canban_workflow_engine::source::default_document(
+        "delivery:gallery-project",
+        WorkspaceSettings::default(),
+    );
+    canban_workflow_engine::source::set_backlog_options(&mut primary, true, true);
+    canban_workflow_engine::source::set_backlog_admission(&mut primary, true, Some(2));
+    let primary_yaml = canban_workflow_engine::source::encode(&primary).unwrap();
+    snapshot.workflow_revisions.push(WorkflowRevision {
+        source_yaml: Some(primary_yaml),
+        id: "delivery:gallery-project:1".into(),
+        project_id: "gallery-project".into(),
+        workflow_id: "delivery:gallery-project".into(),
+        revision: 1,
+        definition: primary.compile().unwrap(),
+        created_at: now(),
+    });
+    snapshot.workflow_sources.push(WorkflowSource {
+        id: "gallery-project:development.yaml".into(),
+        project_id: "gallery-project".into(),
+        filename: "development.yaml".into(),
+        workflow_id: "delivery:gallery-project".into(),
+        revision: 1,
+        hash: "gallery".into(),
+        revision_id: "delivery:gallery-project:1".into(),
+        enabled: true,
+        columns: primary.columns.clone(),
+        rules: primary.on.clone(),
+    });
+
     let raw = include_str!("../workflows/plan-and-develop.yaml");
-    let mut document = canban_workflow_engine::source::parse(raw).unwrap();
-    for column in ["backlog", "review"] {
-        document.on.insert(
-            column.into(),
-            serde_json::from_value(json!({
-                "event":"card.column_entered", "start_at":"plan", "match":{"column":column}
-            }))
-            .unwrap(),
-        );
-    }
-    for index in 0..5 {
-        let workflow_id = format!("gallery-automation-{index}");
-        let revision_id = format!("{workflow_id}:1");
-        let mut definition = document.compile().unwrap();
-        definition.id = workflow_id.clone();
-        definition.name = format!("Plan and deliver · automation {}", index + 1);
-        snapshot.workflow_revisions.push(WorkflowRevision {
-            source_yaml: Some(raw.into()),
-            id: revision_id.clone(),
-            project_id: "gallery-project".into(),
-            workflow_id: workflow_id.clone(),
-            revision: 1,
-            definition,
-            created_at: now(),
-        });
-        snapshot.workflow_sources.push(WorkflowSource {
-            id: workflow_id.clone(),
-            project_id: "gallery-project".into(),
-            filename: format!("automation-{index}.yaml"),
-            workflow_id,
-            revision: 1,
-            hash: "gallery".into(),
-            revision_id,
-            enabled: true,
-            columns: document.columns.clone(),
-            rules: document.on.clone(),
-        });
-    }
+    let document = canban_workflow_engine::source::parse(raw).unwrap();
+    let workflow_id = "gallery-automation-extra".to_owned();
+    let revision_id = format!("{workflow_id}:1");
+    let mut definition = document.compile().unwrap();
+    definition.id = workflow_id.clone();
+    definition.name = "Extra Develop helper".into();
+    snapshot.workflow_revisions.push(WorkflowRevision {
+        source_yaml: Some(raw.into()),
+        id: revision_id.clone(),
+        project_id: "gallery-project".into(),
+        workflow_id: workflow_id.clone(),
+        revision: 1,
+        definition,
+        created_at: now(),
+    });
+    snapshot.workflow_sources.push(WorkflowSource {
+        id: workflow_id.clone(),
+        project_id: "gallery-project".into(),
+        filename: "extra-develop.yaml".into(),
+        workflow_id,
+        revision: 1,
+        hash: "gallery".into(),
+        revision_id,
+        enabled: true,
+        columns: document.columns,
+        rules: document.on,
+    });
     snapshot
 }
 

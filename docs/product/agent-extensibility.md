@@ -4,7 +4,7 @@ Status: implemented 2026-11-07; current lifecycle/API description reconciled 202
 
 ## CLI capability surface
 
-The CLI and native UI call the same AppServer operations through a same-user socket. Remote Agents use the [Core-backed CLI bridge](../multi-machine.md#remote-context-and-agent-cli) to that same authority, not a second product server. Dedicated helpers are `report`, `reply`, `bind-session`, `status` and `snapshot`; the general form is `canban call METHOD JSON`. `serve` hosts the same AppServer without the UI.
+The CLI and native UI call the same AppServer operations through a same-user socket. Remote Agents use the [Core-backed CLI bridge](../multi-machine.md#remote-context-and-agent-cli) to that same authority, not a second product server. Dedicated helpers are `report`, `reply`, `card update`, `card adopt`, `bind-session`, `skill` (`--skill`), `status` and `snapshot`; the general form is `canban call METHOD JSON`. `serve` hosts the same AppServer without the UI.
 
 | Area | Operations |
 | --- | --- |
@@ -19,6 +19,14 @@ The CLI and native UI call the same AppServer operations through a same-user soc
 `agent.turn_ended` is a deprecated ignored compatibility operation; hidden `agent-notify` is a no-op for old invocations. Neither closes or binds a conversation. No lifecycle callback is required by the new profile interface.
 
 Launch supplies `CANBAN_CLI`, `CANBAN_HOME`, `CANBAN_ENDPOINT`, `CANBAN_REQUEST_ID`, `CANBAN_ATTEMPT`, `CANBAN_PROFILE_ID`, `CANBAN_SESSION_ID` and `CANBAN_RUN_DIR`. Use the current invocation binding rather than a command remembered from older history. Reports/replies belong in the run directory, outside delivered source. The CLI sends file bytes to AppServer. Mutations use `request_key` for retry receipts; Card edits also use revision checks. See [Review delivery](review-delivery.md) for concrete delivery payloads and uncertain-result handling.
+
+## Built-in Canban CLI Skill
+
+Canban bundles a version-locked Agent Skill at [`skills/canban/SKILL.md`](../../skills/canban/SKILL.md) teaching coding agents how to operate Cards, comments, reviews, workflows, and execution outcomes through `$CANBAN_CLI` without mutating user-global agent folders automatically:
+
+- **Local materialization**: `AppServer::open` atomically writes `<CANBAN_HOME>/skills/canban/SKILL.md` (and `stage_remote` stages it onto remote execution homes), and `canban skill` / `canban --skill` prints the embedded Markdown directly without opening application data.
+- **Optional user-guided installation**: Both the Agent Setup onboarding wizard (`agent-setup`) and `Settings -> Agents & Identities` display an optional **Canban CLI Skill** block right below **Default Agent** with `npx skills add <CANBAN_HOME>/skills --skill canban -g`, a **Copy** button (`copy-skill-command` in the Command Catalog), and an **Open Terminal (`⌘T`)** action.
+- **Global `⌘T` standalone Terminal**: `new-terminal` (`⌘T`) is bound globally so users can open a standalone Shell tab unassociated with any Card directly from Settings, Agent Setup, Board, or Terminals (while preserving Card-scoped terminal creation when a Card's Live Terminal split is open).
 
 The socket has application-wide authority, including other Cards and Agent controls. There is no per-Agent capability sandbox in Canban. Provider sandbox/approval settings remain active. Terminal input/stream traffic goes directly through Herdr rather than a business operation per keystroke.
 

@@ -100,10 +100,11 @@ comment publishing control.
 
 Typing a standalone `@` opens configured Profile candidates at the caret; an explicit `@` (**Mention an Agent**) button in the composer toolbar also opens the candidate picker. Typing filters candidates; Up/Down select, Enter/Tab/click accepts and Escape dismisses. Shift+Enter inserts a newline while candidates are visible, and Enter/Shift+Enter insert newlines when candidates are closed. Completion and prose mention detection ignore email-like text (`user@profile`), quoted lines (`>`), escaped `\@`, inline backticks and fenced code blocks. Standalone `@profile` tokens anywhere in prose (leading or mid-sentence) surface removable recipient chips above the composer; clicking `×` on a chip removes a leading `@profile` prefix or suppresses a mid-sentence `@profile` from the explicit `mentions` array while keeping prose intact. The **"Local discussion · not posted to GitHub"** scope note is shown only when the Card is linked to a GitHub Issue or Pull Request.
 
-Hash completion uses the same local Card and connected GitHub Issue/PR source as
-the task editor. Candidates are recomputed across the full inventory as the query
-changes. Description, comment, reply and report readers share hover previews and
-navigation: Cards open locally and Profiles open Settings. Connected GitHub
+Hash completion uses the same `#tag` (including **New tag · Create**), local Card
+and connected GitHub Issue/PR source as the task editor. Candidates are recomputed
+across the full inventory as the query changes. Description, comment, reply and
+report readers share hover previews and navigation: `#tag` tokens open Quick Open
+pre-filled with `#tag`, Cards open locally and Profiles open Settings. Connected GitHub
 Issue/PR root URLs open the native GitHub detail; disconnected links and links
 with query/fragment/subpaths open the browser, preserving their exact target.
 Other HTTP(S) destinations open the browser. Code literals remain literal. See [reference behavior and

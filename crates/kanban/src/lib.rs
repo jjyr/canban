@@ -40,6 +40,7 @@ pub fn project(name: &str, directory: &str, workflow: Workflow) -> Result<Projec
         github: None,
         delivery_mode: Default::default(),
         agent_overrides: Default::default(),
+        tags: Default::default(),
         location: None,
         id: id(),
         name: name.trim().into(),
