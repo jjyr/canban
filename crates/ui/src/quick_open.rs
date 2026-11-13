@@ -2,7 +2,7 @@
 mod model;
 use crate::presenter::*;
 use canban_ui_kit::*;
-pub use model::{Candidate, Target, candidates, ranked};
+pub use model::{Candidate, Target, candidates, candidates_with_tags, ranked};
 use nsh_core::{keymap::When, prelude::*};
 
 pub fn matching_commands_with_scores(
@@ -69,6 +69,32 @@ fn contextual_commands(ui: Ui, raw_query: &str) -> Vec<(usize, SearchChoice)> {
     }
 
     let snapshot = ui.snapshot.get();
+    let pid = ui.project.get();
+    if !pid.is_empty() {
+        let active = crate::tags::active_board_tags(ui, &pid);
+        let project_name = snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == pid)
+            .map(|p| p.name.as_str())
+            .unwrap_or("Project");
+        for tag in crate::tags::ordered_known(&snapshot, &ui.local_tags.get(), Some(&pid)) {
+            let is_active = active
+                .iter()
+                .any(|t| t.to_lowercase() == tag.to_lowercase());
+            dynamic_cmds.push(DynamicCommand {
+                id: format!("cmd:filter-tag:{tag}"),
+                title: if is_active {
+                    format!("Clear #{tag} Board Filter")
+                } else {
+                    format!("Filter Board by #{tag}")
+                },
+                detail: format!("{project_name} · Board Tag Filter"),
+                icon: Icon::Board,
+                keywords: format!("tag filter board #{tag} {tag}"),
+            });
+        }
+    }
     for wt in &snapshot.worktrees {
         let project_name = snapshot
             .projects
@@ -144,7 +170,8 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
             });
             let all = computed(move || {
                 let snapshot = ui.snapshot.get();
-                let mut rows = candidates(&snapshot);
+                let local_tags = ui.local_tags.get();
+                let mut rows = candidates_with_tags(&snapshot, &local_tags);
                 if ui.project_picker.get() {
                     for row in &mut rows {
                         if let Target::Project(id) = &row.target
@@ -286,9 +313,12 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                         return;
                     }
                     // Resolve against fresh local state, rather than an obsolete retained attempt.
-                    if let Some(row) = candidates(&ui.snapshot.get_untracked())
-                        .into_iter()
-                        .find(|r| r.id == id)
+                    if let Some(row) = candidates_with_tags(
+                        &ui.snapshot.get_untracked(),
+                        &ui.local_tags.get_untracked(),
+                    )
+                    .into_iter()
+                    .find(|r| r.id == id)
                     {
                         activate(ui, row);
                     } else {
@@ -301,7 +331,8 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                     if ui.project_picker.get() {
                         "Search projects…".into()
                     } else {
-                        "Search projects, cards, worktrees, agents… or type > for commands".into()
+                        "Search projects, cards, #tags, worktrees, agents… or type > for commands"
+                            .into()
                     }
                 },
                 view()

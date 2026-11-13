@@ -3,6 +3,8 @@ use super::NODE;
 use canban_types::{Profile, Snapshot};
 use nsh_base::text_view::{Block, CustomNode, Document, Inline};
 
+use std::collections::BTreeMap;
+
 fn reference(href: &str, text: String, content: Vec<Inline>) -> Inline {
     Inline::Custom(
         CustomNode::new(NODE)
@@ -19,6 +21,7 @@ fn token_link(
     trigger: char,
     s: &Snapshot,
     profiles: &[Profile],
+    known_tags: &BTreeMap<String, String>,
     project: &str,
 ) -> Option<String> {
     if trigger == '@' {
@@ -26,6 +29,11 @@ fn token_link(
             .iter()
             .find(|p| p.id == token)
             .map(|p| format!("profile:{}", p.id));
+    }
+    if let Some(norm) = canban_types::normalize_tag(token)
+        && let Some(canonical) = known_tags.get(&norm.to_lowercase())
+    {
+        return Some(format!("tag:{canonical}"));
     }
     let number = token.parse::<u64>().ok()?;
     // Bare hashes in a GitHub-connected project are ambiguous. Completion writes
@@ -41,7 +49,13 @@ fn token_link(
         .find(|c| c.project_id == project && c.number == number && c.removed_at.is_none())
         .map(|c| format!("card:{}", c.id))
 }
-fn text_nodes(text: &str, s: &Snapshot, profiles: &[Profile], project: &str) -> Vec<Inline> {
+fn text_nodes(
+    text: &str,
+    s: &Snapshot,
+    profiles: &[Profile],
+    known_tags: &BTreeMap<String, String>,
+    project: &str,
+) -> Vec<Inline> {
     let mut nodes = Vec::new();
     let mut last = 0;
     for (start, trigger) in text.char_indices().filter(|(_, c)| matches!(c, '@' | '#')) {
@@ -56,13 +70,7 @@ fn text_nodes(text: &str, s: &Snapshot, profiles: &[Profile], project: &str) -> 
         let tail = &text[start + 1..];
         let len = tail
             .char_indices()
-            .find(|(_, c)| {
-                if trigger == '@' {
-                    !c.is_alphanumeric() && *c != '_' && *c != '-'
-                } else {
-                    !c.is_ascii_digit()
-                }
-            })
+            .find(|(_, c)| !c.is_alphanumeric() && *c != '_' && *c != '-')
             .map(|(i, _)| i)
             .unwrap_or(tail.len());
         if len == 0 {
@@ -76,7 +84,7 @@ fn text_nodes(text: &str, s: &Snapshot, profiles: &[Profile], project: &str) -> 
         {
             continue;
         }
-        let Some(href) = token_link(&tail[..len], trigger, s, profiles, project) else {
+        let Some(href) = token_link(&tail[..len], trigger, s, profiles, known_tags, project) else {
             continue;
         };
         if start > last {
@@ -95,6 +103,7 @@ fn inlines(
     nodes: &mut Vec<Inline>,
     s: &Snapshot,
     profiles: &[Profile],
+    known_tags: &BTreeMap<String, String>,
     project: &str,
     prose: bool,
 ) {
@@ -102,7 +111,7 @@ fn inlines(
     for mut node in std::mem::take(nodes) {
         match &mut node {
             Inline::Text { text } if prose => {
-                out.extend(text_nodes(text, s, profiles, project));
+                out.extend(text_nodes(text, s, profiles, known_tags, project));
                 continue;
             }
             Inline::Link { url, content, .. }
@@ -118,44 +127,61 @@ fn inlines(
             | Inline::Highlight { content, .. }
             | Inline::Superscript { content }
             | Inline::Subscript { content }
-            | Inline::Small { content } => inlines(content, s, profiles, project, prose),
+            | Inline::Small { content } => {
+                inlines(content, s, profiles, known_tags, project, prose)
+            }
             _ => {}
         }
         out.push(node);
     }
     *nodes = out;
 }
-fn blocks(nodes: &mut [Block], s: &Snapshot, profiles: &[Profile], project: &str, prose: bool) {
+fn blocks(
+    nodes: &mut [Block],
+    s: &Snapshot,
+    profiles: &[Profile],
+    known_tags: &BTreeMap<String, String>,
+    project: &str,
+    prose: bool,
+) {
     for node in nodes {
         match node {
             Block::Paragraph { content } | Block::Heading { content, .. } => {
-                inlines(content, s, profiles, project, prose)
+                inlines(content, s, profiles, known_tags, project, prose)
             }
-            Block::Blockquote { children, .. } => blocks(children, s, profiles, project, false),
+            Block::Blockquote { children, .. } => {
+                blocks(children, s, profiles, known_tags, project, false)
+            }
             Block::List { items, .. } => {
                 for item in items {
-                    blocks(&mut item.children, s, profiles, project, prose);
+                    blocks(&mut item.children, s, profiles, known_tags, project, prose);
                 }
             }
             Block::Details {
                 summary, children, ..
             } => {
-                inlines(summary, s, profiles, project, prose);
-                blocks(children, s, profiles, project, prose);
+                inlines(summary, s, profiles, known_tags, project, prose);
+                blocks(children, s, profiles, known_tags, project, prose);
             }
             Block::Table(table) => {
                 for cell in table.head.iter_mut().chain(table.rows.iter_mut().flatten()) {
-                    inlines(&mut cell.content, s, profiles, project, prose);
+                    inlines(&mut cell.content, s, profiles, known_tags, project, prose);
                 }
             }
             _ => {}
         }
     }
 }
-pub(super) fn decorate(document: &mut Document, s: &Snapshot, profiles: &[Profile], project: &str) {
-    blocks(&mut document.blocks, s, profiles, project, true);
+pub(super) fn decorate(
+    document: &mut Document,
+    s: &Snapshot,
+    profiles: &[Profile],
+    known_tags: &BTreeMap<String, String>,
+    project: &str,
+) {
+    blocks(&mut document.blocks, s, profiles, known_tags, project, true);
     for note in &mut document.footnotes {
-        blocks(&mut note.children, s, profiles, project, true);
+        blocks(&mut note.children, s, profiles, known_tags, project, true);
     }
 }
 
@@ -236,6 +262,7 @@ mod tests {
             &mut doc,
             &Snapshot::default(),
             &canban_types::Config::default().profiles,
+            &BTreeMap::new(),
             "p",
         );
         assert_eq!(doc.plain_text(), before);
@@ -246,5 +273,28 @@ mod tests {
         assert!(data.contains("https://example.com"));
         assert!(data.contains("codeBlock"));
         assert!(data.contains("mail@example.com"));
+    }
+
+    #[test]
+    fn known_tags_decorate_into_clickable_tag_references_without_touching_unknown_hashes() {
+        let mut known = BTreeMap::new();
+        known.insert("ui-kit".into(), "ui-kit".into());
+        known.insert("前端".into(), "前端".into());
+        let source = "Check #ui-kit, (#前端), and [#custom](tag:custom); ignore #ff0000, `#ui-kit`, and:\n\n> #ui-kit in quote";
+        let mut doc = Parser::new().markdown(source);
+        let before = doc.plain_text();
+        decorate(
+            &mut doc,
+            &Snapshot::default(),
+            &canban_types::Config::default().profiles,
+            &known,
+            "p",
+        );
+        assert_eq!(doc.plain_text(), before);
+        let data = serde_json::to_value(&doc).unwrap().to_string();
+        assert_eq!(data.matches("tag:ui-kit").count(), 1);
+        assert_eq!(data.matches("tag:前端").count(), 1);
+        assert_eq!(data.matches("tag:custom").count(), 1);
+        assert!(!data.contains("tag:ff0000"));
     }
 }

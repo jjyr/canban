@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub struct Entry {
     pub card: Card,
     pub agents: Vec<String>,
+    pub tags: Vec<String>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Group {
@@ -15,7 +16,16 @@ pub struct Group {
     pub entries: Vec<Entry>,
 }
 pub fn project_entries(snapshot: &Snapshot, project_id: &str, query: &str) -> Vec<Entry> {
-    groups(snapshot, query)
+    project_entries_with_tags(snapshot, &BTreeSet::new(), project_id, query)
+}
+
+pub fn project_entries_with_tags(
+    snapshot: &Snapshot,
+    local_tags: &BTreeSet<String>,
+    project_id: &str,
+    query: &str,
+) -> Vec<Entry> {
+    groups_with_tags(snapshot, local_tags, query)
         .into_iter()
         .filter(|g| project_id.is_empty() || g.id == project_id)
         .flat_map(|g| g.entries)
@@ -23,6 +33,16 @@ pub fn project_entries(snapshot: &Snapshot, project_id: &str, query: &str) -> Ve
 }
 
 pub fn groups(snapshot: &Snapshot, query: &str) -> Vec<Group> {
+    groups_with_tags(snapshot, &BTreeSet::new(), query)
+}
+
+pub fn groups_with_tags(
+    snapshot: &Snapshot,
+    local_tags: &BTreeSet<String>,
+    query: &str,
+) -> Vec<Group> {
+    let known_tags = crate::tags::known_map(snapshot, local_tags, None);
+    let (tag_terms, other_query) = crate::tags::split_tag_query(query);
     let mut groups = BTreeMap::<String, Vec<(usize, Entry)>>::new();
     for card in snapshot
         .cards
@@ -51,20 +71,41 @@ pub fn groups(snapshot: &Snapshot, query: &str) -> Vec<Group> {
             providers.insert(r.profile.command_name());
         }
         let agents = agents.into_iter().collect::<Vec<_>>();
-        let fields = vec![
+        let tags = crate::tags::card_tags(&card, &known_tags);
+        let mut fields = vec![
             card.title.clone(),
             format!("#{}", card.number),
             name.into(),
             agents.join(" "),
             providers.into_iter().collect::<Vec<_>>().join(" "),
         ];
-        let Some(score) = canban_ui_kit::search::score(&fields, query) else {
-            continue;
+        for tag in &tags {
+            fields.push(format!("#{tag}"));
+            fields.push(tag.clone());
+        }
+        let score = if tag_terms.is_empty() {
+            let Some(score) = canban_ui_kit::search::score(&fields, query) else {
+                continue;
+            };
+            score
+        } else {
+            let Some(tag_score) = crate::tags::score_tags(&tags, &tag_terms) else {
+                continue;
+            };
+            let other_score = if other_query.is_empty() {
+                0
+            } else {
+                let Some(s) = canban_ui_kit::search::score(&fields, &other_query) else {
+                    continue;
+                };
+                s
+            };
+            tag_score + other_score
         };
         groups
             .entry(card.project_id.clone())
             .or_default()
-            .push((score, Entry { card, agents }));
+            .push((score, Entry { card, agents, tags }));
     }
     let mut result = groups
         .into_iter()
@@ -116,6 +157,7 @@ mod tests {
                 github: None,
                 delivery_mode: Default::default(),
                 agent_overrides: Default::default(),
+                tags: Default::default(),
                 location: None,
                 target_branch: None,
                 created_at: 1,
