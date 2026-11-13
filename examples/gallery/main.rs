@@ -701,6 +701,52 @@ pub fn Gallery() -> impl IntoElement {
                             s.events.push(e);
                         });
                     }))
+                    .child(action("Silent idle #1", Variant::Quiet, move |_| {
+                        ui.snapshot.update(|s| {
+                            let turn = s
+                                .attempts
+                                .iter()
+                                .find(|a| a.id == "idle-attempt-1")
+                                .and_then(|a| a.observed.as_ref())
+                                .and_then(|v| v["turn"].as_u64())
+                                .unwrap_or(0)
+                                + 1;
+                            if !s.requests.iter().any(|r| r.id == "idle-req-1") {
+                                let req: canban_types::Request = serde_json::from_value(json!({
+                                    "id": "idle-req-1",
+                                    "project_id": "gallery-project",
+                                    "card_id": "card-1",
+                                    "stage": "develop",
+                                    "trigger": "interactive",
+                                    "profile": canban_types::Config::default().profiles[0],
+                                    "instruction": "Interactive check",
+                                    "state": "running",
+                                    "attempt": 1,
+                                    "created_at": 1
+                                }))
+                                .unwrap();
+                                s.requests.push(req);
+                            }
+                            s.attempts.retain(|a| a.id != "idle-attempt-1");
+                            let attempt: canban_types::Attempt = serde_json::from_value(json!({
+                                "id": "idle-attempt-1",
+                                "request_id": "idle-req-1",
+                                "project_id": "gallery-project",
+                                "card_id": "card-1",
+                                "number": 1,
+                                "state": "running",
+                                "terminal": "pty-idle-1",
+                                "cwd": "/tmp",
+                                "input_path": "in",
+                                "connection_state": "connected",
+                                "observed": {"state": "live", "turn": turn, "status": {"state": "idle"}},
+                                "lifecycle": {"observed_at": canban_types::now(), "idle_since": canban_types::now()},
+                                "created_at": 1
+                            }))
+                            .unwrap();
+                            s.attempts.push(attempt);
+                        });
+                    }))
                     .child(action("Return #1 to Backlog", Variant::Quiet, move |_| {
                         ui.snapshot.update(|s| {
                             let seq = s
