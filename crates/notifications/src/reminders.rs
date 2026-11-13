@@ -124,7 +124,29 @@ pub fn reminders(s: &Snapshot) -> Vec<Reminder> {
                     .as_ref()
                     .and_then(|a| a.lifecycle.waiting.as_ref())
                     .map(|w| format!("wait:{}", w.id))
-                    .unwrap_or_else(|| format!("runtime:{}", row.id)),
+                    .unwrap_or_else(|| {
+                        let runtime = row
+                            .attempt
+                            .as_ref()
+                            .map(|a| a.runtime_status())
+                            .unwrap_or("unknown");
+                        let target = row
+                            .attempt
+                            .as_ref()
+                            .map(|a| a.id.as_str())
+                            .unwrap_or(&row.id);
+                        if matches!(runtime, "idle" | "done") {
+                            let turn = row
+                                .attempt
+                                .as_ref()
+                                .and_then(|a| a.observed.as_ref())
+                                .and_then(|v| v["turn"].as_u64())
+                                .unwrap_or(0);
+                            format!("idle:{target}:{turn}")
+                        } else {
+                            format!("runtime:{target}")
+                        }
+                    }),
                 _ => format!(
                     "recovery:{}",
                     row.attempt
@@ -138,6 +160,7 @@ pub fn reminders(s: &Snapshot) -> Vec<Reminder> {
                 .as_ref()
                 .and_then(|a| a.lifecycle.waiting.as_ref())
                 .map(|w| w.since)
+                .or_else(|| row.attempt.as_ref().and_then(|a| a.lifecycle.idle_since))
                 .or_else(|| report.map(|e| e.created_at))
                 .unwrap_or(row.card.created_at);
             items
@@ -226,9 +249,7 @@ pub fn sound_items_with_reminders(s: &Snapshot, reminder_items: &[Reminder]) -> 
             "execution.failed" | "execution.missing" => {
                 ids.insert(format!("event:{}", e.id));
             }
-            "review.merge_failed"
-            | "review.upstream_sync_failed"
-            | "github.pr_merge_attention" => {
+            "review.merge_failed" | "review.upstream_sync_failed" | "github.pr_merge_attention" => {
                 ids.insert(format!("event:{}", e.id));
             }
             "review.merged" | "github.pr_merged" | "github.pr_delivered" if e.actor != "user" => {
@@ -243,6 +264,31 @@ pub fn sound_items_with_reminders(s: &Snapshot, reminder_items: &[Reminder]) -> 
                     })
                     .unwrap_or_else(|| format!("merged:{}:{}", e.card_id, e.id));
                 ids.insert(key);
+            }
+            _ => {}
+        }
+    }
+
+    for t in &s.terminals {
+        if t.conversation_id.is_some() || t.agent_engine.is_none() {
+            continue;
+        }
+        let Some(runtime) = &t.runtime else {
+            continue;
+        };
+        if runtime.state == "finished" || runtime.connection != "connected" {
+            continue;
+        }
+        match runtime.agent_status.as_deref() {
+            Some(st @ ("blocked" | "error")) => {
+                ids.insert(format!("terminal-attn:{}:{st}", t.id));
+            }
+            Some("idle" | "done") if runtime.agent_turn.unwrap_or(0) > 0 => {
+                ids.insert(format!(
+                    "terminal-idle:{}:{}",
+                    t.id,
+                    runtime.agent_turn.unwrap_or(0)
+                ));
             }
             _ => {}
         }

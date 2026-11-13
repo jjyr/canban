@@ -356,10 +356,7 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
     );
     assert_eq!(
         delivery.observe(&sound_items(&s)),
-        vec![
-            "merged:c:pr:42",
-            "merged:c:workflow-deliver:run1:1"
-        ]
+        vec!["merged:c:pr:42", "merged:c:workflow-deliver:run1:1"]
     );
     // Repeated snapshots never replay already-delivered merge chimes.
     assert!(delivery.observe(&sound_items(&s)).is_empty());
@@ -367,4 +364,83 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
     // Archived cards clear sound items cleanly.
     s.cards[0].archived_at = Some(99);
     assert!(sound_items(&s).is_empty());
+}
+
+#[test]
+fn unfinished_idle_turns_and_ephemeral_cli_agents_notify_per_turn_without_false_launch_chime() {
+    let mut s = fixture();
+    let mut delivery = DeliveryTracker::default();
+    assert!(delivery.observe(&sound_items(&s)).is_empty());
+
+    // Interactive Card Agent finishes Turn 1 without closing -> notifies with `idle:r-int:1:1`.
+    let req: Request = serde_json::from_value(json!({
+        "id":"r-int","project_id":"p","card_id":"c","stage":"develop","trigger":"interactive",
+        "profile":Config::default().profiles[0],"instruction":"Chat","state":"running","attempt":1,"created_at":1
+    }))
+    .unwrap();
+    let attempt: Attempt = serde_json::from_value(json!({
+        "id":"r-int:1","request_id":"r-int","project_id":"p","card_id":"c","number":1,"state":"running",
+        "terminal":"t-int","cwd":"/tmp","input_path":"in","connection_state":"connected",
+        "observed":{"state":"live","turn":1,"status":{"state":"idle"}},
+        "lifecycle":{"observed_at":canban_types::now(),"idle_since":10},
+        "created_at":1
+    }))
+    .unwrap();
+    s.requests.push(req);
+    s.attempts.push(attempt);
+    assert_eq!(counts_count(&s).pending, 1);
+    assert_eq!(delivery.observe(&sound_items(&s)), vec!["idle:r-int:1:1"]);
+    // Repeated polls on the same turn do not re-chime.
+    assert!(delivery.observe(&sound_items(&s)).is_empty());
+
+    // User replies -> Agent resumes working -> pending clears.
+    s.attempts[0].observed = Some(json!({"state":"live","turn":2,"status":{"state":"working"}}));
+    assert!(reminders(&s).is_empty());
+    assert!(sound_items(&s).is_empty());
+
+    // Turn 2 finishes -> new turn ID chimes again!
+    s.attempts[0].observed = Some(json!({"state":"live","turn":2,"status":{"state":"done"}}));
+    assert_eq!(delivery.observe(&sound_items(&s)), vec!["idle:r-int:1:2"]);
+
+    // Once reported `completed`, the live idle terminal becomes quiet (no pending reminder or sound).
+    s.requests[0].state = "completed".into();
+    assert!(reminders(&s).is_empty());
+    assert!(sound_items(&s).is_empty());
+
+    // Ephemeral CLI Agent (`agent_engine = Some("agy")`):
+    // Turn 0 at fresh launch does NOT chime; Turn 1 completion and `blocked` DO chime!
+    s.terminals.push(TerminalEntry {
+        id: "ephemeral-agy".into(),
+        conversation_id: None,
+        number: 2,
+        name: None,
+        manual_number: Some(1),
+        origin_card_id: Some("c".into()),
+        agent_engine: Some("agy".into()),
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("core".into()),
+            terminal: Some("pty-ephemeral".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("idle".into()),
+            agent_turn: Some(0),
+        }),
+        created_at: 2,
+    });
+    assert!(delivery.observe(&sound_items(&s)).is_empty());
+
+    s.terminals[0].runtime.as_mut().unwrap().agent_turn = Some(1);
+    assert_eq!(
+        delivery.observe(&sound_items(&s)),
+        vec!["terminal-idle:ephemeral-agy:1"]
+    );
+
+    s.terminals[0].runtime.as_mut().unwrap().agent_status = Some("blocked".into());
+    assert_eq!(
+        delivery.observe(&sound_items(&s)),
+        vec!["terminal-attn:ephemeral-agy:blocked"]
+    );
 }

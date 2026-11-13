@@ -76,7 +76,7 @@ fn card_tab_title(e: &Entry) -> String {
         return name.clone();
     }
     if let Some(profile) = e.profile() {
-        format!("@{profile} · {}", e.display_status())
+        format!("@{profile}")
     } else {
         e.title()
     }
@@ -172,13 +172,87 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                                 let hint = e.hint();
                                 let mark =
                                     e.provider().map(|(ic, _)| ic).unwrap_or(Icon::Terminal);
-                                let dot_color = if e.needs_attention() {
-                                    ATTENTION
-                                } else if e.ended() || e.inactive() {
-                                    MUTED
-                                } else {
-                                    SUCCESS
-                                };
+                                let attention = e.attention_reason();
+                                let mut tab_button = view()
+                                    .h_full()
+                                    .focusable(true)
+                                    .cursor_pointer()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .overflow_hidden()
+                                    .px_2p5()
+                                    .bg(CLEAR)
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .role(AccessibilityRole::Tab)
+                                    .accessibility_state(move || {
+                                        nsh_core::AccessibilityState {
+                                            selected: is_sel,
+                                            ..Default::default()
+                                        }
+                                    })
+                                    .label(format!("Tab {text}"));
+                                if attention.is_some() {
+                                    tab_button = tab_button.child(
+                                        icon_tinted(Icon::Info, ATTENTION)
+                                            .w(px(13.))
+                                            .h(px(13.))
+                                            .flex_shrink_0(),
+                                    );
+                                } else if e.agent.is_some() {
+                                    tab_button = tab_button.child(
+                                        view()
+                                            .w(px(5.))
+                                            .h(px(5.))
+                                            .rounded(px(3.))
+                                            .bg(if e.ended() || e.inactive() {
+                                                MUTED
+                                            } else {
+                                                SUCCESS
+                                            })
+                                            .flex_shrink_0()
+                                            .pointer_events(PointerEvents::None),
+                                    );
+                                }
+                                tab_button = tab_button
+                                    .child(
+                                        icon(mark)
+                                            .w(px(13.))
+                                            .h(px(13.))
+                                            .flex_shrink_0(),
+                                    )
+                                    .child(
+                                        label(text.clone())
+                                            .font_weight(if is_sel {
+                                                FontWeight::SEMIBOLD
+                                            } else {
+                                                FontWeight::NORMAL
+                                            })
+                                            .truncate()
+                                            .min_w(px(0.)),
+                                    )
+                                    .on_press_down(
+                                        move |event: &nsh_core::PressEvent| {
+                                            if event.clicks >= 2 {
+                                                ui.terminal_rename
+                                                    .set(Some(rename_id.clone()));
+                                            }
+                                        },
+                                    )
+                                    .on_context_menu(
+                                        move |event: &nsh_core::ContextMenuEvent| {
+                                            ui.spawn(crate::terminals::tabs::menu(
+                                                ui,
+                                                menu_id.clone(),
+                                                Some(event.page_position),
+                                            ));
+                                        },
+                                    )
+                                    .on_press(move |_: &nsh_core::PressEvent| {
+                                        select_card_tab(ui, &tab_cid, id.clone());
+                                        ui.card_terminal_focused.set(true);
+                                    });
                                 strip = strip.child(
                                     view()
                                         .h_full()
@@ -198,74 +272,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                                             hint_tooltip(hint.clone())
                                                 .placement(Placement::Bottom),
                                         )
-                                        .child(
-                                            view()
-                                                .h_full()
-                                                .focusable(true)
-                                                .cursor_pointer()
-                                                .flex_1()
-                                                .min_w(px(0.))
-                                                .overflow_hidden()
-                                                .px_2p5()
-                                                .bg(CLEAR)
-                                                .flex_row()
-                                                .items_center()
-                                                .gap_1p5()
-                                                .role(AccessibilityRole::Tab)
-                                                .accessibility_state(move || {
-                                                    nsh_core::AccessibilityState {
-                                                        selected: is_sel,
-                                                        ..Default::default()
-                                                    }
-                                                })
-                                                .label(format!("Tab {text}"))
-                                                .child(
-                                                    view()
-                                                        .w(px(5.))
-                                                        .h(px(5.))
-                                                        .rounded(px(3.))
-                                                        .bg(dot_color)
-                                                        .flex_shrink_0()
-                                                        .pointer_events(PointerEvents::None),
-                                                )
-                                                .child(
-                                                    icon(mark)
-                                                        .w(px(13.))
-                                                        .h(px(13.))
-                                                        .flex_shrink_0(),
-                                                )
-                                                .child(
-                                                    label(text.clone())
-                                                        .font_weight(if is_sel {
-                                                            FontWeight::SEMIBOLD
-                                                        } else {
-                                                            FontWeight::NORMAL
-                                                        })
-                                                        .truncate()
-                                                        .min_w(px(0.)),
-                                                )
-                                                .on_press_down(
-                                                    move |event: &nsh_core::PressEvent| {
-                                                        if event.clicks >= 2 {
-                                                            ui.terminal_rename
-                                                                .set(Some(rename_id.clone()));
-                                                        }
-                                                    },
-                                                )
-                                                .on_context_menu(
-                                                    move |event: &nsh_core::ContextMenuEvent| {
-                                                        ui.spawn(crate::terminals::tabs::menu(
-                                                            ui,
-                                                            menu_id.clone(),
-                                                            Some(event.page_position),
-                                                        ));
-                                                    },
-                                                )
-                                                .on_press(move |_: &nsh_core::PressEvent| {
-                                                    select_card_tab(ui, &tab_cid, id.clone());
-                                                    ui.card_terminal_focused.set(true);
-                                                }),
-                                        )
+                                        .child(tab_button)
                                         .child(chrome_button(
                                             Icon::Close,
                                             format!("Close terminal {}", e.title()),

@@ -121,6 +121,8 @@ fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() 
             state: "running".into(),
             connection: "connected".into(),
             error: None,
+            agent_status: None,
+            agent_turn: None,
         }),
         created_at: 0,
     });
@@ -179,6 +181,8 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
             state: "running".into(),
             connection: "connected".into(),
             error: None,
+            agent_status: None,
+            agent_turn: None,
         }),
         created_at: 0,
     };
@@ -302,7 +306,13 @@ fn inactive_is_a_live_unattended_conversation_and_closed_entries_leave_inventory
     };
     assert!(entry(&s).listed());
     assert!(entry(&s).inactive());
+    // Immediate state update: recent interaction does not pin a finished idle Agent as active.
     s.attempts[0].lifecycle.last_interaction_at = Some(now());
+    assert!(entry(&s).inactive());
+    assert!(!entry(&s).needs_attention());
+    // Unfinished assignment sitting idle requires user inspection instead of silent inactive state.
+    s.requests[0].state = "running".into();
+    assert!(entry(&s).needs_attention());
     assert!(!entry(&s).inactive());
     s.attempts[0].observed = Some(json!({"state":"finished"}));
     assert!(!entry(&s).listed());
@@ -394,6 +404,8 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             state: "running".into(),
             connection: "connected".into(),
             error: None,
+            agent_status: None,
+            agent_turn: None,
         }),
         created_at: 2,
     });
@@ -413,6 +425,8 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             state: "running".into(),
             connection: "connected".into(),
             error: None,
+            agent_status: None,
+            agent_turn: None,
         }),
         created_at: 3,
     });
@@ -432,6 +446,8 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             state: "finished".into(),
             connection: "connected".into(),
             error: None,
+            agent_status: None,
+            agent_turn: None,
         }),
         created_at: 4,
     });
@@ -500,6 +516,8 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
             state: "running".into(),
             connection: "connected".into(),
             error: None,
+            agent_status: None,
+            agent_turn: None,
         }),
         created_at: 2,
     });
@@ -519,6 +537,8 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
             state: "finished".into(),
             connection: "connected".into(),
             error: None,
+            agent_status: None,
+            agent_turn: None,
         }),
         created_at: 3,
     });
@@ -544,5 +564,99 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
     assert_eq!(
         crate::terminals::default_card_terminal(&s, "c2", None),
         None
+    );
+}
+
+#[test]
+fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surface_attention() {
+    let mut s = fixture();
+    s.terminals = crate::terminals::entries(&s)
+        .into_iter()
+        .map(|e| e.saved)
+        .collect();
+    s.terminals.push(TerminalEntry {
+        id: "manual-shell".into(),
+        conversation_id: None,
+        number: 2,
+        name: None,
+        manual_number: Some(1),
+        origin_card_id: Some("c1".into()),
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("core".into()),
+            terminal: Some("pty-shell".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("idle".into()),
+            agent_turn: Some(3),
+        }),
+        created_at: 2,
+    });
+    s.terminals.push(TerminalEntry {
+        id: "ephemeral-cli".into(),
+        conversation_id: None,
+        number: 3,
+        name: None,
+        manual_number: Some(2),
+        origin_card_id: Some("c1".into()),
+        agent_engine: Some("agy".into()),
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("core".into()),
+            terminal: Some("pty-agy".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("idle".into()),
+            agent_turn: Some(0),
+        }),
+        created_at: 3,
+    });
+
+    let rows = crate::terminals::entries(&s);
+    let shell = rows.iter().find(|e| e.saved.id == "manual-shell").unwrap();
+    assert!(!shell.inactive());
+    assert!(!shell.needs_attention());
+
+    let cli = rows.iter().find(|e| e.saved.id == "ephemeral-cli").unwrap();
+    assert!(!cli.inactive());
+    // Fresh launch at turn 0 does not show false attention.
+    assert!(!cli.needs_attention());
+
+    // After finishing turn 1, ephemeral CLI Agent shows attention icon / reason.
+    s.terminals
+        .last_mut()
+        .unwrap()
+        .runtime
+        .as_mut()
+        .unwrap()
+        .agent_turn = Some(1);
+    let cli = crate::terminals::entries(&s)
+        .into_iter()
+        .find(|e| e.saved.id == "ephemeral-cli")
+        .unwrap();
+    assert!(cli.needs_attention());
+    assert!(
+        cli.attention_reason()
+            .unwrap()
+            .contains("waiting for your input")
+    );
+
+    // Permission block at any turn shows attention icon / reason.
+    let rt = s.terminals.last_mut().unwrap().runtime.as_mut().unwrap();
+    rt.agent_turn = Some(0);
+    rt.agent_status = Some("blocked".into());
+    let cli = crate::terminals::entries(&s)
+        .into_iter()
+        .find(|e| e.saved.id == "ephemeral-cli")
+        .unwrap();
+    assert!(cli.needs_attention());
+    assert_eq!(
+        cli.attention_reason().as_deref(),
+        Some("Agent needs terminal input")
     );
 }

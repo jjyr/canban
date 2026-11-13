@@ -1,4 +1,4 @@
-//! Runtime status, user activity and resumable idle reclamation.
+//! Runtime status, user activity and idle Agent terminal reclamation.
 use super::*;
 
 pub(super) fn idle_candidate(
@@ -50,9 +50,7 @@ pub(super) fn idle_candidate(
     {
         return false;
     }
-    run.provider_session_id.is_some()
-        && !req.profile.resume_command().is_empty()
-        && matches!(req.profile.exit, Some(ExitAction::Input { .. }))
+    true
 }
 
 impl AppServer {
@@ -189,13 +187,15 @@ impl AppServer {
             {
                 continue;
             }
-            let request = snapshot
-                .requests
-                .iter()
-                .find(|r| r.id == run.request_id)
-                .unwrap();
-            let Some(ExitAction::Input { text }) = &request.profile.exit else {
+            let Some(request) = snapshot.requests.iter().find(|r| r.id == run.request_id) else {
                 continue;
+            };
+            let exit_action = request.profile.exit.clone();
+            let close_note = match &exit_action {
+                Some(ExitAction::Input { .. }) => {
+                    "Closing an idle Agent using its normal exit command"
+                }
+                _ => "Closing an idle Agent terminal after idle timeout",
             };
             let execute = self.store.lock().unwrap().write(|db| {
                 let current = db.snapshot()?;
@@ -225,7 +225,7 @@ impl AppServer {
                     &db.get::<Card>(&a.card_id)?,
                     "execution.idle_close_requested",
                     "system",
-                    "Closing a resumable idle Agent using its normal exit command",
+                    close_note,
                     Some(a.request_id.clone()),
                     json!({"attempt":a.number}),
                 )?;
@@ -234,9 +234,11 @@ impl AppServer {
             if !execute {
                 continue;
             }
+            let _ = self.capture_output(run);
             // Herdr guards `idle` at delivery and refuses blocked dialogs without force.
-            // Its public conditional schema has no `done` variant; recheck that state
-            // immediately before the same normal-exit action used after completion.
+            // Profiles with an explicit exit command try graceful input first; profiles using
+            // `ExitAction::Manual` (or `None`, e.g. `agy`, `gemini`, `opencode`) terminate
+            // the verified-idle PTY cleanly via `terminal.kill`.
             let result = (|| -> Result<Value> {
                 let actual = client.get(terminal)?;
                 let state = actual["status"]["state"].as_str().unwrap_or("");
@@ -244,11 +246,15 @@ impl AppServer {
                     actual["state"] == "live" && matches!(state, "idle" | "done"),
                     "Agent is no longer idle"
                 );
-                let mut params = json!({"terminal":terminal,"text":text});
-                if state == "idle" {
-                    params["if"] = json!("idle");
+                if let Some(ExitAction::Input { text }) = &exit_action {
+                    let mut params = json!({"terminal":terminal,"text":text});
+                    if state == "idle" {
+                        params["if"] = json!("idle");
+                    }
+                    client.call("terminal.send", params)
+                } else {
+                    client.call("terminal.kill", json!({"terminal":terminal}))
                 }
-                client.call("terminal.send", params)
             })();
             if let Err(e) = result {
                 self.store.lock().unwrap().write(|db| {

@@ -9,10 +9,9 @@ Status: implemented, 2026-11-09. This is the current contract and supersedes imm
 | traffic lights  [<] [>] list | [Card/profile x] [Terminal 1 x] [+] Card/branch |
 +------+----------------------+----------------------------------------------+
 | rail | Terminals            |                                              |
-|      | [Show inactive]      |             Native Terminal                  |
-|      |                      |                                              |
+|      |                      |             Native Terminal                  |
 |      | v [folder] Project   |                                              |
-|      |   | Card title       |                                              |
+|      |   | Card title   [!] |                                              |
 |      |   | provider/profile |                                              |
 |      |   | Terminal 1       |                                              |
 +------+----------------------+----------------------------------------------+
@@ -20,7 +19,7 @@ Status: implemented, 2026-11-09. This is the current contract and supersedes imm
 
 Project groups use a shared folder vector, muted semibold typography, spacing and indented child guides. Selection belongs to the Terminal row. Local Shell rows omit the AppServer host caption; remote names remain useful compact context. Full directory/Core/machine values stay in tooltips/actions. Manual names remain Terminal 1, Terminal 2, etc.; Agent names retain Card/stage/provider/profile.
 
-The fixed list header has one state button: Show inactive / Hide inactive, with selected styling when enabled. Inactive means a live Agent at a verified idle/done state without actionable attention or recent human interaction. A short 30-second activity grace keeps recent input visible. Selected/open-tab sessions remain reachable while live. Manual Shells stay visible while open. Finished processes and archived Card sessions appear in neither setting; closing or observing exit also removes their tabs. There is no full-page ended-session replacement. Exact Resume remains an explicit Card Agent action.
+All live terminals stay visible in the sidebar until closed or reclaimed; there is no Show/Hide inactive toggle button and no inline Active/Inactive text next to terminal rows or tabs. `Active` vs `Inactive` is strictly an internal lifecycle state for managed Card/Workflow Agents (manual Shells and independent CLI sessions do not participate in automatic idle reclamation). Whenever a terminal needs user inspection (permission/input `blocked`, unfinished/interactive Agent turn sitting `idle`/`done`, runtime `error`, or disconnected), an attention icon (`!`) is rendered on its sidebar row and tab alongside notification chimes. Finished processes and archived Card sessions leave both tree and tabs; saved history and Resume remain on the Card.
 
 ## Completion, interaction and delayed exit
 
@@ -35,16 +34,16 @@ explicit outcome -> Workflow result/progression
                      /        \
               human input    idle timeout
                   |              |
-                Active      normal profile exit
+                Active      profile exit or PTY close
                   |              |
            idle/done again   remove row and tab
                                  |
                       history retained on Card
                                  |
-                         explicit exact Resume
+                         explicit Resume / reopen
 ```
 
-The scheduler idle timeout remains configurable in Settings and agents.json (default 15 minutes; 0 disables it). Completion no longer sends an immediate exit command. Herdr runtime status is still required; a report alone cannot prove the provider is idle. Unfinished automatic assignments, permissions/blocked states, unknown/disconnected runtimes and unresolved Questions stay protected. Completed assignments can be reclaimed while the Card awaits human review. Normal idle reclamation requires an exact resumable session and a configured normal exit action. Providers lacking these capabilities retain manual control.
+The scheduler idle timeout remains configurable in Settings and agents.json (default 15 minutes; 0 disables it). Completion no longer sends an immediate exit command. Herdr runtime status is still required; a report alone cannot prove the provider is idle. Unfinished automatic assignments, permissions/blocked states, unknown/disconnected runtimes and unresolved Questions stay protected and immediately alert the user (`Needs you`). Completed assignments (and long-idle interactive Card sessions) are reclaimed after `idle_minutes` across all Agent profiles: profiles with an input `ExitAction` request normal exit first (falling back to clean PTY termination if still idle after 30s), while profiles with `ExitAction::Manual` terminate the verified-idle PTY directly after capturing output. Manual Terminals (`conversation_id == None`) are never auto-reclaimed.
 
 Opening a viewer does not indefinitely prevent reclamation. AppServer's framed relay observes actual user input/focus and refreshes its activity timestamp; automatic protocol replies, geometry changes and output-consumption acknowledgments do not refresh it. Idle admission uses the later of the runtime idle timestamp and last human interaction. Input while the process remains live postpones exit. A renewed working state stops idle candidacy. Uncertain exit delivery is recorded rather than automatically resent or force-killed.
 

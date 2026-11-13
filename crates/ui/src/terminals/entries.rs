@@ -64,25 +64,68 @@ impl Entry {
         if self.needs_attention() {
             return "Needs you".into();
         }
+        if self.agent.is_none() {
+            return match self.status().as_str() {
+                "starting" | "checking" | "connecting" => "Starting",
+                "closing" => "Closing",
+                "unavailable" | "replaced" => "Disconnected",
+                _ => "Open",
+            }
+            .into();
+        }
         if self.inactive() {
-            return "Inactive".into();
+            return "Idle".into();
         }
         match self.status().as_str() {
             "running" | "working" => "Working",
             "queued" => "Queued",
             "starting" => "Starting",
-            "idle" | "done" => "Active",
+            "idle" | "done" => "Idle",
             _ => "Unknown",
         }
         .into()
     }
+    pub fn attention_reason(&self) -> Option<String> {
+        if self.ended() {
+            return None;
+        }
+        if let Some(row) = &self.agent {
+            if row.actionable() {
+                return Some(
+                    row.reasons
+                        .iter()
+                        .map(|r| r.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                );
+            }
+            return None;
+        }
+        let r = self.saved.runtime.as_ref()?;
+        if r.state == "finished" {
+            return None;
+        }
+        if r.connection != "connected" && !matches!(r.state.as_str(), "starting") {
+            return Some(
+                r.error
+                    .clone()
+                    .unwrap_or_else(|| "Terminal disconnected — inspect session".into()),
+            );
+        }
+        if self.saved.agent_engine.is_some() {
+            match r.agent_status.as_deref() {
+                Some("blocked") => return Some("Agent needs terminal input".into()),
+                Some("error") => return Some("Agent reported an error — inspect terminal".into()),
+                Some("idle" | "done") if r.agent_turn.unwrap_or(0) > 0 => {
+                    return Some("Agent finished its turn and is waiting for your input".into());
+                }
+                _ => {}
+            }
+        }
+        None
+    }
     pub fn needs_attention(&self) -> bool {
-        self.agent.as_ref().is_some_and(|r| r.actionable())
-            || self
-                .saved
-                .runtime
-                .as_ref()
-                .is_some_and(|r| r.state != "finished" && r.connection != "connected")
+        self.attention_reason().is_some()
     }
     pub fn ended(&self) -> bool {
         self.agent.as_ref().map(model::closed).unwrap_or_else(|| {
@@ -92,7 +135,7 @@ impl Entry {
                 .is_some_and(|r| r.state == "finished")
         })
     }
-    /// Inactive is a live, available conversation; exited entries belong to Card history.
+    /// Internal managed-Agent lifecycle state; manual terminals never participate.
     pub fn inactive(&self) -> bool {
         if self.agent.is_none() || self.needs_attention() {
             return false;
@@ -104,13 +147,7 @@ impl Entry {
             .as_ref()
             .and_then(|g| g.request_id.as_ref())
             .is_some_and(|r| Some(r.as_str()) == row.request.as_ref().map(|r| r.id.as_str()));
-        !waiting
-            && row.attempt.as_ref().is_none_or(|a| {
-                a.lifecycle
-                    .last_interaction_at
-                    .is_none_or(|t| canban_types::now().saturating_sub(t) > 30_000)
-            })
-            && matches!(self.status().as_str(), "idle" | "done")
+        !waiting && matches!(self.status().as_str(), "idle" | "done")
     }
     pub fn listed(&self) -> bool {
         !self.ended() && self.card.as_ref().is_none_or(|c| c.active())
@@ -180,14 +217,14 @@ impl Entry {
                 lines.push(context);
             }
             lines.push(format!(
-                "{} · {} · @{} · {}",
+                "{} · {} · @{}",
                 self.stage.as_deref().unwrap_or("Unknown stage"),
                 self.provider().map(|(_, p)| p).unwrap_or_default(),
                 self.profile().unwrap_or("unknown"),
-                self.display_status()
             ));
-        } else {
-            lines.push(self.display_status());
+        }
+        if let Some(reason) = self.attention_reason() {
+            lines.push(reason);
         }
         if let Some(cwd) = self.cwd() {
             lines.push(format!("Directory: {cwd}"));

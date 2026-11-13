@@ -1052,15 +1052,23 @@ pub fn Gallery() -> impl IntoElement {
                     ui.terminal_sidebar.set(true);
                     ui.open_terminal(canban_types::Conversation::key("overview-card-2","codex"));
                 }))
-                .child(action("Inactive Terminals",Variant::Secondary,move |_|{
+                .child(action("Idle & Attention Terminals",Variant::Secondary,move |_|{
                     let mut snapshot=fixtures::terminal_workspace();
                     for card in &mut snapshot.cards {card.human_gate=None;card.attention=None;}
-                    for r in &mut snapshot.requests {r.state="completed".into();}
-                    for a in &mut snapshot.attempts {
-                        if !a.finished() {a.observed=Some(json!({"state":"live","status":{"state":"done"}}));a.connection_state="connected".into();a.lifecycle.observed_at=Some(canban_types::now());a.lifecycle.last_interaction_at=None;}
+                    for (idx, r) in snapshot.requests.iter_mut().enumerate() {
+                        r.state = if idx == 0 { "running".into() } else { "completed".into() };
+                    }
+                    for (idx, a) in snapshot.attempts.iter_mut().enumerate() {
+                        if !a.finished() {
+                            let status = if idx == 0 { "idle" } else { "done" };
+                            a.observed=Some(json!({"state":"live","turn":1,"status":{"state":status}}));
+                            a.connection_state="connected".into();
+                            a.lifecycle.observed_at=Some(canban_types::now());
+                            a.lifecycle.last_interaction_at=None;
+                        }
                     }
                     ui.snapshot.set(snapshot);ui.terminal_tabs.set(Vec::new());ui.terminal_selection.set(String::new());
-                    ui.terminal_inactive.set(false);ui.navigate("terminals");scene.set("workspace".into());
+                    ui.navigate("terminals");scene.set("workspace".into());
                 }))
                 .child(action("Quick Open", Variant::Secondary, move |_| {
                     scene.set("workspace".into());

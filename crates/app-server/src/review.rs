@@ -1137,6 +1137,8 @@ impl AppServer {
                     state: "starting".into(),
                     connection: "checking".into(),
                     error: None,
+                    agent_status: None,
+                    agent_turn: None,
                 }),
             };
             db.save(&item)?;

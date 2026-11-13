@@ -144,6 +144,20 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                     source: "runtime".into(),
                     message: "Agent reported an error; inspect terminal".into(),
                 });
+            } else if !a.finished()
+                && a.close_state.is_empty()
+                && matches!(runtime, "idle" | "done")
+                && matches!(req.state.as_str(), "running" | "working")
+            {
+                let msg = if req.trigger.is_automatic() {
+                    "Agent stopped without reporting an outcome — inspect terminal".into()
+                } else {
+                    "Agent finished its turn and is waiting for your input".into()
+                };
+                reasons.push(OverviewReason {
+                    source: "runtime".into(),
+                    message: msg,
+                });
             }
         } else if matches!(req.state.as_str(), "unknown" | "needs_report" | "blocked") {
             reasons.push(OverviewReason {

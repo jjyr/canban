@@ -121,6 +121,8 @@ impl AppServer {
                 state: "starting".into(),
                 connection: "connecting".into(),
                 error: None,
+                agent_status: None,
+                agent_turn: None,
             });
             self.store.lock().unwrap().write(|db| {
                 db.save(&session)?;

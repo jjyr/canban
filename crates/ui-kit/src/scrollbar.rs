@@ -172,8 +172,10 @@ impl Ctl {
             Axis::Vertical => to.y = px(offset),
         }
         NodeRef(node).scroll_to(to, false);
-        self.metrics
-            .set(Some(ScrollEvent { offset: to, ..current }));
+        self.metrics.set(Some(ScrollEvent {
+            offset: to,
+            ..current
+        }));
     }
 
     fn touch(self) {
@@ -202,8 +204,7 @@ impl Ctl {
     }
 
     fn shown(self) -> bool {
-        self.scrolls()
-            && (self.drag.get().is_some() || self.over_track.get() || self.active.get())
+        self.scrolls() && (self.drag.get().is_some() || self.over_track.get() || self.active.get())
     }
 
     fn fade_to(self, visible: bool, first: bool) {
@@ -328,9 +329,8 @@ pub fn ScrollbarRail(props: ScrollbarRailProps, _cx: Scope<NoEvent>) -> impl Int
             PointerEvents::None
         }
     };
-    let emphasized = computed(move || {
-        ctl.drag.get().is_some() || ctl.over_thumb.get() || ctl.over_track.get()
-    });
+    let emphasized =
+        computed(move || ctl.drag.get().is_some() || ctl.over_thumb.get() || ctl.over_track.get());
     let thumb_cross = move || {
         Length::from(px(if emphasized.get() {
             THUMB_ACTIVE

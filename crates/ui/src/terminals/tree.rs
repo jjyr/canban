@@ -11,13 +11,7 @@ fn toggle(ui: Ui, key: String) {
 fn row(ui: Ui, e: Entry) -> impl IntoElement {
     let id = e.saved.id.clone();
     let selected = ui.terminal_selection.get() == id;
-    let color = if e.needs_attention() {
-        ATTENTION
-    } else if e.ended() || e.inactive() {
-        MUTED
-    } else {
-        SUCCESS
-    };
+    let attention = e.attention_reason();
     let machine = if e.machine() == "local" {
         "Local".into()
     } else {
@@ -32,7 +26,7 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
         .w_full()
         .min_w(px(0.))
         .flex_row()
-        .items_start()
+        .items_center()
         .gap_2()
         .child(
             if e.agent.is_none()
@@ -56,11 +50,13 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
             .w(px(super::labels::stage_width(&e)))
             .flex_shrink_0();
         first = first.child(if selected { stage } else { stage.truncate() });
-    } else {
+    }
+    if let Some(reason) = &attention {
         first = first.child(
-            muted(super::labels::sidebar_status(&e))
-                .text_color(color)
-                .flex_shrink_0(),
+            view()
+                .flex_shrink_0()
+                .tooltip(hint_tooltip(reason.clone()).placement(Placement::Right))
+                .child(icon_tinted(Icon::Info, ATTENTION).w(px(14.)).h(px(14.))),
         );
     }
     content = content.child(first);
@@ -82,8 +78,7 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
                 .flex_row()
                 .items_start()
                 .gap_2()
-                .child(super::labels::sidebar_provider(&e, selected).flex_1())
-                .child(muted(e.display_status()).text_color(color).flex_shrink_0()),
+                .child(super::labels::sidebar_provider(&e, selected).flex_1()),
         );
     }
     let machine = muted(machine).w_full().min_w(px(0.));
@@ -179,27 +174,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                 .justify_between()
                 .px_2()
                 .pb_2()
-                .child(label("Terminals").font_weight(FontWeight::SEMIBOLD))
-                .child(
-                    action(
-                        move || {
-                            if ui.terminal_inactive.get() {
-                                "Hide inactive"
-                            } else {
-                                "Show inactive"
-                            }
-                        },
-                        Variant::Quiet,
-                        move |_| ui.terminal_inactive.update(|v| *v = !*v),
-                    )
-                    .bg(move || {
-                        if ui.terminal_inactive.get() {
-                            SELECTED
-                        } else {
-                            CLEAR
-                        }
-                    }),
-                ),
+                .child(label("Terminals").font_weight(FontWeight::SEMIBOLD)),
         )
         .child(
             scroll()
@@ -215,7 +190,6 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                         .filter(Entry::listed)
                         .collect();
                     let folds = ui.terminal_folds.get();
-                    let show_inactive = ui.terminal_inactive.get();
                     let mut body = view().gap_2();
                     let mut groups: Vec<_> = snapshot
                         .projects
@@ -279,15 +253,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                 .collect();
                             let project_rows: Vec<_> = rows
                                 .iter()
-                                .filter(|e| {
-                                    e.project_id == project
-                                        && (show_inactive
-                                            || !e.inactive()
-                                            || e.saved.id == ui.terminal_selection.get_untracked()
-                                            || ui
-                                                .terminal_tabs
-                                                .with_untracked(|tabs| tabs.contains(&e.saved.id)))
-                                })
+                                .filter(|e| e.project_id == project)
                                 .cloned()
                                 .collect();
 

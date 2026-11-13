@@ -39,13 +39,6 @@ pub fn sidebar_provider(e: &Entry, expanded: bool) -> View {
         .child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0())
         .child(if expanded { name } else { name.truncate() })
 }
-pub fn sidebar_status(e: &Entry) -> String {
-    if e.agent.is_none() && matches!(e.status().as_str(), "running" | "live") {
-        "Active".into()
-    } else {
-        e.display_status()
-    }
-}
 pub fn sidebar_hint(e: &Entry, machine: &str) -> String {
     let mut lines = vec![e.title(), format!("Project: {}", e.project_name)];
     if let Some(profile) = e.profile() {
@@ -60,7 +53,9 @@ pub fn sidebar_hint(e: &Entry, machine: &str) -> String {
             lines.push(format!("#{} {}", c.number, c.title));
         }
     }
-    lines.push(sidebar_status(e));
+    if let Some(reason) = e.attention_reason() {
+        lines.push(reason);
+    }
     lines.push(format!("Machine: {machine}"));
     lines.join("\n")
 }
