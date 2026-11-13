@@ -49,6 +49,11 @@ pub fn watch(ui: Ui) {
         }
         let ids = listed.get();
         let active_card_tab = ui.card_tab.get();
+        if let Some(confirm_id) = ui.terminal_close_confirm.get_untracked()
+            && !ids.contains(&confirm_id)
+        {
+            ui.terminal_close_confirm.set(None);
+        }
         if !active_card_tab.is_empty() && !ids.contains(&active_card_tab) {
             let cid = ui.card.get_untracked();
             let recent = ui.terminal_recent.with(|m| m.get(&cid).cloned());
@@ -540,6 +545,25 @@ pub fn close_entry(ui: Ui, id: &str) {
     if id.is_empty() {
         return;
     }
+    let needs_confirm = ui.snapshot.with_untracked(|s| {
+        entries(s)
+            .into_iter()
+            .find(|e| e.saved.id == id)
+            .and_then(|e| e.close_confirm_reason(s))
+            .is_some()
+    });
+    if needs_confirm {
+        ui.terminal_close_confirm.set(Some(id.to_owned()));
+        return;
+    }
+    close_entry_confirmed(ui, id);
+}
+
+pub fn close_entry_confirmed(ui: Ui, id: &str) {
+    if id.is_empty() {
+        return;
+    }
+    ui.terminal_close_confirm.set(None);
     if crate::APP.get().is_none() {
         // A static Gallery has no runtime; simulate the same closed outcome.
         let entry = entries(&ui.snapshot.get_untracked())
@@ -646,6 +670,7 @@ pub fn bindings(ui: Ui) {
         if (!on_terminals && !on_card_terminal)
             || ui.quick_open.get()
             || ui.terminal_rename.get().is_some()
+            || ui.terminal_close_confirm.get().is_some()
             || ui.worktree_modal.get().is_some()
             || ui.worktree_promote.get().is_some()
             || ui.worktree_remove_confirm.get().is_some()

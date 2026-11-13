@@ -956,6 +956,22 @@ pub fn Gallery() -> impl IntoElement {
         ui.open_terminal("gallery-manual".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminal-close-confirm") {
+        canban_ui::frame::configure_window_chrome();
+        let mut s = fixtures::terminal_workspace();
+        for a in &mut s.attempts {
+            if a.card_id == "overview-card-2" {
+                a.observed = Some(json!({"state":"live","status":{"state":"working"}}));
+                a.connection_state = "connected".into();
+                a.lifecycle.observed_at = Some(canban_types::now());
+            }
+        }
+        ui.snapshot.set(s);
+        let id = canban_types::Conversation::key("overview-card-2", "codex");
+        ui.open_terminal(id.clone());
+        canban_ui::terminals::close_tab(ui, &id);
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("card-terminals") {
         canban_ui::frame::configure_window_chrome();
         ui.snapshot.set(fixtures::workspace_with_card_terminals());
@@ -1171,6 +1187,23 @@ pub fn Gallery() -> impl IntoElement {
                     ui.navigate("terminals");
                     ui.terminal_sidebar.set(true);
                     ui.open_terminal(canban_types::Conversation::key("overview-card-2","codex"));
+                }))
+                .child(action("Close Running Agent?", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    let mut s = fixtures::terminal_workspace();
+                    for a in &mut s.attempts {
+                        if a.card_id == "overview-card-2" {
+                            a.observed = Some(json!({"state":"live","status":{"state":"working"}}));
+                            a.connection_state = "connected".into();
+                            a.lifecycle.observed_at = Some(canban_types::now());
+                        }
+                    }
+                    ui.snapshot.set(s);
+                    ui.navigate("terminals");
+                    ui.terminal_sidebar.set(true);
+                    let id = canban_types::Conversation::key("overview-card-2", "codex");
+                    ui.open_terminal(id.clone());
+                    canban_ui::terminals::close_tab(ui, &id);
                 }))
                 .child(action("Idle & Attention Terminals",Variant::Secondary,move |_|{
                     let mut snapshot=fixtures::terminal_workspace();

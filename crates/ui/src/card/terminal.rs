@@ -368,6 +368,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                             && ui.utility_popup.get().is_empty()
                             && !ui.native_modal.get()
                             && ui.terminal_rename.get().is_none()
+                            && ui.terminal_close_confirm.get().is_none()
                             && ui.worktree_modal.get().is_none()
                             && ui.worktree_promote.get().is_none()
                             && ui.worktree_remove_confirm.get().is_none()

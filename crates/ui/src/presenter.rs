@@ -53,6 +53,7 @@ pub struct Ui {
     pub terminal_details: Signal<bool>,
     pub terminal_focus: Signal<u64>,
     pub terminal_rename: Signal<Option<String>>,
+    pub terminal_close_confirm: Signal<Option<String>>,
     pub operation_error: Signal<String>,
     pub backend_notice: Signal<String>,
     pub history: Signal<crate::navigation::History>,
@@ -223,6 +224,7 @@ impl Ui {
             || self.native_modal.get_untracked()
             || self.quick_merge.get_untracked().is_some()
             || self.terminal_rename.get_untracked().is_some()
+            || self.terminal_close_confirm.get_untracked().is_some()
             || self.worktree_modal.get_untracked().is_some()
             || self.worktree_promote.get_untracked().is_some()
             || self.worktree_remove_confirm.get_untracked().is_some()
@@ -285,6 +287,7 @@ impl Ui {
             terminal_details: signal(false),
             terminal_focus: signal(0),
             terminal_rename: signal(None),
+            terminal_close_confirm: signal(None),
             operation_error: signal(String::new()),
             backend_notice: signal(String::new()),
             history: signal(crate::navigation::History::default()),

@@ -127,6 +127,91 @@ impl Entry {
     pub fn needs_attention(&self) -> bool {
         self.attention_reason().is_some()
     }
+    /// Reason why closing this Terminal requires confirmation because a live Agent
+    /// is running inside it and its status is not `done` (or `idle`).
+    pub fn close_confirm_reason(&self, s: &Snapshot) -> Option<String> {
+        if self.ended() {
+            return None;
+        }
+        if let Some(row) = &self.agent {
+            let attempt = row.attempt.as_ref()?;
+            if attempt.finished() || attempt.terminal.is_none() || !attempt.close_state.is_empty() {
+                return None;
+            }
+            let status = if attempt.connection_state == "connected" {
+                attempt
+                    .observed
+                    .as_ref()
+                    .and_then(|v| v["status"]["state"].as_str())
+                    .unwrap_or("unknown")
+            } else {
+                attempt.connection_state.as_str()
+            };
+            if attempt.connection_state == "connected" && matches!(status, "done" | "idle") {
+                return None;
+            }
+            let who = self
+                .profile()
+                .map(|p| format!("@{p}"))
+                .unwrap_or_else(|| "Agent".into());
+            let detail = match status {
+                "working" | "running" => format!("{who} is currently running a turn."),
+                "blocked" => format!("{who} is waiting for your input in this terminal."),
+                "error" => format!("{who} reported an error and has not finished."),
+                _ => format!("{who} is active (status `{status}`), not done."),
+            };
+            return Some(format!(
+                "{detail} Closing this terminal terminates its live process."
+            ));
+        }
+        if let Some(cfg) = s
+            .configuration_sessions
+            .iter()
+            .find(|c| c.id == self.saved.id)
+        {
+            let rt = self.saved.runtime.as_ref()?;
+            if rt.state == "finished" || rt.state == "closing" || rt.terminal.is_none() {
+                return None;
+            }
+            let status = rt.agent_status.as_deref().unwrap_or(cfg.state.as_str());
+            if rt.connection == "connected" && matches!(status, "done" | "idle") {
+                return None;
+            }
+            return Some(format!(
+                "Configuration Agent @{} is still active (not done). Closing this terminal terminates its live process.",
+                cfg.profile_id
+            ));
+        }
+        let r = self.saved.runtime.as_ref()?;
+        if r.state == "finished" || r.state == "closing" || r.terminal.is_none() {
+            return None;
+        }
+        let has_agent = self.saved.agent_engine.is_some() || r.agent_status.is_some();
+        if !has_agent {
+            return None;
+        }
+        let status = if r.connection != "connected" {
+            r.connection.as_str()
+        } else {
+            r.agent_status.as_deref().unwrap_or("running")
+        };
+        if r.connection == "connected" && matches!(status, "done" | "idle") {
+            return None;
+        }
+        let who = self
+            .provider()
+            .map(|(_, p)| p)
+            .unwrap_or_else(|| "Agent".into());
+        let detail = match status {
+            "working" | "running" => format!("{who} is currently running in this terminal."),
+            "blocked" => format!("{who} is waiting for your input in this terminal."),
+            "error" => format!("{who} reported an error and is not done."),
+            _ => format!("{who} is active in this terminal (status `{status}`), not done."),
+        };
+        Some(format!(
+            "{detail} Closing this terminal terminates its live process."
+        ))
+    }
     pub fn ended(&self) -> bool {
         self.agent.as_ref().map(model::closed).unwrap_or_else(|| {
             self.saved

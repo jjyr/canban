@@ -736,3 +736,261 @@ fn card_agent_actions_open_card_with_expanded_agent_terminal_instead_of_terminal
         assert!(ui.card_terminal_open.get_untracked());
     });
 }
+
+#[test]
+fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_shells_close_immediately()
+ {
+    let runtime = nsh_core::element::Runtime::default();
+    let _entered = runtime.enter();
+    let (_owner, ()) = nsh_core::element::create_root(|| {
+        let ui = crate::presenter::Ui::new();
+        let mut s = fixture();
+        s.terminals = crate::terminals::entries(&s)
+            .into_iter()
+            .map(|e| e.saved)
+            .collect();
+        let conv_c1 = Conversation::key("c1", "codex");
+        let conv_c2 = Conversation::key("c2", "codex");
+
+        // Add a plain shell, an ephemeral CLI Agent, and a Workflow Configuration Agent.
+        s.terminals.push(TerminalEntry {
+            id: "plain-shell".into(),
+            conversation_id: None,
+            number: 10,
+            name: None,
+            manual_number: Some(1),
+            origin_card_id: Some("c1".into()),
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some("pty-plain".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+            }),
+            created_at: 10,
+        });
+        s.terminals.push(TerminalEntry {
+            id: "ephemeral-agent".into(),
+            conversation_id: None,
+            number: 11,
+            name: None,
+            manual_number: Some(2),
+            origin_card_id: Some("c1".into()),
+            agent_engine: Some("agy".into()),
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some("pty-ephemeral".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+            }),
+            created_at: 11,
+        });
+        s.configuration_sessions.push(ConfigurationSession {
+            id: "cfg-session".into(),
+            project_id: "p1".into(),
+            profile_id: "developer".into(),
+            provider_session_id: None,
+            generation: 1,
+            state: "running".into(),
+            prompt: String::new(),
+            error: None,
+        });
+        s.terminals.push(TerminalEntry {
+            id: "cfg-session".into(),
+            conversation_id: None,
+            number: 12,
+            name: Some("Workflows · developer".into()),
+            manual_number: None,
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some("pty-cfg".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: Some("working".into()),
+                agent_turn: Some(1),
+            }),
+            created_at: 12,
+        });
+
+        ui.snapshot.set(s);
+        ui.terminal_tabs.set(vec![
+            conv_c1.clone(),
+            conv_c2.clone(),
+            "plain-shell".into(),
+            "ephemeral-agent".into(),
+            "cfg-session".into(),
+        ]);
+        ui.terminal_selection.set(conv_c1.clone());
+
+        // 1. Plain shell without an Agent closes immediately with no confirmation dialog.
+        crate::terminals::close_tab(ui, "plain-shell");
+        assert!(ui.terminal_close_confirm.get_untracked().is_none());
+        assert!(
+            !ui.terminal_tabs
+                .get_untracked()
+                .iter()
+                .any(|t| t == "plain-shell")
+        );
+
+        // 2. Managed Card Agent in `"working"`, `"blocked"`, or `"error"` prompts for confirmation.
+        for non_done in ["working", "blocked", "error"] {
+            ui.snapshot.update(|s| {
+                s.attempts[0].connection_state = "connected".into();
+                s.attempts[0].observed = Some(json!({"state":"live","status":{"state":non_done}}));
+            });
+            crate::terminals::close_tab(ui, &conv_c1);
+            assert_eq!(
+                ui.terminal_close_confirm.get_untracked().as_deref(),
+                Some(conv_c1.as_str()),
+                "expected confirmation for managed agent status `{non_done}`"
+            );
+            assert!(ui.has_blocking_overlay());
+            assert!(
+                ui.terminal_tabs
+                    .get_untracked()
+                    .iter()
+                    .any(|t| t == &conv_c1)
+            );
+            ui.terminal_close_confirm.set(None);
+        }
+
+        // Confirming `close_entry_confirmed` dismisses the modal and closes the running Agent tab.
+        crate::terminals::close_tab(ui, &conv_c1);
+        assert_eq!(
+            ui.terminal_close_confirm.get_untracked().as_deref(),
+            Some(conv_c1.as_str())
+        );
+        crate::terminals::close_entry_confirmed(ui, &conv_c1);
+        assert!(ui.terminal_close_confirm.get_untracked().is_none());
+        assert!(
+            !ui.terminal_tabs
+                .get_untracked()
+                .iter()
+                .any(|t| t == &conv_c1)
+        );
+
+        // 3. Managed Card Agent in `"done"` or `"idle"` (even with older `observed_at`) closes immediately!
+        for finished_turn in ["done", "idle"] {
+            ui.snapshot.update(|s| {
+                s.attempts[1].connection_state = "connected".into();
+                s.attempts[1].lifecycle.observed_at = Some(0);
+                s.attempts[1].observed =
+                    Some(json!({"state":"live","status":{"state":finished_turn}}));
+            });
+            let entry = crate::terminals::entries(&ui.snapshot.get_untracked())
+                .into_iter()
+                .find(|e| e.saved.id == conv_c2)
+                .unwrap();
+            assert_eq!(
+                entry.close_confirm_reason(&ui.snapshot.get_untracked()),
+                None,
+                "status `{finished_turn}` must not require close confirmation"
+            );
+        }
+        crate::terminals::close_tab(ui, &conv_c2);
+        assert!(ui.terminal_close_confirm.get_untracked().is_none());
+        assert!(
+            !ui.terminal_tabs
+                .get_untracked()
+                .iter()
+                .any(|t| t == &conv_c2)
+        );
+
+        // 4. Ephemeral CLI Agent (`agent_engine = Some("agy")`) requires confirmation before `"done"`/`"idle"`,
+        //    and closes immediately once it reports `"done"`.
+        crate::terminals::close_entry(ui, "ephemeral-agent");
+        assert_eq!(
+            ui.terminal_close_confirm.get_untracked().as_deref(),
+            Some("ephemeral-agent")
+        );
+        ui.terminal_close_confirm.set(None);
+
+        ui.snapshot.update(|s| {
+            let t = s
+                .terminals
+                .iter_mut()
+                .find(|t| t.id == "ephemeral-agent")
+                .unwrap();
+            t.runtime.as_mut().unwrap().agent_status = Some("done".into());
+        });
+        crate::terminals::close_tab(ui, "ephemeral-agent");
+        assert!(ui.terminal_close_confirm.get_untracked().is_none());
+        assert!(
+            !ui.terminal_tabs
+                .get_untracked()
+                .iter()
+                .any(|t| t == "ephemeral-agent")
+        );
+
+        // 5. Manual Agent launched inside a plain shell (`agent_engine = None`, `agent_status = Some("working")`)
+        //    also prompts before terminating, while `"done"` closes immediately.
+        ui.snapshot.update(|s| {
+            s.terminals.push(TerminalEntry {
+                id: "shell-with-manual-agent".into(),
+                conversation_id: None,
+                number: 13,
+                name: None,
+                manual_number: Some(3),
+                origin_card_id: None,
+                agent_engine: None,
+                runtime: Some(TerminalRuntime {
+                    machine: "local".into(),
+                    owner_core_id: None,
+                    core_id: Some("core".into()),
+                    terminal: Some("pty-manual-agent".into()),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: Some("working".into()),
+                    agent_turn: Some(2),
+                }),
+                created_at: 13,
+            });
+        });
+        crate::terminals::close_entry(ui, "shell-with-manual-agent");
+        assert_eq!(
+            ui.terminal_close_confirm.get_untracked().as_deref(),
+            Some("shell-with-manual-agent")
+        );
+        ui.terminal_close_confirm.set(None);
+
+        // 6. Project Workflow Configuration Agent prompts when working and closes immediately when `"done"`.
+        crate::terminals::close_tab(ui, "cfg-session");
+        assert_eq!(
+            ui.terminal_close_confirm.get_untracked().as_deref(),
+            Some("cfg-session")
+        );
+        ui.terminal_close_confirm.set(None);
+        ui.snapshot.update(|s| {
+            let t = s
+                .terminals
+                .iter_mut()
+                .find(|t| t.id == "cfg-session")
+                .unwrap();
+            t.runtime.as_mut().unwrap().agent_status = Some("done".into());
+        });
+        crate::terminals::close_tab(ui, "cfg-session");
+        assert!(ui.terminal_close_confirm.get_untracked().is_none());
+        assert!(
+            !ui.terminal_tabs
+                .get_untracked()
+                .iter()
+                .any(|t| t == "cfg-session")
+        );
+    });
+}

@@ -592,3 +592,103 @@ pub fn rename_dialog(ui: Ui) -> impl IntoElement {
         },
     )
 }
+
+pub fn close_confirm_dialog(ui: Ui) -> impl IntoElement {
+    when(
+        move || ui.terminal_close_confirm.get().is_some(),
+        move || {
+            let id = ui
+                .terminal_close_confirm
+                .get_untracked()
+                .unwrap_or_default();
+            let (title, subtitle, reason) = ui.snapshot.with_untracked(|s| {
+                let entry = entries(s).into_iter().find(|e| e.saved.id == id);
+                let title = entry
+                    .as_ref()
+                    .map(|e| format!("Close {}?", e.title()))
+                    .unwrap_or_else(|| "Close terminal?".into());
+                let subtitle = entry.as_ref().and_then(|e| {
+                    if e.agent.is_some() {
+                        Some(format!(
+                            "{} · {} · @{}",
+                            e.project_name,
+                            e.stage.as_deref().unwrap_or("Stage"),
+                            e.profile().unwrap_or("agent")
+                        ))
+                    } else if let Some(card) = &e.card {
+                        Some(format!("{} · #{} {}", e.project_name, card.number, card.title))
+                    } else if e.project_id.is_some() {
+                        Some(e.project_name.clone())
+                    } else {
+                        None
+                    }
+                });
+                let reason = entry
+                    .and_then(|e| e.close_confirm_reason(s))
+                    .unwrap_or_else(|| {
+                        "An Agent is still running in this terminal and is not done. Closing this terminal terminates its live process.".into()
+                    });
+                (title, subtitle, reason)
+            });
+            let dismiss = move || {
+                ui.terminal_close_confirm.set(None);
+                ui.terminal_focus.update(|n| *n += 1);
+            };
+            let confirm_id = id.clone();
+            let mut body = panel()
+                .w(px(420.))
+                .max_w(Percentage(0.95))
+                .border_1()
+                .border_color(BORDER)
+                .gap_3()
+                .child(
+                    view()
+                        .flex_row()
+                        .justify_between()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            label(title)
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .flex_1()
+                                .min_w(px(0.))
+                                .truncate(),
+                        )
+                        .child(chrome_button(
+                            Icon::Close,
+                            "Cancel terminal close",
+                            move |_| dismiss(),
+                        )),
+                );
+            if let Some(sub) = subtitle {
+                body = body.child(muted(sub).w_full().min_w(px(0.)).truncate());
+            }
+            body = body.child(notice(reason, Tone::Attention)).child(
+                view()
+                    .flex_row()
+                    .justify_end()
+                    .gap_2()
+                    .child(action("Cancel", Variant::Quiet, move |_| dismiss()))
+                    .child(
+                        action("Close terminal", Variant::Danger, move |_| {
+                            close_entry_confirmed(ui, &confirm_id)
+                        })
+                        .disabled(move || ui.is_method_pending("terminal.close")),
+                    ),
+            );
+            nsh_base::dialog()
+                .animation(canban_ui_kit::motion::modal)
+                .close_on_escape(true)
+                .close_on_backdrop_press(true)
+                .on_cancel(dismiss)
+                .child(
+                    view()
+                        .flex_1()
+                        .items_center()
+                        .justify_center()
+                        .bg(rgba(0x00000055))
+                        .child(body),
+                )
+        },
+    )
+}
