@@ -467,7 +467,10 @@ pub fn reported(
         return Ok(());
     }
     let key = run.step.clone().context("Missing Agent step")?;
-    if matches!(run.definition.steps.get(&key), Some(WorkflowStep::Deliver { .. })) {
+    if matches!(
+        run.definition.steps.get(&key),
+        Some(WorkflowStep::Deliver { .. })
+    ) {
         run.outputs.insert(
             key.clone(),
             json!({"report_id":report.id,"path":report.path,"message":report.message,"request_id":request.id,"attempt":report.attempt,"state":"conflict_resolved"}),

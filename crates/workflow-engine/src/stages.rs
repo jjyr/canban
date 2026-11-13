@@ -45,7 +45,12 @@ fn successors(doc: &Document, idx: usize) -> Vec<String> {
     if step.uses == "condition" {
         ["then", "otherwise"]
             .iter()
-            .filter_map(|k| step.with.get(*k).and_then(|v| v.as_str()).map(str::to_owned))
+            .filter_map(|k| {
+                step.with
+                    .get(*k)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            })
             .collect()
     } else {
         doc.raw_next(idx)
@@ -141,7 +146,9 @@ pub fn normalize(doc: &mut Document, fallback_columns: &[WorkflowColumn]) {
                 .and_then(|s| doc.next_column(s))
                 .is_some_and(|n| n == target)
         {
-            doc.steps[i].with.insert("column".into(), json!(NEXT_COLUMN));
+            doc.steps[i]
+                .with
+                .insert("column".into(), json!(NEXT_COLUMN));
         }
         let resolved = doc.move_target(&doc.steps[i], stage.as_deref());
         if let Some(col) = resolved {
@@ -430,9 +437,9 @@ pub fn set_exit(doc: &mut Document, column: &str, exit: Exit) -> Result<()> {
             let s = &doc.steps[i];
             stage_of.get(&s.id).map(String::as_str) == Some(column)
                 && !matches!(s.uses.as_str(), "condition" | "complete" | "card.move")
-                && s.next.as_deref().is_none_or(|n| {
-                    index(doc, n).is_some_and(|j| doc.steps[j].uses == "complete")
-                })
+                && s.next
+                    .as_deref()
+                    .is_none_or(|n| index(doc, n).is_some_and(|j| doc.steps[j].uses == "complete"))
         })
         .collect();
     let at = tails.last().map_or(doc.steps.len(), |t| t + 1);
@@ -515,13 +522,17 @@ pub fn remove_column(doc: &mut Document, column: &str) -> Result<()> {
     for id in fixed {
         remove_step(doc, &id)?;
     }
-    doc.on.retain(|_, r| r.selector.column.as_deref() != Some(column));
+    doc.on
+        .retain(|_, r| r.selector.column.as_deref() != Some(column));
     doc.columns.retain(|c| c.id != column);
     // A relative exit from the new last column has nowhere to go.
     let last = doc.columns.last().map(|c| c.id.clone());
     if let Some(last) = last
         && let Some(m) = view(doc, &last)?.exit_step
-        && doc.steps[index(doc, &m).unwrap()].with.get("column").and_then(|v| v.as_str())
+        && doc.steps[index(doc, &m).unwrap()]
+            .with
+            .get("column")
+            .and_then(|v| v.as_str())
             == Some(NEXT_COLUMN)
     {
         remove_step(doc, &m)?;
@@ -555,7 +566,10 @@ pub fn move_column(doc: &mut Document, column: &str, to: usize) -> Result<()> {
     // Relative exits from the new last column would point nowhere.
     if let Some(last) = doc.columns.last().map(|c| c.id.clone())
         && let Some(m) = view(doc, &last)?.exit_step
-        && doc.steps[index(doc, &m).unwrap()].with.get("column").and_then(|v| v.as_str())
+        && doc.steps[index(doc, &m).unwrap()]
+            .with
+            .get("column")
+            .and_then(|v| v.as_str())
             == Some(NEXT_COLUMN)
     {
         remove_step(doc, &m)?;
@@ -583,7 +597,10 @@ pub fn template(kind: &str) -> Option<Step> {
             "approval",
             "Human approval",
             "approval",
-            vec![("title", json!("Human approval is required before continuing"))],
+            vec![(
+                "title",
+                json!("Human approval is required before continuing"),
+            )],
         ),
         "deliver" => ("deliver", "Queue merge", "deliver", vec![]),
         "wait_agent" => ("admit:agent", "Wait for free Agent", "admit", vec![]),
@@ -689,9 +706,13 @@ mod tests {
         ));
 
         // Review agent after Implement, then drag it into Review before the condition.
-        let review =
-            insert_step(&mut d, "develop", Some("agent:develop"), template("review").unwrap())
-                .unwrap();
+        let review = insert_step(
+            &mut d,
+            "develop",
+            Some("agent:develop"),
+            template("review").unwrap(),
+        )
+        .unwrap();
         assert_eq!(stages(&d)[1].steps, ["agent:develop", review.as_str()]);
         compiles(&d);
         move_step(&mut d, &review, "review", None).unwrap();
@@ -738,9 +759,18 @@ mod tests {
         // Review's approval and deliver rework to Implement; move Implement into Review.
         move_step(&mut d, "agent:develop", "review", Some("approval:review")).unwrap();
         let step = |id: &str| d.steps.iter().find(|s| s.id == id).unwrap().clone();
-        assert_eq!(step("approval:review").on_changes_requested.as_deref(), Some("agent:develop"));
-        assert_eq!(step("deliver:review").on_changes_requested.as_deref(), Some("agent:develop"));
-        assert_eq!(step("approval:review").next.as_deref(), Some("agent:develop"));
+        assert_eq!(
+            step("approval:review").on_changes_requested.as_deref(),
+            Some("agent:develop")
+        );
+        assert_eq!(
+            step("deliver:review").on_changes_requested.as_deref(),
+            Some("agent:develop")
+        );
+        assert_eq!(
+            step("approval:review").next.as_deref(),
+            Some("agent:develop")
+        );
         assert!(stages(&d)[1].steps.is_empty());
         compiles(&d);
         // Moving within the same Stage to the front.
@@ -758,12 +788,16 @@ mod tests {
         compiles(&d);
         // Relative exit now targets QA (it follows Develop).
         let flow = d.compile().unwrap();
-        assert!(matches!(&flow.steps["move:develop"], WorkflowStep::Move { column, .. } if column == "qa"));
+        assert!(
+            matches!(&flow.steps["move:develop"], WorkflowStep::Move { column, .. } if column == "qa")
+        );
         rename_column(&mut d, "qa", "Quality").unwrap();
         assert_eq!(d.columns[2].name, "Quality");
         move_column(&mut d, "qa", 3).unwrap();
         let flow = d.compile().unwrap();
-        assert!(matches!(&flow.steps["move:develop"], WorkflowStep::Move { column, .. } if column == "review"));
+        assert!(
+            matches!(&flow.steps["move:develop"], WorkflowStep::Move { column, .. } if column == "review")
+        );
         remove_column(&mut d, "review").unwrap();
         assert!(!d.columns.iter().any(|c| c.id == "review"));
         assert!(!d.steps.iter().any(|s| s.stage.as_deref() == Some("review")));

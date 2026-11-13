@@ -345,6 +345,8 @@ impl Db<'_> {
                 number: self.counter("terminal-number")?,
                 name: None,
                 manual_number: None,
+                origin_card_id: None,
+                agent_engine: None,
                 runtime: None,
                 created_at: c.created_at,
             })?;

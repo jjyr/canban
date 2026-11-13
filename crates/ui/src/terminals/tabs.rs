@@ -49,7 +49,7 @@ pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
         MenuItem::separator(),
         MenuItem::new("Rename tab…")
             .on_select(move || ui.terminal_rename.set(Some(rename.clone()))),
-        MenuItem::new("Close terminal").on_select(move || close_tab(ui, &close)),
+        MenuItem::new("Close terminal").on_select(move || close_entry(ui, &close)),
     ];
     if let Some(card) = &e.card {
         let card = card.id.clone();
@@ -305,16 +305,11 @@ pub fn header(ui: Ui) -> impl IntoElement {
             action("▾", Variant::Quiet, move |_| machine_menu(ui))
                 .accessibility_label(|| Some("Choose terminal machine".into())),
         )
-        .child(when(
-            move || card_context(ui).is_some_and(|c| c.archived_at.is_none()),
-            move || {
-                chrome_button_disabled(
-                    Icon::Agent,
-                    "Choose Card Agent",
-                    move || ui.pending.get(),
-                    move |_| choose_card_agent(ui),
-                )
-            },
+        .child(chrome_button_disabled(
+            Icon::Agent,
+            "Open Agent",
+            move || ui.pending.get(),
+            move |_| open_ephemeral_agent(ui),
         ))
         .child(view().flex_1().min_w(px(24.)).h_full().window_drag(true))
         .child(dynamic(move || {

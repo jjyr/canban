@@ -33,23 +33,27 @@ impl AppServer {
             }),
             "configuration.open" => self.mutate(method,&p,|db| {
                 let project:Project=db.get(strp(&p,"project_id")?)?;
-                let profile=canban_scheduler::select_in_project(&self.config(),Some(&project),Some(strp(&p,"profile_id")?))?;
+                let explicit_profile=p["profile_id"].as_str().map(str::trim).filter(|s|!s.is_empty());
+                let profile=canban_scheduler::select_in_project(&self.config(),Some(&project),explicit_profile)?;
                 let key=format!("configuration:{}:workflows:{}",project.id,profile.id);
                 let old=db.get::<ConfigurationSession>(&key).ok();
+                let mut fresh=p["fresh"]==true || old.is_none();
                 if let Some(old)=&old {
                     let terminal=db.get::<TerminalEntry>(&key)?;
                     if terminal.runtime.as_ref().is_some_and(|r|r.state!="finished") || old.state=="queued" {
                         ensure!(p["fresh"]!=true,"End the existing configuration Agent before starting a new conversation");
                         return Ok(json!({"terminal_id":key,"reused":true,"state":terminal.runtime.as_ref().map(|r|r.state.as_str()).unwrap_or("queued")}));
                     }
-                    ensure!(old.provider_session_id.is_some() || p["fresh"]==true,"Exact provider history unavailable; explicitly start a new conversation");
-                    ensure!(p["fresh"]==true || !profile.resume_command().is_empty(),"Profile does not support Resume");
+                    if p["auto_fresh"]==true && (old.provider_session_id.is_none() || profile.resume_command().is_empty()) {
+                        fresh=true;
+                    }
+                    ensure!(old.provider_session_id.is_some() || fresh,"Exact provider history unavailable; explicitly start a new conversation");
+                    ensure!(fresh || !profile.resume_command().is_empty(),"Profile does not support Resume");
                 }
-                let fresh=p["fresh"]==true || old.is_none();
                 let prompt=self.workflow_prompt(&project);
                 if p["prompt"].is_string() {ensure!(p["prompt"]==prompt,"Prompt context changed; reopen Edit with agent to review it");}
                 let session=ConfigurationSession {id:key.clone(),project_id:project.id,profile_id:profile.id,provider_session_id:if fresh {None}else{old.as_ref().and_then(|s|s.provider_session_id.clone())},generation:old.as_ref().map_or(1,|s|s.generation+1),state:"queued".into(),prompt,error:None};
-                let mut terminal=db.get::<TerminalEntry>(&key).unwrap_or(TerminalEntry {id:key.clone(),conversation_id:None,number:db.counter("terminal-number")?,name:Some(format!("Workflows · {}",session.profile_id)),manual_number:None,runtime:None,created_at:now()});
+                let mut terminal=db.get::<TerminalEntry>(&key).unwrap_or(TerminalEntry {id:key.clone(),conversation_id:None,number:db.counter("terminal-number")?,name:Some(format!("Workflows · {}",session.profile_id)),manual_number:None,origin_card_id:None,agent_engine:None,runtime:None,created_at:now()});
                 terminal.runtime=None;db.save(&terminal)?;db.save(&session)?;
                 Ok(json!({"terminal_id":key,"reused":false,"state":"queued"}))
             }),
