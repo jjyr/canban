@@ -31,8 +31,19 @@ impl Entry {
         Some(&self.agent.as_ref()?.request.as_ref()?.profile.id)
     }
     pub fn provider(&self) -> Option<(Icon, String)> {
-        let profile = &self.agent.as_ref()?.request.as_ref()?.profile;
-        Some(crate::profiles::provider(profile))
+        if let Some(profile) = self.agent.as_ref().and_then(|r| r.request.as_ref()).map(|r| &r.profile) {
+            return Some(crate::profiles::provider(profile));
+        }
+        let engine = self.saved.agent_engine.as_deref()?;
+        if let Some(tpl) = engine.strip_prefix("herdr:") {
+            return Some((crate::profiles::agent_icon(tpl), format!("Herdr · {tpl}")));
+        }
+        Some((
+            crate::profiles::agent_icon(engine),
+            canban_profiles::display_name(engine)
+                .map(str::to_owned)
+                .unwrap_or_else(|| engine.to_owned()),
+        ))
     }
     pub fn display_status(&self) -> String {
         if self.ended() {
@@ -198,6 +209,8 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                 number: saved.iter().map(|t| t.number).max().unwrap_or(0) + 1,
                 name: None,
                 manual_number: None,
+                origin_card_id: None,
+                agent_engine: None,
                 runtime: None,
                 created_at: 0,
             });
@@ -219,24 +232,42 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
             .find(|c| c.terminal_id == t.id)
             .cloned();
         let configuration = s.configuration_sessions.iter().find(|c| c.id == t.id);
+        let origin_card = t
+            .origin_card_id
+            .as_ref()
+            .and_then(|id| s.cards.iter().find(|c| &c.id == id))
+            .cloned();
+        let card = if configuration.is_some() {
+            None
+        } else {
+            agent
+                .as_ref()
+                .map(|r| r.card.clone())
+                .or_else(|| {
+                    location
+                        .as_ref()
+                        .and_then(|c| c.card_id.as_ref())
+                        .and_then(|id| s.cards.iter().find(|c| &c.id == id))
+                        .cloned()
+                })
+                .or_else(|| {
+                    let origin = origin_card.as_ref()?;
+                    let same_project = location.as_ref().is_none_or(|loc| {
+                        (loc.project_id.is_none() && loc.cwd.is_none())
+                            || loc.project_id.as_deref() == Some(origin.project_id.as_str())
+                    });
+                    same_project.then(|| origin.clone())
+                })
+        };
         let project_id = configuration.map(|c| c.project_id.clone()).or_else(|| {
             agent
                 .as_ref()
                 .map(|r| r.card.project_id.clone())
                 .or_else(|| location.as_ref().and_then(|c| c.project_id.clone()))
+                .or_else(|| card.as_ref().map(|c| c.project_id.clone()))
         });
-        let card = if configuration.is_some() {
-            None
-        } else {
-            agent.as_ref().map(|r| r.card.clone()).or_else(|| {
-                location
-                    .as_ref()
-                    .and_then(|c| c.card_id.as_ref())
-                    .and_then(|id| s.cards.iter().find(|c| &c.id == id))
-                    .cloned()
-            })
-        };
-        let inferred_card = agent.is_none() && card.is_some();
+        let inferred_card =
+            agent.is_none() && t.origin_card_id.is_none() && card.is_some();
         let stage = agent.as_ref().and_then(|a| a.request.as_ref()).map(|r| {
             s.projects
                 .iter()

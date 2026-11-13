@@ -862,6 +862,8 @@ impl AppServer {
                 number: db.counter("terminal-number")?,
                 name: Some(title_trimmed),
                 manual_number: Some(db.counter("terminal-manual-number")?),
+                origin_card_id: None,
+                agent_engine: None,
                 created_at: now(),
                 runtime: Some(TerminalRuntime {
                     machine: machine.clone(),

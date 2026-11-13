@@ -253,11 +253,24 @@ pub fn execute(ui: Ui, id: &str) {
         "choose-theme" => crate::utilities::open(ui, "theme"),
         "switch-project" => ui.show_search(true),
         "new-terminal" => {
-            ui.navigate("terminals");
-            crate::terminals::new_tab(ui);
+            if ui.page.get_untracked() == "card"
+                && !ui.card_tab.get_untracked().is_empty()
+                && let Some(c) = ui.current_card()
+            {
+                crate::terminals::create_in_card(ui, c.project_id, c.id, false);
+            } else {
+                ui.navigate("terminals");
+                crate::terminals::new_tab(ui);
+            }
         }
         "close-terminal" if ui.page.get_untracked() == "terminals" => {
             crate::terminals::close_tab(ui, &ui.terminal_selection.get_untracked())
+        }
+        "close-terminal"
+            if ui.page.get_untracked() == "card"
+                && !ui.card_tab.get_untracked().is_empty() =>
+        {
+            crate::terminals::close_entry(ui, &ui.card_tab.get_untracked())
         }
         "next-tab" => crate::terminals::cycle(ui, true),
         "previous-tab" => crate::terminals::cycle(ui, false),

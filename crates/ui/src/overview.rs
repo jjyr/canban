@@ -9,6 +9,7 @@ use nsh_core::prelude::*;
 
 fn destination(ui: Ui, row: &OverviewRow, review: bool) {
     ui.open_card(row.card.id.clone());
+    ui.card_tab.set(String::new());
     if let Some(id) = row.outcome_request_id() {
         ui.request.set(id.into());
     }
@@ -700,6 +701,7 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
                         .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
                         .on_press(move |_: &()| {
                             ui.open_card(id.clone());
+                            ui.card_tab.set(String::new());
                             ui.card_event.set(sequence);
                         })
                         .child(
@@ -746,6 +748,7 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
                     Variant::Secondary,
                     move |_| {
                         ui.open_card(id_btn.clone());
+                        ui.card_tab.set(String::new());
                         ui.card_event.set(sequence);
                     },
                 )),

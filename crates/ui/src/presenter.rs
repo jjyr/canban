@@ -57,6 +57,7 @@ pub struct Ui {
     pub backend_notice: Signal<String>,
     pub history: Signal<crate::navigation::History>,
     pub card_standalone: Signal<bool>,
+    pub card_tab: Signal<String>,
     pub terminal_card_context: Signal<String>,
     pub terminal_sidebar: Signal<bool>,
     pub terminal_inactive: Signal<bool>,
@@ -226,6 +227,7 @@ impl Ui {
             backend_notice: signal(String::new()),
             history: signal(crate::navigation::History::default()),
             card_standalone: signal(false),
+            card_tab: signal(String::new()),
             terminal_card_context: signal(String::new()),
             terminal_sidebar: signal(true),
             terminal_inactive: signal(false),
@@ -375,6 +377,7 @@ impl Ui {
     }
     pub fn terminal_card(self, card: String) {
         self.open_card(card);
+        self.card_tab.set(String::new());
         self.card_standalone.set(true);
     }
     pub fn show_search(self, projects: bool) {
@@ -441,6 +444,21 @@ impl Ui {
         }) {
             self.project.set(project);
         }
+        let default_tab = {
+            let live = crate::terminals::card_live_entries(&self.snapshot.get_untracked(), &id);
+            let recent = self.terminal_recent.with(|m| m.get(&id).cloned());
+            recent
+                .filter(|rid| live.iter().any(|e| &e.saved.id == rid))
+                .or_else(|| live.last().map(|e| e.saved.id.clone()))
+                .unwrap_or_default()
+        };
+        if !default_tab.is_empty() {
+            self.terminal_recent.with(|m| {
+                m.insert(id.clone(), default_tab.clone());
+            });
+            self.terminal_focus.update(|v| *v += 1);
+        }
+        self.card_tab.set(default_tab);
         self.card.set(id);
         self.expanded.set(false);
         self.focused_card.set(false);

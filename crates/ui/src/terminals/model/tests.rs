@@ -111,6 +111,8 @@ fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() 
         number: 9,
         name: Some("Server".into()),
         manual_number: Some(1),
+        origin_card_id: None,
+        agent_engine: None,
         runtime: Some(TerminalRuntime {
             machine: "local".into(),
             owner_core_id: None,
@@ -167,6 +169,8 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
         number: 9,
         name: None,
         manual_number: None,
+        origin_card_id: None,
+        agent_engine: None,
         runtime: Some(TerminalRuntime {
             machine: "local".into(),
             owner_core_id: None,
@@ -364,4 +368,104 @@ fn historical_request_never_attaches_to_a_newer_profile_invocation() {
     assert_eq!(live_request(&s, &original), None);
     assert!(live_request(&s, "new-request").is_some());
     assert_eq!(live_request(&s, "removed-request"), None);
+}
+
+#[test]
+fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells() {
+    use canban_ui_kit::Icon;
+    let mut s = fixture();
+    s.terminals = crate::terminals::entries(&s)
+        .into_iter()
+        .map(|e| e.saved)
+        .collect();
+    s.terminals.push(TerminalEntry {
+        id: "agent-ephemeral".into(),
+        conversation_id: None,
+        number: 2,
+        name: None,
+        manual_number: Some(1),
+        origin_card_id: Some("c1".into()),
+        agent_engine: Some("agy".into()),
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("core".into()),
+            terminal: Some("pty-agy".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+        }),
+        created_at: 2,
+    });
+    s.terminals.push(TerminalEntry {
+        id: "shell-backlog".into(),
+        conversation_id: None,
+        number: 3,
+        name: None,
+        manual_number: Some(2),
+        origin_card_id: Some("c1".into()),
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("core".into()),
+            terminal: Some("pty-shell".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+        }),
+        created_at: 3,
+    });
+    s.terminals.push(TerminalEntry {
+        id: "shell-ended".into(),
+        conversation_id: None,
+        number: 4,
+        name: None,
+        manual_number: Some(3),
+        origin_card_id: Some("c1".into()),
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("core".into()),
+            terminal: Some("pty-ended".into()),
+            state: "finished".into(),
+            connection: "connected".into(),
+            error: None,
+        }),
+        created_at: 4,
+    });
+
+    let live = crate::terminals::card_live_entries(&s, "c1");
+    let ids: Vec<_> = live.iter().map(|e| e.saved.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            Conversation::key("c1", "codex").as_str(),
+            "agent-ephemeral",
+            "shell-backlog",
+        ]
+    );
+    let agy = live.iter().find(|e| e.saved.id == "agent-ephemeral").unwrap();
+    assert_eq!(agy.saved.title(), "Antigravity 1");
+    assert_eq!(agy.provider(), Some((Icon::Agy, "Antigravity".into())));
+    assert!(!agy.inferred_card);
+
+    let shell = live.iter().find(|e| e.saved.id == "shell-backlog").unwrap();
+    assert_eq!(shell.saved.title(), "Terminal 2");
+    assert!(shell.provider().is_none());
+
+    // Moving the shell into another project detaches it from the origin card tab bar.
+    s.terminal_contexts.push(TerminalContext {
+        machine: "local".into(),
+        terminal_id: "shell-backlog".into(),
+        core_id: "core".into(),
+        terminal: "pty-shell".into(),
+        cwd: Some("/project-2".into()),
+        project_id: Some("p2".into()),
+        card_id: None,
+        branch: None,
+    });
+    let live_after_move = crate::terminals::card_live_entries(&s, "c1");
+    assert!(live_after_move.iter().all(|e| e.saved.id != "shell-backlog"));
 }

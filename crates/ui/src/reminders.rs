@@ -129,6 +129,8 @@ impl Reader {
                 }
                 if !foreground()
                     || !matches!(ui.page.get_untracked().as_str(), "card" | "review")
+                    || (ui.page.get_untracked() == "card"
+                        && !ui.card_tab.get_untracked().is_empty())
                     || untracked(|| ui.card_id()) != ui.card.get_untracked()
                     || ui.quick_open.get_untracked()
                     || !ui.utility_popup.get_untracked().is_empty()

@@ -9,11 +9,7 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
     let selected_id = card.id.clone();
     let terminal_card = card.id.clone();
     let snapshot = ui.snapshot.get_untracked();
-    let has_terminal = snapshot.attempts.iter().any(|a| a.card_id == card.id)
-        || snapshot.requests.iter().any(|r| r.card_id == card.id)
-        || crate::terminals::entries(&snapshot)
-            .into_iter()
-            .any(|e| e.card.as_ref().is_some_and(|c| c.id == card.id) && e.listed());
+    let has_terminal = !crate::terminals::card_live_entries(&snapshot, &card.id).is_empty();
     let hovered = signal(false);
     let mut tile = panel()
         .p_3()
@@ -69,8 +65,8 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
                         .child(
                             chrome_button(
                                 Icon::Terminal,
-                                format!("Open Terminals for Card #{}", card.number),
-                                move |_| crate::terminals::open_card(ui, &terminal_card),
+                                format!("Open Terminal for Card #{}", card.number),
+                                move |_| crate::terminals::open_card_quick(ui, &terminal_card),
                             )
                             .opacity(move || {
                                 if has_terminal || hovered.get() {

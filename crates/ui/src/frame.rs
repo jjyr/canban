@@ -152,4 +152,5 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         ))
         .child(quick_open::overlay(ui))
         .child(crate::utilities::overlay(ui))
+        .child(terminals::tabs::rename_dialog(ui))
 }

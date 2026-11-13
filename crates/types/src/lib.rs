@@ -701,6 +701,12 @@ pub struct TerminalEntry {
     pub name: Option<String>,
     /// Separate durable sequence for independently opened Terminal labels.
     pub manual_number: Option<u64>,
+    /// Optional Card association when opened directly from a Card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_card_id: Option<String>,
+    /// Optional interactive CLI engine identifier for ephemeral Agent terminals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_engine: Option<String>,
     /// Independent terminals own a binding; Agent bindings remain on Attempts.
     pub runtime: Option<TerminalRuntime>,
     pub created_at: u64,
@@ -709,7 +715,12 @@ impl TerminalEntry {
     pub fn title(&self) -> String {
         self.name.clone().unwrap_or_else(|| {
             if self.conversation_id.is_none() {
-                format!("Terminal {}", self.manual_number.unwrap_or(self.number))
+                let n = self.manual_number.unwrap_or(self.number);
+                if let Some(engine) = &self.agent_engine {
+                    format!("{} {n}", friendly_agent_engine(engine))
+                } else {
+                    format!("Terminal {n}")
+                }
             } else {
                 self.number.to_string()
             }
@@ -735,6 +746,36 @@ impl TerminalEntry {
             }
         }
         serde_json::from_value(value)
+    }
+}
+fn friendly_agent_engine(engine: &str) -> String {
+    let clean = engine.strip_prefix("herdr:").unwrap_or(engine);
+    match clean {
+        "codex" => "Codex".into(),
+        "claude" => "Claude Code".into(),
+        "agy" | "antigravity" => "Antigravity".into(),
+        "gemini" => "Gemini CLI".into(),
+        "opencode" => "OpenCode".into(),
+        "cursor" | "cursor-agent" => "Cursor Agent".into(),
+        "pi" => "Pi".into(),
+        "omp" => "Omp".into(),
+        "copilot" => "GitHub Copilot".into(),
+        "droid" => "Droid".into(),
+        "amp" => "Amp".into(),
+        "kimi" => "Kimi".into(),
+        "kiro" | "kiro-cli" => "Kiro".into(),
+        "qwen" => "Qwen Code".into(),
+        "devin" => "Devin".into(),
+        "cline" => "Cline".into(),
+        "grok" => "Grok".into(),
+        "hermes" => "Hermes".into(),
+        "kilo" => "Kilo".into(),
+        "qodercli" | "qoder" => "Qoder".into(),
+        "letta" => "Letta".into(),
+        "mastracode" | "mastra" => "Mastra Code".into(),
+        "maki" => "Maki".into(),
+        "muse" => "Muse".into(),
+        other => other.into(),
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
