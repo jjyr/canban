@@ -293,7 +293,7 @@ impl AppServer {
                         .is_some_and(|v| v["state"] == "finished")
             }) {
                 let mut r: Request = db.get(&a.request_id)?;
-                if r.state == "completed" {
+                if matches!(r.state.as_str(), "completed" | "backlog") {
                     continue;
                 }
                 a.state = "failed".into();
@@ -353,7 +353,7 @@ impl AppServer {
             if a.state == "missing" {
                 return Ok(());
             }
-            if a.state != "completed" {
+            if !matches!(a.state.as_str(), "completed" | "backlog") {
                 a.state = "missing".into();
             }
             a.connection_state = "missing".into();
@@ -363,7 +363,9 @@ impl AppServer {
             a.close_state = "closed".into();
             a.observed = Some(json!({"state":"missing"}));
             let mut r: Request = db.get(&a.request_id)?;
-            if r.attempt == a.number && !matches!(r.state.as_str(), "completed" | "blocked") {
+            if r.attempt == a.number
+                && !matches!(r.state.as_str(), "completed" | "backlog" | "blocked")
+            {
                 r.state = "failed".into();
                 db.save(&r)?;
             }

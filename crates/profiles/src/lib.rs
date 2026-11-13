@@ -285,6 +285,25 @@ pub fn migrate(value: &mut Value) -> Result<bool> {
     let mut changed = false;
     for p in profiles {
         ensure!(p.is_object(), "Profile must be an object");
+        if let Some((old_role, new_role)) = match p["id"].as_str() {
+            Some("developer") => Some((
+                "You are the Card's development Agent. Implement the agreed task, preserve relevant project conventions, and explain your changes and validation.",
+                "You are the Card's development Agent. Follow repository conventions and verify changes before finishing.",
+            )),
+            Some("reviewer") => Some((
+                "You are the Card's independent review Agent. Inspect the actual changes critically, identify correctness issues and missing validation, and report findings. Do not implement changes unless explicitly asked.",
+                "You are the Card's independent review Agent. Critically inspect changes and test coverage without making unrequested edits.",
+            )),
+            Some("planner") => Some((
+                "You are the Card's planning Agent. Analyze the task and relevant repository files in read-only mode, identify risks, and write a concise implementation plan without modifying source files.",
+                "You are the Card's planning Agent. Inspect repository files in read-only mode without modifying source files.",
+            )),
+            _ => None,
+        } && p["role_instruction"].as_str().map(str::trim) == Some(old_role)
+        {
+            p["role_instruction"] = json!(new_role);
+            changed = true;
+        }
         let legacy = p.get("provider").is_some() || p.get("template").is_some();
         // Pre-interactive registries have no provider field; recognize their
         // explicit batch syntax only during this migration.
@@ -836,6 +855,44 @@ mod tests {
         let dev_on_agy = apply_project_override(&cfg_with_agy, Some(&proj), dev);
         assert_eq!(dev_on_agy.model.as_deref(), Some("gemini-4-carbon-high"));
         assert_eq!(dev_on_agy.effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn migrate_upgrades_unmodified_builtin_role_instructions_and_preserves_custom_ones() {
+        let mut legacy = json!({
+            "profiles": [
+                {
+                    "id": "developer",
+                    "preset": "codex",
+                    "identity": true,
+                    "role_instruction": "You are the Card's development Agent. Implement the agreed task, preserve relevant project conventions, and explain your changes and validation."
+                },
+                {
+                    "id": "reviewer",
+                    "preset": "codex",
+                    "identity": true,
+                    "role_instruction": "Custom security-focused reviewer prompt."
+                }
+            ]
+        });
+        assert!(migrate(&mut legacy).unwrap());
+        assert_eq!(
+            legacy["profiles"][0]["role_instruction"].as_str(),
+            Some(
+                Config::default()
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == "developer")
+                    .unwrap()
+                    .role_instruction
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            legacy["profiles"][1]["role_instruction"].as_str(),
+            Some("Custom security-focused reviewer prompt.")
+        );
+        assert!(!migrate(&mut legacy).unwrap());
     }
 }
 

@@ -33,7 +33,7 @@ pub fn message_id(s: &Snapshot, e: &Event) -> Option<String> {
         "execution.reported"
             if matches!(
                 e.data["state"].as_str(),
-                Some("completed" | "blocked" | "failed")
+                Some("completed" | "backlog" | "blocked" | "failed")
             ) =>
         {
             Some(format!(

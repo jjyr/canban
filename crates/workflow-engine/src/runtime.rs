@@ -244,21 +244,20 @@ fn drive(
                     run.inputs["rework_feedback"] = Value::Null;
                     run.inputs["rework_origin"] = Value::Null;
                 }
+                let prior_steps = if run.outputs.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\n\nEarlier workflow step outputs:\n{}",
+                        serde_json::to_string(&run.outputs)?
+                    )
+                };
                 let stage = Stage {
                     id: card.stage.clone(),
                     name: card.stage.clone(),
                     execute: true,
                     profile,
-                    instruction: format!(
-                        "{}{}\n\nWorkflow {} revision {}, step {}, visit {}.\nEarlier step results (read report files/resources when needed):\n{}",
-                        instruction,
-                        rework_note,
-                        run.workflow_id,
-                        run.definition_revision,
-                        key,
-                        run.visit,
-                        serde_json::to_string(&run.outputs)?
-                    ),
+                    instruction: format!("{instruction}{rework_note}{prior_steps}"),
                     on_completed: None,
                     require_human_review: false,
                 };
@@ -436,7 +435,18 @@ pub fn reported(
         return Ok(());
     }
     if report.state != "completed" {
-        if matches!(report.state.as_str(), "blocked" | "failed") {
+        if report.state == "backlog" {
+            if let Some(key) = run.step.clone() {
+                run.outputs.insert(
+                    key.clone(),
+                    json!({"report_id":report.id,"path":report.path,"message":report.message,"request_id":request.id,"attempt":report.attempt,"state":"backlog"}),
+                );
+                run.history.push(json!({"step":key,"visit":run.visit,"event":"returned_to_backlog","report_id":report.id,"at":now()}));
+            }
+            run.state = "cancelled".into();
+            run.updated_at = now();
+            db.save(&run)?;
+        } else if matches!(report.state.as_str(), "blocked" | "failed") {
             run.state = "blocked".into();
             run.error = Some(report.message.clone());
             db.save(&run)?;
@@ -638,7 +648,9 @@ pub fn admit(
     );
     let key = run.step.clone().context("Missing Admit step")?;
     let Some(WorkflowStep::Admit {
-        max_ready, next: to, ..
+        max_ready,
+        next: to,
+        ..
     }) = run.definition.steps.get(&key).cloned()
     else {
         bail!("Current step is not an Admit gate");
@@ -699,7 +711,9 @@ pub fn rework_conflict(
         key.clone(),
         json!({"state":"conflict","target_branch":target_branch,"target_head":target_head,"files":files,"attempt":attempts + 1}),
     );
-    run.history.push(json!({"step":key,"visit":run.visit,"decision":"merge_conflict","files":files,"at":now()}));
+    run.history.push(
+        json!({"step":key,"visit":run.visit,"decision":"merge_conflict","files":files,"at":now()}),
+    );
     card.human_gate = None;
     card.attention = None;
     card.revision += 1;

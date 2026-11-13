@@ -7,17 +7,23 @@ use crate::source::Document;
 use anyhow::{Result, ensure};
 
 pub const BASELINE: u32 = 1;
-pub const CURRENT: u32 = 2;
+pub const CURRENT: u32 = 3;
 
 pub struct Migration {
     pub version: u32,
     pub up: fn(&mut Document) -> Result<()>,
 }
 
-const STEPS: &[Migration] = &[Migration {
-    version: 2,
-    up: v2_omit_builtin_default_prompts,
-}];
+const STEPS: &[Migration] = &[
+    Migration {
+        version: 2,
+        up: v2_omit_builtin_default_prompts,
+    },
+    Migration {
+        version: 3,
+        up: v3_decision_aware_default_prompts,
+    },
+];
 
 /// Migrate a parsed [`Document`] from any supported [`BASELINE`]..=[`CURRENT`] version to [`CURRENT`].
 /// Returns `Ok(true)` if `doc` was upgraded from an older schema version.
@@ -106,6 +112,13 @@ fn v2_omit_builtin_default_prompts(doc: &mut Document) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Schema 3: Default step prompts become decision-aware (allowing `--state backlog` when a Card
+/// is already implemented or obsolete). Advancing the schema triggers recompilation of active
+/// `WorkflowRevision`s on startup and strips any materialized v2 default prompt strings.
+fn v3_decision_aware_default_prompts(doc: &mut Document) -> Result<()> {
+    v2_omit_builtin_default_prompts(doc)
 }
 
 #[cfg(test)]

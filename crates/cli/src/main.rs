@@ -79,6 +79,7 @@ enum Cmd {
     },
     /// Report your own outcome for the execution injected by Canban.
     Report {
+        /// Outcome state: completed | backlog | blocked | failed | working
         #[arg(long)]
         state: String,
         #[arg(long, default_value = "")]
@@ -372,8 +373,8 @@ fn run() -> Result<()> {
             request_key,
         } => {
             let key = request_key.unwrap_or_else(|| {
-                if state == "completed" {
-                    format!("completed:{request_id}:{attempt}")
+                if matches!(state.as_str(), "completed" | "backlog") {
+                    format!("{state}:{request_id}:{attempt}")
                 } else {
                     canban_types::id()
                 }

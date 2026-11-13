@@ -133,7 +133,7 @@ pub fn retained<'a>(
             && matches!(a.runtime_status(), "idle" | "done")
             && snapshot.requests.iter().any(|r| {
                 r.id == a.request_id
-                    && r.state == "completed"
+                    && matches!(r.state.as_str(), "completed" | "backlog")
                     && r.profile.id == request.profile.id
                     && r.profile.command_name() == request.profile.command_name()
             })
@@ -259,7 +259,10 @@ pub fn admissions(snapshot: &canban_types::Snapshot, max_agents: usize) -> Vec<S
                 .filter(|p| p.active() && p.project_id == c.project_id && p.stage == c.stage)
                 .collect();
             peers.sort_by(|a, b| a.board_cmp(b));
-            let position = peers.iter().position(|p| p.id == c.id).unwrap_or(usize::MAX);
+            let position = peers
+                .iter()
+                .position(|p| p.id == c.id)
+                .unwrap_or(usize::MAX);
             Some((position, run.created_at, run, c, *agent_slot, *max_ready))
         })
         .collect();

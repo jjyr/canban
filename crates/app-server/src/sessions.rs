@@ -218,18 +218,12 @@ impl AppServer {
             )
         })?;
         let prompt = std::fs::read_to_string(self.home.join(&input))?;
-        let binding = json!({"request_id":req.id,"attempt":req.attempt,"run_dir":canban_context::run_dir(&runtime_home,req,req.attempt),"manifest":canban_context::run_dir(&runtime_home,req,req.attempt).join("context.json")});
+        let run_dir = canban_context::run_dir(&runtime_home, req, req.attempt);
         let text = format!(
-            "Canban assignment {}\n{}\n\nUse this assignment's explicit request/attempt values for every Canban CLI call. The launching environment belongs to the preceding assignment.\n{}",
-            binding,
-            format_args!(
-                "CANBAN_REQUEST_ID={} CANBAN_ATTEMPT={} CANBAN_RUN_DIR={}",
-                canban_context::shell_quote(&req.id),
-                req.attempt,
-                canban_context::shell_quote(
-                    &canban_context::run_dir(&runtime_home, req, req.attempt).to_string_lossy()
-                )
-            ),
+            "New Canban assignment (use these explicit values instead of earlier terminal env vars):\nCANBAN_REQUEST_ID={} CANBAN_ATTEMPT={} CANBAN_RUN_DIR={}\n\n{}",
+            canban_context::shell_quote(&req.id),
+            req.attempt,
+            canban_context::shell_quote(&run_dir.to_string_lossy()),
             prompt
         );
         if let Err(e) = client.call("terminal.send", json!({"terminal":terminal,"text":text})) {

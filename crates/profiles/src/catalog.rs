@@ -69,13 +69,10 @@ fn m(items: &[(&str, &str)]) -> Vec<ModelOption> {
         .collect()
 }
 
-fn bind_session_instruction(var_hint: Option<&str>) -> String {
-    match var_hint {
-        Some(env_var) => format!(
-            "Before other work, run \"$CANBAN_CLI\" bind-session --session-id \"${env_var}\" to bind this invocation to its actual provider history. Do not reuse a thread ID quoted in earlier conversation history."
-        ),
-        None => "The provider session ID is allocated and bound by Canban through your launch command. Use the current invocation's Canban reporting commands.".into(),
-    }
+fn bind_session_instruction(env_var: &str) -> String {
+    format!(
+        "Before other work, run \"$CANBAN_CLI\" bind-session --session-id \"${env_var}\" to bind this invocation to its actual provider history. Do not reuse a thread ID quoted in earlier conversation history."
+    )
 }
 
 /// Returns all 24 built-in Herdr CLI agents in recommended onboarding order.
@@ -109,7 +106,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             exit: ExitAction::Input {
                 text: "/exit".into(),
             },
-            session_instruction: Some(bind_session_instruction(Some("CODEX_THREAD_ID"))),
+            session_instruction: Some(bind_session_instruction("CODEX_THREAD_ID")),
             model_args: s(&["-m", "{model}"]),
             effort_args: s(&["-c", "model_reasoning_effort=\"{effort}\""]),
             supported_efforts: s(&["low", "medium", "high", "xhigh", "max"]),
@@ -131,7 +128,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             exit: ExitAction::Input {
                 text: "/exit".into(),
             },
-            session_instruction: Some(bind_session_instruction(None)),
+            session_instruction: None,
             model_args: s(&["--model", "{model}"]),
             effort_args: s(&["--effort", "{effort}"]),
             supported_efforts: s(&["low", "medium", "high", "xhigh", "max"]),
@@ -218,7 +215,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
                 "{prompt}",
             ]),
             exit: ExitAction::Manual,
-            session_instruction: Some(bind_session_instruction(None)),
+            session_instruction: None,
             model_args: s(&["-m", "{model}"]),
             effort_args: Vec::new(),
             supported_efforts: Vec::new(),

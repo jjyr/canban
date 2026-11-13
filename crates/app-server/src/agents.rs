@@ -141,13 +141,13 @@ fn validate_profile_id(id: &str) -> Result<()> {
 fn default_role_instruction(id: &str) -> &'static str {
     match id {
         "planner" => {
-            "You are the Card's planning Agent. Analyze the task and relevant repository files in read-only mode, identify risks, and write a concise implementation plan without modifying source files."
+            "You are the Card's planning Agent. Inspect repository files in read-only mode without modifying source files."
         }
         "developer" => {
-            "You are the Card's development Agent. Implement the agreed task, preserve relevant project conventions, and explain your changes and validation."
+            "You are the Card's development Agent. Follow repository conventions and verify changes before finishing."
         }
         "reviewer" => {
-            "You are the Card's independent review Agent. Inspect the actual changes critically, identify correctness issues and missing validation, and report findings. Do not implement changes unless explicitly asked."
+            "You are the Card's independent review Agent. Critically inspect changes and test coverage without making unrequested edits."
         }
         _ => "",
     }

@@ -87,7 +87,7 @@ impl Default for Workflow {
                 Stage {
                     id: "develop".into(), name: "Develop".into(), execute: true,
                     profile: Some("developer".into()),
-                    instruction: "Implement the card task in the supplied working directory. Explain your changes and validation in your report.".into(),
+                    instruction: "Evaluate the Card against the current codebase before editing:\n- Actionable: implement and validate the changes on the Card branch, commit deliverables, and report `--state completed`.\n- Already implemented, obsolete, or not applicable: make no unnecessary edits and report `--state backlog` explaining why.\n- Ambiguous or awaiting a human decision: report `--state blocked` with specific questions.".into(),
                     on_completed: Some("review".into()), require_human_review: false,
                 },
                 Stage {
@@ -248,19 +248,19 @@ impl Default for Config {
                     "developer",
                     "codex",
                     true,
-                    "You are the Card's development Agent. Implement the agreed task, preserve relevant project conventions, and explain your changes and validation.",
+                    "You are the Card's development Agent. Follow repository conventions and verify changes before finishing.",
                 ),
                 profile(
                     "reviewer",
                     "codex",
                     true,
-                    "You are the Card's independent review Agent. Inspect the actual changes critically, identify correctness issues and missing validation, and report findings. Do not implement changes unless explicitly asked.",
+                    "You are the Card's independent review Agent. Critically inspect changes and test coverage without making unrequested edits.",
                 ),
                 profile(
                     "planner",
                     "codex",
                     true,
-                    "You are the Card's planning Agent. Analyze the task and relevant repository files in read-only mode, identify risks, and write a concise implementation plan without modifying source files.",
+                    "You are the Card's planning Agent. Inspect repository files in read-only mode without modifying source files.",
                 ),
             ],
         }
@@ -514,7 +514,10 @@ impl Attempt {
         {
             Some("idle" | "done" | "blocked" | "error") => true,
             Some(_) => false,
-            None => matches!(self.state.as_str(), "completed" | "blocked" | "failed"),
+            None => matches!(
+                self.state.as_str(),
+                "completed" | "backlog" | "blocked" | "failed"
+            ),
         }
     }
     /// A stale or disconnected status must not release scheduling capacity.
@@ -571,7 +574,9 @@ pub fn agent_activity_warning(
     }
     let pending: Vec<_> = requests
         .iter()
-        .filter(|r| r.card_id == card_id && matches!(r.state.as_str(), "queued" | "starting" | "unknown"))
+        .filter(|r| {
+            r.card_id == card_id && matches!(r.state.as_str(), "queued" | "starting" | "unknown")
+        })
         .collect();
     if pending.is_empty() {
         return None;
@@ -991,7 +996,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn sample_attempt(card_id: &str, state: &str, connection: &str, observed: Option<Value>) -> Attempt {
+    fn sample_attempt(
+        card_id: &str,
+        state: &str,
+        connection: &str,
+        observed: Option<Value>,
+    ) -> Attempt {
         serde_json::from_value(json!({
             "id": "req-1:1",
             "request_id": "req-1",

@@ -579,7 +579,7 @@ impl AppServer {
                             )
                             || r.card_id == c.id
                                 && r.profile.id == agent
-                                && r.state == "completed"
+                                && matches!(r.state.as_str(), "completed" | "backlog")
                                 && r.profile == profile
                                 && attempts.iter().any(|a| {
                                     a.request_id == r.id

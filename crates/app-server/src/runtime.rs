@@ -284,7 +284,9 @@ impl AppServer {
                                     json!({"attempt":run.number}),
                                 )?;
                                 let mut req: Request = db.get(&run.request_id)?;
-                                if req.attempt == run.number && req.state != "completed" {
+                                if req.attempt == run.number
+                                    && !matches!(req.state.as_str(), "completed" | "backlog")
+                                {
                                     req.state = "idle_closed".into();
                                     db.save(&req)?;
                                 }
@@ -296,7 +298,9 @@ impl AppServer {
                                 current.error =
                                     Some("Agent exited without reporting an outcome".into());
                                 let mut req: Request = db.get(&run.request_id)?;
-                                if req.attempt == run.number && req.state != "completed" {
+                                if req.attempt == run.number
+                                    && !matches!(req.state.as_str(), "completed" | "backlog")
+                                {
                                     req.state = "failed".into();
                                     db.save(&req)?;
                                 }
@@ -477,7 +481,7 @@ impl AppServer {
             else {
                 continue;
             };
-            if matches!(req.state.as_str(), "completed" | "idle_closed")
+            if matches!(req.state.as_str(), "completed" | "backlog" | "idle_closed")
                 && !snapshot.attempts.iter().any(|a| {
                     a.request_id == req.id
                         && a.number == req.attempt
@@ -879,7 +883,7 @@ impl AppServer {
                 db.save(&r)?;
             }
             if let Ok(mut a) = db.get::<Attempt>(&Attempt::key(&req.id, req.attempt))
-                && a.state != "completed"
+                && !matches!(a.state.as_str(), "completed" | "backlog")
             {
                 a.state = if a.state == "unknown"
                     || a.terminal.is_none() && error.contains("timed out")
