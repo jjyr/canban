@@ -1122,9 +1122,9 @@ fn review_clears_warning_when_herdr_reports_agent_stopped_and_never_blocks_merge
             current.id = Attempt::key(&run.request_id, 2);
             current.number = 2;
             current.state = "completed".into();
-            // Connected terminals whose Agent turn stopped (idle/done) emit no warning at all.
+            // Connected terminals whose Agent turn stopped (idle/done/blocked/error) emit no warning at all.
             current.connection_state = "connected".into();
-            for stopped_state in ["idle", "done"] {
+            for stopped_state in ["idle", "done", "blocked", "error"] {
                 current.observed = Some(json!({"state":"live","status":{"state":stopped_state}}));
                 db.save(&current)?;
                 assert!(
@@ -1140,7 +1140,7 @@ fn review_clears_warning_when_herdr_reports_agent_stopped_and_never_blocks_merge
                 assert!(
                     super::review::activity_warning(db, &card)?
                         .unwrap()
-                        .contains("still running")
+                        .contains("status is unavailable")
                 );
             }
             current.connection_state = "connected".into();
@@ -1199,7 +1199,7 @@ fn review_clears_warning_when_herdr_reports_agent_stopped_and_never_blocks_merge
                 assert!(
                     super::review::activity_warning(db, &card)?
                         .unwrap()
-                        .contains("queued or uncertain")
+                        .contains("pending Agent work")
                 );
             }
             Ok(())
@@ -1213,7 +1213,7 @@ fn review_clears_warning_when_herdr_reports_agent_stopped_and_never_blocks_merge
         queued_preview["warning"]
             .as_str()
             .unwrap()
-            .contains("queued or uncertain"),
+            .contains("pending Agent work"),
         "{queued_preview}"
     );
     card = app

@@ -487,7 +487,8 @@ fn service_lock_ends_with_last_owner_even_if_a_child_inherited_its_descriptor() 
 
 fn yaml(id: &str, event: &str) -> String {
     format!(
-        "# Preserve this comment\nschema: 1\nid: {id}\nname: Test YAML\non:\n  start:\n    event: {event}\n    start_at: gate\nsteps:\n  - id: gate\n    uses: approval\n    with:\n      title: Inspect YAML\n"
+        "# Preserve this comment\nschema: {}\nid: {id}\nname: Test YAML\non:\n  start:\n    event: {event}\n    start_at: gate\nsteps:\n  - id: gate\n    uses: approval\n    with:\n      title: Inspect YAML\n",
+        canban_workflow_engine::migrations::CURRENT
     )
 }
 fn collection(app: &AppServer, p: &Project) -> Value {
@@ -1746,5 +1747,349 @@ fn removing_the_running_step_finishes_it_then_stops_the_run() {
         snap.cards.iter().find(|x| x.id == c.id).unwrap().stage,
         "develop",
         "the removed step's successors (move to Review) do not run"
+    );
+}
+
+#[test]
+fn report_auto_commits_card_worktree_and_workflow_deliver_retries_paused_or_stopped_merge() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "init"]);
+    let remote = dir.path().join("remote.git");
+    std::fs::create_dir_all(&remote).unwrap();
+    git_in(&remote, &["init", "--bare", "-b", "main"]);
+    git_in(&source, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git_in(&source, &["push", "-u", "origin", "main"]);
+
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "AutoCommit & Retry", "directory": source}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    // Disable human review on Review column so Develop -> Review enters Queue merge directly.
+    edit_development(&app, &p, |d| {
+        canban_workflow_engine::source::set_review_manual(d, false);
+    });
+
+    // Part 1: Uncommitted edits in Card worktree are auto-committed on execution.report,
+    // and when the main checkout temporarily has local edits, workflow.deliver retries immediately once clean.
+    let c1: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Feature A", "body": "auto commit test"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let dev1 = snap.requests.iter().find(|r| r.card_id == c1.id).unwrap().clone();
+    let ops = canban_workspaces::Ops::local();
+    let wt1 = ops.prepare(&app.home, &p, snap.cards.iter().find(|c| c.id == c1.id).unwrap()).unwrap();
+    let branch1 = ops.current_branch(wt1.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c1.id)?;
+            card.worktree = Some(wt1.to_str().unwrap().into());
+            card.branch = Some(branch1);
+            db.save(&card)
+        })
+        .unwrap();
+    git_identity(&wt1);
+    let head_before = git_in(&wt1, &["rev-parse", "HEAD"]);
+    // Agent writes a file WITHOUT running git commit!
+    std::fs::write(wt1.join("feature_a.txt"), "hello auto commit\n").unwrap();
+    // Make main checkout dirty so Queue merge pauses cleanly.
+    std::fs::write(source.join("untracked_local.tmp"), "dirty\n").unwrap();
+
+    finish_closed(&app, &dev1, "dev1-done");
+    // Verify execution.report auto-committed the Card worktree!
+    let head_after = git_in(&wt1, &["rev-parse", "HEAD"]);
+    assert_ne!(head_before, head_after, "Card worktree should be auto-committed on completion");
+    assert!(
+        git_in(&wt1, &["status", "--porcelain"]).is_empty(),
+        "Card worktree must be clean after auto-commit"
+    );
+
+    app.pump_deliveries().unwrap();
+    let snap = app.snapshot().unwrap();
+    let run1 = snap.workflow_runs.iter().find(|r| r.card_id == c1.id && r.active()).unwrap();
+    assert_eq!(run1.state, "waiting_approval", "dirty main checkout pauses auto-merge");
+    let card1 = snap.cards.iter().find(|c| c.id == c1.id).unwrap();
+    assert!(
+        card1
+            .human_gate
+            .as_ref()
+            .unwrap()
+            .reason
+            .contains("Project checkout has local changes")
+    );
+
+    // Clean main checkout and manually trigger retry via workflow.deliver.
+    std::fs::remove_file(source.join("untracked_local.tmp")).unwrap();
+    let retried = app
+        .call(
+            "workflow.deliver",
+            json!({"card_id": c1.id, "revision": card1.revision}),
+        )
+        .unwrap();
+    assert_eq!(retried["state"], "completed", "workflow.deliver synchronously pumps delivery");
+    assert_eq!(
+        std::fs::read_to_string(source.join("feature_a.txt")).unwrap(),
+        "hello auto commit\n"
+    );
+
+    // Part 2: If a workflow run was stopped after hitting a merge conflict (leaving no active run
+    // and an interrupted MERGE_HEAD in the Card worktree), workflow.deliver starts a fresh run
+    // at deliver:review and routes the pending conflict back to @developer!
+    let c2: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Feature B", "body": "stopped conflict retry"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c2.id, "revision": c2.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let dev2 = snap.requests.iter().find(|r| r.card_id == c2.id).unwrap().clone();
+    let wt2 = ops.prepare(&app.home, &p, snap.cards.iter().find(|c| c.id == c2.id).unwrap()).unwrap();
+    let branch2 = ops.current_branch(wt2.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c2.id)?;
+            card.worktree = Some(wt2.to_str().unwrap().into());
+            card.branch = Some(branch2);
+            db.save(&card)
+        })
+        .unwrap();
+    git_identity(&wt2);
+    std::fs::write(wt2.join("README.md"), "card2 conflict\n").unwrap();
+    std::fs::write(source.join("README.md"), "main conflict\n").unwrap();
+    git_in(&source, &["commit", "-am", "main conflict"]);
+    git_in(&source, &["push", "origin", "main"]);
+
+    finish_closed(&app, &dev2, "dev2-done");
+    app.pump_deliveries().unwrap();
+    let snap = app.snapshot().unwrap();
+    let run2 = snap.workflow_runs.iter().find(|r| r.card_id == c2.id && r.active()).unwrap();
+    assert_eq!(run2.state, "waiting_agent");
+    // User stops the workflow, leaving the Card in `review` with no active run and an unmerged MERGE_HEAD!
+    app.call("workflow.stop", json!({"run_id": run2.id})).unwrap();
+    let snap = app.snapshot().unwrap();
+    assert!(!snap.workflow_runs.iter().any(|r| r.card_id == c2.id && r.active()));
+
+    let card2 = snap.cards.iter().find(|c| c.id == c2.id).unwrap();
+    let restarted = app
+        .call(
+            "workflow.deliver",
+            json!({"card_id": c2.id, "revision": card2.revision}),
+        )
+        .unwrap();
+    assert_eq!(
+        restarted["state"], "waiting_agent",
+        "retrying delivery on an interrupted merge conflict routes back to the Agent"
+    );
+    let snap = app.snapshot().unwrap();
+    let new_req = snap
+        .requests
+        .iter()
+        .rfind(|r| r.card_id == c2.id)
+        .unwrap()
+        .clone();
+    assert!(new_req.instruction.contains("Merge conflict to resolve before delivery"));
+}
+
+#[test]
+fn startup_and_apply_migrate_schema_1_workflows_to_current_revision_preserving_in_flight_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    let home = dir.path().join("home");
+    let project_id;
+    let card_id;
+    let first_run_rev;
+    {
+        let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+        let p: Project = serde_json::from_value(
+            app.call(
+                "project.create",
+                json!({
+                    "name": "Legacy Schema 1",
+                    "directory": source,
+                    "workflow_yaml": r#"schema: 1
+id: delivery:legacy
+name: Legacy v1
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the card task in the supplied working directory. Explain your changes and validation in your report.
+    next: agent:custom
+  - id: agent:custom
+    uses: agent
+    with:
+      profile: reviewer
+      instruction: Verify project-specific invariants.
+    next: __end
+  - id: __end
+    uses: complete
+workspace:
+  create_worktree: false
+  sync_base: false
+"#
+                }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        project_id = p.id.clone();
+        // `project.create` with a `schema: 1` payload immediately upgrades it to CURRENT!
+        let col = collection(&app, &p);
+        let stored = col["sources"][0]["source"].as_str().unwrap();
+        assert!(stored.contains(&format!("schema: {}", canban_workflow_engine::migrations::CURRENT)));
+        assert!(!stored.contains("Explain your changes and validation in your report."));
+        assert!(stored.contains("Verify project-specific invariants."));
+
+        // Simulate an existing SQLite database created by an older Canban build with `schema: 1` in `workflow_revisions`.
+        let v1_raw = r#"schema: 1
+id: delivery:legacy
+name: Legacy v1
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+steps:
+  - id: agent:develop
+    uses: agent
+    with:
+      profile: developer
+      instruction: Implement the card task in the supplied working directory. Explain your changes and validation in your report.
+    next: __end
+  - id: __end
+    uses: complete
+workspace:
+  create_worktree: false
+  sync_base: false
+"#;
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut src: WorkflowSource = db
+                    .list::<WorkflowSource>()?
+                    .into_iter()
+                    .find(|s| s.project_id == p.id)
+                    .unwrap();
+                let mut rev: WorkflowRevision = db.get(&src.revision_id)?;
+                rev.source_yaml = Some(v1_raw.into());
+                src.hash = canban_context::digest(v1_raw.as_bytes());
+                db.save(&rev)?;
+                db.save(&src)
+            })
+            .unwrap();
+
+        let c: Card = serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"project_id": p.id, "title": "In flight", "body": "keep rev 1"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        card_id = c.id.clone();
+        app.call(
+            "card.move",
+            json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+        )
+        .unwrap();
+        let snap = app.snapshot().unwrap();
+        first_run_rev = snap
+            .workflow_runs
+            .iter()
+            .find(|r| r.card_id == c.id)
+            .unwrap()
+            .definition_revision;
+        assert_eq!(first_run_rev, 1);
+    }
+
+    // Reopening AppServer runs startup workflow migrations, publishing revision 2 (`schema: 2`)
+    // while preserving revision 1 in history and keeping the in-flight WorkflowRun on revision 1!
+    let app = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+    let snap = app.snapshot().unwrap();
+    let p = snap.projects.iter().find(|p| p.id == project_id).unwrap();
+    let col = collection(&app, p);
+    assert_eq!(col["active"][0]["revision"], 2);
+    let active_yaml = col["sources"][0]["source"].as_str().unwrap();
+    assert!(active_yaml.starts_with(&format!("schema: {}", canban_workflow_engine::migrations::CURRENT)));
+    assert!(!active_yaml.contains("instruction:"));
+
+    // Historical revision 1 remains intact for audit/rollback.
+    let old_rev = app
+        .call("workflow.get", json!({"workflow_id": "delivery:legacy", "revision": 1}))
+        .unwrap();
+    assert!(old_rev["source_yaml"].as_str().unwrap().starts_with("schema: 1"));
+
+    // Active run keeps its captured revision 1.
+    let run = snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == card_id && r.active())
+        .unwrap();
+    assert_eq!(run.definition_revision, first_run_rev);
+
+    // Compiled revision 2 fills in the latest built-in default prompt (`commit your changes on the Card branch`).
+    let latest_rev = app
+        .call("workflow.get", json!({"workflow_id": "delivery:legacy"}))
+        .unwrap();
+    assert!(
+        latest_rev["definition"]["steps"]["agent:develop"]["instruction"]
+            .as_str()
+            .unwrap()
+            .contains("commit your changes on the Card branch")
     );
 }

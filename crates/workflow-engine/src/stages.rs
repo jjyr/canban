@@ -566,29 +566,18 @@ pub fn move_column(doc: &mut Document, column: &str, to: usize) -> Result<()> {
 /// Step templates offered by "Add step".
 pub fn template(kind: &str) -> Option<Step> {
     let (id, name, uses, with): (&str, &str, &str, Vec<(&str, Value)>) = match kind {
-        "agent" => (
-            "agent",
-            "Agent",
-            "agent",
-            vec![("instruction", json!(crate::source::DEFAULT_DEVELOP_PROMPT))],
-        ),
+        "agent" => ("agent", "Agent", "agent", vec![]),
         "plan" => (
             "agent:plan",
             "Plan task",
             "agent",
-            vec![
-                ("profile", json!("developer")),
-                ("instruction", json!(crate::source::DEFAULT_PLAN_PROMPT)),
-            ],
+            vec![("profile", json!("developer"))],
         ),
         "review" => (
             "agent:review",
             "Review",
             "agent",
-            vec![
-                ("profile", json!("reviewer")),
-                ("instruction", json!(crate::source::DEFAULT_REVIEW_PROMPT)),
-            ],
+            vec![("profile", json!("reviewer"))],
         ),
         "approval" => (
             "approval",

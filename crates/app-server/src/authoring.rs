@@ -56,10 +56,13 @@ fn validate(
         ensure!(names.insert(name), "Duplicate filename {name}");
         let raw = strp(input, "source")?;
         let doc = source::parse(raw).with_context(|| name.to_owned())?;
+        let canonical = canban_workflow_engine::migrations::upgrade_yaml(raw)
+            .with_context(|| name.to_owned())?
+            .unwrap_or_else(|| raw.to_owned());
         if !doc.columns.is_empty() && (declared_columns.is_none() || name == "development.yaml") {
             declared_columns = Some(doc.columns.clone());
         }
-        parsed_docs.push((name.to_owned(), raw.to_owned(), doc));
+        parsed_docs.push((name.to_owned(), canonical, doc));
     }
     let effective_columns: Vec<String> = declared_columns
         .as_ref()
@@ -368,21 +371,39 @@ pub(super) fn initialize_new(
     )
 }
 
-/// Ensure every Project has an initialized SQL YAML workflow collection.
+/// Ensure every Project has an initialized SQL YAML workflow collection,
+/// and migrate any active workflow sources on older schema versions to `CURRENT`.
 pub(super) fn initialize(
     home: &Path,
     db: Db<'_>,
     config: &Config,
     project: &Project,
 ) -> Result<()> {
-    if db
+    let mut existing: Vec<_> = db
         .list::<WorkflowSource>()?
-        .iter()
-        .any(|f| f.project_id == project.id)
-    {
-        return Ok(());
+        .into_iter()
+        .filter(|f| f.project_id == project.id)
+        .collect();
+    if existing.is_empty() {
+        return initialize_new(home, db, config, project, None);
     }
-    initialize_new(home, db, config, project, None)
+    existing.sort_by(|a, b| a.filename.cmp(&b.filename));
+    let mut needs_upgrade = false;
+    let mut inputs = Vec::with_capacity(existing.len());
+    for item in &existing {
+        let rev: WorkflowRevision = db.get(&item.revision_id)?;
+        let raw = rev.source_yaml.context("Published YAML is missing")?;
+        if let Some(upgraded) = canban_workflow_engine::migrations::upgrade_yaml(&raw)? {
+            needs_upgrade = true;
+            inputs.push(json!({"filename": item.filename, "source": upgraded}));
+        } else {
+            inputs.push(json!({"filename": item.filename, "source": raw}));
+        }
+    }
+    if needs_upgrade {
+        publish(home, db, project, config, &inputs)?;
+    }
+    Ok(())
 }
 impl AppServer {
     pub(super) fn authoring_call(&self, method: &str, p: Value) -> Result<Value> {

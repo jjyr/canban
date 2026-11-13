@@ -108,7 +108,7 @@ impl AppServer {
     pub(super) fn workflow_call(&self, method: &str, p: Value) -> Result<Value> {
         match method {
             "workflow.schema" => Ok(
-                json!({"schema_version":1,"authoring_format":"YAML 1.2","yaml":{"schema":1,"id":"Workflow ID","name":"Display name","enabled":"optional boolean, default true","columns":[{"id":"column ID (e.g. backlog, design, develop, qa, review)","name":"Column display name"}],"on":{"rule_id":{"event":"manual | card.created | card.column_entered | card.column_left | ...","match":"EventSelector without types; Project scope implicit","start_at":"step ID","enabled":"optional boolean"}},"steps":[{"id":"stable step ID","name":"optional display name","uses":"agent | card.move | approval | deliver | admit | condition | notify | complete","with":"arguments as described in step_types below","next":"optional explicit successor; defaults to next item; card.move may use $entry (target column entry rule start, or end of run)","on_changes_requested":"optional approval/deliver rework target","stage":"optional Board column this step belongs to (Studio Stage); inferred when absent","enabled":"optional boolean, default true; false skips the step at compile time and references continue at its successor (a disabled condition follows otherwise)"}]},"source_operations":{"workflow.sources":{"project_id":"Project ID"},"workflow.check / workflow.apply":{"project_id":"Project ID","revision":"collection revision from workflow.sources","sources":[{"filename":"name.yaml","source":"original YAML"}]},"workflow.prompt":{"project_id":"Project ID"},"configuration.open":{"project_id":"Project ID","profile_id":"Profile ID","prompt":"reviewed Prompt","fresh":"explicit new conversation"}},"step_types":{"agent":{"profile":"optional Profile ID","instruction":"string","next":"optional step ID"},"card.move":{"column":"column ID, or $next for the column after the step's stage","next":"optional step ID or $entry"},"approval":{"title":"string","next":"optional step ID","rework":"optional step ID"},"deliver":{"target_branch":"optional target branch","sync_upstream":"optional boolean, default true (false merges locally without pushing upstream)","max_conflict_attempts":"optional integer, default 3; merge conflicts automatically route to on_changes_requested (rework) up to this many times per run, then pause for a human; 0 disables","next":"optional step ID","rework":"optional step ID"},"admit":{"agent_slot":"optional boolean, default true; wait for a free automatic Agent slot (scheduler.max_agents)","max_ready":"optional integer 1..100; at most this many Cards that passed this gate may remain in its column","next":"optional step ID","note":"waiting runs are admitted in Board order within their column"},"condition":{"pointer":"JSON pointer into inputs/outputs/card (e.g. /card/source_trust)","equals":"JSON value (e.g. external_pr | collaborator | local)","then":"step ID","otherwise":"step ID"},"notify":{"message":"string","next":"optional step ID"},"complete":{}},"operations":["workflow.sources","workflow.check","workflow.apply","workflow.prompt","workflow.list","workflow.get","workflow.start","workflow.runs","workflow.run","workflow.decide","workflow.stop","card.hold_auto_merge","event.list","subscription.save","subscription.list","subscription.deliveries","subscription.ack"],"parameters":{"workflow.sources":{"project_id":"Project ID"},"workflow.check":{"project_id":"Project ID","revision":"collection revision from workflow.sources","sources":[{"filename":"name.yaml","source":"original YAML"}]},"workflow.apply":{"project_id":"Project ID","revision":"collection revision from workflow.sources","sources":[{"filename":"name.yaml","source":"original YAML"}],"request_key":"optional idempotency key"},"workflow.start":{"card_id":"Card ID","workflow_id":"published ID","entry":"entry name","request_key":"optional idempotency key"},"workflow.get":{"workflow_id":"published ID","revision":"optional historical revision"},"workflow.run":{"run_id":"WorkflowRun ID"},"workflow.runs":{"card_id":"optional Card ID"},"workflow.decide":{"run_id":"WorkflowRun ID","visit":"current run.visit","revision":"current Card.revision","decision":"approve | rework","feedback":"optional rework instructions","request_key":"optional idempotency key"},"workflow.stop":{"run_id":"WorkflowRun ID"},"card.hold_auto_merge":{"card_id":"Card ID","revision":"current Card.revision","hold":"optional boolean; toggles when omitted"},"subscription.save":{"subscription_id":"omit for creation","revision":"current revision; 0 creates","enabled":"boolean; default false","selector":"EventSelector","target":"SubscriptionTarget"},"subscription.deliveries":{"subscription_id":"optional subscription ID"},"subscription.ack":{"delivery_id":"consumer receipt ID"},"subscription.retry":{"delivery_id":"failed receipt ID"},"event.list":{"after":"journal offset; default 0","limit":"1..500","selector":"optional EventSelector"}},"selector_fields":["project_id","card_id","repository","subject","types","column","changed_fields","actor","origin","source_kind","reason","reply_to","include_related","include_initial"],"subscription_targets":[{"type":"consumer"},{"type":"workflow","workflow_id":"published ID","entry":"entry name","card_id":"optional fixed Card ID"}],"workspace":{"create_worktree":"boolean","sync_base":"boolean","base_branch":"optional branch","remote":"remote name"},"activation":"YAML apply atomically publishes sources, optional Board columns, and named triggers. Future receipts/runs use the new revision. Existing runs and captured receipts retain theirs; independent subscriptions and manual starts remain explicit."}),
+                json!({"schema_version":canban_workflow_engine::migrations::CURRENT,"supported_schemas":[canban_workflow_engine::migrations::BASELINE,canban_workflow_engine::migrations::CURRENT],"authoring_format":"YAML 1.2","yaml":{"schema":canban_workflow_engine::migrations::CURRENT,"id":"Workflow ID","name":"Display name","enabled":"optional boolean, default true","columns":[{"id":"column ID (e.g. backlog, design, develop, qa, review)","name":"Column display name"}],"on":{"rule_id":{"event":"manual | card.created | card.column_entered | card.column_left | ...","match":"EventSelector without types; Project scope implicit","start_at":"step ID","enabled":"optional boolean"}},"steps":[{"id":"stable step ID","name":"optional display name","uses":"agent | card.move | approval | deliver | admit | condition | notify | complete","with":"arguments as described in step_types below","next":"optional explicit successor; defaults to next item; card.move may use $entry (target column entry rule start, or end of run)","on_changes_requested":"optional approval/deliver rework target","stage":"optional Board column this step belongs to (Studio Stage); inferred when absent","enabled":"optional boolean, default true; false skips the step at compile time and references continue at its successor (a disabled condition follows otherwise)"}]},"source_operations":{"workflow.sources":{"project_id":"Project ID"},"workflow.check / workflow.apply":{"project_id":"Project ID","revision":"collection revision from workflow.sources","sources":[{"filename":"name.yaml","source":"original YAML"}]},"workflow.prompt":{"project_id":"Project ID"},"configuration.open":{"project_id":"Project ID","profile_id":"Profile ID","prompt":"reviewed Prompt","fresh":"explicit new conversation"}},"step_types":{"agent":{"profile":"optional Profile ID","instruction":"optional string; uses built-in role/step default prompt when omitted","next":"optional step ID"},"card.move":{"column":"column ID, or $next for the column after the step's stage","next":"optional step ID or $entry"},"approval":{"title":"string","next":"optional step ID","rework":"optional step ID"},"deliver":{"target_branch":"optional target branch","sync_upstream":"optional boolean, default true (false merges locally without pushing upstream)","max_conflict_attempts":"optional integer, default 3; merge conflicts automatically route to on_changes_requested (rework) up to this many times per run, then pause for a human; 0 disables","next":"optional step ID","rework":"optional step ID"},"admit":{"agent_slot":"optional boolean, default true; wait for a free automatic Agent slot (scheduler.max_agents)","max_ready":"optional integer 1..100; at most this many Cards that passed this gate may remain in its column","next":"optional step ID","note":"waiting runs are admitted in Board order within their column"},"condition":{"pointer":"JSON pointer into inputs/outputs/card (e.g. /card/source_trust)","equals":"JSON value (e.g. external_pr | collaborator | local)","then":"step ID","otherwise":"step ID"},"notify":{"message":"string","next":"optional step ID"},"complete":{}},"operations":["workflow.sources","workflow.check","workflow.apply","workflow.prompt","workflow.list","workflow.get","workflow.start","workflow.runs","workflow.run","workflow.decide","workflow.deliver","workflow.stop","card.hold_auto_merge","event.list","subscription.save","subscription.list","subscription.deliveries","subscription.ack"],"parameters":{"workflow.sources":{"project_id":"Project ID"},"workflow.check":{"project_id":"Project ID","revision":"collection revision from workflow.sources","sources":[{"filename":"name.yaml","source":"original YAML"}]},"workflow.apply":{"project_id":"Project ID","revision":"collection revision from workflow.sources","sources":[{"filename":"name.yaml","source":"original YAML"}],"request_key":"optional idempotency key"},"workflow.start":{"card_id":"Card ID","workflow_id":"published ID","entry":"entry name","request_key":"optional idempotency key"},"workflow.get":{"workflow_id":"published ID","revision":"optional historical revision"},"workflow.run":{"run_id":"WorkflowRun ID"},"workflow.runs":{"card_id":"optional Card ID"},"workflow.decide":{"run_id":"WorkflowRun ID","visit":"current run.visit","revision":"current Card.revision","decision":"approve | rework","feedback":"optional rework instructions","request_key":"optional idempotency key"},"workflow.deliver":{"card_id":"Card ID","revision":"current Card.revision","request_key":"optional idempotency key"},"workflow.stop":{"run_id":"WorkflowRun ID"},"card.hold_auto_merge":{"card_id":"Card ID","revision":"current Card.revision","hold":"optional boolean; toggles when omitted"},"subscription.save":{"subscription_id":"omit for creation","revision":"current revision; 0 creates","enabled":"boolean; default false","selector":"EventSelector","target":"SubscriptionTarget"},"subscription.deliveries":{"subscription_id":"optional subscription ID"},"subscription.ack":{"delivery_id":"consumer receipt ID"},"subscription.retry":{"delivery_id":"failed receipt ID"},"event.list":{"after":"journal offset; default 0","limit":"1..500","selector":"optional EventSelector"}},"selector_fields":["project_id","card_id","repository","subject","types","column","changed_fields","actor","origin","source_kind","reason","reply_to","include_related","include_initial"],"subscription_targets":[{"type":"consumer"},{"type":"workflow","workflow_id":"published ID","entry":"entry name","card_id":"optional fixed Card ID"}],"workspace":{"create_worktree":"boolean","sync_base":"boolean","base_branch":"optional branch","remote":"remote name"},"activation":"YAML apply atomically publishes sources, optional Board columns, and named triggers. Older schema versions upgrade automatically via linear workflow migrations. Future receipts/runs use the new revision; existing runs and captured receipts retain theirs."}),
             ),
             "workflow.list" => Ok(json!(
                 self.store
@@ -202,7 +202,7 @@ impl AppServer {
                     p["execution"].is_null(),
                     "Human decisions require a user invocation"
                 );
-                self.mutate(method, &p, |db| {
+                let res = self.mutate(method, &p, |db| {
                     let mut run: WorkflowRun = db.get(strp(&p, "run_id")?)?;
                     ensure!(
                         p["visit"].as_u64() == Some(run.visit as u64),
@@ -221,7 +221,121 @@ impl AppServer {
                         p["feedback"].as_str(),
                     )?;
                     Ok(json!(run))
-                })
+                })?;
+                if res["state"] == "waiting_delivery" {
+                    let _ = self.pump_deliveries();
+                    if let Some(id) = res["id"].as_str() {
+                        let store = self.store.lock().unwrap();
+                        if let Ok(updated) = store.db().get::<WorkflowRun>(id) {
+                            return Ok(json!(updated));
+                        }
+                    }
+                }
+                Ok(res)
+            }
+            "workflow.deliver" => {
+                ensure!(
+                    p["execution"].is_null(),
+                    "Triggering auto-merge requires a user invocation"
+                );
+                let res = self.mutate(method, &p, |db| {
+                    let mut card: Card = db.get(strp(&p, "card_id")?)?;
+                    revise(&card, &p)?;
+                    ensure!(card.active(), "Restore the Card before merging");
+                    let config = self.config();
+                    if let Some(mut run) = db
+                        .list::<WorkflowRun>()?
+                        .into_iter()
+                        .find(|r| r.card_id == card.id && r.active())
+                    {
+                        let is_deliver = run.step.as_ref().is_some_and(|k| {
+                            matches!(
+                                run.definition.steps.get(k),
+                                Some(WorkflowStep::Deliver { .. })
+                            )
+                        });
+                        if is_deliver && run.state == "waiting_approval" {
+                            approve(db, &config, &mut card, &mut run, false, None)?;
+                            return Ok(json!(run));
+                        }
+                        if is_deliver && run.state == "waiting_delivery" {
+                            card.hold_auto_merge = false;
+                            card.human_gate = None;
+                            card.attention = None;
+                            card.revision += 1;
+                            db.save(&card)?;
+                            return Ok(json!(run));
+                        }
+                        bail!("Card workflow is currently active at another step");
+                    }
+                    // No active workflow run: find the latest enabled workflow on this Project
+                    // containing a `Deliver` step and start directly from it.
+                    let enabled_ids: std::collections::BTreeSet<String> = db
+                        .list::<WorkflowSource>()?
+                        .into_iter()
+                        .filter(|s| s.project_id == card.project_id && s.enabled)
+                        .map(|s| s.workflow_id)
+                        .collect();
+                    let mut latest_by_wf = std::collections::BTreeMap::new();
+                    for w in db
+                        .list::<WorkflowRevision>()?
+                        .into_iter()
+                        .filter(|w| w.project_id == card.project_id)
+                    {
+                        if enabled_ids.is_empty() || enabled_ids.contains(&w.workflow_id) {
+                            latest_by_wf.insert(w.workflow_id.clone(), w);
+                        }
+                    }
+                    let (w, step_id) = latest_by_wf
+                        .into_values()
+                        .find_map(|w| {
+                            let stage_entry = w
+                                .definition
+                                .entries
+                                .get(&card.stage)
+                                .filter(|k| {
+                                    matches!(
+                                        w.definition.steps.get(*k),
+                                        Some(WorkflowStep::Deliver { .. })
+                                    )
+                                })
+                                .cloned();
+                            let any_deliver = stage_entry.or_else(|| {
+                                w.definition
+                                    .steps
+                                    .iter()
+                                    .find(|(_, st)| matches!(st, WorkflowStep::Deliver { .. }))
+                                    .map(|(k, _)| k.clone())
+                            });
+                            any_deliver.map(|k| (w, k))
+                        })
+                        .context("No Queue merge (deliver) step configured in this Project's workflow")?;
+                    card.hold_auto_merge = false;
+                    card.human_gate = None;
+                    card.attention = None;
+                    card.revision += 1;
+                    db.save(&card)?;
+                    let legacy = w.workflow_id.starts_with("delivery:");
+                    let run = start(
+                        db,
+                        &config,
+                        &mut card,
+                        w.definition,
+                        w.revision,
+                        &step_id,
+                        None,
+                        legacy,
+                    )?;
+                    Ok(json!(run))
+                })?;
+                let _ = self.pump_deliveries();
+                if let Some(id) = res["id"].as_str() {
+                    let store = self.store.lock().unwrap();
+                    if let Ok(updated) = store.db().get::<WorkflowRun>(id) {
+                        return Ok(json!(updated));
+                    }
+                }
+                Ok(res)
             }
             _ => bail!("Unknown workflow operation {method}"),
         }
@@ -232,7 +346,7 @@ impl AppServer {
             "Human review must be approved by the user, not an Agent invocation"
         );
         let config = self.config();
-        self.mutate("card.continue", &p, |db| {
+        let res = self.mutate("card.continue", &p, |db| {
             let mut card: Card = db.get(strp(&p, "card_id")?)?;
             revise(&card, &p)?;
             ensure!(card.active(), "Restore the Card before continuing");
@@ -332,6 +446,14 @@ impl AppServer {
             }
             db.save(&card)?;
             Ok(json!(card))
-        })
+        })?;
+        let _ = self.pump_deliveries();
+        if let Some(id) = res["id"].as_str() {
+            let store = self.store.lock().unwrap();
+            if let Ok(updated) = store.db().get::<Card>(id) {
+                return Ok(json!(updated));
+            }
+        }
+        Ok(res)
     }
 }

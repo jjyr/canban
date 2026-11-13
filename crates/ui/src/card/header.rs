@@ -102,16 +102,41 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
                     .on_select(move || dispatch(ui, "workflow.stop", json!({"run_id":run.id}))),
             );
         }
-        let has_deliver_in_project = ui.snapshot.with_untracked(|s| {
-            s.workflow_revisions.iter().any(|w| {
+        let (has_deliver_in_project, active_non_deliver) = ui.snapshot.with_untracked(|s| {
+            let has_deliver = s.workflow_revisions.iter().any(|w| {
                 w.project_id == card.project_id
                     && w.definition
                         .steps
                         .values()
                         .any(|st| matches!(st, canban_types::WorkflowStep::Deliver { .. }))
-            })
+            });
+            let non_deliver = s.workflow_runs.iter().any(|r| {
+                r.card_id == card.id
+                    && r.active()
+                    && !r.step.as_ref().is_some_and(|k| {
+                        matches!(
+                            r.definition.steps.get(k),
+                            Some(canban_types::WorkflowStep::Deliver { .. })
+                        )
+                    })
+            });
+            (has_deliver, non_deliver)
         });
         if has_deliver_in_project && card.active() {
+            if card.worktree.is_some()
+                && card.delivery.is_none()
+                && !card.pull_request.as_ref().is_some_and(|p| p.merged)
+            {
+                let cid = card.id.clone();
+                let rev = card.revision;
+                items.push(
+                    MenuItem::new("Retry auto-merge")
+                        .disabled(active_non_deliver)
+                        .on_select(move || {
+                            dispatch(ui, "workflow.deliver", json!({"card_id":cid,"revision":rev}))
+                        }),
+                );
+            }
             let held = card.hold_auto_merge;
             let cid = card.id.clone();
             let rev = card.revision;

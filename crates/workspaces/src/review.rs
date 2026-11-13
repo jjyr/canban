@@ -52,6 +52,95 @@ impl Ops {
         );
         Ok(out.stdout)
     }
+
+    /// Best-effort checkpoint commit of uncommitted deliverable edits in a managed Card
+    /// worktree when an Agent reports completion without running `git commit` itself.
+    /// Never touches the Project's main checkout or an in-progress merge.
+    pub fn commit_card_worktree_if_dirty(
+        &self,
+        project: &Project,
+        card: &Card,
+        message: &str,
+    ) -> Result<Option<String>> {
+        let Some(worktree) = card.worktree.as_deref() else {
+            return Ok(None);
+        };
+        let cwd = Path::new(worktree);
+        let source = Path::new(&project.directory);
+        if !self.host.is_dir(cwd) || self.host.canonical(source)? == self.host.canonical(cwd)? {
+            return Ok(None);
+        }
+        if self
+            .git(cwd, &["rev-parse", "--verify", "MERGE_HEAD"])?
+            .status
+            .success()
+        {
+            return Ok(None);
+        }
+        let status = self.r_checked(
+            cwd,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?;
+        if status.is_empty() {
+            return Ok(None);
+        }
+        let msg = message.trim();
+        let fallback = format!("Canban #{}: {}", card.number, card.title);
+        let commit_msg = if msg.is_empty() {
+            fallback.as_str()
+        } else {
+            msg
+        };
+        self.r_checked(cwd, &["add", "-A", "--", "."])?;
+        if self
+            .git(cwd, &["diff", "--cached", "--quiet"])?
+            .status
+            .success()
+        {
+            return Ok(None);
+        }
+        self.r_checked(cwd, &["commit", "-m", commit_msg])?;
+        Ok(Some(self.r_text(cwd, &["rev-parse", "HEAD"])?))
+    }
+
+    /// Returns any in-progress textual merge conflict in the Card worktree (`MERGE_HEAD` +
+    /// unmerged paths) so an interrupted Queue merge can re-route conflict resolution on retry.
+    pub fn pending_merge_conflict(
+        &self,
+        project: &Project,
+        card: &Card,
+        target: Option<&str>,
+    ) -> Result<Option<(String, String, Vec<String>)>> {
+        let Some(worktree) = card.worktree.as_deref() else {
+            return Ok(None);
+        };
+        let cwd = Path::new(worktree);
+        let source = Path::new(&project.directory);
+        if !self.host.is_dir(cwd) || self.host.canonical(source)? == self.host.canonical(cwd)? {
+            return Ok(None);
+        }
+        let in_merge = self
+            .git(cwd, &["rev-parse", "--verify", "MERGE_HEAD"])?
+            .status
+            .success();
+        let files =
+            names(&self.r_checked(cwd, &["diff", "--name-only", "--diff-filter=U", "-z"])?)?;
+        if !in_merge || files.is_empty() {
+            return Ok(None);
+        }
+        let source_branch = self.current_branch(&project.directory).unwrap_or_default();
+        let target_branch = target
+            .map(str::to_owned)
+            .or_else(|| project.target_branch.clone())
+            .unwrap_or(source_branch);
+        if target_branch.is_empty() {
+            return Ok(None);
+        }
+        let target_head = self
+            .r_text(cwd, &["rev-parse", "--verify", "MERGE_HEAD"])
+            .unwrap_or_default();
+        Ok(Some((target_branch, target_head, files)))
+    }
     fn r_text(&self, dir: &Path, args: &[&str]) -> Result<String> {
         Ok(String::from_utf8(self.r_checked(dir, args)?)
             .context("Git returned a non-UTF-8 path/ref")?

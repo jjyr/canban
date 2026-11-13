@@ -535,7 +535,7 @@ fn new_workflow(ui: Ui) {
         let mut n = 1;
         while draft.sources.contains_key(&format!("workflow-{n}.yaml")) { n += 1; }
         name = format!("workflow-{n}.yaml");
-        draft.sources.insert(name.clone(), format!("schema: 1\nid: workflow-{}\nname: New workflow\non:\n  manual:\n    event: manual\n    start_at: explain\nsteps:\n  - id: explain\n    uses: agent\n    with:\n      profile: {}\n      instruction: |\n        Read the Card and propose a concrete plan.\n", canban_types::id(), ui.profiles.with_untracked(|p| p.first().map(|p| p.id.clone()).unwrap_or_default())));
+        draft.sources.insert(name.clone(), format!("schema: {}\nid: workflow-{}\nname: New workflow\non:\n  manual:\n    event: manual\n    start_at: explain\nsteps:\n  - id: explain\n    uses: agent\n    with:\n      profile: {}\n      instruction: |\n        Read the Card and propose a concrete plan.\n", canban_workflow_engine::migrations::CURRENT, canban_types::id(), ui.profiles.with_untracked(|p| p.first().map(|p| p.id.clone()).unwrap_or_default())));
         draft.selected = name.clone();
     });
     state.selected.set(name);

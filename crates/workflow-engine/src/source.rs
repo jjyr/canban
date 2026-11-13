@@ -57,12 +57,8 @@ pub fn parse(source: &str) -> Result<Document> {
         source.len() <= 2 * 1024 * 1024,
         "Workflow source exceeds 2 MiB"
     );
-    let doc: Document = serde_yaml_ng::from_str(source)?;
-    ensure!(
-        doc.schema == 1,
-        "Unsupported workflow schema {}",
-        doc.schema
-    );
+    let mut doc: Document = serde_yaml_ng::from_str(source)?;
+    crate::migrations::upgrade(&mut doc)?;
     ensure!(!doc.on.is_empty(), "Workflow needs at least one on rule");
     Ok(doc)
 }
@@ -172,6 +168,18 @@ impl Document {
                 other => bail!("Unknown uses: {other}"),
             };
             args.insert("type".into(), json!(kind));
+            if kind == "agent"
+                && args
+                    .get("instruction")
+                    .and_then(|v| v.as_str())
+                    .is_none_or(|s| s.trim().is_empty())
+            {
+                let prof = args.get("profile").and_then(|v| v.as_str());
+                args.insert(
+                    "instruction".into(),
+                    json!(default_step_prompt(&step.id, prof)),
+                );
+            }
             let stage = stages.get(&step.id).map(String::as_str);
             let mut raw = self.raw_next(i);
             if kind == "move" {
@@ -383,7 +391,7 @@ pub fn encode(document: &Document) -> Result<String> {
 }
 
 pub const DEFAULT_PLAN_PROMPT: &str = "Analyze the Card task, inspect relevant repository files, and write a concise implementation plan with files to change, risks, and validation steps in your report. Do not modify code in this planning step.";
-pub const DEFAULT_DEVELOP_PROMPT: &str = "Implement the card task in the supplied working directory. Explain your changes and validation in your report.";
+pub const DEFAULT_DEVELOP_PROMPT: &str = "Implement the card task in the supplied working directory, commit your changes on the Card branch, and explain your changes and validation in your report.";
 pub const DEFAULT_REVIEW_PROMPT: &str = "Review the work for this card. Inspect the code and earlier results, then write an ordinary Markdown review report. Report findings and any remaining concerns. Do not implement unrelated changes.";
 pub const DEFAULT_MERGE_PROMPT: &str = "Perform pre-merge verification for this card. Run tests and checks in the working directory, verify there are no blockers or unintended changes, and summarize readiness in your report.";
 
@@ -402,12 +410,7 @@ pub fn default_step_prompt(step_id: &str, profile: Option<&str>) -> &'static str
 
 pub fn is_default_step_prompt(step_id: &str, profile: Option<&str>, instruction: &str) -> bool {
     let trimmed = instruction.trim();
-    trimmed.is_empty()
-        || trimmed == default_step_prompt(step_id, profile).trim()
-        || trimmed == DEFAULT_PLAN_PROMPT
-        || trimmed == DEFAULT_DEVELOP_PROMPT
-        || trimmed == DEFAULT_REVIEW_PROMPT
-        || trimmed == DEFAULT_MERGE_PROMPT
+    trimmed.is_empty() || trimmed == default_step_prompt(step_id, profile).trim()
 }
 
 /// Default workflow document for newly created Projects:
@@ -417,7 +420,7 @@ pub fn is_default_step_prompt(step_id: &str, profile: Option<&str>, instruction:
 ///    external untrusted PRs pause at `approval:review` before merging).
 pub fn default_document(workflow_id: impl Into<String>, workspace: WorkspaceSettings) -> Document {
     Document {
-        schema: 1,
+        schema: crate::migrations::CURRENT,
         id: workflow_id.into(),
         name: "Development".into(),
         enabled: true,
@@ -466,10 +469,7 @@ pub fn default_document(workflow_id: impl Into<String>, workspace: WorkspaceSett
                 id: "agent:develop".into(),
                 name: Some("Implement".into()),
                 uses: "agent".into(),
-                with: BTreeMap::from([
-                    ("profile".into(), json!("developer")),
-                    ("instruction".into(), json!(DEFAULT_DEVELOP_PROMPT)),
-                ]),
+                with: BTreeMap::from([("profile".into(), json!("developer"))]),
                 next: Some("move:develop".into()),
                 on_changes_requested: None,
                 stage: None,
@@ -1038,12 +1038,12 @@ fn set_backlog_flow(doc: &mut Document, analyze: bool, auto_develop: bool) {
                 .with
                 .get("instruction")
                 .and_then(|v| v.as_str())
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or(DEFAULT_PLAN_PROMPT)
-                .to_owned();
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_owned);
             (prof, instr)
         })
-        .unwrap_or_else(|| ("developer".into(), DEFAULT_PLAN_PROMPT.into()));
+        .unwrap_or_else(|| ("developer".into(), None));
 
     let existing_approval = doc
         .steps
@@ -1154,16 +1154,17 @@ fn set_backlog_flow(doc: &mut Document, analyze: bool, auto_develop: bool) {
         if let Some(existing) = doc.steps.iter_mut().find(|s| s.id == plan_step_id) {
             existing.next = Some(after_plan);
         } else {
+            let mut with = BTreeMap::from([("profile".into(), json!(plan_profile))]);
+            if let Some(prompt) = plan_prompt {
+                with.insert("instruction".into(), json!(prompt));
+            }
             doc.steps.insert(
                 0,
                 Step {
                     id: plan_step_id.clone(),
                     name: Some("Analyze task".into()),
                     uses: "agent".into(),
-                    with: BTreeMap::from([
-                        ("profile".into(), json!(plan_profile)),
-                        ("instruction".into(), json!(plan_prompt)),
-                    ]),
+                    with,
                     next: Some(after_plan),
                     on_changes_requested: None,
                     stage: None,
@@ -1762,7 +1763,7 @@ mod tests {
         assert!(
             parse(&source.replace("event: manual", "event: manual\n    event: manual")).is_err()
         );
-        assert!(parse(&source.replace("schema: 1", "schema: 2")).is_err());
+        assert!(parse(&source.replace("schema: 1", "schema: 99")).is_err());
         assert!(
             parse(&source.replace("uses: agent", "uses: arbitrary"))
                 .unwrap()

@@ -156,11 +156,13 @@ pub fn start(
             .any(|r| r.card_id == card.id && r.active()),
         "Card already has an active workflow"
     );
-    let step = flow
-        .entries
-        .get(entry)
-        .context("Unknown workflow entry")?
-        .clone();
+    let step = if let Some(s) = flow.entries.get(entry) {
+        s.clone()
+    } else if flow.steps.contains_key(entry) {
+        entry.to_owned()
+    } else {
+        bail!("Unknown workflow entry")
+    };
     let mut run = WorkflowRun {
         id: id(),
         project_id: card.project_id.clone(),

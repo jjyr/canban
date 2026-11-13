@@ -140,7 +140,13 @@ fn step_model(
 ) -> StepModel {
     let title = titles.get(&step.id).cloned().unwrap_or_else(|| step.id.clone());
     let profile = with_str(step, "profile").unwrap_or("").to_owned();
-    let instruction = with_str(step, "instruction").unwrap_or("").to_owned();
+    let raw_instruction = with_str(step, "instruction").unwrap_or("");
+    let is_default = is_default_step_prompt(&step.id, Some(&profile), raw_instruction);
+    let instruction = if is_default {
+        default_step_prompt(&step.id, Some(&profile)).to_owned()
+    } else {
+        raw_instruction.to_owned()
+    };
     let sync_upstream = step
         .with
         .get("sync_upstream")
@@ -173,7 +179,7 @@ fn step_model(
     );
     let (icon, tint, badge, summary) = match step.uses.as_str() {
         "agent" => {
-            let custom = !is_default_step_prompt(&step.id, Some(&profile), &instruction);
+            let custom = !is_default;
             (
                 Icon::Agent,
                 Tint::Accent,
@@ -282,7 +288,7 @@ fn step_model(
         enabled: step.enabled,
         branch,
         pills,
-        default_prompt: is_default_step_prompt(&step.id, Some(&profile), &instruction),
+        default_prompt: is_default,
         profile,
         instruction,
         sync_upstream,
@@ -1364,10 +1370,7 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                             move || {
                                 let reset_id = reset_id.clone();
                                 compact_action("Reset to default", Variant::Secondary, move |_| {
-                                    let def = node.with_untracked(|n| {
-                                        default_step_prompt(&n.id, Some(&n.profile)).to_owned()
-                                    });
-                                    ctx.set_with(&reset_id, "instruction", Some(json!(def)));
+                                    ctx.set_with(&reset_id, "instruction", None);
                                 })
                             },
                         ))
@@ -1561,6 +1564,7 @@ fn prompt_dialog(ctx: Ctx) -> impl IntoElement {
     let editor = canban_ui_kit::markdown::MarkdownInput::new();
     let close = move || ctx.prompt.set(String::new());
     let (save_id, reset_profile) = (id.clone(), model.profile.clone());
+    let apply_profile = reset_profile.clone();
     let reset_id = id.clone();
     super::workflow_dialog(
         view()
@@ -1603,7 +1607,13 @@ fn prompt_dialog(ctx: Ctx) -> impl IntoElement {
                     .child(action("Cancel", Variant::Quiet, move |_| close()))
                     .child(action("Apply", Variant::Primary, move |_| {
                         let value = text.get_untracked();
-                        ctx.set_with(&save_id, "instruction", Some(json!(value)));
+                        let next_val = (!is_default_step_prompt(
+                            &save_id,
+                            Some(&apply_profile),
+                            &value,
+                        ))
+                        .then(|| json!(value));
+                        ctx.set_with(&save_id, "instruction", next_val);
                         close();
                     })),
             ),

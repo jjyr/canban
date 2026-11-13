@@ -1,21 +1,10 @@
 use super::*;
 pub(super) fn activity_warning(db: Db<'_>, card: &Card) -> Result<Option<String>> {
-    if db.list::<Attempt>()?.iter().any(|a| {
-        // Continued assignments retain their last observation, but runtime
-        // ownership has moved to the next assignment in the conversation.
-        a.card_id == card.id && a.terminal.is_some() && !a.agent_stopped()
-    }) {
-        return Ok(Some(
-            "Card Agent is still running; merging now only includes current worktree changes"
-                .into(),
-        ));
-    }
-    if db.list::<Request>()?.iter().any(|r| {
-        r.card_id == card.id && matches!(r.state.as_str(), "queued" | "starting" | "unknown")
-    }) {
-        return Ok(Some("Card still has queued or uncertain Agent work".into()));
-    }
-    Ok(None)
+    Ok(canban_types::agent_activity_warning(
+        &card.id,
+        &db.list::<Attempt>()?,
+        &db.list::<Request>()?,
+    ))
 }
 impl AppServer {
     pub(super) fn review_preview(&self, p: Value) -> Result<Value> {
@@ -324,6 +313,10 @@ impl AppServer {
             }
         };
         if !plan.merge_allowed {
+            let pending_conflict = ops
+                .pending_merge_conflict(&workspace_project, &card, target_branch)
+                .ok()
+                .flatten();
             let reason = format!(
                 "Auto-merge paused: {}",
                 plan.reason
@@ -334,6 +327,21 @@ impl AppServer {
                 let mut current_card: Card = db.get(&card.id)?;
                 let mut current_run: WorkflowRun = db.get(&run.id)?;
                 if current_run.state == "waiting_delivery" {
+                    if let Some((ref conflict_branch, ref conflict_head, ref files)) =
+                        pending_conflict
+                        && canban_workflow_engine::runtime::rework_conflict(
+                            db,
+                            &config,
+                            &mut current_card,
+                            &mut current_run,
+                            conflict_branch,
+                            conflict_head,
+                            files,
+                            enqueue,
+                        )?
+                    {
+                        return Ok(());
+                    }
                     canban_workflow_engine::runtime::hold_delivery(
                         db,
                         &mut current_card,

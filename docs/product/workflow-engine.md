@@ -124,7 +124,7 @@ issue-planning.yaml  • |
 YAML 1.2 parsing uses `serde_yaml_ng` with `deny_unknown_fields`. Duplicate keys, unknown fields, missing step targets, undeclared column/Profile IDs, and automatic cycles fail validation before publication.
 
 ```yaml
-schema: 1
+schema: 2
 id: delivery:example
 name: Development
 enabled: true
@@ -152,7 +152,6 @@ steps:
     uses: agent
     with:
       profile: developer
-      instruction: Implement the card task in the supplied working directory. Explain your changes and validation in your report.
     next: move:develop
   - id: move:develop
     name: Move to Review
@@ -207,7 +206,7 @@ Studio UI: Stage lanes are generated from the graph (no column-specific panels).
 
 | `uses` | `with` arguments and behavior |
 | --- | --- |
-| `agent` | optional `profile` (falls back to global `default_agent`), required `instruction`. Enqueues a `Request` bound to `run_id` and `<step_id>:<visit>`. |
+| `agent` | optional `profile` (falls back to global `default_agent`), optional `instruction` (resolves to the built-in step/role default prompt at compile time when omitted). Enqueues a `Request` bound to `run_id` and `<step_id>:<visit>`. |
 | `card.move` | `column` (must exist in effective columns). Emits `card.stage_changed` with `origin: "workflow"`. |
 | `condition` | JSON `pointer` into `{inputs, outputs, card}` (e.g. `/card/source_trust`), exact `equals`, `then`, and `otherwise` step IDs. |
 | `approval` | `title`, optional `on_changes_requested` rework step ID. Pauses the run in `waiting_approval` and sets `Card.human_gate`. |
@@ -251,6 +250,7 @@ All clients share the same AppServer validation and publication boundary (`canba
 | `workflow.start` | `card_id`, `workflow_id`, `entry` -> explicit manual run start |
 | `workflow.runs` / `workflow.run` | Inspect active and historical `WorkflowRun`s |
 | `workflow.decide` | `run_id`, `visit`, `revision`, `decision: "approve" \| "rework"`, optional `feedback` |
+| `workflow.deliver` | `card_id`, `revision` -> manually trigger or retry Queue Merge (approving a paused `deliver` gate or starting a fresh run at the Project's active `deliver` step) |
 | `card.hold_auto_merge` | `card_id`, `revision`, optional `hold: bool` -> pause or resume Queue Merge on a Card |
 | `workflow.stop` | `run_id` -> cancel future run progression |
 | `event.list` / `subscription.*` | Durable journal pagination and `save` / `list` / `deliveries` / `ack` / `retry` |
@@ -261,7 +261,11 @@ CLI file transport helpers (`canban workflow submit --check` / `submit` / `expor
 
 ## Migration and verification summary
 
-- **Schema 11–12 migration:** Upgrades legacy Project `Workflow` stage templates, queued/running `Request`s, and pending human gates into SQLite `development.yaml` revisions and `WorkflowRun` checkpoints without relaunching Agents or recreating worktrees. Downgrade refuses to discard user-authored YAML sources or active configuration sessions.
+- **SQLite schema 11–12 migration:** Upgrades legacy Project `Workflow` stage templates, queued/running `Request`s, and pending human gates into SQLite `development.yaml` revisions and `WorkflowRun` checkpoints without relaunching Agents or recreating worktrees. Downgrade refuses to discard user-authored YAML sources or active configuration sessions.
+- **Linear Workflow YAML schema migrations (`crates/workflow-engine/src/migrations.rs`, `BASELINE = 1`, `CURRENT = 2`):**
+  - Authoring, compilation, and Studio UI target `CURRENT` exclusively instead of retaining legacy branches across modules.
+  - `source::parse` upgrades older supported `Document.schema` inputs (`1..=CURRENT`) in memory, `workflow.apply` / `project.create` canonicalize older submitted YAML to `CURRENT`, and `AppServer` startup (`authoring::initialize`) automatically publishes a migrated `WorkflowRevision` for any active `WorkflowSource` still on an older `schema`—keeping historical revisions intact and leaving active `WorkflowRun`s pinned to their captured `definition_revision`.
+  - **Workflow schema 2:** Strips unmodified v1 built-in Agent prompts from `with.instruction` so built-in prompts resolve at compile time while user-customized prompts stay explicit in YAML.
 - **Verification suite:**
   - `mise run test` & `cargo clippy --workspace --all-targets -- -D warnings`: Unit and integration coverage in `crates/workflow-engine/src/source.rs` and `crates/app-server/src/tests/workflows.rs`, including default `development.yaml` (`Backlog` quiet intake, `Develop` auto-run, `Review` Queue Merge with `sync_upstream: true` against bare Git remotes vs. `sync_upstream: false` local-only merge), Backlog Auto-Analyze + Auto-Start Develop sequencing, Manual Review gates, external PR trust branching, rework feedback, and 4-column custom workflow preservation.
   - `mise run acceptance` & `mise run acceptance-workflows`: Isolated Herdr Core + real PTY end-to-end execution, restart checkpointing, optimistic `revision_conflict` protection, and CLI export/submit checks.
