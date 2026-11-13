@@ -621,97 +621,112 @@ fn controls(ui: Ui) -> impl IntoElement {
 pub fn screen(ui: Ui) -> impl IntoElement {
     tabs::context_updates(ui);
 
-    view().flex_1().min_h(px(0.)).min_w(px(0.)).child(
-        nsh_base::h_resizable()
-            .flex_1()
-            .min_h(px(0.))
-            .handle_accessibility_label("Resize Terminal sidebar")
-            .render_handle(|_: &nsh_base::ResizeHandleContext| {
-                view()
-                    .w(px(5.))
-                    .h_full()
-                    .items_center()
-                    .justify_center()
-                    .hover(|s| s.bg(ACCENT))
-                    .active(|s| s.bg(ACCENT))
-                    .child(view().w(px(1.)).h_full().bg(BORDER))
-            })
-            .on_resize(move |sizes: &Vec<Points>| {
-                if !ui.narrow.get_untracked()
-                    && ui.terminal_sidebar.get_untracked()
-                    && let Some(size) = sizes.first()
-                {
-                    ui.terminal_width.set((size.0 - 56.).max(190.));
-                    ui.terminal_focus.update(|v| *v += 1);
-                }
-            })
-            .child(
-                nsh_base::resizable_panel()
-                    .size(move || {
-                        if ui.narrow.get() && ui.terminal_sidebar.get() {
-                            None
-                        } else {
-                            Some(px(if ui.terminal_sidebar.get() {
-                                56. + ui.terminal_width.get()
-                            } else {
-                                56.
-                            }))
-                        }
-                    })
-                    .min_size(move || px(if ui.terminal_sidebar.get() { 246. } else { 56. }))
-                    .max_size(move || {
-                        px(if ui.terminal_sidebar.get() {
-                            if ui.narrow.get() { 10000. } else { 600. }
-                        } else {
-                            56.
+    view()
+        .flex_1()
+        .min_h(px(0.))
+        .min_w(px(0.))
+        .flex_row()
+        .child(
+            view()
+                .w(px(56.))
+                .flex_shrink_0()
+                .min_h(px(0.))
+                .bg(SURFACE)
+                .child(
+                    view()
+                        .h(px(42.))
+                        .flex_shrink_0()
+                        .border_b_1()
+                        .border_color(BORDER)
+                        .window_drag(true),
+                )
+                .child(
+                    view()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .child(crate::rail::sidebar(ui)),
+                ),
+        )
+        .child(
+            view()
+                .flex_1()
+                .min_h(px(0.))
+                .min_w(px(0.))
+                .child(
+                    nsh_base::h_resizable()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .handle_accessibility_label("Resize Terminal sidebar")
+                        .render_handle(|_: &nsh_base::ResizeHandleContext| {
+                            view()
+                                .w(px(5.))
+                                .h_full()
+                                .items_center()
+                                .justify_center()
+                                .hover(|s| s.bg(ACCENT))
+                                .active(|s| s.bg(ACCENT))
+                                .child(view().w(px(1.)).h_full().bg(BORDER))
                         })
-                    })
-                    .fixed(move || !ui.narrow.get() || !ui.terminal_sidebar.get())
-                    .child(
-                        view()
-                            .flex_1()
-                            .min_h(px(0.))
-                            .bg(SURFACE)
-                            .child(
-                                view()
-                                    .h(px(42.))
-                                    .flex_shrink_0()
-                                    .flex_row()
-                                    .items_center()
-                                    .border_b_1()
-                                    .border_color(BORDER)
-                                    .window_drag(true)
-                                    .pl(move || px(crate::frame::chrome_left_padding()))
-                                    .child(when(
-                                        move || ui.terminal_sidebar.get(),
-                                        move || controls(ui),
-                                    )),
-                            )
-                            .child(
-                                view()
-                                    .flex_1()
-                                    .min_h(px(0.))
-                                    .flex_row()
-                                    .child(crate::rail::sidebar(ui))
-                                    .child(when(
-                                        move || ui.terminal_sidebar.get(),
-                                        move || tree::sidebar(ui),
-                                    )),
-                            ),
-                    ),
-            )
-            .child(
-                nsh_base::resizable_panel()
-                    .min_size(px(300.))
-                    .visible(move || !ui.narrow.get() || !ui.terminal_sidebar.get())
-                    .child(
-                        view()
-                            .flex_1()
-                            .min_h(px(0.))
-                            .min_w(px(0.))
-                            .child(tabs::header(ui))
-                            .child(viewer::screen(ui)),
-                    ),
-            ),
-    )
+                        .on_resize(move |sizes: &Vec<Points>| {
+                            if !ui.narrow.get_untracked()
+                                && ui.terminal_sidebar.get_untracked()
+                                && let Some(size) = sizes.first()
+                            {
+                                ui.terminal_width.set(size.0.max(190.));
+                                ui.terminal_focus.update(|v| *v += 1);
+                            }
+                        })
+                        .child(
+                            nsh_base::resizable_panel()
+                                .visible(move || ui.terminal_sidebar.get())
+                                .size(move || {
+                                    if ui.narrow.get() {
+                                        None
+                                    } else {
+                                        Some(px(ui.terminal_width.get()))
+                                    }
+                                })
+                                .min_size(px(190.))
+                                .max_size(move || px(if ui.narrow.get() { 10000. } else { 544. }))
+                                .fixed(move || !ui.narrow.get())
+                                .child(
+                                    view()
+                                        .flex_1()
+                                        .min_h(px(0.))
+                                        .bg(SURFACE)
+                                        .child(
+                                            view()
+                                                .h(px(42.))
+                                                .flex_shrink_0()
+                                                .flex_row()
+                                                .items_center()
+                                                .border_b_1()
+                                                .border_color(BORDER)
+                                                .window_drag(true)
+                                                .pl(move || {
+                                                    px((crate::frame::chrome_left_padding() - 56.)
+                                                        .max(0.))
+                                                })
+                                                .child(controls(ui)),
+                                        )
+                                        .child(tree::sidebar(ui)),
+                                ),
+                        )
+                        .child(
+                            nsh_base::resizable_panel()
+                                .min_size(px(300.))
+                                .visible(move || !ui.narrow.get() || !ui.terminal_sidebar.get())
+                                .child(
+                                    view()
+                                        .flex_1()
+                                        .min_h(px(0.))
+                                        .min_w(px(0.))
+                                        .child(tabs::header(ui))
+                                        .child(viewer::screen(ui)),
+                                ),
+                        ),
+                )
+                .child(crate::frame::backend_notice(ui))
+                .child(crate::utilities::bar(ui)),
+        )
 }

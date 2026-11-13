@@ -33,7 +33,7 @@ App chrome derives semantic colors from the selection; the Terminal keeps its ex
 
 The desktop preference also supports optional `last_project`, a stable Project ID used to restore the startup Board. `utilities.configure` accepts `theme`, `last_project`, or both; omitted fields retain their saved value and explicit null clears the Project preference. Validate theme/Project values before writing, and skip unchanged writes. The normal UI saves selections asynchronously in order. See [startup restoration](quick-open-and-navigation.md#board-title-bar-project-activity-2026-11-10). This requires API level 5; old theme-only configs remain readable.
 
-Settings is pinned as the last button at the bottom of the left navigation rail. A conditional Update action appears immediately above it. Settings is absent from the utility bar; the rail/bar divider remains after the 56-point rail. This supersedes the bottom-right Settings placement in the dated acceptance below.
+Settings is pinned as the last button at the true bottom of the full-height left navigation rail (extending alongside the 32-point utility bar with an 8-point bottom inset rather than stopping above an empty rail spacer). A conditional Update action appears immediately above it. Settings is absent from the utility bar; the rail/bar divider remains after the 56-point rail. This supersedes the bottom-right Settings placement in the dated acceptance below.
 
 Caffeine holds a system-idle sleep assertion while allowing display sleep; its dedicated AppServer worker owns the guard, so closing the UI does not release it. It is off after AppServer restart.
 

@@ -188,6 +188,18 @@ fn route_chrome(ui: Ui) -> impl IntoElement {
     })
 }
 
+pub fn backend_notice(ui: Ui) -> impl IntoElement {
+    when(
+        move || !ui.backend_notice.get().is_empty(),
+        move || {
+            canban_ui_kit::notice(
+                move || ui.backend_notice.get(),
+                canban_ui_kit::Tone::Attention,
+            )
+        },
+    )
+}
+
 pub fn screen(ui: Ui) -> impl IntoElement {
     let route = computed(move || {
         let page = ui.page.get();
@@ -237,24 +249,23 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 .child(
                                     view()
                                         .flex_1()
+                                        .min_h(px(0.))
                                         .min_w(px(0.))
-                                        .child(screens::screen(ui, &page)),
+                                        .child(
+                                            view()
+                                                .flex_1()
+                                                .min_h(px(0.))
+                                                .min_w(px(0.))
+                                                .child(screens::screen(ui, &page)),
+                                        )
+                                        .child(backend_notice(ui))
+                                        .child(crate::utilities::bar(ui)),
                                 ),
                         )
                         .into_element()
                 }
             })
         }))
-        .child(when(
-            move || !ui.backend_notice.get().is_empty(),
-            move || {
-                canban_ui_kit::notice(
-                    move || ui.backend_notice.get(),
-                    canban_ui_kit::Tone::Attention,
-                )
-            },
-        ))
-        .child(crate::utilities::bar(ui))
         .child(when(
             move || ui.operation_error.get().is_empty() && !ui.toast.get().is_empty(),
             move || {

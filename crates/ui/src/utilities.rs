@@ -358,55 +358,46 @@ pub fn bar(ui: Ui) -> impl IntoElement {
     view()
         .h(px(32.))
         .flex_shrink_0()
+        .min_w(px(0.))
+        .border_t_1()
+        .border_color(BORDER)
         .flex_row()
         .items_center()
+        .gap_1()
+        .px_2()
         .bg(SURFACE)
-        .child(view().w(px(56.)).h_full().border_r_1().border_color(BORDER))
-        .child(
-            view()
-                .flex_1()
-                .h_full()
-                .min_w(px(0.))
-                .border_t_1()
-                .border_color(BORDER)
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .child(dynamic(move || usage_summary(ui, clock.get())))
-                .child(view().flex_1().min_w(px(0.)))
-                .child(utility_button(
-                    Icon::Coffee,
-                    "Keep AppServer host awake · display may sleep",
-                    move || ui.utility.with(|v| v["awake"] == true),
-                    move || ui.is_method_pending("utilities.awake"),
-                    move |_| toggle_awake(ui),
-                ))
-                .child(utility_button(
-                    Icon::Theme,
-                    "Theme",
-                    move || ui.utility_popup.get() == "theme",
-                    || false,
-                    move |_| open(ui, "theme"),
-                ))
-                .child(utility_button(
-                    Icon::Keyboard,
-                    "Commands & Shortcuts · / or ⌘/",
-                    move || {
-                        ui.quick_open.get()
-                            && crate::quick_open::is_command_query(&ui.search_query.get())
-                    },
-                    || false,
-                    move |_| crate::commands::execute(ui, "shortcuts"),
-                ))
-                .child(utility_button(
-                    Icon::Bug,
-                    "Report issue",
-                    || false,
-                    || false,
-                    move |_| report::open(ui),
-                )),
-        )
+        .child(dynamic(move || usage_summary(ui, clock.get())))
+        .child(view().flex_1().min_w(px(0.)))
+        .child(utility_button(
+            Icon::Coffee,
+            "Keep AppServer host awake · display may sleep",
+            move || ui.utility.with(|v| v["awake"] == true),
+            move || ui.is_method_pending("utilities.awake"),
+            move |_| toggle_awake(ui),
+        ))
+        .child(utility_button(
+            Icon::Theme,
+            "Theme",
+            move || ui.utility_popup.get() == "theme",
+            || false,
+            move |_| open(ui, "theme"),
+        ))
+        .child(utility_button(
+            Icon::Keyboard,
+            "Commands & Shortcuts · / or ⌘/",
+            move || {
+                ui.quick_open.get() && crate::quick_open::is_command_query(&ui.search_query.get())
+            },
+            || false,
+            move |_| crate::commands::execute(ui, "shortcuts"),
+        ))
+        .child(utility_button(
+            Icon::Bug,
+            "Report issue",
+            || false,
+            || false,
+            move |_| report::open(ui),
+        ))
 }
 fn usage_summary(ui: Ui, now: u64) -> View {
     let v = ui.usage.get();
