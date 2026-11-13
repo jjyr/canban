@@ -1,6 +1,6 @@
 //! Standalone native component gallery. Never opens a Canban home or runtime.
 mod fixtures;
-use canban_ui::{components::timeline_item, presenter::Ui, profiles, review};
+use canban_ui::{presenter::Ui, profiles, review};
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::json;
@@ -184,11 +184,72 @@ fn controls() -> impl IntoElement {
                         .child(markdown.render(input, markdown.source(input, "Gallery Markdown", "Write Markdown…"), false, signal(220.)))
                         .child(canban_ui_kit::markdown::reader(move || input.get())),
                 )
-                .child(
+                .child({
+                    let tl_expanded = signal(false);
                     panel()
-                        .child(label("Shared product Timeline item"))
-                        .child(timeline_item(ui, fixtures::timeline())),
-                )
+                        .child(label("Connected Card Timeline · vertical spine & milestone folding"))
+                        .child(dynamic(move || {
+                            use canban_ui::components::timeline_item::{
+                                MilestoneFold, Spine, render_connected,
+                            };
+                            let [e1, e2, e3, e4] = fixtures::timeline_connected();
+                            let open = tl_expanded.get();
+                            let fold = MilestoneFold {
+                                hidden_count: 1,
+                                expanded: open,
+                                hidden_alert: false,
+                                toggle: std::rc::Rc::new(move || tl_expanded.update(|v| *v = !*v)),
+                            };
+                            let mut stack = view().gap_0().child(render_connected(
+                                ui,
+                                e1,
+                                true,
+                                Spine {
+                                    first: true,
+                                    last: false,
+                                },
+                                None,
+                                None,
+                            ));
+                            if open {
+                                stack = stack.child(render_connected(
+                                    ui,
+                                    e2,
+                                    false,
+                                    Spine {
+                                        first: false,
+                                        last: false,
+                                    },
+                                    None,
+                                    None,
+                                ));
+                            }
+                            stack
+                                .child(render_connected(
+                                    ui,
+                                    e3,
+                                    false,
+                                    Spine {
+                                        first: false,
+                                        last: false,
+                                    },
+                                    Some(fold),
+                                    None,
+                                ))
+                                .child(render_connected(
+                                    ui,
+                                    e4,
+                                    true,
+                                    Spine {
+                                        first: false,
+                                        last: true,
+                                    },
+                                    None,
+                                    None,
+                                ))
+                                .into_element()
+                        }))
+                })
                 .child(canban_ui::components::scheduling::settings(ui))
                 .child(profiles::registry(profile_fixture))
                 .child(canban_ui::components::workflow::run_view(fixtures::workflow()))
