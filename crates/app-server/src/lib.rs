@@ -329,6 +329,7 @@ impl AppServer {
         if !path.exists() {
             canban_context::atomic(&path, &serde_json::to_vec_pretty(&Config::default())?)?;
         }
+        canban_context::materialize_skill(&home)?;
         let (config, migration) = Self::read_config(&home)?;
         for mut project in store.db().list::<Project>()? {
             let mut cleared = false;

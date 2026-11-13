@@ -81,8 +81,8 @@ pub const CATALOG: &[Command] = &[
         title: "New Terminal",
         key: "mod+t",
         display: "⌘T",
-        context: "Terminals",
-        keywords: "shell pty",
+        context: "Global",
+        keywords: "shell pty standalone",
     },
     Command {
         id: "new-worktree",
@@ -431,6 +431,14 @@ pub const CATALOG: &[Command] = &[
         keywords: "profiles json refresh",
     },
     Command {
+        id: "copy-skill-command",
+        title: "Copy Canban CLI Skill Install Command",
+        key: "",
+        display: "Agents",
+        context: "Preferences",
+        keywords: "npx skills add agent skill canban cli install",
+    },
+    Command {
         id: "check-herdr",
         title: "Check Herdr Runtime Connection",
         key: "",
@@ -658,6 +666,7 @@ pub fn execute(ui: Ui, id: &str) {
                 ui.navigate("terminals");
                 crate::terminals::new_tab(ui);
             }
+            ui.terminal_focus.update(|v| *v += 1);
         }
         "new-worktree" => {
             let pid = ui.project.get_untracked();
@@ -746,6 +755,7 @@ pub fn execute(ui: Ui, id: &str) {
         "toggle-awake" => crate::utilities::toggle_awake(ui),
         "refresh-usage" => crate::utilities::usage(ui, crate::utilities::machine(ui), true),
         "reload-config" => dispatch(ui, "config.reload", json!({})),
+        "copy-skill-command" => crate::agents_setup::copy_skill_command(ui),
         "check-herdr" => dispatch(ui, "herdr.status", json!({})),
         "check-updates" => crate::updates::check(ui),
         "report-issue" => crate::utilities::report::open(ui),
@@ -798,7 +808,20 @@ pub fn bindings(ui: Ui) {
                 when: When::Always,
                 ..Default::default()
             },
-            move |_| execute(ui, command.id),
+            move |_| {
+                if command.id == "new-terminal"
+                    && (ui.quick_open.get_untracked()
+                        || !ui.utility_popup.get_untracked().is_empty()
+                        || ui.native_modal.get_untracked()
+                        || ui.terminal_rename.get_untracked().is_some()
+                        || ui.worktree_modal.get_untracked().is_some()
+                        || ui.worktree_promote.get_untracked().is_some()
+                        || ui.worktree_remove_confirm.get_untracked().is_some())
+                {
+                    return;
+                }
+                execute(ui, command.id);
+            },
         );
     }
     // Plain `/` opens the command palette (`>` prefix) whenever focus is not in a text input or hosted terminal.
@@ -822,4 +845,36 @@ pub fn bindings(ui: Ui) {
             }
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_ids_are_unique_and_shortcuts_parse() {
+        let mut seen = std::collections::BTreeSet::new();
+        for cmd in CATALOG {
+            assert!(
+                seen.insert(cmd.id),
+                "duplicate command id in CATALOG: {}",
+                cmd.id
+            );
+            if !cmd.key.is_empty() {
+                nsh_core::desktop::Shortcut::parse(cmd.key, false).unwrap();
+            }
+        }
+        let new_term = CATALOG
+            .iter()
+            .find(|c| c.id == "new-terminal")
+            .expect("new-terminal registered");
+        assert_eq!(new_term.context, "Global");
+        assert_eq!(new_term.key, "mod+t");
+        assert!(
+            !crate::terminals::TAB_KEYS
+                .iter()
+                .any(|(k, _)| *k == "mod+t")
+        );
+        assert!(CATALOG.iter().any(|c| c.id == "copy-skill-command"));
+    }
 }

@@ -190,6 +190,7 @@ fn controls() -> impl IntoElement {
                         .child(timeline_item(ui, fixtures::timeline())),
                 )
                 .child(canban_ui::components::scheduling::settings(ui))
+                .child(canban_ui::agents_setup::canban_skill_onboarding_section(ui))
                 .child(profiles::registry(profile_fixture))
                 .child(canban_ui::components::workflow::run_view(fixtures::workflow()))
                 .child(review::diff_panel(fixtures::review()))
@@ -389,6 +390,18 @@ pub fn Gallery() -> impl IntoElement {
         ui.update.set(json!({"build":canban_updater::Build::current(),"disabled":std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("updates-disabled"),"state":{"phase":"available","available":{"manifest":{"version":"20261110-3"}}}}));
         if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("updates-disabled") {
             ui.page.set("settings".into());
+        }
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if matches!(
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
+        Ok("agent-setup" | "settings-agents")
+    ) {
+        ui.card.set(String::new());
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("agent-setup") {
+            ui.page.set("agent-setup".into());
+        } else {
+            ui.open_settings_section("agents");
         }
         return canban_ui::frame::screen(ui).into_element();
     }

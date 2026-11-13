@@ -637,12 +637,7 @@ pub fn cycle(ui: Ui, forward: bool) {
     };
     ui.open_terminal(tabs[next].clone());
 }
-pub(crate) const TAB_KEYS: [(&str, u8); 4] = [
-    ("mod+t", 0),
-    ("mod+w", 1),
-    ("mod+shift+]", 2),
-    ("mod+shift+[", 3),
-];
+pub(crate) const TAB_KEYS: [(&str, u8); 3] = [("mod+w", 1), ("mod+shift+]", 2), ("mod+shift+[", 3)];
 pub fn bindings(ui: Ui) {
     use nsh_core::keymap::When;
     effect(move || {
@@ -667,15 +662,6 @@ pub fn bindings(ui: Ui) {
                 },
                 move |_| {
                     match action {
-                        0 => {
-                            if ui.page.get_untracked() == "card"
-                                && let Some(c) = ui.current_card()
-                            {
-                                create_in_card(ui, c.project_id, c.id, false);
-                            } else {
-                                new_tab(ui);
-                            }
-                        }
                         1 => {
                             if ui.page.get_untracked() == "card" {
                                 let cid = ui.card_id();
