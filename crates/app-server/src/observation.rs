@@ -380,6 +380,8 @@ impl AppServer {
             )?;
             db.save(&a)
         })?;
+        let _ = self.pump_deliveries();
+        let _ = self.try_auto_archive_merged(&run.card_id);
         self.emit("runtime", Some(run.card_id.clone()));
         Ok(())
     }
@@ -414,11 +416,33 @@ impl AppServer {
                 if let Some(at) = server.event_deadline() {
                     due(at);
                 }
+                if s.workflow_runs
+                    .iter()
+                    .any(|r| r.state == "waiting_delivery" && r.queue_pause_reason().is_some())
+                {
+                    // Re-check transient main-checkout blockers (dirty tree or switched branch)
+                    // so the FIFO merge queue automatically drains once the checkout is clean.
+                    due(now().saturating_add(2_000));
+                }
                 for a in &s.attempts {
                     if a.close_state == "closing"
                         && let Some(at) = a.close_requested_at
                     {
                         due(at.saturating_add(30_001));
+                    }
+                    if a.terminal.is_some()
+                        && a.connection_state == "connected"
+                        && !a.agent_stopped()
+                        && let Some(run) = s
+                            .workflow_runs
+                            .iter()
+                            .find(|r| r.card_id == a.card_id && r.state == "waiting_delivery")
+                    {
+                        let anchor = a
+                            .completed_at
+                            .max(Some(run.updated_at))
+                            .unwrap_or(a.created_at);
+                        due(anchor.saturating_add(Self::DELIVERY_AGENT_SETTLE_MS + 1));
                     }
                     if lifecycle::idle_candidate(
                         &s,

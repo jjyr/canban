@@ -19,6 +19,10 @@ pub enum DeliveryError {
     },
     /// The Project target branch moved while delivery was being prepared; retrying is safe.
     TargetAdvanced,
+    /// The main repository checkout temporarily has uncommitted local changes or is checked out
+    /// on another branch; Queue Merge pauses non-destructively at the head of the queue and
+    /// automatically resumes once the checkout is clean and on the target branch.
+    MainCheckoutBusy { reason: String },
 }
 impl std::fmt::Display for DeliveryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -36,13 +40,20 @@ impl std::fmt::Display for DeliveryError {
             Self::TargetAdvanced => {
                 f.write_str("Target branch advanced; refresh the review. Card commit is retained.")
             }
+            Self::MainCheckoutBusy { reason } => f.write_str(reason),
         }
     }
 }
 impl std::error::Error for DeliveryError {}
 
+/// Returns `true` when a `ReviewPreview` rejection reason is purely a transient main-checkout
+/// condition (uncommitted changes or another branch checked out) rather than a Card-level blocker.
+pub fn is_main_checkout_busy_reason(reason: &str) -> bool {
+    reason.starts_with("Main repository checkout (")
+}
+
 impl Ops {
-    fn r_checked(&self, dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    pub(crate) fn r_checked(&self, dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
         let out = self.git(dir, args)?;
         ensure!(
             out.status.success(),
@@ -268,13 +279,15 @@ impl Ops {
             .success();
         let reason = if source_branch != target {
             Some(format!(
-                "Project checkout is on {source_branch}; switch it to {target} before accepting"
+                "Main repository checkout ({}) is on branch `{source_branch}`; switch it to `{target}` before merging this Card.",
+                source.display()
             ))
         } else if !source_status.is_empty() {
-            Some(
-            "Project checkout has local changes. Preserve/commit them before accepting this Card."
-                .into(),
-        )
+            let summary = summarize_porcelain_z(&source_status, 4);
+            Some(format!(
+                "Main repository checkout ({}) has uncommitted local changes ({summary}). Commit or stash them before merging this Card.",
+                source.display()
+            ))
         } else if in_merge || !conflicts.is_empty() {
             Some("Finish or abort the existing merge in the Card terminal before accepting.".into())
         } else {
@@ -385,21 +398,34 @@ impl Ops {
             "Git hooks left Card changes after commit/merge; inspect and refresh before delivery"
         );
         let head = self.r_text(cwd, &["rev-parse", "HEAD"])?;
-        ensure!(
-            self.current_branch(&project.directory).as_deref() == Some(&plan.target_branch),
-            "Project branch changed while preparing the merge; Card commit is retained"
-        );
+        let current_source_branch = self.current_branch(&project.directory).unwrap_or_default();
+        if current_source_branch != plan.target_branch {
+            return Err(DeliveryError::MainCheckoutBusy {
+                reason: format!(
+                    "Main repository checkout ({}) switched to branch `{current_source_branch}` while preparing the merge; switch it back to `{}` (Card commit is retained).",
+                    source.display(),
+                    plan.target_branch
+                ),
+            }
+            .into());
+        }
         if self.r_text(source, &["rev-parse", "HEAD"])? != plan.target_head {
             return Err(DeliveryError::TargetAdvanced.into());
         }
-        ensure!(
-            self.r_checked(
-                source,
-                &["status", "--porcelain=v1", "-z", "--untracked-files=all"]
-            )?
-            .is_empty(),
-            "Project checkout changed; Card commit is retained"
-        );
+        let latest_source_status = self.r_checked(
+            source,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?;
+        if !latest_source_status.is_empty() {
+            return Err(DeliveryError::MainCheckoutBusy {
+                reason: format!(
+                    "Main repository checkout ({}) has uncommitted local changes ({}); commit or stash them before merging (Card commit is retained).",
+                    source.display(),
+                    summarize_porcelain_z(&latest_source_status, 4)
+                ),
+            }
+            .into());
+        }
         self.r_checked(
             source,
             &["merge", "--ff-only", "--no-overwrite-ignore", &head],
@@ -417,6 +443,30 @@ fn names(bytes: &[u8]) -> Result<Vec<String>> {
         .filter(|s| !s.is_empty())
         .map(|s| Ok(std::str::from_utf8(s)?.to_owned()))
         .collect()
+}
+pub(crate) fn summarize_porcelain_z(bytes: &[u8], limit: usize) -> String {
+    let mut paths = Vec::new();
+    let mut parts = bytes.split(|b| *b == 0).filter(|s| !s.is_empty());
+    while let Some(entry) = parts.next() {
+        let s = String::from_utf8_lossy(entry);
+        let status = s.get(..2).unwrap_or("");
+        let path = s.get(3..).unwrap_or(s.as_ref());
+        // In `-z` porcelain v1, rename/copy entries (`R` or `C` in X/Y) are followed by a second NUL-terminated orig_path.
+        if status.contains('R') || status.contains('C') {
+            let _ = parts.next();
+        }
+        paths.push(path.to_owned());
+    }
+    if paths.is_empty() {
+        return "dirty working tree".into();
+    }
+    let total = paths.len();
+    let shown: Vec<String> = paths.into_iter().take(limit).collect();
+    if total > shown.len() {
+        format!("{}, +{} more", shown.join(", "), total - shown.len())
+    } else {
+        shown.join(", ")
+    }
 }
 
 pub fn current_branch(dir: &str) -> Option<String> {
@@ -654,5 +704,13 @@ mod tests {
         assert_eq!(text(f.source(), &["rev-parse", "HEAD"]).unwrap(), before);
         assert!(!f.source().join("hook-added").exists());
         assert!(f.cwd().join("hook-added").exists());
+    }
+    #[test]
+    fn summarize_porcelain_z_lists_paths_and_truncates_cleanly() {
+        let raw = b" M crates/ui/src/lib.rs\0?? scratch.txt\0R  new_name.rs\0old_name.rs\0?? a.rs\0?? b.rs\0";
+        assert_eq!(
+            summarize_porcelain_z(raw, 4),
+            "crates/ui/src/lib.rs, scratch.txt, new_name.rs, a.rs, +1 more"
+        );
     }
 }

@@ -649,6 +649,17 @@ fn configuration_sessions_have_project_ownership_reuse_and_exact_history_resume(
         .call("workflow.prompt", json!({"project_id":p.id}))
         .unwrap()["prompt"]
         .clone();
+    let prompt_str = prompt.as_str().unwrap();
+    assert!(
+        prompt_str.contains("Workflow Configuration Assistant"),
+        "workflow.prompt must use English instructions"
+    );
+    assert!(
+        !prompt_str
+            .chars()
+            .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)),
+        "workflow.prompt must not contain Chinese characters"
+    );
     let params = json!({"project_id":p.id,"profile_id":"codex","prompt":prompt});
     let first = app.call("configuration.open", params.clone()).unwrap();
     let again = app.call("configuration.open", params.clone()).unwrap();
@@ -659,7 +670,7 @@ fn configuration_sessions_have_project_ownership_reuse_and_exact_history_resume(
     assert_eq!(s.cards.len(), 1);
     assert_eq!(s.configuration_sessions.len(), 1);
     let mut c = s.configuration_sessions[0].clone();
-    assert_eq!(c.prompt, prompt.as_str().unwrap());
+    assert_eq!(c.prompt, prompt_str);
     c.provider_session_id = Some("exact-history".into());
     c.state = "finished".into();
     app.store
@@ -694,6 +705,69 @@ fn configuration_sessions_have_project_ownership_reuse_and_exact_history_resume(
         )
         .is_err()
     );
+}
+
+#[test]
+fn configuration_open_uses_configured_default_agent_and_auto_fresh_fallback() {
+    let (_dir, app, p, _) = setup();
+    assert_eq!(app.config().default_agent, "developer");
+    let opened = app
+        .call(
+            "configuration.open",
+            json!({"project_id": p.id, "auto_fresh": true}),
+        )
+        .unwrap();
+    let expected_key = format!("configuration:{}:workflows:developer", p.id);
+    assert_eq!(opened["terminal_id"], expected_key);
+    assert_eq!(opened["reused"], false);
+
+    // Simulate an ended session where exact provider history was never captured:
+    // strict open still guards history, whereas direct `auto_fresh` starts cleanly.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut s: ConfigurationSession = db.get(&expected_key)?;
+            s.provider_session_id = None;
+            s.state = "finished".into();
+            db.save(&s)?;
+            let mut t: TerminalEntry = db.get(&expected_key)?;
+            t.runtime = Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("isolated".into()),
+                terminal: Some("local/closed".into()),
+                state: "finished".into(),
+                connection: "connected".into(),
+                error: None,
+            });
+            db.save(&t)
+        })
+        .unwrap();
+
+    assert!(
+        app.call("configuration.open", json!({"project_id": p.id}))
+            .is_err(),
+        "Without auto_fresh or fresh, missing provider history must still error"
+    );
+    let restarted = app
+        .call(
+            "configuration.open",
+            json!({"project_id": p.id, "auto_fresh": true}),
+        )
+        .unwrap();
+    assert_eq!(restarted["terminal_id"], expected_key);
+    assert_eq!(restarted["reused"], false);
+    let session = app
+        .snapshot()
+        .unwrap()
+        .configuration_sessions
+        .into_iter()
+        .find(|c| c.id == expected_key)
+        .unwrap();
+    assert_eq!(session.profile_id, "developer");
+    assert_eq!(session.generation, 2);
+    assert!(session.provider_session_id.is_none());
 }
 
 #[test]
@@ -1005,8 +1079,8 @@ fn finish_closed(app: &AppServer, req: &Request, key: &str) {
         .unwrap()
         .write(|db| {
             let mut run: Attempt = db.get(&a.id)?;
-            // Simulate a real retained interactive Herdr terminal whose Agent is still live
-            // at the moment it invokes `canban execution report` via tool call.
+            // Simulate a real retained interactive Herdr terminal whose Agent is still mid-turn
+            // when invoking `canban report`, then finishes its turn (`done`) right after.
             run.terminal = Some("t-retained".into());
             run.connection_state = "connected".into();
             run.observed = Some(json!({"state": "live", "status": {"state": "working"}}));
@@ -1014,6 +1088,15 @@ fn finish_closed(app: &AppServer, req: &Request, key: &str) {
         })
         .unwrap();
     app.call("execution.report",json!({"execution":{"request_id":req.id,"attempt_number":a.number},"request_key":key,"state":"completed","message":"Plan ready","body":"Exact plan artifact"})).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut run: Attempt = db.get(&a.id)?;
+            run.observed = Some(json!({"state": "live", "status": {"state": "done"}}));
+            db.save(&run)
+        })
+        .unwrap();
 }
 
 #[test]
@@ -1452,8 +1535,9 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
     .unwrap();
     let snap = app.snapshot().unwrap();
     let dev = snap.requests[0].clone();
+    let updated_p = snap.projects.iter().find(|x| x.id == p.id).unwrap();
     let ops = canban_workspaces::Ops::local();
-    let wt = ops.prepare(&app.home, &p, &snap.cards[0]).unwrap();
+    let wt = ops.prepare(&app.home, updated_p, &snap.cards[0]).unwrap();
     let branch = ops.current_branch(wt.to_str().unwrap()).unwrap();
     app.store
         .lock()
@@ -1500,6 +1584,10 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
         .find(|r| r.card_id == c.id && r.id != dev.id)
         .expect("conflict rework request")
         .clone();
+    assert_eq!(
+        resolve.profile.id, "merger",
+        "Queue Merge conflicts must dispatch the dedicated @merger role"
+    );
     assert!(
         resolve
             .instruction
@@ -1511,7 +1599,12 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
             .workflow_step
             .as_deref()
             .unwrap()
-            .starts_with("agent:develop:")
+            .starts_with("deliver:review:")
+    );
+    assert_eq!(
+        run.step.as_deref(),
+        Some("deliver:review"),
+        "WorkflowRun stays on the Deliver step while @merger resolves conflicts"
     );
 
     // The Agent resolves the in-progress merge in the Card worktree.
@@ -1534,6 +1627,130 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
         std::fs::read_to_string(source.join("README.md")).unwrap(),
         "card + target version\n"
     );
+    let dev_conv = snap
+        .conversations
+        .iter()
+        .find(|conv| conv.card_id == c.id && conv.profile_id == "developer");
+    let merger_conv = snap
+        .conversations
+        .iter()
+        .find(|conv| conv.card_id == c.id && conv.profile_id == "merger");
+    assert!(
+        dev_conv.is_some()
+            && merger_conv.is_some()
+            && dev_conv.unwrap().id != merger_conv.unwrap().id,
+        "@developer and @merger must keep separate role conversations on the Card"
+    );
+}
+
+#[test]
+fn queue_merge_conflict_respects_custom_deliver_profile_and_rejects_unknown_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "init"]);
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Custom Deliver Profile", "directory": source}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Unknown profile on `deliver` must be rejected by `workflow.apply`.
+    let col = collection(&app, &p);
+    let raw = col["sources"][0]["source"].as_str().unwrap();
+    let mut bad_doc = canban_workflow_engine::source::parse(raw).unwrap();
+    bad_doc
+        .steps
+        .iter_mut()
+        .find(|s| s.uses == "deliver")
+        .unwrap()
+        .with
+        .insert("profile".into(), json!("nonexistent-merger"));
+    assert!(
+        app.call(
+            "workflow.apply",
+            json!({
+                "project_id": p.id,
+                "revision": col["revision"],
+                "sources": [{"filename": "development.yaml", "source": canban_workflow_engine::source::encode(&bad_doc).unwrap()}]
+            }),
+        )
+        .is_err()
+    );
+
+    // Custom `with.profile: reviewer` on `deliver` overrides `@merger` for conflict resolution.
+    let mut custom_doc = canban_workflow_engine::source::parse(raw).unwrap();
+    custom_doc.workspace.sync_base = false;
+    let deliver = custom_doc
+        .steps
+        .iter_mut()
+        .find(|s| s.uses == "deliver")
+        .unwrap();
+    deliver.with.insert("profile".into(), json!("reviewer"));
+    deliver.with.insert("sync_upstream".into(), json!(false));
+    deliver.on_changes_requested = None;
+    app.call(
+        "workflow.apply",
+        json!({
+            "project_id": p.id,
+            "revision": col["revision"],
+            "sources": [{"filename": "development.yaml", "source": canban_workflow_engine::source::encode(&custom_doc).unwrap()}]
+        }),
+    )
+    .unwrap();
+
+    let c: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Conflict with custom profile", "body": "Test"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let dev = snap.requests[0].clone();
+    let updated_p = snap.projects.iter().find(|x| x.id == p.id).unwrap();
+    let ops = canban_workspaces::Ops::local();
+    let wt = ops.prepare(&app.home, updated_p, &snap.cards[0]).unwrap();
+    let branch = ops.current_branch(wt.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c.id)?;
+            card.worktree = Some(wt.to_str().unwrap().into());
+            card.branch = Some(branch);
+            db.save(&card)
+        })
+        .unwrap();
+    git_identity(&wt);
+    std::fs::write(wt.join("README.md"), "card edit\n").unwrap();
+    std::fs::write(source.join("README.md"), "main edit\n").unwrap();
+    git_in(&source, &["commit", "-am", "main edit"]);
+
+    finish_closed(&app, &dev, "dev-done");
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let resolve = snap
+        .requests
+        .iter()
+        .find(|r| r.card_id == c.id && r.id != dev.id)
+        .expect("custom conflict profile request");
+    assert_eq!(resolve.profile.id, "reviewer");
 }
 
 #[test]
@@ -1593,8 +1810,9 @@ fn queue_merge_conflict_pauses_for_human_after_attempt_budget() {
     .unwrap();
     let snap = app.snapshot().unwrap();
     let dev = snap.requests[0].clone();
+    let updated_p = snap.projects.iter().find(|x| x.id == p.id).unwrap();
     let ops = canban_workspaces::Ops::local();
-    let wt = ops.prepare(&app.home, &p, &snap.cards[0]).unwrap();
+    let wt = ops.prepare(&app.home, updated_p, &snap.cards[0]).unwrap();
     app.store
         .lock()
         .unwrap()
@@ -1928,20 +2146,22 @@ fn report_auto_commits_card_worktree_and_workflow_deliver_retries_paused_or_stop
         .find(|r| r.card_id == c1.id && r.active())
         .unwrap();
     assert_eq!(
-        run1.state, "waiting_approval",
-        "dirty main checkout pauses auto-merge"
+        run1.state, "waiting_delivery",
+        "dirty main checkout keeps the Card queued non-destructively at the head of the merge queue"
+    );
+    let pause_reason = run1.queue_pause_reason().unwrap();
+    assert!(
+        pause_reason.contains("Main repository checkout")
+            && pause_reason.contains("untracked_local.tmp"),
+        "expected path and dirty filename in queue_pause_reason, got: {pause_reason}"
     );
     let card1 = snap.cards.iter().find(|c| c.id == c1.id).unwrap();
     assert!(
-        card1
-            .human_gate
-            .as_ref()
-            .unwrap()
-            .reason
-            .contains("Project checkout has local changes")
+        card1.human_gate.is_none(),
+        "transient dirty main checkout must not emit noisy human-gate blocks"
     );
 
-    // Clean main checkout and manually trigger retry via workflow.deliver.
+    // Clean main checkout and manually trigger retry via workflow.deliver (automatic pump also drains it).
     std::fs::remove_file(source.join("untracked_local.tmp")).unwrap();
     let retried = app
         .call(
@@ -2513,4 +2733,512 @@ fn snapshot_exposes_merging_cards_while_merge_is_in_flight_and_clears_afterward(
         .unwrap();
     assert!(app.snapshot().unwrap().merging_cards.is_empty());
     drop(guard);
+}
+
+#[test]
+fn queue_merge_waits_for_connected_agent_turn_wrapup_and_falls_back_after_settle_grace() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "init"]);
+    let remote = dir.path().join("remote.git");
+    std::fs::create_dir_all(&remote).unwrap();
+    git_in(&remote, &["init", "--bare", "-b", "main"]);
+    git_in(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git_in(&source, &["push", "-u", "origin", "main"]);
+
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Settle Grace", "directory": source}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Case 1: Agent reports `completed` via tool call while Herdr still reports `status.state == "working"`.
+    // Queue merge stays in `waiting_delivery` until the Agent finishes its turn (`done` / `idle`),
+    // including any post-report worktree changes before merging!
+    let c1: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Wrap-up Wait", "body": "Wait for turn end"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let req1 = snap
+        .requests
+        .iter()
+        .find(|r| r.card_id == c1.id)
+        .unwrap()
+        .clone();
+    let ops = canban_workspaces::Ops::local();
+    let wt1 = ops
+        .prepare(
+            &app.home,
+            &p,
+            snap.cards.iter().find(|c| c.id == c1.id).unwrap(),
+        )
+        .unwrap();
+    let branch1 = ops.current_branch(wt1.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c1.id)?;
+            card.worktree = Some(wt1.to_str().unwrap().into());
+            card.branch = Some(branch1);
+            db.save(&card)
+        })
+        .unwrap();
+    git_identity(&wt1);
+    std::fs::write(wt1.join("part1.txt"), "committed before report\n").unwrap();
+    git_in(&wt1, &["add", "."]);
+    git_in(&wt1, &["commit", "-m", "feat: part 1"]);
+
+    let a1 = admit(&app, &req1);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut run: Attempt = db.get(&a1.id)?;
+            run.terminal = Some("t-wrapup-1".into());
+            run.connection_state = "connected".into();
+            run.observed = Some(json!({"state": "live", "status": {"state": "working"}}));
+            db.save(&run)
+        })
+        .unwrap();
+    app.call(
+        "execution.report",
+        json!({
+            "execution": {"request_id": req1.id, "attempt_number": a1.number},
+            "request_key": "c1-report",
+            "state": "completed",
+            "message": "Implemented feature"
+        }),
+    )
+    .unwrap();
+
+    // Immediately after `execution.report` (and even on `pump_deliveries`), the Card moved to
+    // `review` and entered `waiting_delivery`, but has NOT merged yet while Agent is `working`!
+    app.pump_deliveries().unwrap();
+    let snap = app.snapshot().unwrap();
+    let card1 = snap.cards.iter().find(|c| c.id == c1.id).unwrap();
+    assert_eq!(card1.stage, "review");
+    assert!(
+        card1.delivery.is_none(),
+        "Queue merge must not merge while the connected Agent is still wrapping up its turn"
+    );
+    let run1 = snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == c1.id)
+        .unwrap();
+    assert_eq!(run1.state, "waiting_delivery");
+
+    // Agent writes a cleanup/followup edit before finishing its turn, then transitions to `done`.
+    std::fs::write(wt1.join("wrapup.txt"), "added during wrapup\n").unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut run: Attempt = db.get(&a1.id)?;
+            run.observed = Some(json!({"state": "live", "status": {"state": "done"}}));
+            db.save(&run)
+        })
+        .unwrap();
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let card1 = snap.cards.iter().find(|c| c.id == c1.id).unwrap();
+    assert!(
+        card1.delivery.is_some(),
+        "Queue merge completes once Agent turn transitions to done/idle"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("wrapup.txt")).unwrap(),
+        "added during wrapup\n"
+    );
+
+    // Case 2: If a provider's status stays stuck at `"working"` past `DELIVERY_AGENT_SETTLE_MS`,
+    // Queue merge falls back and delivers instead of wedging forever.
+    let c2: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Settle Timeout Fallback", "body": "Stuck status"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c2.id, "revision": c2.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let req2 = snap
+        .requests
+        .iter()
+        .find(|r| r.card_id == c2.id)
+        .unwrap()
+        .clone();
+    let wt2 = ops
+        .prepare(
+            &app.home,
+            &p,
+            snap.cards.iter().find(|c| c.id == c2.id).unwrap(),
+        )
+        .unwrap();
+    let branch2 = ops.current_branch(wt2.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c2.id)?;
+            card.worktree = Some(wt2.to_str().unwrap().into());
+            card.branch = Some(branch2);
+            db.save(&card)
+        })
+        .unwrap();
+    git_identity(&wt2);
+    std::fs::write(wt2.join("part2.txt"), "timeout fallback\n").unwrap();
+
+    let a2 = admit(&app, &req2);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut run: Attempt = db.get(&a2.id)?;
+            run.terminal = Some("t-wrapup-2".into());
+            run.connection_state = "connected".into();
+            run.observed = Some(json!({"state": "live", "status": {"state": "working"}}));
+            db.save(&run)
+        })
+        .unwrap();
+    app.call(
+        "execution.report",
+        json!({
+            "execution": {"request_id": req2.id, "attempt_number": a2.number},
+            "request_key": "c2-report",
+            "state": "completed",
+            "message": "Done"
+        }),
+    )
+    .unwrap();
+    assert!(
+        app.snapshot()
+            .unwrap()
+            .cards
+            .iter()
+            .find(|c| c.id == c2.id)
+            .unwrap()
+            .delivery
+            .is_none()
+    );
+
+    // Age `completed_at` and `run.updated_at` past the settle grace window.
+    let expired = now().saturating_sub(AppServer::DELIVERY_AGENT_SETTLE_MS + 1_000);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut att: Attempt = db.get(&a2.id)?;
+            att.completed_at = Some(expired);
+            db.save(&att)?;
+            let mut wf: WorkflowRun = db
+                .list::<WorkflowRun>()?
+                .into_iter()
+                .find(|r| r.card_id == c2.id)
+                .unwrap();
+            wf.updated_at = expired;
+            db.save(&wf)
+        })
+        .unwrap();
+    app.pump_deliveries().unwrap();
+    let snap = app.snapshot().unwrap();
+    let card2 = snap.cards.iter().find(|c| c.id == c2.id).unwrap();
+    assert!(
+        card2.delivery.is_some(),
+        "Queue merge must proceed once settle grace expires"
+    );
+}
+
+#[test]
+fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_for_clean_merges() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    std::fs::write(source.join("shared.txt"), "base\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "init"]);
+    let remote = dir.path().join("remote.git");
+    std::fs::create_dir_all(&remote).unwrap();
+    git_in(&remote, &["init", "--bare", "-b", "main"]);
+    git_in(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git_in(&source, &["push", "-u", "origin", "main"]);
+
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "FIFO Merge Queue", "directory": source}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    edit_development(&app, &p, |d| {
+        canban_workflow_engine::source::set_review_manual(d, false);
+    });
+    let ops = canban_workspaces::Ops::local();
+
+    // Create 3 Cards BEFORE moving any of them to Develop.
+    // Deliberately move them to Develop / finish them in reverse creation order (c3 -> c1 -> c2)
+    // to prove the Merge Queue follows actual queue entry (`queued_at`), NOT Card/run creation rowid!
+    let mut created = Vec::new();
+    for title in [
+        "Card 1 (conflicts with 3)",
+        "Card 2 (clean)",
+        "Card 3 (first in queue, clean)",
+    ] {
+        let c: Card = serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"project_id": p.id, "title": title, "body": title}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        created.push(c);
+    }
+    let (c1, c2, c3) = (created[0].clone(), created[1].clone(), created[2].clone());
+
+    let prepare_in_develop = |card: &Card| -> (Request, PathBuf) {
+        app.call(
+            "card.move",
+            json!({"card_id": card.id, "revision": card.revision, "stage": "develop"}),
+        )
+        .unwrap();
+        let snap = app.snapshot().unwrap();
+        let req = snap
+            .requests
+            .iter()
+            .find(|r| r.card_id == card.id)
+            .unwrap()
+            .clone();
+        let wt = ops
+            .prepare(
+                &app.home,
+                &p,
+                snap.cards.iter().find(|c| c.id == card.id).unwrap(),
+            )
+            .unwrap();
+        let branch = ops.current_branch(wt.to_str().unwrap()).unwrap();
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut stored: Card = db.get(&card.id)?;
+                stored.worktree = Some(wt.to_str().unwrap().into());
+                stored.branch = Some(branch);
+                db.save(&stored)
+            })
+            .unwrap();
+        git_identity(&wt);
+        (req, wt)
+    };
+
+    let (dev1, wt1) = prepare_in_develop(&c1);
+    let (dev2, wt2) = prepare_in_develop(&c2);
+    let (dev3, wt3) = prepare_in_develop(&c3);
+
+    // c3 modifies shared.txt cleanly vs base; c1 ALSO modifies shared.txt differently (so c1 will
+    // conflict once c3 lands first!); c2 touches an independent file (`clean2.txt`).
+    std::fs::write(wt3.join("shared.txt"), "from c3\n").unwrap();
+    git_in(&wt3, &["commit", "-am", "feat: c3"]);
+
+    std::fs::write(wt1.join("shared.txt"), "from c1\n").unwrap();
+    git_in(&wt1, &["commit", "-am", "feat: c1"]);
+
+    std::fs::write(wt2.join("clean2.txt"), "from c2\n").unwrap();
+    git_in(&wt2, &[" add", "."].map(str::trim));
+    git_in(&wt2, &["commit", "-m", "feat: c2"]);
+
+    // Temporarily dirty the main checkout so all 3 Cards queue up while the user has local edits!
+    std::fs::write(source.join("wip.local"), "temporary local edit\n").unwrap();
+
+    // Finish in order: c3 (1st), then c1 (2nd), then c2 (3rd), spacing by >=2ms for distinct `queued_at`.
+    finish_closed(&app, &dev3, "c3-done");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    finish_closed(&app, &dev1, "c1-done");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    finish_closed(&app, &dev2, "c2-done");
+
+    app.pump_deliveries().unwrap();
+    let snap = app.snapshot().unwrap();
+    let queue_ids: Vec<String> = snap
+        .merge_queue(&p.id)
+        .into_iter()
+        .map(|r| r.card_id.clone())
+        .collect();
+    assert_eq!(
+        queue_ids,
+        vec![c3.id.clone(), c1.id.clone(), c2.id.clone()],
+        "Merge queue must preserve strict FIFO arrival order (c3 -> c1 -> c2)"
+    );
+    // None of the 3 Cards were kicked out to waiting_approval, and NO @merger session was spawned!
+    for cid in [&c3.id, &c1.id, &c2.id] {
+        let card = snap.cards.iter().find(|c| &c.id == cid).unwrap();
+        assert!(card.delivery.is_none());
+        assert!(card.human_gate.is_none());
+    }
+    assert_eq!(
+        snap.merge_queue_status(&c3.id)
+            .map(|(pos, total, _)| (pos, total)),
+        Some((1, 3))
+    );
+    assert_eq!(
+        snap.merge_queue_status(&c2.id)
+            .map(|(pos, total, _)| (pos, total)),
+        Some((3, 3))
+    );
+    assert!(
+        !snap.requests.iter().any(|r| r.profile.id == "merger"),
+        "No @merger request may be created while waiting or for clean merges"
+    );
+
+    // User cleans up the main repository checkout: a single `pump_deliveries()` automatically:
+    // 1. Merges c3 natively (0 @merger sessions!)
+    // 2. Advances to c1, detects conflict with new `main`, and dispatches @merger ONLY for c1
+    // 3. Keeps c2 waiting behind c1 at queue position #2 (c2 MUST NOT jump ahead of c1!)
+    std::fs::remove_file(source.join("wip.local")).unwrap();
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let card3 = snap.cards.iter().find(|c| c.id == c3.id).unwrap();
+    let card1 = snap.cards.iter().find(|c| c.id == c1.id).unwrap();
+    let card2 = snap.cards.iter().find(|c| c.id == c2.id).unwrap();
+    assert!(
+        card3.delivery.is_some(),
+        "c3 (head of queue) must auto-merge immediately once main checkout is clean"
+    );
+    assert!(
+        !snap
+            .requests
+            .iter()
+            .any(|r| r.card_id == c3.id && r.profile.id == "merger"),
+        "Clean merge of c3 must NOT spawn @merger"
+    );
+    assert!(
+        !snap
+            .conversations
+            .iter()
+            .any(|conv| conv.card_id == c3.id && conv.profile_id == "merger"),
+        "Clean merge of c3 must NOT create a @merger conversation"
+    );
+    assert!(card1.delivery.is_none());
+    assert!(
+        card2.delivery.is_none(),
+        "c2 must stay queued behind c1 while @merger resolves c1's conflict (strict HoL serialization)"
+    );
+    let queue_after_c3: Vec<String> = snap
+        .merge_queue(&p.id)
+        .into_iter()
+        .map(|r| r.card_id.clone())
+        .collect();
+    assert_eq!(
+        queue_after_c3,
+        vec![c1.id.clone(), c2.id.clone()],
+        "c1 holds head #1 during @merger conflict resolution, with c2 queued at #2"
+    );
+    let merger_c1: Vec<&Request> = snap
+        .requests
+        .iter()
+        .filter(|r| r.card_id == c1.id && r.profile.id == "merger")
+        .collect();
+    assert_eq!(
+        merger_c1.len(),
+        1,
+        "Exactly one @merger request is dispatched for conflicting c1"
+    );
+
+    // Even if another pump_deliveries() fires while @merger is still working on c1, c2 STILL waits!
+    app.pump_deliveries().unwrap();
+    assert!(
+        app.snapshot()
+            .unwrap()
+            .cards
+            .iter()
+            .find(|c| c.id == c2.id)
+            .unwrap()
+            .delivery
+            .is_none()
+    );
+
+    // @merger resolves the conflict in c1's worktree and reports completed -> pump_deliveries
+    // merges c1 AND immediately drains c2 right behind it without spawning @merger for c2!
+    let merger_req = merger_c1[0].clone();
+    std::fs::write(wt1.join("shared.txt"), "from c3 + from c1\n").unwrap();
+    git_in(&wt1, &["add", "shared.txt"]);
+    git_in(&wt1, &["commit", "--no-edit"]);
+    finish_closed(&app, &merger_req, "c1-conflict-resolved");
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    assert!(
+        snap.merge_queue(&p.id).is_empty(),
+        "Entire FIFO merge queue should be drained"
+    );
+    assert!(
+        snap.cards
+            .iter()
+            .find(|c| c.id == c1.id)
+            .unwrap()
+            .delivery
+            .is_some(),
+        "c1 merged after @merger resolved conflict"
+    );
+    assert!(
+        snap.cards
+            .iter()
+            .find(|c| c.id == c2.id)
+            .unwrap()
+            .delivery
+            .is_some(),
+        "c2 automatically merged right after c1 completed"
+    );
+    assert!(
+        !snap
+            .requests
+            .iter()
+            .any(|r| r.card_id == c2.id && r.profile.id == "merger"),
+        "Clean merge of c2 must NOT spawn @merger"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("shared.txt")).unwrap(),
+        "from c3 + from c1\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("clean2.txt")).unwrap(),
+        "from c2\n"
+    );
 }

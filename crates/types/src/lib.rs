@@ -163,7 +163,10 @@ impl Profile {
     pub fn is_identity(&self) -> bool {
         self.identity
             || !self.role_instruction.trim().is_empty()
-            || matches!(self.id.as_str(), "planner" | "developer" | "reviewer")
+            || matches!(
+                self.id.as_str(),
+                "planner" | "developer" | "reviewer" | "merger"
+            )
     }
     pub fn command(&self) -> &[String] {
         self.argv.as_deref().unwrap_or_default()
@@ -248,19 +251,41 @@ impl Default for Config {
                     "developer",
                     "codex",
                     true,
-                    "You are the Card's development Agent. Follow repository conventions and verify changes before finishing.",
+                    include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../prompts/profiles/role_developer.txt"
+                    ))
+                    .trim_end(),
                 ),
                 profile(
                     "reviewer",
                     "codex",
                     true,
-                    "You are the Card's independent review Agent. Critically inspect changes and test coverage without making unrequested edits.",
+                    include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../prompts/profiles/role_reviewer.txt"
+                    ))
+                    .trim_end(),
                 ),
                 profile(
                     "planner",
                     "codex",
                     true,
-                    "You are the Card's planning Agent. Inspect repository files in read-only mode without modifying source files.",
+                    include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../prompts/profiles/role_planner.txt"
+                    ))
+                    .trim_end(),
+                ),
+                profile(
+                    "merger",
+                    "codex",
+                    true,
+                    include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../prompts/profiles/role_merger.txt"
+                    ))
+                    .trim_end(),
                 ),
             ],
         }
@@ -414,6 +439,71 @@ pub struct Event {
     pub data: Value,
     pub created_at: u64,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RequestTrigger {
+    Workflow,
+    StageEntry,
+    Interactive,
+    Comment { comment_id: String },
+    Custom(String),
+}
+impl RequestTrigger {
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "workflow" => Self::Workflow,
+            "stage_entry" => Self::StageEntry,
+            "interactive" => Self::Interactive,
+            _ if raw.starts_with("comment:") => Self::Comment {
+                comment_id: raw["comment:".len()..].to_owned(),
+            },
+            other => Self::Custom(other.to_owned()),
+        }
+    }
+    pub fn is_automatic(&self) -> bool {
+        matches!(self, Self::Workflow | Self::StageEntry)
+    }
+    pub fn is_comment(&self) -> bool {
+        matches!(self, Self::Comment { .. })
+    }
+    pub fn comment_id(&self) -> Option<&str> {
+        match self {
+            Self::Comment { comment_id } => Some(comment_id),
+            _ => None,
+        }
+    }
+}
+impl std::fmt::Display for RequestTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Workflow => f.write_str("workflow"),
+            Self::StageEntry => f.write_str("stage_entry"),
+            Self::Interactive => f.write_str("interactive"),
+            Self::Comment { comment_id } => write!(f, "comment:{comment_id}"),
+            Self::Custom(raw) => f.write_str(raw),
+        }
+    }
+}
+impl From<&str> for RequestTrigger {
+    fn from(raw: &str) -> Self {
+        Self::parse(raw)
+    }
+}
+impl From<String> for RequestTrigger {
+    fn from(raw: String) -> Self {
+        Self::parse(&raw)
+    }
+}
+impl Serialize for RequestTrigger {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+impl<'de> Deserialize<'de> for RequestTrigger {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self::parse(&s))
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Request {
     #[serde(default)]
@@ -427,7 +517,7 @@ pub struct Request {
     pub id: String,
     pub project_id: String,
     pub card_id: String,
-    pub trigger: String,
+    pub trigger: RequestTrigger,
     pub stage: String,
     pub profile: Profile,
     pub instruction: String,
@@ -767,6 +857,12 @@ pub struct TerminalEntry {
     pub name: Option<String>,
     /// Separate durable sequence for independently opened Terminal labels.
     pub manual_number: Option<u64>,
+    /// Optional Card association when opened directly from a Card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_card_id: Option<String>,
+    /// Optional interactive CLI engine identifier for ephemeral Agent terminals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_engine: Option<String>,
     /// Independent terminals own a binding; Agent bindings remain on Attempts.
     pub runtime: Option<TerminalRuntime>,
     pub created_at: u64,
@@ -775,7 +871,12 @@ impl TerminalEntry {
     pub fn title(&self) -> String {
         self.name.clone().unwrap_or_else(|| {
             if self.conversation_id.is_none() {
-                format!("Terminal {}", self.manual_number.unwrap_or(self.number))
+                let n = self.manual_number.unwrap_or(self.number);
+                if let Some(engine) = &self.agent_engine {
+                    format!("{} {n}", friendly_agent_engine(engine))
+                } else {
+                    format!("Terminal {n}")
+                }
             } else {
                 self.number.to_string()
             }
@@ -801,6 +902,36 @@ impl TerminalEntry {
             }
         }
         serde_json::from_value(value)
+    }
+}
+fn friendly_agent_engine(engine: &str) -> String {
+    let clean = engine.strip_prefix("herdr:").unwrap_or(engine);
+    match clean {
+        "codex" => "Codex".into(),
+        "claude" => "Claude Code".into(),
+        "agy" | "antigravity" => "Antigravity".into(),
+        "gemini" => "Gemini CLI".into(),
+        "opencode" => "OpenCode".into(),
+        "cursor" | "cursor-agent" => "Cursor Agent".into(),
+        "pi" => "Pi".into(),
+        "omp" => "Omp".into(),
+        "copilot" => "GitHub Copilot".into(),
+        "droid" => "Droid".into(),
+        "amp" => "Amp".into(),
+        "kimi" => "Kimi".into(),
+        "kiro" | "kiro-cli" => "Kiro".into(),
+        "qwen" => "Qwen Code".into(),
+        "devin" => "Devin".into(),
+        "cline" => "Cline".into(),
+        "grok" => "Grok".into(),
+        "hermes" => "Hermes".into(),
+        "kilo" => "Kilo".into(),
+        "qodercli" | "qoder" => "Qoder".into(),
+        "letta" => "Letta".into(),
+        "mastracode" | "mastra" => "Mastra Code".into(),
+        "maki" => "Maki".into(),
+        "muse" => "Muse".into(),
+        other => other.into(),
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

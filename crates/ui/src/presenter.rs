@@ -57,6 +57,7 @@ pub struct Ui {
     pub backend_notice: Signal<String>,
     pub history: Signal<crate::navigation::History>,
     pub card_standalone: Signal<bool>,
+    pub card_tab: Signal<String>,
     pub terminal_card_context: Signal<String>,
     pub terminal_sidebar: Signal<bool>,
     pub terminal_inactive: Signal<bool>,
@@ -98,6 +99,7 @@ pub struct Ui {
     pub card_view: Option<Signal<String>>,
     pub request: Signal<String>,
     pub page: Signal<String>,
+    pub settings_section: Signal<String>,
     pub status: Signal<String>,
     pub toast: Signal<String>,
     pub toast_epoch: Signal<u64>,
@@ -211,6 +213,10 @@ impl Ui {
             .set(self.review_request.get_untracked() + 1);
         self.page.set(page.into());
     }
+    pub fn open_settings_section(self, section: &str) {
+        self.settings_section.set(section.into());
+        self.navigate("settings");
+    }
     pub fn has_blocking_overlay(self) -> bool {
         self.quick_open.get_untracked()
             || !self.utility_popup.get_untracked().is_empty()
@@ -222,6 +228,7 @@ impl Ui {
             || self.worktree_remove_confirm.get_untracked().is_some()
     }
     pub fn close_card(self) {
+        self.card_tab.set(String::new());
         self.card_terminal_open.set(false);
         self.card_terminal_focused.set(false);
         self.card.set(String::new());
@@ -282,6 +289,7 @@ impl Ui {
             backend_notice: signal(String::new()),
             history: signal(crate::navigation::History::default()),
             card_standalone: signal(false),
+            card_tab: signal(String::new()),
             terminal_card_context: signal(String::new()),
             terminal_sidebar: signal(true),
             terminal_inactive: signal(false),
@@ -348,6 +356,7 @@ impl Ui {
             card_view: None,
             request: signal(String::new()),
             page: signal("board".into()),
+            settings_section: signal(String::new()),
             status: signal(String::new()),
             toast: signal(String::new()),
             toast_epoch: signal(0),
@@ -507,6 +516,21 @@ impl Ui {
         }) {
             self.project.set(project);
         }
+        let recent = self.terminal_recent.with(|m| m.get(&id).cloned());
+        let default_tab = crate::terminals::default_card_terminal(
+            &self.snapshot.get_untracked(),
+            &id,
+            recent.as_deref(),
+        )
+        .unwrap_or_default();
+        let has_live = !default_tab.is_empty();
+        if has_live {
+            self.terminal_recent.with(|m| {
+                m.insert(id.clone(), default_tab.clone());
+            });
+        }
+        self.card_tab.set(default_tab);
+        self.card_terminal_open.set(has_live);
         self.card.set(id);
         self.expanded.set(false);
         self.focused_card.set(false);
@@ -527,10 +551,23 @@ impl Ui {
                 }
             });
         }
-        self.open_card(card_id);
-        self.card_terminal_open.set(true);
-        self.card_terminal_focused.set(true);
-        self.terminal_focus.update(|v| *v += 1);
+        self.open_card(card_id.clone());
+        if let Some(conv) = conversation {
+            self.card_tab.set(conv);
+        }
+        if !self.card_tab.get_untracked().is_empty() {
+            self.card_terminal_open.set(true);
+            self.card_terminal_focused.set(true);
+            self.terminal_focus.update(|v| *v += 1);
+            return;
+        }
+        if let Some(c) = self
+            .snapshot
+            .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned())
+            .filter(|c| c.archived_at.is_none())
+        {
+            crate::terminals::create_in_card(self, c.project_id, c.id, true);
+        }
     }
     pub fn back(self) {
         crate::navigation::go(self, false);

@@ -121,6 +121,7 @@ impl AppServer {
         drop(_gate);
         if value["state"] == "merged" {
             let _ = self.try_auto_archive_merged(&card.id);
+            let _ = self.pump_deliveries();
         }
         self.emit("review", Some(card.id));
         Ok(value)
@@ -239,45 +240,177 @@ impl AppServer {
     }
 
     pub(crate) fn pump_deliveries(&self) -> Result<()> {
-        let pending: Vec<WorkflowRun> = self
-            .store
-            .lock()
-            .unwrap()
-            .db()
-            .list::<WorkflowRun>()?
-            .into_iter()
-            .filter(|r| r.state == "waiting_delivery")
-            .collect();
-        for run in pending {
-            let _ = self.execute_workflow_delivery(&run.id);
+        let Ok(_gate) = self.review_gate.try_lock() else {
+            return Ok(());
+        };
+        let project_ids: Vec<String> = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let runs = db.list::<WorkflowRun>()?;
+            let mut ids = std::collections::BTreeSet::new();
+            for run in runs {
+                if run.step_is_deliver() && run.active() {
+                    ids.insert(run.project_id);
+                }
+            }
+            ids.into_iter().collect()
+        };
+        for project_id in project_ids {
+            self.pump_project_delivery_queue(&project_id)?;
         }
         Ok(())
     }
 
-    fn execute_workflow_delivery(&self, run_id: &str) -> Result<()> {
-        let Ok(_gate) = self.review_gate.try_lock() else {
-            return Ok(());
-        };
-        let (card, project, run, has_pending_requests) = {
+    fn pump_project_delivery_queue(&self, project_id: &str) -> Result<()> {
+        // Bound iterations per pump pass to guard against pathological retry loops.
+        for _ in 0..64 {
+            // Reconcile any newly-held cards in `waiting_delivery` so they leave the active queue
+            // before selecting the head of line.
+            let held_runs: Vec<(String, String)> = {
+                let store = self.store.lock().unwrap();
+                let db = store.db();
+                let cards: std::collections::BTreeMap<String, Card> = db
+                    .list::<Card>()?
+                    .into_iter()
+                    .filter(|c| c.project_id == project_id)
+                    .map(|c| (c.id.clone(), c))
+                    .collect();
+                db.list::<WorkflowRun>()?
+                    .into_iter()
+                    .filter(|r| {
+                        r.project_id == project_id
+                            && r.state == "waiting_delivery"
+                            && cards
+                                .get(&r.card_id)
+                                .is_some_and(|c| c.active() && c.hold_auto_merge)
+                    })
+                    .map(|r| (r.card_id, r.id))
+                    .collect()
+            };
+            for (card_id, run_id) in held_runs {
+                self.store.lock().unwrap().write(|db| {
+                    let mut current_card: Card = db.get(&card_id)?;
+                    let mut current_run: WorkflowRun = db.get(&run_id)?;
+                    if current_run.state == "waiting_delivery" && current_card.hold_auto_merge {
+                        canban_workflow_engine::runtime::hold_delivery(
+                            db,
+                            &mut current_card,
+                            &mut current_run,
+                            "Auto-merge held by user; approve or resume to merge",
+                        )?;
+                    }
+                    Ok(())
+                })?;
+                self.emit("application", Some(card_id));
+            }
+
+            let head_run = {
+                let store = self.store.lock().unwrap();
+                let db = store.db();
+                let runs = db.list::<WorkflowRun>()?;
+                let cards = db.list::<Card>()?;
+                canban_types::project_merge_queue(&runs, &cards, project_id)
+                    .into_iter()
+                    .next()
+                    .cloned()
+            };
+            let Some(head) = head_run else {
+                break;
+            };
+            // Head-of-line serialization: if the #1 Card in the queue is actively resolving a
+            // merge conflict via @merger (`waiting_agent` / `running`), subsequent Cards wait
+            // behind it instead of jumping ahead and advancing `main` under the resolver.
+            if head.state != "waiting_delivery" {
+                break;
+            }
+            if !self.execute_workflow_delivery(&head.id)? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn set_queue_pause_reason(
+        &self,
+        card_id: &str,
+        run_id: &str,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        let mut changed = false;
+        self.store.lock().unwrap().write(|db| {
+            let mut current_run: WorkflowRun = db.get(run_id)?;
+            if current_run.state != "waiting_delivery" {
+                return Ok(());
+            }
+            let prev = current_run.queue_pause_reason().map(str::to_owned);
+            let next = reason.map(str::trim).filter(|s| !s.is_empty());
+            if prev.as_deref() == next {
+                return Ok(());
+            }
+            if let Some(msg) = next {
+                current_run.inputs["queue_pause_reason"] = json!(msg);
+            } else if let Some(obj) = current_run.inputs.as_object_mut() {
+                obj.remove("queue_pause_reason");
+            }
+            current_run.updated_at = now();
+            db.save(&current_run)?;
+            changed = true;
+            Ok(())
+        })?;
+        if changed {
+            self.emit("review", Some(card_id.to_owned()));
+        }
+        Ok(changed)
+    }
+
+    /// Maximum grace window for a connected Agent that already reported `completed` to
+    /// finish wrapping up its interactive turn before Queue Merge integrates the worktree.
+    pub(crate) const DELIVERY_AGENT_SETTLE_MS: u64 = 180_000;
+
+    /// Executes one step for the head-of-line `waiting_delivery` run.
+    /// Returns `Ok(true)` when this run exited the head of the queue (merged or stepped aside
+    /// to a human gate) so the caller can immediately advance to the next Card in line, or
+    /// `Ok(false)` when this run still holds the head of the queue (settling, conflict handed
+    /// to `@merger`, or waiting on a transient main-checkout condition).
+    fn execute_workflow_delivery(&self, run_id: &str) -> Result<bool> {
+        let (card, project, run, has_pending_requests, settling_agent) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
             let Ok(run) = db.get::<WorkflowRun>(run_id) else {
-                return Ok(());
+                return Ok(false);
             };
             if run.state != "waiting_delivery" {
-                return Ok(());
+                return Ok(false);
             }
             let card: Card = db.get(&run.card_id)?;
             if !card.active() {
-                return Ok(());
+                return Ok(false);
             }
             let project: Project = db.get(&card.project_id)?;
             let project = self.bound_project(&project, &card);
-            let has_pending_requests = db.list::<Request>()?.iter().any(|r| {
+            let requests = db.list::<Request>()?;
+            let has_pending_requests = requests.iter().any(|r| {
                 r.card_id == card.id
-                    && matches!(r.state.as_str(), "queued" | "starting" | "unknown")
+                    && matches!(
+                        r.state.as_str(),
+                        "queued" | "starting" | "running" | "working" | "unknown"
+                    )
             });
-            (card, project, run, has_pending_requests)
+            let now_ms = now();
+            let settling_agent = db.list::<Attempt>()?.into_iter().any(|a| {
+                if a.card_id != card.id || a.terminal.is_none() || a.agent_stopped() {
+                    return false;
+                }
+                if a.connection_state != "connected" {
+                    return false;
+                }
+                let anchor = a
+                    .completed_at
+                    .max(Some(run.updated_at))
+                    .unwrap_or(a.created_at);
+                now_ms.saturating_sub(anchor) < Self::DELIVERY_AGENT_SETTLE_MS
+            });
+            (card, project, run, has_pending_requests, settling_agent)
         };
         let config = self.config();
         if card.hold_auto_merge {
@@ -295,7 +428,7 @@ impl AppServer {
                 Ok(())
             })?;
             self.emit("application", Some(card.id));
-            return Ok(());
+            return Ok(true);
         }
         // No worktree means there is nothing to merge (e.g. create_worktree: false);
         // complete the step without waiting on Agent terminals.
@@ -316,10 +449,10 @@ impl AppServer {
                 Ok(())
             })?;
             self.emit("application", Some(card.id));
-            return Ok(());
+            return Ok(true);
         }
-        if has_pending_requests {
-            return Ok(());
+        if has_pending_requests || settling_agent {
+            return Ok(false);
         }
         let _merging = self.track_merging(&card.id);
         let target_branch = run.inputs["target_branch"].as_str();
@@ -331,6 +464,14 @@ impl AppServer {
             && ops.has_push_remote(&workspace_project)
             && let Err(e) = ops.sync_target(&workspace_project, target_branch)
         {
+            if let Some(canban_workspaces::review::DeliveryError::MainCheckoutBusy {
+                reason: busy,
+            }) = e.downcast_ref::<canban_workspaces::review::DeliveryError>()
+            {
+                let pause_msg = format!("Merge queue waiting: {busy}");
+                self.set_queue_pause_reason(&card.id, &run.id, Some(&pause_msg))?;
+                return Ok(false);
+            }
             let reason = format!("Auto-merge paused (upstream sync): {e:#}");
             self.store.lock().unwrap().write(|db| {
                 let mut current_card: Card = db.get(&card.id)?;
@@ -346,7 +487,7 @@ impl AppServer {
                 Ok(())
             })?;
             self.emit("review", Some(card.id));
-            return Ok(());
+            return Ok(true);
         }
         let plan = match ops.review_preview(&workspace_project, &card, target_branch) {
             Ok(plan) => plan,
@@ -366,7 +507,7 @@ impl AppServer {
                     Ok(())
                 })?;
                 self.emit("review", Some(card.id));
-                return Ok(());
+                return Ok(true);
             }
         };
         if !plan.merge_allowed {
@@ -374,12 +515,21 @@ impl AppServer {
                 .pending_merge_conflict(&workspace_project, &card, target_branch)
                 .ok()
                 .flatten();
+            if pending_conflict.is_none()
+                && let Some(raw_reason) = plan.reason.as_deref()
+                && canban_workspaces::review::is_main_checkout_busy_reason(raw_reason)
+            {
+                let pause_msg = format!("Merge queue waiting: {raw_reason}");
+                self.set_queue_pause_reason(&card.id, &run.id, Some(&pause_msg))?;
+                return Ok(false);
+            }
             let reason = format!(
                 "Auto-merge paused: {}",
                 plan.reason
                     .as_deref()
                     .unwrap_or("Merge unavailable; human review required")
             );
+            let mut dispatched_conflict = false;
             self.store.lock().unwrap().write(|db| {
                 let mut current_card: Card = db.get(&card.id)?;
                 let mut current_run: WorkflowRun = db.get(&run.id)?;
@@ -397,6 +547,7 @@ impl AppServer {
                             enqueue,
                         )?
                     {
+                        dispatched_conflict = true;
                         return Ok(());
                     }
                     canban_workflow_engine::runtime::hold_delivery(
@@ -409,8 +560,10 @@ impl AppServer {
                 Ok(())
             })?;
             self.emit("review", Some(card.id));
-            return Ok(());
+            return Ok(!dispatched_conflict);
         }
+        // Main checkout is clean and ready: clear any previous transient wait reason.
+        let _ = self.set_queue_pause_reason(&card.id, &run.id, None);
         let key = format!("workflow-deliver:{}:{}", run.id, run.visit);
         let message = format!("Canban #{}: {}", card.number, card.title);
         let result = ops.review_merge(
@@ -426,10 +579,12 @@ impl AppServer {
             None
         };
         let mut merged_and_completed = false;
+        let mut advance_queue = true;
         self.store.lock().unwrap().write(|db| {
             let mut current_card: Card = db.get(&card.id)?;
             let mut current_run: WorkflowRun = db.get(&run.id)?;
             if current_run.state != "waiting_delivery" {
+                advance_queue = false;
                 return Ok(());
             }
             match result {
@@ -537,7 +692,7 @@ impl AppServer {
                 Err(error) => {
                     use canban_workspaces::review::DeliveryError;
                     match error.downcast_ref::<DeliveryError>() {
-                        // The Project branch moved under us; leave the run queued for a retry.
+                        // The Project branch moved under us; retry this head Card immediately.
                         Some(DeliveryError::TargetAdvanced) => {
                             log(
                                 db,
@@ -548,6 +703,14 @@ impl AppServer {
                                 None,
                                 json!({"target_branch":plan.target_branch,"request_key":key,"workflow_run_id":run.id}),
                             )?;
+                            return Ok(());
+                        }
+                        Some(DeliveryError::MainCheckoutBusy { reason: busy }) => {
+                            current_run.inputs["queue_pause_reason"] =
+                                json!(format!("Merge queue waiting: {busy}"));
+                            current_run.updated_at = now();
+                            db.save(&current_run)?;
+                            advance_queue = false;
                             return Ok(());
                         }
                         Some(DeliveryError::Conflict {
@@ -566,6 +729,7 @@ impl AppServer {
                             enqueue,
                         )? =>
                         {
+                            advance_queue = false;
                             return Ok(());
                         }
                         _ => {}
@@ -592,12 +756,11 @@ impl AppServer {
         })?;
         self.git_changed(&project.work_location().machine);
         drop(_merging);
-        drop(_gate);
         if merged_and_completed {
             let _ = self.try_auto_archive_merged(&card.id);
         }
         self.emit("review", Some(card.id));
-        Ok(())
+        Ok(advance_queue)
     }
 
     pub(super) fn git_refs(&self, p: Value) -> Result<Value> {
@@ -963,6 +1126,8 @@ impl AppServer {
                 number: db.counter("terminal-number")?,
                 name: Some(title_trimmed),
                 manual_number: Some(db.counter("terminal-manual-number")?),
+                origin_card_id: None,
+                agent_engine: None,
                 created_at: now(),
                 runtime: Some(TerminalRuntime {
                     machine: machine.clone(),
@@ -986,9 +1151,17 @@ impl AppServer {
             return Ok(saved);
         };
 
-        let prompt = format!(
-            "You are assisting with a code review in repository `{}` (directory: `{}`).\n\nPlease inspect the relevant files, address or respond to each review item below, and summarize your changes.\n\n{}",
-            project.name, cwd, formatted_review
+        let prompt = canban_context::render_template(
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../prompts/runtime/review_assist.txt"
+            ))
+            .trim_end(),
+            &[
+                ("project_name", &project.name),
+                ("cwd", &cwd),
+                ("formatted_review", formatted_review),
+            ],
         );
         let client = canban_herdr::Client {
             config: self.config(),

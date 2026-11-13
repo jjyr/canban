@@ -140,15 +140,26 @@ fn validate_profile_id(id: &str) -> Result<()> {
 
 fn default_role_instruction(id: &str) -> &'static str {
     match id {
-        "planner" => {
-            "You are the Card's planning Agent. Inspect repository files in read-only mode without modifying source files."
-        }
-        "developer" => {
-            "You are the Card's development Agent. Follow repository conventions and verify changes before finishing."
-        }
-        "reviewer" => {
-            "You are the Card's independent review Agent. Critically inspect changes and test coverage without making unrequested edits."
-        }
+        "planner" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../prompts/profiles/role_planner.txt"
+        ))
+        .trim_end(),
+        "developer" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../prompts/profiles/role_developer.txt"
+        ))
+        .trim_end(),
+        "reviewer" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../prompts/profiles/role_reviewer.txt"
+        ))
+        .trim_end(),
+        "merger" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../prompts/profiles/role_merger.txt"
+        ))
+        .trim_end(),
         _ => "",
     }
 }
@@ -440,8 +451,8 @@ impl AppServer {
             }
         }
 
-        // 3. Ensure built-in semantic identities (`developer`, `reviewer`, `planner`) exist and use selected engines.
-        for role_id in ["developer", "reviewer", "planner"] {
+        // 3. Ensure built-in semantic identities (`developer`, `reviewer`, `planner`, `merger`) exist and use selected engines.
+        for role_id in ["developer", "reviewer", "planner", "merger"] {
             let chosen_engine = identity_engines
                 .get(role_id)
                 .cloned()
@@ -487,7 +498,10 @@ impl AppServer {
 
         // Also update any custom identities explicitly listed in `identity_engines`.
         for (role_id, engine_id) in &identity_engines {
-            if matches!(role_id.as_str(), "developer" | "reviewer" | "planner") {
+            if matches!(
+                role_id.as_str(),
+                "developer" | "reviewer" | "planner" | "merger"
+            ) {
                 continue;
             }
             let preset_ref = raw
@@ -818,7 +832,7 @@ impl AppServer {
             "delete_profile" => {
                 let id = strp(&p, "id")?.trim();
                 ensure!(
-                    !matches!(id, "developer" | "reviewer" | "planner"),
+                    !matches!(id, "developer" | "reviewer" | "planner" | "merger"),
                     "Built-in identity @{id} cannot be deleted; disable it or change its backing Agent instead"
                 );
                 let before = raw.profiles.len();

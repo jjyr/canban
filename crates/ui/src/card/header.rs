@@ -240,35 +240,6 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         ),
                 )
                 .child(when(
-                    move || ui.page.get() == "card",
-                    move || {
-                        view()
-                            .tooltip(hint_tooltip(
-                                "Toggle side-by-side Live Terminal · ⌘J",
-                            ))
-                            .child(
-                                compact_action(
-                                    move || {
-                                        if ui.card_terminal_open.get() {
-                                            ">_ Hide"
-                                        } else {
-                                            ">_ Terminal"
-                                        }
-                                    },
-                                    Variant::Secondary,
-                                    move |_| super::terminal::toggle(ui),
-                                )
-                                .bg(move || {
-                                    if ui.card_terminal_open.get() {
-                                        SELECTED
-                                    } else {
-                                        INSET
-                                    }
-                                }),
-                            )
-                    },
-                ))
-                .child(when(
                     move || ui.page.get() != "review" && !ui.card_terminal_open.get(),
                     move || crate::editor::expand(ui),
                 ))
@@ -293,11 +264,64 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 ))
                 .child(chrome_button_disabled(
                     Icon::Agent,
-                    "Send to Agent",
-                    move || !ui.current_card().is_some_and(|c| c.active()),
+                    "Open Agent",
+                    move || {
+                        ui.pending.get()
+                            || ui.current_card().is_none_or(|c| c.archived_at.is_some())
+                    },
+                    move |_| {
+                        let Some(c) = ui.current_card() else {
+                            return;
+                        };
+                        if ui.page.get_untracked() == "review" {
+                            crate::terminals::create_in_card(ui, c.project_id, c.id, true);
+                            return;
+                        }
+                        if !ui.card_terminal_open.get_untracked() {
+                            let s = ui.snapshot.get_untracked();
+                            let live = crate::terminals::card_live_entries(&s, &c.id);
+                            let recent = ui.terminal_recent.with(|m| m.get(&c.id).cloned());
+                            let existing_agent = recent
+                                .as_deref()
+                                .and_then(|rid| {
+                                    live.iter().find(|e| {
+                                        e.saved.id == rid
+                                            && (e.agent.is_some()
+                                                || e.saved.agent_engine.is_some())
+                                    })
+                                })
+                                .or_else(|| {
+                                    live.iter().find(|e| {
+                                        e.agent.is_some() || e.saved.agent_engine.is_some()
+                                    })
+                                })
+                                .map(|e| e.saved.id.clone());
+                            if let Some(id) = existing_agent {
+                                crate::terminals::select_card_tab(ui, &c.id, id);
+                                ui.card_terminal_open.set(true);
+                                ui.card_terminal_focused.set(true);
+                                return;
+                            }
+                        }
+                        crate::terminals::create_in_card(ui, c.project_id, c.id, true);
+                    },
+                ))
+                .child(chrome_button_disabled(
+                    Icon::Terminal,
+                    "Toggle Terminal · ⌘J",
+                    move || {
+                        ui.pending.get()
+                            || ui.current_card().is_none_or(|c| {
+                                c.archived_at.is_some() && !ui.card_terminal_open.get()
+                            })
+                    },
                     move |_| {
                         if let Some(c) = ui.current_card() {
-                            crate::sessions::send_card(ui, &c.id);
+                            if ui.page.get_untracked() == "review" {
+                                crate::terminals::open_card(ui, &c.id);
+                                return;
+                            }
+                            crate::card::terminal::toggle(ui);
                         }
                     },
                 ))
@@ -422,101 +446,6 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                                         .truncate(),
                                 )
                                 .on_press(move |_: &()| copy_text(ui, branch.clone())),
-                        ),
-                );
-            }
-            for agent in canban_notifications::overview(&s)
-                .into_iter()
-                .filter(|r| r.card.id == c.id && r.request.is_some())
-            {
-                let req = agent.request.as_ref().unwrap();
-                let (mark, _) = crate::profiles::provider(&req.profile);
-                let text = if crate::terminals::model::closed(&agent) {
-                    if crate::terminals::model::can_resume(&agent, &ui.profiles.get()) {
-                        "Resume"
-                    } else {
-                        "View history"
-                    }
-                } else if agent
-                    .attempt
-                    .as_ref()
-                    .is_some_and(|a| a.connection_state != "connected" && !a.finished())
-                {
-                    "Disconnected"
-                } else if agent
-                    .attempt
-                    .as_ref()
-                    .is_some_and(|a| a.runtime_status() == "blocked")
-                {
-                    "Needs input"
-                } else if agent.group == "Needs attention" {
-                    "Check terminal"
-                } else {
-                    agent.group.as_str()
-                };
-                let hint = agent
-                    .reasons
-                    .iter()
-                    .map(|r| r.message.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let title = format!("{} · {text}", req.profile.id);
-                let id = agent.id.clone();
-                let cid = c.id.clone();
-                let ended = crate::terminals::model::closed(&agent);
-                let resumable = crate::terminals::model::can_resume(&agent, &ui.profiles.get());
-                let can_open = !c.removed_at.is_some();
-                row = row.child(
-                    view()
-                        .min_w(px(0.))
-                        .max_w(px(170.))
-                        .tooltip(hint_tooltip(if hint.is_empty() {
-                            title.clone()
-                        } else {
-                            hint
-                        }))
-                        .child(
-                            canban_ui_kit::press_target()
-                                .min_w(px(0.))
-                                .h(px(24.))
-                                .px_1p5()
-                                .rounded(px(5.))
-                                .flex_row()
-                                .items_center()
-                                .gap_1()
-                                .bg(CLEAR)
-                                .hover(|st| st.bg(INSET))
-                                .focus(|st| st.border_1().border_color(ACCENT))
-                                .disabled(!can_open)
-                                .accessibility_label(move || {
-                                    Some(format!("Open Agent {title}").into())
-                                })
-                                .child(icon(mark).w(px(13.)).h(px(13.)))
-                                .child(
-                                    muted(format!("{} · {text}", req.profile.id))
-                                        .text_color(if agent.actionable() {
-                                            ATTENTION
-                                        } else {
-                                            MUTED
-                                        })
-                                        .truncate(),
-                                )
-                                .on_press(move |_: &()| {
-                                    if ended && resumable {
-                                        crate::terminals::navigation::resume(ui, &id);
-                                    } else if ui.page.get_untracked() == "card" {
-                                        if ended {
-                                            ui.open_terminal(id.clone());
-                                        } else {
-                                            ui.open_card_with_terminal(
-                                                cid.clone(),
-                                                Some(id.clone()),
-                                            );
-                                        }
-                                    } else {
-                                        ui.open_terminal(id.clone());
-                                    }
-                                }),
                         ),
                 );
             }

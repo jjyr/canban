@@ -3,9 +3,9 @@ pub mod entries;
 mod labels;
 pub mod model;
 pub mod navigation;
-mod tabs;
+pub(crate) mod tabs;
 mod tree;
-mod viewer;
+pub(crate) mod viewer;
 pub mod worktrees;
 use crate::presenter::*;
 use canban_notifications::OverviewRow;
@@ -18,9 +18,14 @@ use serde_json::json;
 pub fn watch(ui: Ui) {
     navigation::watch(ui);
     effect(move || {
-        let terminal = ui.terminal_selection.get();
-        let page = ui.page.get();
-        if page != "terminals" || terminal.is_empty() {
+        let terminal = if ui.page.get() == "terminals" {
+            ui.terminal_selection.get()
+        } else if ui.page.get() == "card" {
+            ui.card_tab.get()
+        } else {
+            String::new()
+        };
+        if terminal.is_empty() {
             return;
         }
         if let Some(app) = crate::APP.get().cloned() {
@@ -43,6 +48,22 @@ pub fn watch(ui: Ui) {
             return;
         }
         let ids = listed.get();
+        let active_card_tab = ui.card_tab.get();
+        if !active_card_tab.is_empty() && !ids.contains(&active_card_tab) {
+            let cid = ui.card.get_untracked();
+            let recent = ui.terminal_recent.with(|m| m.get(&cid).cloned());
+            let next = default_card_terminal(&ui.snapshot.get_untracked(), &cid, recent.as_deref())
+                .unwrap_or_default();
+            if next.is_empty() {
+                ui.card_tab.set(String::new());
+                if !ui.is_method_pending("terminal.create") && !ui.is_method_pending("agent.open") {
+                    ui.card_terminal_open.set(false);
+                    ui.card_terminal_focused.set(false);
+                }
+            } else {
+                select_card_tab(ui, &cid, next);
+            }
+        }
         let tabs = ui.terminal_tabs.get();
         let kept: Vec<_> = tabs.iter().filter(|id| ids.contains(id)).cloned().collect();
         if tabs != kept {
@@ -112,7 +133,220 @@ pub fn reveal_group(ui: Ui, id: &str) {
         });
     }
 }
-/// Navigation never creates/resumes an invocation; that requires an explicit Agent action.
+pub fn card_live_entries(snapshot: &canban_types::Snapshot, card_id: &str) -> Vec<Entry> {
+    if card_id.is_empty() {
+        return Vec::new();
+    }
+    entries(snapshot)
+        .into_iter()
+        .filter(|e| {
+            e.card.as_ref().is_some_and(|c| c.id == card_id)
+                && e.listed()
+                && (e.agent.is_none()
+                    || e.binding().is_some()
+                    || matches!(e.status().as_str(), "queued" | "starting"))
+        })
+        .collect()
+}
+
+/// Resolve the active Terminal/Agent tab for a Card: prefer the Card's last-selected
+/// live entry when still active, otherwise select the first active entry (`live.first()`).
+pub fn default_card_terminal(
+    snapshot: &canban_types::Snapshot,
+    card_id: &str,
+    recent: Option<&str>,
+) -> Option<String> {
+    let live = card_live_entries(snapshot, card_id);
+    recent
+        .filter(|rid| live.iter().any(|e| e.saved.id.as_str() == *rid))
+        .map(str::to_owned)
+        .or_else(|| live.first().map(|e| e.saved.id.clone()))
+}
+
+pub(crate) fn select_card_tab(ui: Ui, card_id: &str, terminal_id: String) {
+    if !card_id.is_empty() && !terminal_id.is_empty() {
+        ui.terminal_recent.with(|m| {
+            m.insert(card_id.to_owned(), terminal_id.clone());
+        });
+    }
+    ui.card_tab.set(terminal_id);
+    ui.terminal_focus.update(|v| *v += 1);
+}
+
+fn gallery_create_entry(
+    ui: Ui,
+    project_id: Option<String>,
+    card_id: Option<String>,
+    agent: bool,
+) -> String {
+    let prefix = if agent {
+        "gallery-agent"
+    } else {
+        "gallery-shell"
+    };
+    let id = format!("{prefix}-{}", canban_types::id());
+    let agent_engine = agent.then(|| {
+        let def = ui.default_agent.get_untracked();
+        let project = project_id.as_deref().and_then(|pid| {
+            ui.snapshot
+                .with_untracked(|s| s.projects.iter().find(|p| p.id == pid).cloned())
+        });
+        ui.profiles
+            .with_untracked(|ps| {
+                ps.iter()
+                    .find(|p| p.id == def)
+                    .or_else(|| ps.first())
+                    .map(|p| {
+                        let (_, _, _) = crate::profiles::effective_provider(p, project.as_ref());
+                        project
+                            .as_ref()
+                            .and_then(|proj| proj.agent_overrides.get(&p.id).cloned())
+                            .or_else(|| p.preset.clone())
+                            .unwrap_or_else(|| p.command_name())
+                    })
+            })
+            .unwrap_or_else(|| "codex".into())
+    });
+    let saved = canban_types::TerminalEntry {
+        id: id.clone(),
+        conversation_id: None,
+        number: ui
+            .snapshot
+            .with_untracked(|s| s.terminals.iter().map(|t| t.number).max().unwrap_or(8))
+            + 1,
+        name: None,
+        manual_number: Some(
+            ui.snapshot.with_untracked(|s| {
+                s.terminals
+                    .iter()
+                    .filter_map(|t| t.manual_number)
+                    .max()
+                    .unwrap_or(0)
+            }) + 1,
+        ),
+        origin_card_id: card_id.clone(),
+        agent_engine,
+        created_at: 0,
+        runtime: Some(canban_types::TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("gallery".into()),
+            terminal: Some(id.clone()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+        }),
+    };
+    let inherited_location = current(ui).and_then(|e| e.location);
+    ui.snapshot.update(|s| {
+        s.terminals.push(saved);
+        if let Some(mut loc) = inherited_location {
+            loc.terminal_id = id.clone();
+            loc.core_id = "gallery".into();
+            loc.terminal = id.clone();
+            if let Some(ref pid) = project_id {
+                loc.project_id = Some(pid.clone());
+            }
+            if let Some(ref cid) = card_id {
+                loc.card_id = Some(cid.clone());
+            }
+            s.terminal_contexts.push(loc);
+        } else if project_id.is_some() || card_id.is_some() {
+            s.terminal_contexts.push(canban_types::TerminalContext {
+                machine: "local".into(),
+                terminal_id: id.clone(),
+                core_id: "gallery".into(),
+                terminal: id.clone(),
+                cwd: Some("/workspace/project".into()),
+                project_id,
+                card_id,
+                branch: None,
+            });
+        }
+    });
+    id
+}
+
+/// Open the Card's side-by-side terminal split directly (selecting the active tab or spawning a shell).
+pub fn open_card_quick(ui: Ui, card_id: &str) {
+    let Some(card) = ui
+        .snapshot
+        .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned())
+    else {
+        return;
+    };
+    if ui.page.get_untracked() != "card" || ui.card.get_untracked() != card.id {
+        ui.open_card(card.id.clone());
+    }
+    if !ui.card_tab.get_untracked().is_empty() {
+        ui.card_terminal_open.set(true);
+        ui.card_terminal_focused.set(true);
+        ui.terminal_focus.update(|v| *v += 1);
+        return;
+    }
+    if card.archived_at.is_some() {
+        ui.operation_error
+            .set("Restore this Card before opening a new terminal.".into());
+        return;
+    }
+    create_in_card(ui, card.project_id, card.id, false);
+}
+
+/// Spawn a new Shell Terminal (`agent == false`) or clean ephemeral CLI Agent (`agent == true`) on a Card.
+pub fn create_in_card(ui: Ui, project_id: String, card_id: String, agent: bool) {
+    let archived = ui.snapshot.with_untracked(|s| {
+        s.cards
+            .iter()
+            .any(|c| c.id == card_id && c.archived_at.is_some())
+    });
+    if archived {
+        ui.operation_error.set(if agent {
+            "Restore this Card before opening an Agent.".into()
+        } else {
+            "Restore this Card before opening a new terminal.".into()
+        });
+        return;
+    }
+    let source_page = ui.page.get_untracked();
+    let in_card_workspace = !matches!(source_page.as_str(), "terminals" | "review");
+    if in_card_workspace {
+        if source_page != "card" || ui.card.get_untracked() != card_id {
+            ui.open_card(card_id.clone());
+        }
+        ui.card_terminal_open.set(true);
+        ui.card_terminal_focused.set(true);
+    }
+    if crate::APP.get().is_none() {
+        let id = gallery_create_entry(ui, Some(project_id), Some(card_id.clone()), agent);
+        if ui.page.get_untracked() == "card" && ui.card.get_untracked() == card_id {
+            select_card_tab(ui, &card_id, id);
+            ui.card_terminal_open.set(true);
+            ui.card_terminal_focused.set(true);
+        } else {
+            ui.open_terminal(id);
+        }
+        return;
+    }
+    let mut params = json!({"project_id": project_id, "card_id": card_id});
+    if agent {
+        params["agent"] = json!(true);
+    }
+    let target_card = card_id;
+    dispatch_then(ui, "terminal.create", params, move |v| {
+        let Some(id) = v["id"].as_str().map(str::to_owned) else {
+            return;
+        };
+        if ui.page.get_untracked() == "card" && ui.card.get_untracked() == target_card {
+            select_card_tab(ui, &target_card, id);
+            ui.card_terminal_open.set(true);
+            ui.card_terminal_focused.set(true);
+        } else if source_page == "terminals" || source_page == "review" {
+            ui.open_terminal(id);
+        }
+    });
+}
+
+/// Open Card terminal from global/menu surfaces without intermediate prompts.
 pub fn open_card(ui: Ui, card_id: &str) {
     navigation::open_card(ui, card_id);
 }
@@ -125,35 +359,23 @@ pub fn card_context(ui: Ui) -> Option<canban_types::Card> {
     ui.snapshot
         .with(|s| s.cards.iter().find(|c| c.id == card).cloned())
 }
-pub fn choose_card_agent(ui: Ui) {
-    use nsh_core::element::desktop::{MenuItem, popup_menu};
-    let Some(card) = card_context(ui).filter(|c| c.archived_at.is_none()) else {
+
+/// Launch a clean ephemeral interactive CLI Agent in the current terminal/card context (never Resume).
+pub fn open_ephemeral_agent(ui: Ui) {
+    if let Some(card) = card_context(ui).filter(|c| c.archived_at.is_none()) {
+        create_in_card(ui, card.project_id, card.id, true);
         return;
-    };
-    ui.spawn(async move {
-        let items = ui
-            .profiles
-            .get_untracked()
-            .into_iter()
-            .map(|p| {
-                let card = card.id.clone();
-                MenuItem::new(format!(
-                    "{} @{}",
-                    ui.snapshot
-                        .with_untracked(|s| crate::terminals::model::conversations(s)
-                            .iter()
-                            .find(|r| r.card.id == card
-                                && r.request.as_ref().is_some_and(|r| r.profile.id == p.id))
-                            .map(|r| if model::closed(r) { "Resume" } else { "Open" })
-                            .unwrap_or("Start")),
-                    p.id
-                ))
-                .on_select(move || crate::sessions::open(ui, card.clone(), p.id.clone()))
-            })
-            .collect();
-        popup_menu(items).await;
-    });
+    }
+    let selected = ui.terminal_selection.get_untracked();
+    let mut params = json!({"agent": true});
+    if !selected.is_empty() {
+        params["inherit_terminal_id"] = json!(selected);
+    } else if !ui.project.get_untracked().is_empty() {
+        params["project_id"] = json!(ui.project.get_untracked());
+    }
+    launch(ui, params);
 }
+
 pub fn open_request(ui: Ui, request_id: &str) {
     navigation::open_request(ui, request_id);
 }
@@ -180,45 +402,10 @@ fn launch(ui: Ui, params: serde_json::Value) {
     let source = ui.location();
     let selection = ui.terminal_selection.get_untracked();
     if crate::APP.get().is_none() {
-        let id = format!("gallery-shell-{}", canban_types::id());
-        let saved = canban_types::TerminalEntry {
-            id: id.clone(),
-            conversation_id: None,
-            number: ui
-                .snapshot
-                .with_untracked(|s| s.terminals.iter().map(|t| t.number).max().unwrap_or(8))
-                + 1,
-            name: None,
-            manual_number: Some(
-                ui.snapshot.with_untracked(|s| {
-                    s.terminals
-                        .iter()
-                        .filter_map(|t| t.manual_number)
-                        .max()
-                        .unwrap_or(0)
-                }) + 1,
-            ),
-            created_at: 0,
-            runtime: Some(canban_types::TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
-                core_id: Some("gallery".into()),
-                terminal: Some(id.clone()),
-                state: "running".into(),
-                connection: "connected".into(),
-                error: None,
-            }),
-        };
-        let mut location = current(ui).and_then(|e| e.location);
-        ui.snapshot.update(|s| {
-            s.terminals.push(saved.clone());
-            if let Some(ref mut c) = location {
-                c.terminal_id = id.clone();
-                c.core_id = "gallery".into();
-                c.terminal = id.clone();
-                s.terminal_contexts.push(c.clone());
-            }
-        });
+        let project_id = params["project_id"].as_str().map(str::to_owned);
+        let card_id = params["card_id"].as_str().map(str::to_owned);
+        let agent = params["agent"] == true;
+        let id = gallery_create_entry(ui, project_id, card_id, agent);
         ui.open_terminal(id);
         return;
     }
@@ -285,25 +472,35 @@ pub fn machine_menu(ui: Ui) {
     });
 }
 pub fn reopen(ui: Ui, id: String) {
-    if let Some(project) = ui.snapshot.with_untracked(|s| {
+    if let Some((project, profile)) = ui.snapshot.with_untracked(|s| {
         s.configuration_sessions
             .iter()
             .find(|c| c.id == id)
-            .map(|c| c.project_id.clone())
+            .map(|c| (c.project_id.clone(), c.profile_id.clone()))
     }) {
-        ui.project.set(project);
-        ui.navigate("workflows");
+        dispatch_complete(
+            ui,
+            "configuration.open",
+            json!({
+                "project_id": project,
+                "profile_id": profile,
+                "auto_fresh": true,
+            }),
+            move |result| {
+                if let Ok(value) = result
+                    && let Some(tid) = value["terminal_id"].as_str()
+                {
+                    ui.open_terminal(tid.into());
+                }
+            },
+        );
         return;
     }
 
     launch(ui, json!({"inherit_terminal_id":id}));
 }
-pub fn close_tab(ui: Ui, id: &str) {
-    if id.is_empty()
-        || !ui
-            .terminal_tabs
-            .with_untracked(|tabs| tabs.iter().any(|t| t == id))
-    {
+pub fn close_entry(ui: Ui, id: &str) {
+    if id.is_empty() {
         return;
     }
     if crate::APP.get().is_none() {
@@ -339,6 +536,17 @@ pub fn close_tab(ui: Ui, id: &str) {
     );
 }
 
+pub fn close_tab(ui: Ui, id: &str) {
+    if id.is_empty()
+        || !ui
+            .terminal_tabs
+            .with_untracked(|tabs| tabs.iter().any(|t| t == id))
+    {
+        return;
+    }
+    close_entry(ui, id);
+}
+
 fn remove_tab(ui: Ui, id: &str) {
     ui.terminal_focus.update(|v| *v += 1);
     let mut tabs = ui.terminal_tabs.get_untracked();
@@ -356,6 +564,27 @@ fn remove_tab(ui: Ui, id: &str) {
     }
 }
 pub fn cycle(ui: Ui, forward: bool) {
+    if ui.page.get_untracked() == "card"
+        && ui.card_terminal_open.get_untracked()
+        && let Some(c) = ui.current_card()
+    {
+        let slots: Vec<_> = card_live_entries(&ui.snapshot.get_untracked(), &c.id)
+            .into_iter()
+            .map(|e| e.saved.id)
+            .collect();
+        if slots.is_empty() {
+            return;
+        }
+        let cur = ui.card_tab.get_untracked();
+        let old = slots.iter().position(|s| *s == cur).unwrap_or(0);
+        let next = if forward {
+            (old + 1) % slots.len()
+        } else {
+            (old + slots.len() - 1) % slots.len()
+        };
+        select_card_tab(ui, &c.id, slots[next].clone());
+        return;
+    }
     let tabs = ui.terminal_tabs.get_untracked();
     if tabs.is_empty() {
         return;
@@ -380,7 +609,9 @@ pub(crate) const TAB_KEYS: [(&str, u8); 4] = [
 pub fn bindings(ui: Ui) {
     use nsh_core::keymap::When;
     effect(move || {
-        if ui.page.get() != "terminals"
+        let on_terminals = ui.page.get() == "terminals";
+        let on_card_terminal = ui.page.get() == "card" && ui.card_terminal_open.get();
+        if (!on_terminals && !on_card_terminal)
             || ui.quick_open.get()
             || ui.terminal_rename.get().is_some()
             || ui.worktree_modal.get().is_some()
@@ -399,23 +630,29 @@ pub fn bindings(ui: Ui) {
                 },
                 move |_| {
                     match action {
-                        0 => new_tab(ui),
-                        1 => close_tab(ui, &ui.terminal_selection.get_untracked()),
-                        _ => {
-                            let tabs = ui.terminal_tabs.get_untracked();
-                            if !tabs.is_empty() {
-                                let old = tabs
-                                    .iter()
-                                    .position(|t| *t == ui.terminal_selection.get_untracked())
-                                    .unwrap_or(0);
-                                let next = if action == 2 {
-                                    (old + 1) % tabs.len()
-                                } else {
-                                    (old + tabs.len() - 1) % tabs.len()
-                                };
-                                ui.open_terminal(tabs[next].clone());
+                        0 => {
+                            if ui.page.get_untracked() == "card"
+                                && let Some(c) = ui.current_card()
+                            {
+                                create_in_card(ui, c.project_id, c.id, false);
+                            } else {
+                                new_tab(ui);
                             }
                         }
+                        1 => {
+                            if ui.page.get_untracked() == "card" {
+                                let cid = ui.card_id();
+                                if let Some(entry) =
+                                    crate::card::terminal::select_entry_for_card(ui, &cid)
+                                {
+                                    close_entry(ui, &entry.saved.id);
+                                }
+                            } else {
+                                close_tab(ui, &ui.terminal_selection.get_untracked());
+                            }
+                        }
+                        2 => cycle(ui, true),
+                        _ => cycle(ui, false),
                     }
                     ui.terminal_focus.update(|v| *v += 1);
                 },
@@ -446,98 +683,108 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .flex_1()
         .min_h(px(0.))
         .min_w(px(0.))
+        .flex_row()
         .child(
-            nsh_base::h_resizable()
+            view()
+                .w(px(56.))
+                .flex_shrink_0()
+                .min_h(px(0.))
+                .bg(SURFACE)
+                .child(
+                    view()
+                        .h(px(42.))
+                        .flex_shrink_0()
+                        .border_b_1()
+                        .border_color(BORDER)
+                        .window_drag(true),
+                )
+                .child(
+                    view()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .child(crate::rail::sidebar(ui)),
+                ),
+        )
+        .child(
+            view()
                 .flex_1()
                 .min_h(px(0.))
-                .handle_accessibility_label("Resize Terminal sidebar")
-                .render_handle(|_: &nsh_base::ResizeHandleContext| {
-                    view()
-                        .w(px(5.))
-                        .h_full()
-                        .items_center()
-                        .justify_center()
-                        .hover(|s| s.bg(ACCENT))
-                        .active(|s| s.bg(ACCENT))
-                        .child(view().w(px(1.)).h_full().bg(BORDER))
-                })
-                .on_resize(move |sizes: &Vec<Points>| {
-                    if !ui.narrow.get_untracked()
-                        && ui.terminal_sidebar.get_untracked()
-                        && let Some(size) = sizes.first()
-                    {
-                        ui.terminal_width.set((size.0 - 56.).max(190.));
-                        ui.terminal_focus.update(|v| *v += 1);
-                    }
-                })
+                .min_w(px(0.))
                 .child(
-                    nsh_base::resizable_panel()
-                        .size(move || {
-                            if ui.narrow.get() && ui.terminal_sidebar.get() {
-                                None
-                            } else {
-                                Some(px(if ui.terminal_sidebar.get() {
-                                    56. + ui.terminal_width.get()
-                                } else {
-                                    56.
-                                }))
+                    nsh_base::h_resizable()
+                        .flex_1()
+                        .min_h(px(0.))
+                        .handle_accessibility_label("Resize Terminal sidebar")
+                        .render_handle(|_: &nsh_base::ResizeHandleContext| {
+                            view()
+                                .w(px(5.))
+                                .h_full()
+                                .items_center()
+                                .justify_center()
+                                .hover(|s| s.bg(ACCENT))
+                                .active(|s| s.bg(ACCENT))
+                                .child(view().w(px(1.)).h_full().bg(BORDER))
+                        })
+                        .on_resize(move |sizes: &Vec<Points>| {
+                            if !ui.narrow.get_untracked()
+                                && ui.terminal_sidebar.get_untracked()
+                                && let Some(size) = sizes.first()
+                            {
+                                ui.terminal_width.set(size.0.max(190.));
+                                ui.terminal_focus.update(|v| *v += 1);
                             }
                         })
-                        .min_size(move || px(if ui.terminal_sidebar.get() { 246. } else { 56. }))
-                        .max_size(move || {
-                            px(if ui.terminal_sidebar.get() {
-                                if ui.narrow.get() { 10000. } else { 600. }
-                            } else {
-                                56.
-                            })
-                        })
-                        .fixed(move || !ui.narrow.get() || !ui.terminal_sidebar.get())
                         .child(
-                            view()
-                                .flex_1()
-                                .min_h(px(0.))
-                                .bg(SURFACE)
-                                .child(
-                                    view()
-                                        .h(px(42.))
-                                        .flex_shrink_0()
-                                        .flex_row()
-                                        .items_center()
-                                        .border_b_1()
-                                        .border_color(BORDER)
-                                        .window_drag(true)
-                                        .pl(move || px(crate::frame::chrome_left_padding()))
-                                        .child(when(
-                                            move || ui.terminal_sidebar.get(),
-                                            move || controls(ui),
-                                        )),
-                                )
+                            nsh_base::resizable_panel()
+                                .visible(move || ui.terminal_sidebar.get())
+                                .size(move || {
+                                    if ui.narrow.get() {
+                                        None
+                                    } else {
+                                        Some(px(ui.terminal_width.get()))
+                                    }
+                                })
+                                .min_size(px(190.))
+                                .max_size(move || px(if ui.narrow.get() { 10000. } else { 544. }))
+                                .fixed(move || !ui.narrow.get())
                                 .child(
                                     view()
                                         .flex_1()
                                         .min_h(px(0.))
-                                        .flex_row()
-                                        .child(crate::rail::sidebar(ui))
-                                        .child(when(
-                                            move || ui.terminal_sidebar.get(),
-                                            move || tree::sidebar(ui),
-                                        )),
+                                        .bg(SURFACE)
+                                        .child(
+                                            view()
+                                                .h(px(42.))
+                                                .flex_shrink_0()
+                                                .flex_row()
+                                                .items_center()
+                                                .border_b_1()
+                                                .border_color(BORDER)
+                                                .window_drag(true)
+                                                .pl(move || {
+                                                    px((crate::frame::chrome_left_padding() - 56.)
+                                                        .max(0.))
+                                                })
+                                                .child(controls(ui)),
+                                        )
+                                        .child(tree::sidebar(ui)),
+                                ),
+                        )
+                        .child(
+                            nsh_base::resizable_panel()
+                                .min_size(px(300.))
+                                .visible(move || !ui.narrow.get() || !ui.terminal_sidebar.get())
+                                .child(
+                                    view()
+                                        .flex_1()
+                                        .min_h(px(0.))
+                                        .min_w(px(0.))
+                                        .child(tabs::header(ui))
+                                        .child(viewer::screen(ui)),
                                 ),
                         ),
                 )
-                .child(
-                    nsh_base::resizable_panel()
-                        .min_size(px(300.))
-                        .visible(move || !ui.narrow.get() || !ui.terminal_sidebar.get())
-                        .child(
-                            view()
-                                .flex_1()
-                                .min_h(px(0.))
-                                .min_w(px(0.))
-                                .child(tabs::header(ui))
-                                .child(viewer::screen(ui)),
-                        ),
-                ),
+                .child(crate::frame::backend_notice(ui))
+                .child(crate::utilities::bar(ui)),
         )
-        .child(tabs::rename_dialog(ui))
 }

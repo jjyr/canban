@@ -2,12 +2,13 @@
 pub mod button;
 pub mod checkbox;
 pub mod input;
-mod scrollbar;
+pub mod scrollbar;
 pub mod surface;
 pub mod tokens;
 pub use button::{Variant, action, action_with_icon, compact_action, press_target};
 pub use checkbox::checkbox;
 pub use input::{bound_field, field};
+pub use scrollbar::vertical_scrollbar;
 pub use surface::{badge, heading, label, muted, panel, read_text};
 
 pub mod navigation;
@@ -27,7 +28,7 @@ pub use entry_card::entry_card;
 pub mod directory_field;
 pub use directory_field::{directory_field, directory_input};
 pub mod settings;
-pub use settings::{settings_field, settings_section};
+pub use settings::{settings_field, settings_nav_heading, settings_nav_item, settings_section};
 pub mod section_group;
 pub use section_group::{SectionGroup, collapsible_section_group, section_group};
 pub mod chrome;

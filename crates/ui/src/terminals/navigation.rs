@@ -1,6 +1,5 @@
 //! Shared destination resolution. Inspecting history never starts an execution.
 use super::*;
-use nsh_core::element::desktop::{MenuItem, popup_menu};
 
 pub fn history(ui: Ui, row: &OverviewRow) {
     ui.open_card(row.card.id.clone());
@@ -15,8 +14,15 @@ pub fn open_request(ui: Ui, id: &str) {
             .set("This execution is no longer available".into());
         return;
     };
+    let conversation = canban_types::Conversation::key(&req.card_id, &req.profile.id);
     if let Some(terminal) = live_request(&snapshot, id) {
-        ui.open_terminal(terminal);
+        ui.open_card_with_terminal(req.card_id.clone(), Some(terminal));
+    } else if matches!(req.state.as_str(), "queued" | "starting")
+        && super::card_live_entries(&snapshot, &req.card_id)
+            .iter()
+            .any(|e| e.saved.id == conversation)
+    {
+        ui.open_card_with_terminal(req.card_id.clone(), Some(conversation));
     } else {
         ui.open_card(req.card_id.clone());
         ui.request.set(req.id.clone());
@@ -86,60 +92,23 @@ pub fn direct(rows: &[Entry], recent: Option<&str>) -> Option<String> {
     (live.len() == 1).then(|| live[0].saved.id.clone())
 }
 pub fn open_card(ui: Ui, card: &str) {
-    let rows: Vec<_> = entries(&ui.snapshot.get_untracked())
-        .into_iter()
-        .filter(|e| e.agent.is_some() && e.card.as_ref().is_some_and(|c| c.id == card))
-        .collect();
+    let snapshot = ui.snapshot.get_untracked();
+    let Some(c) = snapshot.cards.iter().find(|c| c.id == card).cloned() else {
+        ui.operation_error
+            .set("This Card is no longer available".into());
+        return;
+    };
     let recent = ui.terminal_recent.with(|m| m.get(card).cloned());
-    if let Some(id) = direct(&rows, recent.as_deref()) {
+    if let Some(id) = super::default_card_terminal(&snapshot, card, recent.as_deref()) {
         ui.open_terminal(id);
         return;
     }
-    let mut items = Vec::new();
-    for entry in rows {
-        let provider = entry.provider().map(|(_, name)| name).unwrap_or_default();
-        let machine = crate::machines::name(ui, entry.machine());
-        let status = entry.display_status();
-        let row = entry.agent.unwrap();
-        let profile = row.request.as_ref().unwrap().profile.id.clone();
-        let id = row.id.clone();
-        let title = format!(
-            "@{profile} · {provider} · {status} · {machine} · {}",
-            label(&row)
-        );
-        items.push(MenuItem::new(title).on_select(move || ui.open_terminal(id.clone())));
-        if model::can_resume(&row, &ui.profiles.get_untracked()) {
-            let id = row.id.clone();
-            items.push(
-                MenuItem::new(format!("Resume @{profile}")).on_select(move || resume(ui, &id)),
-            );
-        }
-    }
-    let snapshot = ui.snapshot.get_untracked();
-    if snapshot.cards.iter().any(|c| c.id == card && c.active()) {
-        for profile in ui.profiles.get_untracked() {
-            if !snapshot
-                .requests
-                .iter()
-                .any(|r| r.card_id == card && r.profile.id == profile.id)
-            {
-                let card = card.to_owned();
-                items.push(
-                    MenuItem::new(format!("Start @{}", profile.id)).on_select(move || {
-                        crate::sessions::open(ui, card.clone(), profile.id.clone())
-                    }),
-                );
-            }
-        }
-    }
-    if items.is_empty() {
+    if c.archived_at.is_some() {
         ui.operation_error
-            .set("No Agent is available. Restore archived Cards before starting an Agent.".into());
+            .set("Restore this Card before opening a new terminal.".into());
         return;
     }
-    ui.spawn(async move {
-        popup_menu(items).await;
-    });
+    super::create(ui, c.project_id, Some(c.id));
 }
 
 /// Only an explicit launch may follow a pending request into its eventual PTY.

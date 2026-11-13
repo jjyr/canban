@@ -13,6 +13,8 @@ fn controls() -> impl IntoElement {
     let directory = signal(String::new());
     let markdown = canban_ui_kit::markdown::MarkdownInput::new();
     let group_open = signal(true);
+    let nav_selected = signal(0_usize);
+    let gutter_scroll = element_ref();
     view().flex_1().min_h(px(0.0)).p_5().gap_4().bg(BACKGROUND)
     .child(heading("Component Gallery"))
     .child(muted("Production components · local fixtures · no AppServer or Agent required"))
@@ -110,6 +112,74 @@ fn controls() -> impl IntoElement {
                 )
                 .child(
                     panel()
+                        .child(label("Custom scrollbars · built-in overlay & outer-gutter rail"))
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap_5()
+                                .child(
+                                    view()
+                                        .w(px(260.))
+                                        .gap_1p5()
+                                        .child(muted("Built-in scroll() indicator"))
+                                        .child(
+                                            scroll()
+                                                .h(px(136.))
+                                                .rounded(px(RADIUS))
+                                                .border_1()
+                                                .border_color(BORDER)
+                                                .bg(INSET)
+                                                .p_2p5()
+                                                .child(view().gap_1p5().children((1..=10).map(
+                                                    |i| {
+                                                        muted(format!(
+                                                            "Row #{i} · theme-reactive subtle pill"
+                                                        ))
+                                                    },
+                                                ))),
+                                        ),
+                                )
+                                .child(
+                                    view()
+                                        .w(px(260.))
+                                        .gap_1p5()
+                                        .child(muted("Board outer-gutter vertical_scrollbar"))
+                                        .child(
+                                            view()
+                                                .relative()
+                                                .h(px(136.))
+                                                .child(
+                                                    scroll()
+                                                        .element_ref(&gutter_scroll)
+                                                        .scrollbar(false)
+                                                        .flex_1()
+                                                        .child(view().gap_2().children(
+                                                            (1..=8).map(|i| {
+                                                                panel()
+                                                                    .py_2()
+                                                                    .px_3()
+                                                                    .border_1()
+                                                                    .border_color(BORDER)
+                                                                    .child(label(format!(
+                                                                        "Card #{i} · crisp border"
+                                                                    )))
+                                                            }),
+                                                        )),
+                                                )
+                                                .child(
+                                                    vertical_scrollbar(gutter_scroll)
+                                                        .absolute()
+                                                        .top_0()
+                                                        .bottom_0()
+                                                        .right(px(-8.)),
+                                                ),
+                                        ),
+                                ),
+                        ),
+                )
+                .child(
+                    panel()
                         .child(label("Markdown editor / shared reading styles"))
                         .child(markdown.render(input, markdown.source(input, "Gallery Markdown", "Write Markdown…"), false, signal(220.)))
                         .child(canban_ui_kit::markdown::reader(move || input.get())),
@@ -124,6 +194,38 @@ fn controls() -> impl IntoElement {
                 .child(canban_ui::components::workflow::run_view(fixtures::workflow()))
                 .child(review::diff_panel(fixtures::review()))
                 .child(canban_ui::utilities::terminal_settings(ui))
+                .child(
+                    panel()
+                        .child(label("Settings jump column controls"))
+                        .child(
+                            view()
+                                .w(px(208.))
+                                .p_2()
+                                .rounded(px(RADIUS))
+                                .border_1()
+                                .border_color(BORDER)
+                                .bg(SURFACE)
+                                .gap_0p5()
+                                .child(settings_nav_heading("INTERFACE"))
+                                .child(settings_nav_item(
+                                    "Theme & support",
+                                    move || nav_selected.get() == 0,
+                                    move |_| nav_selected.set(0),
+                                ))
+                                .child(settings_nav_item(
+                                    "Terminal",
+                                    move || nav_selected.get() == 1,
+                                    move |_| nav_selected.set(1),
+                                ))
+                                .child(view().my_1p5().mx_2().h(px(1.)).bg(BORDER))
+                                .child(settings_nav_item(
+                                    "Acknowledgements",
+                                    move || nav_selected.get() == 2,
+                                    move |_| nav_selected.set(2),
+                                )),
+                        ),
+                )
+                .child(canban_ui::settings::acknowledgements_section(ui))
                 .child(
                     panel().child(label("Native libghostty terminal")).child(
                         native("canban/terminal")
@@ -649,8 +751,8 @@ pub fn Gallery() -> impl IntoElement {
         ui.workflows.drafts.update(|d| {
             d.insert(ui.project.get_untracked(), draft);
         });
-        ui.workflows.prompt.set("你是当前 Canban 项目的 Workflow 配置助手。\n本次范围是整个项目的 Workflows，而非某个选中的文件。\n\n请先只读分析全部 Workflow YAML，用 ASCII 展示事件、Agent、审批及三列的影响。\n等待用户提出具体修改要求，再校验和发布。".repeat(4));
-        ui.workflows.profile.set("codex".into());
+        ui.workflows.prompt.set("You are the Workflow Configuration Assistant for the current Canban Project.\nYour scope covers all Workflows in this Project, not just a single file.\n\nFirst, perform a read-only analysis of all Workflow YAML sources, present an ASCII overview of triggers, Agents, approvals, and Board columns, and wait for the user's specific modification instructions before validating and publishing.\n".repeat(4));
+        ui.workflows.profile.set(ui.default_agent.get_untracked());
         ui.page.set("workflows".into());
         if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("workflows-conflict") {
             ui.workflows.drafts.update(|drafts| {
@@ -734,6 +836,12 @@ pub fn Gallery() -> impl IntoElement {
         ui.open_terminal("gallery-manual".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("card-terminals") {
+        canban_ui::frame::configure_window_chrome();
+        ui.snapshot.set(fixtures::workspace_with_card_terminals());
+        ui.open_card("card-2".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("agent-setup") {
         ui.onboarded.set(false);
         ui.page.set("agent-setup".into());
@@ -750,6 +858,10 @@ pub fn Gallery() -> impl IntoElement {
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("settings") {
         ui.page.set("settings".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("acknowledgements") {
+        ui.open_settings_section("acknowledgements");
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("notifications") {
@@ -844,9 +956,14 @@ pub fn Gallery() -> impl IntoElement {
                     ui.select_project("gallery-project".into());
                 }))
                 .child(action("Card conversation", Variant::Secondary, move |_| {
-                    scene.set("workspace".into()); ui.snapshot.set(fixtures::conversation());
-                    ui.card_terminal_open.set(false);
-                    ui.card.set("card-1".into()); ui.page.set("card".into());
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::conversation());
+                    ui.open_card("card-1".into());
+                }))
+                .child(action("Card Terminals", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::workspace_with_card_terminals());
+                    ui.open_card("card-2".into());
                 }))
                 .child(action("Card + Live Terminal", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
@@ -1012,6 +1129,10 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Settings", Variant::Quiet, move |_| {
                     scene.set("workspace".into());
                     ui.navigate("settings");
+                }))
+                .child(action("Acknowledgements", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    ui.open_settings_section("acknowledgements");
                 }))
                 .child(action("Agent Setup", Variant::Quiet, move |_| {
                     scene.set("workspace".into());

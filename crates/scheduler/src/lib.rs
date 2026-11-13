@@ -1,5 +1,5 @@
 use anyhow::Result;
-use canban_types::{Config, Profile, Project, Request, id, now};
+use canban_types::{Config, Profile, Project, Request, RequestTrigger, id, now};
 /// Resolve an explicit profile ID, otherwise the global default.
 pub fn select(config: &Config, explicit: Option<&str>) -> Result<Profile> {
     select_in_project(config, None, explicit)
@@ -43,7 +43,7 @@ pub fn request(
     project: &str,
     card: &str,
     stage: &str,
-    trigger: &str,
+    trigger: impl Into<RequestTrigger>,
     profile: Profile,
     instruction: String,
     on_completed: Option<String>,
@@ -109,7 +109,7 @@ pub fn active_count(snapshot: &canban_types::Snapshot) -> usize {
             .count()
 }
 pub fn automatic(request: &Request) -> bool {
-    matches!(request.trigger.as_str(), "stage_entry" | "workflow")
+    request.trigger.is_automatic()
 }
 /// A completed, idle invocation may take another assignment in the same environment.
 pub fn retained<'a>(

@@ -66,7 +66,7 @@ pub fn empty(title: &str, description: &str) -> impl IntoElement {
         .child(muted(description.to_owned()))
 }
 
-/// Whether a Card is actively merging or queued in a workflow delivery step.
+/// Whether a Card is actively merging right now (not merely waiting behind another Card or paused).
 pub fn is_merging(snapshot: &canban_types::Snapshot, card: &canban_types::Card) -> bool {
     if !card.active() || card.merged() {
         return false;
@@ -74,11 +74,15 @@ pub fn is_merging(snapshot: &canban_types::Snapshot, card: &canban_types::Card) 
     if snapshot.merging_cards.iter().any(|id| id == &card.id) {
         return true;
     }
-    !card.hold_auto_merge
-        && snapshot
-            .workflow_runs
-            .iter()
-            .any(|r| r.card_id == card.id && r.state == "waiting_delivery")
+    if card.hold_auto_merge {
+        return false;
+    }
+    if let Some((pos, _, head)) = snapshot.merge_queue_status(&card.id) {
+        return pos == 1 && head.state == "waiting_delivery" && head.queue_pause_reason().is_none();
+    }
+    snapshot.workflow_runs.iter().any(|r| {
+        r.card_id == card.id && r.state == "waiting_delivery" && r.queue_pause_reason().is_none()
+    })
 }
 
 /// Semantic status descriptors `(label, tone, live)` for a Card on the Board.
@@ -93,6 +97,17 @@ pub fn card_status_specs(
         specs.push(("Merged".into(), Tone::Success, false));
     } else if merging {
         specs.push(("Merging".into(), Tone::Info, true));
+    } else if card.active()
+        && !card.hold_auto_merge
+        && let Some((pos, _, head)) = snapshot.merge_queue_status(&card.id)
+    {
+        if pos == 1 {
+            if head.state == "waiting_delivery" && head.queue_pause_reason().is_some() {
+                specs.push(("Queue waiting".into(), Tone::Attention, false));
+            }
+        } else {
+            specs.push((format!("Queue #{pos}"), Tone::Info, false));
+        }
     }
     if card.human_gate.is_some() || card.attention.is_some() {
         specs.push((
@@ -283,21 +298,59 @@ mod tests {
             "updated_at": 0
         }))
         .unwrap();
-        snapshot.workflow_runs = vec![run];
+        snapshot.cards = vec![card.clone()];
+        snapshot.workflow_runs = vec![run.clone()];
         assert!(is_merging(&snapshot, &card));
         assert_eq!(
             card_status_specs(&snapshot, &card, false),
             vec![("Merging".into(), Tone::Info, true)]
         );
 
+        // Transient main-checkout wait at queue head shows Queue waiting rather than live Merging.
+        snapshot.workflow_runs[0].inputs = serde_json::json!({"queued_at": 10, "queue_pause_reason": "Main repository checkout (/repo) has uncommitted local changes"});
+        assert!(!is_merging(&snapshot, &card));
+        assert_eq!(
+            card_status_specs(&snapshot, &card, false),
+            vec![("Queue waiting".into(), Tone::Attention, false)]
+        );
+        snapshot.workflow_runs[0].inputs = serde_json::json!({"queued_at": 10});
+
+        // A second Card queued behind the head shows its FIFO queue position (`Queue #2`) without claiming Merging.
+        let card2: canban_types::Card = serde_json::from_value(serde_json::json!({
+            "id": "c2",
+            "project_id": "p",
+            "number": 27,
+            "title": "Second in queue",
+            "body": "",
+            "stage": "review",
+            "revision": 1,
+            "created_at": 2
+        }))
+        .unwrap();
+        let mut run2 = run;
+        run2.id = "run-2".into();
+        run2.card_id = "c2".into();
+        run2.inputs = serde_json::json!({"queued_at": 20});
+        snapshot.cards.push(card2.clone());
+        snapshot.workflow_runs.push(run2);
+        assert!(!is_merging(&snapshot, &card2));
+        assert_eq!(
+            card_status_specs(&snapshot, &card2, false),
+            vec![("Queue #2".into(), Tone::Info, false)]
+        );
+        snapshot.cards.truncate(1);
+        snapshot.workflow_runs.truncate(1);
+
         // Holding auto-merge suppresses `waiting_delivery` Merging in favor of Merge held.
         card.hold_auto_merge = true;
+        snapshot.cards[0] = card.clone();
         assert!(!is_merging(&snapshot, &card));
         assert_eq!(
             card_status_specs(&snapshot, &card, false),
             vec![("Merge held".into(), Tone::Neutral, false)]
         );
         card.hold_auto_merge = false;
+        snapshot.cards[0] = card.clone();
 
         // Paused workflow (`waiting_approval`) does not claim Merging.
         snapshot.workflow_runs[0].state = "waiting_approval".into();

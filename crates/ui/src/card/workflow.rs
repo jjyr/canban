@@ -81,60 +81,89 @@ pub fn render(ui: Ui) -> impl IntoElement {
     dynamic(move || {
         let card_id = ui.card_id();
         let card_opt = ui.current_card();
-        let (runs, has_any_active_run, idle_deliver_workflow, had_previous_run) =
-            ui.snapshot.with(|s| {
-                let card_runs: Vec<_> = s
-                    .workflow_runs
+        let (
+            runs,
+            has_any_active_run,
+            idle_deliver_workflow,
+            had_previous_run,
+            req_profiles,
+            queue_info,
+        ) = ui.snapshot.with(|s| {
+            let req_profiles: std::collections::BTreeMap<String, String> = s
+                .requests
+                .iter()
+                .filter(|r| r.card_id == card_id)
+                .map(|r| (r.id.clone(), r.profile.id.clone()))
+                .collect();
+            let card_runs: Vec<_> = s
+                .workflow_runs
+                .iter()
+                .filter(|r| r.card_id == card_id)
+                .collect();
+            let active_visible = card_runs
+                .iter()
+                .filter(|r| r.active())
+                .map(|r| (*r).clone())
+                .collect::<Vec<_>>();
+            let any_active = !active_visible.is_empty();
+            let had_prev = !card_runs.is_empty();
+            let idle_deliver = if !any_active && let Some(c) = &card_opt {
+                let enabled_ids: std::collections::BTreeSet<&str> = s
+                    .workflow_sources
                     .iter()
-                    .filter(|r| r.card_id == card_id)
+                    .filter(|src| src.project_id == c.project_id && src.enabled)
+                    .map(|src| src.workflow_id.as_str())
                     .collect();
-                let active_visible = card_runs
+                let mut latest = std::collections::BTreeMap::new();
+                for w in s
+                    .workflow_revisions
                     .iter()
-                    .filter(|r| r.active())
-                    .map(|r| (*r).clone())
-                    .collect::<Vec<_>>();
-                let any_active = !active_visible.is_empty();
-                let had_prev = !card_runs.is_empty();
-                let idle_deliver = if !any_active && let Some(c) = &card_opt {
-                    let enabled_ids: std::collections::BTreeSet<&str> = s
-                        .workflow_sources
-                        .iter()
-                        .filter(|src| src.project_id == c.project_id && src.enabled)
-                        .map(|src| src.workflow_id.as_str())
-                        .collect();
-                    let mut latest = std::collections::BTreeMap::new();
-                    for w in s
-                        .workflow_revisions
-                        .iter()
-                        .filter(|w| w.project_id == c.project_id)
-                    {
-                        if enabled_ids.is_empty() || enabled_ids.contains(w.workflow_id.as_str()) {
-                            latest.insert(w.workflow_id.clone(), w);
-                        }
+                    .filter(|w| w.project_id == c.project_id)
+                {
+                    if enabled_ids.is_empty() || enabled_ids.contains(w.workflow_id.as_str()) {
+                        latest.insert(w.workflow_id.clone(), w);
                     }
-                    latest.into_values().find_map(|w| {
-                        let stage_has_deliver = c.stage == "review"
-                            || w.definition.entries.get(&c.stage).is_some_and(|k| {
-                                matches!(
-                                    w.definition.steps.get(k),
-                                    Some(WorkflowStep::Deliver { .. })
-                                )
-                            });
-                        if !stage_has_deliver {
-                            return None;
+                }
+                latest.into_values().find_map(|w| {
+                    let stage_has_deliver = c.stage == "review"
+                        || w.definition.entries.get(&c.stage).is_some_and(|k| {
+                            matches!(
+                                w.definition.steps.get(k),
+                                Some(WorkflowStep::Deliver { .. })
+                            )
+                        });
+                    if !stage_has_deliver {
+                        return None;
+                    }
+                    w.definition.steps.iter().find_map(|(k, st)| match st {
+                        WorkflowStep::Deliver { .. } => {
+                            Some((w.definition.name.clone(), step_badge_label(k, st)))
                         }
-                        w.definition.steps.iter().find_map(|(k, st)| match st {
-                            WorkflowStep::Deliver { .. } => {
-                                Some((w.definition.name.clone(), step_badge_label(k, st)))
-                            }
-                            _ => None,
-                        })
+                        _ => None,
                     })
-                } else {
-                    None
-                };
-                (active_visible, any_active, idle_deliver, had_prev)
+                })
+            } else {
+                None
+            };
+            let queue_info = s.merge_queue_status(&card_id).map(|(pos, total, head)| {
+                let head_card_num = s
+                    .cards
+                    .iter()
+                    .find(|c| c.id == head.card_id)
+                    .map(|c| c.number);
+                let head_pause = head.queue_pause_reason().map(str::to_owned);
+                let head_resolving = matches!(head.state.as_str(), "waiting_agent" | "running");
+                (pos, total, head_card_num, head_pause, head_resolving)
             });
+            (
+                active_visible,
+                any_active,
+                idle_deliver,
+                had_prev,
+                req_profiles,
+                queue_info,
+            )
+        });
 
         if runs.is_empty()
             && !has_any_active_run
@@ -259,6 +288,11 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         )
                     });
 
+                    let active_profile = run
+                        .request_id
+                        .as_ref()
+                        .and_then(|rid| req_profiles.get(rid))
+                        .map(String::as_str);
                     let mut stepper = view().flex_row().flex_wrap().items_center().gap_1();
                     for (idx, step_id) in steps.iter().enumerate() {
                         if idx > 0 {
@@ -266,11 +300,12 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         }
                         let step = &run.definition.steps[step_id];
                         let is_current = run.step.as_ref() == Some(step_id) && run.active();
-                        let is_done = run.outputs.contains_key(step_id)
-                            || run
-                                .history
-                                .iter()
-                                .any(|h| h["step"] == *step_id && h["event"] == "completed");
+                        let is_done = !is_current
+                            && (run.outputs.contains_key(step_id)
+                                || run
+                                    .history
+                                    .iter()
+                                    .any(|h| h["step"] == *step_id && h["event"] == "completed"));
                         let marker = if is_current {
                             "●"
                         } else if is_done {
@@ -278,7 +313,15 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         } else {
                             "○"
                         };
-                        let text_label = format!("{marker} {}", step_badge_label(step_id, step));
+                        let mut badge_label = step_badge_label(step_id, step);
+                        if is_current
+                            && matches!(step, WorkflowStep::Deliver { .. })
+                            && matches!(run.state.as_str(), "waiting_agent" | "running")
+                            && let Some(prof) = active_profile
+                        {
+                            badge_label = format!("{badge_label} (@{prof})");
+                        }
+                        let text_label = format!("{marker} {badge_label}");
                         let tone = if is_current {
                             if run.state == "waiting_approval" || run.state == "stale" {
                                 Tone::Attention
@@ -454,25 +497,53 @@ pub fn render(ui: Ui) -> impl IntoElement {
                     }
 
                     let state_label = match run.state.as_str() {
-                        "stale" => "Changes required",
-                        "waiting_delivery" => "Merging…",
-                        "waiting_capacity" => "Waiting for Agent slot…",
+                        "stale" => "Changes required".to_owned(),
+                        "waiting_delivery" => {
+                            if let Some((pos, total, head_num, _, head_resolving)) = &queue_info {
+                                if *pos > 1 {
+                                    if *head_resolving {
+                                        if let Some(num) = head_num {
+                                            format!(
+                                                "Queued for merge (#{pos} of {total} · waiting on #{num} conflict)"
+                                            )
+                                        } else {
+                                            format!("Queued for merge (#{pos} of {total})")
+                                        }
+                                    } else {
+                                        format!("Queued for merge (#{pos} of {total})")
+                                    }
+                                } else if run.queue_pause_reason().is_some() {
+                                    "Merge queue waiting".to_owned()
+                                } else {
+                                    "Merging…".to_owned()
+                                }
+                            } else if run.queue_pause_reason().is_some() {
+                                "Merge queue waiting".to_owned()
+                            } else {
+                                "Merging…".to_owned()
+                            }
+                        }
+                        "waiting_capacity" => "Waiting for Agent slot…".to_owned(),
                         "waiting_agent" | "running" => {
                             if run.inputs["conflict_attempts"].as_u64().unwrap_or(0) > 0 {
-                                "Resolving merge conflict…"
+                                if let Some(prof) = active_profile {
+                                    format!("Resolving merge conflict (@{prof})…")
+                                } else {
+                                    "Resolving merge conflict…".to_owned()
+                                }
                             } else {
-                                "Agent running…"
+                                "Agent running…".to_owned()
                             }
                         }
-                        "blocked" => "Blocked",
+                        "blocked" => "Blocked".to_owned(),
                         _ if is_deliver_step => {
                             if card_opt.as_ref().is_some_and(|c| c.hold_auto_merge) {
-                                "Auto-merge held"
+                                "Auto-merge held".to_owned()
                             } else {
-                                "Auto-merge paused"
+                                "Auto-merge paused".to_owned()
                             }
                         }
-                        _ => "Review required",
+                        _ => "Review required".to_owned(),
                     };
                     let mut body = view()
                         .p_2()
@@ -495,7 +566,15 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         )
                         .child(stepper);
 
-                    if (run.state == "waiting_approval" || run.state == "stale")
+                    if run.state == "waiting_delivery" {
+                        if let Some(pause_reason) = run.queue_pause_reason() {
+                            body = body.child(notice(pause_reason.to_owned(), Tone::Attention));
+                        } else if let Some((pos, _, _, Some(head_pause), _)) = &queue_info
+                            && *pos > 1
+                        {
+                            body = body.child(notice(head_pause.clone(), Tone::Attention));
+                        }
+                    } else if (run.state == "waiting_approval" || run.state == "stale")
                         && let Some(reason) = card_opt
                             .as_ref()
                             .and_then(|c| {

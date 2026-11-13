@@ -398,7 +398,9 @@ impl AppServer {
                 // Ordinary queued work from a stage the user has left must not
                 // start later. Already-running executions are deliberately not drained.
                 for mut request in db.list::<Request>()?.into_iter().filter(|r| {
-                    r.card_id == c.id && r.state == "queued" && r.trigger == "stage_entry"
+                    r.card_id == c.id
+                        && r.state == "queued"
+                        && r.trigger == RequestTrigger::StageEntry
                 }) {
                     request.state = "cancelled".into();
                     db.save(&request)?;
@@ -477,9 +479,7 @@ impl AppServer {
                     db.save(&c)?;
                     Ok(serde_json::to_value(c)?)
                 })?;
-                if res["hold_auto_merge"] == false {
-                    let _ = self.pump_deliveries();
-                }
+                let _ = self.pump_deliveries();
                 Ok(res)
             }
             "card.workspace" => {
@@ -595,17 +595,25 @@ impl AppServer {
                     let req = if let Some(req) = active {
                         req
                     } else {
+                        let instruction = canban_context::render_template(
+                            include_str!(concat!(
+                                env!("CARGO_MANIFEST_DIR"),
+                                "/../../prompts/runtime/comment_task.txt"
+                            ))
+                            .trim_end(),
+                            &[("body", body)],
+                        );
                         enqueue(
                             db,
                             &config,
                             &mut c,
                             &project,
                             stage,
-                            &format!("comment:{}", event.id),
+                            RequestTrigger::Comment {
+                                comment_id: event.id.clone(),
+                            },
                             Some(&agent),
-                            Some(format!(
-                                "Answer this comment/question in the context of the Card.\n\n{body}"
-                            )),
+                            Some(instruction),
                         )?
                         .context("Question not queued")?
                     };

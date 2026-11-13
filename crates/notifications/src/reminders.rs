@@ -31,10 +31,11 @@ pub fn message_id(s: &Snapshot, e: &Event) -> Option<String> {
     }
     match e.kind.as_str() {
         "execution.reported"
-            if matches!(
-                e.data["state"].as_str(),
-                Some("completed" | "backlog" | "blocked" | "failed")
-            ) =>
+            if e.data["comment_replied"] != true
+                && matches!(
+                    e.data["state"].as_str(),
+                    Some("completed" | "backlog" | "blocked" | "failed")
+                ) =>
         {
             Some(format!(
                 "report:{}",

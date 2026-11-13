@@ -74,36 +74,81 @@ impl AppServer {
     }
     pub(super) fn open_agent(&self, p: Value) -> Result<Value> {
         let config = self.config();
-        self.mutate("agent.open",&p,|db| {
-            let mut card:Card=db.get(strp(&p,"card_id")?)?;
-            ensure!(card.archived_at.is_none(),"Restore this Card before opening its Agent");
-            let project:Project=db.get(&card.project_id)?;
-            let profile=canban_scheduler::select_in_project(&config,Some(&project),Some(strp(&p,"profile_id")?))?;
-            let mut context=conversation(db,&card,&profile)?;
-            if let Some(expected)=p["expected_attempt_id"].as_str() {
-                let snapshot=db.snapshot()?;
-                let row=canban_notifications::overview(&snapshot).into_iter().find(|r|r.id == context.id).context("Conversation no longer exists")?;
-                let run=row.attempt.context("Conversation has no invocation")?;
-                ensure!(run.id == expected && run.finished(),"Overview invocation changed; select it again");
-                ensure!(context.provider_session_id.is_some() && context.provider_session_id == run.provider_session_id,"Exact provider session is unavailable");
-                ensure!(!profile.resume_command().is_empty(),"Profile has no resume command");
+        self.mutate("agent.open", &p, |db| {
+            let mut card: Card = db.get(strp(&p, "card_id")?)?;
+            ensure!(
+                card.archived_at.is_none(),
+                "Restore this Card before opening its Agent"
+            );
+            let project: Project = db.get(&card.project_id)?;
+            let profile = canban_scheduler::select_in_project(
+                &config,
+                Some(&project),
+                Some(strp(&p, "profile_id")?),
+            )?;
+            let mut context = conversation(db, &card, &profile)?;
+            if let Some(expected) = p["expected_attempt_id"].as_str() {
+                let snapshot = db.snapshot()?;
+                let row = canban_notifications::overview(&snapshot)
+                    .into_iter()
+                    .find(|r| r.id == context.id)
+                    .context("Conversation no longer exists")?;
+                let run = row.attempt.context("Conversation has no invocation")?;
+                ensure!(
+                    run.id == expected && run.finished(),
+                    "Overview invocation changed; select it again"
+                );
+                ensure!(
+                    context.provider_session_id.is_some()
+                        && context.provider_session_id == run.provider_session_id,
+                    "Exact provider session is unavailable"
+                );
+                ensure!(
+                    !profile.resume_command().is_empty(),
+                    "Profile has no resume command"
+                );
             }
-            if let Some(id)=&context.last_request_id {
-                let req:Request=db.get(id)?;
-                let run=db.get::<Attempt>(&Attempt::key(&req.id,req.attempt)).ok();
-                let live=run.as_ref().is_some_and(|a|a.terminal.is_some() && a.observed.as_ref().is_none_or(|v|v["state"]!="finished"));
-                if (matches!(req.state.as_str(),"queued"|"starting"|"unknown") && !(card.human_gate.is_some() && req.state=="queued" && canban_scheduler::automatic(&req))) || live {
+            if let Some(id) = &context.last_request_id {
+                let req: Request = db.get(id)?;
+                let run = db.get::<Attempt>(&Attempt::key(&req.id, req.attempt)).ok();
+                let live = run.as_ref().is_some_and(|a| {
+                    a.terminal.is_some()
+                        && a.observed.as_ref().is_none_or(|v| v["state"] != "finished")
+                });
+                if (matches!(req.state.as_str(), "queued" | "starting" | "unknown")
+                    && !(card.human_gate.is_some()
+                        && req.state == "queued"
+                        && canban_scheduler::automatic(&req)))
+                    || live
+                {
                     return Ok(json!({"request_id":req.id,"reused":true,"attempt":run}));
                 }
             }
-            if p["fresh"]==true || context.provider != profile.command_name() {
-                context.provider_session_id=None;
-                context.provider=profile.command_name();
+            if p["fresh"] == true || context.provider != profile.command_name() {
+                context.provider_session_id = None;
+                context.provider = profile.command_name();
                 db.save(&context)?;
             }
-            let stage=canban_workflow_engine::stage(&project.workflow,&card.stage)?;
-            let req=enqueue(db,&config,&mut card,&project,stage,"interactive",Some(&profile.id),Some("The user sent this Card to you for discussion. Read the Card context, then reply with a brief summary of your understanding and any open questions. Do not start implementing and do not report completion for this initialization. Wait for the user's next instruction; when that requested work is complete, explicitly report its outcome.".into()))?.context("Agent was not queued")?;
-            context.last_request_id=Some(req.id.clone());db.save(&context)?;
+            let stage = canban_workflow_engine::stage(&project.workflow, &card.stage)?;
+            let init_prompt = include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../prompts/runtime/interactive_init.txt"
+            ))
+            .trim_end()
+            .to_owned();
+            let req = enqueue(
+                db,
+                &config,
+                &mut card,
+                &project,
+                stage,
+                RequestTrigger::Interactive,
+                Some(&profile.id),
+                Some(init_prompt),
+            )?
+            .context("Agent was not queued")?;
+            context.last_request_id = Some(req.id.clone());
+            db.save(&context)?;
             Ok(json!({"request_id":req.id,"reused":false}))
         })
     }
@@ -219,12 +264,21 @@ impl AppServer {
         })?;
         let prompt = std::fs::read_to_string(self.home.join(&input))?;
         let run_dir = canban_context::run_dir(&runtime_home, req, req.attempt);
-        let text = format!(
-            "New Canban assignment (use these explicit values instead of earlier terminal env vars):\nCANBAN_REQUEST_ID={} CANBAN_ATTEMPT={} CANBAN_RUN_DIR={}\n\n{}",
-            canban_context::shell_quote(&req.id),
-            req.attempt,
-            canban_context::shell_quote(&run_dir.to_string_lossy()),
-            prompt
+        let req_quoted = canban_context::shell_quote(&req.id);
+        let attempt_str = req.attempt.to_string();
+        let run_dir_quoted = canban_context::shell_quote(&run_dir.to_string_lossy());
+        let text = canban_context::render_template(
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../prompts/runtime/continue_assignment.txt"
+            ))
+            .trim_end(),
+            &[
+                ("request_id", &req_quoted),
+                ("attempt", &attempt_str),
+                ("run_dir", &run_dir_quoted),
+                ("prompt", &prompt),
+            ],
         );
         if let Err(e) = client.call("terminal.send", json!({"terminal":terminal,"text":text})) {
             self.store.lock().unwrap().write(|db| {

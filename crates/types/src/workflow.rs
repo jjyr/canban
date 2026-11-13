@@ -1,5 +1,5 @@
 //! Shared declarative workflow and durable subscription contracts.
-use crate::{Event, WorkspaceSettings};
+use crate::{Card, Event, Snapshot, WorkspaceSettings};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -48,6 +48,8 @@ pub enum WorkflowStep {
     },
     Deliver {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         target_branch: Option<String>,
         #[serde(default = "default_sync_upstream", skip_serializing_if = "is_true")]
         sync_upstream: bool,
@@ -55,8 +57,8 @@ pub enum WorkflowStep {
         next: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rework: Option<String>,
-        /// Automatic merge-conflict hand-offs to `rework` per run before pausing for a human.
-        /// `0` disables automatic conflict rework.
+        /// Automatic merge-conflict hand-offs to `@merger` (or `profile`) per run before
+        /// pausing for a human. `0` disables automatic conflict resolution.
         #[serde(
             default = "default_max_conflict_attempts",
             skip_serializing_if = "is_default_max_conflict_attempts"
@@ -139,6 +141,81 @@ impl WorkflowRun {
             self.state.as_str(),
             "completed" | "cancelled" | "superseded"
         )
+    }
+
+    /// True when the run's current step is a `Deliver` (Queue Merge) step.
+    pub fn step_is_deliver(&self) -> bool {
+        self.step.as_ref().is_some_and(|k| {
+            matches!(
+                self.definition.steps.get(k),
+                Some(WorkflowStep::Deliver { .. })
+            )
+        })
+    }
+
+    /// Monotonic queue ticket timestamp recorded when the run entered `Deliver`.
+    pub fn merge_queued_at(&self) -> u64 {
+        self.inputs["queued_at"].as_u64().unwrap_or(self.created_at)
+    }
+
+    /// Transient main-checkout wait reason while holding the head of a Project's merge queue.
+    pub fn queue_pause_reason(&self) -> Option<&str> {
+        self.inputs["queue_pause_reason"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    }
+
+    /// True when this run occupies a slot in its Project's active FIFO merge queue:
+    /// either waiting to merge (`waiting_delivery`) or actively resolving a merge conflict
+    /// at the head of the queue (`waiting_agent` / `running` at `Deliver`).
+    pub fn in_merge_queue(&self, card: &Card) -> bool {
+        card.active()
+            && !card.merged()
+            && !card.hold_auto_merge
+            && self.step_is_deliver()
+            && matches!(
+                self.state.as_str(),
+                "waiting_delivery" | "waiting_agent" | "running"
+            )
+    }
+}
+
+/// Orders active merge-queue runs for `project_id` in strict FIFO order by
+/// `(queued_at, storage_index)`.
+pub fn project_merge_queue<'a>(
+    workflow_runs: &'a [WorkflowRun],
+    cards: &[Card],
+    project_id: &str,
+) -> Vec<&'a WorkflowRun> {
+    let cards_by_id: BTreeMap<&str, &Card> = cards.iter().map(|c| (c.id.as_str(), c)).collect();
+    let mut entries: Vec<(usize, &'a WorkflowRun)> = workflow_runs
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            r.project_id == project_id
+                && cards_by_id
+                    .get(r.card_id.as_str())
+                    .is_some_and(|c| r.in_merge_queue(c))
+        })
+        .collect();
+    entries.sort_by_key(|(idx, r)| (r.merge_queued_at(), *idx));
+    entries.into_iter().map(|(_, r)| r).collect()
+}
+
+impl Snapshot {
+    /// Active FIFO merge queue for `project_id`.
+    pub fn merge_queue(&self, project_id: &str) -> Vec<&WorkflowRun> {
+        project_merge_queue(&self.workflow_runs, &self.cards, project_id)
+    }
+
+    /// Returns `(1_based_position, total_in_queue, head_run)` when `card_id` is in its Project's active merge queue.
+    pub fn merge_queue_status(&self, card_id: &str) -> Option<(usize, usize, &WorkflowRun)> {
+        let card = self.cards.iter().find(|c| c.id == card_id)?;
+        let queue = self.merge_queue(&card.project_id);
+        let head = *queue.first()?;
+        let pos = queue.iter().position(|r| r.card_id == card_id)?;
+        Some((pos + 1, queue.len(), head))
     }
 }
 

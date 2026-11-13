@@ -304,6 +304,89 @@ pub fn workspace() -> canban_types::Snapshot {
     s
 }
 
+pub fn workspace_with_card_terminals() -> canban_types::Snapshot {
+    use canban_types::*;
+    let mut s = workspace();
+    let dev_profile = agent_config()
+        .profiles
+        .into_iter()
+        .find(|p| p.id == "developer")
+        .unwrap();
+    let mut req = canban_scheduler::request(
+        "gallery-project",
+        "card-2",
+        "develop",
+        "stage_entry",
+        dev_profile,
+        "Implement credential validation.".into(),
+        None,
+    );
+    req.id = "card-2-req".into();
+    req.state = "running".into();
+    req.attempt = 1;
+    let mut run: Attempt = serde_json::from_value(json!({
+        "id": Attempt::key(&req.id, 1),
+        "request_id": req.id,
+        "project_id": "gallery-project",
+        "card_id": "card-2",
+        "number": 1,
+        "state": "running",
+        "core_id": "gallery",
+        "terminal": "card-2-dev-pty",
+        "cwd": "/preview/worktrees/card-2",
+        "input_path": "input.md",
+        "output_path": null,
+        "observed": {"state": "live", "status": {"state": "working"}},
+        "error": null,
+        "created_at": now(),
+        "provider_session_id": "session-card-2",
+        "connection_state": "connected"
+    }))
+    .unwrap();
+    run.lifecycle.observed_at = Some(u64::MAX);
+    s.requests.push(req);
+    s.attempts.push(run);
+    s.terminals.push(TerminalEntry {
+        id: "card-2-shell-1".into(),
+        conversation_id: None,
+        number: 2,
+        name: None,
+        manual_number: Some(1),
+        origin_card_id: Some("card-2".into()),
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("gallery".into()),
+            terminal: Some("card-2-shell-pty".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+        }),
+        created_at: now(),
+    });
+    s.terminals.push(TerminalEntry {
+        id: "card-2-agy-1".into(),
+        conversation_id: None,
+        number: 3,
+        name: None,
+        manual_number: Some(2),
+        origin_card_id: Some("card-2".into()),
+        agent_engine: Some("agy".into()),
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("gallery".into()),
+            terminal: Some("card-2-agy-pty".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+        }),
+        created_at: now(),
+    });
+    s
+}
+
 /// Three overflowing columns for independent scrolling and overlay thumb regression checks.
 pub fn overflowing_board() -> canban_types::Snapshot {
     let mut s = workspace();
@@ -655,6 +738,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         number,
         name: None,
         manual_number: Some(1),
+        origin_card_id: None,
+        agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
             machine: "local".into(),
             owner_core_id: None,
@@ -739,6 +824,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         number: number + 4,
         name: Some("feat/standalone-spike".into()),
         manual_number: Some(4),
+        origin_card_id: None,
+        agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
             machine: "local".into(),
             owner_core_id: None,
@@ -844,7 +931,7 @@ pub fn board_cards() -> canban_types::Snapshot {
             "request_id": null,
             "trigger_event_id": null,
             "input_digest": "gallery",
-            "inputs": {"sync_upstream": true},
+            "inputs": {"sync_upstream": true, "queued_at": 100},
             "outputs": {},
             "history": [],
             "error": null,
@@ -854,6 +941,117 @@ pub fn board_cards() -> canban_types::Snapshot {
         .unwrap(),
     );
     s.cards.push(merging);
+    let mut conflict = s.cards[2].clone();
+    conflict.id = "conflict-card".into();
+    conflict.number = 8;
+    conflict.title = "Resolve merge conflict with main via @merger".into();
+    conflict.stage = "review".into();
+    conflict.branch = Some("canban/gallery/8".into());
+    let merger_profile = Config::default()
+        .profiles
+        .into_iter()
+        .find(|p| p.id == "merger")
+        .unwrap();
+    let mut merger_req = canban_scheduler::request(
+        "gallery-project",
+        &conflict.id,
+        "review",
+        "workflow",
+        merger_profile,
+        "Merge conflict to resolve before delivery".into(),
+        None,
+    );
+    merger_req.state = "working".into();
+    merger_req.workflow_run_id = Some("gallery-conflict-run".into());
+    merger_req.workflow_step = Some("deliver:review:2".into());
+    let merger_req_id = merger_req.id.clone();
+    s.requests.push(merger_req);
+    s.workflow_runs.push(
+        serde_json::from_value(json!({
+            "id": "gallery-conflict-run",
+            "project_id": "gallery-project",
+            "card_id": "conflict-card",
+            "workflow_id": "delivery",
+            "definition_revision": 1,
+            "definition": {
+                "id": "delivery",
+                "name": "Development",
+                "entries": {"review": "deliver:review"},
+                "steps": {
+                    "agent:develop": {
+                        "type": "agent",
+                        "profile": "developer",
+                        "instruction": "Implement",
+                        "next": "deliver:review"
+                    },
+                    "deliver:review": {
+                        "type": "deliver",
+                        "sync_upstream": true,
+                        "max_conflict_attempts": 3,
+                        "next": "__end"
+                    },
+                    "__end": {"type": "complete"}
+                }
+            },
+            "state": "waiting_agent",
+            "step": "deliver:review",
+            "visit": 2,
+            "request_id": merger_req_id,
+            "trigger_event_id": null,
+            "input_digest": "gallery",
+            "inputs": {"sync_upstream": true, "conflict_attempts": 1, "queued_at": 200},
+            "outputs": {"agent:develop": {"state": "completed"}},
+            "history": [{"step": "agent:develop", "visit": 1, "event": "completed"}],
+            "error": null,
+            "created_at": 0,
+            "updated_at": 0
+        }))
+        .unwrap(),
+    );
+    s.cards.push(conflict);
+    let mut queued_behind = s.cards[2].clone();
+    queued_behind.id = "queued-merge-card".into();
+    queued_behind.number = 9;
+    queued_behind.title = "Queued behind active delivery · FIFO position #3".into();
+    queued_behind.stage = "review".into();
+    queued_behind.branch = Some("canban/gallery/9".into());
+    s.workflow_runs.push(
+        serde_json::from_value(json!({
+            "id": "gallery-queued-merge-run",
+            "project_id": "gallery-project",
+            "card_id": "queued-merge-card",
+            "workflow_id": "delivery",
+            "definition_revision": 1,
+            "definition": {
+                "id": "delivery",
+                "name": "Development",
+                "entries": {"review": "deliver:review"},
+                "steps": {
+                    "deliver:review": {
+                        "type": "deliver",
+                        "sync_upstream": true,
+                        "max_conflict_attempts": 3,
+                        "next": "__end"
+                    },
+                    "__end": {"type": "complete"}
+                }
+            },
+            "state": "waiting_delivery",
+            "step": "deliver:review",
+            "visit": 1,
+            "request_id": null,
+            "trigger_event_id": null,
+            "input_digest": "gallery",
+            "inputs": {"sync_upstream": true, "queued_at": 300},
+            "outputs": {},
+            "history": [],
+            "error": null,
+            "created_at": 0,
+            "updated_at": 0
+        }))
+        .unwrap(),
+    );
+    s.cards.push(queued_behind);
     let mut long = s.cards[2].clone();
     long.id = "long-card".into();
     long.number = 7;
@@ -1135,6 +1333,9 @@ pub fn agent_config() -> canban_types::Config {
     }
     if let Some(rev) = cfg.profiles.iter_mut().find(|p| p.id == "reviewer") {
         rev.preset = Some("agy".into());
+    }
+    if let Some(merger) = cfg.profiles.iter_mut().find(|p| p.id == "merger") {
+        merger.preset = Some("agy".into());
     }
     cfg.profiles.push(Profile {
         id: "qa".into(),

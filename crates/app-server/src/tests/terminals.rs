@@ -241,15 +241,14 @@ fn upgrading_conversations_allocates_stable_numbers_without_runtime_changes() {
         // the OS lock immediately available amid concurrent child launches.
         let until = std::time::Instant::now() + Duration::from_secs(5);
         loop {
-            if let Ok(lock) = canban_updater::service_lock(&home) {
-                drop(lock);
-                return AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+            match AppServer::open(home.clone(), PathBuf::from("/bin/echo")) {
+                Ok(app) => return app,
+                Err(err) if std::time::Instant::now() < until => {
+                    let _ = err;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("Old service still owns home: {err:#}"),
             }
-            assert!(
-                std::time::Instant::now() < until,
-                "Old service still owns home"
-            );
-            std::thread::sleep(Duration::from_millis(10));
         }
     }
     let (dir, app, _p, c) = setup();
@@ -538,6 +537,59 @@ fn first_terminal_accepts_empty_inheritance_without_a_project_or_conversation() 
     assert!(s.projects.is_empty() && s.conversations.is_empty());
     assert!(s.requests.is_empty() && s.attempts.is_empty());
     assert_eq!(s.terminals.len(), 1);
+}
+#[test]
+fn ephemeral_agent_terminal_launches_without_prompt_or_resume_and_records_origin_card() {
+    let (dir, app, p, c) = setup();
+    core(&app, dir.path());
+    {
+        let mut cfg = app.config();
+        cfg.profiles.push(Profile {
+            id: "agy".into(),
+            preset: Some("agy".into()),
+            model: Some("gemini-4-carbon-high".into()),
+            ..Default::default()
+        });
+        let resolved = canban_profiles::resolve(cfg, &app.home).unwrap();
+        *app.config.write().unwrap() = resolved;
+    }
+    app.call(
+        "project.agents",
+        json!({"project_id": p.id, "agent_overrides": {"developer": "agy"}}),
+    )
+    .unwrap();
+
+    let created = app
+        .call(
+            "terminal.create",
+            json!({"project_id": p.id, "card_id": c.id, "agent": true}),
+        )
+        .unwrap();
+    let entry: TerminalEntry = serde_json::from_value(created).unwrap();
+    assert!(entry.id.starts_with("agent-"));
+    assert_eq!(entry.origin_card_id.as_deref(), Some(c.id.as_str()));
+    assert_eq!(entry.agent_engine.as_deref(), Some("agy"));
+    assert_eq!(entry.title(), "Antigravity 1");
+    assert!(entry.conversation_id.is_none());
+
+    let launches = std::fs::read_to_string(dir.path().join("launches")).unwrap();
+    let launch: Value = serde_json::from_str(launches.lines().last().unwrap()).unwrap();
+    assert_eq!(launch["cwd"], p.directory);
+    let argv: Vec<String> = serde_json::from_value(launch["argv"].clone()).unwrap();
+    assert!(argv[0].ends_with("agy"));
+    assert!(!argv.iter().any(|a| a == "-i"
+        || a == "--conversation"
+        || a.contains("implement")
+        || a.contains("Card")));
+    assert!(
+        argv.windows(2)
+            .any(|w| w == ["--model", "gemini-4-carbon-high"])
+    );
+
+    let s = app.snapshot().unwrap();
+    assert!(s.requests.is_empty());
+    assert!(s.attempts.is_empty());
+    assert!(s.conversations.is_empty());
 }
 
 #[test]
