@@ -564,6 +564,19 @@ pub fn overview() -> canban_types::Snapshot {
                 request_id: Some(req.id.clone()),
                 next_stage: None,
             });
+            s.reports.push(Report {
+                id: format!("overview-report-{i}"),
+                request_id: req.id.clone(),
+                project_id: card.project_id.clone(),
+                card_id: card.id.clone(),
+                attempt: 1,
+                state: "completed".into(),
+                message: "Completed changes and verified all workspace tests".into(),
+                path: None,
+                request_key: format!("key-{i}"),
+                fingerprint: format!("fp-{i}"),
+                created_at: now() - 60_000,
+            });
         }
         if *state != "queued" {
             let mut run:Attempt=serde_json::from_value(json!({"id":Attempt::key(&req.id,1),"request_id":req.id,"project_id":card.project_id,"card_id":card.id,"number":1,"state":req.state,"core_id":"gallery-core","terminal":format!("t{}",i+1),"cwd":"/example/card-worktree","input_path":"input.md","output_path":null,"observed":{"state":if matches!(*state,"closed"|"exited") {"finished"} else {"live"},"status":{"state":if *state=="review" {"done"} else {state},"kind":"permission","title":"Allow repository command?","msg":"Agent requests permission to run git status in the Card worktree."}},"error":null,"created_at":now()-180_000,"provider_session_id":format!("session-{i}"),"connection_state":if *state=="unknown" {"unavailable"} else {"connected"}})).unwrap();
@@ -637,6 +650,29 @@ pub fn overview() -> canban_types::Snapshot {
         s.events.push(event);
     }
     s.cards[2].body=(0..20).map(|i|format!("### Context {i}\n\nLong task context tests direct navigation to an unread reply.\n\n")).collect();
+    let mut stage_done = timeline();
+    stage_done.id = "overview-unread-stage".into();
+    stage_done.sequence = 10;
+    stage_done.card_id = s.cards[3].id.clone();
+    stage_done.project_id = s.cards[3].project_id.clone();
+    stage_done.kind = "execution.reported".into();
+    stage_done.actor = "agent:developer".into();
+    stage_done.message = "completed: Unit tests passed; queued for next stage".into();
+    stage_done.data = json!({"report_id": "overview-stage-rep", "state": "completed"});
+    s.events.push(stage_done);
+
+    let mut merge_card = base.clone();
+    merge_card.id = "overview-merge-conflict".into();
+    merge_card.number = 9;
+    merge_card.title = "Refactor event bus".into();
+    merge_card.stage = "review".into();
+    merge_card.human_gate = Some(HumanGate {
+        reason: "Merge conflict with main; auto-merge paused".into(),
+        request_id: None,
+        next_stage: None,
+    });
+    s.cards.push(merge_card);
+
     let mut recovery = base;
     recovery.id = "workspace-recovery".into();
     recovery.title = "Reconnect the execution machine".into();
