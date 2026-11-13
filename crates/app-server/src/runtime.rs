@@ -317,8 +317,16 @@ impl AppServer {
                         }
                         db.save(&current)
                     })?;
-                    if finished {
+                    let agent_stopped = finished
+                        || matches!(
+                            observed["status"]["state"].as_str(),
+                            Some("idle" | "done" | "blocked" | "error")
+                        )
+                        || observed["status"]["state"].is_null();
+                    if agent_stopped {
                         let _ = self.pump_deliveries();
+                    }
+                    if finished {
                         let _ = self.try_auto_archive_merged(&run.card_id);
                     }
                     self.emit("runtime", Some(run.card_id.clone()));
