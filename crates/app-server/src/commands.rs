@@ -479,9 +479,7 @@ impl AppServer {
                     db.save(&c)?;
                     Ok(serde_json::to_value(c)?)
                 })?;
-                if res["hold_auto_merge"] == false {
-                    let _ = self.pump_deliveries();
-                }
+                let _ = self.pump_deliveries();
                 Ok(res)
             }
             "card.workspace" => {

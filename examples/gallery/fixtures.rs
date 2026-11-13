@@ -931,7 +931,7 @@ pub fn board_cards() -> canban_types::Snapshot {
             "request_id": null,
             "trigger_event_id": null,
             "input_digest": "gallery",
-            "inputs": {"sync_upstream": true},
+            "inputs": {"sync_upstream": true, "queued_at": 100},
             "outputs": {},
             "history": [],
             "error": null,
@@ -999,7 +999,7 @@ pub fn board_cards() -> canban_types::Snapshot {
             "request_id": merger_req_id,
             "trigger_event_id": null,
             "input_digest": "gallery",
-            "inputs": {"sync_upstream": true, "conflict_attempts": 1},
+            "inputs": {"sync_upstream": true, "conflict_attempts": 1, "queued_at": 200},
             "outputs": {"agent:develop": {"state": "completed"}},
             "history": [{"step": "agent:develop", "visit": 1, "event": "completed"}],
             "error": null,
@@ -1009,6 +1009,49 @@ pub fn board_cards() -> canban_types::Snapshot {
         .unwrap(),
     );
     s.cards.push(conflict);
+    let mut queued_behind = s.cards[2].clone();
+    queued_behind.id = "queued-merge-card".into();
+    queued_behind.number = 9;
+    queued_behind.title = "Queued behind active delivery · FIFO position #3".into();
+    queued_behind.stage = "review".into();
+    queued_behind.branch = Some("canban/gallery/9".into());
+    s.workflow_runs.push(
+        serde_json::from_value(json!({
+            "id": "gallery-queued-merge-run",
+            "project_id": "gallery-project",
+            "card_id": "queued-merge-card",
+            "workflow_id": "delivery",
+            "definition_revision": 1,
+            "definition": {
+                "id": "delivery",
+                "name": "Development",
+                "entries": {"review": "deliver:review"},
+                "steps": {
+                    "deliver:review": {
+                        "type": "deliver",
+                        "sync_upstream": true,
+                        "max_conflict_attempts": 3,
+                        "next": "__end"
+                    },
+                    "__end": {"type": "complete"}
+                }
+            },
+            "state": "waiting_delivery",
+            "step": "deliver:review",
+            "visit": 1,
+            "request_id": null,
+            "trigger_event_id": null,
+            "input_digest": "gallery",
+            "inputs": {"sync_upstream": true, "queued_at": 300},
+            "outputs": {},
+            "history": [],
+            "error": null,
+            "created_at": 0,
+            "updated_at": 0
+        }))
+        .unwrap(),
+    );
+    s.cards.push(queued_behind);
     let mut long = s.cards[2].clone();
     long.id = "long-card".into();
     long.number = 7;

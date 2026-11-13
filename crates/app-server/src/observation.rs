@@ -416,6 +416,14 @@ impl AppServer {
                 if let Some(at) = server.event_deadline() {
                     due(at);
                 }
+                if s.workflow_runs
+                    .iter()
+                    .any(|r| r.state == "waiting_delivery" && r.queue_pause_reason().is_some())
+                {
+                    // Re-check transient main-checkout blockers (dirty tree or switched branch)
+                    // so the FIFO merge queue automatically drains once the checkout is clean.
+                    due(now().saturating_add(2_000));
+                }
                 for a in &s.attempts {
                     if a.close_state == "closing"
                         && let Some(at) = a.close_requested_at
