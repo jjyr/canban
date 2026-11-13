@@ -1698,15 +1698,9 @@ fn step_inspector(
                                             {
                                                 list.push(canban_types::Profile {
                                                     id: cur,
-                                                    name: None,
                                                     enabled: false,
-                                                    identity: false,
-                                                    preset: None,
                                                     argv: Some(vec!["disabled".into()]),
-                                                    resume_argv: None,
-                                                    exit: None,
-                                                    session_instruction: None,
-                                                    role_instruction: String::new(),
+                                                    ..Default::default()
                                                 });
                                             }
                                             list

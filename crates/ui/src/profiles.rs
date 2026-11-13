@@ -138,6 +138,8 @@ pub fn registry_items(profiles: Signal<Vec<Profile>>) -> impl IntoElement {
                 .into_iter()
                 .map(|profile| {
                     let (provider_icon, provider_name) = provider(&profile);
+                    let model_badge = profile.model.clone();
+                    let effort_badge = profile.effort.clone();
                     view()
                         .min_w(px(0.))
                         .py_2()
@@ -148,6 +150,7 @@ pub fn registry_items(profiles: Signal<Vec<Profile>>) -> impl IntoElement {
                         .child(
                             view()
                                 .flex_row()
+                                .flex_wrap()
                                 .items_center()
                                 .gap_2()
                                 .min_w(px(0.))
@@ -157,7 +160,17 @@ pub fn registry_items(profiles: Signal<Vec<Profile>>) -> impl IntoElement {
                                         .font_weight(FontWeight::MEDIUM)
                                         .truncate(),
                                 )
-                                .child(badge(provider_name)),
+                                .child(badge(provider_name))
+                                .child(if let Some(m) = model_badge {
+                                    badge(m).into_element()
+                                } else {
+                                    view().into_element()
+                                })
+                                .child(if let Some(e) = effort_badge {
+                                    badge(format!("effort: {e}")).into_element()
+                                } else {
+                                    view().into_element()
+                                }),
                         )
                         .child(muted(if profile.role_instruction.is_empty() {
                             "No fixed role instruction".into()

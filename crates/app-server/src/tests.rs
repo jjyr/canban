@@ -2347,6 +2347,117 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
         "agy",
         "Omitted profile must use default_agent (@developer -> agy)"
     );
+
+    // 7. Global `model` & `effort` options on CLI Agents and Identities (`set_profile_options`):
+    //    - Setting `model` / `effort` on `@agy` propagates to `@developer` (which uses preset `agy`)
+    //      without rewriting `@developer.model` in raw `config/agents.json`.
+    //    - Setting an explicit `model` / `effort` on `@developer` overrides `@agy`'s defaults.
+    //    - Switching `@developer`'s backing engine to `codex` clears incompatible `agy` model/effort.
+    app.call(
+        "config.agents.save",
+        json!({
+            "op": "set_profile_options",
+            "id": "agy",
+            "model": "gemini-4-carbon-medium",
+            "effort": "medium",
+        }),
+    )
+    .unwrap();
+    let cfg_after_agy_opts = app.config();
+    let dev_inherited = cfg_after_agy_opts
+        .profiles
+        .iter()
+        .find(|p| p.id == "developer")
+        .unwrap();
+    assert_eq!(
+        dev_inherited.model.as_deref(),
+        Some("gemini-4-carbon-medium")
+    );
+    assert_eq!(dev_inherited.effort.as_deref(), Some("medium"));
+
+    let cat_after_agy = app
+        .call("agent.catalog", json!({"machine": "local"}))
+        .unwrap();
+    let raw_dev = cat_after_agy["raw_profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "developer")
+        .unwrap();
+    assert!(
+        raw_dev.get("model").is_none() || raw_dev["model"].is_null(),
+        "Inherited model must not be persisted as an explicit identity override"
+    );
+    let agy_entry = cat_after_agy["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "agy")
+        .unwrap();
+    assert!(agy_entry["supports_model"].as_bool().unwrap());
+    assert!(agy_entry["supports_effort"].as_bool().unwrap());
+    assert!(!agy_entry["models"].as_array().unwrap().is_empty());
+
+    // Explicit identity override on `@developer`
+    app.call(
+        "config.agents.save",
+        json!({
+            "op": "set_profile_options",
+            "id": "developer",
+            "model": "claude-opus-5-5-high",
+            "effort": "high",
+        }),
+    )
+    .unwrap();
+    let dev_explicit = app
+        .config()
+        .profiles
+        .into_iter()
+        .find(|p| p.id == "developer")
+        .unwrap();
+    assert_eq!(dev_explicit.model.as_deref(), Some("claude-opus-5-5-high"));
+    assert_eq!(dev_explicit.effort.as_deref(), Some("high"));
+
+    // Updating `@developer`'s prompt on the SAME engine preserves explicit model & effort
+    app.call(
+        "config.agents.save",
+        json!({
+            "op": "upsert_identity",
+            "id": "developer",
+            "engine": "agy",
+            "role_instruction": "Custom developer prompt.",
+            "enabled": true,
+        }),
+    )
+    .unwrap();
+    let dev_same_eng = app
+        .config()
+        .profiles
+        .into_iter()
+        .find(|p| p.id == "developer")
+        .unwrap();
+    assert_eq!(dev_same_eng.model.as_deref(), Some("claude-opus-5-5-high"));
+    assert_eq!(dev_same_eng.effort.as_deref(), Some("high"));
+
+    // Switching `@developer` to `codex` clears its incompatible `agy` model/effort override
+    app.call(
+        "config.agents.save",
+        json!({
+            "op": "upsert_identity",
+            "id": "developer",
+            "engine": "codex",
+            "enabled": true,
+        }),
+    )
+    .unwrap();
+    let dev_switched = app
+        .config()
+        .profiles
+        .into_iter()
+        .find(|p| p.id == "developer")
+        .unwrap();
+    assert_eq!(dev_switched.model, None);
+    assert_eq!(dev_switched.effort, None);
 }
 
 pub(super) fn apply_project_yaml(app: &AppServer, project_id: &str, yaml: &str) {

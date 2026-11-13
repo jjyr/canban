@@ -172,12 +172,20 @@ Canban endpoint: {}
                 } else {
                     "Continue the existing Project Workflows configuration conversation. Re-read current sources and active revisions before any modification. Wait for the user's next instruction.".into()
                 };
+                let cwd = self.home.join("projects").join(&session.project_id);
+                std::fs::create_dir_all(&cwd)?;
+                let cwd_str = cwd.to_string_lossy().into_owned();
+                let project_dir = project
+                    .map(|p| p.directory.as_str())
+                    .unwrap_or(cwd_str.as_str());
                 let mut argv = canban_profiles::command(
                     &profile,
                     session.provider_session_id.as_deref(),
                     fresh,
                     &[
                         ("home", &self.home.to_string_lossy()),
+                        ("cwd", &cwd_str),
+                        ("project_dir", project_dir),
                         ("cli", &self.cli.to_string_lossy()),
                         ("prompt", &prompt),
                     ],
@@ -189,8 +197,6 @@ Canban endpoint: {}
                 if !is_herdr_template {
                     argv[0] = canban_profiles::executable(&argv[0]);
                 }
-                let cwd = self.home.join("projects").join(&session.project_id);
-                std::fs::create_dir_all(&cwd)?;
                 let env = std::collections::BTreeMap::from([
                     (
                         "CANBAN_HOME".into(),
@@ -214,7 +220,7 @@ Canban endpoint: {}
                 let receipt = client.launch_on(
                     "local",
                     argv,
-                    &cwd.to_string_lossy(),
+                    &cwd_str,
                     env,
                     std::collections::BTreeMap::from([
                         ("canban.configuration".into(), session.id.clone()),

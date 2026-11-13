@@ -905,6 +905,8 @@ impl AppServer {
                 true,
                 &[
                     ("home", &self.home.to_string_lossy()),
+                    ("cwd", &cwd),
+                    ("project_dir", &project.directory),
                     ("cli", &self.cli.to_string_lossy()),
                     ("prompt", &prompt),
                 ],

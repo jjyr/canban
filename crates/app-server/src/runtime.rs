@@ -815,6 +815,8 @@ impl AppServer {
             fresh,
             &[
                 ("home", &home.to_string_lossy()),
+                ("cwd", &run.cwd),
+                ("project_dir", &project.directory),
                 ("prompt", &prompt),
                 ("cli", &cli.to_string_lossy()),
             ],

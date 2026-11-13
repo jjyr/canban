@@ -126,6 +126,10 @@ pub struct Profile {
     pub identity: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     #[serde(default)]
     pub role_instruction: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,6 +149,8 @@ impl Default for Profile {
             enabled: true,
             identity: false,
             preset: None,
+            model: None,
+            effort: None,
             role_instruction: String::new(),
             argv: None,
             resume_argv: None,
