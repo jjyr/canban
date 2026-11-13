@@ -112,7 +112,11 @@ impl BoardDrag {
             ghost: signal(None),
         };
         effect(move || {
-            let _ = (ui.snapshot.get(), ui.github.filters.get());
+            let _ = (
+                ui.snapshot.get(),
+                ui.github.filters.get(),
+                ui.merging_cards.get(),
+            );
             if this.phase.get_untracked() == 0 {
                 this.sync();
             } else if this.trace {
@@ -192,6 +196,14 @@ impl BoardDrag {
                     offset: position.y.0,
                 },
             );
+            m.dirty = true;
+        });
+    }
+    /// Forget unmounted columns (single-stage compact Board) so drag hit
+    /// testing only targets visible stages.
+    pub fn retain(self, stages: &[String]) {
+        self.metrics.with(|m| {
+            m.columns.retain(|stage, _| stages.contains(stage));
             m.dirty = true;
         });
     }

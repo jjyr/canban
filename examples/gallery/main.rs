@@ -7,7 +7,7 @@ use serde_json::json;
 
 fn controls() -> impl IntoElement {
     let ui = Ui::new();
-    let input = signal("中文与 English · long text fixture".into());
+    let input = signal("Card 现在编辑用中文时 mixed English @developer 与 `code` 对齐测试".into());
     let profile_fixture = signal(canban_types::Config::default().profiles);
     let count = signal(0_u32);
     let directory = signal(String::new());
@@ -62,15 +62,27 @@ fn controls() -> impl IntoElement {
                         ))
                         .child(badge("Needs attention"))
                         .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(live_status("Merging", Tone::Info))
+                                .child(status("Merged", Tone::Success))
+                                .child(status("Needs review", Tone::Attention))
+                                .child(status("Merge held", Tone::Neutral)),
+                        )
+                        .child(
                             action("Disabled action", Variant::Secondary, |_| {}).disabled(true),
                         ),
                 )
                 .child(
                     panel()
-                        .child(label("Buttons · hover / press / keyboard focus"))
+                        .child(label("Buttons & shared tooltips · hover / press / keyboard focus"))
                         .child(
                             view()
                                 .flex_row()
+                                .flex_wrap()
+                                .items_center()
                                 .gap_3()
                                 .child(action("Primary", Variant::Primary, move |_| {
                                     count.set(count.get_untracked() + 1)
@@ -80,7 +92,19 @@ fn controls() -> impl IntoElement {
                                 }))
                                 .child(action("Danger", Variant::Danger, move |_| {
                                     count.set(count.get_untracked() + 1)
-                                })),
+                                }))
+                                .child(
+                                    view()
+                                        .px_2p5()
+                                        .py_1()
+                                        .rounded(px(5.))
+                                        .bg(INSET)
+                                        .hover(|s| s.bg(CARD_HOVER))
+                                        .tooltip(hint_tooltip(
+                                            "Styled tooltip surface · readable over dense Card text",
+                                        ))
+                                        .child(muted("Hover for shared tooltip")),
+                                ),
                         )
                         .child(muted(move || format!("Press count: {}", count.get()))),
                 )
@@ -317,6 +341,8 @@ pub fn Gallery() -> impl IntoElement {
             "execution.started",
             "comment.replied",
             "execution.failed",
+            // Bookkeeping that Card Activity hides (Card #16 regression).
+            "card.updated",
         ]
         .iter()
         .enumerate()
@@ -326,12 +352,12 @@ pub fn Gallery() -> impl IntoElement {
             event.card_id = "card-1".into();
             event.sequence = index as u64 + 1;
             event.kind = (*kind).into();
-            event.actor = if index == 0 {
-                "JJy".into()
+            event.actor = if index == 0 || index == 5 {
+                "user".into()
             } else {
                 "agent:developer".into()
             };
-            event.request_id = if index == 0 {
+            event.request_id = if index == 0 || index == 5 {
                 None
             } else {
                 Some("card-fixture-request".into())
@@ -581,9 +607,41 @@ pub fn Gallery() -> impl IntoElement {
         ui.page.set("board".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    // Card tile states (running Agent pulse, gates, branch); `-open` keeps a
+    // Card pane open so a narrow Board switches to one stage with stage tabs.
+    if let Ok(scene @ ("board-cards" | "board-cards-open")) =
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref()
+    {
+        ui.snapshot.set(fixtures::board_cards());
+        if scene == "board-cards-open" {
+            ui.card.set("card-2".into());
+            ui.page.set("card".into());
+        } else {
+            ui.card.set(String::new());
+            ui.page.set("board".into());
+        }
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("board-overflow") {
         ui.snapshot.set(fixtures::overflowing_board());
         ui.page.set("board".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    // Card header quick merge: `card-quick-merge` shows the header Merge action;
+    // `card-quick-merge-warning` opens the running-Agent confirmation it raises.
+    if matches!(
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
+        Ok("card-quick-merge" | "card-quick-merge-warning")
+    ) {
+        ui.card_standalone.set(true);
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("card-quick-merge-warning") {
+            let mut preview = fixtures::review();
+            preview.warning = Some(
+                "Card Agent is still running; merging now only includes current worktree changes"
+                    .into(),
+            );
+            ui.quick_merge.set(Some(preview));
+        }
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminals") {
@@ -614,6 +672,17 @@ pub fn Gallery() -> impl IntoElement {
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("settings") {
         ui.page.set("settings".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("notifications") {
+        ui.snapshot.set(fixtures::overview());
+        ui.page.set("board".into());
+        canban_ui::overview::toggle(ui);
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("card-terminal") {
+        ui.snapshot.set(fixtures::conversation());
+        ui.open_card_with_terminal("card-1".into(), None);
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("motion") {
@@ -697,13 +766,25 @@ pub fn Gallery() -> impl IntoElement {
                     ui.select_project("gallery-project".into());
                 }))
                 .child(action("Card conversation", Variant::Secondary, move |_| {
-                    scene.set("workspace".into()); ui.snapshot.set(fixtures::conversation());
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::conversation());
                     ui.open_card("card-1".into());
                 }))
                 .child(action("Card Terminals", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
                     ui.snapshot.set(fixtures::workspace_with_card_terminals());
                     ui.open_card("card-2".into());
+                }))
+                .child(action("Card + Live Terminal", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::conversation());
+                    ui.open_card_with_terminal("card-1".into(), None);
+                }))
+                .child(action("Activity Popover", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::overview());
+                    ui.page.set("board".into());
+                    canban_ui::overview::toggle(ui);
                 }))
                 .child(action("Git Compare", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
@@ -820,6 +901,9 @@ pub fn Gallery() -> impl IntoElement {
                 }))
                 .child(action("Card states", Variant::Quiet, move |_| {
                     scene.set("workspace".into());ui.snapshot.set(fixtures::board_cards());ui.card.set(String::new());ui.page.set("board".into());
+                }))
+                .child(action("Card states · Card open", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());ui.snapshot.set(fixtures::board_cards());ui.card.set("card-2".into());ui.page.set("card".into());
                 }))
                 .child(action("Usage fixtures", Variant::Quiet, move |_| {
                     ui.usage.set(json!({"machine":"local","updated_at":canban_types::now(),"readings":[{"provider":"codex","auth":"present","account":"demo@example.invalid","windows":[{"name":"Session","used":22,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+5*86400) as i64,0).unwrap().to_rfc3339()}]},{"provider":"claude","auth":"present","account":"other@example.invalid","stale":true,"error":"HTTP 429","windows":[{"name":"Weekly","used":68,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+7*86400) as i64,0).unwrap().to_rfc3339()}]}]}));

@@ -67,8 +67,7 @@ pub fn draft_status(ui: Ui, key: String, _draft: Signal<Draft>) -> impl IntoElem
     when(
         move || {
             let _ = ui.draft_status.get();
-            let s = persistence::status(&visible_key);
-            s != "Draft saved" && s != "Preview draft"
+            !persistence::status(&visible_key).is_empty()
         },
         move || {
             let status_key = status_key.clone();

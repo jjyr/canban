@@ -42,23 +42,7 @@ fn summary_editor(value: Signal<String>) -> View {
 }
 
 fn default_profile_id(ui: Ui) -> String {
-    let def = ui.default_agent.get_untracked();
-    ui.profiles
-        .with_untracked(|profiles| {
-            profiles
-                .iter()
-                .find(|p| p.id == def)
-                .or_else(|| profiles.iter().find(|p| p.id == "developer"))
-                .or_else(|| profiles.first())
-                .map(|p| p.id.clone())
-        })
-        .unwrap_or_else(|| {
-            if def.is_empty() {
-                "developer".into()
-            } else {
-                def
-            }
-        })
+    crate::sessions::default_profile(ui)
 }
 
 pub fn context_label_untracked(ui: Ui) -> String {
@@ -284,7 +268,7 @@ fn render_submit_drawer(ui: Ui) -> impl IntoElement {
                         .map(|(id, text)| {
                             let target_id = id.to_owned();
                             let check_id = id.to_owned();
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .h(px(28.))
                                 .px_2p5()
                                 .rounded(px(RADIUS))
@@ -394,7 +378,7 @@ fn render_submit_drawer(ui: Ui) -> impl IntoElement {
                                 .gap_3()
                                 .child(profile_picker(ui, st.submit_profile))
                                 .child(if can_isolate {
-                                    nsh_base::button()
+                                    canban_ui_kit::press_target()
                                         .h(px(26.))
                                         .px_2()
                                         .rounded(px(5.))
@@ -440,7 +424,7 @@ fn render_submit_drawer(ui: Ui) -> impl IntoElement {
                                 .gap_3()
                                 .child(profile_picker(ui, st.submit_profile))
                                 .child(
-                                    nsh_base::button()
+                                    canban_ui_kit::press_target()
                                         .h(px(26.))
                                         .px_2()
                                         .rounded(px(5.))

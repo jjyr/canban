@@ -10,6 +10,20 @@ From Card details choose **Review changes**. Refresh the diff, read report/Timel
 - Return to Develop using the workflow stage action. Add feedback to the Card/comment first. The workflow schedules that stage with the existing profile conversation and a new invocation binding.
 - Accept using **Accept · commit and merge**. This is a deliberate Git operation, separate from Archive.
 
+### Quick merge from the Card header
+
+Status: implemented 2026-11-13 (Card #22; user selected the one-click option and no Board-tile button).
+
+The Card header shows **Merge** next to `Diff` / `Review` for an active local-delivery Card that has a worktree, no Local delivery receipt and no PR binding (effective delivery mode is not GitHub PR, and the Card is not a GitHub PR source). It is hidden on the Review page, whose own merge control remains, and on Board tiles.
+
+Pressing it calls the read-only `review.preview` for the Project target branch without rendering the diff, then:
+
+- `merge_allowed == false`: shows the preview reason as an operation error and changes nothing.
+- A preview `warning` (for example a still-running or queued Card Agent): opens a confirmation dialog with the Card branch, target, changed-file count and warning. **Merge anyway** continues; **Terminals ↗** and **Cancel** do not merge.
+- Otherwise: immediately calls `review.merge` with the preview token/revision and the default message `Canban #<number>: <title>`.
+
+The merge is skipped if the Card revision changed while previewing. AppServer still revalidates the token, target cleanliness and conflicts, records the delivery receipt, completes waiting delivery steps and attempts the normal merged-Card auto-archive. No RPC or schema changed. Gallery scenes: `card-quick-merge` and `card-quick-merge-warning`.
+
 Project creation captures its current local branch as `target_branch`; callers can specify it explicitly. Review can choose another existing local branch. The Project checkout must already be on that target branch and clean. Canban does not silently switch branches, discard local edits, push, or publish a PR. Non-Git/unborn Projects or Cards without a separate Git worktree do not support this merge path.
 
 The diff includes tracked changes since the merge base and untracked files. Acceptance includes the complete reviewed Card checkout, including untracked source files; there is no partial staging/hunk selector. The preview indicates truncation beyond 2 MiB; inspect the complete checkout in the terminal when truncated. Binary patches are represented as Git binary diffs.

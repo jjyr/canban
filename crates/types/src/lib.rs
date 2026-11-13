@@ -87,7 +87,7 @@ impl Default for Workflow {
                 Stage {
                     id: "develop".into(), name: "Develop".into(), execute: true,
                     profile: Some("developer".into()),
-                    instruction: "Implement the card task in the supplied working directory. Explain your changes and validation in your report.".into(),
+                    instruction: "Evaluate the Card against the current codebase before editing:\n- Actionable: implement and validate the changes on the Card branch, commit deliverables, and report `--state completed`.\n- Already implemented, obsolete, or not applicable: make no unnecessary edits and report `--state backlog` explaining why.\n- Ambiguous or awaiting a human decision: report `--state blocked` with specific questions.".into(),
                     on_completed: Some("review".into()), require_human_review: false,
                 },
                 Stage {
@@ -248,19 +248,19 @@ impl Default for Config {
                     "developer",
                     "codex",
                     true,
-                    "You are the Card's development Agent. Implement the agreed task, preserve relevant project conventions, and explain your changes and validation.",
+                    "You are the Card's development Agent. Follow repository conventions and verify changes before finishing.",
                 ),
                 profile(
                     "reviewer",
                     "codex",
                     true,
-                    "You are the Card's independent review Agent. Inspect the actual changes critically, identify correctness issues and missing validation, and report findings. Do not implement changes unless explicitly asked.",
+                    "You are the Card's independent review Agent. Critically inspect changes and test coverage without making unrequested edits.",
                 ),
                 profile(
                     "planner",
                     "codex",
                     true,
-                    "You are the Card's planning Agent. Analyze the task and relevant repository files in read-only mode, identify risks, and write a concise implementation plan without modifying source files.",
+                    "You are the Card's planning Agent. Inspect repository files in read-only mode without modifying source files.",
                 ),
             ],
         }
@@ -302,6 +302,18 @@ impl Project {
             directory: self.directory.clone(),
         })
     }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ManagedWorktree {
+    pub id: String,
+    pub project_id: String,
+    pub branch: String,
+    pub base_branch: String,
+    #[serde(default)]
+    pub base_commit: Option<String>,
+    pub path: String,
+    pub location: WorkLocation,
+    pub created_at: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WorkspaceBinding {
@@ -499,7 +511,7 @@ impl Attempt {
                 .as_ref()
                 .is_some_and(|v| v["state"] == "finished")
     }
-    /// True when the terminal exited or Herdr reports the Agent has stopped its turn.
+    /// True when the terminal exited or Herdr reports the Agent is no longer running a turn.
     pub fn agent_stopped(&self) -> bool {
         if self.finished() {
             return true;
@@ -512,9 +524,12 @@ impl Attempt {
             .as_ref()
             .and_then(|v| v["status"]["state"].as_str())
         {
-            Some("idle" | "done") => true,
+            Some("idle" | "done" | "blocked" | "error") => true,
             Some(_) => false,
-            None => self.state == "completed",
+            None => matches!(
+                self.state.as_str(),
+                "completed" | "backlog" | "blocked" | "failed"
+            ),
         }
     }
     /// A stale or disconnected status must not release scheduling capacity.
@@ -538,6 +553,52 @@ impl Attempt {
     pub fn key(request: &str, number: u32) -> String {
         format!("{request}:{number}")
     }
+}
+
+/// Merge-time caution about Agent work on a Card, or `None` when every Agent has
+/// stopped its turn. Shared by AppServer previews and the live UI (which must
+/// re-evaluate it as Herdr status changes; a preview snapshot goes stale once an
+/// Agent that reported while finishing its turn becomes idle).
+pub fn agent_activity_warning(
+    card_id: &str,
+    attempts: &[Attempt],
+    requests: &[Request],
+) -> Option<String> {
+    // Continued assignments are `finished()`: runtime ownership moved to the next one.
+    let live = attempts
+        .iter()
+        .filter(|a| a.card_id == card_id && a.terminal.is_some() && !a.agent_stopped());
+    let mut uncertain = false;
+    for a in live {
+        if a.connection_state == "connected" {
+            return Some(
+                "Card Agent is still running; merging now only includes current worktree changes"
+                    .into(),
+            );
+        }
+        uncertain = true;
+    }
+    if uncertain {
+        return Some(
+            "Card Agent status is unavailable (terminal disconnected); merging now only includes current worktree changes"
+                .into(),
+        );
+    }
+    let pending: Vec<_> = requests
+        .iter()
+        .filter(|r| {
+            r.card_id == card_id && matches!(r.state.as_str(), "queued" | "starting" | "unknown")
+        })
+        .collect();
+    if pending.is_empty() {
+        return None;
+    }
+    let what = pending
+        .iter()
+        .map(|r| format!("@{} {}", r.profile.id, r.state))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("Card still has pending Agent work ({what})"))
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Conversation {
@@ -672,10 +733,15 @@ pub struct Snapshot {
     #[serde(default)]
     pub github_issues: Vec<GitHubIssueSnapshot>,
     #[serde(default)]
+    pub worktrees: Vec<ManagedWorktree>,
+    #[serde(default)]
     pub terminals: Vec<TerminalEntry>,
     /// Ephemeral Herdr observations, never persisted as Terminal ownership.
     #[serde(default)]
     pub terminal_contexts: Vec<TerminalContext>,
+    /// Cards currently executing a merge or delivery step in AppServer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merging_cards: Vec<String>,
     pub projects: Vec<Project>,
     pub cards: Vec<Card>,
     pub events: Vec<Event>,
@@ -898,10 +964,14 @@ impl Card {
         })
     }
     pub fn board_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.board_rank()
-            .cmp(&other.board_rank())
+        self.merged()
+            .cmp(&other.merged())
+            .then_with(|| self.board_rank().cmp(&other.board_rank()))
             .then_with(|| self.number.cmp(&other.number))
             .then_with(|| self.id.cmp(&other.id))
+    }
+    pub fn merged(&self) -> bool {
+        self.delivery.is_some() || self.pull_request.as_ref().is_some_and(|p| p.merged)
     }
     pub fn github_issue(&self) -> Option<&GitHubIssueRef> {
         match &self.content {
@@ -978,3 +1048,102 @@ pub struct GitHubPr {
 
 mod workflow;
 pub use workflow::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sample_attempt(
+        card_id: &str,
+        state: &str,
+        connection: &str,
+        observed: Option<Value>,
+    ) -> Attempt {
+        serde_json::from_value(json!({
+            "id": "req-1:1",
+            "request_id": "req-1",
+            "project_id": "proj-1",
+            "card_id": card_id,
+            "number": 1,
+            "state": state,
+            "core_id": "core-1",
+            "terminal": "t1",
+            "cwd": "/tmp",
+            "input_path": "in.md",
+            "created_at": 1,
+            "connection_state": connection,
+            "observed": observed,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn agent_activity_warning_clears_as_soon_as_live_snapshot_becomes_idle() {
+        let mut attempts = vec![sample_attempt(
+            "card-1",
+            "completed",
+            "connected",
+            Some(json!({"state": "live", "status": {"state": "working"}})),
+        )];
+        let requests = Vec::new();
+        // Right at `execution.report`, Herdr can still report `"working"` mid-turn.
+        assert!(
+            agent_activity_warning("card-1", &attempts, &requests)
+                .unwrap()
+                .contains("still running")
+        );
+
+        // Once Herdr transitions to any non-running turn state, live evaluation clears it.
+        for stopped in ["idle", "done", "blocked", "error"] {
+            attempts[0].observed = Some(json!({"state": "live", "status": {"state": stopped}}));
+            assert_eq!(agent_activity_warning("card-1", &attempts, &requests), None);
+        }
+
+        // Providers without deep status hooks also clear once the execution reported an outcome.
+        for outcome in ["completed", "blocked", "failed"] {
+            attempts[0].state = outcome.into();
+            attempts[0].observed = Some(json!({"state": "live"}));
+            assert_eq!(agent_activity_warning("card-1", &attempts, &requests), None);
+        }
+    }
+
+    #[test]
+    fn merged_cards_sink_below_unmerged_peers_in_board_order() {
+        let mut merged: Card = serde_json::from_value(json!({
+            "id": "card-1",
+            "project_id": "proj",
+            "number": 1,
+            "board_order": 0,
+            "title": "Merged earlier",
+            "body": "",
+            "stage": "review",
+            "revision": 1,
+            "created_at": 1,
+            "delivery": {
+                "target_branch": "main",
+                "commit": "abc1234",
+                "request_key": "k1",
+                "merged_at": 100
+            }
+        }))
+        .unwrap();
+        let open: Card = serde_json::from_value(json!({
+            "id": "card-2",
+            "project_id": "proj",
+            "number": 2,
+            "board_order": 1024,
+            "title": "Open peer",
+            "body": "",
+            "stage": "review",
+            "revision": 1,
+            "created_at": 2
+        }))
+        .unwrap();
+        assert!(merged.merged());
+        assert!(!open.merged());
+        assert_eq!(open.board_cmp(&merged), std::cmp::Ordering::Less);
+        merged.delivery = None;
+        assert_eq!(merged.board_cmp(&open), std::cmp::Ordering::Less);
+    }
+}

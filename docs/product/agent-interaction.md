@@ -38,7 +38,7 @@ New execution uses the Project's current work location at admission. Retained qu
 | Enter an executable workflow stage | Queue stage assignment | Reuse a compatible completed idle invocation, otherwise wait for a safe boundary | Resume with fresh assignment/callback |
 | Browse Card/history/Overview or Back/Forward | Read context only | Read context or navigate to live viewer | Read saved history; no implicit Resume |
 
-An existing live Card Agent link opens its Terminal. An exited Agent action is explicitly labelled Resume. **Open Card Terminals** selects existing Card context, or an empty Card-context Terminal view if none exists; **Choose Agent** then explicitly invokes `agent.open`. Historical Timeline output opens that execution's saved report/output, not a stale live address. All starts/resumes share Scheduler admission, default global budget eight and human-gate rules; manual Shells do not consume Agent slots.
+An existing live Card Agent link opens its Terminal. An exited Agent action is explicitly labelled Resume. **Send to Agent** explicitly invokes `agent.open` for the default Agent with the Card context (updated 2026-11-13); Terminal-page **Choose Agent** remains available for other profiles. Historical Timeline output opens that execution's saved report/output, not a stale live address. All starts/resumes share Scheduler admission, default global budget eight and human-gate rules; manual Shells do not consume Agent slots.
 
 ## Workspace and controls
 

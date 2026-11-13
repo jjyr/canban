@@ -6,7 +6,8 @@ Status: implementation inventory, current contracts reconciled 2026-11-10. Dated
 | --- | --- | --- | --- |
 | Semantic tokens | crates/ui-kit/src/tokens.rs | Fixed-dark reactive surfaces/text/accent/borders and sizing from the named-theme catalog | Named-theme Gallery/application acceptance in desktop-utilities.md; earlier Light/Dark checks are historical |
 | Scroll indicators | crates/ui-kit/src/scrollbar.rs | Native NSH macOS dark-mode CoreAnimation overlay scroll indicators (`set_scrollbar_theme(None)`): reveal on scroll, thumb dragging, fade after idle, zero layout width reserved, and unobstructed pointer hit-testing inside `scroll()`. Native Terminal rendering remains separate. | Three overflowing production Board columns in Gallery; isolated actual App scroll, Card click/drag and theme switch |
-| Button | crates/ui-kit/src/button.rs | nsh-base Button; typed variants (`Primary`, `Secondary`, `Quiet`, `Danger`), `compact_action` for 26-point inline/toolbar controls, shared text/icon actions and centralized hover/pressed/focus/disabled styles | Native mouse, Tab/Space and disabled-skip checks |
+| Button | crates/ui-kit/src/button.rs | nsh-base Button; typed variants (`Primary`, `Secondary`, `Quiet`, `Danger`), `compact_action` for 26-point inline/toolbar controls, shared text/icon actions and centralized hover/pressed/focus/disabled styles. `press_target()` is the unstyled press-target constructor for every clickable surface: it shows the pointing-hand cursor while enabled and the arrow while disabled; do not call `nsh_base::button()` directly | Native mouse, Tab/Space, pointer-cursor and disabled-skip checks |
+| Tooltip | crates/ui-kit/src/tooltip.rs | nsh-base Tooltip; `tooltip_box()` and `hint_tooltip()` provide the shared opaque `SURFACE` + `BORDER` + shadow bubble across Card tiles, Card headers, chrome buttons, Terminal tabs and sidebars; do not call bare `nsh_base::tooltip()` directly | Unit source guard, Gallery `board-cards` / `controls` scenes, and isolated native App hover checks |
 | Text field | crates/ui-kit/src/input.rs | Controlled NSH Input; common geometry/focus/text | Multiline Unicode paste/edit/save, live Markdown preview and retained draft through state refresh |
 | Checkbox | crates/ui-kit/src/checkbox.rs | Controlled nsh-base Checkbox; common checked/focus presentation | Reusable control retained; the former Note-selection consumer is removed |
 | Numeric attention badge | crates/ui-kit/src/status.rs | Domain-free positive count, hidden zero, 99+ visual cap; shared by Project buttons and search rows | Production Project activity Gallery and native badge updates |
@@ -33,7 +34,7 @@ Native terminal regression scenarios also cover hidden cursor/null cursor metada
 
 `crates/ui/src/review.rs` (with `review/model.rs`, `review/sidebar.rs`, `review/diff.rs`, and `review/submit.rs`) owns the first-class Left Rail `Diff & Review` route (`Icon::Compare`) as well as direct Card review/delivery and `diff_panel`. It operates with or without an active Card or Pull Request:
 - **Ad-hoc Git Compare**: Top Project, Base, and Compare pickers plus the collapsible Quick Compare sidebar (`Working tree`, `Staged`, `Last commit`, local/remote **Branches**, `Cards & PRs`, and `Recent Commits`) invoke `git.refs` and `git.compare`.
-- **Card & PR Review**: Local Cards with a worktree or branch expose `Diff` / `Review` across stages and preserve immutable `ReviewPreview` token-checked Local Merge, Publish PR, merge-blocker notices, `Return to Develop`, `Delivered` receipt + `Archive Card`, and a toggleable `Show Card` drawer. GitHub PR Cards without a local checkout fetch remote PR files and review threads via `review.github_pr` (`gh` CLI / GitHub cache), and offer a `Local branch` / `Remote PR #N` switcher when a local checkout also exists.
+- **Card & PR Review**: Local Cards with a worktree or branch expose `Diff` / `Review` across stages and preserve immutable `ReviewPreview` token-checked Local Merge, Publish PR, merge-blocker notices, `Return to Develop`, `Delivered` receipt + `Archive Card`, and a toggleable `Show Card` drawer. GitHub PR Cards without a local checkout fetch remote PR files and review threads via `review.github_pr` (`gh` CLI / GitHub cache), and offer a `Local branch` / `Remote PR #N` switcher when a local checkout also exists. The Card header also offers a one-click `Merge` (quick merge) for eligible local-delivery Cards, owned by `crates/ui/src/card/quick_merge.rs`; it reuses `review.preview` → `review.merge` and confirms only preview warnings (see [review delivery](product/review-delivery.md#quick-merge-from-the-card-header)).
 - **Inline Comments & Batch Dispatch**: Clicking any unified diff line opens an inline comment box attached to `path:line` (`LEFT`/`RIGHT`) and collects a pending batch. Dispatch (`review.send_agent` or `github.remote.review`) supports launching an interactive `@Agent` directly in Herdr Terminals (even without a Card), creating a new Card, posting to a Card's `@Agent` locally (seeding `refs/canban/cards/<id>` from `refs/pull/<n>/head` when needed), or syncing a formal Review (`Comment` / `Approve` / `Request changes`) to GitHub. The standalone Gallery exercises the same production components across `Git Compare`, `Review delivery`, and `Delivered receipt` scenes.
 
 Terminal reconnection keeps the immutable Core/terminal identity, waits for native layout before initial attach, reapplies current size/focus after handshake and drops disconnected/uncertain input. Precise wheel deltas accumulate and are converted to libghostty's negative-up direction. The 12,000-line Model regression and native upward/downward scroll checks cover the shared behavior.
@@ -112,7 +113,7 @@ The production inventory groups entries by task Project (managed Agents), observ
 
 `ui-kit/segmented.rs` provides direct single-choice buttons with shared adaptive tokens and separate selected, hover and keyboard-focus states. The New Card form uses Local / GitHub Issue segments, including the official GitHub mark, instead of a type menu. Drafts remain independent across type switches.
 
-Board headers show the workflow stage name without numeric Card counts. When active column rules exist, a workflow-node button opens their details on click; it has no hover tooltip. Headers retain equal height with or without this button. Custom workflow stage names remain unchanged. Card tiles omit repeated stage labels, drag instructions, empty metadata rows and inactive/completed/queued execution summaries. The top-right Grip is now decorative; the [whole-Card drag contract](board-interaction.md) supersedes its earlier dedicated target. Titles remain primary, excerpts are single-line, branch text is bounded with a full tooltip. Routing-tag fields and badges are removed from creation, editing, Board tiles and Quick Open. `components/activity.rs::card_activity` shares active provider/Profile identity and actionable human-gate signals between tiles and Card details; provider detection is shared with Terminal rows through `profiles::provider`.
+Board headers show the workflow stage name without numeric Card counts. When active column rules exist, a workflow-node button opens their details on click; it has no hover tooltip. Headers retain equal height with or without this button. Custom workflow stage names remain unchanged. Card tiles omit repeated stage labels, drag instructions, empty metadata rows and inactive/completed/queued execution summaries. The top-right Grip is now decorative; the [whole-Card drag contract](board-interaction.md) supersedes its earlier dedicated target. Titles remain primary, excerpts are single-line, branch text is bounded with a full tooltip. Routing-tag fields and badges are removed from creation, editing, Board tiles and Quick Open. `components/activity.rs::card_status`/`running_agents` share actionable gate/failure chips and running Agent identity; provider detection is shared with Terminal rows through `profiles::provider`.
 
 The standalone Gallery adds Card states and New Card scenes, including queued, executing, human-gated and long-title Cards at constrained width. Native acceptance at `/private/tmp/cb-native-o55cpz5o` verified small-grip Backlog → Develop drag with actual fixture scheduling, direct type switching with exact title/body retention, and Local Card creation. UI tests (12), targeted strict all-target Clippy, application/Gallery packaging and diff whitespace checks passed. These interaction fixtures do not invoke a model or use the user's live Core.
 
@@ -167,7 +168,9 @@ and a persisted-unread jump affordance. See [unified reminders](reminders.md).
 
 Shared motion now lives in `ui-kit/src/motion.rs`, with a retained native
 `reveal_split` in `split.rs`. `ui/workspace.rs` keeps Board mounted across Card
-open/close and scopes the outgoing Card identity through animation completion.
+open/close, dismisses an open right-hand Card/New Card pane when non-interactive
+Board space is clicked on the left, and scopes the outgoing Card identity
+through animation completion.
 Markdown input resizing and the shared modal adapters reuse this policy. The
 Gallery's `CANBAN_GALLERY_SCENE=motion` covers interruption, switching, resizing,
 reduced motion and Quick Open. See [native motion](ui-motion.md) for contracts
@@ -199,8 +202,9 @@ Native checks covered pending/progress presentation, recovery layout, real packa
 `ui/src/editor.rs` shares Markdown source, preview, reference completion and draft
 feedback between New Card and task editing. `ui/src/references.rs` supplies local
 Card/Profile candidates and bounded GitHub Issue/PR lookups. UI Kit owns the
-Enter/Shift+Enter newline policy, including open completion menus, and scoped
-Command+Enter submission. The right-pane split retains its editor while expanded.
+`Menlo, PingFang SC` editor font cascade, Enter/Tab completion acceptance,
+Enter/Shift+Enter newlines and scoped Command+Enter submission. New Card binds
+guarded Escape dismissal, and the right-pane split retains its editor while expanded.
 
 `ui/src/drafts.rs` owns window projections, `drafts/list.rs` the searchable Drafts
 screen, and `drafts/persistence.rs` one coalescing background writer. AppServer
@@ -242,6 +246,11 @@ message chrome or a compact system row. It owns local full-body expansion and
 report loading; navigation retains explicit request identity. The Card Timeline
 owns adjacent routine-event grouping, read coordinates and execution disclosure.
 `MarkdownInput` keeps nonempty compact drafts expanded on blur for every consumer.
-Gallery scenes `card-local`, `card-issue`, and `card-pr` cover narrow identity,
-references, long reports, routine groups, failures and historical details using
-production components. See [verification](card-conversation-acceptance-20261111.md).
+## UX refinement: Unified 42pt Chrome, Global Activity Popover, Card + Live Terminal & Managed Worktrees (2026-11-13)
+
+- `ui/frame.rs`: Owns the unified 42-point window chrome across all non-Terminal routes (matching exact traffic-light + `<` / `>` Back/Forward geometry with `terminals.rs`), mounting route-specific header slots (`Board` Project picker + cross-Project activity chips + right-aligned Project actions, `Card`, `Diff & Review`, `GitHub`, `Settings`, and sub-pages) plus the persistent far-right `overview::trigger_pill` and right-anchored `overview::popover`.
+- `ui/rail.rs`: 56-point icon rail (`Quick Open`, `Board`, `Terminals`, `Diff & Review`, `GitHub`, conditional `Update`, and bottom `Settings`), omitting the superseded standalone `Overview` route.
+- `ui/overview.rs`: Composes the persistent top-right status trigger (`⚡ N · ● active/max`, `Command+I`) and right-anchored Activity & Notifications popover (`Needs you`, `Updates` with inline `Read` / `Read all`, `Running` / `Queued` / `Idle` / `Closed`, and 1-step **Card & Terminal →** navigation), while retaining pure production row helpers for Gallery regression scenes.
+- `ui/card/terminal.rs`, `ui/card.rs`, `ui/workspace.rs`: Side-by-side left-right `Card + Live Terminal` split (`Command+J` / `>_ Terminal`), single-attachment `canban/terminal` viewer mounted exclusively on `"card"` route, non-destructive viewer detach on hide/close, explicit Markdown editor vs PTY keyboard focus ownership, Agent profile selector, `[Interrupt]`, and `[Pop out to Terminals ↗]`.
+- `ui/terminals/worktrees.rs`, `ui/terminals/tree.rs`, `ui/terminals/tabs.rs`: `New Managed Branch Worktree…` creation modal, persistent `ManagedWorktree` tree nodes retained across `Command+W` tab closes, quick reopen (`Shell` / `@Agent`), `Open in Diff & Review`, `Promote to Card…`, and guarded `Delete Worktree…`.
+- `ui/commands.rs`, `ui/quick_open.rs`: Full Command Catalog (`>`) parity covering global chrome, Notifications popover, Card operations, Terminal & Worktree lifecycle, utilities, config reload, and updates.

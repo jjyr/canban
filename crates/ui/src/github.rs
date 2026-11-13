@@ -645,9 +645,9 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                                 latest.body.clear();
                             }
                         }
-                        // If navigation did not leave this form (for example an
-                        // expansion during submission), continue with a fresh
-                        // draft identity, keeping all post-submit input.
+                        // Remain on New Card with a fresh draft identity so
+                        // users can create multiple Cards consecutively while
+                        // preserving any post-submit input.
                         let still_here = draft.try_get().is_some()
                             && ui.page.get_untracked() == "new-card"
                             && ui.new_draft.get_untracked() == key;
@@ -656,6 +656,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                             drafts::put(ui, next.clone(), latest);
                             drafts::remove(ui, &key);
                             ui.new_draft.set(next);
+                            crate::navigation::replace(ui);
                         } else if latest.has_content(&key) {
                             drafts::put(ui, key, latest);
                         } else {
@@ -690,7 +691,24 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
     });
     let height = signal(280.);
     let active = computed(move || ui.page.get() == "new-card");
-    let (_local_editor, local_view) = crate::editor::body(
+    effect(move || {
+        if !active.get() {
+            return;
+        }
+        on_key_with(
+            "escape",
+            KeyOptions {
+                when: nsh_core::keymap::When::Always,
+                ..Default::default()
+            },
+            move |_| {
+                if ui.page.get_untracked() == "new-card" && !ui.has_blocking_overlay() {
+                    ui.navigate("board");
+                }
+            },
+        );
+    });
+    let (local_editor, local_view) = crate::editor::body(
         ui,
         local,
         computed(move || target.get()),
@@ -698,7 +716,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
         height,
         move || ui.card_submit.update(|n| *n += 1),
     );
-    let (_, instructions_view) = crate::editor::body(
+    let (instructions_editor, instructions_view) = crate::editor::body(
         ui,
         instructions,
         computed(move || target.get()),
@@ -706,6 +724,12 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
         height,
         move || ui.card_submit.update(|n| *n += 1),
     );
+    effect(move || {
+        if !active.get() {
+            local_editor.blur();
+            instructions_editor.blur();
+        }
+    });
     view()
         .key(key.clone())
         .flex_1()

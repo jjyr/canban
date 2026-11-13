@@ -446,7 +446,10 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             "shell-backlog",
         ]
     );
-    let agy = live.iter().find(|e| e.saved.id == "agent-ephemeral").unwrap();
+    let agy = live
+        .iter()
+        .find(|e| e.saved.id == "agent-ephemeral")
+        .unwrap();
     assert_eq!(agy.saved.title(), "Antigravity 1");
     assert_eq!(agy.provider(), Some((Icon::Agy, "Antigravity".into())));
     assert!(!agy.inferred_card);
@@ -467,5 +470,9 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
         branch: None,
     });
     let live_after_move = crate::terminals::card_live_entries(&s, "c1");
-    assert!(live_after_move.iter().all(|e| e.saved.id != "shell-backlog"));
+    assert!(
+        live_after_move
+            .iter()
+            .all(|e| e.saved.id != "shell-backlog")
+    );
 }

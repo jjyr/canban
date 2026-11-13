@@ -24,30 +24,43 @@ pub fn entries(events: &[Event]) -> Vec<(Event, bool)> {
         })
         .collect()
 }
-/// Only known routine facts collapse; questions, failures and decisions stay visible.
-fn routine(event: &Event, narrative: bool) -> bool {
-    !narrative
-        && event.request_id.is_some()
-        && matches!(
-            event.kind.as_str(),
-            "execution.queued" | "execution.started" | "execution.attached" | "execution.reported"
-        )
+/// Process bookkeeping that the conversation already implies. The durable
+/// events remain stored (workflow triggers depend on some of them); the Card
+/// Activity only shows conversation, decisions, stage moves and problems.
+fn noise(kind: &str) -> bool {
+    matches!(
+        kind,
+        "card.updated"
+            | "card.order_changed"
+            | "card.context_updated"
+            | "workspace.prepared"
+            | "workflow.started"
+            | "workflow.notified"
+            | "workflow.completed"
+            | "execution.queued"
+            | "execution.retry_queued"
+            | "execution.started"
+            | "execution.attached"
+            | "execution.continued"
+            | "execution.reconnected"
+            | "execution.input_resolved"
+            | "execution.control_requested"
+            | "execution.close_requested"
+            | "execution.idle_close_requested"
+            | "execution.idle_closed"
+            | "execution.ended"
+    )
 }
-fn groups(events: &[Event]) -> Vec<Vec<(Event, bool)>> {
-    let mut groups: Vec<Vec<(Event, bool)>> = Vec::new();
-    for (event, narrative) in entries(events) {
-        if routine(&event, narrative)
-            && let Some(last) = groups.last_mut()
-            && last
-                .iter()
-                .all(|(e, n)| routine(e, *n) && e.request_id == event.request_id)
-        {
-            last.push((event, narrative));
-        } else {
-            groups.push(vec![(event, narrative)]);
-        }
-    }
-    groups
+/// Visible Activity rows. An explicitly targeted event (deep link) is always kept.
+fn visible(events: &[Event], target: Option<u64>) -> Vec<(Event, bool)> {
+    entries(events)
+        .into_iter()
+        .filter(|(event, narrative)| {
+            Some(event.sequence) == target
+                || *narrative
+                || !(noise(&event.kind) || event.kind == "execution.reported")
+        })
+        .collect()
 }
 fn execution(ui: Ui, reading: Reading, request_id: String) -> impl IntoElement {
     dynamic(move || {
@@ -119,93 +132,57 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
                 .collect::<Vec<_>>()
         })
     });
+    let rows = computed(move || visible(&events.get(), ui.card_event.get()));
     view()
         .gap_3()
         .child(muted("Activity"))
         .child(each(
-            move || groups(&events.get()),
-            |group| group[0].0.id.clone(),
+            move || rows.get(),
+            |(event, _)| event.id.clone(),
             move |item, _| {
-                let expanded = signal(false);
                 dynamic(move || {
-                    let group = item.get();
-                    let targeted = group.iter().any(|(e, _)| {
-                        ui.card_event.get() == Some(e.sequence)
-                            || e.request_id.as_deref() == Some(ui.request.get().as_str())
-                    });
-                    let grouped = group.len() > 1;
-                    let visible = expanded.get() || targeted || !grouped;
-                    let tracked = group.iter().map(|(e, _)| e.sequence).collect::<Vec<_>>();
+                    let (event, narrative) = item.get();
+                    let sequence = event.sequence;
                     let target = element_ref();
-                    let mut area =
-                        view()
-                            .element_ref(&target)
-                            .gap_1()
-                            .on_layout(move |_: &Bounds<Points>| {
-                                let tracked = tracked.clone();
-                                ui.spawn(async move {
-                                    let Some(bounds) = reading.bounds(target).await else {
-                                        return;
-                                    };
-                                    if reading.jump_ready.try_get().is_none() {
-                                        return;
-                                    }
-                                    for sequence in &tracked {
-                                        reading.reader.row(ui, *sequence, bounds);
-                                    }
-                                    if reading.jump_ready.get_untracked()
-                                        && ui
-                                            .card_event
-                                            .get_untracked()
-                                            .is_some_and(|target| tracked.contains(&target))
-                                        && ui.card_id() == ui.card.get_untracked()
-                                    {
-                                        ui.card_event.set(None);
-                                        expanded.set(true);
-                                        reading.follow.set(false);
-                                        reading.scroll.scroll_to(
-                                            Point::new(
-                                                px(0.),
-                                                px((bounds.origin.y.0 - 12.).max(0.)),
-                                            ),
-                                            false,
-                                        );
-                                    }
-                                });
+                    let mut area = view()
+                        .element_ref(&target)
+                        .gap_1()
+                        .on_layout(move |_: &Bounds<Points>| {
+                            ui.spawn(async move {
+                                let Some(bounds) = reading.bounds(target).await else {
+                                    return;
+                                };
+                                if reading.jump_ready.try_get().is_none() {
+                                    return;
+                                }
+                                reading.reader.row(ui, sequence, bounds);
+                                if reading.jump_ready.get_untracked()
+                                    && ui.card_event.get_untracked() == Some(sequence)
+                                    && ui.card_id() == ui.card.get_untracked()
+                                {
+                                    ui.card_event.set(None);
+                                    reading.follow.set(false);
+                                    reading.scroll.scroll_to(
+                                        Point::new(px(0.), px((bounds.origin.y.0 - 12.).max(0.))),
+                                        false,
+                                    );
+                                }
                             });
-                    if grouped {
-                        let actor = group[0].0.actor.trim_start_matches("agent:");
-                        area = area.child(
-                            compact_action(
-                                format!(
-                                    "{} {actor} · {} execution events",
-                                    if visible { "▾" } else { "▸" },
-                                    group.len()
-                                ),
-                                Variant::Quiet,
-                                move |_| expanded.update(|v| *v = !*v),
-                            )
-                            .self_start(),
-                        );
-                    }
-                    if visible {
-                        for (event, narrative) in &group {
-                            area = area.child(crate::components::timeline_item::render(
-                                ui,
-                                event.clone(),
-                                *narrative,
-                            ));
-                        }
-                    }
-                    // One detail owner per request, placed beside its earliest event.
-                    if let Some(request) = group[0].0.request_id.clone() {
-                        let first = events.with(|all| {
+                        })
+                        .child(crate::components::timeline_item::render(
+                            ui,
+                            event.clone(),
+                            narrative,
+                        ));
+                    // One detail owner per request, placed beside its earliest visible row.
+                    if let Some(request) = event.request_id.clone() {
+                        let first = rows.with(|all| {
                             all.iter()
-                                .filter(|e| e.request_id.as_ref() == Some(&request))
-                                .map(|e| e.sequence)
+                                .filter(|(e, _)| e.request_id.as_ref() == Some(&request))
+                                .map(|(e, _)| e.sequence)
                                 .min()
                         });
-                        if first == Some(group[0].0.sequence) {
+                        if first == Some(sequence) {
                             area = area.child(execution(ui, reading, request));
                         }
                     }
@@ -216,7 +193,10 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
         .child(dynamic(move || {
             let request = ui.request.get();
             if !request.is_empty()
-                && !events.with(|all| all.iter().any(|e| e.request_id.as_ref() == Some(&request)))
+                && !rows.with(|all| {
+                    all.iter()
+                        .any(|(e, _)| e.request_id.as_ref() == Some(&request))
+                })
             {
                 execution(ui, reading, request).into_element()
             } else {
@@ -229,7 +209,7 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
 mod tests {
     use super::*;
     #[test]
-    fn grouping_preserves_decisions_comments_failures_and_request_boundaries() {
+    fn activity_hides_bookkeeping_but_keeps_conversation_decisions_and_failures() {
         let make = |seq, kind: &str, request: &str| Event {
             id: format!("e{seq}"),
             sequence: seq,
@@ -238,25 +218,57 @@ mod tests {
             kind: kind.into(),
             actor: "agent:developer".into(),
             message: kind.into(),
-            request_id: Some(request.into()),
+            request_id: (!request.is_empty()).then(|| request.into()),
             data: serde_json::json!({}),
             created_at: 1,
         };
-        let rows = groups(&[
-            make(1, "execution.queued", "r"),
-            make(2, "execution.started", "r"),
-            make(3, "comment.created", "r"),
+        let events = [
+            make(1, "card.created", ""),
+            make(2, "card.updated", ""),
+            make(3, "comment.created", ""),
             make(4, "execution.queued", "r"),
-            make(5, "execution.started", "other"),
-            make(6, "execution.failed", "other"),
-            make(7, "workflow.approved", "other"),
-            make(8, "execution.reported", "other"),
-        ]);
-        assert_eq!(
-            rows.iter().map(Vec::len).collect::<Vec<_>>(),
-            vec![2, 1, 1, 1, 1, 1, 1]
-        );
-        assert!(rows.last().unwrap()[0].1);
+            make(5, "execution.started", "r"),
+            make(6, "card.stage_changed", ""),
+            make(7, "execution.failed", "other"),
+            make(8, "workflow.approved", "other"),
+            make(9, "execution.reported", "other"),
+            make(10, "workflow.started", ""),
+            make(11, "execution.input_required", "r"),
+        ];
+        let kept = |target| {
+            visible(&events, target)
+                .iter()
+                .map(|(e, _)| e.sequence)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kept(None), vec![1, 3, 6, 7, 8, 9, 11]);
+        // A deep link to hidden bookkeeping still resolves.
+        assert_eq!(kept(Some(4)), vec![1, 3, 4, 6, 7, 8, 9, 11]);
+    }
+    #[test]
+    fn report_echoed_by_a_reply_is_hidden_from_activity() {
+        let report = Event {
+            id: "report".into(),
+            sequence: 1,
+            project_id: "p".into(),
+            card_id: "c".into(),
+            kind: "execution.reported".into(),
+            actor: "agent:developer".into(),
+            message: "completed: Answer".into(),
+            request_id: Some("r".into()),
+            data: serde_json::json!({"report_id":"result"}),
+            created_at: 1,
+        };
+        let reply = Event {
+            id: "reply".into(),
+            sequence: 2,
+            kind: "comment.replied".into(),
+            message: "Answer".into(),
+            ..report.clone()
+        };
+        let rows = visible(&[report, reply], None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0.kind, "comment.replied");
     }
     #[test]
     fn explicit_report_identity_hides_the_body_echo_without_a_file() {

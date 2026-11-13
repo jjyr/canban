@@ -44,6 +44,7 @@ fn sync_nsh_tokens() {
     t.input = INSET.resolve();
     t.ring = ACCENT.resolve();
     t.radius = px(RADIUS);
+    t.font_mono = Some(MONO_FONT.into());
     nsh_core::element::set_tokens(t);
 }
 pub fn current_theme() -> &'static canban_themes::Theme {
@@ -63,7 +64,7 @@ impl ThemeColor {
             return AdaptiveColor::TRANSPARENT;
         }
         let color = if self.0 == 17 {
-            rgb(current_theme().chrome()[1]).to_hsla().lighten(0.025)
+            rgb(current_theme().chrome()[1]).to_hsla().lighten(0.05)
         } else {
             rgb(current_theme().chrome()[self.0]).to_hsla()
         };
@@ -106,3 +107,24 @@ pub const RADIUS: f32 = 8.0;
 pub const CONTROL_HEIGHT: f32 = 34.0;
 pub const BODY_SIZE: f32 = 13.0;
 pub const CAPTION_SIZE: f32 = 12.0;
+/// Explicit Latin + CJK fixed-advance cascade for NSH rope editors.
+/// Avoids macOS `.AppleSystemUIFontMonospaced` synthetic CJK-Latin inter-script
+/// spacing so per-grapheme caret X measurement matches CoreText line rendering.
+pub const MONO_FONT: &str = "Menlo, PingFang SC";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mono_font_uses_named_latin_and_cjk_families_without_system_ui_monospace() {
+        let families: Vec<_> = nsh_core::font_families(MONO_FONT).collect();
+        assert_eq!(
+            families,
+            vec![
+                nsh_core::FamilyName::Named("Menlo"),
+                nsh_core::FamilyName::Named("PingFang SC"),
+            ]
+        );
+    }
+}

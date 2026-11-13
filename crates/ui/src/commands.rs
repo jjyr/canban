@@ -1,6 +1,12 @@
-//! One visible command catalog for global bindings, Terminal keys and help.
+//! One visible command catalog for global bindings, Terminal keys and Command Palette (`⌘/`, `/`, `>…`).
+//!
+//! Every user-executable UI operation across global chrome, Activity & Notifications,
+//! Board, Card Workspace, Diff & Review, Terminals, Managed Worktrees, GitHub, and
+//! Settings is registered here and dispatches the same underlying intent as UI controls.
 use crate::presenter::*;
 use nsh_core::{keymap::When, prelude::*};
+use serde_json::json;
+
 #[derive(Clone, Copy)]
 pub struct Command {
     pub id: &'static str,
@@ -10,30 +16,41 @@ pub struct Command {
     pub context: &'static str,
     pub keywords: &'static str,
 }
+
 pub const CREATE_CARD: Command = Command {
     id: "create-card",
     title: "Create Card",
     key: "mod+enter",
     display: "⌘Enter",
     context: "New Card",
-    keywords: "",
+    keywords: "submit",
 };
+
 pub const SEND_COMMENT: Command = Command {
     id: "send-comment",
     title: "Send comment",
     key: "mod+enter",
     display: "⌘Enter",
     context: "Card comment",
-    keywords: "",
+    keywords: "reply",
 };
+
 pub const CATALOG: &[Command] = &[
+    Command {
+        id: "toggle-notifications",
+        title: "Toggle Activity & Notifications",
+        key: "mod+i",
+        display: "⌘I",
+        context: "Global",
+        keywords: "overview alerts unread inbox running status slots",
+    },
     Command {
         id: "new-card",
         title: "New Card",
         key: "mod+n",
         display: "⌘N",
         context: "Global",
-        keywords: "",
+        keywords: "task create",
     },
     Command {
         id: "quick-open",
@@ -45,11 +62,19 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         id: "shortcuts",
-        title: "Show Shortcuts",
+        title: "Commands & Shortcuts",
         key: "mod+/",
         display: "⌘/",
         context: "Global",
         keywords: "commands palette >",
+    },
+    Command {
+        id: "toggle-card-terminal",
+        title: "Toggle Card Live Terminal",
+        key: "mod+j",
+        display: "⌘J",
+        context: "Card",
+        keywords: "split cli side-by-side discuss conversation",
     },
     Command {
         id: "new-terminal",
@@ -57,7 +82,15 @@ pub const CATALOG: &[Command] = &[
         key: "mod+t",
         display: "⌘T",
         context: "Terminals",
-        keywords: "shell",
+        keywords: "shell pty",
+    },
+    Command {
+        id: "new-worktree",
+        title: "New Managed Branch Worktree…",
+        key: "",
+        display: "Terminals",
+        context: "Worktrees",
+        keywords: "git branch checkout worktree spike standalone",
     },
     Command {
         id: "close-terminal",
@@ -65,7 +98,7 @@ pub const CATALOG: &[Command] = &[
         key: "mod+w",
         display: "⌘W",
         context: "Terminals",
-        keywords: "",
+        keywords: "tab",
     },
     Command {
         id: "next-tab",
@@ -99,7 +132,7 @@ pub const CATALOG: &[Command] = &[
         key: "mod+[",
         display: "⌘[",
         context: "Global",
-        keywords: "",
+        keywords: "history",
     },
     Command {
         id: "forward",
@@ -107,7 +140,15 @@ pub const CATALOG: &[Command] = &[
         key: "mod+]",
         display: "⌘]",
         context: "Global",
-        keywords: "",
+        keywords: "history",
+    },
+    Command {
+        id: "mark-all-read",
+        title: "Mark All Updates as Read",
+        key: "",
+        display: "Notifications",
+        context: "Notifications",
+        keywords: "notifications clear unread overview",
     },
     Command {
         id: "go-board",
@@ -116,14 +157,6 @@ pub const CATALOG: &[Command] = &[
         display: "Board",
         context: "Navigation",
         keywords: "kanban cards",
-    },
-    Command {
-        id: "go-overview",
-        title: "Go to Overview",
-        key: "",
-        display: "Overview",
-        context: "Navigation",
-        keywords: "activity",
     },
     Command {
         id: "go-terminals",
@@ -179,7 +212,7 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "Workspace",
         context: "Navigation",
-        keywords: "",
+        keywords: "unsent",
     },
     Command {
         id: "go-archive",
@@ -187,7 +220,7 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "Project",
         context: "Navigation",
-        keywords: "",
+        keywords: "archived closed",
     },
     Command {
         id: "go-settings",
@@ -195,7 +228,151 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "App",
         context: "Navigation",
-        keywords: "preferences config agents identities",
+        keywords: "preferences config identities",
+    },
+    Command {
+        id: "go-machines",
+        title: "Open Execution Machines",
+        key: "",
+        display: "Machines",
+        context: "Navigation",
+        keywords: "remote ssh host core",
+    },
+    Command {
+        id: "go-project-location",
+        title: "Configure Project Work Location",
+        key: "",
+        display: "Project",
+        context: "Navigation",
+        keywords: "directory folder repository path",
+    },
+    Command {
+        id: "go-github-repo",
+        title: "Configure Project GitHub Repository",
+        key: "",
+        display: "GitHub",
+        context: "Navigation",
+        keywords: "sync repo owner",
+    },
+    Command {
+        id: "go-github-account",
+        title: "GitHub Account & Access",
+        key: "",
+        display: "GitHub",
+        context: "Preferences",
+        keywords: "oauth login token",
+    },
+    Command {
+        id: "new-project",
+        title: "Create New Project…",
+        key: "",
+        display: "Workspace",
+        context: "Navigation",
+        keywords: "add repository",
+    },
+    Command {
+        id: "switch-project",
+        title: "Switch Project",
+        key: "",
+        display: "Workspace",
+        context: "Navigation",
+        keywords: "choose project",
+    },
+    Command {
+        id: "popout-card-terminal",
+        title: "Pop Out Card Terminal to Terminals",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "full screen expand pty",
+    },
+    Command {
+        id: "open-card-diff",
+        title: "Open Card Diff & Review",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "compare patch changes",
+    },
+    Command {
+        id: "quick-merge-card",
+        title: "Quick Merge Current Card",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "accept deliver merge branch",
+    },
+    Command {
+        id: "edit-card",
+        title: "Edit Card Description",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "task body title",
+    },
+    Command {
+        id: "card-workspace-details",
+        title: "Toggle Card Workspace Details",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "worktree branch directory",
+    },
+    Command {
+        id: "card-attachments",
+        title: "Toggle Card Attachments",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "files images upload",
+    },
+    Command {
+        id: "send-card-default",
+        title: "Send Card to Default Profile",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "start run dispatch card",
+    },
+    Command {
+        id: "archive-card",
+        title: "Archive or Restore Current Card",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "close reopen lifecycle",
+    },
+    Command {
+        id: "toggle-terminal-sidebar",
+        title: "Toggle Terminal Sidebar",
+        key: "",
+        display: "Terminals",
+        context: "Terminals",
+        keywords: "tree panel hide show",
+    },
+    Command {
+        id: "toggle-inactive-terminals",
+        title: "Show or Hide Closed Terminals",
+        key: "",
+        display: "Terminals",
+        context: "Terminals",
+        keywords: "inactive finished history",
+    },
+    Command {
+        id: "rename-terminal",
+        title: "Rename Current Terminal Tab…",
+        key: "",
+        display: "Terminals",
+        context: "Terminals",
+        keywords: "label title",
+    },
+    Command {
+        id: "interrupt-terminal",
+        title: "Interrupt Active Terminal",
+        key: "",
+        display: "Terminals",
+        context: "Terminals",
+        keywords: "stop sigint ctrl-c",
     },
     Command {
         id: "choose-theme",
@@ -206,17 +383,106 @@ pub const CATALOG: &[Command] = &[
         keywords: "dark light color",
     },
     Command {
-        id: "switch-project",
-        title: "Switch Project",
+        id: "choose-terminal-font",
+        title: "Choose Terminal Font…",
         key: "",
-        display: "Workspace",
-        context: "Navigation",
-        keywords: "choose project",
+        display: "Appearance",
+        context: "Preferences",
+        keywords: "monospace family size",
+    },
+    Command {
+        id: "toggle-awake",
+        title: "Toggle Keep Host Awake",
+        key: "",
+        display: "System",
+        context: "Preferences",
+        keywords: "coffee sleep caffeinate power",
+    },
+    Command {
+        id: "refresh-usage",
+        title: "Refresh Subscription Usage",
+        key: "",
+        display: "System",
+        context: "Preferences",
+        keywords: "quota codex claude limits",
+    },
+    Command {
+        id: "reload-config",
+        title: "Reload Configuration",
+        key: "",
+        display: "System",
+        context: "Preferences",
+        keywords: "profiles json refresh",
+    },
+    Command {
+        id: "check-herdr",
+        title: "Check Herdr Runtime Connection",
+        key: "",
+        display: "System",
+        context: "Preferences",
+        keywords: "daemon pty status",
+    },
+    Command {
+        id: "check-updates",
+        title: "Check for Application Updates",
+        key: "",
+        display: "System",
+        context: "Preferences",
+        keywords: "upgrade version release",
+    },
+    Command {
+        id: "report-issue",
+        title: "Report an Issue…",
+        key: "",
+        display: "Support",
+        context: "Preferences",
+        keywords: "bug feedback diagnostics",
     },
 ];
+
 pub fn execute(ui: Ui, id: &str) {
+    if id == "toggle-notifications" || id == "go-overview" {
+        ui.quick_open.set(false);
+        crate::overview::toggle(ui);
+        return;
+    }
     crate::utilities::close(ui);
     ui.quick_open.set(false);
+
+    if let Some(stage_id) = id.strip_prefix("move-card:") {
+        if let Some(card) = ui.current_card().filter(|c| c.active()) {
+            crate::presenter::move_card(ui, &card.id, stage_id);
+        }
+        return;
+    }
+    if let Some(wt_id) = id.strip_prefix("worktree-shell:") {
+        if let Some(wt) = ui
+            .snapshot
+            .with_untracked(|s| s.worktrees.iter().find(|w| w.id == wt_id).cloned())
+        {
+            crate::terminals::worktrees::open_shell(ui, &wt);
+        }
+        return;
+    }
+    if let Some(wt_id) = id.strip_prefix("worktree-promote:") {
+        if ui
+            .snapshot
+            .with_untracked(|s| s.worktrees.iter().any(|w| w.id == wt_id))
+        {
+            ui.worktree_promote.set(Some(wt_id.to_owned()));
+        }
+        return;
+    }
+    if let Some(wt_id) = id.strip_prefix("worktree-diff:") {
+        if let Some(wt) = ui
+            .snapshot
+            .with_untracked(|s| s.worktrees.iter().find(|w| w.id == wt_id).cloned())
+        {
+            crate::terminals::worktrees::open_diff(ui, &wt);
+        }
+        return;
+    }
+
     match id {
         "back" => crate::navigation::go(ui, false),
         "forward" => crate::navigation::go(ui, true),
@@ -233,8 +499,8 @@ pub fn execute(ui: Ui, id: &str) {
             ui.search_query.set(">".into());
             ui.quick_open.set(true);
         }
+        "mark-all-read" => crate::overview::mark_all_read(ui, None),
         "go-board" => ui.navigate("board"),
-        "go-overview" => ui.navigate("overview"),
         "go-terminals" => ui.navigate("terminals"),
         "go-review" => crate::review::open_compare(ui),
         "go-github" => ui.navigate("github"),
@@ -250,8 +516,113 @@ pub fn execute(ui: Ui, id: &str) {
         "go-drafts" => ui.navigate("drafts"),
         "go-archive" => ui.navigate("archive"),
         "go-settings" => ui.navigate("settings"),
-        "choose-theme" => crate::utilities::open(ui, "theme"),
+        "go-machines" => ui.navigate("machines"),
+        "go-project-location" => {
+            if ui.current_project().is_some() {
+                ui.navigate("project-location");
+            } else {
+                ui.navigate("new-project");
+            }
+        }
+        "go-github-repo" => {
+            if ui.current_project().is_some() {
+                ui.navigate("github-repository");
+            } else {
+                ui.navigate("github");
+            }
+        }
+        "go-github-account" => ui.navigate("github-account"),
+        "new-project" => ui.navigate("new-project"),
         "switch-project" => ui.show_search(true),
+        "toggle-card-terminal" => {
+            if ui.page.get_untracked() == "card" && !ui.card.get_untracked().is_empty() {
+                crate::card::terminal::toggle(ui);
+            } else if let Some(c) = ui.current_card() {
+                ui.open_card_with_terminal(c.id, None);
+            } else {
+                ui.notify("Open a Card first to toggle its Live Terminal");
+            }
+        }
+        "popout-card-terminal" => {
+            if !ui.card_id().is_empty() {
+                crate::card::terminal::pop_out(ui);
+            } else {
+                ui.navigate("terminals");
+            }
+        }
+        "open-card-diff" => {
+            if let Some(c) = ui.current_card() {
+                crate::review::open_card(ui, &c.id);
+            } else {
+                crate::review::open_compare(ui);
+            }
+        }
+        "quick-merge-card" => {
+            if let Some(c) = ui.current_card() {
+                let project = ui.current_project();
+                if crate::card::quick_merge_eligible(&c, project.as_ref()) {
+                    crate::card::quick_merge_start(ui, c);
+                } else {
+                    ui.notify("Current Card is not eligible for local quick merge");
+                }
+            } else {
+                ui.notify("Select a Card first");
+            }
+        }
+        "edit-card" => {
+            if let Some(c) = ui.current_card() {
+                let key = format!("card:{}", c.id);
+                let mut d = ui
+                    .drafts
+                    .with(|m| m.get(&key).cloned())
+                    .unwrap_or_else(|| crate::drafts::Draft::card(&c));
+                d.editing = !d.editing;
+                crate::drafts::put(ui, key, d);
+            }
+        }
+        "card-workspace-details" => {
+            if let Some(c) = ui.current_card() {
+                let key = format!("card:{}", c.id);
+                let mut d = ui
+                    .drafts
+                    .with(|m| m.get(&key).cloned())
+                    .unwrap_or_else(|| crate::drafts::Draft::card(&c));
+                d.workspace_details = !d.workspace_details;
+                crate::drafts::put(ui, key, d);
+            }
+        }
+        "card-attachments" => {
+            if let Some(c) = ui.current_card() {
+                let key = format!("card:{}", c.id);
+                let mut d = ui
+                    .drafts
+                    .with(|m| m.get(&key).cloned())
+                    .unwrap_or_else(|| crate::drafts::Draft::card(&c));
+                d.details = !d.details;
+                crate::drafts::put(ui, key, d);
+            }
+        }
+        "send-card-default" => {
+            if let Some(c) = ui.current_card().filter(|c| c.active()) {
+                crate::sessions::send_card(ui, &c.id);
+            } else {
+                ui.notify("Select an active Card first");
+            }
+        }
+        "archive-card" => {
+            if let Some(c) = ui.current_card() {
+                let inactive = c.archived_at.is_some() || c.removed_at.is_some();
+                crate::card_actions::apply(
+                    ui,
+                    c,
+                    if inactive {
+                        crate::card_actions::Action::Restore
+                    } else {
+                        crate::card_actions::Action::Archive
+                    },
+                );
+            }
+        }
         "new-terminal" => {
             if ui.page.get_untracked() == "card"
                 && !ui.card_tab.get_untracked().is_empty()
@@ -263,20 +634,106 @@ pub fn execute(ui: Ui, id: &str) {
                 crate::terminals::new_tab(ui);
             }
         }
+        "new-worktree" => {
+            let pid = ui.project.get_untracked();
+            let target = if pid.is_empty() {
+                ui.snapshot
+                    .with_untracked(|s| s.projects.first().map(|p| p.id.clone()))
+                    .unwrap_or_default()
+            } else {
+                pid
+            };
+            if target.is_empty() {
+                ui.navigate("new-project");
+            } else {
+                ui.navigate("terminals");
+                ui.worktree_modal.set(Some(target));
+            }
+        }
         "close-terminal" if ui.page.get_untracked() == "terminals" => {
             crate::terminals::close_tab(ui, &ui.terminal_selection.get_untracked())
         }
         "close-terminal"
-            if ui.page.get_untracked() == "card"
-                && !ui.card_tab.get_untracked().is_empty() =>
+            if ui.page.get_untracked() == "card" && !ui.card_tab.get_untracked().is_empty() =>
         {
             crate::terminals::close_entry(ui, &ui.card_tab.get_untracked())
         }
-        "next-tab" => crate::terminals::cycle(ui, true),
-        "previous-tab" => crate::terminals::cycle(ui, false),
+        "next-tab" => {
+            if ui.page.get_untracked() == "card" && !ui.card_tab.get_untracked().is_empty() {
+                crate::terminals::cycle(ui, true);
+            } else {
+                ui.navigate("terminals");
+                crate::terminals::cycle(ui, true);
+            }
+        }
+        "previous-tab" => {
+            if ui.page.get_untracked() == "card" && !ui.card_tab.get_untracked().is_empty() {
+                crate::terminals::cycle(ui, false);
+            } else {
+                ui.navigate("terminals");
+                crate::terminals::cycle(ui, false);
+            }
+        }
+        "toggle-terminal-sidebar" => {
+            ui.navigate("terminals");
+            ui.terminal_sidebar.update(|v| *v = !*v);
+        }
+        "toggle-inactive-terminals" => {
+            ui.navigate("terminals");
+            ui.terminal_inactive.update(|v| *v = !*v);
+        }
+        "rename-terminal" => {
+            if ui.page.get_untracked() == "card" && !ui.card_tab.get_untracked().is_empty() {
+                ui.terminal_rename.set(Some(ui.card_tab.get_untracked()));
+            } else {
+                let sel = ui.terminal_selection.get_untracked();
+                if !sel.is_empty() {
+                    ui.navigate("terminals");
+                    ui.terminal_rename.set(Some(sel));
+                }
+            }
+        }
+        "interrupt-terminal" => {
+            let entry = if ui.page.get_untracked() == "card" {
+                if ui.card_terminal_open.get_untracked() {
+                    let cid = ui.card_id();
+                    crate::card::terminal::select_entry_for_card(ui, &cid)
+                } else if !ui.card_tab.get_untracked().is_empty() {
+                    let sel = ui.card_tab.get_untracked();
+                    crate::terminals::entries(&ui.snapshot.get_untracked())
+                        .into_iter()
+                        .find(|e| e.saved.id == sel)
+                } else {
+                    None
+                }
+            } else {
+                crate::terminals::current(ui)
+            };
+            if let Some(e) = entry {
+                if let Some(attempt) = e
+                    .agent
+                    .as_ref()
+                    .and_then(|a| a.attempt.as_ref())
+                    .filter(|a| !a.finished() && a.terminal.is_some())
+                {
+                    dispatch(ui, "agent.interrupt", json!({"attempt_id": attempt.id}));
+                } else if !e.ended() && e.binding().is_some() {
+                    dispatch(ui, "terminal.interrupt", json!({"terminal_id": e.saved.id}));
+                }
+            }
+        }
+        "choose-theme" => crate::utilities::open(ui, "theme"),
+        "choose-terminal-font" => crate::utilities::open(ui, "terminal-font"),
+        "toggle-awake" => crate::utilities::toggle_awake(ui),
+        "refresh-usage" => crate::utilities::usage(ui, crate::utilities::machine(ui), true),
+        "reload-config" => dispatch(ui, "config.reload", json!({})),
+        "check-herdr" => dispatch(ui, "herdr.status", json!({})),
+        "check-updates" => crate::updates::check(ui),
+        "report-issue" => crate::utilities::report::open(ui),
         _ => {}
     }
 }
+
 pub fn bindings(ui: Ui) {
     crate::navigation::watch(ui);
     crate::terminals::watch(ui);
@@ -292,6 +749,23 @@ pub fn bindings(ui: Ui) {
                 move |_| {
                     ui.card_submit.update(|n| *n += 1);
                 },
+            );
+        }
+    });
+    effect(move || {
+        if ui.page.get() == "card"
+            && !ui.card.get().is_empty()
+            && !ui.quick_open.get()
+            && ui.utility_popup.get().is_empty()
+            && !ui.native_modal.get()
+        {
+            on_key_with(
+                "mod+j",
+                KeyOptions {
+                    when: When::Always,
+                    ..Default::default()
+                },
+                move |_| crate::card::terminal::toggle(ui),
             );
         }
     });
@@ -319,6 +793,9 @@ pub fn bindings(ui: Ui) {
             if !ui.quick_open.get_untracked()
                 && ui.utility_popup.get_untracked().is_empty()
                 && !ui.native_modal.get_untracked()
+                && ui.worktree_modal.get_untracked().is_none()
+                && ui.worktree_promote.get_untracked().is_none()
+                && ui.worktree_remove_confirm.get_untracked().is_none()
             {
                 ui.project_picker.set(false);
                 ui.search_query.set(">".into());

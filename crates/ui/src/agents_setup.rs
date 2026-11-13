@@ -536,7 +536,7 @@ fn agent_tile(
     on_toggle: impl Fn() + 'static,
 ) -> AnyElement {
     let mark = engine_icon(&id);
-    nsh_base::button()
+    canban_ui_kit::press_target()
         .w(px(192.))
         .min_h(px(44.))
         .px_3()
@@ -1979,18 +1979,6 @@ pub fn project_agents_screen(ui: Ui) -> impl IntoElement {
         .min_h(px(0.))
         .p_5()
         .gap_4()
-        .child(subpage_header(
-            "Back to Board",
-            move || {
-                format!(
-                    "{} / Project Agents",
-                    ui.current_project()
-                        .map(|p| p.name)
-                        .unwrap_or_else(|| "Project".into())
-                )
-            },
-            move |_| ui.navigate("board"),
-        ))
         .child(
             scroll().flex_1().min_h(px(0.)).child(
                 view()

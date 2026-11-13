@@ -1,5 +1,5 @@
 # Planning stays in Backlog; approval is an explicit human decision.
-schema: 1
+schema: 2
 id: plan-and-develop
 name: Plan and develop
 on:

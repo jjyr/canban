@@ -255,8 +255,20 @@ pub fn workspace() -> canban_types::Snapshot {
             Some("Which environment should the Agent use?"),
         ),
         (3, "Explore a smaller navigation layout", "backlog", None),
+        (
+            4,
+            "Auto-merged today · dashed border + quick Archive",
+            "review",
+            None,
+        ),
     ] {
-        s.cards.push(Card{source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:"## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.".into(),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery:None,created_at:now()});
+        let delivery = (i == 4).then(|| Delivery {
+            target_branch: "main".into(),
+            commit: "fcf9d2d".into(),
+            request_key: "gallery-merged-today".into(),
+            merged_at: now(),
+        });
+        s.cards.push(Card{source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:"## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.".into(),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery,created_at:now()});
     }
     s.notes.push(Note{id:"note-1".into(),project_id:"gallery-project".into(),title:"Search ideas.md".into(),body:"# Search experience\n\nFind a Card without remembering its number.\n\nSee [Architecture](note:note-2).".into(),revision:1,created_at:now(),updated_at:now(),links:vec!["note-2".into()],card_ids:vec!["card-1".into()]});
     s.notes.push(Note {
@@ -779,6 +791,62 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
             "canban/very-long-worktree-and-branch-name/context-navigation-acceptance-42".into(),
         ),
     });
+    let proj_id = s.projects[0].id.clone();
+    s.worktrees.push(canban_types::ManagedWorktree {
+        id: "gallery-wt-spike".into(),
+        project_id: proj_id.clone(),
+        branch: "feat/standalone-spike".into(),
+        base_branch: "main".into(),
+        base_commit: None,
+        path: "/tmp/gallery/worktrees/standalone-spike".into(),
+        location: canban_types::WorkLocation {
+            machine: "local".into(),
+            directory: "/tmp/gallery/worktrees/standalone-spike".into(),
+        },
+        created_at: canban_types::now(),
+    });
+    s.worktrees.push(canban_types::ManagedWorktree {
+        id: "gallery-wt-retained".into(),
+        project_id: proj_id.clone(),
+        branch: "chore/retained-experiment".into(),
+        base_branch: "main".into(),
+        base_commit: None,
+        path: "/tmp/gallery/worktrees/retained-experiment".into(),
+        location: canban_types::WorkLocation {
+            machine: "local".into(),
+            directory: "/tmp/gallery/worktrees/retained-experiment".into(),
+        },
+        created_at: canban_types::now(),
+    });
+    s.terminals.push(canban_types::TerminalEntry {
+        id: "gallery-wt-shell".into(),
+        conversation_id: None,
+        number: number + 4,
+        name: Some("feat/standalone-spike".into()),
+        manual_number: Some(4),
+        origin_card_id: None,
+        agent_engine: None,
+        runtime: Some(canban_types::TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("gallery".into()),
+            terminal: Some("wt-shell".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+        }),
+        created_at: 0,
+    });
+    s.terminal_contexts.push(canban_types::TerminalContext {
+        machine: "local".into(),
+        terminal_id: "gallery-wt-shell".into(),
+        core_id: "gallery".into(),
+        terminal: "wt-shell".into(),
+        cwd: Some("/tmp/gallery/worktrees/standalone-spike".into()),
+        project_id: Some(proj_id),
+        card_id: None,
+        branch: Some("feat/standalone-spike".into()),
+    });
     s
 }
 
@@ -796,6 +864,8 @@ pub fn board_cards() -> canban_types::Snapshot {
         next_stage: None,
     });
     s.cards[1].attention = None;
+    // Running Card: status chips, branch and the pulsing Agent share one footer.
+    s.cards[1].branch = Some("canban/gallery/2".into());
     let profile = Config::default()
         .profiles
         .into_iter()
@@ -814,7 +884,7 @@ pub fn board_cards() -> canban_types::Snapshot {
     s.requests.push(running);
     let mut queued = s.cards[2].clone();
     queued.id = "queued-card".into();
-    queued.number = 4;
+    queued.number = 5;
     queued.title = "Waiting for a free execution slot".into();
     queued.stage = "develop".into();
     let request = canban_scheduler::request(
@@ -828,9 +898,52 @@ pub fn board_cards() -> canban_types::Snapshot {
     );
     s.requests.push(request);
     s.cards.push(queued);
+    let mut merging = s.cards[2].clone();
+    merging.id = "merging-card".into();
+    merging.number = 6;
+    merging.title = "Queue merge into main · syncing upstream".into();
+    merging.stage = "review".into();
+    merging.branch = Some("canban/gallery/6".into());
+    s.workflow_runs.push(
+        serde_json::from_value(json!({
+            "id": "gallery-merging-run",
+            "project_id": "gallery-project",
+            "card_id": "merging-card",
+            "workflow_id": "delivery",
+            "definition_revision": 1,
+            "definition": {
+                "id": "delivery",
+                "name": "Development",
+                "entries": {"review": "deliver:review"},
+                "steps": {
+                    "deliver:review": {
+                        "type": "deliver",
+                        "sync_upstream": true,
+                        "max_conflict_attempts": 3,
+                        "next": "__end"
+                    },
+                    "__end": {"type": "complete"}
+                }
+            },
+            "state": "waiting_delivery",
+            "step": "deliver:review",
+            "visit": 1,
+            "request_id": null,
+            "trigger_event_id": null,
+            "input_digest": "gallery",
+            "inputs": {"sync_upstream": true},
+            "outputs": {},
+            "history": [],
+            "error": null,
+            "created_at": 0,
+            "updated_at": 0
+        }))
+        .unwrap(),
+    );
+    s.cards.push(merging);
     let mut long = s.cards[2].clone();
     long.id = "long-card".into();
-    long.number = 5;
+    long.number = 7;
     long.title="Keep a long Card title readable without repeating the stage, routing configuration or empty execution state".into();
     long.body = String::new();
     s.cards.push(long);

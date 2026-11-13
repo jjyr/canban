@@ -67,6 +67,7 @@ record!(WorkflowRun, "workflow_runs", card);
 record!(EventSubscription, "event_subscriptions");
 record!(EventDelivery, "event_deliveries");
 record!(GitHubIssueSnapshot, "github_issues", project);
+record!(ManagedWorktree, "managed_worktrees", project);
 record!(Note, "notes", project);
 record!(NoteRevision, "note_revisions", project);
 record!(NoteEvent, "note_events", project);
@@ -458,8 +459,10 @@ impl Db<'_> {
             card_reads: self.list()?,
             github: Default::default(),
             github_issues: self.list()?,
+            worktrees: self.list()?,
             terminals: self.list()?,
             terminal_contexts: Vec::new(),
+            merging_cards: Vec::new(),
             projects: self.list()?,
             cards: self
                 .list::<Card>()?

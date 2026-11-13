@@ -88,6 +88,11 @@ pub fn run_view(run: WorkflowRun) -> impl IntoElement {
                 then, otherwise, ..
             } => format!("Condition → {then} / {otherwise}"),
             WorkflowStep::Notify { message, .. } => format!("Notify · {message}"),
+            WorkflowStep::Admit {
+                agent_slot,
+                max_ready,
+                ..
+            } => admit_label(*agent_slot, *max_ready),
             WorkflowStep::Complete => "Complete".into(),
         };
         let marker = if current {
@@ -124,4 +129,13 @@ pub fn run_view(run: WorkflowRun) -> impl IntoElement {
         content = content.child(label(error).text_color(DANGER));
     }
     content
+}
+
+fn admit_label(agent_slot: bool, max_ready: Option<u32>) -> String {
+    match (agent_slot, max_ready) {
+        (true, Some(k)) => format!("Wait for a free Agent (keep ≤{k} ready)"),
+        (true, None) => "Wait for a free Agent".into(),
+        (false, Some(k)) => format!("Plan ahead · keep ≤{k} ready"),
+        (false, None) => "Admit".into(),
+    }
 }

@@ -117,7 +117,17 @@ impl AppServer {
             );
         }
         let default_machine = self.config().default_machine;
-        let want_agent = p["agent"] == true;
+        let explicit_profile = p["profile_id"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
+        let want_agent = p["agent"] == true || explicit_profile.is_some();
+        if want_agent {
+            ensure!(
+                p["execution"].is_null(),
+                "Standalone Agent CLI launch requires a user action"
+            );
+        }
         let mut launch = None;
         let saved = self.mutate("terminal.create", &p, |db| {
             let mut project = p["project_id"]
@@ -200,13 +210,23 @@ impl AppServer {
                 Path::new(&cwd).is_absolute() && host.is_dir(Path::new(&cwd)),
                 "Terminal directory no longer exists on the selected machine"
             );
+            let custom_name = p["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned);
+            if let Some(n) = &custom_name {
+                ensure!(
+                    n.chars().count() <= 80 && !n.chars().any(char::is_control),
+                    "Use at most 80 printable characters"
+                );
+            }
             let agent_profile = if want_agent {
                 let cfg = self.config();
-                let explicit_profile = p["profile_id"].as_str().filter(|s| !s.is_empty());
                 Some(canban_scheduler::select_in_project(
                     &cfg,
                     project.as_ref(),
-                    explicit_profile,
+                    explicit_profile.as_deref(),
                 )?)
             } else {
                 None
@@ -228,7 +248,7 @@ impl AppServer {
                 id: format!("{prefix}-{}", id()),
                 conversation_id: None,
                 number: db.counter("terminal-number")?,
-                name: None,
+                name: custom_name,
                 manual_number: Some(db.counter("terminal-manual-number")?),
                 origin_card_id,
                 agent_engine,
@@ -266,29 +286,52 @@ impl AppServer {
                     .context("Core has no identity")?
                     .into(),
             );
+            let host = canban_herdr::host::Host::new(self.config(), &runtime.machine);
             let mut env = std::collections::BTreeMap::new();
             let argv = if let Some(profile) = &agent_profile {
+                let exec_home = self.execution_home(&runtime.machine)?;
                 let session_id = profile
                     .command()
                     .iter()
                     .any(|s| s.contains("{session_id}"))
                     .then(super::runtime::uuid_session_id);
-                let mut argv = canban_profiles::interactive_command(
-                    profile,
-                    session_id.as_deref(),
-                    &[
-                        ("home", &self.home.to_string_lossy()),
-                        ("cwd", &cwd),
-                        ("project_dir", &project_dir),
-                        ("cli", &self.cli.to_string_lossy()),
-                    ],
-                )?;
+                let mut argv = if let Some(prompt) = p["prompt"].as_str().filter(|s| !s.is_empty())
+                {
+                    canban_profiles::command(
+                        profile,
+                        session_id.as_deref(),
+                        true,
+                        &[
+                            ("home", &exec_home.to_string_lossy()),
+                            ("cwd", &cwd),
+                            ("project_dir", &project_dir),
+                            ("prompt", prompt),
+                            ("cli", &self.cli.to_string_lossy()),
+                        ],
+                    )?
+                } else {
+                    canban_profiles::interactive_command(
+                        profile,
+                        session_id.as_deref(),
+                        &[
+                            ("home", &exec_home.to_string_lossy()),
+                            ("cwd", &cwd),
+                            ("project_dir", &project_dir),
+                            ("cli", &self.cli.to_string_lossy()),
+                        ],
+                    )?
+                };
                 let is_herdr_template = profile
                     .preset
                     .as_deref()
                     .is_some_and(|s| s.starts_with("herdr:"));
-                if runtime.machine == "local" && !argv.is_empty() && !is_herdr_template {
-                    argv[0] = canban_profiles::executable(&argv[0]);
+                if !argv.is_empty() && !is_herdr_template {
+                    if runtime.machine == "local" {
+                        argv[0] = canban_profiles::executable(&argv[0]);
+                    } else if Path::new(&argv[0]).components().count() == 1 {
+                        let program = host.python("import os,shutil,json,sys;h=os.path.expanduser('~');p=os.environ.get('PATH','')+os.pathsep+os.path.join(h,'.local/bin')+os.pathsep+os.path.join(h,'.cargo/bin');print(json.dumps(shutil.which(sys.argv[1],path=p) or sys.argv[1]))", &[&argv[0]])?;
+                        argv[0] = program.as_str().context("No remote executable")?.into();
+                    }
                 }
                 if runtime.machine == "local" {
                     env.insert(
@@ -303,7 +346,6 @@ impl AppServer {
                 }
                 argv
             } else {
-                let host = canban_herdr::host::Host::new(self.config(), &runtime.machine);
                 let shell = if runtime.machine == "local" {
                     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
                 } else {

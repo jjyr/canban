@@ -38,6 +38,7 @@ pub struct AppServer {
     listeners: Mutex<Vec<mpsc::Sender<AppEvent>>>,
     stop: AtomicBool,
     review_gate: Mutex<()>,
+    merging_cards: Mutex<std::collections::BTreeSet<String>>,
     terminal_gate: Mutex<()>,
     terminal_contexts: Mutex<Vec<TerminalContext>>,
     inventory: Mutex<observation::Inventory>,
@@ -66,6 +67,19 @@ impl Drop for Running {
         self.server.stop.store(true, Ordering::SeqCst);
         self.server.wake_runtime();
         self.server.context_signal.notify_all();
+    }
+}
+pub(crate) struct MergingCard<'a> {
+    server: &'a AppServer,
+    card_id: String,
+}
+impl Drop for MergingCard<'_> {
+    fn drop(&mut self) {
+        self.server
+            .merging_cards
+            .lock()
+            .unwrap()
+            .remove(&self.card_id);
     }
 }
 fn strp<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
@@ -372,6 +386,7 @@ impl AppServer {
             listeners: Mutex::new(Vec::new()),
             stop: AtomicBool::new(false),
             review_gate: Mutex::new(()),
+            merging_cards: Mutex::new(Default::default()),
             terminal_gate: Mutex::new(()),
             terminal_contexts: Mutex::new(Vec::new()),
             inventory: Mutex::new(Default::default()),
@@ -496,10 +511,33 @@ impl AppServer {
             .unwrap()
             .retain(|tx| tx.send(event.clone()).is_ok());
     }
+    pub(crate) fn track_merging<'a>(&'a self, card_id: &str) -> MergingCard<'a> {
+        let id = card_id.to_owned();
+        if self.merging_cards.lock().unwrap().insert(id.clone()) {
+            self.emit("review", Some(id.clone()));
+        }
+        MergingCard {
+            server: self,
+            card_id: id,
+        }
+    }
     pub fn snapshot(&self) -> Result<Snapshot> {
         let mut snapshot = self.store.lock().unwrap().snapshot()?;
         snapshot.github = serde_json::from_value(serde_json::to_value(self.github.status())?)?;
         self.project_github(&mut snapshot);
+        snapshot.merging_cards = self
+            .merging_cards
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|id| {
+                snapshot
+                    .cards
+                    .iter()
+                    .any(|c| &c.id == *id && c.active() && !c.merged())
+            })
+            .cloned()
+            .collect();
         snapshot.terminal_contexts = self
             .terminal_contexts
             .lock()
@@ -565,6 +603,7 @@ impl AppServer {
             Ok(result)
         })?;
         let _ = self.pump_deliveries();
+        let _ = self.pump_admissions();
         self.emit("application", p["card_id"].as_str().map(str::to_owned));
         Ok(result)
     }
@@ -594,6 +633,7 @@ mod resources;
 mod runtime;
 mod sessions;
 mod terminals;
+mod worktrees;
 
 pub fn default_home() -> Result<PathBuf> {
     if let Some(v) = std::env::var_os("CANBAN_HOME") {

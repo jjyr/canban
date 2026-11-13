@@ -1,7 +1,7 @@
 //! Semantic status; consumers map product state to a generic visual tone.
 use super::tokens::*;
 use nsh_core::prelude::*;
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
     Neutral,
     Info,
@@ -57,6 +57,12 @@ pub fn reminder_count(
     )
 }
 pub fn status(value: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoElement {
+    status_chip(value, tone, false)
+}
+pub fn live_status(value: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoElement {
+    status_chip(value, tone, true)
+}
+fn status_chip(value: impl IntoReactive<SharedString>, tone: Tone, live: bool) -> impl IntoElement {
     let (bg, fg) = match tone {
         Tone::Neutral => (INSET, MUTED),
         Tone::Info => (SELECTED, ACCENT),
@@ -64,20 +70,24 @@ pub fn status(value: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoEl
         Tone::Attention => (ATTENTION_SURFACE, ATTENTION),
         Tone::Danger => (DANGER_SURFACE, DANGER),
     };
-    view()
+    let mut chip = view()
         .self_start()
         .flex_row()
         .items_center()
+        .gap_1p5()
         .px_2()
         .py_1()
         .rounded(px(5.0))
-        .bg(bg)
-        .child(
-            text(value)
-                .text_size(px(CAPTION_SIZE))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(fg),
-        )
+        .bg(bg);
+    if live {
+        chip = chip.child(live_dot(fg));
+    }
+    chip.child(
+        text(value)
+            .text_size(px(CAPTION_SIZE))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(fg),
+    )
 }
 pub fn notice(message: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoElement {
     let (bg, border, color) = match tone {
@@ -95,4 +105,30 @@ pub fn notice(message: impl IntoReactive<SharedString>, tone: Tone) -> impl Into
         .border_color(border)
         .rounded(px(RADIUS))
         .child(text(message).text_size(px(BODY_SIZE)).text_color(color))
+}
+/// Looping "work in progress" mark: a steady dot with a ping halo. Reduced
+/// motion keeps the steady dot so the state stays visible without movement.
+pub fn live_dot(color: ThemeColor) -> View {
+    const SIZE: f32 = 8.0;
+    let dot = || {
+        view()
+            .absolute()
+            .top(px(0.))
+            .left(px(0.))
+            .w(px(SIZE))
+            .h(px(SIZE))
+            .rounded(px(SIZE / 2.))
+            .bg(color)
+    };
+    let mark = view()
+        .relative()
+        .flex_shrink_0()
+        .w(px(SIZE))
+        .h(px(SIZE))
+        .pointer_events(PointerEvents::None);
+    if crate::motion::reduced() {
+        mark.child(dot())
+    } else {
+        mark.child(dot().opacity(0.6).animate_ping()).child(dot())
+    }
 }

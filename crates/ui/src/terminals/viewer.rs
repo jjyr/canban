@@ -124,13 +124,10 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                         })
                     }))
                 } else {
-                    view()
-                        .items_start()
-                        .gap_3()
-                        .child(
-                            action("New terminal", Variant::Secondary, move |_| new_tab(ui))
-                                .disabled(move || ui.pending.get()),
-                        )
+                    view().items_start().gap_3().child(
+                        action("New terminal", Variant::Secondary, move |_| new_tab(ui))
+                            .disabled(move || ui.pending.get()),
+                    )
                 })
                 .into_element();
         };
@@ -138,13 +135,16 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
             return native("canban/terminal")
                 .prop("theme", crate::utilities::terminal_theme)
                 .prop("font", move || crate::utilities::terminal_font(ui))
-                .prop("ui_command_keys", json!(["o","n","/","t","w","[","]","{","}"]))
+                .prop("ui_command_keys", json!(["o","n","/","i","j","t","w","[","]","{","}"]))
                 .prop("focus", move || {
                     json!({
                         "ticket": ui.terminal_focus.get(),
                         "enabled": !ui.quick_open.get()
                             && ui.utility_popup.get().is_empty()
                             && ui.terminal_rename.get().is_none()
+                            && ui.worktree_modal.get().is_none()
+                            && ui.worktree_promote.get().is_none()
+                            && ui.worktree_remove_confirm.get().is_none()
                     })
                 })
                 .key(id)
@@ -161,17 +161,26 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
         native("canban/terminal")
             .prop("theme", crate::utilities::terminal_theme)
             .prop("font", move || crate::utilities::terminal_font(ui))
-            .prop("ui_command_keys", json!(["o","n","/","t","w","[","]","{","}"]))
+            .prop(
+                "ui_command_keys",
+                json!(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"]),
+            )
             .prop("focus", move || {
                 json!({
                     "ticket": ui.terminal_focus.get(),
                     "enabled": !ui.quick_open.get()
                         && ui.utility_popup.get().is_empty()
                         && ui.terminal_rename.get().is_none()
+                        && ui.worktree_modal.get().is_none()
+                        && ui.worktree_promote.get().is_none()
+                        && ui.worktree_remove_confirm.get().is_none()
                 })
             })
             .key(id)
-            .prop("binding", json!({"config":app.config(),"terminal":terminal,"core_id":core_id}))
+            .prop(
+                "binding",
+                json!({"config":app.config(),"terminal":terminal,"core_id":core_id}),
+            )
             .prop("read_only", move || json!(read_only.get()))
             .prop("input_status", move || json!(input_status.get()))
             .flex_1()

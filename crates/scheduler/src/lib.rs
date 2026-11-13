@@ -133,10 +133,9 @@ pub fn retained<'a>(
             && matches!(a.runtime_status(), "idle" | "done")
             && snapshot.requests.iter().any(|r| {
                 r.id == a.request_id
-                    && r.state == "completed"
+                    && matches!(r.state.as_str(), "completed" | "backlog")
                     && r.profile.id == request.profile.id
-                    && r.profile.command() == request.profile.command()
-                    && r.profile.resume_command() == request.profile.resume_command()
+                    && r.profile.command_name() == request.profile.command_name()
             })
             && !snapshot
                 .questions
@@ -154,7 +153,8 @@ pub fn eligible(snapshot: &canban_types::Snapshot, request: &Request) -> bool {
     if card.removed_at.is_some()
         || card.archived_at.is_some()
         || (automatic(request)
-            && (card.human_gate.is_some()
+            && (card.merged()
+                || card.human_gate.is_some()
                 || card.attention.is_some()
                 || card.stage != request.stage))
     {
@@ -200,6 +200,98 @@ pub fn next(snapshot: &canban_types::Snapshot, max_agents: usize) -> Option<Requ
             (std::cmp::Reverse(depth), r.created_at)
         })
         .cloned()
+}
+
+/// Workflow runs to release from `admit` gates, in admission order.
+///
+/// Waiting Cards are ordered by their Board position within their column (ties by
+/// age), so the top of Backlog starts first. `agent_slot` gates consume the free
+/// automatic budget: `max_agents` minus active Agents minus queued eligible work
+/// (already admitted Cards whose Agent has not launched yet). `max_ready` gates keep
+/// at most K admitted Cards in the gate's column.
+pub fn admissions(snapshot: &canban_types::Snapshot, max_agents: usize) -> Vec<String> {
+    use canban_types::WorkflowStep;
+    let card = |id: &str| snapshot.cards.iter().find(|c| c.id == id);
+    let queued = snapshot
+        .requests
+        .iter()
+        .filter(|r| eligible(snapshot, r))
+        .count();
+    let mut free = max_agents.saturating_sub(active_count(snapshot) + queued);
+    // (project, workflow, gate step, column) -> admitted Cards still in that column.
+    let mut ready = std::collections::BTreeMap::<(String, String, String, String), u32>::new();
+    for run in snapshot.workflow_runs.iter().filter(|r| r.active()) {
+        let gate = &run.inputs["ready_gate"];
+        let (Some(step), Some(column)) = (gate["step"].as_str(), gate["column"].as_str()) else {
+            continue;
+        };
+        if card(&run.card_id).is_some_and(|c| c.active() && c.stage == column) {
+            *ready
+                .entry((
+                    run.project_id.clone(),
+                    run.workflow_id.clone(),
+                    step.into(),
+                    column.into(),
+                ))
+                .or_default() += 1;
+        }
+    }
+    let mut waiting: Vec<_> = snapshot
+        .workflow_runs
+        .iter()
+        .filter(|r| r.active() && r.state == "waiting_capacity")
+        .filter_map(|run| {
+            let c = card(&run.card_id)?;
+            if !c.active() || c.merged() || c.human_gate.is_some() || c.attention.is_some() {
+                return None;
+            }
+            let Some(WorkflowStep::Admit {
+                agent_slot,
+                max_ready,
+                ..
+            }) = run.step.as_ref().and_then(|k| run.definition.steps.get(k))
+            else {
+                return None;
+            };
+            let mut peers: Vec<_> = snapshot
+                .cards
+                .iter()
+                .filter(|p| p.active() && p.project_id == c.project_id && p.stage == c.stage)
+                .collect();
+            peers.sort_by(|a, b| a.board_cmp(b));
+            let position = peers
+                .iter()
+                .position(|p| p.id == c.id)
+                .unwrap_or(usize::MAX);
+            Some((position, run.created_at, run, c, *agent_slot, *max_ready))
+        })
+        .collect();
+    waiting.sort_by(|a, b| (a.0, a.1, &a.2.id).cmp(&(b.0, b.1, &b.2.id)));
+    let mut admitted = Vec::new();
+    for (_, _, run, c, agent_slot, max_ready) in waiting {
+        if agent_slot && free == 0 {
+            continue;
+        }
+        let key = (
+            run.project_id.clone(),
+            run.workflow_id.clone(),
+            run.step.clone().unwrap_or_default(),
+            c.stage.clone(),
+        );
+        if let Some(limit) = max_ready
+            && ready.get(&key).copied().unwrap_or(0) >= limit
+        {
+            continue;
+        }
+        if agent_slot {
+            free -= 1;
+        }
+        if max_ready.is_some() {
+            *ready.entry(key).or_default() += 1;
+        }
+        admitted.push(run.id.clone());
+    }
+    admitted
 }
 
 #[cfg(test)]

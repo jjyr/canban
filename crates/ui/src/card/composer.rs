@@ -9,9 +9,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
     editor.restore_after(
         computed(move || ui.quick_open.get() || !ui.utility_popup.get().is_empty()),
         computed(move || {
-            (ui.page.get() == "review"
-                || ui.page.get() == "card" && ui.card_tab.get().is_empty())
+            (ui.page.get() == "review" || ui.page.get() == "card" && ui.card_tab.get().is_empty())
                 && ui.card_id() == ui.card.get()
+                && !ui.card_terminal_focused.get()
         }),
     );
     reading.editor.replace(Some(editor));
@@ -19,9 +19,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
     let key = format!("card:{card}");
     editor.on_submit(
         move || {
-            (ui.page.get() == "review"
-                || ui.page.get() == "card" && ui.card_tab.get().is_empty())
+            (ui.page.get() == "review" || ui.page.get() == "card" && ui.card_tab.get().is_empty())
                 && ui.card_id() == ui.card.get()
+                && !ui.card_terminal_focused.get()
                 && !ui.quick_open.get()
                 && ui.utility_popup.get().is_empty()
         },
@@ -126,7 +126,11 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
     });
     view()
         .element_ref(&reading.composer)
-        .on_touch(|_: &TouchEvent| {})
+        .on_touch(move |e: &TouchEvent| {
+            if e.phase == TouchPhase::Start && ui.card_terminal_focused.get_untracked() {
+                ui.card_terminal_focused.set(false);
+            }
+        })
         .on_file_drop({
             let card = untracked(|| ui.card_id());
             move |e: &nsh_core::element::FileDropEvent| {

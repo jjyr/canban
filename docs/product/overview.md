@@ -1,27 +1,52 @@
-# Global Overview
+# Global Activity & Notifications (superseding standalone Overview)
 
-Current implementation: 2026-11-11 refinement. Overview is the global handling and execution view across Projects. Board remains the management workspace; Terminals owns direct PTY interaction. The [refinement design](../overview-and-terminal-navigation-proposal.md) records the selected direction and entry inventory. See [refinement acceptance](../overview-terminal-acceptance-20261111.md) for executed checks and limits.
+Current contract, updated 2026-11-13: Global cross-Project execution visibility and human intervention live in the persistent **top-right Activity & Notifications trigger and right-anchored popover** (`Command+I`, also searchable in the Command Palette via `>` / `Command+/` / `/`), visible across every page in the unified 42-point window chrome—including `Terminals`. The standalone Left Rail `Overview` page is removed so users never take an extra full-page detour merely to read a status notice and click through to a Card or Terminal.
 
-## Information and layout
+Board remains the management workspace; Card is the unified side-by-side discussion/problem-solving workspace (`Card + Live Terminal`); `Terminals` owns multi-tab PTY sessions, manual Shells and standalone Managed Branch Worktrees.
 
-Overview has no default inspector or Terminal preview. Compact production rows show task identity, Project/profile, and a source-derived reason or reported activity. Missing activity uses a factual state, never an invented summary. Branch and raw execution IDs are not permanent row content. Waiting duration is shown only when an actual runtime wait timestamp exists.
+## Chrome trigger and popover layout
 
-Sections are Needs you, Updates, Running, Queued, Idle and Closed. Needs you combines task decisions, runtime input, recovery and human Review, preserving each source's independent resolution. Idle and Closed are collapsed by default and retain expansion state. Empty groups are omitted. Running includes Project-owned Workflow configuration Terminals as well as Card Agents; unrelated manual Shells remain in Terminals.
+```text
+Window top chrome (42 pt, right end on every screen):
+  ... [page actions]   [ ⚡ 2 · ● 3/8 ]
+                              |
+                              v
+                  +--------------------------------------------------+
+                  | Activity & Notifications   [All ▾]  [✓ Read all] |
+                  +--------------------------------------------------+
+                  | NEEDS YOU · 2                                    |
+                  | ! #42 Search permissions    canban · @developer  |
+                  |   Permission required       [Card & Terminal →]  |
+                  | ◇ #28 Export results        tools · @reviewer    |
+                  |   Ready for human review   [Merge] [Review →]    |
+                  |                                                  |
+                  | UPDATES · 1                                      |
+                  | • #31 Fix reconnect         fiber · @developer   |
+                  |   Latest unread reply…      [✓ Read] [Card →]    |
+                  |                                                  |
+                  | RUNNING · 3 / 8                     [Terminals ↗]|
+                  | ● #36 Add search            canban · @developer  |
+                  | ▸ Queued (1) · Idle (2) · Closed (8)             |
+                  +--------------------------------------------------+
+```
 
-Rows retain Card/profile conversation identity. Multiple profiles on one Card remain distinct; Card-only recovery stays visible without fabricating an Agent. Stable Project/Card/identity ordering avoids reordering on every activity timestamp. The heading reports Scheduler execution slots and queued requests; section counts describe their items. The rail badge continues to count unique Cards with unread or pending reminders, not execution slots.
-
-Updates displays unread Card summaries and opens the corresponding Timeline event. Cards already represented in Needs you do not repeat in Updates; their actionable rows retain unread counts. Running and Updates can represent different facts about the same Card. Visiting Overview never marks replies read or approves a gate.
-
-## Direct navigation
-
-Row activation and its visible primary action share a destination: Review for a human review result, Card for task decisions/recovery, exact Terminal for a live runtime interaction, or saved Card/request history for queued/closed work. Keyboard focus alone has no effects. Rows with both task and runtime concerns expose a separate Terminal action. Resume Agent is explicit and subject to exact-provider-history eligibility and Scheduler admission.
-
-Opening a destination retains Overview selection, scroll and expansion for Back. Background status changes never redirect the user. Card-level Needs attention now handles its actual reason directly or offers a compact menu when several independent reasons exist; it no longer routes through an Overview inspector.
-
-See [Terminal navigation](../terminal-workspace.md#unified-terminal-navigation) for multiple profiles, ended history, disconnected bindings and explicit execution effects. Runtime recovery cannot approve a task gate; Herdr done alone does not constitute Ready for review. Unknown connection state is not Idle.
+- **Persistent top-right status pill:** Anchored at the far right of the 42-point window chrome on every screen (`Board`, `Card`, `Terminals`, `Diff & Review`, `GitHub`, `Settings`, and sub-pages). It displays actionable/unread count (`⚡ N` when `Needs you` + unread `Updates` > 0) alongside Scheduler execution usage (`● active/max`). Clicking the pill or pressing `Command+I` toggles the right-anchored popover.
+- **Dismissal and input gating:** Escape, clicking outside the popover, or activating a navigation destination closes the popover cleanly and restores focus. While open, underlying native `canban/terminal` keyboard input is gated so shortcuts and navigation keys never leak to a live PTY.
+- **Sections and scoping:** Optional Project filter (`All Projects` by default, or scoped to the active Project). Sections are `Needs you`, `Updates`, `Running`, `Queued`, and collapsible `Idle` / `Closed` groups. Empty groups are omitted. `Running` includes Project-owned Workflow configuration Agents as well as Card Agents; manual Shells remain in `Terminals`.
+- **Inline handling & 1-step direct destinations:**
+  - `Needs you` combines human Review gates, runtime permission/input waits, and task/recovery decisions while preserving each source's independent resolution. Runtime permission/question items offer **Card & Terminal →**, which opens the Card workspace with its right-hand live Terminal split already expanded and focused on that exact Agent PTY—eliminating multi-hop navigation. Review gates expose **Review →** (and quick **Merge** when local quick-merge is eligible).
+  - `Updates` displays unread Card reply/report excerpts (excluding Cards already shown in `Needs you`, which carry their unread count inline). Users can mark individual items read (**✓ Read** via `notifications.read`), mark all unread updates read (**✓ Read all** via `notifications.read_all`), or jump directly to the Card Timeline event (**Card →**). Opening the popover alone never marks items read or approves a human gate.
 
 ## Ownership and validation
 
-`crates/notifications/src/overview.rs` retains the authoritative Card conversation/reason projection. `crates/ui/src/overview.rs` composes the global display and Project configuration entries from prepared snapshot data, without render-time runtime reads. `crates/ui/src/terminals/navigation.rs` owns shared UI destination selection; AppServer owns durable execution and eligibility.
+`crates/notifications/src/overview.rs` retains the authoritative Card conversation, unread, and reason projection. `crates/ui/src/overview.rs` provides both the right-anchored global popover (`overview::popover` and `overview::trigger_pill`) and shared production row projections used by Gallery regression scenes, without render-time runtime or Git reads. `crates/ui/src/commands.rs` exposes `Toggle Activity & Notifications` (`Command+I`) and `Mark All Updates as Read` in the Command Palette.
 
-The Gallery uses the production screen with multi-reason, multiple-profile, long-title, queued, disconnected, idle and closed fixtures. Native acceptance must separately exercise direct actions, nested Board buttons, Back/Forward, narrow layouts, exact resume and unread positioning using an isolated Core. Historical lifecycle/backend evidence remains in [Agent Overview and lifecycle](../agent-overview-and-lifecycle.md).
+---
+
+## Historical standalone Overview page (2026-11-11, superseded 2026-11-13)
+
+The 2026-11-11 refinement below describes the earlier standalone Left Rail `Overview` route prior to its replacement by the global top-right Activity & Notifications popover. Keep for decision history and earlier acceptance context ([refinement design](../overview-and-terminal-navigation-proposal.md), [refinement acceptance](../overview-terminal-acceptance-20261111.md), [Agent Overview and lifecycle](../agent-overview-and-lifecycle.md)):
+
+- Overview had no default inspector or Terminal preview; compact production rows showed task identity, Project/profile, and a source-derived reason or reported activity.
+- Sections were `Needs you`, `Updates`, `Running`, `Queued`, `Idle`, and `Closed`, with `Idle` and `Closed` collapsed by default.
+- Row activation and primary buttons navigated to `Review`, `Card`, or `Terminals` with Back/Forward history preservation.

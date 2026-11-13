@@ -3,16 +3,13 @@ use canban_ui_kit::*;
 use nsh_core::prelude::*;
 use serde_json::json;
 
-fn layout(
-    title: impl IntoReactive<SharedString>,
-    subtitle: impl IntoReactive<SharedString>,
-) -> View {
+fn layout(subtitle: impl IntoReactive<SharedString>) -> View {
     view()
         .flex_1()
         .p_5()
         .gap_4()
         .min_h(px(0.0))
-        .child(view().gap_1().child(heading(title)).child(muted(subtitle)))
+        .child(muted(subtitle))
 }
 pub fn screen(ui: Ui, page: &str) -> AnyElement {
     match page {
@@ -24,11 +21,6 @@ pub fn screen(ui: Ui, page: &str) -> AnyElement {
             .min_h(px(0.))
             .p_5()
             .gap_4()
-            .child(subpage_header(
-                "Back to Settings",
-                "Settings / Machines",
-                move |_| ui.navigate("settings"),
-            ))
             .child(
                 scroll().flex_1().min_h(px(0.)).child(
                     view()
@@ -62,7 +54,7 @@ fn settings(ui: Ui) -> impl IntoElement {
     let home_for_copy = home.clone();
     let config_path = format!("{home}/config/agents.json");
     let runtime = crate::APP.get().map(|app| app.config()).unwrap_or_default();
-    layout("Settings", "Application preferences and Agent configuration.")
+    layout("Application preferences and Agent configuration.")
         .child(
             scroll().flex_1().min_h(px(0.)).child(
                 view()

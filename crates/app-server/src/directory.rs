@@ -82,7 +82,14 @@ fn signature(s: &Snapshot, machine: &str) -> String {
             ])
         })
         .collect::<Vec<_>>();
-    canban_context::digest(&serde_json::to_vec(&json!([machine, projects, cards])).unwrap())
+    let worktrees = s
+        .worktrees
+        .iter()
+        .map(|wt| json!([wt.id, wt.project_id, wt.path, wt.branch, wt.location]))
+        .collect::<Vec<_>>();
+    canban_context::digest(
+        &serde_json::to_vec(&json!([machine, projects, cards, worktrees])).unwrap(),
+    )
 }
 pub(super) struct CheckPermit<'a>(&'a AppServer, String);
 impl Drop for CheckPermit<'_> {
@@ -164,6 +171,7 @@ impl AppServer {
                         c
                     })
                     .collect(),
+                worktrees: s.worktrees.clone(),
                 ..Default::default()
             };
             q.mappings

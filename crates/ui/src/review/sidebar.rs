@@ -229,7 +229,7 @@ fn sidebar_row(
     on_click: impl Fn() + 'static,
 ) -> impl IntoElement {
     let title_str = title.into();
-    nsh_base::button()
+    canban_ui_kit::press_target()
         .w_full()
         .min_h(px(28.))
         .px_2()
@@ -264,51 +264,49 @@ fn sidebar_branch_row(
     selected: bool,
     on_click: impl Fn() + 'static,
 ) -> impl IntoElement {
-    view()
-        .tooltip(nsh_base::tooltip().child(label(name.clone())))
-        .child(
-            nsh_base::button()
-                .w_full()
-                .min_h(px(26.))
-                .px_2()
-                .py_0p5()
-                .rounded(px(5.))
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_1p5()
-                .bg(if selected { SELECTED } else { CLEAR })
-                .hover(|s| s.bg(if selected { SELECTED } else { CARD_HOVER }))
-                .on_press(move |_: &()| on_click())
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .child(icon(Icon::Branch).w(px(11.5)).h(px(11.5)).flex_shrink_0())
-                        .child(
-                            label(name)
-                                .font_family("Menlo")
-                                .text_size(px(11.5))
-                                .font_weight(if is_current || selected {
-                                    FontWeight::SEMIBOLD
-                                } else {
-                                    FontWeight::NORMAL
-                                })
-                                .truncate()
-                                .flex_1()
-                                .min_w(px(0.)),
-                        ),
-                )
-                .child(
-                    muted(meta)
-                        .font_family("Menlo")
-                        .text_size(px(10.))
-                        .flex_shrink_0(),
-                ),
-        )
+    view().tooltip(hint_tooltip(name.clone())).child(
+        canban_ui_kit::press_target()
+            .w_full()
+            .min_h(px(26.))
+            .px_2()
+            .py_0p5()
+            .rounded(px(5.))
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_1p5()
+            .bg(if selected { SELECTED } else { CLEAR })
+            .hover(|s| s.bg(if selected { SELECTED } else { CARD_HOVER }))
+            .on_press(move |_: &()| on_click())
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(icon(Icon::Branch).w(px(11.5)).h(px(11.5)).flex_shrink_0())
+                    .child(
+                        label(name)
+                            .font_family("Menlo")
+                            .text_size(px(11.5))
+                            .font_weight(if is_current || selected {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .truncate()
+                            .flex_1()
+                            .min_w(px(0.)),
+                    ),
+            )
+            .child(
+                muted(meta)
+                    .font_family("Menlo")
+                    .text_size(px(10.))
+                    .flex_shrink_0(),
+            ),
+    )
 }
 
 fn sidebar_commit_row(
@@ -319,9 +317,11 @@ fn sidebar_commit_row(
     on_click: impl Fn() + 'static,
 ) -> impl IntoElement {
     view()
-        .tooltip(nsh_base::tooltip().child(label(format!("{short_sha} · {subject} ({rel_time})"))))
+        .tooltip(hint_tooltip(format!(
+            "{short_sha} · {subject} ({rel_time})"
+        )))
         .child(
-            nsh_base::button()
+            canban_ui_kit::press_target()
                 .w_full()
                 .min_h(px(27.))
                 .px_2()
@@ -390,7 +390,7 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                             },
                         ))
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .element_ref(&project_anchor)
                                 .h(px(28.))
                                 .px_2p5()
@@ -451,7 +451,7 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                                 }),
                         )
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .element_ref(&base_anchor)
                                 .h(px(28.))
                                 .px_2p5()
@@ -485,7 +485,7 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                         )
                         .child(muted("←").text_size(px(12.)))
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .element_ref(&cmp_anchor)
                                 .h(px(28.))
                                 .px_2p5()
@@ -1072,7 +1072,12 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                     any = true;
                     col = col.child(notice(reason, Tone::Attention));
                 }
-                if let Some(warning) = p.warning {
+                // Re-evaluate against the live snapshot: the preview's warning was
+                // captured when the Diff opened and goes stale once the Agent idles.
+                let live_warning = ui.snapshot.with(|s| {
+                    canban_types::agent_activity_warning(&p.card_id, &s.attempts, &s.requests)
+                });
+                if let Some(warning) = live_warning {
                     any = true;
                     let cid = p.card_id.clone();
                     col = col.child(

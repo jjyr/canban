@@ -1,37 +1,30 @@
-//! Stage-aligned visual workflow studio with fine-grained layout-only updates.
-//! Stage columns, inline stage automation switches, step cards, and the Step
-//! Inspector stay mounted across selection, option toggles, and prompt edits.
+//! Stage-oriented visual Workflow Studio.
+//!
+//! Every Board column is a Stage lane generated from the YAML graph
+//! (`canban_workflow_engine::stages`): an ordered pipeline of step cards plus an
+//! exit. Each card is configured inline (forms are derived from its `uses`),
+//! can be dragged within or across Stages, disabled, or removed. Prompts open
+//! in a dialog. Structure edits go through the same draft/publish path as YAML.
 use super::update_doc;
 use crate::presenter::*;
+use canban_types::WorkflowColumn;
 use canban_ui_kit::{tokens::*, *};
-use canban_workflow_engine::source::{self, default_step_prompt, is_default_step_prompt};
+use canban_workflow_engine::{
+    source::{self, Document, NEXT_COLUMN, default_step_prompt, is_default_step_prompt},
+    stages::{self, Exit},
+};
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PillTone {
-    Muted,
-    Success,
-    Attention,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PillModel {
-    key: String,
-    text: String,
-    tone: PillTone,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NodeTone {
+enum Tint {
     Accent,
     Success,
     Attention,
     Muted,
 }
-
-impl NodeTone {
+impl Tint {
     fn color(self) -> AdaptiveColor {
         match self {
             Self::Accent => ACCENT.into(),
@@ -43,82 +36,548 @@ impl NodeTone {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct NodeModel {
+struct StepModel {
     id: String,
-    connector: Option<String>,
-    icon: Icon,
-    tone: NodeTone,
+    /// Previous card in the lane (drop indicator anchor).
+    prev: Option<String>,
     title: String,
-    kind_badge: String,
-    detail_line: String,
-    pills: Vec<PillModel>,
+    name: String,
+    uses: String,
+    icon: Icon,
+    tint: Tint,
+    badge: String,
+    summary: String,
+    enabled: bool,
+    /// "If …" / "Otherwise" when this card starts a condition branch.
+    branch: Option<String>,
+    pills: Vec<String>,
+    profile: String,
+    instruction: String,
+    default_prompt: bool,
+    sync_upstream: bool,
+    target_branch: String,
+    max_conflict: u32,
+    rework: String,
+    gate_title: String,
+    agent_slot: bool,
+    max_ready: Option<u32>,
+    message: String,
+    move_column: String,
+    condition: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LaneModel {
     id: String,
     name: String,
-    can_remove: bool,
-    has_custom_steps: bool,
-    nodes: Vec<NodeModel>,
+    index: usize,
+    last: bool,
+    exit: Exit,
+    exit_label: String,
+    entry: bool,
+    nodes: Vec<StepModel>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct StepInspectorModel {
-    id: String,
-    title: String,
-    uses: String,
-    next_desc: String,
-    profile: String,
-    instruction: String,
-    is_default_prompt: bool,
-    sync_upstream: bool,
-    target_branch: String,
-    rework_target: String,
-    gate_title: String,
-    move_column: String,
-    other_summary: String,
-}
-
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 struct GraphModel {
     has_doc: bool,
     workflow_name: String,
     workflow_id: String,
     workflow_enabled: bool,
-    options: source::WorkflowOptions,
-    columns: Vec<canban_types::WorkflowColumn>,
+    columns: Vec<WorkflowColumn>,
     lanes: Vec<LaneModel>,
-    steps: Vec<StepInspectorModel>,
-    agent_targets: Vec<(String, String)>,
+    step_count: usize,
+    rework_targets: Vec<(String, String)>,
 }
 
-impl Default for GraphModel {
-    fn default() -> Self {
-        Self {
-            has_doc: false,
-            workflow_name: String::new(),
-            workflow_id: String::new(),
-            workflow_enabled: true,
-            options: source::WorkflowOptions {
-                backlog_analyze: false,
-                backlog_auto_develop: false,
-                review_manual: false,
-                sync_upstream: true,
-                external_pr: "require_review".into(),
-            },
-            columns: Vec::new(),
-            lanes: Vec::new(),
-            steps: Vec::new(),
-            agent_targets: Vec::new(),
+fn with_str<'a>(step: &'a source::Step, key: &str) -> Option<&'a str> {
+    step.with.get(key).and_then(|v| v.as_str())
+}
+
+fn humanize_step_title(step: &source::Step, col_names: &BTreeMap<String, String>) -> String {
+    if let Some(name) = step.name.as_deref().filter(|n| !n.trim().is_empty()) {
+        return name.to_owned();
+    }
+    match (step.id.as_str(), step.uses.as_str()) {
+        ("agent:plan" | "plan", "agent") => "Plan task".into(),
+        ("agent:develop" | "develop", "agent") => "Implement".into(),
+        ("agent:review" | "review", "agent") => "Review".into(),
+        ("agent:merge" | "merge_verify", "agent") => "Pre-merge check".into(),
+        (_, "card.move") => {
+            let target = with_str(step, "column").unwrap_or("stage");
+            if target == NEXT_COLUMN {
+                "Move to next stage".into()
+            } else {
+                format!(
+                    "Move to {}",
+                    col_names.get(target).map(String::as_str).unwrap_or(target)
+                )
+            }
         }
+        (_, "approval") => "Human approval".into(),
+        (_, "deliver") => "Queue merge".into(),
+        ("condition:external_pr", "condition") => "External PR check".into(),
+        (_, "condition") => "Condition".into(),
+        (_, "admit") => {
+            if step.with.get("agent_slot").and_then(|v| v.as_bool()) == Some(false) {
+                "Plan-ahead limit".into()
+            } else {
+                "Wait for free Agent".into()
+            }
+        }
+        (_, "notify") => "Notify".into(),
+        _ => step.id.clone(),
+    }
+}
+
+fn step_model(
+    doc: &Document,
+    step: &source::Step,
+    prev: Option<String>,
+    branch: Option<String>,
+    titles: &BTreeMap<String, String>,
+    _col_names: &BTreeMap<String, String>,
+) -> StepModel {
+    let title = titles
+        .get(&step.id)
+        .cloned()
+        .unwrap_or_else(|| step.id.clone());
+    let profile = with_str(step, "profile").unwrap_or("").to_owned();
+    let raw_instruction = with_str(step, "instruction").unwrap_or("");
+    let is_default = is_default_step_prompt(&step.id, Some(&profile), raw_instruction);
+    let instruction = if is_default {
+        default_step_prompt(&step.id, Some(&profile)).to_owned()
+    } else {
+        raw_instruction.to_owned()
+    };
+    let sync_upstream = step
+        .with
+        .get("sync_upstream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let target_branch = with_str(step, "target_branch").unwrap_or("").to_owned();
+    let max_conflict = step
+        .with
+        .get("max_conflict_attempts")
+        .and_then(|v| v.as_u64())
+        .map_or(canban_types::DEFAULT_MAX_CONFLICT_ATTEMPTS, |v| v as u32);
+    let agent_slot = step
+        .with
+        .get("agent_slot")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let max_ready = step
+        .with
+        .get("max_ready")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+    let move_column = with_str(step, "column").unwrap_or("").to_owned();
+    let condition = format!(
+        "{} == {}",
+        with_str(step, "pointer").unwrap_or("/input"),
+        step.with
+            .get("equals")
+            .map(|v| v
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| v.to_string()))
+            .unwrap_or_default()
+    );
+    let (icon, tint, badge, summary) = match step.uses.as_str() {
+        "agent" => {
+            let custom = !is_default;
+            (
+                Icon::Agent,
+                Tint::Accent,
+                format!(
+                    "@{}{}",
+                    if profile.is_empty() {
+                        "default"
+                    } else {
+                        &profile
+                    },
+                    if custom { " · custom" } else { "" }
+                ),
+                instruction
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("Run Agent task")
+                    .to_owned(),
+            )
+        }
+        "admit" => (
+            Icon::History,
+            Tint::Muted,
+            "Gate".into(),
+            match (agent_slot, max_ready) {
+                (true, Some(k)) => format!("Free Agent slot · keep ≤{k} ready"),
+                (true, None) => "Waits until an automatic Agent slot is free".into(),
+                (false, Some(k)) => format!("Keep at most {k} ready Cards in this stage"),
+                (false, None) => "Admission gate".into(),
+            },
+        ),
+        "approval" => (
+            Icon::Check,
+            Tint::Attention,
+            "Human gate".into(),
+            with_str(step, "title")
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Pause for human approval")
+                .to_owned(),
+        ),
+        "deliver" => (
+            Icon::Branch,
+            Tint::Success,
+            if sync_upstream {
+                "Merge · Sync"
+            } else {
+                "Merge · Local"
+            }
+            .into(),
+            format!(
+                "{}{} · conflicts → Agent ×{max_conflict}",
+                if target_branch.is_empty() {
+                    "Project branch".to_owned()
+                } else {
+                    target_branch.clone()
+                },
+                if sync_upstream {
+                    " + upstream"
+                } else {
+                    " (local)"
+                }
+            ),
+        ),
+        "condition" => (
+            Icon::Trigger,
+            Tint::Attention,
+            "Condition".into(),
+            condition.clone(),
+        ),
+        "notify" => (
+            Icon::Info,
+            Tint::Muted,
+            "Notify".into(),
+            with_str(step, "message").unwrap_or("").to_owned(),
+        ),
+        "card.move" => (Icon::Forward, Tint::Accent, "Move".into(), title.clone()),
+        other => (
+            Icon::Info,
+            Tint::Muted,
+            other.to_owned(),
+            "Workflow step".into(),
+        ),
+    };
+    let mut pills = Vec::new();
+    if let Some(rework) = &step.on_changes_requested {
+        pills.push(format!(
+            "↺ Rework → {}",
+            titles
+                .get(rework)
+                .cloned()
+                .unwrap_or_else(|| rework.clone())
+        ));
+    }
+    if step.uses == "condition" {
+        for (key, mark) in [("then", "✓"), ("otherwise", "✕")] {
+            if let Some(t) = with_str(step, key) {
+                pills.push(format!(
+                    "{mark} {} → {}",
+                    if key == "then" { "Then" } else { "Else" },
+                    titles.get(t).cloned().unwrap_or_else(|| t.to_owned())
+                ));
+            }
+        }
+    } else if step.next.as_deref().is_some_and(|n| {
+        doc.steps
+            .iter()
+            .find(|s| s.id == n)
+            .is_some_and(|s| s.uses == "complete")
+    }) {
+        pills.push("■ Ends run".into());
+    }
+    StepModel {
+        id: step.id.clone(),
+        prev,
+        title,
+        name: step.name.clone().unwrap_or_default(),
+        uses: step.uses.clone(),
+        icon,
+        tint,
+        badge,
+        summary,
+        enabled: step.enabled,
+        branch,
+        pills,
+        default_prompt: is_default,
+        profile,
+        instruction,
+        sync_upstream,
+        target_branch,
+        max_conflict,
+        rework: step.on_changes_requested.clone().unwrap_or_default(),
+        gate_title: with_str(step, "title").unwrap_or("").to_owned(),
+        agent_slot,
+        max_ready,
+        message: with_str(step, "message").unwrap_or("").to_owned(),
+        move_column,
+        condition,
+    }
+}
+
+fn build_model(doc: &Document) -> GraphModel {
+    let col_names: BTreeMap<String, String> = doc
+        .columns
+        .iter()
+        .map(|c| (c.id.clone(), c.name.clone()))
+        .collect();
+    let titles: BTreeMap<String, String> = doc
+        .steps
+        .iter()
+        .map(|s| (s.id.clone(), humanize_step_title(s, &col_names)))
+        .collect();
+    let mut branches = BTreeMap::new();
+    for s in doc.steps.iter().filter(|s| s.uses == "condition") {
+        if let Some(t) = with_str(s, "then") {
+            branches.insert(t.to_owned(), format!("If {}", titles[&s.id]));
+        }
+        if let Some(o) = with_str(s, "otherwise") {
+            branches.insert(o.to_owned(), "Otherwise".to_owned());
+        }
+    }
+    let views = stages::stages(doc);
+    let total = views.len();
+    let lanes = views
+        .into_iter()
+        .enumerate()
+        .map(|(index, v)| {
+            let nodes = v
+                .steps
+                .iter()
+                .enumerate()
+                .filter_map(|(k, id)| {
+                    let step = doc.steps.iter().find(|s| &s.id == id)?;
+                    Some(step_model(
+                        doc,
+                        step,
+                        k.checked_sub(1).map(|p| v.steps[p].clone()),
+                        branches.get(id).cloned(),
+                        &titles,
+                        &col_names,
+                    ))
+                })
+                .collect();
+            let exit_label = match &v.exit {
+                Exit::Next => match doc.next_column(&v.column) {
+                    Some(n) => format!("Next stage · {}", col_names.get(&n).unwrap_or(&n)),
+                    None => "Next stage".into(),
+                },
+                Exit::Column(c) => format!("→ {}", col_names.get(c).unwrap_or(c)),
+                Exit::Stay => "Stay in this column".into(),
+            };
+            LaneModel {
+                id: v.column,
+                name: v.name,
+                index,
+                last: index + 1 == total,
+                exit: v.exit,
+                exit_label,
+                entry: v.entry_rule.is_some(),
+                nodes,
+            }
+        })
+        .collect();
+    GraphModel {
+        has_doc: true,
+        workflow_name: doc.name.clone(),
+        workflow_id: doc.id.clone(),
+        workflow_enabled: doc.enabled,
+        columns: doc.columns.clone(),
+        lanes,
+        step_count: doc.steps.iter().filter(|s| s.uses != "complete").count(),
+        rework_targets: doc
+            .steps
+            .iter()
+            .filter(|s| s.uses == "agent")
+            .map(|s| (s.id.clone(), titles[&s.id].clone()))
+            .collect(),
+    }
+}
+
+fn default_columns() -> Vec<WorkflowColumn> {
+    [
+        ("backlog", "Backlog"),
+        ("develop", "Develop"),
+        ("review", "Review"),
+    ]
+    .into_iter()
+    .map(|(id, name)| WorkflowColumn {
+        id: id.into(),
+        name: name.into(),
+    })
+    .collect()
+}
+
+fn short_workflow_id(id: &str) -> String {
+    if id.len() > 24 {
+        format!("{}…", &id[..23])
+    } else {
+        id.to_owned()
+    }
+}
+
+/// Step drag session: per-card pan values drive translation; a frame loop
+/// hit-tests lanes and card midpoints to compute the drop slot.
+#[derive(Clone, Copy)]
+struct StepDrag {
+    dragging: Signal<String>,
+    target: Signal<Option<(String, Option<String>)>>,
+    down: Stored<Point<Points>>,
+    cards: Stored<BTreeMap<String, (String, ElementRef)>>,
+    lanes: Stored<BTreeMap<String, ElementRef>>,
+}
+impl StepDrag {
+    fn new() -> Self {
+        Self {
+            dragging: signal(String::new()),
+            target: signal(None),
+            down: stored(Point::default()),
+            cards: stored(BTreeMap::new()),
+            lanes: stored(BTreeMap::new()),
+        }
+    }
+    fn press(self, event: &PressEvent, x: AnimatedValue, y: AnimatedValue) {
+        if self.dragging.get_untracked().is_empty() {
+            self.down.replace(event.page_position);
+            x.set(0.);
+            y.set(0.);
+        }
+    }
+    fn start(self, id: String, x: AnimatedValue, y: AnimatedValue) {
+        self.dragging.set(id.clone());
+        spawn(async move {
+            let lanes = self.lanes.get();
+            let cards = self.cards.get();
+            let mut lane_rects = Vec::new();
+            for (lane, r) in lanes {
+                if let Some(m) = r.measure().await {
+                    lane_rects.push((lane, m.page.x.0, m.frame.size.width.0));
+                }
+            }
+            let mut mids = Vec::new();
+            for (cid, (lane, r)) in cards {
+                if cid == id {
+                    continue;
+                }
+                if let Some(m) = r.measure().await {
+                    mids.push((lane, cid, m.page.y.0 + m.frame.size.height.0 / 2.));
+                }
+            }
+            let origin = self.down.get();
+            while self.dragging.try_get().is_some_and(|d| d == id) {
+                next_frame().await;
+                let dx = x.value().await;
+                let dy = y.value().await;
+                let (px, py) = (origin.x.0 + dx, origin.y.0 + dy);
+                let target = lane_rects
+                    .iter()
+                    .find(|(_, lx, w)| px >= *lx && px <= lx + w)
+                    .map(|(lane, _, _)| {
+                        let after = mids
+                            .iter()
+                            .filter(|(l, _, mid)| l == lane && *mid < py)
+                            .max_by(|a, b| a.2.total_cmp(&b.2))
+                            .map(|(_, c, _)| c.clone());
+                        (lane.clone(), after)
+                    });
+                if self.target.try_get().is_some_and(|t| t != target) {
+                    self.target.set(target);
+                }
+            }
+        });
+    }
+    fn end(self, ctx: Ctx, x: AnimatedValue, y: AnimatedValue) {
+        let id = self.dragging.get_untracked();
+        let target = self.target.get_untracked();
+        self.dragging.set(String::new());
+        self.target.set(None);
+        x.set(0.);
+        y.set(0.);
+        let Some((lane, after)) = target else { return };
+        if id.is_empty() || after.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        ctx.edit(move |d| {
+            let after = insertion_anchor(d, &lane, after, &id);
+            stages::move_step(d, &id, &lane, after.as_deref())
+        });
+    }
+}
+
+/// Steps cannot be inserted directly after a condition; fall back to the
+/// closest earlier pipeline step (or the Stage start).
+fn insertion_anchor(
+    doc: &Document,
+    lane: &str,
+    after: Option<String>,
+    moving: &str,
+) -> Option<String> {
+    let view = stages::stages(doc).into_iter().find(|s| s.column == lane)?;
+    let list: Vec<_> = view.steps.into_iter().filter(|s| s != moving).collect();
+    let mut pos = after.and_then(|a| list.iter().position(|s| *s == a))?;
+    loop {
+        let id = &list[pos];
+        if doc
+            .steps
+            .iter()
+            .find(|s| &s.id == id)
+            .is_some_and(|s| s.uses != "condition")
+        {
+            return Some(id.clone());
+        }
+        pos = pos.checked_sub(1)?;
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Ctx {
+    ui: Ui,
+    fallback: Memo<Vec<WorkflowColumn>>,
+    graph: Memo<GraphModel>,
+    error: Signal<String>,
+    drag: StepDrag,
+    prompt: Signal<String>,
+    renaming: Signal<String>,
+    rename_text: Signal<String>,
+    adding: Signal<String>,
+    confirm_delete: Signal<String>,
+}
+impl Ctx {
+    /// Applies a structural edit atomically to the draft (normalizing first);
+    /// failures leave the draft untouched and surface as a notice.
+    fn edit(self, f: impl FnOnce(&mut Document) -> anyhow::Result<()>) {
+        let fallback = self.fallback.get_untracked();
+        let mut failure = None;
+        update_doc(self.ui, |d| {
+            let mut next = d.clone();
+            stages::normalize(&mut next, &fallback);
+            match f(&mut next) {
+                Ok(()) => *d = next,
+                Err(e) => failure = Some(format!("{e:#}")),
+            }
+        });
+        self.error.set(failure.unwrap_or_default());
+    }
+    fn set_with(self, id: &str, key: &'static str, value: Option<Value>) {
+        let id = id.to_owned();
+        self.edit(move |d| stages::set_step_with(d, &id, key, value));
     }
 }
 
 pub(super) fn render(ui: Ui) -> AnyElement {
     let state = ui.workflows;
-
-    let fallback_columns = computed(move || {
+    let fallback = computed(move || {
         let project_id = ui.project.get();
         ui.snapshot.with(|s| {
             s.projects
@@ -128,7 +587,7 @@ pub(super) fn render(ui: Ui) -> AnyElement {
                     p.workflow
                         .stages
                         .iter()
-                        .map(|st| canban_types::WorkflowColumn {
+                        .map(|st| WorkflowColumn {
                             id: st.id.clone(),
                             name: st.name.clone(),
                         })
@@ -138,35 +597,29 @@ pub(super) fn render(ui: Ui) -> AnyElement {
                 .unwrap_or_else(default_columns)
         })
     });
-
     let graph = computed(move || {
-        let fallback = fallback_columns.get();
+        let fb = fallback.get();
         state.studio_doc.with(|opt| match opt {
-            Some(doc) => build_graph_model(doc, &fallback),
+            Some(doc) => {
+                let mut d = doc.clone();
+                stages::normalize(&mut d, &fb);
+                build_model(&d)
+            }
             None => GraphModel::default(),
         })
     });
-
-    let active_step_id = computed(move || {
-        let requested = state.selected_step.get();
-        graph.with(|g| {
-            if g.steps.iter().any(|s| s.id == requested) {
-                requested
-            } else {
-                g.steps
-                    .iter()
-                    .find(|s| s.uses == "agent")
-                    .or_else(|| g.steps.first())
-                    .map(|s| s.id.clone())
-                    .unwrap_or_default()
-            }
-        })
-    });
-
-    let active_step = computed(move || {
-        let id = active_step_id.get();
-        graph.with(|g| g.steps.iter().find(|s| s.id == id).cloned())
-    });
+    let ctx = Ctx {
+        ui,
+        fallback,
+        graph,
+        error: signal(String::new()),
+        drag: StepDrag::new(),
+        prompt: signal(String::new()),
+        renaming: signal(String::new()),
+        rename_text: signal(String::new()),
+        adding: signal(String::new()),
+        confirm_delete: signal(String::new()),
+    };
 
     view()
         .flex_1()
@@ -213,623 +666,23 @@ pub(super) fn render(ui: Ui) -> AnyElement {
                     && graph.with(|g| g.has_doc)
             },
             move || {
-                scroll().flex_1().min_h(px(0.)).child(
-                    view()
-                        .gap_3()
-                        .pb_4()
-                        .child(stage_canvas(ui, graph, active_step_id))
-                        .child(step_inspector(ui, graph, active_step)),
-                )
+                scroll()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(view().gap_3().pb_4().child(stage_canvas(ctx)))
             },
+        ))
+        .child(when(
+            move || !ctx.prompt.get().is_empty(),
+            move || prompt_dialog(ctx),
         ))
         .into_element()
 }
 
-fn build_graph_model(
-    doc: &source::Document,
-    fallback_columns: &[canban_types::WorkflowColumn],
-) -> GraphModel {
-    let options = source::derive_options(doc);
-    let effective_columns = if !doc.columns.is_empty() {
-        doc.columns.clone()
-    } else {
-        fallback_columns.to_vec()
-    };
-    let visible_steps = ordered_visible_steps(doc);
-    let col_names: BTreeMap<String, String> = effective_columns
-        .iter()
-        .map(|c| (c.id.clone(), c.name.clone()))
-        .collect();
-    let step_titles: BTreeMap<String, String> = doc
-        .steps
-        .iter()
-        .map(|s| (s.id.clone(), humanize_step_title(s, &col_names)))
-        .collect();
-
-    let first_col_id = effective_columns
-        .first()
-        .map(|c| c.id.clone())
-        .unwrap_or_else(|| "backlog".into());
-    let mut lane_steps: BTreeMap<String, Vec<source::Step>> = effective_columns
-        .iter()
-        .map(|c| (c.id.clone(), Vec::new()))
-        .collect();
-    let mut current_lane = first_col_id;
-    for step in &visible_steps {
-        if let Some(rule_col) = doc
-            .on
-            .values()
-            .filter(|r| r.enabled && r.start_at == step.id)
-            .find_map(|r| r.selector.column.as_deref())
-            && lane_steps.contains_key(rule_col)
-        {
-            current_lane = rule_col.to_owned();
-        }
-        lane_steps
-            .entry(current_lane.clone())
-            .or_default()
-            .push(step.clone());
-        if step.uses == "card.move"
-            && let Some(target_col) = step.with.get("column").and_then(|v| v.as_str())
-            && lane_steps.contains_key(target_col)
-        {
-            current_lane = target_col.to_owned();
-        }
-    }
-
-    let stage_count = effective_columns.len();
-    let lanes = effective_columns
-        .iter()
-        .map(|col| {
-            let steps_in_col = lane_steps.get(&col.id).cloned().unwrap_or_default();
-            let has_custom_steps = match col.id.as_str() {
-                "backlog" => steps_in_col.iter().any(|s| {
-                    !matches!(
-                        (s.id.as_str(), s.uses.as_str()),
-                        ("agent:plan" | "plan", "agent")
-                            | ("move:backlog" | "enter_develop", "card.move")
-                    )
-                }),
-                "review" => steps_in_col.iter().any(|s| s.uses == "agent"),
-                _ => false,
-            };
-            let nodes = steps_in_col
-                .iter()
-                .enumerate()
-                .map(|(idx, step)| {
-                    let connector = if idx == 0 {
-                        None
-                    } else {
-                        step_connector_label(doc, &steps_in_col[..idx], step)
-                    };
-                    build_node_model(doc, step, connector, &col_names, &step_titles)
-                })
-                .collect();
-            LaneModel {
-                id: col.id.clone(),
-                name: col.name.clone(),
-                can_remove: stage_count > 1
-                    && !matches!(col.id.as_str(), "backlog" | "develop" | "review"),
-                has_custom_steps,
-                nodes,
-            }
-        })
-        .collect();
-
-    let agent_targets = visible_steps
-        .iter()
-        .filter(|s| s.uses == "agent")
-        .map(|s| {
-            let lbl = step_titles
-                .get(&s.id)
-                .cloned()
-                .unwrap_or_else(|| s.id.clone());
-            (s.id.clone(), lbl)
-        })
-        .collect();
-
-    let steps = visible_steps
-        .iter()
-        .enumerate()
-        .map(|(pos, step)| build_inspector_model(doc, &visible_steps, pos, step, &step_titles))
-        .collect();
-
-    GraphModel {
-        has_doc: true,
-        workflow_name: doc.name.clone(),
-        workflow_id: doc.id.clone(),
-        workflow_enabled: doc.enabled,
-        options,
-        columns: effective_columns,
-        lanes,
-        steps,
-        agent_targets,
-    }
-}
-
-fn step_connector_label(
-    doc: &source::Document,
-    preceding_in_lane: &[source::Step],
-    current: &source::Step,
-) -> Option<String> {
-    for prev in preceding_in_lane.iter().rev() {
-        if prev.uses == "condition" {
-            if prev.with.get("then").and_then(|v| v.as_str()) == Some(current.id.as_str()) {
-                return Some("↳ Then".into());
-            }
-            if prev.with.get("otherwise").and_then(|v| v.as_str()) == Some(current.id.as_str()) {
-                return Some("↳ Else".into());
-            }
-        }
-    }
-    if let Some(prev) = preceding_in_lane.last()
-        && prev.uses != "condition"
-    {
-        let prev_next = prev.next.as_deref().or_else(|| {
-            doc.steps
-                .iter()
-                .position(|s| s.id == prev.id)
-                .and_then(|i| doc.steps.get(i + 1))
-                .map(|s| s.id.as_str())
-        });
-        if prev_next == Some(current.id.as_str()) {
-            return Some("↓".into());
-        }
-    }
-    None
-}
-
-fn build_node_model(
-    doc: &source::Document,
-    step: &source::Step,
-    connector: Option<String>,
-    col_names: &BTreeMap<String, String>,
-    step_titles: &BTreeMap<String, String>,
-) -> NodeModel {
-    let step_id = step.id.clone();
-    let title = step_titles
-        .get(&step_id)
-        .cloned()
-        .unwrap_or_else(|| step.id.clone());
-
-    let (icon, tone, kind_badge, detail_line) = match step.uses.as_str() {
-        "agent" => {
-            let prof = step
-                .with
-                .get("profile")
-                .and_then(|v| v.as_str())
-                .unwrap_or("default");
-            let instr = step
-                .with
-                .get("instruction")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let customized = !is_default_step_prompt(&step.id, Some(prof), instr);
-            let first_line = instr
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-                .unwrap_or("Run agent task");
-            (
-                Icon::Agent,
-                NodeTone::Accent,
-                format!("@{prof}{}", if customized { " · custom" } else { "" }),
-                first_line.to_owned(),
-            )
-        }
-        "card.move" => {
-            let target = step
-                .with
-                .get("column")
-                .and_then(|v| v.as_str())
-                .unwrap_or("column");
-            let target_name = col_names.get(target).map(String::as_str).unwrap_or(target);
-            (
-                Icon::Forward,
-                NodeTone::Accent,
-                "Stage Move".into(),
-                format!("Move Card into {target_name}"),
-            )
-        }
-        "approval" => {
-            let gate = step
-                .with
-                .get("title")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .unwrap_or("Pause for human review & approval");
-            (
-                Icon::Check,
-                NodeTone::Attention,
-                "Human Gate".into(),
-                gate.to_owned(),
-            )
-        }
-        "deliver" => {
-            let sync = step
-                .with
-                .get("sync_upstream")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            let branch = step
-                .with
-                .get("target_branch")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty());
-            let detail = match (branch, sync) {
-                (Some(b), true) => format!("Merge into {b} & sync upstream"),
-                (Some(b), false) => format!("Merge into {b} (local only)"),
-                (None, true) => "Merge & sync upstream remote".into(),
-                (None, false) => "Merge locally only (no upstream sync)".into(),
-            };
-            let badge_txt = if sync {
-                "Queue Merge · Sync"
-            } else {
-                "Queue Merge · Local"
-            };
-            (Icon::Branch, NodeTone::Success, badge_txt.into(), detail)
-        }
-        "condition" => {
-            let ptr = step
-                .with
-                .get("pointer")
-                .and_then(|v| v.as_str())
-                .unwrap_or("/input");
-            let eq = step
-                .with
-                .get("equals")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-                .unwrap_or_else(|| step.with.get("equals").unwrap_or(&Value::Null).to_string());
-            (
-                Icon::Trigger,
-                NodeTone::Attention,
-                "Condition".into(),
-                format!("{ptr} == {eq}"),
-            )
-        }
-        other => (
-            Icon::Info,
-            NodeTone::Muted,
-            other.to_owned(),
-            "Workflow step".into(),
-        ),
-    };
-
-    let mut pills = Vec::new();
-    for (rule_name, rule) in &doc.on {
-        if rule.enabled && rule.start_at == step_id {
-            pills.push(PillModel {
-                key: format!("on:{rule_name}"),
-                text: format!("⚡ on:{rule_name}"),
-                tone: PillTone::Muted,
-            });
-        }
-    }
-    if let Some(rework) = &step.on_changes_requested {
-        let rw_label = step_titles
-            .get(rework)
-            .cloned()
-            .unwrap_or_else(|| rework.clone());
-        pills.push(PillModel {
-            key: "rework".into(),
-            text: format!("↺ Rework → {rw_label}"),
-            tone: PillTone::Attention,
-        });
-    }
-    if step.uses == "condition" {
-        if let Some(then_id) = step.with.get("then").and_then(|v| v.as_str())
-            && let Some(t_lbl) = step_titles.get(then_id)
-        {
-            pills.push(PillModel {
-                key: "then".into(),
-                text: format!("✓ Then → {t_lbl}"),
-                tone: PillTone::Success,
-            });
-        }
-        if let Some(else_id) = step.with.get("otherwise").and_then(|v| v.as_str())
-            && let Some(e_lbl) = step_titles.get(else_id)
-        {
-            pills.push(PillModel {
-                key: "else".into(),
-                text: format!("✕ Else → {e_lbl}"),
-                tone: PillTone::Muted,
-            });
-        }
-    } else if let Some(explicit_next) = &step.next
-        && doc
-            .steps
-            .iter()
-            .find(|s| &s.id == explicit_next)
-            .is_some_and(|s| s.uses == "complete")
-    {
-        pills.push(PillModel {
-            key: "end".into(),
-            text: "■ Ends run".into(),
-            tone: PillTone::Muted,
-        });
-    }
-
-    NodeModel {
-        id: step_id,
-        connector,
-        icon,
-        tone,
-        title,
-        kind_badge,
-        detail_line,
-        pills,
-    }
-}
-
-fn build_inspector_model(
-    doc: &source::Document,
-    visible_steps: &[source::Step],
-    step_pos: usize,
-    step: &source::Step,
-    step_titles: &BTreeMap<String, String>,
-) -> StepInspectorModel {
-    let step_id = step.id.clone();
-    let title = step_titles
-        .get(&step_id)
-        .cloned()
-        .unwrap_or_else(|| step.id.clone());
-    let next_desc = step
-        .next
-        .clone()
-        .or_else(|| visible_steps.get(step_pos + 1).map(|s| s.id.clone()))
-        .map(|id| {
-            if doc
-                .steps
-                .iter()
-                .find(|s| s.id == id)
-                .is_some_and(|s| s.uses == "complete")
-            {
-                "Complete workflow run".to_owned()
-            } else {
-                step_titles
-                    .get(&id)
-                    .map(|t| format!("{t} ({id})"))
-                    .unwrap_or(id)
-            }
-        })
-        .unwrap_or_else(|| "Complete workflow run".into());
-
-    let profile = step
-        .with
-        .get("profile")
-        .and_then(|v| v.as_str())
-        .unwrap_or("developer")
-        .to_owned();
-    let instruction = step
-        .with
-        .get("instruction")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    let is_default_prompt = is_default_step_prompt(&step_id, Some(&profile), &instruction);
-    let sync_upstream = step
-        .with
-        .get("sync_upstream")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let target_branch = step
-        .with
-        .get("target_branch")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    let rework_target = step.on_changes_requested.clone().unwrap_or_default();
-    let gate_title = step
-        .with
-        .get("title")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    let move_column = step
-        .with
-        .get("column")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    let other_summary = match step.uses.as_str() {
-        "condition" => format!(
-            "Evaluates JSON pointer `{}` == `{}` and routes to `{}` (then) or `{}` (otherwise).",
-            step.with
-                .get("pointer")
-                .and_then(|v| v.as_str())
-                .unwrap_or(""),
-            step.with.get("equals").unwrap_or(&Value::Null),
-            step.with
-                .get("then")
-                .and_then(|v| v.as_str())
-                .unwrap_or("end"),
-            step.with
-                .get("otherwise")
-                .and_then(|v| v.as_str())
-                .unwrap_or("end"),
-        ),
-        "notify" => format!(
-            "Posts a Card attention notification: {}",
-            step.with
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-        ),
-        _ => "Structural workflow step.".to_owned(),
-    };
-
-    StepInspectorModel {
-        id: step_id,
-        title,
-        uses: step.uses.clone(),
-        next_desc,
-        profile,
-        instruction,
-        is_default_prompt,
-        sync_upstream,
-        target_branch,
-        rework_target,
-        gate_title,
-        move_column,
-        other_summary,
-    }
-}
-
-fn ordered_visible_steps(doc: &source::Document) -> Vec<source::Step> {
-    let non_complete: Vec<_> = doc
-        .steps
-        .iter()
-        .filter(|s| s.uses != "complete")
-        .cloned()
-        .collect();
-    if non_complete.len() <= 1 {
-        return non_complete;
-    }
-    let step_map: BTreeMap<String, usize> = doc
-        .steps
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.id.clone(), i))
-        .collect();
-    let mut visited = std::collections::BTreeSet::new();
-    let mut ordered = Vec::with_capacity(non_complete.len());
-
-    fn walk(
-        id: &str,
-        doc: &source::Document,
-        step_map: &BTreeMap<String, usize>,
-        visited: &mut std::collections::BTreeSet<String>,
-        ordered: &mut Vec<source::Step>,
-    ) {
-        if !visited.insert(id.to_owned()) {
-            return;
-        }
-        let Some(&idx) = step_map.get(id) else {
-            return;
-        };
-        let step = &doc.steps[idx];
-        if step.uses == "complete" {
-            return;
-        }
-        ordered.push(step.clone());
-        if step.uses == "condition" {
-            if let Some(t) = step.with.get("then").and_then(|v| v.as_str()) {
-                walk(t, doc, step_map, visited, ordered);
-            }
-            if let Some(o) = step.with.get("otherwise").and_then(|v| v.as_str()) {
-                walk(o, doc, step_map, visited, ordered);
-            }
-        } else {
-            let next_id = step
-                .next
-                .clone()
-                .or_else(|| doc.steps.get(idx + 1).map(|s| s.id.clone()));
-            if let Some(next_id) = next_id {
-                walk(&next_id, doc, step_map, visited, ordered);
-            }
-        }
-    }
-
-    let mut roots: Vec<String> = Vec::new();
-    for col_key in ["backlog", "develop", "review"] {
-        if let Some(r) = doc.on.get(col_key)
-            && r.enabled
-            && !roots.contains(&r.start_at)
-        {
-            roots.push(r.start_at.clone());
-        }
-    }
-    for col in &doc.columns {
-        for r in doc.on.values() {
-            if r.enabled
-                && r.selector.column.as_deref() == Some(col.id.as_str())
-                && !roots.contains(&r.start_at)
-            {
-                roots.push(r.start_at.clone());
-            }
-        }
-    }
-    for r in doc.on.values() {
-        if r.enabled && !roots.contains(&r.start_at) {
-            roots.push(r.start_at.clone());
-        }
-    }
-    for root in roots {
-        walk(&root, doc, &step_map, &mut visited, &mut ordered);
-    }
-    for step in non_complete {
-        if visited.insert(step.id.clone()) {
-            ordered.push(step);
-        }
-    }
-    ordered
-}
-
-fn default_columns() -> Vec<canban_types::WorkflowColumn> {
-    vec![
-        canban_types::WorkflowColumn {
-            id: "backlog".into(),
-            name: "Backlog".into(),
-        },
-        canban_types::WorkflowColumn {
-            id: "develop".into(),
-            name: "Develop".into(),
-        },
-        canban_types::WorkflowColumn {
-            id: "review".into(),
-            name: "Review".into(),
-        },
-    ]
-}
-
-fn humanize_step_title(step: &source::Step, col_names: &BTreeMap<String, String>) -> String {
-    if let Some(name) = step
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        return name.to_owned();
-    }
-    match (step.id.as_str(), step.uses.as_str()) {
-        ("agent:plan" | "plan", "agent") => "Plan task".into(),
-        ("agent:develop" | "develop", "agent") => "Implement".into(),
-        ("agent:review" | "review", "agent") => "Review".into(),
-        ("agent:merge" | "merge_verify", "agent") => "Pre-merge check".into(),
-        (_, "card.move") => {
-            let target = step
-                .with
-                .get("column")
-                .and_then(|v| v.as_str())
-                .unwrap_or("stage");
-            let cname = col_names.get(target).map(String::as_str).unwrap_or(target);
-            format!("Move to {cname}")
-        }
-        (_, "approval") => "Human approval".into(),
-        (_, "deliver") => "Queue merge".into(),
-        ("condition:external_pr", "condition") => "External PR check".into(),
-        _ => step.id.clone(),
-    }
-}
-
-fn short_workflow_id(id: &str) -> String {
-    if let Some((prefix, rest)) = id.split_once(':')
-        && rest.len() > 12
-        && rest.chars().all(|c| c.is_ascii_hexdigit())
-    {
-        format!("{prefix}:{}", &rest[..8])
-    } else if id.len() > 28 {
-        format!("{}…", &id[..24])
-    } else {
-        id.to_owned()
-    }
-}
-
-fn stage_canvas(ui: Ui, graph: Memo<GraphModel>, active_step_id: Memo<String>) -> AnyElement {
-    let state = ui.workflows;
-
-    let add_col_controls = view()
+fn stage_canvas(ctx: Ctx) -> AnyElement {
+    let state = ctx.ui.workflows;
+    let graph = ctx.graph;
+    let add_stage = view()
         .flex_row()
         .items_center()
         .gap_2()
@@ -838,39 +691,16 @@ fn stage_canvas(ui: Ui, graph: Memo<GraphModel>, active_step_id: Memo<String>) -
             "+ Add stage",
             Variant::Secondary,
             move |_| {
-                let raw_name = state.new_column_name.get_untracked();
-                let title = raw_name.trim().to_owned();
-                if title.is_empty() {
+                let name = state.new_column_name.get_untracked();
+                if name.trim().is_empty() {
                     return;
-                }
-                let slug: String = title
-                    .to_ascii_lowercase()
-                    .chars()
-                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                    .collect::<String>()
-                    .trim_matches('_')
-                    .to_owned();
-                let mut updated_cols = graph.with_untracked(|g| g.columns.clone());
-                if slug.is_empty() || updated_cols.iter().any(|c| c.id == slug) {
-                    return;
-                }
-                if let Some(pos) = updated_cols.iter().position(|c| c.id == "review") {
-                    updated_cols.insert(
-                        pos,
-                        canban_types::WorkflowColumn {
-                            id: slug,
-                            name: title,
-                        },
-                    );
-                } else {
-                    updated_cols.push(canban_types::WorkflowColumn {
-                        id: slug,
-                        name: title,
-                    });
                 }
                 state.new_column_name.set(String::new());
-                update_doc(ui, |d| {
-                    d.columns = updated_cols;
+                ctx.edit(move |d| {
+                    // New stages go before the last column (usually Review).
+                    let before =
+                        (d.columns.len() > 1).then(|| d.columns.last().unwrap().id.clone());
+                    stages::add_column(d, &name, before.as_deref()).map(|_| ())
                 });
             },
         ));
@@ -883,7 +713,7 @@ fn stage_canvas(ui: Ui, graph: Memo<GraphModel>, active_step_id: Memo<String>) -
         .child(each(
             move || graph.with(|g| g.lanes.clone()),
             |lane| lane.id.clone(),
-            move |lane, col_idx| stage_lane(ui, graph, lane, col_idx, active_step_id),
+            move |lane, _| stage_lane(ctx, lane),
         ));
 
     panel()
@@ -907,12 +737,8 @@ fn stage_canvas(ui: Ui, graph: Memo<GraphModel>, active_step_id: Memo<String>) -
                                 .flex_wrap()
                                 .items_center()
                                 .gap_2()
-                                .min_w(px(0.))
                                 .child(icon_tinted(Icon::Trigger, ACCENT).w(px(15.)).h(px(15.)))
-                                .child(
-                                    label("Stage Execution Graph")
-                                        .font_weight(FontWeight::SEMIBOLD),
-                                )
+                                .child(label("Stages").font_weight(FontWeight::SEMIBOLD))
                                 .child(muted("·"))
                                 .child(
                                     label(move || graph.with(|g| g.workflow_name.clone()))
@@ -932,32 +758,51 @@ fn stage_canvas(ui: Ui, graph: Memo<GraphModel>, active_step_id: Memo<String>) -
                                 ))
                                 .child(muted(move || {
                                     graph.with(|g| {
-                                        format!("{} stages · {} steps", g.lanes.len(), g.steps.len())
+                                        format!("{} stages · {} steps", g.lanes.len(), g.step_count)
                                     })
                                 })),
                         )
                         .child(muted(
-                            "Configure stage automation inline or click any step node below to customize its Agent & Prompt.",
+                            "Click a step to configure it · drag ⋮⋮ to reorder or move it to another stage · each stage ends with its exit.",
                         )),
                 )
-                .child(add_col_controls),
+                .child(add_stage),
         )
+        .child(when(
+            move || !ctx.error.get().is_empty(),
+            move || notice(move || ctx.error.get(), Tone::Attention),
+        ))
         .child(scroll().horizontal().w_full().child(lanes_row))
         .into_element()
 }
 
-fn stage_lane(
-    ui: Ui,
-    graph: Memo<GraphModel>,
-    lane: ReadSignal<LaneModel>,
-    col_idx: ReadSignal<usize>,
-    active_step_id: Memo<String>,
-) -> impl IntoElement {
-    let col_id = lane.with_untracked(|l| l.id.clone());
-    let is_backlog = col_id == "backlog";
-    let is_review = col_id == "review";
-    let remove_id = col_id.clone();
+fn drop_line(ctx: Ctx, lane: String, after: Option<String>) -> impl IntoElement {
+    when(
+        move || {
+            !ctx.drag.dragging.get().is_empty()
+                && ctx.drag.target.get() == Some((lane.clone(), after.clone()))
+        },
+        move || view().h(px(3.)).w_full().rounded(px(2.)).bg(ACCENT),
+    )
+}
 
+fn stage_lane(ctx: Ctx, lane: ReadSignal<LaneModel>) -> impl IntoElement {
+    let lane_id = lane.with_untracked(|l| l.id.clone());
+    let lane_ref = element_ref();
+    ctx.drag.lanes.with(|m| m.insert(lane_id.clone(), lane_ref));
+
+    let (id_rename, id_confirm, id_left, id_right, id_del, id_add) = (
+        lane_id.clone(),
+        lane_id.clone(),
+        lane_id.clone(),
+        lane_id.clone(),
+        lane_id.clone(),
+        lane_id.clone(),
+    );
+    let renaming = {
+        let id = lane_id.clone();
+        computed(move || ctx.renaming.get() == id)
+    };
     let header = view()
         .flex_row()
         .items_center()
@@ -972,6 +817,7 @@ fn stage_lane(
                 .items_center()
                 .gap_1p5()
                 .min_w(px(0.))
+                .flex_1()
                 .child(
                     view()
                         .px_1p5()
@@ -980,120 +826,221 @@ fn stage_lane(
                         .bg(SURFACE)
                         .border_1()
                         .border_color(BORDER)
-                        .child(muted(move || format!("{}", col_idx.get() + 1)).text_size(px(11.))),
+                        .child(
+                            muted(move || format!("{}", lane.with(|l| l.index) + 1))
+                                .text_size(px(11.)),
+                        ),
                 )
-                .child(
-                    label(move || lane.with(|l| l.name.clone()))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .truncate(),
-                )
-                .child(muted(format!("({col_id})")).text_size(px(11.))),
+                .child(when(
+                    move || !renaming.get(),
+                    move || {
+                        let id = id_rename.clone();
+                        press_target()
+                            .min_w(px(0.))
+                            .accessibility_label(|| Some("Rename stage".into()))
+                            .on_press(move |_: &()| {
+                                ctx.rename_text.set(lane.with_untracked(|l| l.name.clone()));
+                                ctx.renaming.set(id.clone());
+                            })
+                            .child(
+                                label(move || lane.with(|l| l.name.clone()))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .truncate(),
+                            )
+                    },
+                ))
+                .child(when(
+                    move || renaming.get(),
+                    move || {
+                        let id = id_confirm.clone();
+                        let commit = move || {
+                            let name = ctx.rename_text.get_untracked();
+                            let id = id.clone();
+                            ctx.renaming.set(String::new());
+                            ctx.edit(move |d| stages::rename_column(d, &id, &name));
+                        };
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(field(ctx.rename_text, "Stage name").w(px(130.)).on_submit({
+                                let commit = commit.clone();
+                                move |_: &str| commit()
+                            }))
+                            .child(compact_action("Save", Variant::Primary, move |_| commit()))
+                    },
+                )),
         )
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .gap_1()
+                .gap_0p5()
                 .child(when(
-                    move || lane.with(|l| l.has_custom_steps),
-                    move || badge("Custom"),
-                ))
-                .child(badge(move || {
-                    let count = lane.with(|l| l.nodes.len());
-                    format!("{count} step{}", if count == 1 { "" } else { "s" })
-                }))
-                .child(when(
-                    move || lane.with(|l| l.can_remove),
+                    move || lane.with(|l| l.index > 0),
                     move || {
-                        let target = remove_id.clone();
-                        compact_action("×", Variant::Quiet, move |_| {
-                            let remaining: Vec<_> = graph
-                                .with_untracked(|g| g.columns.clone())
-                                .into_iter()
-                                .filter(|c| c.id != target)
-                                .collect();
-                            update_doc(ui, |d| {
-                                d.columns = remaining;
-                            });
+                        let id = id_left.clone();
+                        compact_action("←", Variant::Quiet, move |_| {
+                            let id = id.clone();
+                            let to = lane.with_untracked(|l| l.index.saturating_sub(1));
+                            ctx.edit(move |d| stages::move_column(d, &id, to));
                         })
+                    },
+                ))
+                .child(when(
+                    move || lane.with(|l| !l.last),
+                    move || {
+                        let id = id_right.clone();
+                        compact_action("→", Variant::Quiet, move |_| {
+                            let id = id.clone();
+                            let to = lane.with_untracked(|l| l.index + 1);
+                            ctx.edit(move |d| stages::move_column(d, &id, to));
+                        })
+                    },
+                ))
+                .child(when(
+                    move || ctx.graph.with(|g| g.lanes.len() > 1),
+                    move || {
+                        let id = id_del.clone();
+                        let confirm_id = id.clone();
+                        compact_action(
+                            move || {
+                                if ctx.confirm_delete.get() == confirm_id {
+                                    "Delete stage?"
+                                } else {
+                                    "×"
+                                }
+                            },
+                            Variant::Quiet,
+                            move |_| {
+                                if ctx.confirm_delete.get_untracked() != id {
+                                    ctx.confirm_delete.set(id.clone());
+                                    return;
+                                }
+                                ctx.confirm_delete.set(String::new());
+                                let id = id.clone();
+                                ctx.edit(move |d| stages::remove_column(d, &id));
+                            },
+                        )
                     },
                 )),
         );
 
-    let lane_card = view()
-        .w(px(260.))
+    let lane_for_nodes = lane_id.clone();
+    let lane_for_end = lane_id.clone();
+    let body = view()
+        .gap_1p5()
         .flex_1()
-        .min_w(px(248.))
+        .child(when(
+            move || lane.with(|l| l.nodes.is_empty()),
+            move || {
+                view()
+                    .py_3()
+                    .px_3()
+                    .rounded(px(RADIUS))
+                    .border_1()
+                    .border_color(BORDER)
+                    .bg(BACKGROUND)
+                    .opacity(0.68)
+                    .items_center()
+                    .justify_center()
+                    .child(muted(move || {
+                        if lane.with(|l| l.entry) {
+                            "No steps yet"
+                        } else {
+                            "No automation · Cards wait here"
+                        }
+                    }))
+            },
+        ))
+        .child(each(
+            move || lane.with(|l| l.nodes.clone()),
+            |n| n.id.clone(),
+            move |node, _| step_card(ctx, node, lane_for_nodes.clone()),
+        ))
+        .child(dynamic(move || {
+            let last = lane.with(|l| l.nodes.last().map(|n| n.id.clone()));
+            drop_line(ctx, lane_for_end.clone(), last)
+        }));
+
+    let adding = {
+        let id = lane_id.clone();
+        computed(move || ctx.adding.get() == id)
+    };
+    let add_step = view()
+        .gap_1p5()
+        .child(compact_action(
+            move || if adding.get() { "Cancel" } else { "+ Add step" },
+            Variant::Quiet,
+            move |_| {
+                if adding.get_untracked() {
+                    ctx.adding.set(String::new());
+                } else {
+                    ctx.adding.set(id_add.clone());
+                }
+            },
+        ))
+        .child(when(
+            move || adding.get(),
+            move || {
+                let mut grid = view().flex_row().flex_wrap().gap_1();
+                for (kind, title) in stages::TEMPLATES {
+                    let kind = *kind;
+                    grid = grid.child(compact_action(*title, Variant::Secondary, move |_| {
+                        let lane_id = lane.with_untracked(|l| l.id.clone());
+                        let after = lane.with_untracked(|l| l.nodes.last().map(|n| n.id.clone()));
+                        ctx.adding.set(String::new());
+                        ctx.edit(move |d| {
+                            let step = stages::template(kind)
+                                .ok_or_else(|| anyhow::anyhow!("Unknown step type {kind}"))?;
+                            let after = insertion_anchor(d, &lane_id, after, "");
+                            let id = stages::insert_step(d, &lane_id, after.as_deref(), step)?;
+                            ctx.ui.workflows.selected_step.set(id);
+                            Ok(())
+                        });
+                    }));
+                }
+                grid
+            },
+        ));
+
+    let exit_row = exit_controls(ctx, lane);
+
+    let lane_card = view()
+        .element_ref(&lane_ref)
+        .w(px(272.))
+        .flex_1()
+        .min_w(px(260.))
         .p_3()
         .gap_2p5()
         .rounded(px(RADIUS))
         .bg(INSET)
         .border_1()
-        .border_color(BORDER)
+        .border_color(move || {
+            let id = lane.with(|l| l.id.clone());
+            if ctx
+                .drag
+                .target
+                .with(|t| t.as_ref().is_some_and(|(l, _)| *l == id))
+            {
+                ACCENT
+            } else {
+                BORDER
+            }
+        })
         .child(header)
-        .child(when(
-            move || is_backlog,
-            move || backlog_stage_controls(ui, graph),
-        ))
-        .child(when(
-            move || is_review,
-            move || review_stage_controls(ui, graph),
-        ))
-        .child(
-            view()
-                .gap_1p5()
-                .flex_1()
-                .child(when(
-                    move || lane.with(|l| l.nodes.is_empty()),
-                    move || {
-                        view()
-                            .py_3p5()
-                            .px_3()
-                            .rounded(px(RADIUS))
-                            .border_1()
-                            .border_color(BORDER)
-                            .bg(BACKGROUND)
-                            .opacity(0.68)
-                            .items_center()
-                            .justify_center()
-                            .child(muted(if is_backlog {
-                                "Quiet intake · Cards stay in Backlog"
-                            } else {
-                                "No automated steps in this stage"
-                            }))
-                    },
-                ))
-                .child(each(
-                    move || lane.with(|l| l.nodes.clone()),
-                    |node| node.id.clone(),
-                    move |node, _| {
-                        view()
-                            .w_full()
-                            .gap_1()
-                            .child(when(
-                                move || node.with(|n| n.connector.is_some()),
-                                move || {
-                                    view().items_center().py_0p5().child(
-                                        muted(move || {
-                                            node.with(|n| n.connector.clone().unwrap_or_default())
-                                        })
-                                        .text_size(px(11.)),
-                                    )
-                                },
-                            ))
-                            .child(step_node_card(ui, node, active_step_id))
-                    },
-                )),
-        );
+        .child(body)
+        .child(add_step)
+        .child(exit_row);
 
     view()
         .flex_row()
         .items_stretch()
         .gap_2p5()
         .flex_1()
-        .min_w(px(256.))
+        .min_w(px(268.))
         .child(when(
-            move || col_idx.get() > 0,
+            move || lane.with(|l| l.index > 0),
             move || {
                 view()
                     .justify_center()
@@ -1104,884 +1051,666 @@ fn stage_lane(
         .child(lane_card)
 }
 
-fn backlog_stage_controls(ui: Ui, graph: Memo<GraphModel>) -> View {
+fn exit_controls(ctx: Ctx, lane: ReadSignal<LaneModel>) -> impl IntoElement {
+    let pick = move |exit: Exit| {
+        let id = lane.with_untracked(|l| l.id.clone());
+        ctx.edit(move |d| stages::set_exit(d, &id, exit));
+    };
     view()
-        .p_2()
-        .gap_1p5()
-        .rounded(px(RADIUS))
-        .bg(SURFACE)
-        .border_1()
+        .gap_1()
+        .pt_1p5()
+        .border_t_1()
         .border_color(BORDER)
         .child(
             view()
                 .flex_row()
-                .flex_wrap()
                 .items_center()
-                .justify_between()
                 .gap_1p5()
-                .child(muted("New Card analyze"))
+                .child(icon(Icon::Forward).w(px(12.)).h(px(12.)).opacity(0.7))
+                .child(muted("Then").text_size(px(12.)))
                 .child(
-                    segmented()
-                        .child(compact_segment(
-                            "Off",
-                            None,
-                            move || graph.with(|g| !g.options.backlog_analyze),
-                            move |_| {
-                                let auto_dev =
-                                    graph.with_untracked(|g| g.options.backlog_auto_develop);
-                                update_doc(ui, |d| source::set_backlog_options(d, false, auto_dev));
-                            },
-                        ))
-                        .child(compact_segment(
-                            "Auto",
-                            None,
-                            move || graph.with(|g| g.options.backlog_analyze),
-                            move |_| {
-                                let auto_dev =
-                                    graph.with_untracked(|g| g.options.backlog_auto_develop);
-                                update_doc(ui, |d| source::set_backlog_options(d, true, auto_dev));
-                            },
-                        )),
+                    label(move || lane.with(|l| l.exit_label.clone()))
+                        .text_size(px(12.))
+                        .truncate(),
                 ),
         )
         .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_1p5()
-                .child(muted("Auto-start Develop"))
-                .child(
-                    segmented()
-                        .child(compact_segment(
-                            "Stay",
+            segmented()
+                .child(when(
+                    move || lane.with(|l| !l.last),
+                    move || {
+                        compact_segment(
+                            "Next stage",
                             None,
-                            move || graph.with(|g| !g.options.backlog_auto_develop),
-                            move |_| {
-                                let analyze = graph.with_untracked(|g| g.options.backlog_analyze);
-                                update_doc(ui, |d| source::set_backlog_options(d, analyze, false));
-                            },
-                        ))
-                        .child(compact_segment(
-                            "Auto-Develop",
+                            move || lane.with(|l| l.exit == Exit::Next),
+                            move |_| pick(Exit::Next),
+                        )
+                    },
+                ))
+                .child(when(
+                    move || lane.with(|l| matches!(l.exit, Exit::Column(_))),
+                    move || {
+                        compact_segment(
+                            lane.with_untracked(|l| l.exit_label.clone()),
                             None,
-                            move || graph.with(|g| g.options.backlog_auto_develop),
-                            move |_| {
-                                let analyze = graph.with_untracked(|g| g.options.backlog_analyze);
-                                update_doc(ui, |d| source::set_backlog_options(d, analyze, true));
-                            },
-                        )),
-                ),
+                            || true,
+                            |_| {},
+                        )
+                    },
+                ))
+                .child(compact_segment(
+                    "Stay",
+                    None,
+                    move || lane.with(|l| l.exit == Exit::Stay),
+                    move |_| pick(Exit::Stay),
+                )),
         )
 }
 
-fn review_stage_controls(ui: Ui, graph: Memo<GraphModel>) -> View {
-    view()
-        .p_2()
-        .gap_1p5()
-        .rounded(px(RADIUS))
-        .bg(SURFACE)
-        .border_1()
-        .border_color(BORDER)
+fn step_card(ctx: Ctx, node: ReadSignal<StepModel>, lane_id: String) -> impl IntoElement {
+    let state = ctx.ui.workflows;
+    let id = node.with_untracked(|n| n.id.clone());
+    let reference = element_ref();
+    ctx.drag
+        .cards
+        .with(|m| m.insert(id.clone(), (lane_id.clone(), reference)));
+    let x = animated_value(0.);
+    let y = animated_value(0.);
+    let expanded = {
+        let id = id.clone();
+        computed(move || state.selected_step.get() == id)
+    };
+    let lifted = {
+        let id = id.clone();
+        computed(move || ctx.drag.dragging.get() == id)
+    };
+    let (id_press, id_drag, id_toggle) = (id.clone(), id.clone(), id.clone());
+    let prev = node.with_untracked(|n| n.prev.clone());
+
+    let handle = view()
+        .px_0p5()
+        .py_1()
+        .rounded(px(4.))
+        .cursor_pointer()
+        .hover(|s| s.bg(INSET))
+        .label("Drag to reorder or move to another stage")
+        .child(icon(Icon::Grip).w(px(12.)).h(px(12.)).opacity(0.7))
+        .pan_values(Some(&x), Some(&y))
+        .on_press_down(move |e: &PressEvent| ctx.drag.press(e, x, y))
+        .on_pan_start(move |_: &PanEvent| ctx.drag.start(id_drag.clone(), x, y))
+        .on_pan_end(move |_: &PanEvent| ctx.drag.end(ctx, x, y));
+
+    let title_button = press_target()
+        .flex_1()
+        .min_w(px(0.))
+        .accessibility_label(move || Some(node.with(|n| format!("Configure {}", n.title)).into()))
+        .on_press(move |_: &()| {
+            if expanded.get_untracked() {
+                state.selected_step.set(String::new());
+            } else {
+                state.selected_step.set(id_press.clone());
+            }
+        })
         .child(
             view()
                 .flex_row()
-                .flex_wrap()
                 .items_center()
-                .justify_between()
                 .gap_1p5()
-                .child(muted("Review delivery"))
+                .min_w(px(0.))
                 .child(
-                    segmented()
-                        .child(compact_segment(
-                            "Queue Merge",
-                            None,
-                            move || graph.with(|g| !g.options.review_manual),
-                            move |_| {
-                                update_doc(ui, |d| source::set_review_manual(d, false));
-                            },
-                        ))
-                        .child(compact_segment(
-                            "Manual",
-                            None,
-                            move || graph.with(|g| g.options.review_manual),
-                            move |_| {
-                                update_doc(ui, |d| source::set_review_manual(d, true));
-                            },
-                        )),
-                ),
-        )
-        .child(when(
-            move || graph.with(|g| !g.options.review_manual),
-            move || {
-                view()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap_1p5()
-                    .child(muted("Upstream"))
-                    .child(
-                        segmented()
-                            .child(compact_segment(
-                                "Sync",
-                                None,
-                                move || graph.with(|g| g.options.sync_upstream),
-                                move |_| {
-                                    update_doc(ui, |d| source::set_sync_upstream(d, true));
-                                },
-                            ))
-                            .child(compact_segment(
-                                "Local Only",
-                                None,
-                                move || graph.with(|g| !g.options.sync_upstream),
-                                move |_| {
-                                    update_doc(ui, |d| source::set_sync_upstream(d, false));
-                                },
-                            )),
-                    )
-            },
-        ))
-        .child(
-            view()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_1p5()
-                .child(muted("External PR"))
+                    icon_tinted(node.with_untracked(|n| n.icon), move || {
+                        node.with(|n| n.tint.color())
+                    })
+                    .w(px(14.))
+                    .h(px(14.)),
+                )
                 .child(
-                    segmented()
-                        .child(compact_segment(
-                            "Human",
-                            None,
-                            move || graph.with(|g| g.options.external_pr == "require_review"),
-                            move |_| {
-                                update_doc(ui, |d| {
-                                    source::set_external_pr_rule(d, "require_review")
-                                });
-                            },
-                        ))
-                        .child(compact_segment(
-                            "Same",
-                            None,
-                            move || graph.with(|g| g.options.external_pr == "same"),
-                            move |_| {
-                                update_doc(ui, |d| source::set_external_pr_rule(d, "same"));
-                            },
-                        ))
-                        .child(compact_segment(
-                            "Manual",
-                            None,
-                            move || graph.with(|g| g.options.external_pr == "manual_only"),
-                            move |_| {
-                                update_doc(ui, |d| source::set_external_pr_rule(d, "manual_only"));
-                            },
-                        )),
-                ),
-        )
-}
+                    label(move || node.with(|n| n.title.clone()))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .truncate()
+                        .min_w(px(0.))
+                        .flex_1(),
+                )
+                .child(badge(move || node.with(|n| n.badge.clone()))),
+        );
 
-fn step_node_card(
-    ui: Ui,
-    node: ReadSignal<NodeModel>,
-    active_step_id: Memo<String>,
-) -> impl IntoElement {
-    let state = ui.workflows;
-    let step_id = node.with_untracked(|n| n.id.clone());
-    let click_id = step_id.clone();
-    let sel_id = step_id.clone();
-    let border_id = step_id.clone();
-    let initial_icon = node.with_untracked(|n| n.icon);
+    let toggle = compact_action(
+        move || {
+            if node.with(|n| n.enabled) {
+                "On"
+            } else {
+                "Off"
+            }
+        },
+        Variant::Quiet,
+        move |_| {
+            let id = id_toggle.clone();
+            let enabled = !node.with_untracked(|n| n.enabled);
+            ctx.edit(move |d| stages::set_step_enabled(d, &id, enabled));
+        },
+    );
 
-    nsh_base::button()
+    let card = view()
+        .element_ref(&reference)
         .w_full()
         .p_2p5()
         .gap_1p5()
         .rounded(px(RADIUS))
-        .bg(move || {
-            if active_step_id.get() == sel_id {
-                SELECTED
-            } else {
-                SURFACE
-            }
-        })
+        .bg(move || if expanded.get() { SELECTED } else { SURFACE })
         .border_1()
         .border_color(move || {
-            if active_step_id.get() == border_id {
+            if expanded.get() || lifted.get() {
                 ACCENT
             } else {
                 BORDER
             }
         })
-        .hover(|s| s.border_color(ACCENT).bg(CARD_HOVER))
-        .on_press(move |_: &()| state.selected_step.set(click_id.clone()))
+        .opacity(move || {
+            if lifted.get() {
+                0.85_f32
+            } else if node.with(|n| n.enabled) {
+                1.0
+            } else {
+                0.55
+            }
+        })
+        .bind_translate_x(&x)
+        .bind_translate_y(&y)
         .child(
             view()
                 .w_full()
                 .flex_row()
                 .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .min_w(px(0.))
-                        .flex_1()
-                        .child(
-                            icon_tinted(initial_icon, move || node.with(|n| n.tone.color()))
-                                .w(px(14.))
-                                .h(px(14.)),
-                        )
-                        .child(
-                            label(move || node.with(|n| n.title.clone()))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .truncate()
-                                .min_w(px(0.)),
-                        ),
-                )
-                .child(badge(move || node.with(|n| n.kind_badge.clone()))),
+                .gap_1()
+                .child(handle)
+                .child(title_button)
+                .child(toggle),
         )
         .child(
-            muted(move || node.with(|n| n.detail_line.clone()))
-                .text_size(px(12.))
-                .truncate()
-                .w_full()
-                .min_w(px(0.)),
+            muted(move || {
+                node.with(|n| {
+                    if n.enabled {
+                        n.summary.clone()
+                    } else {
+                        format!("Disabled · skipped · {}", n.summary)
+                    }
+                })
+            })
+            .text_size(px(12.))
+            .truncate()
+            .w_full()
+            .min_w(px(0.)),
         )
         .child(when(
             move || node.with(|n| !n.pills.is_empty()),
             move || {
-                view()
-                    .flex_row()
-                    .flex_wrap()
-                    .items_center()
-                    .gap_1()
-                    .child(each(
-                        move || node.with(|n| n.pills.clone()),
-                        |p| p.key.clone(),
-                        move |pill, _| {
-                            view()
-                                .px_1p5()
-                                .py_0p5()
-                                .rounded(px(4.))
-                                .bg(INSET)
-                                .border_1()
-                                .border_color(move || match pill.with(|p| p.tone) {
-                                    PillTone::Muted => BORDER,
-                                    PillTone::Success => SUCCESS,
-                                    PillTone::Attention => ATTENTION,
-                                })
-                                .child(
-                                    label(move || pill.with(|p| p.text.clone()))
-                                        .text_size(px(11.))
-                                        .text_color(move || match pill.with(|p| p.tone) {
-                                            PillTone::Muted => MUTED,
-                                            PillTone::Success => SUCCESS,
-                                            PillTone::Attention => ATTENTION,
-                                        }),
-                                )
-                        },
-                    ))
+                view().flex_row().flex_wrap().gap_1().child(each(
+                    move || node.with(|n| n.pills.clone()),
+                    |p| p.clone(),
+                    move |pill, _| {
+                        view()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded(px(4.))
+                            .bg(INSET)
+                            .border_1()
+                            .border_color(BORDER)
+                            .child(
+                                label(move || pill.get())
+                                    .text_size(px(11.))
+                                    .text_color(MUTED),
+                            )
+                    },
+                ))
             },
         ))
+        .child(when(
+            move || expanded.get(),
+            move || step_settings(ctx, node),
+        ));
+
+    view()
+        .w_full()
+        .gap_1()
+        .child(drop_line(ctx, lane_id, prev))
+        .child(when(
+            move || node.with(|n| n.branch.is_some()),
+            move || {
+                muted(move || node.with(|n| format!("{} ↓", n.branch.clone().unwrap_or_default())))
+                    .text_size(px(11.))
+            },
+        ))
+        .child(card)
 }
 
-fn step_inspector(
-    ui: Ui,
-    graph: Memo<GraphModel>,
-    active_step: Memo<Option<StepInspectorModel>>,
-) -> AnyElement {
-    let state = ui.workflows;
-    let prompt_sig = signal(String::new());
-    let branch_sig = signal(String::new());
-    let gate_title_sig = signal(String::new());
-    let syncing = stored(false);
-    let bound_step_id = stored(String::new());
+fn setting_row(title: &'static str, control: impl IntoElement) -> View {
+    view()
+        .flex_row()
+        .flex_wrap()
+        .items_center()
+        .gap_1p5()
+        .child(muted(title).text_size(px(12.)))
+        .child(control)
+}
 
-    let prompt_editor = canban_ui_kit::markdown::MarkdownInput::new();
-    prompt_editor.restore_after(
-        computed(move || state.agent.get() || state.history_open.get() || ui.quick_open.get()),
-        computed(move || ui.page.get() == "workflows" && state.mode.get() != "yaml"),
-    );
-
-    // Sync bound editor signals whenever active step changes or external YAML changes.
+/// Text input bound to one step value; commits on every edit after mount.
+fn text_setting(
+    ctx: Ctx,
+    id: String,
+    initial: String,
+    placeholder: &'static str,
+    apply: impl Fn(Ctx, &str, String) + Copy + 'static,
+) -> impl IntoElement {
+    let value = signal(initial);
+    let mounted = stored(false);
     effect(move || {
-        let Some(step) = active_step.get() else {
-            bound_step_id.replace(String::new());
+        let v = value.get();
+        if !mounted.replace(true) {
             return;
-        };
-        let step_changed = bound_step_id.get() != step.id;
-        bound_step_id.replace(step.id.clone());
-        syncing.replace(true);
-        if (step_changed || !prompt_editor.focused.get_untracked())
-            && prompt_sig.get_untracked() != step.instruction
-        {
-            prompt_sig.set(step.instruction);
         }
-        if (step_changed || branch_sig.get_untracked().trim() != step.target_branch)
-            && branch_sig.get_untracked() != step.target_branch
-        {
-            branch_sig.set(step.target_branch);
-        }
-        if gate_title_sig.get_untracked() != step.gate_title {
-            gate_title_sig.set(step.gate_title);
-        }
-        syncing.replace(false);
+        apply(ctx, &id, v);
     });
+    field(value, placeholder).flex_1().min_w(px(140.))
+}
 
-    // Incremental in-memory updates from bound fields (never remounts the inspector).
-    effect(move || {
-        let val = prompt_sig.get();
-        if syncing.get() {
-            return;
-        }
-        let Some(step) = active_step.get_untracked() else {
-            return;
-        };
-        if step.uses == "agent" && val != step.instruction {
-            let target_id = step.id;
-            update_doc(ui, |d| {
-                if let Some(s) = d.steps.iter_mut().find(|s| s.id == target_id) {
-                    s.with.insert("instruction".into(), json!(val));
-                }
-            });
-        }
-    });
+fn choice<T: Clone + PartialEq + 'static>(
+    options: Vec<(String, T)>,
+    current: impl Fn() -> T + Copy + 'static,
+    pick: impl Fn(T) + Clone + 'static,
+) -> impl IntoElement {
+    let mut seg = segmented();
+    for (title, value) in options {
+        let (sel, chosen) = (value.clone(), value);
+        let pick = pick.clone();
+        seg = seg.child(compact_segment(
+            title,
+            None,
+            move || current() == sel,
+            move |_| pick(chosen.clone()),
+        ));
+    }
+    seg
+}
 
-    effect(move || {
-        let val = branch_sig.get();
-        if syncing.get() {
-            return;
-        }
-        let Some(step) = active_step.get_untracked() else {
-            return;
-        };
-        let trimmed = val.trim().to_owned();
-        if step.uses == "deliver" && trimmed != step.target_branch {
-            let target_id = step.id;
-            update_doc(ui, |d| {
-                if let Some(s) = d.steps.iter_mut().find(|s| s.id == target_id) {
-                    if trimmed.is_empty() {
-                        s.with.remove("target_branch");
-                    } else {
-                        s.with.insert("target_branch".into(), json!(trimmed));
-                    }
-                }
-            });
-        }
-    });
+fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
+    let ui = ctx.ui;
+    let model = node.get_untracked();
+    let id = model.id.clone();
+    let mut form = view().gap_2().pt_1p5().border_t_1().border_color(BORDER);
 
-    effect(move || {
-        let val = gate_title_sig.get();
-        if syncing.get() {
-            return;
-        }
-        let Some(step) = active_step.get_untracked() else {
-            return;
-        };
-        if step.uses == "approval" && val != step.gate_title {
-            let target_id = step.id;
-            update_doc(ui, |d| {
-                if let Some(s) = d.steps.iter_mut().find(|s| s.id == target_id) {
-                    s.with.insert("title".into(), json!(val));
-                }
-            });
-        }
-    });
+    form = form.child(setting_row(
+        "Name",
+        text_setting(
+            ctx,
+            id.clone(),
+            model.name.clone(),
+            "Display name",
+            |ctx, id, v| {
+                let id = id.to_owned();
+                ctx.edit(move |d| stages::set_step_name(d, &id, Some(v)));
+            },
+        ),
+    ));
 
-    let active_uses = computed(move || {
-        active_step.with(|s| s.as_ref().map(|st| st.uses.clone()).unwrap_or_default())
-    });
-
-    let rework_selector = move || {
-        view()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .child(muted("Rework target:"))
-            .child(
-                segmented()
-                    .child(compact_segment(
-                        "None",
-                        None,
-                        move || {
-                            active_step
-                                .with(|s| s.as_ref().is_none_or(|st| st.rework_target.is_empty()))
-                        },
-                        move |_| {
-                            let Some(step) = active_step.get_untracked() else {
-                                return;
-                            };
-                            update_doc(ui, |d| {
-                                if let Some(s) = d.steps.iter_mut().find(|s| s.id == step.id) {
-                                    s.on_changes_requested = None;
-                                }
+    let rework = {
+        let id = id.clone();
+        move || {
+            let id = id.clone();
+            dynamic(move || {
+                let targets = ctx.graph.with(|g| g.rework_targets.clone());
+                let mut options = vec![("None".to_owned(), String::new())];
+                options.extend(targets.into_iter().map(|(tid, title)| (title, tid)));
+                let id = id.clone();
+                setting_row(
+                    "Rework / conflicts →",
+                    choice(
+                        options,
+                        move || node.with(|n| n.rework.clone()),
+                        move |t: String| {
+                            let id = id.clone();
+                            ctx.edit(move |d| {
+                                stages::set_rework(d, &id, Some(t).filter(|t| !t.is_empty()))
                             });
                         },
-                    ))
-                    .child(each(
-                        move || graph.with(|g| g.agent_targets.clone()),
-                        |(id, _)| id.clone(),
-                        move |target, _| {
-                            let (aid, albl) = target.get_untracked();
-                            let sel_id = aid.clone();
-                            let click_id = aid;
-                            compact_segment(
-                                albl,
-                                None,
-                                move || {
-                                    active_step.with(|s| {
-                                        s.as_ref().is_some_and(|st| st.rework_target == sel_id)
-                                    })
-                                },
-                                move |_| {
-                                    let Some(step) = active_step.get_untracked() else {
-                                        return;
-                                    };
-                                    let chosen = click_id.clone();
-                                    update_doc(ui, |d| {
-                                        if let Some(s) =
-                                            d.steps.iter_mut().find(|s| s.id == step.id)
-                                        {
-                                            s.on_changes_requested = Some(chosen);
-                                        }
-                                    });
-                                },
-                            )
-                        },
-                    )),
-            )
+                    ),
+                )
+            })
+        }
     };
 
-    when(
-        move || active_step.with(|s| s.is_some()),
-        move || {
-            panel()
-                .gap_3()
-                .border_1()
-                .border_color(BORDER)
+    match model.uses.as_str() {
+        "agent" => {
+            let pid = id.clone();
+            form = form
+                .child(dynamic(move || {
+                    let profiles = ui.profiles.get();
+                    let mut seg = view().flex_row().flex_wrap().gap_1();
+                    for prof in profiles {
+                        let (sel, chosen) = (prof.id.clone(), prof.id.clone());
+                        let (mark, _, _) = crate::profiles::effective_provider(
+                            &prof,
+                            ui.current_project().as_ref(),
+                        );
+                        let pid = pid.clone();
+                        seg = seg.child(compact_segment(
+                            format!("@{}", prof.id),
+                            Some(mark),
+                            move || node.with(|n| n.profile == sel),
+                            move |_| ctx.set_with(&pid, "profile", Some(json!(chosen.clone()))),
+                        ));
+                    }
+                    view()
+                        .gap_1()
+                        .child(muted("Agent").text_size(px(12.)))
+                        .child(seg)
+                }))
                 .child(
+                    view().p_2().rounded(px(RADIUS)).bg(INSET).child(
+                        muted(move || {
+                            node.with(|n| {
+                                n.instruction.lines().take(4).collect::<Vec<_>>().join("\n")
+                            })
+                        })
+                        .text_size(px(12.)),
+                    ),
+                )
+                .child({
+                    let (open_id, reset_id) = (id.clone(), id.clone());
                     view()
                         .flex_row()
                         .flex_wrap()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(
-                            view()
-                                .flex_row()
-                                .flex_wrap()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    label(move || {
-                                        active_step.with(|s| match s {
-                                            Some(st) => {
-                                                format!("Step Inspector · {} ({})", st.title, st.id)
-                                            }
-                                            None => "Step Inspector".into(),
-                                        })
-                                    })
-                                    .font_weight(FontWeight::SEMIBOLD),
-                                )
-                                .child(badge(move || {
-                                    active_step.with(|s| match s {
-                                        Some(st) => format!("uses: {}", st.uses),
-                                        None => String::new(),
-                                    })
-                                }))
-                                .child(when(
-                                    move || {
-                                        active_step.with(|s| {
-                                            s.as_ref().is_some_and(|st| {
-                                                st.uses == "agent" && st.is_default_prompt
-                                            })
-                                        })
-                                    },
-                                    move || status("Default prompt", Tone::Neutral),
-                                ))
-                                .child(when(
-                                    move || {
-                                        active_step.with(|s| {
-                                            s.as_ref().is_some_and(|st| {
-                                                st.uses == "agent" && !st.is_default_prompt
-                                            })
-                                        })
-                                    },
-                                    move || status("Customized prompt", Tone::Info),
-                                ))
-                                .child(when(
-                                    move || active_uses.get() != "condition",
-                                    move || {
-                                        muted(move || {
-                                            active_step.with(|s| match s {
-                                                Some(st) => format!("Next → {}", st.next_desc),
-                                                None => String::new(),
-                                            })
-                                        })
-                                    },
-                                )),
-                        )
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(when(
-                                    move || {
-                                        active_step.with(|s| {
-                                            s.as_ref().is_some_and(|st| {
-                                                st.uses == "agent" && !st.is_default_prompt
-                                            })
-                                        })
-                                    },
-                                    move || {
-                                        compact_action(
-                                            "Reset to default prompt",
-                                            Variant::Secondary,
-                                            move |_| {
-                                                let Some(step) = active_step.get_untracked() else {
-                                                    return;
-                                                };
-                                                let def = default_step_prompt(
-                                                    &step.id,
-                                                    Some(&step.profile),
-                                                )
-                                                .to_owned();
-                                                syncing.replace(true);
-                                                prompt_sig.set(def.clone());
-                                                syncing.replace(false);
-                                                let target = step.id;
-                                                update_doc(ui, |d| {
-                                                    if let Some(s) =
-                                                        d.steps.iter_mut().find(|s| s.id == target)
-                                                    {
-                                                        s.with
-                                                            .insert("instruction".into(), json!(def));
-                                                    }
-                                                });
-                                            },
-                                        )
-                                    },
-                                ))
-                                .child(compact_action(
-                                    "Edit in YAML Source",
-                                    Variant::Secondary,
-                                    move |_| state.mode.set("yaml".into()),
-                                )),
+                        .gap_1()
+                        .child(compact_action(
+                            "Edit prompt…",
+                            Variant::Primary,
+                            move |_| ctx.prompt.set(open_id.clone()),
+                        ))
+                        .child(when(
+                            move || node.with(|n| !n.default_prompt),
+                            move || {
+                                let reset_id = reset_id.clone();
+                                compact_action("Reset to default", Variant::Secondary, move |_| {
+                                    ctx.set_with(&reset_id, "instruction", None);
+                                })
+                            },
+                        ))
+                        .child(when(
+                            move || node.with(|n| n.default_prompt),
+                            move || status("Default prompt", Tone::Neutral),
+                        ))
+                });
+        }
+        "admit" => {
+            let (slot_id, ready_id) = (id.clone(), id.clone());
+            form = form
+                .child(setting_row(
+                    "Wait for free Agent",
+                    choice(
+                        vec![("On".into(), true), ("Off".into(), false)],
+                        move || node.with(|n| n.agent_slot),
+                        move |on| {
+                            let id = slot_id.clone();
+                            let ready = node.with_untracked(|n| n.max_ready);
+                            ctx.edit(move |d| {
+                                stages::set_step_with(
+                                    d,
+                                    &id,
+                                    "agent_slot",
+                                    (!on).then_some(json!(false)),
+                                )?;
+                                // A gate needs at least one condition.
+                                if !on && ready.is_none() {
+                                    stages::set_step_with(
+                                        d,
+                                        &id,
+                                        "max_ready",
+                                        Some(json!(source::DEFAULT_BACKLOG_MAX_READY)),
+                                    )?;
+                                }
+                                Ok(())
+                            });
+                        },
+                    ),
+                ))
+                .child(dynamic(move || {
+                    let current = node.with(|n| n.max_ready);
+                    let mut values = vec![1u32, 2, 3, 5];
+                    if let Some(k) = current
+                        && !values.contains(&k)
+                    {
+                        values.push(k);
+                        values.sort_unstable();
+                    }
+                    let mut options = vec![("Off".to_owned(), None)];
+                    options.extend(values.into_iter().map(|k| (k.to_string(), Some(k))));
+                    let id = ready_id.clone();
+                    setting_row(
+                        "Keep ≤K ready in stage",
+                        choice(
+                            options,
+                            move || node.with(|n| n.max_ready),
+                            move |k: Option<u32>| {
+                                let id = id.clone();
+                                let slot = node.with_untracked(|n| n.agent_slot);
+                                ctx.edit(move |d| {
+                                    stages::set_step_with(
+                                        d,
+                                        &id,
+                                        "max_ready",
+                                        k.map(|k| json!(k)),
+                                    )?;
+                                    if k.is_none() && !slot {
+                                        stages::set_step_with(d, &id, "agent_slot", None)?;
+                                    }
+                                    Ok(())
+                                });
+                            },
                         ),
+                    )
+                }));
+        }
+        "deliver" => {
+            let (sync_id, conflict_id) = (id.clone(), id.clone());
+            form = form
+                .child(setting_row(
+                    "Upstream",
+                    choice(
+                        vec![("Merge & sync".into(), true), ("Local only".into(), false)],
+                        move || node.with(|n| n.sync_upstream),
+                        move |on| ctx.set_with(&sync_id, "sync_upstream", Some(json!(on))),
+                    ),
+                ))
+                .child(setting_row(
+                    "Target branch",
+                    text_setting(
+                        ctx,
+                        id.clone(),
+                        model.target_branch.clone(),
+                        "Project default (e.g. main)",
+                        |ctx, id, v| {
+                            let v = v.trim().to_owned();
+                            ctx.set_with(id, "target_branch", (!v.is_empty()).then(|| json!(v)));
+                        },
+                    ),
+                ))
+                .child(setting_row(
+                    "Conflicts → Agent",
+                    choice(
+                        vec![
+                            ("Off".into(), 0u32),
+                            ("×1".into(), 1),
+                            ("×3".into(), 3),
+                            ("×5".into(), 5),
+                        ],
+                        move || node.with(|n| n.max_conflict),
+                        move |k| {
+                            ctx.set_with(
+                                &conflict_id,
+                                "max_conflict_attempts",
+                                (k != canban_types::DEFAULT_MAX_CONFLICT_ATTEMPTS)
+                                    .then(|| json!(k)),
+                            )
+                        },
+                    ),
+                ))
+                .child(rework());
+        }
+        "approval" => {
+            form = form
+                .child(setting_row(
+                    "Message",
+                    text_setting(
+                        ctx,
+                        id.clone(),
+                        model.gate_title.clone(),
+                        "Human approval is required",
+                        |ctx, id, v| ctx.set_with(id, "title", Some(json!(v))),
+                    ),
+                ))
+                .child(rework());
+        }
+        "notify" => {
+            form = form.child(setting_row(
+                "Message",
+                text_setting(
+                    ctx,
+                    id.clone(),
+                    model.message.clone(),
+                    "Notification text",
+                    |ctx, id, v| ctx.set_with(id, "message", Some(json!(v))),
+                ),
+            ));
+        }
+        "card.move" => {
+            let mid = id.clone();
+            form = form.child(dynamic(move || {
+                let mut options = vec![("Next stage".to_owned(), NEXT_COLUMN.to_owned())];
+                options.extend(
+                    ctx.graph
+                        .with(|g| g.columns.clone())
+                        .into_iter()
+                        .map(|c| (c.name, c.id)),
+                );
+                let mid = mid.clone();
+                setting_row(
+                    "Move to",
+                    choice(
+                        options,
+                        move || node.with(|n| n.move_column.clone()),
+                        move |c: String| ctx.set_with(&mid, "column", Some(json!(c))),
+                    ),
                 )
-                .child(when(
-                    move || active_uses.get() == "agent",
-                    move || {
-                        view()
-                            .gap_2p5()
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(muted("Agent Profile:"))
-                                    .child(segmented().child(each(
-                                        move || {
-                                            let mut list = ui.profiles.get();
-                                            if let Some(cur) =
-                                                active_step.with(|s| s.as_ref().map(|st| st.profile.clone()))
-                                                && !cur.is_empty()
-                                                && !list.iter().any(|p| p.id == cur)
-                                            {
-                                                list.push(canban_types::Profile {
-                                                    id: cur,
-                                                    enabled: false,
-                                                    argv: Some(vec!["disabled".into()]),
-                                                    ..Default::default()
-                                                });
-                                            }
-                                            list
-                                        },
-                                        |p| p.id.clone(),
-                                        move |p, _| {
-                                            let prof = p.get_untracked();
-                                            let pid = prof.id.clone();
-                                            let sel_pid = pid.clone();
-                                            let click_pid = pid.clone();
-                                            let label_str = if !prof.enabled {
-                                                format!("@{pid} (disabled)")
-                                            } else {
-                                                format!("@{pid}")
-                                            };
-                                            let (mark, _, _) = crate::profiles::effective_provider(
-                                                &prof,
-                                                ui.current_project().as_ref(),
-                                            );
-                                            compact_segment(
-                                                label_str,
-                                                Some(mark),
-                                                move || {
-                                                    active_step.with(|s| {
-                                                        s.as_ref()
-                                                            .is_some_and(|st| st.profile == sel_pid)
-                                                    })
-                                                },
-                                                move |_| {
-                                                    let Some(step) = active_step.get_untracked()
-                                                    else {
-                                                        return;
-                                                    };
-                                                    let chosen = click_pid.clone();
-                                                    update_doc(ui, |d| {
-                                                        if let Some(s) = d
-                                                            .steps
-                                                            .iter_mut()
-                                                            .find(|s| s.id == step.id)
-                                                        {
-                                                            s.with.insert(
-                                                                "profile".into(),
-                                                                json!(chosen),
-                                                            );
-                                                        }
-                                                    });
-                                                },
-                                            )
-                                        },
-                                    )))
-                                    .child(dynamic(move || {
-                                        let Some(step) = active_step.get() else {
-                                            return view().into_element();
-                                        };
-                                        let proj = ui.current_project();
-                                        let Some(prof) = ui
-                                            .all_profiles
-                                            .with(|all| all.iter().find(|p| p.id == step.profile).cloned())
-                                        else {
-                                            return view().into_element();
-                                        };
-                                        if !prof.enabled {
-                                            return status("Disabled in Settings", Tone::Attention)
-                                                .into_element();
-                                        }
-                                        let (prov, overridden) =
-                                            crate::profiles::effective_provider_name(&prof, proj.as_ref());
-                                        if overridden {
-                                            status(
-                                                format!("Runs via {prov} (Project override)"),
-                                                Tone::Info,
-                                            )
-                                            .into_element()
-                                        } else if prof.is_identity() {
-                                            muted(format!("→ {prov}")).text_size(px(11.5)).into_element()
-                                        } else {
-                                            view().into_element()
-                                        }
-                                    })),
+            }));
+        }
+        "condition" => {
+            form = form.child(muted(move || {
+                node.with(|n| format!("When {} · branches are edited in YAML Source", n.condition))
+            }));
+        }
+        _ => {}
+    }
+
+    let del_id = id.clone();
+    form.child(
+        view()
+            .flex_row()
+            .flex_wrap()
+            .gap_1()
+            .child(compact_action("Delete step", Variant::Danger, move |_| {
+                let id = del_id.clone();
+                ui.workflows.selected_step.set(String::new());
+                ctx.edit(move |d| stages::remove_step(d, &id).map(|_| ()));
+            }))
+            .child(compact_action("Edit in YAML", Variant::Quiet, move |_| {
+                ui.workflows.mode.set("yaml".into())
+            })),
+    )
+    .into_element()
+}
+
+fn prompt_dialog(ctx: Ctx) -> impl IntoElement {
+    let id = ctx.prompt.get_untracked();
+    let model = ctx.graph.with_untracked(|g| {
+        g.lanes
+            .iter()
+            .flat_map(|l| l.nodes.iter())
+            .find(|n| n.id == id)
+            .cloned()
+    });
+    let Some(model) = model else {
+        ctx.prompt.set(String::new());
+        return view().into_element();
+    };
+    let text = signal(model.instruction.clone());
+    let editor = canban_ui_kit::markdown::MarkdownInput::new();
+    let close = move || ctx.prompt.set(String::new());
+    let (save_id, reset_profile) = (id.clone(), model.profile.clone());
+    let apply_profile = reset_profile.clone();
+    let reset_id = id.clone();
+    super::workflow_dialog(
+        view()
+            .flex_1()
+            .min_h(px(0.))
+            .gap_3()
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(icon(Icon::Agent))
+                    .child(heading(format!("Prompt · {}", model.title)))
+                    .child(badge(format!(
+                        "@{}",
+                        if model.profile.is_empty() {
+                            "default"
+                        } else {
+                            &model.profile
+                        }
+                    )))
+                    .child(view().flex_1())
+                    .child(chrome_button(
+                        Icon::Close,
+                        "Close prompt editor",
+                        move |_| close(),
+                    )),
+            )
+            .child(
+                view()
+                    .flex_1()
+                    .min_h(px(240.))
+                    .bg(INSET)
+                    .rounded(px(RADIUS))
+                    .p_2()
+                    .child(
+                        editor
+                            .source(
+                                text,
+                                "Step Prompt",
+                                "Write the step instruction for the Agent…",
                             )
-                            .child(
-                                view()
-                                    .h(px(172.))
-                                    .bg(INSET)
-                                    .rounded(px(RADIUS))
-                                    .p_2()
-                                    .child(
-                                        prompt_editor
-                                            .source(
-                                                prompt_sig,
-                                                "Step Prompt",
-                                                "Write step instruction for the Agent…",
-                                            )
-                                            .size_full(),
-                                    ),
-                            )
-                    },
-                ))
-                .child(when(
-                    move || active_uses.get() == "deliver",
-                    move || {
-                        view()
-                            .gap_2p5()
-                            .child(muted(
-                                "Queue Merge integrates the Card worktree into the target branch. Clicking 'Hold auto-merge' on a Card pauses this step.",
-                            ))
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_4()
-                                    .child(
-                                        view()
-                                            .flex_row()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(muted("Upstream sync:"))
-                                            .child(
-                                                segmented()
-                                                    .child(compact_segment(
-                                                        "Merge & Sync Upstream",
-                                                        None,
-                                                        move || {
-                                                            active_step.with(|s| {
-                                                                s.as_ref().is_none_or(|st| {
-                                                                    st.sync_upstream
-                                                                })
-                                                            })
-                                                        },
-                                                        move |_| {
-                                                            let Some(step) =
-                                                                active_step.get_untracked()
-                                                            else {
-                                                                return;
-                                                            };
-                                                            update_doc(ui, |d| {
-                                                                if let Some(s) = d
-                                                                    .steps
-                                                                    .iter_mut()
-                                                                    .find(|s| s.id == step.id)
-                                                                {
-                                                                    s.with.insert(
-                                                                        "sync_upstream".into(),
-                                                                        json!(true),
-                                                                    );
-                                                                }
-                                                            });
-                                                        },
-                                                    ))
-                                                    .child(compact_segment(
-                                                        "Merge Only (Local)",
-                                                        None,
-                                                        move || {
-                                                            active_step.with(|s| {
-                                                                s.as_ref().is_some_and(|st| {
-                                                                    !st.sync_upstream
-                                                                })
-                                                            })
-                                                        },
-                                                        move |_| {
-                                                            let Some(step) =
-                                                                active_step.get_untracked()
-                                                            else {
-                                                                return;
-                                                            };
-                                                            update_doc(ui, |d| {
-                                                                if let Some(s) = d
-                                                                    .steps
-                                                                    .iter_mut()
-                                                                    .find(|s| s.id == step.id)
-                                                                {
-                                                                    s.with.insert(
-                                                                        "sync_upstream".into(),
-                                                                        json!(false),
-                                                                    );
-                                                                }
-                                                            });
-                                                        },
-                                                    )),
-                                            ),
-                                    )
-                                    .child(
-                                        view()
-                                            .flex_row()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(muted("Target branch:"))
-                                            .child(
-                                                field(branch_sig, "Project default (e.g. main)")
-                                                    .w(px(190.)),
-                                            ),
-                                    ),
-                            )
-                            .child(rework_selector())
-                    },
-                ))
-                .child(when(
-                    move || active_uses.get() == "approval",
-                    move || {
-                        view()
-                            .gap_2p5()
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(muted("Gate message:"))
-                                    .child(
-                                        field(
-                                            gate_title_sig,
-                                            "Human review is required before continuing",
-                                        )
-                                        .flex_1()
-                                        .min_w(px(240.)),
-                                    ),
-                            )
-                            .child(rework_selector())
-                    },
-                ))
-                .child(when(
-                    move || active_uses.get() == "card.move",
-                    move || {
-                        view()
-                            .flex_row()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .child(muted("Destination stage:"))
-                            .child(segmented().child(each(
-                                move || graph.with(|g| g.columns.clone()),
-                                |col| col.id.clone(),
-                                move |col, _| {
-                                    let c = col.get_untracked();
-                                    let sel_id = c.id.clone();
-                                    let click_id = c.id;
-                                    compact_segment(
-                                        c.name,
-                                        None,
-                                        move || {
-                                            active_step.with(|s| {
-                                                s.as_ref()
-                                                    .is_some_and(|st| st.move_column == sel_id)
-                                            })
-                                        },
-                                        move |_| {
-                                            let Some(step) = active_step.get_untracked() else {
-                                                return;
-                                            };
-                                            let chosen = click_id.clone();
-                                            update_doc(ui, |d| {
-                                                if let Some(s) =
-                                                    d.steps.iter_mut().find(|s| s.id == step.id)
-                                                {
-                                                    s.with.insert("column".into(), json!(chosen));
-                                                }
-                                            });
-                                        },
-                                    )
-                                },
-                            )))
-                    },
-                ))
-                .child(when(
-                    move || {
-                        !matches!(
-                            active_uses.get().as_str(),
-                            "" | "agent" | "deliver" | "approval" | "card.move"
-                        )
-                    },
-                    move || {
-                        muted(move || {
-                            active_step.with(|s| match s {
-                                Some(st) => st.other_summary.clone(),
-                                None => String::new(),
-                            })
-                        })
-                    },
-                ))
-        },
+                            .size_full(),
+                    ),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(action("Reset to default", Variant::Secondary, move |_| {
+                        text.set(default_step_prompt(&reset_id, Some(&reset_profile)).to_owned())
+                    }))
+                    .child(view().flex_1())
+                    .child(action("Cancel", Variant::Quiet, move |_| close()))
+                    .child(action("Apply", Variant::Primary, move |_| {
+                        let value = text.get_untracked();
+                        let next_val =
+                            (!is_default_step_prompt(&save_id, Some(&apply_profile), &value))
+                                .then(|| json!(value));
+                        ctx.set_with(&save_id, "instruction", next_val);
+                        close();
+                    })),
+            ),
+        close,
     )
     .into_element()
 }
@@ -1990,59 +1719,65 @@ fn step_inspector(
 mod tests {
     use super::*;
 
-    #[test]
-    fn inline_stage_toggles_preserve_lane_keys_and_update_only_affected_columns() {
+    fn model(edit: impl FnOnce(&mut Document)) -> GraphModel {
         let mut doc =
             source::default_document("delivery:test", canban_types::WorkspaceSettings::default());
-        let fallback = default_columns();
-        let initial = build_graph_model(&doc, &fallback);
+        stages::normalize(&mut doc, &[]);
+        edit(&mut doc);
+        build_model(&doc)
+    }
+
+    #[test]
+    fn lanes_are_generated_from_the_workflow_graph() {
+        let g = model(|_| {});
         assert_eq!(
-            initial
-                .lanes
-                .iter()
-                .map(|l| l.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["backlog", "develop", "review"]
+            g.lanes.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(),
+            ["backlog", "develop", "review"]
         );
-        assert!(initial.lanes[0].nodes.is_empty());
-        assert_eq!(initial.lanes[1].nodes.len(), 2);
-        assert_eq!(initial.lanes[2].nodes.len(), 3);
-
-        // Toggling Backlog Auto-Analyze leaves Develop and Review LaneModels identical (`PartialEq`).
-        source::set_backlog_options(&mut doc, true, true);
-        let after_backlog = build_graph_model(&doc, &fallback);
-        assert_eq!(after_backlog.lanes[0].nodes.len(), 2);
-        assert_eq!(after_backlog.lanes[1], initial.lanes[1]);
-        assert_eq!(after_backlog.lanes[2], initial.lanes[2]);
-
-        // Toggling Review sync_upstream keeps the exact same Review node keys.
-        let review_keys_before: Vec<_> = after_backlog.lanes[2]
-            .nodes
-            .iter()
-            .map(|n| n.id.clone())
-            .collect();
-        source::set_sync_upstream(&mut doc, false);
-        let after_sync = build_graph_model(&doc, &fallback);
-        let review_keys_after: Vec<_> = after_sync.lanes[2]
-            .nodes
-            .iter()
-            .map(|n| n.id.clone())
-            .collect();
-        assert_eq!(review_keys_before, review_keys_after);
-        assert_eq!(after_sync.lanes[0], after_backlog.lanes[0]);
-        assert_eq!(after_sync.lanes[1], after_backlog.lanes[1]);
-        assert!(
-            after_sync.lanes[2]
-                .nodes
-                .iter()
-                .any(|n| n.kind_badge == "Queue Merge · Local")
+        assert!(g.lanes[0].nodes.is_empty());
+        assert_eq!(g.lanes[0].exit, Exit::Stay);
+        assert_eq!(g.lanes[1].nodes.len(), 1, "the exit move is not a card");
+        assert_eq!(g.lanes[1].exit, Exit::Next);
+        assert_eq!(g.lanes[1].exit_label, "Next stage · Review");
+        let review: Vec<_> = g.lanes[2].nodes.iter().map(|n| n.uses.as_str()).collect();
+        assert_eq!(review, ["condition", "approval", "deliver"]);
+        assert_eq!(
+            g.lanes[2].nodes[1].branch.as_deref(),
+            Some("If External PR check")
         );
+        assert_eq!(g.lanes[2].nodes[2].branch.as_deref(), Some("Otherwise"));
+        assert!(g.lanes[2].last);
+    }
 
-        // Switching Review to Manual collapses Review to `approval:review`, leaving Backlog & Develop untouched.
-        source::set_review_manual(&mut doc, true);
-        let after_manual = build_graph_model(&doc, &fallback);
-        assert_eq!(after_manual.lanes[0], after_sync.lanes[0]);
-        assert_eq!(after_manual.lanes[1], after_sync.lanes[1]);
-        assert_eq!(after_manual.lanes[2].nodes.len(), 1);
+    #[test]
+    fn custom_columns_and_disabled_steps_render_without_special_cases() {
+        let g = model(|d| {
+            stages::add_column(d, "QA", Some("review")).unwrap();
+            let id =
+                stages::insert_step(d, "qa", None, stages::template("review").unwrap()).unwrap();
+            stages::set_exit(d, "qa", Exit::Next).unwrap();
+            stages::set_step_enabled(d, &id, false).unwrap();
+        });
+        let qa = g.lanes.iter().find(|l| l.id == "qa").unwrap();
+        assert_eq!(qa.nodes.len(), 1);
+        assert!(!qa.nodes[0].enabled);
+        assert_eq!(qa.exit_label, "Next stage · Review");
+        // Develop's relative exit now points at QA.
+        assert_eq!(g.lanes[1].exit_label, "Next stage · QA");
+    }
+
+    #[test]
+    fn insertion_anchor_skips_conditions() {
+        let mut doc =
+            source::default_document("delivery:test", canban_types::WorkspaceSettings::default());
+        stages::normalize(&mut doc, &[]);
+        assert_eq!(
+            insertion_anchor(&doc, "review", Some("condition:external_pr".into()), ""),
+            None
+        );
+        assert_eq!(
+            insertion_anchor(&doc, "review", Some("deliver:review".into()), ""),
+            Some("deliver:review".into())
+        );
     }
 }

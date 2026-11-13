@@ -285,6 +285,25 @@ pub fn migrate(value: &mut Value) -> Result<bool> {
     let mut changed = false;
     for p in profiles {
         ensure!(p.is_object(), "Profile must be an object");
+        if let Some((old_role, new_role)) = match p["id"].as_str() {
+            Some("developer") => Some((
+                "You are the Card's development Agent. Implement the agreed task, preserve relevant project conventions, and explain your changes and validation.",
+                "You are the Card's development Agent. Follow repository conventions and verify changes before finishing.",
+            )),
+            Some("reviewer") => Some((
+                "You are the Card's independent review Agent. Inspect the actual changes critically, identify correctness issues and missing validation, and report findings. Do not implement changes unless explicitly asked.",
+                "You are the Card's independent review Agent. Critically inspect changes and test coverage without making unrequested edits.",
+            )),
+            Some("planner") => Some((
+                "You are the Card's planning Agent. Analyze the task and relevant repository files in read-only mode, identify risks, and write a concise implementation plan without modifying source files.",
+                "You are the Card's planning Agent. Inspect repository files in read-only mode without modifying source files.",
+            )),
+            _ => None,
+        } && p["role_instruction"].as_str().map(str::trim) == Some(old_role)
+        {
+            p["role_instruction"] = json!(new_role);
+            changed = true;
+        }
         let legacy = p.get("provider").is_some() || p.get("template").is_some();
         // Pre-interactive registries have no provider field; recognize their
         // explicit batch syntax only during this migration.
@@ -874,7 +893,6 @@ mod tests {
         assert_eq!(dev_on_agy.model.as_deref(), Some("gemini-4-carbon-high"));
         assert_eq!(dev_on_agy.effort.as_deref(), Some("high"));
     }
-
     #[test]
     fn interactive_command_strips_prompt_flags_and_never_resumes() {
         let dir = tempfile::tempdir().unwrap();
@@ -916,7 +934,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(codex_args[0], "codex");
-        assert!(!codex_args.iter().any(|a| a == "resume" || a.is_empty() || a.contains("{prompt}")));
+        assert!(
+            !codex_args
+                .iter()
+                .any(|a| a == "resume" || a.is_empty() || a.contains("{prompt}"))
+        );
 
         let claude = cfg.profiles.iter().find(|p| p.id == "claude").unwrap();
         let claude_args = interactive_command(
@@ -927,20 +949,36 @@ mod tests {
         .unwrap();
         assert_eq!(
             claude_args,
-            vec!["claude", "--session-id", "11111111-2222-3333-4444-555555555555"]
+            vec![
+                "claude",
+                "--session-id",
+                "11111111-2222-3333-4444-555555555555"
+            ]
         );
 
         let agy = cfg.profiles.iter().find(|p| p.id == "agy").unwrap();
         let agy_args = interactive_command(
             agy,
             Some("conv-1"),
-            &[("home", "/tmp/home"), ("cwd", "/tmp/wt"), ("project_dir", "/tmp/repo")],
+            &[
+                ("home", "/tmp/home"),
+                ("cwd", "/tmp/wt"),
+                ("project_dir", "/tmp/repo"),
+            ],
         )
         .unwrap();
         assert_eq!(agy_args[0], "agy");
-        assert!(!agy_args.iter().any(|a| a == "-i" || a == "--conversation" || a.contains("{prompt}")));
+        assert!(
+            !agy_args
+                .iter()
+                .any(|a| a == "-i" || a == "--conversation" || a.contains("{prompt}"))
+        );
         assert!(agy_args.iter().any(|a| a == "--settings"));
-        assert!(agy_args.windows(2).any(|w| w == ["--model", "gemini-4-carbon-high"]));
+        assert!(
+            agy_args
+                .windows(2)
+                .any(|w| w == ["--model", "gemini-4-carbon-high"])
+        );
 
         for (id, forbidden) in [
             ("gemini", "-i"),
@@ -949,12 +987,57 @@ mod tests {
         ] {
             let p = cfg.profiles.iter().find(|p| p.id == id).unwrap();
             let args = interactive_command(p, Some("sess-1"), &[("home", "/tmp/home")]).unwrap();
-            assert!(!args.iter().any(|a| a == forbidden || a == "--resume" || a == "--session" || a.contains("{prompt}")));
+            assert!(!args.iter().any(|a| a == forbidden
+                || a == "--resume"
+                || a == "--session"
+                || a.contains("{prompt}")));
         }
 
-        let tpl = cfg.profiles.iter().find(|p| p.id == "tpl").unwrap();
+        let tpl = cfg.profiles.iter().find(|p| p.id == id_or("tpl")).unwrap();
         let tpl_args = interactive_command(tpl, None, &[]).unwrap();
         assert_eq!(tpl_args, vec!["my-tpl"]);
+    }
+
+    fn id_or(s: &str) -> &str {
+        s
+    }
+
+    #[test]
+    fn migrate_upgrades_unmodified_builtin_role_instructions_and_preserves_custom_ones() {
+        let mut legacy = json!({
+            "profiles": [
+                {
+                    "id": "developer",
+                    "preset": "codex",
+                    "identity": true,
+                    "role_instruction": "You are the Card's development Agent. Implement the agreed task, preserve relevant project conventions, and explain your changes and validation."
+                },
+                {
+                    "id": "reviewer",
+                    "preset": "codex",
+                    "identity": true,
+                    "role_instruction": "Custom security-focused reviewer prompt."
+                }
+            ]
+        });
+        assert!(migrate(&mut legacy).unwrap());
+        assert_eq!(
+            legacy["profiles"][0]["role_instruction"].as_str(),
+            Some(
+                Config::default()
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == "developer")
+                    .unwrap()
+                    .role_instruction
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            legacy["profiles"][1]["role_instruction"].as_str(),
+            Some("Custom security-focused reviewer prompt.")
+        );
+        assert!(!migrate(&mut legacy).unwrap());
     }
 }
 

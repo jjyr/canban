@@ -102,7 +102,7 @@ impl AppServer {
                 db.save(&context)?;
             }
             let stage=canban_workflow_engine::stage(&project.workflow,&card.stage)?;
-            let req=enqueue(db,&config,&mut card,&project,stage,"interactive",Some(&profile.id),Some("Initialize this Card conversation and briefly say you are ready. Do not report completion for this initialization. Wait for the user's next instruction; when that requested work is complete, explicitly report its outcome.".into()))?.context("Agent was not queued")?;
+            let req=enqueue(db,&config,&mut card,&project,stage,"interactive",Some(&profile.id),Some("The user sent this Card to you for discussion. Read the Card context, then reply with a brief summary of your understanding and any open questions. Do not start implementing and do not report completion for this initialization. Wait for the user's next instruction; when that requested work is complete, explicitly report its outcome.".into()))?.context("Agent was not queued")?;
             context.last_request_id=Some(req.id.clone());db.save(&context)?;
             Ok(json!({"request_id":req.id,"reused":false}))
         })
@@ -218,18 +218,12 @@ impl AppServer {
             )
         })?;
         let prompt = std::fs::read_to_string(self.home.join(&input))?;
-        let binding = json!({"request_id":req.id,"attempt":req.attempt,"run_dir":canban_context::run_dir(&runtime_home,req,req.attempt),"manifest":canban_context::run_dir(&runtime_home,req,req.attempt).join("context.json")});
+        let run_dir = canban_context::run_dir(&runtime_home, req, req.attempt);
         let text = format!(
-            "Canban assignment {}\n{}\n\nUse this assignment's explicit request/attempt values for every Canban CLI call. The launching environment belongs to the preceding assignment.\n{}",
-            binding,
-            format_args!(
-                "CANBAN_REQUEST_ID={} CANBAN_ATTEMPT={} CANBAN_RUN_DIR={}",
-                canban_context::shell_quote(&req.id),
-                req.attempt,
-                canban_context::shell_quote(
-                    &canban_context::run_dir(&runtime_home, req, req.attempt).to_string_lossy()
-                )
-            ),
+            "New Canban assignment (use these explicit values instead of earlier terminal env vars):\nCANBAN_REQUEST_ID={} CANBAN_ATTEMPT={} CANBAN_RUN_DIR={}\n\n{}",
+            canban_context::shell_quote(&req.id),
+            req.attempt,
+            canban_context::shell_quote(&run_dir.to_string_lossy()),
             prompt
         );
         if let Err(e) = client.call("terminal.send", json!({"terminal":terminal,"text":text})) {

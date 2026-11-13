@@ -87,9 +87,18 @@ pub fn document(ui: Ui, key: String, initial: Draft) -> Signal<Draft> {
         .drafts
         .with(|drafts| drafts.entry(key.clone()).or_insert(initial).clone());
     let draft = signal(value);
+    let sync_key = key.clone();
     effect(move || {
         let value = draft.get();
         put(ui, key.clone(), value);
+    });
+    effect(move || {
+        let _ = ui.draft_epoch.get();
+        if let Some(external) = ui.drafts.with(|all| all.get(&sync_key).cloned())
+            && external != draft.get_untracked()
+        {
+            draft.set(external);
+        }
     });
     draft
 }

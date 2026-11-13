@@ -151,7 +151,7 @@ where
     let update = std::rc::Rc::new(update);
     if auto_start {
         let auto_update = update.clone();
-        request_animation_frame(move |_| {
+        set_timeout(std::time::Duration::from_millis(10), move || {
             let future = auto_update();
             spawn(async move {
                 if let Err(e) = future.await {

@@ -324,5 +324,10 @@ mod tests {
         }
         assert_eq!(context("中文 😀 #123", 10), Some((6, '#', "123".into())));
         assert_eq!(context("See @dev", 8), Some((4, '@', "dev".into())));
+        let mixed = "请让 @dev";
+        assert_eq!(
+            context(mixed, mixed.encode_utf16().count() as u32),
+            Some((3, '@', "dev".into()))
+        );
     }
 }

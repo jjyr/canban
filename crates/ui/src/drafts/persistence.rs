@@ -170,22 +170,11 @@ pub fn status(key: &str) -> String {
         .get()
         .and_then(|s| {
             s.entries.lock().unwrap().get(key).map(|e| {
-                if !e.error.is_empty() {
-                    e.error.clone()
-                } else if e.latest != e.saved {
-                    "Saving draft…".into()
-                } else {
-                    "Draft saved".into()
-                }
+                // Autosave is silent while it succeeds; only failures surface.
+                e.error.clone()
             })
         })
-        .unwrap_or_else(|| {
-            if SERVICE.get().is_none() {
-                "Preview draft".into()
-            } else {
-                String::new()
-            }
-        })
+        .unwrap_or_default()
 }
 pub fn flush() {
     if let Some(service) = SERVICE.get() {

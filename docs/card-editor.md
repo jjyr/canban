@@ -5,11 +5,18 @@ Status: implemented user-approved direction; native acceptance recorded 2026-11-
 New Cards and existing task descriptions share the native Markdown source editor.
 The default surface is the Board's right pane; Expand uses the main workspace,
 and Collapse restores the pane without replacing the editor, selection, undo
-history or scroll position. There is no separate centered editing dialog.
+history or scroll position. Clicking non-interactive Board space on the left
+collapses an open right-pane Card or New Card back to the Board, and Escape
+closes New Card when no completion menu or modal overlay is open. There is no
+separate centered editing dialog.
 
-Enter and Shift+Enter insert newlines, including while completion is open.
-Tab or a click accepts a candidate; arrows select and Escape dismisses the list.
+Enter, Tab or a click accepts an open completion candidate; arrows select,
+Shift+Enter inserts a newline without accepting, and Escape dismisses the list.
+When completion is closed, Enter and Shift+Enter insert newlines.
 Command+Enter dispatches the same guarded create/save intent as the button.
+Source editors use an explicit `Menlo, PingFang SC` font cascade so per-grapheme
+caret measurement matches CoreText line rendering across mixed Chinese and
+English text.
 
 Drafts are saved independently of published Card content. Closing or navigating
 away retains a draft; only explicit confirmation updates a Card. A searchable Drafts screen
@@ -40,8 +47,8 @@ replace or null tombstone. Tombstones prevent late saves from resurrecting
 discarded text, and identical retries are idempotent. Desktop API level is 7.
 
 One background writer coalesces checkpoints around 300 ms; ordinary application
-exit requests a final flush. Saving feedback distinguishes pending, saved and
-failed writes, with an explicit retry action. A crash before a checkpoint or a
+exit requests a final flush. Successful autosave is silent (no "Saving draft…" flicker, 2026-11-13); only
+failed writes are shown, with an explicit retry action. A crash before a checkpoint or a
 failed write can leave recent input unpersisted. Concurrent-window conflicts are
 reported rather than silently overwriting another saved draft. Card revisions
 remain separate; a rejected Card save shows the latest saved description beside
@@ -50,9 +57,12 @@ the retained draft and allows explicitly adopting that revision before saving.
 New Card drafts have independent identities in navigation history and submission
 fences, retain the target Project and keep
 Local description and GitHub instructions separately. Content-derived request
-keys make retries of an identical create submission idempotent. A completion
-only clears submitted fields, preserving later input and other type-specific
-drafts. Published task readers do not present unsubmitted edits as saved content.
+keys make retries of an identical create submission idempotent. Creating a Card
+from New Card keeps the New Card form open on a fresh draft identity (preserving
+the selected target Project, card kind and any post-submit input, while replacing
+the submitted draft's history entry so Back returns directly to the previous
+route), allowing consecutive Card creation without re-opening New Card. Published
+task readers do not present unsubmitted edits as saved content.
 
 Text, recipients and references persist. Pending attachment bytes, native undo
 history, caret and scroll positions are not restored across application restart.

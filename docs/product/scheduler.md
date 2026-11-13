@@ -30,6 +30,10 @@ Slots cover starting, working, closing and unknown/uncertain runtime. A pending 
 
 The limit covers Agents managed by this Canban home/AppServer. Unrelated Herdr terminals are outside it. Herdr status and normal closure continue while the queue is full.
 
+## Workflow admission (`admit`)
+
+Scheduler admission budgets launches; workflow `admit` gates budget *starting work*. Before each dispatch the AppServer evaluates `canban_scheduler::admissions`: runs in `waiting_capacity` are ordered by their Card's Board position within its column (then age). An `agent_slot` gate is admitted only while `max_agents - active - queued eligible requests > 0`, so already-admitted Cards whose Agent has not launched still count. A `max_ready: K` gate keeps at most K Cards that passed it in the gate's column (for Backlog: planning, awaiting plan approval, or waiting for a slot). Cards with a human gate/attention are skipped. Studio exposes this as Backlog **Auto-start Develop → When Agent free** plus **Plan ahead (ready Cards)**.
+
 ## Depth-first priority
 
 The stage's index in its Project's saved template defines depth. A later stage wins over an earlier stage across Boards; requests at the same depth use enqueue time/insertion order. This is the agreed simple priority policy, not a graph execution engine or a hardcoded `review` name. Multiple slots can advance several Cards concurrently.

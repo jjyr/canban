@@ -132,18 +132,10 @@ fn tab(ui: Ui, e: Entry, capacity: f32) -> impl IntoElement {
         .gap_0()
         .px_1()
         .bg(if selected { SELECTED } else { CLEAR })
+        .hover(move |s| s.bg(if selected { SELECTED } else { CARD_HOVER }))
         .border_r_1()
         .border_color(BORDER)
-        .tooltip(
-            nsh_base::tooltip()
-                .placement(Placement::Bottom)
-                .px_3()
-                .py_2()
-                .bg(SURFACE)
-                .border_1()
-                .border_color(BORDER)
-                .child(label(hint.clone())),
-        )
+        .tooltip(hint_tooltip(hint.clone()).placement(Placement::Bottom))
         .child(
             view()
                 .h_full()
@@ -156,6 +148,7 @@ fn tab(ui: Ui, e: Entry, capacity: f32) -> impl IntoElement {
                 .items_center()
                 .justify_center()
                 .role(AccessibilityRole::Tab)
+                .cursor_pointer()
                 .accessibility_state(move || nsh_core::AccessibilityState {
                     selected,
                     ..Default::default()
@@ -217,9 +210,9 @@ pub fn header(ui: Ui) -> impl IntoElement {
         let controls = if ui.terminal_sidebar.get() {
             0.
         } else {
-            64. + (nsh_core::element::desktop::title_bar().left.0.max(78.) - 56.).max(0.)
+            96. + (crate::frame::chrome_left_padding() - 56.).max(0.)
         };
-        (w - (w * 0.4).min(420.) - 88. - controls).max(40.)
+        (w - (w * 0.35).min(340.) - 196. - controls).max(40.)
     });
     let strip = element_ref();
     let active = computed(move || ui.terminal_selection.get());
@@ -262,9 +255,10 @@ pub fn header(ui: Ui) -> impl IntoElement {
             px(if ui.terminal_sidebar.get() {
                 0.
             } else {
-                (nsh_core::element::desktop::title_bar().left.0.max(78.) - 56.).max(0.)
+                (crate::frame::chrome_left_padding() - 56.).max(0.)
             })
         })
+        .pr(px(10.))
         .child(when(
             move || !ui.terminal_sidebar.get(),
             move || super::controls(ui),
@@ -332,7 +326,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                 .justify_end()
                 .gap_2()
                 .min_w(px(0.))
-                .w(move || px((width.get() * 0.4).min(420.)))
+                .w(move || px((width.get() * 0.35).min(340.)))
                 .flex_shrink_0();
             if let Some(card) = e.card.clone() {
                 context = context.child(
@@ -340,24 +334,30 @@ pub fn header(ui: Ui) -> impl IntoElement {
                         .flex_1()
                         .min_w(px(0.))
                         .overflow_hidden()
-                        .tooltip(nsh_base::tooltip().child(label(format!(
-                            "#{} {}\n{}",
-                            card.number,
-                            card.title,
-                            if e.inferred_card {
-                                "Card inferred from directory or branch"
-                            } else {
-                                "Open task Card"
-                            }
-                        ))))
+                        .tooltip(
+                            hint_tooltip(format!(
+                                "#{} {}\n{}",
+                                card.number,
+                                card.title,
+                                if e.inferred_card {
+                                    "Card inferred from directory or branch"
+                                } else {
+                                    "Open task Card"
+                                }
+                            ))
+                            .placement(Placement::Bottom),
+                        )
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .w_full()
                                 .min_w(px(0.))
                                 .h(px(30.))
                                 .justify_center()
                                 .px_2()
+                                .rounded(px(5.))
                                 .bg(CLEAR)
+                                .hover(|s| s.bg(INSET))
+                                .focus(|s| s.border_1().border_color(ACCENT))
                                 .child(
                                     label(format!("#{} {}", card.number, card.title))
                                         .text_color(if e.inferred_card { MUTED } else { TEXT })
@@ -370,12 +370,15 @@ pub fn header(ui: Ui) -> impl IntoElement {
                 );
             } else if let Some(project) = e.project_id.clone() {
                 context = context.child(
-                    nsh_base::button()
+                    canban_ui_kit::press_target()
                         .flex_1()
                         .min_w(px(0.))
                         .h(px(30.))
                         .px_2()
+                        .rounded(px(5.))
                         .bg(CLEAR)
+                        .hover(|s| s.bg(INSET))
+                        .focus(|s| s.border_1().border_color(ACCENT))
                         .child(label(e.project_name.clone()).w_full().truncate())
                         .accessibility_label(move || Some("Open current Project".into()))
                         .on_press(move |_: &()| ui.select_project(project.clone())),
@@ -403,14 +406,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                         .min_w(px(0.))
                         .overflow_hidden()
                         .tooltip(
-                            nsh_base::tooltip()
-                                .placement(Placement::Bottom)
-                                .px_3()
-                                .py_2()
-                                .bg(SURFACE)
-                                .border_1()
-                                .border_color(BORDER)
-                                .child(label(e.cwd().unwrap_or_default())),
+                            hint_tooltip(e.cwd().unwrap_or_default()).placement(Placement::Bottom),
                         )
                         .child(
                             muted(compact(&title, if ui.narrow.get() { 14 } else { 32 }))
@@ -436,26 +432,20 @@ pub fn header(ui: Ui) -> impl IntoElement {
                                 .max(36.))
                         })
                         .flex_shrink_0()
-                        .tooltip(
-                            nsh_base::tooltip()
-                                .placement(Placement::Bottom)
-                                .px_3()
-                                .py_2()
-                                .bg(SURFACE)
-                                .border_1()
-                                .border_color(BORDER)
-                                .child(label(full)),
-                        )
+                        .tooltip(hint_tooltip(full).placement(Placement::Bottom))
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .h(px(30.))
                                 .w_full()
                                 .min_w(px(0.))
                                 .px_2()
+                                .rounded(px(5.))
                                 .flex_row()
                                 .gap_1()
                                 .items_center()
                                 .bg(CLEAR)
+                                .hover(|s| s.bg(INSET))
+                                .focus(|s| s.border_1().border_color(ACCENT))
                                 .accessibility_label({
                                     let b = branch.clone();
                                     move || Some(format!("Branch {b}").into())
@@ -473,7 +463,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                 .element_ref(&anchor),
             )
         }))
-        .child(view().w(px(10.)).h_full().window_drag(true))
+        .child(crate::overview::trigger_pill(ui))
 }
 pub fn rename_dialog(ui: Ui) -> impl IntoElement {
     when(

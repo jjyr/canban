@@ -6,6 +6,7 @@ pub mod navigation;
 pub(crate) mod tabs;
 mod tree;
 pub(crate) mod viewer;
+pub mod worktrees;
 use crate::presenter::*;
 use canban_notifications::OverviewRow;
 use canban_ui_kit::{tokens::*, *};
@@ -154,7 +155,11 @@ fn gallery_create_entry(
     card_id: Option<String>,
     agent: bool,
 ) -> String {
-    let prefix = if agent { "gallery-agent" } else { "gallery-shell" };
+    let prefix = if agent {
+        "gallery-agent"
+    } else {
+        "gallery-shell"
+    };
     let id = format!("{prefix}-{}", canban_types::id());
     let agent_engine = agent.then(|| {
         let def = ui.default_agent.get_untracked();
@@ -348,6 +353,10 @@ pub fn create(ui: Ui, project: String, card: Option<String>) {
     }
     launch(ui, json!({"project_id":project,"card_id":card}));
 }
+pub(crate) fn launch_custom(ui: Ui, params: serde_json::Value) {
+    launch(ui, params);
+}
+
 fn launch(ui: Ui, params: serde_json::Value) {
     let source = ui.location();
     let selection = ui.terminal_selection.get_untracked();
@@ -361,10 +370,17 @@ fn launch(ui: Ui, params: serde_json::Value) {
     }
     dispatch_then(ui, "terminal.create", params, move |v| {
         if ui.location() == source
-            && ui.terminal_selection.get_untracked() == selection
             && let Some(id) = v["id"].as_str()
         {
-            ui.open_terminal(id.into());
+            if ui.page.get_untracked() == "card" && !ui.card.get_untracked().is_empty() {
+                if ui.card_terminal_open.get_untracked() {
+                    ui.open_card_with_terminal(ui.card.get_untracked(), Some(id.into()));
+                } else {
+                    select_card_tab(ui, &ui.card.get_untracked(), id.into());
+                }
+            } else if ui.terminal_selection.get_untracked() == selection {
+                ui.open_terminal(id.into());
+            }
         }
     });
 }
@@ -380,8 +396,27 @@ pub fn new_tab(ui: Ui) {
 pub fn machine_menu(ui: Ui) {
     use nsh_core::element::desktop::{MenuItem, popup_menu};
     ui.spawn(async move {
-        let mut items =
-            vec![MenuItem::new("Local").on_select(move || launch(ui, json!({"machine":"local"})))];
+        let mut items = vec![
+            MenuItem::new("New Terminal (Local)")
+                .on_select(move || launch(ui, json!({"machine":"local"}))),
+        ];
+        if !ui.project.get_untracked().is_empty()
+            || ui.snapshot.with_untracked(|s| !s.projects.is_empty())
+        {
+            items.push(
+                MenuItem::new("New Managed Branch Worktree…").on_select(move || {
+                    let pid = ui.project.get_untracked();
+                    let target = if pid.is_empty() {
+                        ui.snapshot
+                            .with_untracked(|s| s.projects.first().map(|p| p.id.clone()))
+                            .unwrap_or_default()
+                    } else {
+                        pid
+                    };
+                    ui.worktree_modal.set(Some(target));
+                }),
+            );
+        }
         for m in ui
             .machines
             .with_untracked(|v| v["machines"].as_array().cloned().unwrap_or_default())
@@ -513,10 +548,10 @@ pub fn cycle(ui: Ui, forward: bool) {
     ui.open_terminal(tabs[next].clone());
 }
 pub(crate) const TAB_KEYS: [(&str, u8); 4] = [
-    (crate::commands::CATALOG[3].key, 0),
-    (crate::commands::CATALOG[4].key, 1),
-    (crate::commands::CATALOG[5].key, 2),
-    (crate::commands::CATALOG[6].key, 3),
+    ("mod+t", 0),
+    ("mod+w", 1),
+    ("mod+shift+]", 2),
+    ("mod+shift+[", 3),
 ];
 pub fn bindings(ui: Ui) {
     use nsh_core::keymap::When;
@@ -526,6 +561,9 @@ pub fn bindings(ui: Ui) {
         if (!on_terminals && !on_card_terminal)
             || ui.quick_open.get()
             || ui.terminal_rename.get().is_some()
+            || ui.worktree_modal.get().is_some()
+            || ui.worktree_promote.get().is_some()
+            || ui.worktree_remove_confirm.get().is_some()
             || !ui.utility_popup.get().is_empty()
         {
             return;
@@ -569,6 +607,7 @@ fn controls(ui: Ui) -> impl IntoElement {
         .flex_row()
         .items_center()
         .gap_1()
+        .child(when(|| true, move || crate::navigation::controls(ui)))
         .child(chrome_button(
             Icon::Sidebar,
             "Show / hide terminal list",
@@ -578,109 +617,101 @@ fn controls(ui: Ui) -> impl IntoElement {
                 ui.terminal_focus.update(|v| *v += 1);
             },
         ))
-        .child(when(|| true, move || crate::navigation::controls(ui)))
 }
 pub fn screen(ui: Ui) -> impl IntoElement {
     tabs::context_updates(ui);
 
-    view()
-        .flex_1()
-        .min_h(px(0.))
-        .min_w(px(0.))
-        .child(
-            nsh_base::h_resizable()
-                .flex_1()
-                .min_h(px(0.))
-                .handle_accessibility_label("Resize Terminal sidebar")
-                .render_handle(|_: &nsh_base::ResizeHandleContext| {
-                    view()
-                        .w(px(5.))
-                        .h_full()
-                        .items_center()
-                        .justify_center()
-                        .hover(|s| s.bg(ACCENT))
-                        .active(|s| s.bg(ACCENT))
-                        .child(view().w(px(1.)).h_full().bg(BORDER))
-                })
-                .on_resize(move |sizes: &Vec<Points>| {
-                    if !ui.narrow.get_untracked()
-                        && ui.terminal_sidebar.get_untracked()
-                        && let Some(size) = sizes.first()
-                    {
-                        ui.terminal_width.set((size.0 - 56.).max(190.));
-                        ui.terminal_focus.update(|v| *v += 1);
-                    }
-                })
-                .child(
-                    nsh_base::resizable_panel()
-                        .size(move || {
-                            if ui.narrow.get() && ui.terminal_sidebar.get() {
-                                None
-                            } else {
-                                Some(px(if ui.terminal_sidebar.get() {
-                                    56. + ui.terminal_width.get()
-                                } else {
-                                    56.
-                                }))
-                            }
-                        })
-                        .min_size(move || px(if ui.terminal_sidebar.get() { 246. } else { 56. }))
-                        .max_size(move || {
-                            px(if ui.terminal_sidebar.get() {
-                                if ui.narrow.get() { 10000. } else { 600. }
+    view().flex_1().min_h(px(0.)).min_w(px(0.)).child(
+        nsh_base::h_resizable()
+            .flex_1()
+            .min_h(px(0.))
+            .handle_accessibility_label("Resize Terminal sidebar")
+            .render_handle(|_: &nsh_base::ResizeHandleContext| {
+                view()
+                    .w(px(5.))
+                    .h_full()
+                    .items_center()
+                    .justify_center()
+                    .hover(|s| s.bg(ACCENT))
+                    .active(|s| s.bg(ACCENT))
+                    .child(view().w(px(1.)).h_full().bg(BORDER))
+            })
+            .on_resize(move |sizes: &Vec<Points>| {
+                if !ui.narrow.get_untracked()
+                    && ui.terminal_sidebar.get_untracked()
+                    && let Some(size) = sizes.first()
+                {
+                    ui.terminal_width.set((size.0 - 56.).max(190.));
+                    ui.terminal_focus.update(|v| *v += 1);
+                }
+            })
+            .child(
+                nsh_base::resizable_panel()
+                    .size(move || {
+                        if ui.narrow.get() && ui.terminal_sidebar.get() {
+                            None
+                        } else {
+                            Some(px(if ui.terminal_sidebar.get() {
+                                56. + ui.terminal_width.get()
                             } else {
                                 56.
-                            })
+                            }))
+                        }
+                    })
+                    .min_size(move || px(if ui.terminal_sidebar.get() { 246. } else { 56. }))
+                    .max_size(move || {
+                        px(if ui.terminal_sidebar.get() {
+                            if ui.narrow.get() { 10000. } else { 600. }
+                        } else {
+                            56.
                         })
-                        .fixed(move || !ui.narrow.get() || !ui.terminal_sidebar.get())
-                        .child(
-                            view()
-                                .flex_1()
-                                .min_h(px(0.))
-                                .bg(SURFACE)
-                                .child(
-                                    view()
-                                        .h(px(42.))
-                                        .flex_shrink_0()
-                                        .flex_row()
-                                        .items_center()
-                                        .window_drag(true)
-                                        .pl(move || {
-                                            px(nsh_core::element::desktop::title_bar()
-                                                .left
-                                                .0
-                                                .max(78.))
-                                        })
-                                        .child(when(
-                                            move || ui.terminal_sidebar.get(),
-                                            move || controls(ui),
-                                        )),
-                                )
-                                .child(
-                                    view()
-                                        .flex_1()
-                                        .min_h(px(0.))
-                                        .flex_row()
-                                        .child(crate::rail::sidebar(ui))
-                                        .child(when(
-                                            move || ui.terminal_sidebar.get(),
-                                            move || tree::sidebar(ui),
-                                        )),
-                                ),
-                        ),
-                )
-                .child(
-                    nsh_base::resizable_panel()
-                        .min_size(px(300.))
-                        .visible(move || !ui.narrow.get() || !ui.terminal_sidebar.get())
-                        .child(
-                            view()
-                                .flex_1()
-                                .min_h(px(0.))
-                                .min_w(px(0.))
-                                .child(tabs::header(ui))
-                                .child(viewer::screen(ui)),
-                        ),
-                ),
-        )
+                    })
+                    .fixed(move || !ui.narrow.get() || !ui.terminal_sidebar.get())
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .bg(SURFACE)
+                            .child(
+                                view()
+                                    .h(px(42.))
+                                    .flex_shrink_0()
+                                    .flex_row()
+                                    .items_center()
+                                    .border_b_1()
+                                    .border_color(BORDER)
+                                    .window_drag(true)
+                                    .pl(move || px(crate::frame::chrome_left_padding()))
+                                    .child(when(
+                                        move || ui.terminal_sidebar.get(),
+                                        move || controls(ui),
+                                    )),
+                            )
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .flex_row()
+                                    .child(crate::rail::sidebar(ui))
+                                    .child(when(
+                                        move || ui.terminal_sidebar.get(),
+                                        move || tree::sidebar(ui),
+                                    )),
+                            ),
+                    ),
+            )
+            .child(
+                nsh_base::resizable_panel()
+                    .min_size(px(300.))
+                    .visible(move || !ui.narrow.get() || !ui.terminal_sidebar.get())
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .min_w(px(0.))
+                            .child(tabs::header(ui))
+                            .child(viewer::screen(ui)),
+                    ),
+            ),
+    )
 }

@@ -1,5 +1,15 @@
 use super::*;
 /// Card content/surface. Board owns pointer capture, drag geometry and activation.
+///
+/// Layout (rows appear only when they have content):
+/// ```text
+/// #16  Title wraps beside the number            (3) [>_]
+/// GitHub Issue #12 · open · by author
+/// First body line, truncated
+/// Needs review  ⎇ branch            [((●)) ✦ @developer]
+/// ```
+/// The hover terminal button opens this Card's quick terminal; a running Agent pill
+/// pulses and opens that Agent's live terminal.
 pub fn card_tile(ui: Ui, card: Card) -> View {
     let reminder_id = card.id.clone();
     let count = computed(move || {
@@ -8,13 +18,18 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
     });
     let selected_id = card.id.clone();
     let terminal_card = card.id.clone();
+    let card_number = card.number;
+    let archive_card = card.clone();
     let snapshot = ui.snapshot.get_untracked();
     let has_terminal = !crate::terminals::card_live_entries(&snapshot, &card.id).is_empty();
     let hovered = signal(false);
+    let active = card.active();
+    let merged = card.merged();
     let mut tile = panel()
-        .p_3()
+        .px_3()
+        .py_2p5()
         .min_w(px(0.))
-        .gap_2()
+        .gap_1p5()
         .border_1()
         .border_color(BORDER)
         .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
@@ -22,81 +37,100 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
         .bg(move || {
             if ui.card.get() == selected_id {
                 SELECTED.resolve()
+            } else if merged {
+                INSET.resolve()
             } else {
                 SURFACE.resolve()
             }
         })
-        .hover(|s| s.bg(CARD_HOVER))
-        .child(
-            view()
-                .flex_row()
-                .min_h(px(28.))
-                .justify_between()
-                .items_center()
-                .child(if let Some(source) = card.github_issue() {
-                    view()
-                        .flex_row()
-                        .gap_1()
-                        .items_center()
-                        .tooltip(nsh_base::tooltip().child(label(format!(
-                            "Card #{} · {}#{}",
-                            card.number, source.repository, source.number
-                        ))))
-                        .child(icon(Icon::GitHub).w(px(14.)).h(px(14.)))
-                        .child(muted(format!(
-                            "#{} · {} #{}",
-                            card.number,
-                            if card.is_github_pr() { "PR" } else { "Issue" },
-                            source.number
-                        )))
-                        .into_element()
-                } else {
-                    muted(format!("#{}", card.number)).into_element()
-                })
-                .child(
-                    view()
-                        .flex_row()
-                        .gap_1p5()
-                        .items_center()
-                        .child(reminder_count(
-                            move || count.get().total,
-                            move || count.get().pending > 0,
-                        ))
-                        .child(
-                            chrome_button(
-                                Icon::Terminal,
-                                format!("Open Terminal for Card #{}", card.number),
-                                move |_| crate::terminals::open_card_quick(ui, &terminal_card),
+        .hover(|s| s.bg(CARD_HOVER));
+    if merged {
+        tile = tile.border_dashed().opacity(0.72);
+    }
+    tile = tile.child(
+        view()
+            .flex_row()
+            .items_start()
+            .gap_2()
+            .min_w(px(0.))
+            .child(
+                view()
+                    .flex_row()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap_1p5()
+                    .items_start()
+                    .pt_0p5()
+                    .child(muted(format!("#{}", card.number)).flex_shrink_0())
+                    .child(
+                        text(card.title.clone())
+                            .text_size(px(BODY_SIZE))
+                            .text_color(if merged { MUTED } else { TEXT })
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .flex_1()
+                            .min_w(px(0.)),
+                    ),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .gap_1()
+                    .items_center()
+                    .h(px(22.))
+                    .child(reminder_count(
+                        move || count.get().total,
+                        move || count.get().pending > 0,
+                    ))
+                    .child(when(
+                        move || active && merged,
+                        move || archive_button(ui, archive_card.clone()),
+                    ))
+                    // Space stays reserved so hovering never rewraps the title.
+                    .child(when(
+                        move || active || has_terminal,
+                        move || {
+                            terminal_button(ui, terminal_card.clone(), card_number).opacity(
+                                move || {
+                                    if has_terminal || hovered.get() {
+                                        1.0_f32
+                                    } else {
+                                        0.0_f32
+                                    }
+                                },
                             )
-                            .opacity(move || {
-                                if has_terminal || hovered.get() {
-                                    1.0_f32
-                                } else {
-                                    0.0_f32
-                                }
-                            }),
-                        ),
-                ),
-        )
-        .child(
-            label(card.title.clone())
-                .font_weight(FontWeight::SEMIBOLD)
-                .min_w(px(0.)),
-        );
-    if let Some(source) = card.github_issue()
-        && let Some(cached) = snapshot.github_issues.iter().find(|v| {
+                        },
+                    )),
+            ),
+    );
+    if let Some(source) = card.github_issue() {
+        let cached = snapshot.github_issues.iter().find(|v| {
             v.project_id == card.project_id
                 && v.source.repository_id == source.repository_id
                 && v.source.issue_id == source.issue_id
-        })
-    {
-        tile = tile.child(
-            view()
-                .flex_row()
-                .gap_1()
+        });
+        let mut meta = view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .min_w(px(0.))
+            .tooltip(hint_tooltip(format!(
+                "Card #{} · {}#{}",
+                card.number, source.repository, source.number
+            )))
+            .child(icon(Icon::GitHub).w(px(12.)).h(px(12.)))
+            .child(muted(format!(
+                "{} #{}",
+                if card.is_github_pr() { "PR" } else { "Issue" },
+                source.number
+            )));
+        if let Some(cached) = cached {
+            meta = meta
                 .child(badge(cached.state.clone()))
-                .child(muted(format!("by {}", cached.author_login))),
-        );
+                .child(muted(format!("by {}", cached.author_login)).truncate());
+        }
+        tile = tile.child(meta);
     }
     let excerpt = card
         .body
@@ -107,24 +141,111 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
     if !excerpt.is_empty() {
         tile = tile.child(muted(excerpt.to_owned()).truncate().min_w(px(0.)));
     }
-    if let Some(activity) = crate::components::activity::card_activity(&snapshot, &card) {
-        tile = tile.child(activity);
-    }
-    if let Some(branch) = card.branch.as_ref().filter(|b| !b.is_empty()) {
+    let ui_merging = ui
+        .merging_cards
+        .with_untracked(|ids| ids.contains(&card.id));
+    let chips = crate::components::activity::card_status_with_merging(&snapshot, &card, ui_merging);
+    let running = crate::components::activity::running_agents(&snapshot, &card);
+    let branch = card.branch.clone().filter(|b| !b.is_empty());
+    if !chips.is_empty() || !running.is_empty() || branch.is_some() {
+        let mut left = view()
+            .flex_row()
+            .flex_wrap()
+            .flex_1()
+            .items_center()
+            .gap_1p5()
+            .min_w(px(0.))
+            .children(chips);
+        if let Some(branch) = branch {
+            left = left.child(
+                view()
+                    .flex_row()
+                    .flex_shrink(1.)
+                    .items_center()
+                    .gap_1()
+                    .min_w(px(0.))
+                    .tooltip(hint_tooltip(branch.clone()))
+                    .child(icon(Icon::Branch).w(px(12.)).h(px(12.)))
+                    .child(
+                        muted(crate::components::git_workspace::compact(&branch, 24))
+                            .truncate()
+                            .min_w(px(0.)),
+                    ),
+            );
+        }
         tile = tile.child(
             view()
                 .flex_row()
+                .flex_wrap()
                 .items_center()
-                .gap_1()
+                .justify_between()
+                .gap_1p5()
                 .min_w(px(0.))
-                .tooltip(nsh_base::tooltip().child(label(branch.clone())))
-                .child(icon(Icon::Branch).w(px(12.)).h(px(12.)))
-                .child(
-                    muted(crate::components::git_workspace::compact(branch, 28))
-                        .truncate()
-                        .min_w(px(0.)),
+                .child(left)
+                .children(
+                    running
+                        .into_iter()
+                        .map(|request| agent_pill(ui, request).into_element())
+                        .collect::<Vec<_>>(),
                 ),
         );
     }
     tile
+}
+
+/// Quick action on merged Cards: archive immediately without waiting for tomorrow.
+fn archive_button(ui: Ui, card: Card) -> View {
+    chrome_button_disabled(
+        Icon::Archive,
+        "Archive Card",
+        move || ui.pending.get(),
+        move |_| crate::card_actions::apply(ui, card.clone(), crate::card_actions::Action::Archive),
+    )
+    .w(px(22.))
+    .h(px(22.))
+}
+
+/// Hover entry: open this Card's quick terminal view directly.
+fn terminal_button(ui: Ui, card: String, number: u64) -> View {
+    chrome_button(
+        Icon::Terminal,
+        format!("Open Terminal for Card #{number}"),
+        move |_| crate::terminals::open_card_quick(ui, &card),
+    )
+    .w(px(22.))
+    .h(px(22.))
+}
+
+/// A running Agent: pulsing mark + provider icon + profile. Opens its terminal.
+fn agent_pill(ui: Ui, request: Request) -> impl IntoElement {
+    let (mark, provider) = crate::profiles::provider(&request.profile);
+    let profile = request.profile.id.clone();
+    let hint = format!("{provider} · @{profile} is working — open terminal");
+    let a11y = hint.clone();
+    let id = request.id.clone();
+    view().flex_shrink_0().tooltip(hint_tooltip(hint)).child(
+        press_target()
+            .h(px(22.))
+            .px_2()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .rounded(px(11.))
+            .bg(SELECTED)
+            .border_1()
+            .border_color(ACCENT)
+            .hover(|s| s.bg(CARD_HOVER))
+            .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
+            .accessibility_label(move || Some(a11y.clone().into()))
+            .child(live_dot(ACCENT))
+            .child(icon(mark).w(px(12.)).h(px(12.)))
+            .child(
+                text(format!("@{profile}"))
+                    .text_size(px(CAPTION_SIZE))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(ACCENT)
+                    .truncate(),
+            )
+            .on_press(move |_: &()| crate::terminals::open_request(ui, &id)),
+    )
 }

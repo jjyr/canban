@@ -15,57 +15,52 @@ pub struct Drop {
     pub stage: String,
     pub before_card_id: Option<String>,
 }
-pub fn screen(ui: Ui) -> impl IntoElement {
+pub fn chrome_bar(ui: Ui) -> impl IntoElement {
     let project = computed(move || {
         let _ = ui.project.get();
         ui.current_project()
     });
-    let has_github = computed(move || {
-        let current = ui.project.get();
-        project.get().is_some_and(|p| p.github.is_some())
-            || ui.snapshot.with(|s| {
-                s.cards
-                    .iter()
-                    .any(|c| c.project_id == current && c.github_issue().is_some())
-            })
-    });
     view()
         .flex_1()
         .min_w(px(0.))
-        .min_h(px(0.))
-        .p_4()
-        .gap_4()
+        .h_full()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .pl_2()
+        .window_drag(true)
         .child(
             view()
                 .flex_row()
-                .justify_between()
                 .items_center()
-                .gap_2()
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .flex_1()
-                        .min_w(px(100.))
-                        .child(project_picker(ui))
-                        .child(when(
-                            move || project.get().is_some(),
-                            move || {
-                                view().flex_shrink_0().child(icon_action(
-                                    Icon::GitHub,
-                                    "GitHub repository & synchronization".into(),
-                                    move || project.get().is_some_and(|p| p.github.is_some()),
-                                    || 0,
-                                    move |_| ui.navigate("github-repository"),
-                                ))
-                            },
-                        )),
-                )
+                .gap_0p5()
+                .min_w(px(80.))
+                .max_w(px(280.))
+                .window_drag(false)
+                .child(project_picker(ui))
                 .child(when(
                     move || project.get().is_some(),
                     move || {
-                        action(
+                        chrome_button(
+                            Icon::GitHub,
+                            "GitHub repository & synchronization",
+                            move |_| ui.navigate("github-repository"),
+                        )
+                    },
+                )),
+        )
+        .child(activity::strip(ui))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .flex_shrink_0()
+                .window_drag(false)
+                .child(when(
+                    move || project.get().is_some() && !ui.narrow.get(),
+                    move || {
+                        compact_action(
                             move || {
                                 let n = project.get().map(|p| p.agent_overrides.len()).unwrap_or(0);
                                 if n == 0 {
@@ -77,44 +72,41 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             Variant::Quiet,
                             move |_| ui.navigate("project-agents"),
                         )
-                        .flex_shrink_0()
                     },
                 ))
                 .child(when(
-                    move || project.get().is_some(),
+                    move || project.get().is_some() && !ui.narrow.get(),
                     move || {
-                        action("Workflows", Variant::Quiet, move |_| {
+                        compact_action("Workflows", Variant::Quiet, move |_| {
                             ui.navigate("workflows")
                         })
-                        .flex_shrink_0()
                     },
                 ))
-                .child(
-                    action(
-                        move || {
-                            let _ = ui.draft_epoch.get();
-                            let count = ui.drafts.with(|all| {
-                                all.iter()
-                                    .filter(|(key, draft)| draft.has_content(key))
-                                    .count()
-                            });
-                            if count == 0 {
-                                "Drafts".into()
-                            } else {
-                                format!("Drafts ({count})")
-                            }
-                        },
-                        Variant::Secondary,
-                        move |_| ui.navigate("drafts"),
-                    )
-                    .flex_shrink_0(),
-                )
+                .child(when(
+                    move || !ui.narrow.get(),
+                    move || {
+                        compact_action(
+                            move || {
+                                let _ = ui.draft_epoch.get();
+                                let count = ui.drafts.with(|all| {
+                                    all.iter()
+                                        .filter(|(key, draft)| draft.has_content(key))
+                                        .count()
+                                });
+                                if count == 0 {
+                                    "Drafts".into()
+                                } else {
+                                    format!("Drafts ({count})")
+                                }
+                            },
+                            Variant::Secondary,
+                            move |_| ui.navigate("drafts"),
+                        )
+                    },
+                ))
                 .child(when(
                     move || project.get().is_some(),
-                    move || {
-                        action("+ Add Card", Variant::Primary, move |_| ui.new_card())
-                            .flex_shrink_0()
-                    },
+                    move || compact_action("+ Add Card", Variant::Primary, move |_| ui.new_card()),
                 ))
                 .child(when(
                     move || project.get().is_some(),
@@ -126,6 +118,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 if let Some(bounds) = anchor.measure().await {
                                     popup_menu_at(
                                         vec![
+                                            MenuItem::new("Workflows…")
+                                                .on_select(move || ui.navigate("workflows")),
+                                            MenuItem::new("Drafts…")
+                                                .on_select(move || ui.navigate("drafts")),
                                             MenuItem::new("Archive")
                                                 .on_select(move || ui.navigate("archive")),
                                             MenuItem::new("Project Agents…")
@@ -135,6 +131,12 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                             MenuItem::new("GitHub repository…").on_select(
                                                 move || ui.navigate("github-repository"),
                                             ),
+                                            MenuItem::separator(),
+                                            MenuItem::new("New Managed Branch Worktree…")
+                                                .on_select(move || {
+                                                    ui.worktree_modal
+                                                        .set(Some(ui.project.get_untracked()));
+                                                }),
                                             MenuItem::separator(),
                                             MenuItem::new("Switch Project…")
                                                 .on_select(move || ui.show_search(true)),
@@ -154,6 +156,28 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     },
                 )),
         )
+}
+
+pub fn screen(ui: Ui) -> impl IntoElement {
+    let project = computed(move || {
+        let _ = ui.project.get();
+        ui.current_project()
+    });
+    let has_github = computed(move || {
+        let current = ui.project.get();
+        project.get().is_some_and(|p| p.github.is_some())
+            || ui.snapshot.with(|s| {
+                s.cards
+                    .iter()
+                    .any(|c| c.project_id == current && c.github_issue().is_some())
+            })
+    });
+    view()
+        .flex_1()
+        .min_w(px(0.))
+        .min_h(px(0.))
+        .p_4()
+        .gap_3()
         .child(when(
             move || has_github.get(),
             move || crate::github::filters::toolbar(ui),
@@ -177,13 +201,25 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             };
             untracked(|| {
                 let state = drag::BoardDrag::new(ui, project.clone());
+                let stages = project.workflow.stages.clone();
+                let width = signal(0f32);
+                let compact = compact_mode(ui, width, stages.len());
+                let focus = focus_stage(ui, &stages);
                 view()
                     .flex_1()
                     .min_h(px(0.))
                     .min_w(px(0.))
+                    .gap_3()
                     .relative()
                     .element_ref(&state.root)
-                    .on_layout(move |_: &Bounds<Points>| state.dirty())
+                    .on_layout(move |b: &Bounds<Points>| {
+                        width.set(b.size.width.0);
+                        state.dirty()
+                    })
+                    .child(when(move || compact.get(), {
+                        let stages = stages.clone();
+                        move || stage_tabs(state, stages.clone(), focus)
+                    }))
                     .child(
                         scroll()
                             .horizontal()
@@ -200,22 +236,108 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     .on_layout(move |b: &Bounds<Points>| {
                                         state.content_width(b.size.width.0)
                                     })
-                                    .children(
-                                        project
-                                            .workflow
-                                            .stages
-                                            .into_iter()
-                                            .map(|stage| {
-                                                columns::column(ui, state, stage).into_element()
-                                            })
-                                            .collect::<Vec<_>>(),
-                                    ),
+                                    .child(dynamic(move || {
+                                        let compact = compact.get();
+                                        let focus = focus.get();
+                                        let shown: Vec<_> = stages
+                                            .iter()
+                                            .filter(|s| !compact || s.id == focus)
+                                            .cloned()
+                                            .collect();
+                                        untracked(|| {
+                                            state.retain(
+                                                &shown
+                                                    .iter()
+                                                    .map(|s| s.id.clone())
+                                                    .collect::<Vec<_>>(),
+                                            );
+                                            view()
+                                                .flex_row()
+                                                .gap_3()
+                                                .flex_1()
+                                                .min_h(px(0.))
+                                                .children(
+                                                    shown
+                                                        .into_iter()
+                                                        .map(|stage| {
+                                                            columns::column(
+                                                                ui, state, stage, compact,
+                                                            )
+                                                            .into_element()
+                                                        })
+                                                        .collect::<Vec<_>>(),
+                                                )
+                                                .into_element()
+                                        })
+                                    })),
                             ),
                     )
                     .child(state.overlay())
                     .into_element()
             })
         }))
+}
+
+/// With the Card pane open beside the Board and too little room for every
+/// column, show one stage at a time (stage tabs) instead of clipped columns.
+fn compact_mode(ui: Ui, width: Signal<f32>, stages: usize) -> Memo<bool> {
+    computed(move || {
+        let page = ui.page.get();
+        let pane = (page == "new-card" || page == "card" && !ui.card.get().is_empty())
+            && !ui.narrow.get()
+            && !ui.card_standalone.get();
+        let needed = stages as f32 * columns::COLUMN_MIN + stages.saturating_sub(1) as f32 * 12.;
+        let width = width.get();
+        pane && stages > 1 && width > 0. && width < needed
+    })
+}
+
+/// The compact stage follows the opened Card; tabs can switch it explicitly.
+fn focus_stage(ui: Ui, stages: &[canban_types::Stage]) -> Signal<String> {
+    let first = stages.first().map(|s| s.id.clone()).unwrap_or_default();
+    let ids: Vec<_> = stages.iter().map(|s| s.id.clone()).collect();
+    let focus = signal(first);
+    effect(move || {
+        let id = ui.card.get();
+        let stage = ui
+            .snapshot
+            .with_untracked(|s| s.cards.iter().find(|c| c.id == id).map(|c| c.stage.clone()));
+        if let Some(stage) = stage.filter(|s| ids.contains(s)) {
+            focus.set(stage);
+        }
+    });
+    focus
+}
+
+fn stage_tabs(
+    state: drag::BoardDrag,
+    stages: Vec<canban_types::Stage>,
+    focus: Signal<String>,
+) -> impl IntoElement {
+    dynamic(move || {
+        let cards = state.cards.get();
+        segmented().children(
+            stages
+                .iter()
+                .map(|stage| {
+                    let id = stage.id.clone();
+                    let selected = id.clone();
+                    let count = id.clone();
+                    compact_segment(
+                        format!(
+                            "{} {}",
+                            stage.name,
+                            cards.iter().filter(|c| c.stage == count).count()
+                        ),
+                        None,
+                        move || focus.get() == selected,
+                        move |_| focus.set(id.clone()),
+                    )
+                    .into_element()
+                })
+                .collect::<Vec<_>>(),
+        )
+    })
 }
 
 /// Board owns Project selection/creation; the rail only navigates surfaces.
@@ -235,14 +357,14 @@ fn project_picker(ui: Ui) -> impl IntoElement {
             items.iter().any(|i| i.project_id == project && i.pending),
         )
     });
-    view().min_w(px(80.)).max_w(px(560.)).child(
-        nsh_base::button()
-            .min_h(px(40.))
-            .min_w(px(80.))
-            .max_w(px(560.))
+    view().min_w(px(72.)).max_w(px(240.)).child(
+        canban_ui_kit::press_target()
+            .h(px(28.))
+            .min_w(px(72.))
+            .max_w(px(240.))
             .flex_row()
             .items_center()
-            .gap_2()
+            .gap_1p5()
             .px_2()
             .rounded(px(RADIUS))
             .border_1()
@@ -262,12 +384,14 @@ fn project_picker(ui: Ui) -> impl IntoElement {
                 )
             })
             .child(
-                heading(move || {
+                label(move || {
                     let _ = ui.project.get();
                     ui.current_project()
                         .map(|p| p.name)
                         .unwrap_or_else(|| "Choose Project".into())
                 })
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(13.5))
                 .truncate()
                 .min_w(px(0.)),
             )
@@ -275,7 +399,12 @@ fn project_picker(ui: Ui) -> impl IntoElement {
                 move || updates.get().0,
                 move || updates.get().1,
             ))
-            .child(icon(Icon::ChevronDown).flex_shrink_0())
+            .child(
+                icon(Icon::ChevronDown)
+                    .w(px(13.))
+                    .h(px(13.))
+                    .flex_shrink_0(),
+            )
             .on_press(move |_: &()| ui.show_search(true)),
     )
 }

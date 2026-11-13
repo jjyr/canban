@@ -103,6 +103,8 @@ pub struct Ui {
     pub toast_epoch: Signal<u64>,
     pub pending: Signal<bool>,
     pub pending_methods: Signal<BTreeSet<&'static str>>,
+    /// Cards with a UI-initiated merge operation currently in flight.
+    pub merging_cards: Signal<BTreeSet<String>>,
     pub refreshing: Signal<bool>,
     pub snapshot_epoch: Signal<u64>,
     pub output: Signal<String>,
@@ -110,6 +112,8 @@ pub struct Ui {
     pub output_request: Signal<u64>,
     pub review: Signal<Option<ReviewPreview>>,
     pub review_request: Signal<u64>,
+    /// Card header quick merge awaiting confirmation of a preview warning.
+    pub quick_merge: Signal<Option<ReviewPreview>>,
     pub drafts: Stored<BTreeMap<String, Draft>>,
     pub scrolls: Stored<BTreeMap<String, Point<Points>>>,
     pub narrow: Signal<bool>,
@@ -117,6 +121,12 @@ pub struct Ui {
     pub focused_card: Signal<bool>,
     pub board_width: Signal<f32>,
     pub focus_width: Signal<f32>,
+    pub card_terminal_open: Signal<bool>,
+    pub card_terminal_width: Signal<f32>,
+    pub card_terminal_focused: Signal<bool>,
+    pub worktree_modal: Signal<Option<String>>,
+    pub worktree_promote: Signal<Option<String>>,
+    pub worktree_remove_confirm: Signal<Option<String>>,
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -136,6 +146,23 @@ fn ordered_enabled_profiles(all: &[Profile], default_agent: &str) -> Vec<Profile
         (rank, p.id.clone())
     });
     enabled
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceDismiss {
+    CloseNewCard,
+    CloseCard,
+}
+
+pub fn workspace_dismiss_action(page: &str, blocked: bool) -> Option<WorkspaceDismiss> {
+    if blocked {
+        return None;
+    }
+    match page {
+        "new-card" => Some(WorkspaceDismiss::CloseNewCard),
+        "card" => Some(WorkspaceDismiss::CloseCard),
+        _ => None,
+    }
 }
 
 impl Ui {
@@ -183,6 +210,32 @@ impl Ui {
         self.review_request
             .set(self.review_request.get_untracked() + 1);
         self.page.set(page.into());
+    }
+    pub fn has_blocking_overlay(self) -> bool {
+        self.quick_open.get_untracked()
+            || !self.utility_popup.get_untracked().is_empty()
+            || self.native_modal.get_untracked()
+            || self.quick_merge.get_untracked().is_some()
+            || self.terminal_rename.get_untracked().is_some()
+            || self.worktree_modal.get_untracked().is_some()
+            || self.worktree_promote.get_untracked().is_some()
+            || self.worktree_remove_confirm.get_untracked().is_some()
+    }
+    pub fn close_card(self) {
+        self.card_tab.set(String::new());
+        self.card_terminal_open.set(false);
+        self.card_terminal_focused.set(false);
+        self.card.set(String::new());
+        self.card_standalone.set(false);
+        self.clear_output();
+        self.page.set("board".into());
+    }
+    pub fn dismiss_workspace_pane(self) {
+        match workspace_dismiss_action(&self.page.get_untracked(), self.has_blocking_overlay()) {
+            Some(WorkspaceDismiss::CloseNewCard) => self.navigate("board"),
+            Some(WorkspaceDismiss::CloseCard) => self.close_card(),
+            None => {}
+        }
     }
     pub fn new() -> Self {
         let snapshot = signal(Snapshot::default());
@@ -298,6 +351,7 @@ impl Ui {
             toast_epoch: signal(0),
             pending: signal(false),
             pending_methods: signal(BTreeSet::new()),
+            merging_cards: signal(BTreeSet::new()),
             refreshing: signal(false),
             snapshot_epoch: signal(0),
             output: signal(String::new()),
@@ -305,6 +359,7 @@ impl Ui {
             output_request: signal(0),
             review: signal(None),
             review_request: signal(0),
+            quick_merge: signal(None),
             drafts: stored(crate::drafts::persistence::initial()),
             scrolls: stored(BTreeMap::new()),
             narrow: signal(false),
@@ -312,6 +367,12 @@ impl Ui {
             focused_card: signal(false),
             board_width: signal(700.0),
             focus_width: signal(420.0),
+            card_terminal_open: signal(false),
+            card_terminal_width: signal(520.0),
+            card_terminal_focused: signal(false),
+            worktree_modal: signal(None),
+            worktree_promote: signal(None),
+            worktree_remove_confirm: signal(None),
         }
     }
     pub fn location(self) -> Location {
@@ -426,6 +487,8 @@ impl Ui {
     pub fn open_card(self, id: String) {
         self.request.set(String::new());
         self.card_event.set(None);
+        self.card_terminal_open.set(false);
+        self.card_terminal_focused.set(false);
         self.card_standalone.set(
             matches!(
                 self.page.get_untracked().as_str(),
@@ -468,11 +531,33 @@ impl Ui {
             .set(self.output_request.get_untracked() + 1);
         self.page.set("card".into());
     }
+    pub fn open_card_with_terminal(self, card_id: String, conversation: Option<String>) {
+        if let Some(conv) = &conversation {
+            self.terminal_recent.with(|recent| {
+                recent.insert(card_id.clone(), conv.clone());
+            });
+            self.terminal_tabs.update(|tabs| {
+                if !tabs.contains(conv) {
+                    tabs.push(conv.clone());
+                }
+            });
+        }
+        self.open_card(card_id);
+        self.card_terminal_open.set(true);
+        self.card_terminal_focused.set(true);
+        self.terminal_focus.update(|v| *v += 1);
+    }
     pub fn back(self) {
         crate::navigation::go(self, false);
     }
     pub fn is_method_pending(self, method: &'static str) -> bool {
         self.pending_methods.with(|s| s.contains(method))
+    }
+    pub fn is_card_merging(self, snapshot: &Snapshot, card: &Card) -> bool {
+        crate::components::activity::is_merging(snapshot, card)
+            || card.active()
+                && !card.merged()
+                && self.merging_cards.with(|ids| ids.contains(&card.id))
     }
     pub fn notify(self, message: impl Into<String>) {
         let message = message.into();
@@ -585,6 +670,17 @@ pub fn dispatch_complete(
     ui.pending_methods.update(|s| {
         s.insert(method);
     });
+    let merging_card = matches!(
+        method,
+        "review.merge" | "github.pr.merge" | "workflow.deliver"
+    )
+    .then(|| params["card_id"].as_str().map(str::to_owned))
+    .flatten();
+    if let Some(ref cid) = merging_card {
+        ui.merging_cards.update(|ids| {
+            ids.insert(cid.clone());
+        });
+    }
     ui.pending.set(true);
     ui.operation_error.set(String::new());
     ui.status.set(format!("{method}…"));
@@ -601,6 +697,11 @@ pub fn dispatch_complete(
         ui.pending_methods.update(|s| {
             s.remove(method);
         });
+        if let Some(ref cid) = merging_card {
+            ui.merging_cards.update(|ids| {
+                ids.remove(cid);
+            });
+        }
         ui.pending
             .set(!ui.pending_methods.with_untracked(BTreeSet::is_empty));
         match result {
@@ -632,16 +733,31 @@ pub fn dispatch_complete(
                         "scheduler.configure" => ui.notify("Scheduling settings saved"),
                         "project.location" => ui.notify("Work location updated"),
                         "workflow.save" => ui.notify("Workflow saved"),
+                        "review.merge" if value["state"] == "merged" => ui.notify(format!(
+                            "Merged into {}",
+                            value["target_branch"].as_str().unwrap_or("target branch")
+                        )),
                         "utilities.awake" => ui.notify(if value["awake"] == true {
                             "Host awake enabled"
                         } else {
                             "Host awake disabled"
                         }),
                         "utilities.configure"
+                        | "notifications.read"
+                        | "notifications.read_all"
                         | "comment.add"
                         | "card.move"
-                        | "project.create"
-                        | "card.create" => ui.status.set("Saved".into()),
+                        | "project.create" => ui.status.set("Saved".into()),
+                        "card.create" | "github.issue.add" => {
+                            if let Some(number) = value["number"].as_u64() {
+                                ui.notify(format!("Created Card #{number}"));
+                            } else {
+                                ui.notify("Card created");
+                            }
+                        }
+                        "worktree.create" => ui.notify("Managed worktree created"),
+                        "worktree.promote" => ui.notify("Promoted worktree to Card"),
+                        "worktree.remove" => ui.notify("Worktree deleted"),
                         _ => ui.notify("Saved"),
                     }
                 }
@@ -654,13 +770,20 @@ pub fn dispatch_complete(
                             ui.page.set("board".into());
                         }
                     }
-                    "card.create" | "github.issue.add" | "github.item.add" if active => {
+                    "card.create" | "github.issue.add" | "github.item.add"
+                        if should_open_created_card(active, &source) =>
+                    {
                         if let Some(id) = value["id"].as_str() {
                             ui.open_card(id.into());
                         }
                     }
                     "card.archive" if active => crate::card_actions::after_archive(ui),
-                    "review.merge" | "github.pr.merge" | "github.pr.refresh"
+                    "review.merge"
+                    | "github.pr.merge"
+                    | "github.pr.refresh"
+                    | "workflow.deliver"
+                    | "workflow.decide"
+                    | "card.hold_auto_merge"
                         if active && ui.current_card().is_some_and(|c| c.archived_at.is_some()) =>
                     {
                         ui.review.set(None);
@@ -796,4 +919,54 @@ pub fn copy_text(ui: Ui, value: String) {
             Err(e) => ui.operation_error.set(e.to_string()),
         }
     });
+}
+/// New Card form submissions remain on a fresh New Card draft for consecutive
+/// creation; other active surfaces (e.g. GitHub `+ Add to Board`) open the Card.
+pub(crate) fn should_open_created_card(active: bool, source: &Location) -> bool {
+    active && source.page != "new-card"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn location(page: &str, new_draft: &str) -> Location {
+        Location {
+            new_draft: new_draft.into(),
+            page: page.into(),
+            project: "proj-1".into(),
+            card: String::new(),
+            request: String::new(),
+            terminal: String::new(),
+            standalone: false,
+            terminal_card: String::new(),
+        }
+    }
+
+    #[test]
+    fn workspace_dismiss_closes_only_card_and_new_card_when_unblocked() {
+        assert_eq!(
+            workspace_dismiss_action("card", false),
+            Some(WorkspaceDismiss::CloseCard)
+        );
+        assert_eq!(
+            workspace_dismiss_action("new-card", false),
+            Some(WorkspaceDismiss::CloseNewCard)
+        );
+        assert_eq!(workspace_dismiss_action("board", false), None);
+        assert_eq!(workspace_dismiss_action("review", false), None);
+        assert_eq!(workspace_dismiss_action("card", true), None);
+        assert_eq!(workspace_dismiss_action("new-card", true), None);
+    }
+
+    #[test]
+    fn new_card_submission_stays_on_new_card_for_consecutive_creation() {
+        let new_card = location("new-card", "new-card:first");
+        assert!(!should_open_created_card(true, &new_card));
+        assert!(!should_open_created_card(false, &new_card));
+
+        let github = location("github", "");
+        assert!(should_open_created_card(true, &github));
+        assert!(!should_open_created_card(false, &github));
+    }
 }

@@ -1,21 +1,10 @@
 use super::*;
 pub(super) fn activity_warning(db: Db<'_>, card: &Card) -> Result<Option<String>> {
-    if db.list::<Attempt>()?.iter().any(|a| {
-        // Continued assignments retain their last observation, but runtime
-        // ownership has moved to the next assignment in the conversation.
-        a.card_id == card.id && a.terminal.is_some() && !a.agent_stopped()
-    }) {
-        return Ok(Some(
-            "Card Agent is still running; merging now only includes current worktree changes"
-                .into(),
-        ));
-    }
-    if db.list::<Request>()?.iter().any(|r| {
-        r.card_id == card.id && matches!(r.state.as_str(), "queued" | "starting" | "unknown")
-    }) {
-        return Ok(Some("Card still has queued or uncertain Agent work".into()));
-    }
-    Ok(None)
+    Ok(canban_types::agent_activity_warning(
+        &card.id,
+        &db.list::<Attempt>()?,
+        &db.list::<Request>()?,
+    ))
 }
 impl AppServer {
     pub(super) fn review_preview(&self, p: Value) -> Result<Value> {
@@ -65,6 +54,7 @@ impl AppServer {
             return Ok(saved);
         }
         let (card, project, plan) = context.unwrap();
+        let _merging = self.track_merging(&card.id);
         let message = p["message"]
             .as_str()
             .filter(|s| !s.trim().is_empty())
@@ -127,6 +117,7 @@ impl AppServer {
             Ok(value)
         })?;
         self.git_changed(&project.work_location().machine);
+        drop(_merging);
         drop(_gate);
         if value["state"] == "merged" {
             let _ = self.try_auto_archive_merged(&card.id);
@@ -135,6 +126,10 @@ impl AppServer {
         Ok(value)
     }
     pub(crate) fn try_auto_archive_merged(&self, card_id: &str) -> Result<bool> {
+        self.try_auto_archive_merged_at(card_id, now())
+    }
+
+    pub(crate) fn try_auto_archive_merged_at(&self, card_id: &str, now_ms: u64) -> Result<bool> {
         let (card, project) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
@@ -142,8 +137,7 @@ impl AppServer {
                 return Ok(false);
             };
             if !card.active()
-                || (card.delivery.is_none()
-                    && !card.pull_request.as_ref().is_some_and(|p| p.merged))
+                || !card.merged()
                 || card.attention.is_some()
                 || card.human_gate.is_some()
                 || activity_warning(db, &card)?.is_some()
@@ -166,8 +160,24 @@ impl AppServer {
                 })
                 .max_by_key(|e| e.sequence);
             if last_lifecycle
+                .as_ref()
                 .is_some_and(|e| matches!(e.kind.as_str(), "card.restored" | "card.archived"))
             {
+                return Ok(false);
+            }
+            // Keep Cards merged today visible on the Board until the next local calendar day.
+            let merged_at = card
+                .delivery
+                .as_ref()
+                .map(|d| d.merged_at)
+                .or_else(|| last_lifecycle.as_ref().map(|e| e.created_at))
+                .unwrap_or(card.created_at);
+            let same_local_day: bool = db.conn.query_row(
+                "SELECT date(?1 / 1000, 'unixepoch', 'localtime') >= date(?2 / 1000, 'unixepoch', 'localtime')",
+                params![merged_at as i64, now_ms as i64],
+                |r| r.get(0),
+            )?;
+            if same_local_day {
                 return Ok(false);
             }
             let project: Project = db.get(&card.project_id)?;
@@ -191,6 +201,41 @@ impl AppServer {
             "revision": card.revision,
         }))?;
         Ok(true)
+    }
+
+    pub(crate) fn pump_merged_archives(&self) -> Result<()> {
+        let now_ms = now();
+        let candidates: Vec<String> = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let today: String = db.conn.query_row(
+                "SELECT date(?1 / 1000, 'unixepoch', 'localtime')",
+                params![now_ms as i64],
+                |r| r.get(0),
+            )?;
+            let mut ids = Vec::new();
+            for c in db.list::<Card>()? {
+                if !c.active() || !c.merged() || c.attention.is_some() || c.human_gate.is_some() {
+                    continue;
+                }
+                if let Some(d) = &c.delivery {
+                    let merged_day: String = db.conn.query_row(
+                        "SELECT date(?1 / 1000, 'unixepoch', 'localtime')",
+                        params![d.merged_at as i64],
+                        |r| r.get(0),
+                    )?;
+                    if merged_day >= today {
+                        continue;
+                    }
+                }
+                ids.push(c.id);
+            }
+            ids
+        };
+        for id in candidates {
+            let _ = self.try_auto_archive_merged_at(&id, now_ms);
+        }
+        Ok(())
     }
 
     pub(crate) fn pump_deliveries(&self) -> Result<()> {
@@ -276,6 +321,7 @@ impl AppServer {
         if has_pending_requests {
             return Ok(());
         }
+        let _merging = self.track_merging(&card.id);
         let target_branch = run.inputs["target_branch"].as_str();
         let sync_upstream = run.inputs["sync_upstream"].as_bool().unwrap_or(true);
         let mut workspace_project = project.clone();
@@ -324,6 +370,10 @@ impl AppServer {
             }
         };
         if !plan.merge_allowed {
+            let pending_conflict = ops
+                .pending_merge_conflict(&workspace_project, &card, target_branch)
+                .ok()
+                .flatten();
             let reason = format!(
                 "Auto-merge paused: {}",
                 plan.reason
@@ -334,6 +384,21 @@ impl AppServer {
                 let mut current_card: Card = db.get(&card.id)?;
                 let mut current_run: WorkflowRun = db.get(&run.id)?;
                 if current_run.state == "waiting_delivery" {
+                    if let Some((ref conflict_branch, ref conflict_head, ref files)) =
+                        pending_conflict
+                        && canban_workflow_engine::runtime::rework_conflict(
+                            db,
+                            &config,
+                            &mut current_card,
+                            &mut current_run,
+                            conflict_branch,
+                            conflict_head,
+                            files,
+                            enqueue,
+                        )?
+                    {
+                        return Ok(());
+                    }
                     canban_workflow_engine::runtime::hold_delivery(
                         db,
                         &mut current_card,
@@ -470,6 +535,41 @@ impl AppServer {
                     }
                 }
                 Err(error) => {
+                    use canban_workspaces::review::DeliveryError;
+                    match error.downcast_ref::<DeliveryError>() {
+                        // The Project branch moved under us; leave the run queued for a retry.
+                        Some(DeliveryError::TargetAdvanced) => {
+                            log(
+                                db,
+                                &current_card,
+                                "review.merge_retry",
+                                "system",
+                                "Target branch advanced during delivery; retrying",
+                                None,
+                                json!({"target_branch":plan.target_branch,"request_key":key,"workflow_run_id":run.id}),
+                            )?;
+                            return Ok(());
+                        }
+                        Some(DeliveryError::Conflict {
+                            target_branch,
+                            target_head,
+                            files,
+                            ..
+                        }) if canban_workflow_engine::runtime::rework_conflict(
+                            db,
+                            &config,
+                            &mut current_card,
+                            &mut current_run,
+                            target_branch,
+                            target_head,
+                            files,
+                            enqueue,
+                        )? =>
+                        {
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
                     let reason = format!("Auto-merge failed: {error:#}");
                     log(
                         db,
@@ -491,6 +591,7 @@ impl AppServer {
             Ok(())
         })?;
         self.git_changed(&project.work_location().machine);
+        drop(_merging);
         drop(_gate);
         if merged_and_completed {
             let _ = self.try_auto_archive_merged(&card.id);

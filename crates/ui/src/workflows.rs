@@ -111,6 +111,60 @@ impl Default for State {
         Self::new()
     }
 }
+pub fn chrome_bar(ui: Ui) -> impl IntoElement {
+    let state = ui.workflows;
+    view()
+        .flex_1()
+        .min_w(px(0.))
+        .h_full()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .pl_2()
+        .window_drag(true)
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .min_w(px(0.))
+                .window_drag(false)
+                .child(compact_action("← Board", Variant::Quiet, move |_| {
+                    ui.navigate("board")
+                }))
+                .child(
+                    label(move || {
+                        format!(
+                            "{} / Workflows",
+                            ui.current_project().map(|p| p.name).unwrap_or_default()
+                        )
+                    })
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(13.5))
+                    .truncate()
+                    .min_w(px(0.)),
+                ),
+        )
+        .child(view().flex_1().h_full().window_drag(true))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .flex_shrink_0()
+                .window_drag(false)
+                .child(compact_action(
+                    "Project Agents",
+                    Variant::Quiet,
+                    move |_| ui.navigate("project-agents"),
+                ))
+                .child(
+                    compact_action("Edit with agent", Variant::Primary, move |_| edit_agent(ui))
+                        .disabled(move || ui.pending.get() || state.loading.get()),
+                ),
+        )
+}
+
 fn project_source_stamp(ui: Ui, project: &str) -> SourceStamp {
     ui.snapshot.with_untracked(|s| {
         s.workflow_sources
@@ -403,11 +457,6 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         },
     );
     view().flex_1().min_h(px(0.)).min_w(px(0.)).p_5().gap_4()
-        .child(view().flex_row().items_center().gap_3()
-            .child(chrome_button(Icon::Back, "Back to Board", move |_| ui.navigate("board")))
-            .child(heading(move || format!("{} / Workflows", ui.current_project().map(|p| p.name).unwrap_or_default())).truncate().min_w(px(0.)).flex_1())
-            .child(action("Project Agents", Variant::Quiet, move |_| ui.navigate("project-agents")).flex_shrink_0())
-            .child(action_with_icon(Icon::Agent, "Edit with agent", Variant::Primary, move |_| edit_agent(ui)).flex_shrink_0().disabled(move || ui.pending.get() || state.loading.get())))
         .child(when(move || !state.error.get().is_empty(), move || notice(move || state.error.get(), Tone::Attention)))
         .child(view().flex_1().min_h(px(0.)).flex_row().gap_4()
             .child(view().w(px(200.)).flex_shrink_0().min_h(px(0.)).gap_2()
@@ -535,7 +584,7 @@ fn new_workflow(ui: Ui) {
         let mut n = 1;
         while draft.sources.contains_key(&format!("workflow-{n}.yaml")) { n += 1; }
         name = format!("workflow-{n}.yaml");
-        draft.sources.insert(name.clone(), format!("schema: 1\nid: workflow-{}\nname: New workflow\non:\n  manual:\n    event: manual\n    start_at: explain\nsteps:\n  - id: explain\n    uses: agent\n    with:\n      profile: {}\n      instruction: |\n        Read the Card and propose a concrete plan.\n", canban_types::id(), ui.profiles.with_untracked(|p| p.first().map(|p| p.id.clone()).unwrap_or_default())));
+        draft.sources.insert(name.clone(), format!("schema: {}\nid: workflow-{}\nname: New workflow\non:\n  manual:\n    event: manual\n    start_at: explain\nsteps:\n  - id: explain\n    uses: agent\n    with:\n      profile: {}\n      instruction: |\n        Read the Card and propose a concrete plan.\n", canban_workflow_engine::migrations::CURRENT, canban_types::id(), ui.profiles.with_untracked(|p| p.first().map(|p| p.id.clone()).unwrap_or_default())));
         draft.selected = name.clone();
     });
     state.selected.set(name);

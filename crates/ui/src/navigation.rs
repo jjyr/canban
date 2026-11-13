@@ -25,6 +25,13 @@ impl History {
         self.entries.push(route);
         self.index = self.entries.len() - 1;
     }
+    pub fn replace_current(&mut self, route: Location) {
+        if let Some(current) = self.entries.get_mut(self.index) {
+            *current = route;
+        } else {
+            self.visit(route);
+        }
+    }
     pub fn step(&mut self, forward: bool) -> Option<Location> {
         if forward {
             if self.index + 1 >= self.entries.len() {
@@ -65,13 +72,7 @@ pub fn watch(ui: Ui) {
 }
 pub fn replace(ui: Ui) {
     let route = ui.location();
-    ui.history.update(|h| {
-        if let Some(current) = h.entries.get_mut(h.index) {
-            *current = route;
-        } else {
-            h.visit(route);
-        }
-    });
+    ui.history.update(|h| h.replace_current(route));
 }
 pub fn go(ui: Ui, forward: bool) {
     let mut history = ui.history.get_untracked();
@@ -135,16 +136,18 @@ pub fn go(ui: Ui, forward: bool) {
             ui.new_draft.set(target.new_draft);
         }
         ui.project.set(target.project);
-        let default_card_tab = if target.page == "card" && !target.card.is_empty() && target.request.is_empty() {
-            let live = crate::terminals::card_live_entries(&ui.snapshot.get_untracked(), &target.card);
-            let recent = ui.terminal_recent.with(|m| m.get(&target.card).cloned());
-            recent
-                .filter(|rid| live.iter().any(|e| &e.saved.id == rid))
-                .or_else(|| live.last().map(|e| e.saved.id.clone()))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let default_card_tab =
+            if target.page == "card" && !target.card.is_empty() && target.request.is_empty() {
+                let live =
+                    crate::terminals::card_live_entries(&ui.snapshot.get_untracked(), &target.card);
+                let recent = ui.terminal_recent.with(|m| m.get(&target.card).cloned());
+                recent
+                    .filter(|rid| live.iter().any(|e| &e.saved.id == rid))
+                    .or_else(|| live.last().map(|e| e.saved.id.clone()))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
         ui.card_tab.set(default_card_tab);
         ui.card.set(target.card);
         ui.request.set(target.request);
@@ -223,5 +226,21 @@ mod tests {
         h.visit(route("archive"));
         assert!(h.step(true).is_none());
         assert_eq!(h.entries.len(), 3);
+    }
+    #[test]
+    fn consecutive_new_card_replacement_keeps_single_back_step_to_origin() {
+        let mut h = History::default();
+        let board = route("board");
+        let mut first = route("new-card");
+        first.new_draft = "new-card:first".into();
+        let mut second = route("new-card");
+        second.new_draft = "new-card:second".into();
+        h.visit(board.clone());
+        h.visit(first);
+        h.replace_current(second.clone());
+        // Subsequent async history watcher visit is a no-op on the replaced route.
+        h.visit(second);
+        assert_eq!(h.entries.len(), 2);
+        assert_eq!(h.step(false), Some(board));
     }
 }

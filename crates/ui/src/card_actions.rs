@@ -82,6 +82,16 @@ pub fn items(ui: Ui, card: Card) -> Vec<MenuItem> {
         }),
     ];
     let terminal_card = card.id.clone();
+    let agent_card = card.id.clone();
+    let project_id = card.project_id.clone();
+    items.insert(
+        0,
+        MenuItem::new("Open Agent")
+            .disabled(inactive || ui.pending.get_untracked())
+            .on_select(move || {
+                crate::terminals::create_in_card(ui, project_id.clone(), agent_card.clone(), true)
+            }),
+    );
     items.insert(
         0,
         MenuItem::new("Open Card Terminal")

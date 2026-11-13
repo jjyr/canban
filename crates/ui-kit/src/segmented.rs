@@ -37,7 +37,7 @@ fn segment_inner(
 ) -> nsh_base::ButtonElement {
     let selected = computed(selected);
     let a11y_title = title.clone();
-    let mut button = nsh_base::button()
+    let mut button = crate::press_target()
         .min_h(px(height))
         .flex_row()
         .items_center()

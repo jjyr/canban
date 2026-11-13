@@ -2,10 +2,7 @@ use super::*;
 use nsh_core::element::desktop::{MenuItem, popup_menu};
 use serde_json::json;
 fn close(ui: Ui) {
-    ui.card_tab.set(String::new());
-    ui.card.set(String::new());
-    ui.card_standalone.set(false);
-    ui.page.set("board".into());
+    ui.close_card();
 }
 fn review(ui: Ui) {
     if let Some(c) = ui.current_card() {
@@ -87,7 +84,9 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
                     json!({"workflow_id":workflow.workflow_id,"card_id":card.id,"entry":entry});
                 items.push(
                     MenuItem::new(format!("Run {} · {}", workflow.definition.name, entry))
-                        .disabled(active || !card.active() || card.human_gate.is_some())
+                        .disabled(
+                            active || !card.active() || card.merged() || card.human_gate.is_some(),
+                        )
                         .on_select(move || dispatch(ui, "workflow.start", params.clone())),
                 );
             }
@@ -104,16 +103,42 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
                     .on_select(move || dispatch(ui, "workflow.stop", json!({"run_id":run.id}))),
             );
         }
-        let has_deliver_in_project = ui.snapshot.with_untracked(|s| {
-            s.workflow_revisions.iter().any(|w| {
+        let (has_deliver_in_project, active_non_deliver) = ui.snapshot.with_untracked(|s| {
+            let has_deliver = s.workflow_revisions.iter().any(|w| {
                 w.project_id == card.project_id
                     && w.definition
                         .steps
                         .values()
                         .any(|st| matches!(st, canban_types::WorkflowStep::Deliver { .. }))
-            })
+            });
+            let non_deliver = s.workflow_runs.iter().any(|r| {
+                r.card_id == card.id
+                    && r.active()
+                    && !r.step.as_ref().is_some_and(|k| {
+                        matches!(
+                            r.definition.steps.get(k),
+                            Some(canban_types::WorkflowStep::Deliver { .. })
+                        )
+                    })
+            });
+            (has_deliver, non_deliver)
         });
-        if has_deliver_in_project && card.active() {
+        if has_deliver_in_project && card.active() && !card.merged() {
+            if card.worktree.is_some() {
+                let cid = card.id.clone();
+                let rev = card.revision;
+                items.push(
+                    MenuItem::new("Retry auto-merge")
+                        .disabled(active_non_deliver)
+                        .on_select(move || {
+                            dispatch(
+                                ui,
+                                "workflow.deliver",
+                                json!({"card_id":cid,"revision":rev}),
+                            )
+                        }),
+                );
+            }
             let held = card.hold_auto_merge;
             let cid = card.id.clone();
             let rev = card.revision;
@@ -194,7 +219,10 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 .gap_1()
                 .child(when(
                     move || {
-                        ui.page.get() == "card" && (ui.narrow.get() || ui.card_standalone.get())
+                        ui.page.get() == "card"
+                            && (ui.narrow.get()
+                                || ui.card_standalone.get()
+                                || ui.card_terminal_open.get())
                     },
                     move || chrome_button(Icon::Back, "Back to Board", move |_| close(ui)),
                 ))
@@ -202,9 +230,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     view()
                         .flex_1()
                         .min_w(px(0.))
-                        .tooltip(nsh_base::tooltip().child(label(move || {
+                        .tooltip(hint_tooltip(move || {
                             ui.current_card().map(|c| c.title).unwrap_or_default()
-                        })))
+                        }))
                         .child(
                             label(move || ui.current_card().map(|c| c.title).unwrap_or_default())
                                 .font_weight(FontWeight::SEMIBOLD)
@@ -213,8 +241,27 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         ),
                 )
                 .child(when(
-                    move || ui.page.get() != "review",
+                    move || ui.page.get() != "review" && !ui.card_terminal_open.get(),
                     move || crate::editor::expand(ui),
+                ))
+                .child(when(
+                    move || ui.current_card().is_some_and(|c| c.active() && c.merged()),
+                    move || {
+                        chrome_button_disabled(
+                            Icon::Archive,
+                            "Archive Card",
+                            move || ui.pending.get(),
+                            move |_| {
+                                if let Some(c) = ui.current_card() {
+                                    crate::card_actions::apply(
+                                        ui,
+                                        c,
+                                        crate::card_actions::Action::Archive,
+                                    );
+                                }
+                            },
+                        )
+                    },
                 ))
                 .child(chrome_button_disabled(
                     Icon::Agent,
@@ -241,6 +288,10 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             if ui.page.get_untracked() == "review" {
                                 crate::terminals::open_card(ui, &c.id);
                                 return;
+                            }
+                            if ui.card_terminal_open.get_untracked() {
+                                ui.card_terminal_open.set(false);
+                                ui.card_terminal_focused.set(false);
                             }
                             let live = crate::terminals::card_live_entries(
                                 &ui.snapshot.get_untracked(),
@@ -299,7 +350,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 .gap_2()
                 .min_w(px(0.))
                 .child(
-                    nsh_base::button()
+                    canban_ui_kit::press_target()
                         .element_ref(&stage_anchor)
                         .h(px(24.))
                         .px_2()
@@ -344,10 +395,12 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             });
                         }),
                 );
-            if c.delivery.is_some() || c.pull_request.as_ref().is_some_and(|p| p.merged) {
+            if c.merged() {
                 row = row.child(status("Merged", Tone::Success));
+            } else if ui.is_card_merging(&s, &c) {
+                row = row.child(live_status("Merging", Tone::Info));
             }
-            if let Some(c_active) = Some(&c).filter(|c| c.active()) {
+            if let Some(c_active) = Some(&c).filter(|c| c.active() && !c.merged()) {
                 let has_deliver_in_project = s.workflow_revisions.iter().any(|w| {
                     w.project_id == c_active.project_id
                         && w.definition
@@ -364,15 +417,19 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     view()
                         .min_w(px(0.))
                         .max_w(px(150.))
-                        .tooltip(nsh_base::tooltip().child(label(branch.clone())))
+                        .tooltip(hint_tooltip(branch.clone()))
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .min_w(px(0.))
                                 .h(px(24.))
+                                .px_1p5()
+                                .rounded(px(5.))
                                 .flex_row()
                                 .items_center()
                                 .gap_1()
                                 .bg(CLEAR)
+                                .hover(|st| st.bg(INSET))
+                                .focus(|st| st.border_1().border_color(ACCENT))
                                 .accessibility_label(|| Some("Copy Card branch".into()))
                                 .child(icon(Icon::Branch).w(px(12.)).h(px(12.)))
                                 .child(
@@ -386,7 +443,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             let attachment_count = s.artifacts.iter().filter(|a| a.card_id == c.id).count();
             if attachment_count > 0 {
                 row = row.child(
-                    nsh_base::button()
+                    canban_ui_kit::press_target()
                         .h(px(24.))
                         .px_2()
                         .rounded(px(5.))
@@ -431,6 +488,35 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     move |_| review(ui),
                 ));
             }
+            let project = s.projects.iter().find(|p| p.id == c.project_id);
+            if ui.page.get() != "review" && quick_merge::eligible(&c, project) {
+                let target = project
+                    .and_then(|p| p.target_branch.clone())
+                    .unwrap_or_else(|| "main".into());
+                let card = c.clone();
+                let a11y = format!("Quick merge into {target}");
+                row = row.child(
+                    view()
+                        .tooltip(hint_tooltip(format!(
+                            "Merge into {target} with the default commit message, without opening the diff"
+                        )))
+                        .child(
+                            compact_action(
+                                move || {
+                                    if quick_merge::busy(ui) {
+                                        "Merging…"
+                                    } else {
+                                        "Merge"
+                                    }
+                                },
+                                Variant::Secondary,
+                                move |_| quick_merge::start(ui, card.clone()),
+                            )
+                            .accessibility_label(move || Some(a11y.clone().into()))
+                            .disabled(move || quick_merge::busy(ui)),
+                        ),
+                );
+            }
             if !in_review_stage && c.human_gate.is_some() {
                 row = row.child(
                     compact_action("Continue workflow", Variant::Secondary, move |_| {
@@ -448,7 +534,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             if let Some(reason) = c.attention.or_else(|| c.human_gate.map(|g| g.reason)) {
                 row = row.child(
                     view()
-                        .tooltip(nsh_base::tooltip().child(label(reason)))
+                        .tooltip(hint_tooltip(reason))
                         .child(
                             compact_action("Needs attention", Variant::Secondary, move |_| {
                                 crate::overview::show_card_attention(
@@ -463,6 +549,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             row
         }))
         .child(tab_bar(ui))
+        .child(quick_merge::confirm_dialog(ui))
 }
 
 fn card_tab_title(e: &crate::terminals::Entry) -> String {
@@ -480,9 +567,10 @@ fn tab_bar(ui: Ui) -> impl IntoElement {
     when(
         move || {
             ui.page.get() != "review"
-                && ui
-                    .current_card()
-                    .is_some_and(|c| !crate::terminals::card_live_entries(&ui.snapshot.get(), &c.id).is_empty())
+                && !ui.card_terminal_open.get()
+                && ui.current_card().is_some_and(|c| {
+                    !crate::terminals::card_live_entries(&ui.snapshot.get(), &c.id).is_empty()
+                })
         },
         move || {
             view()
@@ -521,13 +609,16 @@ fn tab_bar(ui: Ui) -> impl IntoElement {
                                 view()
                                     .h_full()
                                     .focusable(true)
+                                    .cursor_pointer()
                                     .px_3()
                                     .flex_shrink_0()
                                     .flex_row()
                                     .items_center()
                                     .gap_1p5()
                                     .bg(if card_selected { SURFACE } else { CLEAR })
-                                    .hover(move |st| st.bg(if card_selected { SURFACE } else { CARD_HOVER }))
+                                    .hover(move |st| {
+                                        st.bg(if card_selected { SURFACE } else { CARD_HOVER })
+                                    })
                                     .border_r_1()
                                     .border_color(BORDER)
                                     .role(AccessibilityRole::Tab)
@@ -536,13 +627,11 @@ fn tab_bar(ui: Ui) -> impl IntoElement {
                                         ..Default::default()
                                     })
                                     .label("Card tab")
-                                    .child(
-                                        label("Card").font_weight(if card_selected {
-                                            FontWeight::SEMIBOLD
-                                        } else {
-                                            FontWeight::NORMAL
-                                        }),
-                                    )
+                                    .child(label("Card").font_weight(if card_selected {
+                                        FontWeight::SEMIBOLD
+                                    } else {
+                                        FontWeight::NORMAL
+                                    }))
                                     .child(reminder_count(
                                         move || unread.total,
                                         move || unread.pending > 0,
@@ -561,10 +650,7 @@ fn tab_bar(ui: Ui) -> impl IntoElement {
                                 let is_sel = selected_tab == id;
                                 let text = card_tab_title(&e);
                                 let hint = e.hint();
-                                let mark = e
-                                    .provider()
-                                    .map(|(ic, _)| ic)
-                                    .unwrap_or(Icon::Terminal);
+                                let mark = e.provider().map(|(ic, _)| ic).unwrap_or(Icon::Terminal);
                                 let dot_color = if e.needs_attention() {
                                     ATTENTION
                                 } else if e.ended() || e.inactive() {
@@ -582,22 +668,19 @@ fn tab_bar(ui: Ui) -> impl IntoElement {
                                         .gap_0()
                                         .pr_0p5()
                                         .bg(if is_sel { SURFACE } else { CLEAR })
+                                        .hover(move |st| {
+                                            st.bg(if is_sel { SURFACE } else { CARD_HOVER })
+                                        })
                                         .border_r_1()
                                         .border_color(BORDER)
                                         .tooltip(
-                                            nsh_base::tooltip()
-                                                .placement(Placement::Bottom)
-                                                .px_3()
-                                                .py_2()
-                                                .bg(SURFACE)
-                                                .border_1()
-                                                .border_color(BORDER)
-                                                .child(label(hint.clone())),
+                                            hint_tooltip(hint.clone()).placement(Placement::Bottom),
                                         )
                                         .child(
                                             view()
                                                 .h_full()
                                                 .focusable(true)
+                                                .cursor_pointer()
                                                 .flex_1()
                                                 .min_w(px(0.))
                                                 .overflow_hidden()
@@ -639,12 +722,14 @@ fn tab_bar(ui: Ui) -> impl IntoElement {
                                                         .truncate()
                                                         .min_w(px(0.)),
                                                 )
-                                                .on_press_down(move |event: &nsh_core::PressEvent| {
-                                                    if event.clicks >= 2 {
-                                                        ui.terminal_rename
-                                                            .set(Some(rename_id.clone()));
-                                                    }
-                                                })
+                                                .on_press_down(
+                                                    move |event: &nsh_core::PressEvent| {
+                                                        if event.clicks >= 2 {
+                                                            ui.terminal_rename
+                                                                .set(Some(rename_id.clone()));
+                                                        }
+                                                    },
+                                                )
                                                 .on_context_menu(
                                                     move |event: &nsh_core::ContextMenuEvent| {
                                                         ui.spawn(crate::terminals::tabs::menu(
@@ -672,29 +757,19 @@ fn tab_bar(ui: Ui) -> impl IntoElement {
                             strip
                         })),
                 )
-                .child(
-                    view()
-                        .px_1()
-                        .flex_shrink_0()
-                        .child(chrome_button_disabled(
-                            Icon::Plus,
-                            "New terminal",
-                            move || {
-                                ui.pending.get()
-                                    || ui.current_card().is_none_or(|c| c.archived_at.is_some())
-                            },
-                            move |_| {
-                                if let Some(c) = ui.current_card() {
-                                    crate::terminals::create_in_card(
-                                        ui,
-                                        c.project_id,
-                                        c.id,
-                                        false,
-                                    );
-                                }
-                            },
-                        )),
-                )
+                .child(view().px_1().flex_shrink_0().child(chrome_button_disabled(
+                    Icon::Plus,
+                    "New terminal",
+                    move || {
+                        ui.pending.get()
+                            || ui.current_card().is_none_or(|c| c.archived_at.is_some())
+                    },
+                    move |_| {
+                        if let Some(c) = ui.current_card() {
+                            crate::terminals::create_in_card(ui, c.project_id, c.id, false);
+                        }
+                    },
+                )))
         },
     )
 }

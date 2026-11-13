@@ -22,15 +22,6 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .min_w(px(0.))
         .p_5()
         .gap_4()
-        .child(subpage_header(
-            "Back to Board",
-            move || {
-                ui.current_project()
-                    .map(|p| format!("{} / Archive", p.name))
-                    .unwrap_or_else(|| "Archive".into())
-            },
-            move |_| ui.navigate("board"),
-        ))
         .child(
             view()
                 .flex_row()
@@ -132,7 +123,7 @@ fn row(ui: Ui, entry: model::Entry) -> impl IntoElement {
         .gap_1()
         .child(header)
         .child(muted(meta).truncate().min_w(px(0.)));
-    let main = nsh_base::button()
+    let main = canban_ui_kit::press_target()
         .flex_1()
         .min_w(px(0.))
         .items_start()

@@ -34,21 +34,23 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
         .flex_row()
         .items_start()
         .gap_2()
-        .child(if e.agent.is_none()
-            && let Some((mark, _)) = e.provider()
-        {
-            view()
-                .flex_1()
-                .min_w(px(0.))
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0())
-                .child(title)
-                .into_element()
-        } else {
-            title.into_element()
-        });
+        .child(
+            if e.agent.is_none()
+                && let Some((mark, _)) = e.provider()
+            {
+                view()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0())
+                    .child(title)
+                    .into_element()
+            } else {
+                title.into_element()
+            },
+        );
     if e.agent.is_some() {
         let stage = muted(e.stage.clone().unwrap_or_default())
             .w(px(super::labels::stage_width(&e)))
@@ -99,7 +101,7 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
             ));
         })
         .child(
-            nsh_base::button()
+            canban_ui_kit::press_target()
                 .w_full()
                 .min_h(px(if e.agent.is_some() { 72. } else { 48. }))
                 .px_2()
@@ -129,6 +131,17 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             s.cards
                 .iter()
                 .map(|c| (c.id.clone(), c.number, c.title.clone(), c.archived_at))
+                .collect::<Vec<_>>(),
+            s.worktrees
+                .iter()
+                .map(|w| {
+                    (
+                        w.id.clone(),
+                        w.project_id.clone(),
+                        w.branch.clone(),
+                        w.path.clone(),
+                    )
+                })
                 .collect::<Vec<_>>(),
             entries(&s)
                 .into_iter()
@@ -217,7 +230,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                         let collapsed = folds.contains(&key);
                         let mut group = view().gap_1().pt_2();
                         let mut heading = view().flex_row().items_center().min_w(px(0.)).child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .flex_1()
                                 .min_w(px(0.))
                                 .min_h(px(32.))
@@ -241,23 +254,196 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                 .on_press(move |_: &()| toggle(ui, key.clone())),
                         );
                         if let Some(pid) = project.clone() {
-                            heading = heading.child(chrome_button_disabled(
-                                Icon::Plus,
-                                format!("New terminal in {name}"),
-                                move || ui.pending.get(),
-                                move |_| create(ui, pid.clone(), None),
-                            ));
+                            let pid_wt = pid.clone();
+                            heading = heading
+                                .child(chrome_button_disabled(
+                                    Icon::Branch,
+                                    format!("New branch worktree in {name}"),
+                                    move || ui.pending.get(),
+                                    move |_| ui.worktree_modal.set(Some(pid_wt.clone())),
+                                ))
+                                .child(chrome_button_disabled(
+                                    Icon::Plus,
+                                    format!("New terminal in {name}"),
+                                    move || ui.pending.get(),
+                                    move |_| create(ui, pid.clone(), None),
+                                ));
                         }
                         group = group.child(heading);
                         if !collapsed {
-                            for e in rows.iter().filter(|e| {
-                                e.project_id == project
-                                    && (show_inactive
-                                        || !e.inactive()
-                                        || e.saved.id == ui.terminal_selection.get_untracked()
-                                        || ui
-                                            .terminal_tabs
-                                            .with_untracked(|tabs| tabs.contains(&e.saved.id)))
+                            let project_worktrees: Vec<_> = snapshot
+                                .worktrees
+                                .iter()
+                                .filter(|w| Some(w.project_id.as_str()) == project.as_deref())
+                                .cloned()
+                                .collect();
+                            let project_rows: Vec<_> = rows
+                                .iter()
+                                .filter(|e| {
+                                    e.project_id == project
+                                        && (show_inactive
+                                            || !e.inactive()
+                                            || e.saved.id == ui.terminal_selection.get_untracked()
+                                            || ui
+                                                .terminal_tabs
+                                                .with_untracked(|tabs| tabs.contains(&e.saved.id)))
+                                })
+                                .cloned()
+                                .collect();
+
+                            for wt in &project_worktrees {
+                                let wt_children: Vec<_> = project_rows
+                                    .iter()
+                                    .filter(|e| super::worktrees::entry_in_worktree(e, wt))
+                                    .cloned()
+                                    .collect();
+                                let wt_key = format!("worktree:{}", wt.id);
+                                let wt_collapsed = folds.contains(&wt_key);
+                                let wt_menu_item = wt.clone();
+                                let wt_more_item = wt.clone();
+                                let wt_open_item = wt.clone();
+                                let wt_anchor = element_ref();
+                                let has_live = !wt_children.is_empty();
+
+                                let wt_row = view()
+                                    .ml_2()
+                                    .flex_row()
+                                    .items_center()
+                                    .min_w(px(0.))
+                                    .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
+                                        ui.spawn(super::worktrees::menu(
+                                            ui,
+                                            wt_menu_item.clone(),
+                                            Some(ev.page_position),
+                                        ));
+                                    })
+                                    .child(
+                                        view()
+                                            .flex_1()
+                                            .min_w(px(0.))
+                                            .tooltip(
+                                                hint_tooltip(format!(
+                                                    "Managed worktree `{}`\nBase: {}\n{}",
+                                                    wt.branch,
+                                                    if wt.base_branch.is_empty() {
+                                                        "default"
+                                                    } else {
+                                                        wt.base_branch.as_str()
+                                                    },
+                                                    wt.path
+                                                ))
+                                                .placement(Placement::Right),
+                                            )
+                                            .child(
+                                                canban_ui_kit::press_target()
+                                                    .w_full()
+                                                    .min_w(px(0.))
+                                                    .min_h(px(32.))
+                                                    .px_2()
+                                                    .rounded(px(5.))
+                                                    .bg(CLEAR)
+                                                    .hover(|s| s.bg(INSET))
+                                                    .flex_row()
+                                                    .items_center()
+                                                    .gap_1p5()
+                                                    .child(muted(if wt_collapsed {
+                                                        "▸"
+                                                    } else {
+                                                        "▾"
+                                                    }))
+                                                    .child(
+                                                        icon_tinted(
+                                                            Icon::Branch,
+                                                            if has_live { SUCCESS } else { ACCENT },
+                                                        )
+                                                        .w(px(13.))
+                                                        .h(px(13.)),
+                                                    )
+                                                    .child(
+                                                        label(wt.branch.clone())
+                                                            .flex_1()
+                                                            .min_w(px(0.))
+                                                            .text_size(px(12.5))
+                                                            .font_weight(FontWeight::MEDIUM)
+                                                            .truncate(),
+                                                    )
+                                                    .child(
+                                                        muted(if has_live {
+                                                            format!("{} live", wt_children.len())
+                                                        } else {
+                                                            "ready".into()
+                                                        })
+                                                        .text_size(px(11.)),
+                                                    )
+                                                    .on_press(move |_: &()| {
+                                                        if has_live {
+                                                            toggle(ui, wt_key.clone());
+                                                        } else {
+                                                            super::worktrees::open_shell(
+                                                                ui,
+                                                                &wt_open_item,
+                                                            );
+                                                        }
+                                                    }),
+                                            ),
+                                    )
+                                    .child(when(move || !has_live, {
+                                        let wt_shell_btn = wt.clone();
+                                        move || {
+                                            let wt_for_press = wt_shell_btn.clone();
+                                            chrome_button_disabled(
+                                                Icon::Terminal,
+                                                format!(
+                                                    "Open Shell in worktree {}",
+                                                    wt_shell_btn.branch
+                                                ),
+                                                move || ui.pending.get(),
+                                                move |_| {
+                                                    super::worktrees::open_shell(ui, &wt_for_press)
+                                                },
+                                            )
+                                        }
+                                    }))
+                                    .child(
+                                        chrome_button(
+                                            Icon::More,
+                                            format!("Worktree actions for {}", wt.branch),
+                                            move |_| {
+                                                let item = wt_more_item.clone();
+                                                ui.spawn(async move {
+                                                    let pos = wt_anchor.measure().await.map(|b| {
+                                                        point(
+                                                            b.page.x,
+                                                            b.page.y + b.frame.size.height,
+                                                        )
+                                                    });
+                                                    super::worktrees::menu(ui, item, pos).await;
+                                                });
+                                            },
+                                        )
+                                        .element_ref(&wt_anchor),
+                                    );
+
+                                let mut wt_block = view().gap_0p5().child(wt_row);
+                                if !wt_collapsed {
+                                    for child in wt_children {
+                                        wt_block = wt_block.child(
+                                            view()
+                                                .ml_5()
+                                                .pl_2()
+                                                .border_l_1()
+                                                .border_color(BORDER)
+                                                .child(row(ui, child)),
+                                        );
+                                    }
+                                }
+                                group = group.child(wt_block);
+                            }
+
+                            for e in project_rows.into_iter().filter(|e| {
+                                !project_worktrees
+                                    .iter()
+                                    .any(|wt| super::worktrees::entry_in_worktree(e, wt))
                             }) {
                                 if snapshot
                                     .configuration_sessions
@@ -272,7 +458,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                         .pl_2()
                                         .border_l_1()
                                         .border_color(BORDER)
-                                        .child(row(ui, e.clone())),
+                                        .child(row(ui, e)),
                                 );
                             }
                         }

@@ -2,38 +2,37 @@
 
 Status: Card reading/editing redesign implemented 2026-11-10. See the dated verification sections for exercised builds and remaining limits.
 
-## Layout and ownership
+## Layout and ownership (updated 2026-11-13: side-by-side Card + Live Terminal)
 
 ```text
-+---------------------------------------------------------------+
-| Project / Card #42 OR GitHub Issue/PR repository#42   GitHub ↗ |
-| Card title                                  Terminal ...  X   | fixed
-| Workflow: Review    branch                  Review / Continue |
-+---------------------------------------------------------------+
-| Description (GitHub source + distinct local context)     Edit | scroll
-| References: Issue/PR links from saved content, when present     |
-| Delivery PR: explicit delivery relation, when present          |
-| Activity                                                      |
-| JJ [ Author · time                                            |
-|      Markdown reply                                         ] |
-|    > developer · 2 execution events                            |
-| AG [ Author · time                       Details / Terminal   |
-|      Markdown report · Show full report                     ] |
-| · Failure or human decision stays individually visible         |
-+-------------------- New activity (N) --------------------------+
-| Contextual workflow approval/rework, only when required        |
-| Local discussion · not posted to GitHub                        |
-| Write a comment…                                      Send    | fixed
-+---------------------------------------------------------------+
++---------------------------------------------------+--------------------------------------------+
+| Project / Card #42   [>_ Terminal] [Diff] ...  X  | @developer · Working  [Interrupt] [↗] [×]  | fixed
+| Card title                                        +--------------------------------------------+
+| Workflow: Develop · branch                        |                                            |
++---------------------------------------------------+                                            |
+| Description (GitHub + local context)         Edit |  Live libghostty-vt Native Terminal        |
+| References / Delivery PR                          |  (interactive discussion with @developer   |
+| Activity                                          |   side-by-side while reading Card context) |
+| ME [ Author · time / Markdown reply             ] |                                            |
+| ✦  [ @developer · time / Markdown report        ] |                                            |
++-------------------- New activity (N) -------------+                                            |
+| Contextual workflow approval/rework (when needed) |                                            |
+| Write a comment… (@agent)                    Send |                                            |
++---------------------------------------------------+--------------------------------------------+
 ```
 
-The Board keeps its ordinary columns and Cards, without execution-slot summary or filter buttons. Wide layouts retain the Board beside the Card; narrow layouts use the Card pane with a Back action. Branch text is compact, copyable and has a full-value tooltip. Host, path, base commit and manual workspace refresh are available under **... → Workspace details**, rather than consuming permanent conversation space. **...** owns stage moves, Archive/Restore, Delete/Remove, Stop workflow and context/attachment controls. Board Cards expose the same lifecycle actions in their right-click menu. The X action is labeled **Close Card details** and only dismisses the pane. Review and human Continue remain directly reachable when applicable.
+Card is a self-contained problem-solving workspace. Users can either post structured Timeline comments mentioning `@agent` on the left **or** expand the **right-hand Live Terminal pane** (`>_ Terminal` button in the Card header, `Command+J`, or `Toggle Card Terminal Pane` in the Command Palette) to converse directly with the Card's live Agent PTY side-by-side without leaving the Card view:
 
-Opening/closing the pane now uses a shared native reveal/fade while retaining
-the Board. Switching Cards does not replay the reveal. Composer resizing and
-shared dialogs use the same reduced-motion policy; see [native motion](ui-motion.md).
+- **Left-right split geometry:** When the Card Terminal pane is closed, the Board remains visible beside the Card in wide layouts (or standalone Card when expanded/narrow). When the Card Terminal pane is toggled open (`card_terminal_open`), the workspace presents the **Card reader + Timeline + composer on the left** alongside the **live native `canban/terminal` viewer on the right** via `canban_ui_kit::split` so both Card specification/comments and interactive Agent terminal output remain visible simultaneously. On narrow viewports (`< 860pt`), opening the Card Terminal switches cleanly within the Card workspace while keeping a one-click return toggle in the header.
+- **Single-attachment & non-destructive hide:** Only the `"card"` route mounts the Card's embedded `canban/terminal` viewer (never inside narrow secondary drawers such as Diff & Review's 380pt Card drawer, and never while `"terminals"` is active), guaranteeing a Herdr PTY stream is attached to at most one native viewer at a time. Closing or hiding the Card Terminal pane (`>_ Hide` / `×` / `Command+J`) detaches **only** the UI viewer without terminating the live PTY; explicit PTY termination remains an intentional lifecycle action in `Terminals` or the Terminal overflow menu.
+- **Explicit focus ownership:** Clicking inside the embedded Terminal pane grants native PTY keyboard focus (`card_terminal_focused = true`), whereas clicking the Card task editor or comment composer transfers focus cleanly to the Markdown editor (`card_terminal_focused = false`) so typing prose, `@` mentions, and `Command+Enter` never leak keystrokes into the PTY or get stolen by background terminal output. Global UI Command keys (`Command+O`, `Command+/`, `Command+I`, `Command+J`, `Command+N`, `Command+[` / `]`) remain intercepted by `ui_command_keys` when the embedded Terminal owns focus.
+- **Pop out to Terminals (`↗`):** The embedded Terminal header provides profile switching/starting (`@developer`, `@reviewer`, etc., plus `Open Shell in Worktree`), `[Interrupt]`, and `[Pop out to Terminals ↗]` when the user wants the full multi-tab `Terminals` workspace.
 
-`card.rs` composes independently owned `card/header.rs`, `task.rs`, `details.rs`, `timeline.rs` and `composer.rs`. These use shared UI Kit controls, NSH scroll/input/Markdown/menu behavior and existing product components. The standalone Gallery imports the same screen through the production frame.
+The Board keeps its ordinary columns and Cards, without execution-slot summary or filter buttons. Branch text is compact, copyable and has a full-value tooltip. Host, path, base commit and manual workspace refresh are available under **... → Workspace details**, rather than consuming permanent conversation space. **...** owns stage moves, Archive/Restore, Delete/Remove, Stop workflow and context/attachment controls, all mirrored in the Command Palette (`>`). Board Cards expose the same lifecycle actions in their right-click menu. The X action is labeled **Close Card details** and only dismisses the pane. Review and human Continue remain directly reachable when applicable.
+
+Opening/closing the pane uses a shared native reveal/fade while retaining the Board. Switching Cards does not replay the reveal. Composer resizing and shared dialogs use the same reduced-motion policy; see [native motion](ui-motion.md).
+
+`card.rs` composes independently owned `card/header.rs`, `card/terminal.rs`, `task.rs`, `details.rs`, `timeline.rs` and `composer.rs`. These use shared UI Kit controls, NSH scroll/input/Markdown/menu behavior and existing product components. The standalone Gallery imports the same screen through the production frame.
 
 ## Description and composer
 
@@ -91,7 +90,7 @@ comment publishing control.
 
 ## Recipients and attachments
 
-Typing a standalone `@` opens configured Profile candidates at the caret; an explicit `@` (**Mention an Agent**) button in the composer toolbar also opens the candidate picker. Typing filters candidates; Up/Down select, Tab/click accepts and Escape dismisses. Enter and Shift+Enter insert newlines even while candidates are visible. Completion and prose mention detection ignore email-like text (`user@profile`), quoted lines (`>`), escaped `\@`, inline backticks and fenced code blocks. Standalone `@profile` tokens anywhere in prose (leading or mid-sentence) surface removable recipient chips above the composer; clicking `×` on a chip removes a leading `@profile` prefix or suppresses a mid-sentence `@profile` from the explicit `mentions` array while keeping prose intact. The **"Local discussion · not posted to GitHub"** scope note is shown only when the Card is linked to a GitHub Issue or Pull Request.
+Typing a standalone `@` opens configured Profile candidates at the caret; an explicit `@` (**Mention an Agent**) button in the composer toolbar also opens the candidate picker. Typing filters candidates; Up/Down select, Enter/Tab/click accepts and Escape dismisses. Shift+Enter inserts a newline while candidates are visible, and Enter/Shift+Enter insert newlines when candidates are closed. Completion and prose mention detection ignore email-like text (`user@profile`), quoted lines (`>`), escaped `\@`, inline backticks and fenced code blocks. Standalone `@profile` tokens anywhere in prose (leading or mid-sentence) surface removable recipient chips above the composer; clicking `×` on a chip removes a leading `@profile` prefix or suppresses a mid-sentence `@profile` from the explicit `mentions` array while keeping prose intact. The **"Local discussion · not posted to GitHub"** scope note is shown only when the Card is linked to a GitHub Issue or Pull Request.
 
 Hash completion uses the same local Card and connected GitHub Issue/PR source as
 the task editor. Candidates are recomputed across the full inventory as the query
@@ -110,15 +109,15 @@ Attachment references are readable links to Card-managed resources. Images refer
 
 ## Timeline and reading behavior
 
-Description, events, comments, replies and reports share one vertical scroll owner. First open starts at the description. Routine events are compact rows in sequence order, without a separate Activity disclosure. Narrative bodies share the UI Kit Markdown reader (headings, lists, quotes, code, tables, links and images). File-backed reports load once per keyed row, including archived resources. A report echoed as a reply remains a compact history event when the request and non-null resource path match; a report without a path remains a visible message. Late echoes update that row's presentation without duplicating the report body.
+Description, events, comments, replies and reports share one vertical scroll owner. First open starts at the description. Activity shows conversation, stage moves, decisions, merges and problems as compact rows in sequence order. Process bookkeeping is not shown (updated 2026-11-13, Card #16): `card.updated`, `execution.queued/started/attached/continued`, idle-close progress, `workflow.started` and similar events stay durable for triggers and history but are filtered from the Card Activity projection; a deep link to such an event still reveals it. Comment avatars use the signed-in GitHub account picture for the local user ("ME" while signed out or loading) and the provider icon for Agent messages. Narrative bodies share the UI Kit Markdown reader (headings, lists, quotes, code, tables, links and images). File-backed reports load once per keyed row, including archived resources. A report echoed as a reply is hidden when the request and report identity/resource path match; a report without a path remains a visible message. Late echoes update that row's presentation without duplicating the report body.
 
 The Card saves its reading offset per route. Scrolling away stops following; new activity exposes an explicit jump-to-latest action. At the bottom, new replies and loaded report growth stay visible. Composer growth leaves a reader's offset intact. Draft/offset retention is in-memory for the window lifetime. Agent/Terminal operations and human approval boundaries remain separate from reading and commenting.
 
-## Terminal boundary
+## Terminal boundary (updated 2026-11-13)
 
-Clicking an existing live Agent status or Timeline Agent name navigates to its conversation. An exited Agent status is labeled Resume and explicitly restores its exact session; it does not open an ended-session page. Live navigation does not resume or start an Agent. **Open Card Terminals** selects an existing Card conversation if available; otherwise it opens a Card-context empty Terminal view without selecting an unrelated tab or starting a process.
+Inside the Card workspace, clicking a live Agent pill, Timeline Agent session action, or **Send to Agent** opens/attaches (or explicitly resumes/starts via `agent.open`) that Agent **directly inside the Card's right-hand Live Terminal split** (`card_terminal_open = true`), keeping the user in the Card context rather than forcing a full-page jump to `Terminals`. From the Board tile (pulsing `@profile` pill or hover **Send to Agent**), users can either open the Card with its side-by-side Terminal or use **Pop out to Terminals ↗** when full-screen Terminal management is desired. An exited Agent status is labeled **Resume** and explicitly restores its exact session via `agent.open`; live selection alone never starts or resumes an Agent.
 
-The Terminal chrome offers **Choose Card Agent** for an active associated Card. The empty Card view offers **Choose Agent**. This explicit action invokes the existing `agent.open` Start/Resume boundary. Ended sessions retain Resume/Start fresh; interrupt, close and history remain Terminal controls. **Back to source** returns to the Card and its draft. Closing a Terminal continues to use the existing unified lifecycle close operation.
+Within the Card's embedded Terminal pane header, **Choose Card Agent** switches between active or startable/resumable `@profile` sessions for the Card or opens an interactive Shell in the Card's worktree. `[Interrupt]` sends Ctrl-C / interrupt to the attached PTY, `[Pop out ↗]` opens the exact same tab in the full `Terminals` workspace, and `[×]` / `>_ Hide` collapses the right split without killing the PTY. Closing/terminating a PTY continues to use the unified `terminal.close` lifecycle operation.
 
 ## Earlier verification (2026-11-09)
 

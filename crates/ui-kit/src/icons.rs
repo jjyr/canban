@@ -1,5 +1,5 @@
 //! Shared Lucide vector icons and accessible 40-point navigation actions.
-use super::{label, tokens::*};
+use super::tokens::*;
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,19 +159,9 @@ pub fn icon_action(
     view()
         .w(px(40.))
         .h(px(40.))
-        .tooltip(
-            nsh_base::tooltip()
-                .placement(Placement::Right)
-                .px_3()
-                .py_2()
-                .rounded(px(RADIUS))
-                .bg(SURFACE)
-                .border_1()
-                .border_color(BORDER)
-                .child(label(hint)),
-        )
+        .tooltip(crate::hint_tooltip(hint).placement(Placement::Right))
         .child(
-            nsh_base::button()
+            crate::press_target()
                 .w(px(40.))
                 .h(px(40.))
                 .items_center()

@@ -31,7 +31,12 @@ impl Entry {
         Some(&self.agent.as_ref()?.request.as_ref()?.profile.id)
     }
     pub fn provider(&self) -> Option<(Icon, String)> {
-        if let Some(profile) = self.agent.as_ref().and_then(|r| r.request.as_ref()).map(|r| &r.profile) {
+        if let Some(profile) = self
+            .agent
+            .as_ref()
+            .and_then(|r| r.request.as_ref())
+            .map(|r| &r.profile)
+        {
             return Some(crate::profiles::provider(profile));
         }
         let engine = self.saved.agent_engine.as_deref()?;
@@ -266,8 +271,7 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                 .or_else(|| location.as_ref().and_then(|c| c.project_id.clone()))
                 .or_else(|| card.as_ref().map(|c| c.project_id.clone()))
         });
-        let inferred_card =
-            agent.is_none() && t.origin_card_id.is_none() && card.is_some();
+        let inferred_card = agent.is_none() && t.origin_card_id.is_none() && card.is_some();
         let stage = agent.as_ref().and_then(|a| a.request.as_ref()).map(|r| {
             s.projects
                 .iter()

@@ -150,7 +150,7 @@ pub fn diff_panel(p: ReviewPreview) -> impl IntoElement {
                 .bg(INSET)
                 .overflow_hidden()
                 .child(
-                    nsh_base::button()
+                    canban_ui_kit::press_target()
                         .w_full()
                         .min_h(px(32.))
                         .px_3()

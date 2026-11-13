@@ -10,16 +10,7 @@ pub fn provider(e: &Entry) -> View {
         .items_center()
         .gap_1()
         .min_w(px(0.))
-        .tooltip(
-            nsh_base::tooltip()
-                .placement(Placement::Bottom)
-                .px_3()
-                .py_2()
-                .bg(SURFACE)
-                .border_1()
-                .border_color(BORDER)
-                .child(label(name)),
-        )
+        .tooltip(hint_tooltip(name).placement(Placement::Bottom))
         .child(icon(mark).w(px(14.)).h(px(14.)))
         .child(
             muted(e.profile().unwrap_or_default().to_owned())
