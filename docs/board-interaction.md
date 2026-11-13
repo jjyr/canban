@@ -10,16 +10,16 @@ The existing window title bar also shows other Projects' compact activity summar
 
 A Card's entire surface accepts click/drag. The small Grip is a decorative icon without its own button background or exclusive gesture target. Click opens the Card; native pan recognition uses a movement threshold before claiming a drag, suppressing click activation afterward. Card hover slightly lightens its background through the shared `CARD_HOVER` semantic token. Its ordinary low-contrast border does not change on hover or selection. Selected fill and keyboard focus remain distinct from hover.
 
-### Compact Card tile and stage tabs (2026-11-13, Card #16)
+### Compact Card tile and stage tabs (2026-11-13, Card #16 / #35)
 
 ```text
-#16  Title wraps beside the number            (3) [bot]
+#16  Title wraps beside the number       (3) [bot] [>_]
 GitHub Issue #12 · open · by author          (GitHub Cards only)
 First body line, truncated                    (when present)
 Needs review  ⎇ branch          [((●)) ✦ @developer]   (when present)
 ```
 
-The number shares the title row, and delivery/merge progress, gates/failures, branch and running Agents share one footer, so quiet Cards take two rows. Cards actively merging (`Snapshot.merging_cards`, UI-initiated merge in flight, or an unheld `waiting_delivery` workflow step) render a live `Merging` status chip (`ui-kit::live_status("Merging", Tone::Info)` with `live_dot`) in the footer and Card header until merged, held, or paused. The hover robot (**Send to Agent**) reserves its space so hovering never rewraps the title. A running Agent pill uses `ui-kit::live_dot` (ping halo; steady under Reduce Motion) and opens the live Terminal. Columns are capped at 420pt so wide windows keep Card proportions. When the Card pane is open and the Board is narrower than every column at its 220pt minimum, the Board shows one stage at a time with stage tabs (`Backlog 3 | Develop 1 | Review 1`); the shown stage follows the opened Card. Dragging then reorders within that stage; stage moves use the Card stage menu. Gallery: `CANBAN_GALLERY_SCENE=board-cards` and `board-cards-open`.
+The number shares the title row, and delivery/merge progress, gates/failures, branch and active Agents share one footer, so quiet Cards take two rows. Cards actively merging (`Snapshot.merging_cards`, UI-initiated merge in flight, or an unheld `waiting_delivery` workflow step) render a live `Merging` status chip (`ui-kit::live_status("Merging", Tone::Info)` with `live_dot`) in the footer and Card header until merged, held, or paused. The hover Agent (`[bot]`, **Open Agent for Card #N**) and Terminal (`[>_]`, **Open Terminal for Card #N**) buttons reserve their space so hovering never rewraps the title, and both open the Card page with its side-by-side Agent/Terminal split expanded rather than jumping away to standalone `Terminals`. Active workflow Agent pills (`@profile`) and ephemeral CLI Agent pills on the Card use `ui-kit::live_dot` (or an attention indicator when waiting on user input) and open the Card page with that exact Agent tab expanded and focused. Columns are capped at 420pt so wide windows keep Card proportions. When the Card pane is open and the Board is narrower than every column at its 220pt minimum, the Board shows one stage at a time with stage tabs (`Backlog 3 | Develop 1 | Review 1`); the shown stage follows the opened Card. Dragging then reorders within that stage; stage moves use the Card stage menu. Gallery: `CANBAN_GALLERY_SCENE=board-cards` and `board-cards-open`.
 
 ## Placement preview
 

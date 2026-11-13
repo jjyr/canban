@@ -295,6 +295,14 @@ pub const CATALOG: &[Command] = &[
         keywords: "choose project",
     },
     Command {
+        id: "open-card-agent",
+        title: "Open Card Agent",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "agent cli interactive open spawn",
+    },
+    Command {
         id: "popout-card-terminal",
         title: "Pop Out Card Terminal to Terminals",
         key: "",
@@ -551,6 +559,13 @@ pub fn execute(ui: Ui, id: &str) {
                 ui.open_card_with_terminal(c.id, None);
             } else {
                 ui.notify("Open a Card first to toggle its Live Terminal");
+            }
+        }
+        "open-card-agent" => {
+            if let Some(c) = ui.current_card().filter(|c| c.archived_at.is_none()) {
+                crate::terminals::open_card_agent(ui, &c.id);
+            } else {
+                ui.notify("Select an active Card first");
             }
         }
         "popout-card-terminal" => {

@@ -310,7 +310,7 @@ pub fn create_in_card(ui: Ui, project_id: String, card_id: String, agent: bool) 
         return;
     }
     let source_page = ui.page.get_untracked();
-    let in_card_workspace = !matches!(source_page.as_str(), "terminals" | "review");
+    let in_card_workspace = source_page != "terminals";
     if in_card_workspace {
         if source_page != "card" || ui.card.get_untracked() != card_id {
             ui.open_card(card_id.clone());
@@ -342,10 +342,45 @@ pub fn create_in_card(ui: Ui, project_id: String, card_id: String, agent: bool) 
             select_card_tab(ui, &target_card, id);
             ui.card_terminal_open.set(true);
             ui.card_terminal_focused.set(true);
-        } else if source_page == "terminals" || source_page == "review" {
+        } else if source_page == "terminals" {
             ui.open_terminal(id);
         }
     });
+}
+
+/// Open the Card workspace with an existing active Agent tab expanded, or spawn a clean Agent on it.
+pub fn open_card_agent(ui: Ui, card_id: &str) {
+    let Some(c) = ui
+        .snapshot
+        .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned())
+    else {
+        return;
+    };
+    if c.archived_at.is_some() {
+        ui.operation_error
+            .set("Restore this Card before opening an Agent.".into());
+        return;
+    }
+    let s = ui.snapshot.get_untracked();
+    let live = card_live_entries(&s, &c.id);
+    let recent = ui.terminal_recent.with(|m| m.get(&c.id).cloned());
+    let existing_agent = recent
+        .as_deref()
+        .and_then(|rid| {
+            live.iter().find(|e| {
+                e.saved.id == rid && (e.agent.is_some() || e.saved.agent_engine.is_some())
+            })
+        })
+        .or_else(|| {
+            live.iter()
+                .find(|e| e.agent.is_some() || e.saved.agent_engine.is_some())
+        })
+        .map(|e| e.saved.id.clone());
+    if let Some(id) = existing_agent {
+        ui.open_card_with_terminal(c.id, Some(id));
+    } else {
+        create_in_card(ui, c.project_id, c.id, true);
+    }
 }
 
 /// Open Card terminal from global/menu surfaces without intermediate prompts.

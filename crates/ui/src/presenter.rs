@@ -551,7 +551,13 @@ impl Ui {
         }
         self.open_card(card_id.clone());
         if let Some(conv) = conversation {
-            self.card_tab.set(conv);
+            let is_live =
+                crate::terminals::card_live_entries(&self.snapshot.get_untracked(), &card_id)
+                    .iter()
+                    .any(|e| e.saved.id == conv);
+            if is_live {
+                self.card_tab.set(conv);
+            }
         }
         if !self.card_tab.get_untracked().is_empty() {
             self.card_terminal_open.set(true);

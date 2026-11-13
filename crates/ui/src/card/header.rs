@@ -273,35 +273,17 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         let Some(c) = ui.current_card() else {
                             return;
                         };
-                        if ui.page.get_untracked() == "review" {
-                            crate::terminals::create_in_card(ui, c.project_id, c.id, true);
+                        if ui.page.get_untracked() != "card" || !ui.card_terminal_open.get_untracked()
+                        {
+                            crate::terminals::open_card_agent(ui, &c.id);
                             return;
                         }
-                        if !ui.card_terminal_open.get_untracked() {
-                            let s = ui.snapshot.get_untracked();
-                            let live = crate::terminals::card_live_entries(&s, &c.id);
-                            let recent = ui.terminal_recent.with(|m| m.get(&c.id).cloned());
-                            let existing_agent = recent
-                                .as_deref()
-                                .and_then(|rid| {
-                                    live.iter().find(|e| {
-                                        e.saved.id == rid
-                                            && (e.agent.is_some()
-                                                || e.saved.agent_engine.is_some())
-                                    })
-                                })
-                                .or_else(|| {
-                                    live.iter().find(|e| {
-                                        e.agent.is_some() || e.saved.agent_engine.is_some()
-                                    })
-                                })
-                                .map(|e| e.saved.id.clone());
-                            if let Some(id) = existing_agent {
-                                crate::terminals::select_card_tab(ui, &c.id, id);
-                                ui.card_terminal_open.set(true);
-                                ui.card_terminal_focused.set(true);
-                                return;
-                            }
+                        let cid = ui.card_id();
+                        let on_agent_tab = crate::card::terminal::select_entry_for_card(ui, &cid)
+                            .is_some_and(|e| e.agent.is_some() || e.saved.agent_engine.is_some());
+                        if !on_agent_tab {
+                            crate::terminals::open_card_agent(ui, &c.id);
+                            return;
                         }
                         crate::terminals::create_in_card(ui, c.project_id, c.id, true);
                     },
@@ -317,8 +299,8 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     },
                     move |_| {
                         if let Some(c) = ui.current_card() {
-                            if ui.page.get_untracked() == "review" {
-                                crate::terminals::open_card(ui, &c.id);
+                            if ui.page.get_untracked() != "card" {
+                                crate::terminals::open_card_quick(ui, &c.id);
                                 return;
                             }
                             crate::card::terminal::toggle(ui);

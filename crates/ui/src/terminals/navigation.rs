@@ -60,7 +60,6 @@ pub fn resume(ui: Ui, id: &str) {
         return;
     }
     let origin = ui.location();
-    let in_card = ui.page.get_untracked() == "card" && ui.card.get_untracked() == row.card.id;
     let card_for_open = row.card.id.clone();
     let req = row.request.as_ref().unwrap();
     dispatch_then(
@@ -69,13 +68,9 @@ pub fn resume(ui: Ui, id: &str) {
         json!({"card_id":row.card.id,"profile_id":req.profile.id,"expected_attempt_id":row.attempt.as_ref().map(|a| &a.id)}),
         move |value| {
             if ui.location() == origin
-                && let Some(request) = value["request_id"].as_str()
+                && let Some(_request) = value["request_id"].as_str()
             {
-                if in_card {
-                    ui.open_card_with_terminal(card_for_open, Some(row.id.clone()));
-                } else {
-                    open_after_launch(ui, row.id.clone(), request.into());
-                }
+                ui.open_card_with_terminal(card_for_open, Some(row.id.clone()));
             }
         },
     );

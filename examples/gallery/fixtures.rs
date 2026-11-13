@@ -889,7 +889,51 @@ pub fn board_cards() -> canban_types::Snapshot {
         None,
     );
     running.state = "working".into();
+    running.attempt = 1;
+    let running_id = running.id.clone();
     s.requests.push(running);
+    let mut running_attempt: Attempt = serde_json::from_value(json!({
+        "id": Attempt::key(&running_id, 1),
+        "request_id": running_id,
+        "project_id": "gallery-project",
+        "card_id": "card-2",
+        "number": 1,
+        "state": "running",
+        "core_id": "gallery",
+        "terminal": "gallery-card-2-pty",
+        "cwd": "/preview/worktrees/card-2",
+        "input_path": "input.md",
+        "output_path": null,
+        "observed": {"state": "live", "status": {"state": "working"}},
+        "error": null,
+        "created_at": now(),
+        "provider_session_id": "session-gallery-card-2",
+        "connection_state": "connected"
+    }))
+    .unwrap();
+    running_attempt.lifecycle.observed_at = Some(u64::MAX);
+    s.attempts.push(running_attempt);
+    s.terminals.push(TerminalEntry {
+        id: "gallery-card-1-cli-agent".into(),
+        conversation_id: None,
+        number: 9,
+        name: None,
+        manual_number: Some(1),
+        origin_card_id: Some("card-1".into()),
+        agent_engine: Some("agy".into()),
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("gallery".into()),
+            terminal: Some("gallery-card-1-agy".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("idle".into()),
+            agent_turn: Some(1),
+        }),
+        created_at: now(),
+    });
     let mut queued = s.cards[2].clone();
     queued.id = "queued-card".into();
     queued.number = 5;

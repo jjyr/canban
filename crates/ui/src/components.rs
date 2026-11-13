@@ -48,11 +48,7 @@ pub fn run_panel(ui: Ui, req: Request) -> impl IntoElement {
                 },
                 Variant::Secondary,
                 move |_| {
-                    if ui.page.get_untracked() == "card" {
-                        ui.open_card_with_terminal(card_id.clone(), Some(id.clone()));
-                    } else {
-                        ui.open_terminal(id.clone());
-                    }
+                    ui.open_card_with_terminal(card_id.clone(), Some(id.clone()));
                 },
             ));
         } else if crate::terminals::model::can_resume(&row, &ui.profiles.get_untracked()) {
