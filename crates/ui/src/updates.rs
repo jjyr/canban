@@ -152,24 +152,35 @@ pub fn init(ui: Ui) {
                 });
             }
         }
+        let snapshot_ready = ui.snapshot_ready.get();
+        let refreshing = ui.refreshing.get();
+        let op_error = ui.operation_error.get();
         if std::env::var_os("CANBAN_UPGRADE_TOKEN").is_some()
-            && ui.snapshot_ready.get()
-            && !ui.refreshing.get()
-            && ui.operation_error.get().is_empty()
+            && snapshot_ready
+            && !refreshing
+            && op_error.is_empty()
             && !ready.get()
         {
             ready.replace(true);
-            request_animation_frame(move |_| {
-                if let (Some(app), Ok(token)) =
-                    (crate::APP.get(), std::env::var("CANBAN_UPGRADE_TOKEN"))
-                {
-                    let path = app.home.join("updates").join(format!("ui-ready-{token}"));
-                    let _ = canban_updater::atomic(
-                        &path,
-                        &serde_json::to_vec(&canban_updater::Build::current()).unwrap_or_default(),
-                    );
-                }
-            });
+            // Write readiness directly instead of gating on `request_animation_frame`,
+            // which macOS suspends when a background-spawned candidate window is occluded
+            // or on an inactive Space.
+            if let (Some(app), Ok(token)) = (
+                crate::APP.get().cloned(),
+                std::env::var("CANBAN_UPGRADE_TOKEN"),
+            ) {
+                ui.spawn(async move {
+                    let _ = blocking(move || {
+                        let path = app.home.join("updates").join(format!("ui-ready-{token}"));
+                        canban_updater::atomic(
+                            &path,
+                            &serde_json::to_vec(&canban_updater::Build::current())
+                                .unwrap_or_default(),
+                        )
+                    })
+                    .await;
+                });
+            }
         }
     });
 }
@@ -431,23 +442,134 @@ pub fn Recovery() -> impl IntoElement {
     crate::startup::watch_quit();
     canban_ui_kit::tokens::install_theme();
     let home = canban_app_server::default_home().unwrap_or_default();
-    let error = canban_updater::handoff::journal(&home)
-        .ok()
+    let journal = canban_updater::handoff::journal(&home).ok();
+    // Automatically recover local backend handoffs on fresh user launches, while keeping
+    // worker-spawned recovery windows (`CANBAN_UPGRADE_TOKEN` set) paused to prevent loops.
+    let auto_start = std::env::var_os("CANBAN_UPGRADE_TOKEN").is_none()
+        && canban_app_server::instance::bundled()
+            .ok()
+            .flatten()
+            .is_none()
+        && journal.as_ref().is_some_and(|j| j.local.is_some());
+    let error = journal
         .and_then(|j| j.error)
         .unwrap_or_else(|| "Inspect updater.log before retrying recovery.".into());
-    recovery_screen(home.to_string_lossy().into_owned(), error)
+    recovery_screen_auto(home.to_string_lossy().into_owned(), error, auto_start)
 }
+
 pub fn recovery_screen(home: String, error: String) -> impl IntoElement {
+    recovery_screen_auto(home, error, false)
+}
+
+pub fn recovery_screen_auto(home: String, error: String, auto_start: bool) -> impl IntoElement {
     let directory = std::path::PathBuf::from(&home).join("updates");
-    view().flex_1().bg(BACKGROUND).p_5().justify_center().items_center().child(
-        panel().w_full().max_w(px(680.)).gap_4()
-            .child(heading("Update needs manual recovery"))
-            .child(muted("Automatic recovery stopped. The database and App copies have been preserved."))
-            .child(notice(error,Tone::Attention))
-            .child(label(format!("Details: {home}/updates/updater.log")))
-            .child(muted("Fix the reported cause, then run the saved updater with --recover. This recovery window does not open your database."))
-            .child(view().flex_row().gap_2()
-                .child(action("Open update folder",Variant::Primary,move |_|{let path=directory.clone();spawn(async move{let _=blocking(move||std::process::Command::new("/usr/bin/open").arg(path).status()).await;});}))
-                .child(action("Quit",Variant::Quiet,move |_|nsh_core::element::desktop::quit())))
-    )
+    let home_path = std::path::PathBuf::from(&home);
+    let retrying = signal(auto_start);
+    let retry_error = signal(String::new());
+    let run_recover = std::rc::Rc::new(move || {
+        retrying.set(true);
+        retry_error.set(String::new());
+        let target_home = home_path.clone();
+        let ui_pid = std::process::id();
+        spawn(async move {
+            let res = blocking(move || {
+                let bundled = std::env::current_exe()
+                    .ok()
+                    .map(|p| p.with_file_name("canban-updater"));
+                canban_updater::handoff::recover(&target_home, bundled.as_deref(), Some(ui_pid))
+            })
+            .await;
+            match res {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    retry_error.set(format!("{e:#}"));
+                    retrying.set(false);
+                }
+                Err(e) => {
+                    retry_error.set(e.to_string());
+                    retrying.set(false);
+                }
+            }
+        });
+    });
+    if auto_start {
+        let auto_recover = run_recover.clone();
+        set_timeout(std::time::Duration::from_millis(10), move || {
+            auto_recover();
+        });
+    }
+    view()
+        .flex_1()
+        .bg(BACKGROUND)
+        .p_5()
+        .justify_center()
+        .items_center()
+        .child(
+            panel()
+                .w_full()
+                .max_w(px(680.))
+                .gap_4()
+                .child(heading(move || {
+                    if retrying.get() {
+                        "Recovering local backend…"
+                    } else {
+                        "Update needs manual recovery"
+                    }
+                }))
+                .child(muted(move || {
+                    if retrying.get() {
+                        "Restoring and activating the backend included in this App. Your workspace will open automatically."
+                    } else {
+                        "Automatic recovery stopped. The database and App copies have been preserved."
+                    }
+                }))
+                .child(notice(error, Tone::Attention))
+                .child(when(
+                    move || !retry_error.get().is_empty(),
+                    move || notice(move || retry_error.get(), Tone::Danger),
+                ))
+                .child(label(format!("Details: {home}/updates/updater.log")))
+                .child(muted(
+                    "Click Retry recovery to restore or finish activating this App, or inspect the update folder first.",
+                ))
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            action(
+                                move || {
+                                    if retrying.get() {
+                                        "Recovering…"
+                                    } else {
+                                        "Retry recovery"
+                                    }
+                                },
+                                Variant::Primary,
+                                move |_| {
+                                    if retrying.get_untracked() {
+                                        return;
+                                    }
+                                    run_recover();
+                                },
+                            )
+                            .disabled(move || retrying.get()),
+                        )
+                        .child(action("Open update folder", Variant::Secondary, move |_| {
+                            let path = directory.clone();
+                            spawn(async move {
+                                let _ = blocking(move || {
+                                    std::process::Command::new("/usr/bin/open")
+                                        .arg(path)
+                                        .status()
+                                })
+                                .await;
+                            });
+                        }))
+                        .child(action("Quit", Variant::Quiet, move |_| {
+                            nsh_core::element::desktop::quit()
+                        })),
+                ),
+        )
 }

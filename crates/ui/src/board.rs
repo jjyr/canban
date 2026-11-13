@@ -15,57 +15,52 @@ pub struct Drop {
     pub stage: String,
     pub before_card_id: Option<String>,
 }
-pub fn screen(ui: Ui) -> impl IntoElement {
+pub fn chrome_bar(ui: Ui) -> impl IntoElement {
     let project = computed(move || {
         let _ = ui.project.get();
         ui.current_project()
     });
-    let has_github = computed(move || {
-        let current = ui.project.get();
-        project.get().is_some_and(|p| p.github.is_some())
-            || ui.snapshot.with(|s| {
-                s.cards
-                    .iter()
-                    .any(|c| c.project_id == current && c.github_issue().is_some())
-            })
-    });
     view()
         .flex_1()
         .min_w(px(0.))
-        .min_h(px(0.))
-        .p_4()
-        .gap_4()
+        .h_full()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .pl_2()
+        .window_drag(true)
         .child(
             view()
                 .flex_row()
-                .justify_between()
                 .items_center()
-                .gap_2()
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .flex_1()
-                        .min_w(px(100.))
-                        .child(project_picker(ui))
-                        .child(when(
-                            move || project.get().is_some(),
-                            move || {
-                                view().flex_shrink_0().child(icon_action(
-                                    Icon::GitHub,
-                                    "GitHub repository & synchronization".into(),
-                                    move || project.get().is_some_and(|p| p.github.is_some()),
-                                    || 0,
-                                    move |_| ui.navigate("github-repository"),
-                                ))
-                            },
-                        )),
-                )
+                .gap_0p5()
+                .min_w(px(80.))
+                .max_w(px(280.))
+                .window_drag(false)
+                .child(project_picker(ui))
                 .child(when(
                     move || project.get().is_some(),
                     move || {
-                        action(
+                        chrome_button(
+                            Icon::GitHub,
+                            "GitHub repository & synchronization",
+                            move |_| ui.navigate("github-repository"),
+                        )
+                    },
+                )),
+        )
+        .child(activity::strip(ui))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .flex_shrink_0()
+                .window_drag(false)
+                .child(when(
+                    move || project.get().is_some() && !ui.narrow.get(),
+                    move || {
+                        compact_action(
                             move || {
                                 let n = project.get().map(|p| p.agent_overrides.len()).unwrap_or(0);
                                 if n == 0 {
@@ -77,44 +72,41 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                             Variant::Quiet,
                             move |_| ui.navigate("project-agents"),
                         )
-                        .flex_shrink_0()
                     },
                 ))
                 .child(when(
-                    move || project.get().is_some(),
+                    move || project.get().is_some() && !ui.narrow.get(),
                     move || {
-                        action("Workflows", Variant::Quiet, move |_| {
+                        compact_action("Workflows", Variant::Quiet, move |_| {
                             ui.navigate("workflows")
                         })
-                        .flex_shrink_0()
                     },
                 ))
-                .child(
-                    action(
-                        move || {
-                            let _ = ui.draft_epoch.get();
-                            let count = ui.drafts.with(|all| {
-                                all.iter()
-                                    .filter(|(key, draft)| draft.has_content(key))
-                                    .count()
-                            });
-                            if count == 0 {
-                                "Drafts".into()
-                            } else {
-                                format!("Drafts ({count})")
-                            }
-                        },
-                        Variant::Secondary,
-                        move |_| ui.navigate("drafts"),
-                    )
-                    .flex_shrink_0(),
-                )
+                .child(when(
+                    move || !ui.narrow.get(),
+                    move || {
+                        compact_action(
+                            move || {
+                                let _ = ui.draft_epoch.get();
+                                let count = ui.drafts.with(|all| {
+                                    all.iter()
+                                        .filter(|(key, draft)| draft.has_content(key))
+                                        .count()
+                                });
+                                if count == 0 {
+                                    "Drafts".into()
+                                } else {
+                                    format!("Drafts ({count})")
+                                }
+                            },
+                            Variant::Secondary,
+                            move |_| ui.navigate("drafts"),
+                        )
+                    },
+                ))
                 .child(when(
                     move || project.get().is_some(),
-                    move || {
-                        action("+ Add Card", Variant::Primary, move |_| ui.new_card())
-                            .flex_shrink_0()
-                    },
+                    move || compact_action("+ Add Card", Variant::Primary, move |_| ui.new_card()),
                 ))
                 .child(when(
                     move || project.get().is_some(),
@@ -126,6 +118,10 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 if let Some(bounds) = anchor.measure().await {
                                     popup_menu_at(
                                         vec![
+                                            MenuItem::new("Workflows…")
+                                                .on_select(move || ui.navigate("workflows")),
+                                            MenuItem::new("Drafts…")
+                                                .on_select(move || ui.navigate("drafts")),
                                             MenuItem::new("Archive")
                                                 .on_select(move || ui.navigate("archive")),
                                             MenuItem::new("Project Agents…")
@@ -135,6 +131,12 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                             MenuItem::new("GitHub repository…").on_select(
                                                 move || ui.navigate("github-repository"),
                                             ),
+                                            MenuItem::separator(),
+                                            MenuItem::new("New Managed Branch Worktree…")
+                                                .on_select(move || {
+                                                    ui.worktree_modal
+                                                        .set(Some(ui.project.get_untracked()));
+                                                }),
                                             MenuItem::separator(),
                                             MenuItem::new("Switch Project…")
                                                 .on_select(move || ui.show_search(true)),
@@ -154,6 +156,28 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     },
                 )),
         )
+}
+
+pub fn screen(ui: Ui) -> impl IntoElement {
+    let project = computed(move || {
+        let _ = ui.project.get();
+        ui.current_project()
+    });
+    let has_github = computed(move || {
+        let current = ui.project.get();
+        project.get().is_some_and(|p| p.github.is_some())
+            || ui.snapshot.with(|s| {
+                s.cards
+                    .iter()
+                    .any(|c| c.project_id == current && c.github_issue().is_some())
+            })
+    });
+    view()
+        .flex_1()
+        .min_w(px(0.))
+        .min_h(px(0.))
+        .p_4()
+        .gap_3()
         .child(when(
             move || has_github.get(),
             move || crate::github::filters::toolbar(ui),
@@ -333,14 +357,14 @@ fn project_picker(ui: Ui) -> impl IntoElement {
             items.iter().any(|i| i.project_id == project && i.pending),
         )
     });
-    view().min_w(px(80.)).max_w(px(560.)).child(
+    view().min_w(px(72.)).max_w(px(240.)).child(
         canban_ui_kit::press_target()
-            .min_h(px(40.))
-            .min_w(px(80.))
-            .max_w(px(560.))
+            .h(px(28.))
+            .min_w(px(72.))
+            .max_w(px(240.))
             .flex_row()
             .items_center()
-            .gap_2()
+            .gap_1p5()
             .px_2()
             .rounded(px(RADIUS))
             .border_1()
@@ -360,12 +384,14 @@ fn project_picker(ui: Ui) -> impl IntoElement {
                 )
             })
             .child(
-                heading(move || {
+                label(move || {
                     let _ = ui.project.get();
                     ui.current_project()
                         .map(|p| p.name)
                         .unwrap_or_else(|| "Choose Project".into())
                 })
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_size(px(13.5))
                 .truncate()
                 .min_w(px(0.)),
             )
@@ -373,7 +399,12 @@ fn project_picker(ui: Ui) -> impl IntoElement {
                 move || updates.get().0,
                 move || updates.get().1,
             ))
-            .child(icon(Icon::ChevronDown).flex_shrink_0())
+            .child(
+                icon(Icon::ChevronDown)
+                    .w(px(13.))
+                    .h(px(13.))
+                    .flex_shrink_0(),
+            )
             .on_press(move |_: &()| ui.show_search(true)),
     )
 }

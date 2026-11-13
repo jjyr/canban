@@ -87,7 +87,7 @@ impl Default for Workflow {
                 Stage {
                     id: "develop".into(), name: "Develop".into(), execute: true,
                     profile: Some("developer".into()),
-                    instruction: "Implement the card task in the supplied working directory. Explain your changes and validation in your report.".into(),
+                    instruction: "Evaluate the Card against the current codebase before editing:\n- Actionable: implement and validate the changes on the Card branch, commit deliverables, and report `--state completed`.\n- Already implemented, obsolete, or not applicable: make no unnecessary edits and report `--state backlog` explaining why.\n- Ambiguous or awaiting a human decision: report `--state blocked` with specific questions.".into(),
                     on_completed: Some("review".into()), require_human_review: false,
                 },
                 Stage {
@@ -248,19 +248,19 @@ impl Default for Config {
                     "developer",
                     "codex",
                     true,
-                    "You are the Card's development Agent. Implement the agreed task, preserve relevant project conventions, and explain your changes and validation.",
+                    "You are the Card's development Agent. Follow repository conventions and verify changes before finishing.",
                 ),
                 profile(
                     "reviewer",
                     "codex",
                     true,
-                    "You are the Card's independent review Agent. Inspect the actual changes critically, identify correctness issues and missing validation, and report findings. Do not implement changes unless explicitly asked.",
+                    "You are the Card's independent review Agent. Critically inspect changes and test coverage without making unrequested edits.",
                 ),
                 profile(
                     "planner",
                     "codex",
                     true,
-                    "You are the Card's planning Agent. Analyze the task and relevant repository files in read-only mode, identify risks, and write a concise implementation plan without modifying source files.",
+                    "You are the Card's planning Agent. Inspect repository files in read-only mode without modifying source files.",
                 ),
             ],
         }
@@ -302,6 +302,18 @@ impl Project {
             directory: self.directory.clone(),
         })
     }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ManagedWorktree {
+    pub id: String,
+    pub project_id: String,
+    pub branch: String,
+    pub base_branch: String,
+    #[serde(default)]
+    pub base_commit: Option<String>,
+    pub path: String,
+    pub location: WorkLocation,
+    pub created_at: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WorkspaceBinding {
@@ -514,7 +526,10 @@ impl Attempt {
         {
             Some("idle" | "done" | "blocked" | "error") => true,
             Some(_) => false,
-            None => matches!(self.state.as_str(), "completed" | "blocked" | "failed"),
+            None => matches!(
+                self.state.as_str(),
+                "completed" | "backlog" | "blocked" | "failed"
+            ),
         }
     }
     /// A stale or disconnected status must not release scheduling capacity.
@@ -571,7 +586,9 @@ pub fn agent_activity_warning(
     }
     let pending: Vec<_> = requests
         .iter()
-        .filter(|r| r.card_id == card_id && matches!(r.state.as_str(), "queued" | "starting" | "unknown"))
+        .filter(|r| {
+            r.card_id == card_id && matches!(r.state.as_str(), "queued" | "starting" | "unknown")
+        })
         .collect();
     if pending.is_empty() {
         return None;
@@ -715,6 +732,8 @@ pub struct Snapshot {
     pub github: GitHubAccount,
     #[serde(default)]
     pub github_issues: Vec<GitHubIssueSnapshot>,
+    #[serde(default)]
+    pub worktrees: Vec<ManagedWorktree>,
     #[serde(default)]
     pub terminals: Vec<TerminalEntry>,
     /// Ephemeral Herdr observations, never persisted as Terminal ownership.
@@ -901,10 +920,14 @@ impl Card {
         })
     }
     pub fn board_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.board_rank()
-            .cmp(&other.board_rank())
+        self.merged()
+            .cmp(&other.merged())
+            .then_with(|| self.board_rank().cmp(&other.board_rank()))
             .then_with(|| self.number.cmp(&other.number))
             .then_with(|| self.id.cmp(&other.id))
+    }
+    pub fn merged(&self) -> bool {
+        self.delivery.is_some() || self.pull_request.as_ref().is_some_and(|p| p.merged)
     }
     pub fn github_issue(&self) -> Option<&GitHubIssueRef> {
         match &self.content {
@@ -987,7 +1010,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn sample_attempt(card_id: &str, state: &str, connection: &str, observed: Option<Value>) -> Attempt {
+    fn sample_attempt(
+        card_id: &str,
+        state: &str,
+        connection: &str,
+        observed: Option<Value>,
+    ) -> Attempt {
         serde_json::from_value(json!({
             "id": "req-1:1",
             "request_id": "req-1",
@@ -1034,5 +1062,44 @@ mod tests {
             attempts[0].observed = Some(json!({"state": "live"}));
             assert_eq!(agent_activity_warning("card-1", &attempts, &requests), None);
         }
+    }
+
+    #[test]
+    fn merged_cards_sink_below_unmerged_peers_in_board_order() {
+        let mut merged: Card = serde_json::from_value(json!({
+            "id": "card-1",
+            "project_id": "proj",
+            "number": 1,
+            "board_order": 0,
+            "title": "Merged earlier",
+            "body": "",
+            "stage": "review",
+            "revision": 1,
+            "created_at": 1,
+            "delivery": {
+                "target_branch": "main",
+                "commit": "abc1234",
+                "request_key": "k1",
+                "merged_at": 100
+            }
+        }))
+        .unwrap();
+        let open: Card = serde_json::from_value(json!({
+            "id": "card-2",
+            "project_id": "proj",
+            "number": 2,
+            "board_order": 1024,
+            "title": "Open peer",
+            "body": "",
+            "stage": "review",
+            "revision": 1,
+            "created_at": 2
+        }))
+        .unwrap();
+        assert!(merged.merged());
+        assert!(!open.merged());
+        assert_eq!(open.board_cmp(&merged), std::cmp::Ordering::Less);
+        merged.delivery = None;
+        assert_eq!(merged.board_cmp(&open), std::cmp::Ordering::Less);
     }
 }

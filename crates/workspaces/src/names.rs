@@ -195,6 +195,81 @@ impl Ops {
         }
         anyhow::bail!("Could not allocate a Card workspace after 1024 name conflicts")
     }
+    pub(super) fn create_standalone(
+        &self,
+        home: &Path,
+        project: &Project,
+        branch: &str,
+        start: &str,
+    ) -> Result<PathBuf> {
+        let source = Path::new(&project.directory);
+        self.checked(source, &["check-ref-format", "--branch", branch])?;
+        let heads = self.heads(source)?;
+        let branch_exists = heads.iter().any(|h| h == branch);
+        if !branch_exists {
+            ensure!(
+                !conflicts(&heads, branch),
+                "Branch `{branch}` conflicts with an existing Git ref"
+            );
+        } else {
+            let wt_list = self.checked(source, &["worktree", "list", "--porcelain"])?;
+            let local_ref = format!("branch refs/heads/{branch}");
+            ensure!(
+                !wt_list.lines().any(|l| l == local_ref),
+                "Branch `{branch}` is already checked out in another worktree"
+            );
+        }
+        let root = home.join("worktrees");
+        self.host.mkdir(&root)?;
+        let namespace = namespace(project);
+        let registered = self.checked(source, &["worktree", "list", "--porcelain", "-z"])?;
+        let registered = registered
+            .split('\0')
+            .filter_map(|v| v.strip_prefix("worktree "))
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let leaf_base = component(branch, "worktree");
+        let mut group_suffix = 1;
+        let mut leaf_suffix = 1;
+        for _ in 0..1024 {
+            let group = suffixed(&namespace, group_suffix);
+            let parent = root.join(&group);
+            if self.occupied(&parent)? && !self.host.is_dir(&parent) {
+                group_suffix += 1;
+                leaf_suffix = 1;
+                continue;
+            }
+            let leaf = suffixed(&leaf_base, leaf_suffix);
+            let target = parent.join(&leaf);
+            if registered.contains(&target) || self.occupied(&target)? {
+                leaf_suffix += 1;
+                continue;
+            }
+            self.host.mkdir(&parent)?;
+            if !self.reserve_directory(&target)? {
+                leaf_suffix += 1;
+                continue;
+            }
+            let target_str = target.to_str().context("Invalid worktree path")?;
+            let out = if branch_exists {
+                self.git(source, &["worktree", "add", target_str, branch])?
+            } else {
+                self.git(
+                    source,
+                    &["worktree", "add", "-b", branch, target_str, start],
+                )?
+            };
+            if out.status.success() {
+                return Ok(target);
+            }
+            let _ = self.release_empty_directory(&target);
+            anyhow::bail!(
+                "git worktree add: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        anyhow::bail!("Could not allocate a standalone worktree directory after 1024 attempts")
+    }
 }
 
 #[cfg(test)]

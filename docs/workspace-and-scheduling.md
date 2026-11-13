@@ -78,6 +78,12 @@ Existing `canban/<number>`, `canban/<project-id>/<number>` branches and UUID/num
 
 Card details show branch/target, path, base commit, latest delivery and read-only Git status. Refresh detects missing workspaces, dirty state and merge conflicts. Long values use compact visual labels; **Copy branch** and **Copy workspace path** retain exact values. Board tiles show a compact branch label. These controls are shared production components used by the Gallery.
 
+### Standalone Managed Branch Worktrees (2026-11-13)
+
+In addition to Card-owned workspaces, `canban-workspaces` and `AppServer` (`worktree.create`, `worktree.status`, `worktree.promote`, `worktree.remove`, persisted in SQLite schema v13 `managed_worktrees` and `Snapshot.worktrees`) manage standalone Project branch worktrees created directly from `Terminals` or the Command Palette:
+- Standalone worktrees allocate safe directories under `<execution-home>/worktrees/<directory-name>-<project-id-first-4>/<sanitized-branch>` on the Project's execution host, optionally fast-forwarding `base_branch` before `git worktree add -b <branch> <path> <base>`.
+- Closing Terminal tabs inside a standalone worktree never auto-deletes the checkout; it remains listed under the Project in `Terminals` until explicitly **Promoted to a Card** (`worktree.promote`, which binds a new `Card` to the existing `WorkspaceBinding` and removes the standalone record without moving files) or **Deleted** (`worktree.remove`, guarded against live PTYs and dirty uncommitted changes unless `force: true` is confirmed). See [Terminal workspace](terminal-workspace.md#standalone-managed-branch-worktrees-2026-11-13).
+
 ## Scheduler configuration
 
 `config/agents.json` adds:

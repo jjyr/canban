@@ -8,10 +8,11 @@ Current contract, reconciled 2026-11-10: the native UI, shared UI Kit and produc
 
 ```text
 canban-ui
-  Screens: Board / Card conversation / Overview / Terminals / Review
+  Screens: Board / Card (+ side-by-side Terminal) / Terminals / Diff & Review / GitHub / Settings
+  Global overlays: Quick Open & Command Palette / Right-side Activity & Notifications popover
        |
-  Product components: CardTile / StageColumn / TimelineItem
-                      AgentRunPanel / MentionComposer / ReportViewer
+  Product components: CardTile / StageColumn / TimelineItem / EmbeddedTerminal
+                      AgentRunPanel / MentionComposer / ReportViewer / ChromeSlots
        |
        +----------------------------> canban-ui-kit
        |                                semantic tokens / typography / icons
@@ -34,24 +35,32 @@ Use package canban-ui-kit in crates/ui-kit, separate from canban-ui in crates/ui
 ## Product hierarchy and interaction principles
 
 ```text
+Unified 42-point Window Chrome (all pages)
+  +-- Left: traffic-light clearance + stable Back/Forward (< >) + page context/breadcrumbs
+  +-- Center: window drag region
+  +-- Right: page primary actions + global Activity & Notifications trigger [⚡ N · ● active/max]
+             |
+             +--> Right-side Activity & Notifications Popover (Command+I, global across pages)
+                    Needs you / Updates / Running & Queued -> inline read/merge or 1-step jump
+
 Board (Project work and workflow)
-  +-- Card: task/context + one scrolling conversation/Timeline
-  +-- Review: report, Diff and explicit delivery/rework
+  +-- Card workspace: left-right side-by-side split
+  |     Left: task/context + scrolling Timeline + approval + composer
+  |     Right (toggleable): live native Terminal for the Card's Agent (or [Pop out ↗] to Terminals)
+  +-- Diff & Review: report, ad-hoc Git compare, Diff and explicit delivery/rework
 
-Overview (all Projects)
-  +-- grouped Agents, human decisions and exact destination actions
-
-Terminals (direct interaction)
-  +-- managed Card/profile Agents + independent manual Shells
-
+Terminals (direct interaction & standalone Git workspaces)
+  +-- managed Card/profile Agents + standalone Managed Branch Worktrees + independent manual Shells
 ```
 
-Board is the management center. Overview gathers cross-Project execution and human actions; Terminals owns direct PTY interaction and Agent lifecycle controls. Card conversation keeps task/context and history in one scroll region, with compact fixed controls and a reachable composer. Project creation/selection belongs in Board; the rail stays compact. See [Card composition](card-conversation.md) and [Terminal workspace](terminal-workspace.md) for the exact layouts.
+Board is the management center. Global cross-Project execution and human intervention live in the persistent top-right **Activity & Notifications** popover (`Command+I`) rather than a separate Left Rail page, eliminating two-hop "open Overview → inspect → jump again" detours. Card is a self-contained problem-solving workspace: users can read context, comment with `@agent`, and toggle a **left-right side-by-side Live Terminal** directly beside the Card without losing visual context, while `Terminals` remains available for full-screen multi-tab PTY management, manual Shells, and **Canban-managed standalone Git branch worktrees** (`New Branch Worktree…`, retained across tab closes until explicitly promoted to a Card or deleted). Project creation/selection and primary page actions belong in the unified 42-point window chrome; the 56-point rail stays compact (`Quick Open`, `Board`, `Terminals`, `Diff & Review`, `GitHub`, and bottom `Settings` + conditional `Update`). See [Card composition](card-conversation.md), [Global Activity & Notifications](product/overview.md), and [Terminal workspace](terminal-workspace.md) for exact layouts.
 
+- **Unified 42-point window chrome:** Every screen shares one 42-point top chrome bar. Native traffic-light clearance and `<` / `>` Back/Forward buttons occupy identical horizontal coordinates across all routes (including `Terminals`) so navigation controls never shift when switching pages. Page identity, breadcrumbs, sub-navigation tabs, and primary page actions render in the chrome bar rather than stacking duplicate large page headers inside content scroll regions, and the global Activity & Notifications pill anchors to the far right on every route.
 - Put task identity and current actionable state first. Omit repeated drag instructions, empty execution labels, duplicate stage labels and permanent technical captions. Keep failure and human-action feedback discoverable; quiet presentation must not conceal a failed Agent.
 - Display frequently needed context inline and disclose secondary details on demand. Terminal list rows show title/stage, Provider/Profile, state and machine without metadata popovers or current-directory text. Branch full-value tooltips and secondary menus remain useful. This is not a blanket ban on hover: Theme intentionally previews on hover, then saves on confirmation.
 - Reserve essential controls before allocating flexible title space. Test long names, mixed-language titles, narrow windows, overflow and empty/error/pending states. Truncate compact rows; offer full text through selection, expansion or an appropriate tooltip according to the component contract.
-- Use one operation path for button, shortcut and menu. New Card Create and comment Send share Command+Enter as a convention, with their own scoped validity/pending checks. Escape/outside dismissal and focus return follow the owning overlay's contract.
+- **One operation path & Command Catalog parity:** Every user-executable action across global chrome, Board, Card, Diff & Review, Terminals, Managed Worktrees, GitHub, and Settings must register in the searchable Command Palette (`Command+/`, `/` outside text inputs, or `Command+O` with `>`) and dispatch the exact same operation intent and eligibility/pending checks as its button, shortcut, or context menu. New Card Create and comment Send share Command+Enter as a convention, with their own scoped validity/pending checks. Escape/outside dismissal and focus return follow the owning overlay's contract.
+- **Single active native PTY attachment:** A Herdr PTY stream may be mounted in at most one active `canban/terminal` viewer at any time (either inside the Card's side-by-side split on the Card workspace or inside `Terminals`, never double-mounted simultaneously). Hiding the Card Terminal pane or navigating away detaches only the UI viewer without terminating the underlying PTY; explicit focus ownership keeps Card Markdown editing (`composer` / `task`) separate from embedded PTY key capture.
 - Preserve drafts, selected context, scroll and focus across navigation and background refresh. Do not remount a native Terminal because unrelated metadata changed. Async results must remain fenced to the resource/binding and current generation.
 
 ## NSH reuse boundary

@@ -142,6 +142,7 @@ impl AppServer {
             .unwrap()
             .clone();
         let filtered = Snapshot {
+            worktrees: Vec::new(),
             workflow_sources: Vec::new(),
             configuration_sessions: Vec::new(),
             event_subscriptions: Vec::new(),
@@ -304,7 +305,7 @@ impl AppServer {
                 a.connection_state = "connected".into();
                 db.save(&a)?;
                 let mut r: Request = db.get(&run.request_id)?;
-                if r.state != "completed" {
+                if !matches!(r.state.as_str(), "completed" | "backlog") {
                     r.state = "cancelled".into();
                     db.save(&r)?;
                 }

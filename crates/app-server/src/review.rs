@@ -124,6 +124,10 @@ impl AppServer {
         Ok(value)
     }
     pub(crate) fn try_auto_archive_merged(&self, card_id: &str) -> Result<bool> {
+        self.try_auto_archive_merged_at(card_id, now())
+    }
+
+    pub(crate) fn try_auto_archive_merged_at(&self, card_id: &str, now_ms: u64) -> Result<bool> {
         let (card, project) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
@@ -131,8 +135,7 @@ impl AppServer {
                 return Ok(false);
             };
             if !card.active()
-                || (card.delivery.is_none()
-                    && !card.pull_request.as_ref().is_some_and(|p| p.merged))
+                || !card.merged()
                 || card.attention.is_some()
                 || card.human_gate.is_some()
                 || activity_warning(db, &card)?.is_some()
@@ -155,8 +158,24 @@ impl AppServer {
                 })
                 .max_by_key(|e| e.sequence);
             if last_lifecycle
+                .as_ref()
                 .is_some_and(|e| matches!(e.kind.as_str(), "card.restored" | "card.archived"))
             {
+                return Ok(false);
+            }
+            // Keep Cards merged today visible on the Board until the next local calendar day.
+            let merged_at = card
+                .delivery
+                .as_ref()
+                .map(|d| d.merged_at)
+                .or_else(|| last_lifecycle.as_ref().map(|e| e.created_at))
+                .unwrap_or(card.created_at);
+            let same_local_day: bool = db.conn.query_row(
+                "SELECT date(?1 / 1000, 'unixepoch', 'localtime') >= date(?2 / 1000, 'unixepoch', 'localtime')",
+                params![merged_at as i64, now_ms as i64],
+                |r| r.get(0),
+            )?;
+            if same_local_day {
                 return Ok(false);
             }
             let project: Project = db.get(&card.project_id)?;
@@ -180,6 +199,41 @@ impl AppServer {
             "revision": card.revision,
         }))?;
         Ok(true)
+    }
+
+    pub(crate) fn pump_merged_archives(&self) -> Result<()> {
+        let now_ms = now();
+        let candidates: Vec<String> = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let today: String = db.conn.query_row(
+                "SELECT date(?1 / 1000, 'unixepoch', 'localtime')",
+                params![now_ms as i64],
+                |r| r.get(0),
+            )?;
+            let mut ids = Vec::new();
+            for c in db.list::<Card>()? {
+                if !c.active() || !c.merged() || c.attention.is_some() || c.human_gate.is_some() {
+                    continue;
+                }
+                if let Some(d) = &c.delivery {
+                    let merged_day: String = db.conn.query_row(
+                        "SELECT date(?1 / 1000, 'unixepoch', 'localtime')",
+                        params![d.merged_at as i64],
+                        |r| r.get(0),
+                    )?;
+                    if merged_day >= today {
+                        continue;
+                    }
+                }
+                ids.push(c.id);
+            }
+            ids
+        };
+        for id in candidates {
+            let _ = self.try_auto_archive_merged_at(&id, now_ms);
+        }
+        Ok(())
     }
 
     pub(crate) fn pump_deliveries(&self) -> Result<()> {

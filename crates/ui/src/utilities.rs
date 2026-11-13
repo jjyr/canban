@@ -1,6 +1,6 @@
 //! Shared bottom utility bar and overlays, outside workspace navigation.
-mod panel;
-mod report;
+pub mod panel;
+pub(crate) mod report;
 use crate::presenter::*;
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
@@ -333,6 +333,23 @@ pub fn usage(ui: Ui, machine: String, force: bool) {
 pub fn readings(v: &Value) -> Vec<Value> {
     v["readings"].as_array().cloned().unwrap_or_default()
 }
+pub fn toggle_awake(ui: Ui) {
+    if ui.is_method_pending("utilities.awake") {
+        return;
+    }
+    let on = ui.utility.with_untracked(|v| v["awake"] == true);
+    if crate::APP.get().is_none() {
+        ui.utility.update(|v| v["awake"] = json!(!on));
+        return;
+    }
+    ui.utility_epoch.update(|n| *n += 1);
+    dispatch_complete(ui, "utilities.awake", json!({"enabled":!on}), move |r| {
+        if let Ok(v) = r {
+            ui.utility_epoch.update(|n| *n += 1);
+            ui.utility.set(v);
+        }
+    });
+}
 pub fn bar(ui: Ui) -> impl IntoElement {
     let clock = signal(canban_types::now() / 1000);
     set_interval(std::time::Duration::from_secs(60), move || {
@@ -363,25 +380,7 @@ pub fn bar(ui: Ui) -> impl IntoElement {
                     "Keep AppServer host awake · display may sleep",
                     move || ui.utility.with(|v| v["awake"] == true),
                     move || ui.is_method_pending("utilities.awake"),
-                    move |_| {
-                        let on = ui.utility.with_untracked(|v| v["awake"] == true);
-                        if crate::APP.get().is_none() {
-                            ui.utility.update(|v| v["awake"] = json!(!on));
-                            return;
-                        }
-                        ui.utility_epoch.update(|n| *n += 1);
-                        dispatch_complete(
-                            ui,
-                            "utilities.awake",
-                            json!({"enabled":!on}),
-                            move |r| {
-                                if let Ok(v) = r {
-                                    ui.utility_epoch.update(|n| *n += 1);
-                                    ui.utility.set(v);
-                                }
-                            },
-                        );
-                    },
+                    move |_| toggle_awake(ui),
                 ))
                 .child(utility_button(
                     Icon::Theme,

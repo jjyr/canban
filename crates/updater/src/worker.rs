@@ -62,7 +62,7 @@ pub struct Journal {
     pub recovery_ui: Option<Process>,
 }
 impl Journal {
-    fn save(&self) -> Result<()> {
+    pub(crate) fn save(&self) -> Result<()> {
         atomic(
             &self.home.join("updates/install.json"),
             &serde_json::to_vec_pretty(self)?,

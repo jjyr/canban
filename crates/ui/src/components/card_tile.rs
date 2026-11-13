@@ -18,9 +18,11 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
     });
     let selected_id = card.id.clone();
     let agent_card = card.id.clone();
+    let archive_card = card.clone();
     let snapshot = ui.snapshot.get_untracked();
     let hovered = signal(false);
     let active = card.active();
+    let merged = card.merged();
     let mut tile = panel()
         .px_3()
         .py_2p5()
@@ -33,54 +35,65 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
         .bg(move || {
             if ui.card.get() == selected_id {
                 SELECTED.resolve()
+            } else if merged {
+                INSET.resolve()
             } else {
                 SURFACE.resolve()
             }
         })
-        .hover(|s| s.bg(CARD_HOVER))
-        .child(
-            view()
-                .flex_row()
-                .items_start()
-                .gap_2()
-                .min_w(px(0.))
-                .child(
-                    view()
-                        .flex_row()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .gap_1p5()
-                        .items_start()
-                        .pt_0p5()
-                        .child(muted(format!("#{}", card.number)).flex_shrink_0())
-                        .child(
-                            label(card.title.clone())
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .flex_1()
-                                .min_w(px(0.)),
-                        ),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .flex_shrink_0()
-                        .gap_1()
-                        .items_center()
-                        .h(px(22.))
-                        .child(reminder_count(
-                            move || count.get().total,
-                            move || count.get().pending > 0,
-                        ))
-                        // Space stays reserved so hovering never rewraps the title.
-                        .child(when(
-                            move || active,
-                            move || {
-                                send_button(ui, agent_card.clone())
-                                    .opacity(move || if hovered.get() { 1.0_f32 } else { 0.0_f32 })
-                            },
-                        )),
-                ),
-        );
+        .hover(|s| s.bg(CARD_HOVER));
+    if merged {
+        tile = tile.border_dashed().opacity(0.72);
+    }
+    tile = tile.child(
+        view()
+            .flex_row()
+            .items_start()
+            .gap_2()
+            .min_w(px(0.))
+            .child(
+                view()
+                    .flex_row()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .gap_1p5()
+                    .items_start()
+                    .pt_0p5()
+                    .child(muted(format!("#{}", card.number)).flex_shrink_0())
+                    .child(
+                        text(card.title.clone())
+                            .text_size(px(BODY_SIZE))
+                            .text_color(if merged { MUTED } else { TEXT })
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .flex_1()
+                            .min_w(px(0.)),
+                    ),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .gap_1()
+                    .items_center()
+                    .h(px(22.))
+                    .child(reminder_count(
+                        move || count.get().total,
+                        move || count.get().pending > 0,
+                    ))
+                    .child(when(
+                        move || active && merged,
+                        move || archive_button(ui, archive_card.clone()),
+                    ))
+                    // Space stays reserved so hovering never rewraps the title.
+                    .child(when(
+                        move || active,
+                        move || {
+                            send_button(ui, agent_card.clone())
+                                .opacity(move || if hovered.get() { 1.0_f32 } else { 0.0_f32 })
+                        },
+                    )),
+            ),
+    );
     if let Some(source) = card.github_issue() {
         let cached = snapshot.github_issues.iter().find(|v| {
             v.project_id == card.project_id
@@ -166,6 +179,18 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
         );
     }
     tile
+}
+
+/// Quick action on merged Cards: archive immediately without waiting for tomorrow.
+fn archive_button(ui: Ui, card: Card) -> View {
+    chrome_button_disabled(
+        Icon::Archive,
+        "Archive Card",
+        move || ui.pending.get(),
+        move |_| crate::card_actions::apply(ui, card.clone(), crate::card_actions::Action::Archive),
+    )
+    .w(px(22.))
+    .h(px(22.))
 }
 
 /// Hover entry: open the default Agent's conversation with this Card.

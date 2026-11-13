@@ -177,11 +177,22 @@ impl AppServer {
                 Path::new(&cwd).is_absolute() && host.is_dir(Path::new(&cwd)),
                 "Terminal directory no longer exists on the selected machine"
             );
+            let custom_name = p["name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|n| !n.is_empty())
+                .map(str::to_owned);
+            if let Some(n) = &custom_name {
+                ensure!(
+                    n.chars().count() <= 80 && !n.chars().any(char::is_control),
+                    "Use at most 80 printable characters"
+                );
+            }
             let item = TerminalEntry {
                 id: format!("shell-{}", id()),
                 conversation_id: None,
                 number: db.counter("terminal-number")?,
-                name: None,
+                name: custom_name,
                 manual_number: Some(db.counter("terminal-manual-number")?),
                 created_at: now(),
                 runtime: Some(TerminalRuntime {
@@ -227,6 +238,56 @@ impl AppServer {
                 argv.iter()
                     .map(|v| Ok(v.as_str().context("Invalid command")?.to_owned()))
                     .collect::<Result<Vec<_>>>()?
+            } else if let Some(profile_id) = p["profile_id"].as_str().filter(|s| !s.is_empty()) {
+                ensure!(
+                    p["execution"].is_null(),
+                    "Standalone Agent CLI launch requires a user action"
+                );
+                let cfg = self.config();
+                let project = p["project_id"]
+                    .as_str()
+                    .and_then(|id| self.store.lock().unwrap().db().get::<Project>(id).ok());
+                let raw_profile = cfg
+                    .profiles
+                    .iter()
+                    .find(|prof| prof.id == profile_id && prof.enabled)
+                    .cloned()
+                    .with_context(|| {
+                        format!("Profile @{profile_id} is not configured or enabled")
+                    })?;
+                let resolved =
+                    canban_profiles::apply_project_override(&cfg, project.as_ref(), &raw_profile);
+                let exec_home = self.execution_home(&runtime.machine)?;
+                let proj_dir = project
+                    .as_ref()
+                    .map(|pr| pr.directory.clone())
+                    .unwrap_or_else(|| cwd.clone());
+                let mut cmd = canban_profiles::command(
+                    &resolved,
+                    Some(&crate::runtime::uuid_session_id()),
+                    true,
+                    &[
+                        ("home", &exec_home.to_string_lossy()),
+                        ("cwd", &cwd),
+                        ("project_dir", &proj_dir),
+                        ("prompt", p["prompt"].as_str().unwrap_or("")),
+                        ("cli", &self.cli.to_string_lossy()),
+                    ],
+                )?;
+                cmd.retain(|arg| !arg.is_empty());
+                let is_herdr_template = resolved
+                    .preset
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("herdr:"));
+                if !is_herdr_template {
+                    if runtime.machine == "local" {
+                        cmd[0] = canban_profiles::executable(&cmd[0]);
+                    } else if Path::new(&cmd[0]).components().count() == 1 {
+                        let program = host.python("import os,shutil,json,sys;h=os.path.expanduser('~');p=os.environ.get('PATH','')+os.pathsep+os.path.join(h,'.local/bin')+os.pathsep+os.path.join(h,'.cargo/bin');print(json.dumps(shutil.which(sys.argv[1],path=p) or sys.argv[1]))", &[&cmd[0]])?;
+                        cmd[0] = program.as_str().context("No remote executable")?.into();
+                    }
+                }
+                cmd
             } else {
                 vec![shell, "-l".into()]
             };

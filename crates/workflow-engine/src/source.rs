@@ -184,7 +184,10 @@ impl Document {
             let mut raw = self.raw_next(i);
             if kind == "move" {
                 let column = self.move_target(step, stage).with_context(|| {
-                    format!("Step {} moves to the next column, but its Stage has no next column", step.id)
+                    format!(
+                        "Step {} moves to the next column, but its Stage has no next column",
+                        step.id
+                    )
                 })?;
                 args.insert("column".into(), json!(column));
                 if raw.as_deref() == Some(STAGE_ENTRY) {
@@ -202,14 +205,21 @@ impl Document {
             }
             if kind == "condition" {
                 for key in ["then", "otherwise"] {
-                    let to = step.with.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+                    let to = step
+                        .with
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned);
                     args.insert(key.into(), json!(target(to, true)));
                 }
             }
             if matches!(kind, "approval" | "deliver") {
                 args.insert(
                     "rework".into(),
-                    json!(target(step.on_changes_requested.clone(), true).filter(|_| step.on_changes_requested.is_some())),
+                    json!(
+                        target(step.on_changes_requested.clone(), true)
+                            .filter(|_| step.on_changes_requested.is_some())
+                    ),
                 );
             }
             let compiled: WorkflowStep = serde_json::from_value(Value::Object(args))?;
@@ -217,7 +227,10 @@ impl Document {
         }
         let mut entries = BTreeMap::new();
         for (id, rule) in &self.on {
-            entries.insert(id.clone(), target(Some(rule.start_at.clone()), true).unwrap());
+            entries.insert(
+                id.clone(),
+                target(Some(rule.start_at.clone()), true).unwrap(),
+            );
         }
         if need_end {
             ensure!(
@@ -390,10 +403,10 @@ pub fn encode(document: &Document) -> Result<String> {
     Ok(serde_yaml_ng::to_string(document)?)
 }
 
-pub const DEFAULT_PLAN_PROMPT: &str = "Analyze the Card task, inspect relevant repository files, and write a concise implementation plan with files to change, risks, and validation steps in your report. Do not modify code in this planning step.";
-pub const DEFAULT_DEVELOP_PROMPT: &str = "Implement the card task in the supplied working directory, commit your changes on the Card branch, and explain your changes and validation in your report.";
-pub const DEFAULT_REVIEW_PROMPT: &str = "Review the work for this card. Inspect the code and earlier results, then write an ordinary Markdown review report. Report findings and any remaining concerns. Do not implement unrelated changes.";
-pub const DEFAULT_MERGE_PROMPT: &str = "Perform pre-merge verification for this card. Run tests and checks in the working directory, verify there are no blockers or unintended changes, and summarize readiness in your report.";
+pub const DEFAULT_PLAN_PROMPT: &str = "Analyze the Card against the codebase without modifying files. If it is already implemented or obsolete, report `--state backlog` with a clear explanation; if requirements need clarification, report `--state blocked`; otherwise submit a concise implementation plan (files, risks, validation) with `--state completed`.";
+pub const DEFAULT_DEVELOP_PROMPT: &str = "Evaluate the Card against the current codebase before editing:\n- Actionable: implement and validate the changes on the Card branch, commit deliverables, and report `--state completed`.\n- Already implemented, obsolete, or not applicable: make no unnecessary edits and report `--state backlog` explaining why.\n- Ambiguous or awaiting a human decision: report `--state blocked` with specific questions.";
+pub const DEFAULT_REVIEW_PROMPT: &str = "Review the Card diff and earlier results without unrelated edits. Verify correctness, edge cases, and validation coverage, then report findings and remaining concerns with `--state completed` (or `--state blocked` if critical issues require human attention).";
+pub const DEFAULT_MERGE_PROMPT: &str = "Run pre-merge checks and tests in the working directory, verify there are no blockers or unintended changes, and summarize readiness in your report.";
 
 pub fn default_step_prompt(step_id: &str, profile: Option<&str>) -> &'static str {
     let lower = step_id.to_ascii_lowercase();
@@ -939,11 +952,7 @@ fn apply_backlog_admission(doc: &mut Document, wait_for_agent: bool, max_ready: 
     if rule.start_at == move_id {
         rule.start_at = ADMIT_DEVELOP.into();
     }
-    let at = doc
-        .steps
-        .iter()
-        .position(|s| s.id == move_id)
-        .unwrap_or(0);
+    let at = doc.steps.iter().position(|s| s.id == move_id).unwrap_or(0);
     doc.steps.insert(
         at,
         Step {
@@ -1952,7 +1961,10 @@ steps:
         let o = derive_options(&doc);
         assert!(!o.backlog_wait_for_agent && o.backlog_auto_develop);
         assert!(!doc.steps.iter().any(|s| s.uses == "admit"));
-        assert_eq!(doc.compile().unwrap().steps["agent:plan"].next(), Some("move:backlog"));
+        assert_eq!(
+            doc.compile().unwrap().steps["agent:plan"].next(),
+            Some("move:backlog")
+        );
         set_backlog_admission(&mut doc, true, Some(2));
         set_backlog_options(&mut doc, true, false);
         assert!(!doc.steps.iter().any(|s| s.uses == "admit"));

@@ -165,7 +165,7 @@ fn install(j: &mut Journal) -> Result<()> {
             )?;
         }
         Err(error) => ensure!(
-            process(old.pid).is_err(),
+            !process(old.pid).is_ok_and(|p| p.identity == old.identity),
             "Old backend is not responding: {error:#}"
         ),
     }
@@ -214,6 +214,17 @@ pub(super) fn run(j: &mut Journal, recover: bool) -> Result<()> {
         }
         stop_children(j);
         restore_data(j)?;
+        // Refresh expected Build from the current installed target bundle so recovering
+        // after installing a newer Canban.app adopts its schema and API version.
+        if let Ok(output) = Command::new(cli(j))
+            .arg("build-info")
+            .env_remove("CANBAN_ENDPOINT")
+            .output()
+            && output.status.success()
+            && let Ok(current_build) = serde_json::from_slice::<Build>(&output.stdout)
+        {
+            j.build = current_build;
+        }
         j.server = None;
         j.candidate_ui = None;
         j.ui = None;

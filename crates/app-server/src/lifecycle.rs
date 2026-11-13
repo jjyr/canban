@@ -25,15 +25,18 @@ pub(super) fn idle_candidate(
     let Some(req) = snapshot.requests.iter().find(|r| r.id == run.request_id) else {
         return false;
     };
-    if canban_scheduler::automatic(req) && req.state != "completed" {
+    if canban_scheduler::automatic(req) && !matches!(req.state.as_str(), "completed" | "backlog") {
         return false;
     }
-    if !matches!(req.state.as_str(), "running" | "working" | "completed") {
+    if !matches!(
+        req.state.as_str(),
+        "running" | "working" | "completed" | "backlog"
+    ) {
         return false;
     }
     if snapshot.cards.iter().any(|c| {
         c.id == run.card_id
-            && req.state != "completed"
+            && !matches!(req.state.as_str(), "completed" | "backlog")
             && (c.attention.is_some() || c.human_gate.is_some())
     }) {
         return false;

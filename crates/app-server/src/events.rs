@@ -40,8 +40,12 @@ pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
                 && row.event.kind == "card.restored"
                 && !sub.selector.types.iter().any(|t| t == "card.restored")
                 && sub.selector.reason.as_deref() != Some("restoration");
+            let agent_backlog_workflow = matches!(sub.target, SubscriptionTarget::Workflow { .. })
+                && row.event.data["reason"] == "agent_returned_backlog"
+                && sub.selector.reason.as_deref() != Some("agent_returned_backlog");
             if !initial_workflow
                 && !restoration_workflow
+                && !agent_backlog_workflow
                 && canban_workflow_engine::matches(&sub.selector, &row.event)
             {
                 let key = format!("{}:{}", sub.id, row.event.id);

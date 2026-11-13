@@ -9,9 +9,6 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .min_h(px(0.))
         .p_5()
         .gap_4()
-        .child(subpage_header("Back to Board", "Drafts", move |_| {
-            ui.navigate("board")
-        }))
         .child(
             field(query, "Search drafts…")
                 .label("Search drafts")

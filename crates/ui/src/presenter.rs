@@ -118,6 +118,12 @@ pub struct Ui {
     pub focused_card: Signal<bool>,
     pub board_width: Signal<f32>,
     pub focus_width: Signal<f32>,
+    pub card_terminal_open: Signal<bool>,
+    pub card_terminal_width: Signal<f32>,
+    pub card_terminal_focused: Signal<bool>,
+    pub worktree_modal: Signal<Option<String>>,
+    pub worktree_promote: Signal<Option<String>>,
+    pub worktree_remove_confirm: Signal<Option<String>>,
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -313,6 +319,12 @@ impl Ui {
             focused_card: signal(false),
             board_width: signal(700.0),
             focus_width: signal(420.0),
+            card_terminal_open: signal(false),
+            card_terminal_width: signal(520.0),
+            card_terminal_focused: signal(false),
+            worktree_modal: signal(None),
+            worktree_promote: signal(None),
+            worktree_remove_confirm: signal(None),
         }
     }
     pub fn location(self) -> Location {
@@ -426,6 +438,7 @@ impl Ui {
     pub fn open_card(self, id: String) {
         self.request.set(String::new());
         self.card_event.set(None);
+        self.card_terminal_focused.set(false);
         self.card_standalone.set(
             matches!(
                 self.page.get_untracked().as_str(),
@@ -452,6 +465,22 @@ impl Ui {
         self.output_request
             .set(self.output_request.get_untracked() + 1);
         self.page.set("card".into());
+    }
+    pub fn open_card_with_terminal(self, card_id: String, conversation: Option<String>) {
+        if let Some(conv) = &conversation {
+            self.terminal_recent.with(|recent| {
+                recent.insert(card_id.clone(), conv.clone());
+            });
+            self.terminal_tabs.update(|tabs| {
+                if !tabs.contains(conv) {
+                    tabs.push(conv.clone());
+                }
+            });
+        }
+        self.open_card(card_id);
+        self.card_terminal_open.set(true);
+        self.card_terminal_focused.set(true);
+        self.terminal_focus.update(|v| *v += 1);
     }
     pub fn back(self) {
         crate::navigation::go(self, false);
@@ -627,10 +656,15 @@ pub fn dispatch_complete(
                             "Host awake disabled"
                         }),
                         "utilities.configure"
+                        | "notifications.read"
+                        | "notifications.read_all"
                         | "comment.add"
                         | "card.move"
                         | "project.create"
                         | "card.create" => ui.status.set("Saved".into()),
+                        "worktree.create" => ui.notify("Managed worktree created"),
+                        "worktree.promote" => ui.notify("Promoted worktree to Card"),
+                        "worktree.remove" => ui.notify("Worktree deleted"),
                         _ => ui.notify("Saved"),
                     }
                 }

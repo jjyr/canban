@@ -644,6 +644,17 @@ pub fn Gallery() -> impl IntoElement {
         ui.page.set("settings".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("notifications") {
+        ui.snapshot.set(fixtures::overview());
+        ui.page.set("board".into());
+        canban_ui::overview::toggle(ui);
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("card-terminal") {
+        ui.snapshot.set(fixtures::conversation());
+        ui.open_card_with_terminal("card-1".into(), None);
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("motion") {
         ui.page.set("board".into());
         return view()
@@ -726,7 +737,19 @@ pub fn Gallery() -> impl IntoElement {
                 }))
                 .child(action("Card conversation", Variant::Secondary, move |_| {
                     scene.set("workspace".into()); ui.snapshot.set(fixtures::conversation());
+                    ui.card_terminal_open.set(false);
                     ui.card.set("card-1".into()); ui.page.set("card".into());
+                }))
+                .child(action("Card + Live Terminal", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::conversation());
+                    ui.open_card_with_terminal("card-1".into(), None);
+                }))
+                .child(action("Activity Popover", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::overview());
+                    ui.page.set("board".into());
+                    canban_ui::overview::toggle(ui);
                 }))
                 .child(action("Git Compare", Variant::Secondary, move |_| {
                     scene.set("workspace".into());

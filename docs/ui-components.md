@@ -242,6 +242,11 @@ message chrome or a compact system row. It owns local full-body expansion and
 report loading; navigation retains explicit request identity. The Card Timeline
 owns adjacent routine-event grouping, read coordinates and execution disclosure.
 `MarkdownInput` keeps nonempty compact drafts expanded on blur for every consumer.
-Gallery scenes `card-local`, `card-issue`, and `card-pr` cover narrow identity,
-references, long reports, routine groups, failures and historical details using
-production components. See [verification](card-conversation-acceptance-20261111.md).
+## UX refinement: Unified 42pt Chrome, Global Activity Popover, Card + Live Terminal & Managed Worktrees (2026-11-13)
+
+- `ui/frame.rs`: Owns the unified 42-point window chrome across all non-Terminal routes (matching exact traffic-light + `<` / `>` Back/Forward geometry with `terminals.rs`), mounting route-specific header slots (`Board` Project picker + cross-Project activity chips + right-aligned Project actions, `Card`, `Diff & Review`, `GitHub`, `Settings`, and sub-pages) plus the persistent far-right `overview::trigger_pill` and right-anchored `overview::popover`.
+- `ui/rail.rs`: 56-point icon rail (`Quick Open`, `Board`, `Terminals`, `Diff & Review`, `GitHub`, conditional `Update`, and bottom `Settings`), omitting the superseded standalone `Overview` route.
+- `ui/overview.rs`: Composes the persistent top-right status trigger (`⚡ N · ● active/max`, `Command+I`) and right-anchored Activity & Notifications popover (`Needs you`, `Updates` with inline `Read` / `Read all`, `Running` / `Queued` / `Idle` / `Closed`, and 1-step **Card & Terminal →** navigation), while retaining pure production row helpers for Gallery regression scenes.
+- `ui/card/terminal.rs`, `ui/card.rs`, `ui/workspace.rs`: Side-by-side left-right `Card + Live Terminal` split (`Command+J` / `>_ Terminal`), single-attachment `canban/terminal` viewer mounted exclusively on `"card"` route, non-destructive viewer detach on hide/close, explicit Markdown editor vs PTY keyboard focus ownership, Agent profile selector, `[Interrupt]`, and `[Pop out to Terminals ↗]`.
+- `ui/terminals/worktrees.rs`, `ui/terminals/tree.rs`, `ui/terminals/tabs.rs`: `New Managed Branch Worktree…` creation modal, persistent `ManagedWorktree` tree nodes retained across `Command+W` tab closes, quick reopen (`Shell` / `@Agent`), `Open in Diff & Review`, `Promote to Card…`, and guarded `Delete Worktree…`.
+- `ui/commands.rs`, `ui/quick_open.rs`: Full Command Catalog (`>`) parity covering global chrome, Notifications popover, Card operations, Terminal & Worktree lifecycle, utilities, config reload, and updates.

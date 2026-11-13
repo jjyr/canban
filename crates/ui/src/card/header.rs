@@ -2,6 +2,8 @@ use super::*;
 use nsh_core::element::desktop::{MenuItem, popup_menu};
 use serde_json::json;
 fn close(ui: Ui) {
+    ui.card_terminal_open.set(false);
+    ui.card_terminal_focused.set(false);
     ui.card.set(String::new());
     ui.card_standalone.set(false);
     ui.page.set("board".into());
@@ -85,7 +87,9 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
                     json!({"workflow_id":workflow.workflow_id,"card_id":card.id,"entry":entry});
                 items.push(
                     MenuItem::new(format!("Run {} · {}", workflow.definition.name, entry))
-                        .disabled(active || !card.active() || card.human_gate.is_some())
+                        .disabled(
+                            active || !card.active() || card.merged() || card.human_gate.is_some(),
+                        )
                         .on_select(move || dispatch(ui, "workflow.start", params.clone())),
                 );
             }
@@ -122,18 +126,19 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
             });
             (has_deliver, non_deliver)
         });
-        if has_deliver_in_project && card.active() {
-            if card.worktree.is_some()
-                && card.delivery.is_none()
-                && !card.pull_request.as_ref().is_some_and(|p| p.merged)
-            {
+        if has_deliver_in_project && card.active() && !card.merged() {
+            if card.worktree.is_some() {
                 let cid = card.id.clone();
                 let rev = card.revision;
                 items.push(
                     MenuItem::new("Retry auto-merge")
                         .disabled(active_non_deliver)
                         .on_select(move || {
-                            dispatch(ui, "workflow.deliver", json!({"card_id":cid,"revision":rev}))
+                            dispatch(
+                                ui,
+                                "workflow.deliver",
+                                json!({"card_id":cid,"revision":rev}),
+                            )
                         }),
                 );
             }
@@ -217,7 +222,10 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 .gap_1()
                 .child(when(
                     move || {
-                        ui.page.get() == "card" && (ui.narrow.get() || ui.card_standalone.get())
+                        ui.page.get() == "card"
+                            && (ui.narrow.get()
+                                || ui.card_standalone.get()
+                                || ui.card_terminal_open.get())
                     },
                     move || chrome_button(Icon::Back, "Back to Board", move |_| close(ui)),
                 ))
@@ -236,8 +244,56 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         ),
                 )
                 .child(when(
-                    move || ui.page.get() != "review",
+                    move || ui.page.get() == "card",
+                    move || {
+                        view()
+                            .tooltip(nsh_base::tooltip().child(label(
+                                "Toggle side-by-side Live Terminal · ⌘J",
+                            )))
+                            .child(
+                                compact_action(
+                                    move || {
+                                        if ui.card_terminal_open.get() {
+                                            ">_ Hide"
+                                        } else {
+                                            ">_ Terminal"
+                                        }
+                                    },
+                                    Variant::Secondary,
+                                    move |_| super::terminal::toggle(ui),
+                                )
+                                .bg(move || {
+                                    if ui.card_terminal_open.get() {
+                                        SELECTED
+                                    } else {
+                                        INSET
+                                    }
+                                }),
+                            )
+                    },
+                ))
+                .child(when(
+                    move || ui.page.get() != "review" && !ui.card_terminal_open.get(),
                     move || crate::editor::expand(ui),
+                ))
+                .child(when(
+                    move || ui.current_card().is_some_and(|c| c.active() && c.merged()),
+                    move || {
+                        chrome_button_disabled(
+                            Icon::Archive,
+                            "Archive Card",
+                            move || ui.pending.get(),
+                            move |_| {
+                                if let Some(c) = ui.current_card() {
+                                    crate::card_actions::apply(
+                                        ui,
+                                        c,
+                                        crate::card_actions::Action::Archive,
+                                    );
+                                }
+                            },
+                        )
+                    },
                 ))
                 .child(chrome_button_disabled(
                     Icon::Agent,
@@ -328,10 +384,10 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             });
                         }),
                 );
-            if c.delivery.is_some() || c.pull_request.as_ref().is_some_and(|p| p.merged) {
+            if c.merged() {
                 row = row.child(status("Merged", Tone::Success));
             }
-            if let Some(c_active) = Some(&c).filter(|c| c.active()) {
+            if let Some(c_active) = Some(&c).filter(|c| c.active() && !c.merged()) {
                 let has_deliver_in_project = s.workflow_revisions.iter().any(|w| {
                     w.project_id == c_active.project_id
                         && w.definition
@@ -404,6 +460,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     .join("\n");
                 let title = format!("{} · {text}", req.profile.id);
                 let id = agent.id.clone();
+                let cid = c.id.clone();
                 let ended = crate::terminals::model::closed(&agent);
                 let resumable = crate::terminals::model::can_resume(&agent, &ui.profiles.get());
                 let can_open = !c.removed_at.is_some();
@@ -441,6 +498,15 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                                 .on_press(move |_: &()| {
                                     if ended && resumable {
                                         crate::terminals::navigation::resume(ui, &id);
+                                    } else if ui.page.get_untracked() == "card" {
+                                        if ended {
+                                            ui.open_terminal(id.clone());
+                                        } else {
+                                            ui.open_card_with_terminal(
+                                                cid.clone(),
+                                                Some(id.clone()),
+                                            );
+                                        }
                                     } else {
                                         ui.open_terminal(id.clone());
                                     }
