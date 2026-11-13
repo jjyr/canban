@@ -9,7 +9,7 @@ pub type Queue = for<'a> fn(
     &mut Card,
     &Project,
     &Stage,
-    &str,
+    RequestTrigger,
     Option<&str>,
     Option<String>,
 ) -> Result<Option<Request>>;
@@ -262,9 +262,9 @@ fn drive(
                     require_human_review: false,
                 };
                 let trigger = if run.inputs["legacy"] == true {
-                    "stage_entry"
+                    RequestTrigger::StageEntry
                 } else {
-                    "workflow"
+                    RequestTrigger::Workflow
                 };
                 if let Some(mut req) =
                     queue(db, config, card, &project, &stage, trigger, None, None)?
@@ -765,7 +765,17 @@ pub fn rework_conflict(
         on_completed: None,
         require_human_review: false,
     };
-    let Some(mut req) = queue(db, config, card, &project, &stage, "workflow", None, None)? else {
+    let Some(mut req) = queue(
+        db,
+        config,
+        card,
+        &project,
+        &stage,
+        RequestTrigger::Workflow,
+        None,
+        None,
+    )?
+    else {
         return Ok(false);
     };
     run.visit += 1;

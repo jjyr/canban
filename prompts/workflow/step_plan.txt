@@ -1,0 +1,1 @@
+Analyze the Card against the codebase without modifying files. If it is already implemented or obsolete, report `--state backlog` with a clear explanation; if requirements need clarification, report `--state blocked`; otherwise submit a concise implementation plan (files, risks, validation) with `--state completed`.

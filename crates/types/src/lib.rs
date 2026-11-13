@@ -251,25 +251,41 @@ impl Default for Config {
                     "developer",
                     "codex",
                     true,
-                    "You are the Card's development Agent. Follow repository conventions and verify changes before finishing.",
+                    include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../prompts/profiles/role_developer.txt"
+                    ))
+                    .trim_end(),
                 ),
                 profile(
                     "reviewer",
                     "codex",
                     true,
-                    "You are the Card's independent review Agent. Critically inspect changes and test coverage without making unrequested edits.",
+                    include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../prompts/profiles/role_reviewer.txt"
+                    ))
+                    .trim_end(),
                 ),
                 profile(
                     "planner",
                     "codex",
                     true,
-                    "You are the Card's planning Agent. Inspect repository files in read-only mode without modifying source files.",
+                    include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../prompts/profiles/role_planner.txt"
+                    ))
+                    .trim_end(),
                 ),
                 profile(
                     "merger",
                     "codex",
                     true,
-                    "You are the Card's merge queue Agent. Integrate the target branch cleanly, resolve merge conflicts while preserving both sides' intent, and verify builds and tests before finishing.",
+                    include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../prompts/profiles/role_merger.txt"
+                    ))
+                    .trim_end(),
                 ),
             ],
         }
@@ -423,6 +439,71 @@ pub struct Event {
     pub data: Value,
     pub created_at: u64,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RequestTrigger {
+    Workflow,
+    StageEntry,
+    Interactive,
+    Comment { comment_id: String },
+    Custom(String),
+}
+impl RequestTrigger {
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "workflow" => Self::Workflow,
+            "stage_entry" => Self::StageEntry,
+            "interactive" => Self::Interactive,
+            _ if raw.starts_with("comment:") => Self::Comment {
+                comment_id: raw["comment:".len()..].to_owned(),
+            },
+            other => Self::Custom(other.to_owned()),
+        }
+    }
+    pub fn is_automatic(&self) -> bool {
+        matches!(self, Self::Workflow | Self::StageEntry)
+    }
+    pub fn is_comment(&self) -> bool {
+        matches!(self, Self::Comment { .. })
+    }
+    pub fn comment_id(&self) -> Option<&str> {
+        match self {
+            Self::Comment { comment_id } => Some(comment_id),
+            _ => None,
+        }
+    }
+}
+impl std::fmt::Display for RequestTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Workflow => f.write_str("workflow"),
+            Self::StageEntry => f.write_str("stage_entry"),
+            Self::Interactive => f.write_str("interactive"),
+            Self::Comment { comment_id } => write!(f, "comment:{comment_id}"),
+            Self::Custom(raw) => f.write_str(raw),
+        }
+    }
+}
+impl From<&str> for RequestTrigger {
+    fn from(raw: &str) -> Self {
+        Self::parse(raw)
+    }
+}
+impl From<String> for RequestTrigger {
+    fn from(raw: String) -> Self {
+        Self::parse(&raw)
+    }
+}
+impl Serialize for RequestTrigger {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+impl<'de> Deserialize<'de> for RequestTrigger {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self::parse(&s))
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Request {
     #[serde(default)]
@@ -436,7 +517,7 @@ pub struct Request {
     pub id: String,
     pub project_id: String,
     pub card_id: String,
-    pub trigger: String,
+    pub trigger: RequestTrigger,
     pub stage: String,
     pub profile: Profile,
     pub instruction: String,

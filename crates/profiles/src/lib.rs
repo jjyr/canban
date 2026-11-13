@@ -288,15 +288,27 @@ pub fn migrate(value: &mut Value) -> Result<bool> {
         if let Some((old_role, new_role)) = match p["id"].as_str() {
             Some("developer") => Some((
                 "You are the Card's development Agent. Implement the agreed task, preserve relevant project conventions, and explain your changes and validation.",
-                "You are the Card's development Agent. Follow repository conventions and verify changes before finishing.",
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../prompts/profiles/role_developer.txt"
+                ))
+                .trim_end(),
             )),
             Some("reviewer") => Some((
                 "You are the Card's independent review Agent. Inspect the actual changes critically, identify correctness issues and missing validation, and report findings. Do not implement changes unless explicitly asked.",
-                "You are the Card's independent review Agent. Critically inspect changes and test coverage without making unrequested edits.",
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../prompts/profiles/role_reviewer.txt"
+                ))
+                .trim_end(),
             )),
             Some("planner") => Some((
                 "You are the Card's planning Agent. Analyze the task and relevant repository files in read-only mode, identify risks, and write a concise implementation plan without modifying source files.",
-                "You are the Card's planning Agent. Inspect repository files in read-only mode without modifying source files.",
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../prompts/profiles/role_planner.txt"
+                ))
+                .trim_end(),
             )),
             _ => None,
         } && p["role_instruction"].as_str().map(str::trim) == Some(old_role)
@@ -383,7 +395,11 @@ pub fn migrate(value: &mut Value) -> Result<bool> {
             "id": "merger",
             "identity": true,
             "preset": preset,
-            "role_instruction": "You are the Card's merge queue Agent. Integrate the target branch cleanly, resolve merge conflicts while preserving both sides' intent, and verify builds and tests before finishing.",
+            "role_instruction": include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../prompts/profiles/role_merger.txt"
+            ))
+            .trim_end(),
         });
         if !enabled {
             merger["enabled"] = json!(false);

@@ -140,18 +140,26 @@ fn validate_profile_id(id: &str) -> Result<()> {
 
 fn default_role_instruction(id: &str) -> &'static str {
     match id {
-        "planner" => {
-            "You are the Card's planning Agent. Inspect repository files in read-only mode without modifying source files."
-        }
-        "developer" => {
-            "You are the Card's development Agent. Follow repository conventions and verify changes before finishing."
-        }
-        "reviewer" => {
-            "You are the Card's independent review Agent. Critically inspect changes and test coverage without making unrequested edits."
-        }
-        "merger" => {
-            "You are the Card's merge queue Agent. Integrate the target branch cleanly, resolve merge conflicts while preserving both sides' intent, and verify builds and tests before finishing."
-        }
+        "planner" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../prompts/profiles/role_planner.txt"
+        ))
+        .trim_end(),
+        "developer" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../prompts/profiles/role_developer.txt"
+        ))
+        .trim_end(),
+        "reviewer" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../prompts/profiles/role_reviewer.txt"
+        ))
+        .trim_end(),
+        "merger" => include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../prompts/profiles/role_merger.txt"
+        ))
+        .trim_end(),
         _ => "",
     }
 }

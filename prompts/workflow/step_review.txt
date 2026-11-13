@@ -1,0 +1,1 @@
+Review the Card diff and earlier results without unrelated edits. Verify correctness, edge cases, and validation coverage, then report findings and remaining concerns with `--state completed` (or `--state blocked` if critical issues require human attention).
