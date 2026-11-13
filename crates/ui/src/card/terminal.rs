@@ -294,10 +294,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                         }))
                         .child(
                             view()
-                                .tooltip(
-                                    nsh_base::tooltip()
-                                        .child(label("Open in full-screen Terminals workspace")),
-                                )
+                                .tooltip(hint_tooltip("Open in full-screen Terminals workspace"))
                                 .child(compact_action("Pop out ↗", Variant::Quiet, move |_| {
                                     pop_out(ui)
                                 })),

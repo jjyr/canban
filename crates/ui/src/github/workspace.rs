@@ -342,17 +342,7 @@ fn account_button(ui: Ui) -> impl IntoElement {
         view()
             .flex_shrink_0()
             .window_drag(false)
-            .tooltip(
-                nsh_base::tooltip()
-                    .placement(Placement::Bottom)
-                    .px_3()
-                    .py_2()
-                    .rounded(px(RADIUS))
-                    .bg(SURFACE)
-                    .border_1()
-                    .border_color(BORDER)
-                    .child(label(tip)),
-            )
+            .tooltip(hint_tooltip(tip).placement(Placement::Bottom))
             .child(
                 canban_ui_kit::press_target()
                     .h(px(28.))
@@ -959,7 +949,7 @@ fn list_row(ui: Ui, row: Value) -> AnyElement {
         muted(meta_line).into_element()
     } else {
         muted(meta_line)
-            .tooltip(nsh_base::tooltip().child(label(raw_updated)))
+            .tooltip(hint_tooltip(raw_updated))
             .into_element()
     };
     left_body = left_body.child(meta_el);

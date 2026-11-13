@@ -233,9 +233,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     view()
                         .flex_1()
                         .min_w(px(0.))
-                        .tooltip(nsh_base::tooltip().child(label(move || {
+                        .tooltip(hint_tooltip(move || {
                             ui.current_card().map(|c| c.title).unwrap_or_default()
-                        })))
+                        }))
                         .child(
                             label(move || ui.current_card().map(|c| c.title).unwrap_or_default())
                                 .font_weight(FontWeight::SEMIBOLD)
@@ -247,9 +247,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     move || ui.page.get() == "card",
                     move || {
                         view()
-                            .tooltip(nsh_base::tooltip().child(label(
+                            .tooltip(hint_tooltip(
                                 "Toggle side-by-side Live Terminal · ⌘J",
-                            )))
+                            ))
                             .child(
                                 compact_action(
                                     move || {
@@ -404,15 +404,19 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     view()
                         .min_w(px(0.))
                         .max_w(px(150.))
-                        .tooltip(nsh_base::tooltip().child(label(branch.clone())))
+                        .tooltip(hint_tooltip(branch.clone()))
                         .child(
                             canban_ui_kit::press_target()
                                 .min_w(px(0.))
                                 .h(px(24.))
+                                .px_1p5()
+                                .rounded(px(5.))
                                 .flex_row()
                                 .items_center()
                                 .gap_1()
                                 .bg(CLEAR)
+                                .hover(|st| st.bg(INSET))
+                                .focus(|st| st.border_1().border_color(ACCENT))
                                 .accessibility_label(|| Some("Copy Card branch".into()))
                                 .child(icon(Icon::Branch).w(px(12.)).h(px(12.)))
                                 .child(
@@ -468,19 +472,23 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     view()
                         .min_w(px(0.))
                         .max_w(px(170.))
-                        .tooltip(nsh_base::tooltip().child(label(if hint.is_empty() {
+                        .tooltip(hint_tooltip(if hint.is_empty() {
                             title.clone()
                         } else {
                             hint
-                        })))
+                        }))
                         .child(
                             canban_ui_kit::press_target()
                                 .min_w(px(0.))
                                 .h(px(24.))
+                                .px_1p5()
+                                .rounded(px(5.))
                                 .flex_row()
                                 .items_center()
                                 .gap_1()
                                 .bg(CLEAR)
+                                .hover(|st| st.bg(INSET))
+                                .focus(|st| st.border_1().border_color(ACCENT))
                                 .disabled(!can_open)
                                 .accessibility_label(move || {
                                     Some(format!("Open Agent {title}").into())
@@ -570,9 +578,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 let a11y = format!("Quick merge into {target}");
                 row = row.child(
                     view()
-                        .tooltip(nsh_base::tooltip().child(label(format!(
+                        .tooltip(hint_tooltip(format!(
                             "Merge into {target} with the default commit message, without opening the diff"
-                        ))))
+                        )))
                         .child(
                             compact_action(
                                 move || {
@@ -607,7 +615,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             if let Some(reason) = c.attention.or_else(|| c.human_gate.map(|g| g.reason)) {
                 row = row.child(
                     view()
-                        .tooltip(nsh_base::tooltip().child(label(reason)))
+                        .tooltip(hint_tooltip(reason))
                         .child(
                             compact_action("Needs attention", Variant::Secondary, move |_| {
                                 crate::overview::show_card_attention(

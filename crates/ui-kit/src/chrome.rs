@@ -1,5 +1,5 @@
 //! Compact window-chrome controls. NSH owns keyboard, focus and native tooltips.
-use super::{Icon, icon, label, tokens::*};
+use super::{Icon, hint_tooltip, icon, tokens::*};
 use nsh_core::prelude::*;
 pub fn chrome_button(kind: Icon, title: impl Into<String>, press: impl Fn(&()) + 'static) -> View {
     chrome_button_disabled(kind, title, || false, press)
@@ -15,17 +15,7 @@ pub fn chrome_button_disabled(
     view()
         .flex_shrink_0()
         .window_drag(false)
-        .tooltip(
-            nsh_base::tooltip()
-                .placement(Placement::Bottom)
-                .px_3()
-                .py_2()
-                .rounded(px(RADIUS))
-                .bg(SURFACE)
-                .border_1()
-                .border_color(BORDER)
-                .child(label(hint)),
-        )
+        .tooltip(hint_tooltip(hint).placement(Placement::Bottom))
         .child(chrome_action(kind, title, press).disabled(disabled))
 }
 /// Compact accessible icon action without a tooltip, suitable as a popup trigger.
@@ -63,16 +53,7 @@ pub fn utility_button(
     let selected = computed(selected);
     view()
         .flex_shrink_0()
-        .tooltip(
-            nsh_base::tooltip()
-                .placement(Placement::Top)
-                .px_3()
-                .py_2()
-                .bg(SURFACE)
-                .border_1()
-                .border_color(BORDER)
-                .child(label(hint)),
-        )
+        .tooltip(hint_tooltip(hint).placement(Placement::Top))
         .child(
             crate::press_target()
                 .w(px(30.))

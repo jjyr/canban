@@ -150,45 +150,43 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
             );
 
         file_list = file_list.child(
-            view()
-                .tooltip(nsh_base::tooltip().child(label(fname.clone())))
-                .child(
-                    canban_ui_kit::press_target()
-                        .w_full()
-                        .min_h(px(27.))
-                        .px_2()
-                        .py_0p5()
-                        .rounded(px(5.))
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap_1p5()
-                        .bg(if is_sel { SELECTED } else { CLEAR })
-                        .hover(|s| s.bg(if is_sel { SELECTED } else { CARD_HOVER }))
-                        .on_press(move |_: &()| st.selected_file.set(click_name.clone()))
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_1p5()
-                                .flex_1()
-                                .min_w(px(0.))
-                                .child(
-                                    label(status_char.0)
-                                        .font_family("Menlo")
-                                        .text_size(px(10.5))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(status_char.1),
-                                )
-                                .child(
-                                    label(short_name)
-                                        .text_size(px(12.))
-                                        .truncate()
-                                        .min_w(px(0.)),
-                                ),
-                        )
-                        .child(right_meta),
-                ),
+            view().tooltip(hint_tooltip(fname.clone())).child(
+                canban_ui_kit::press_target()
+                    .w_full()
+                    .min_h(px(27.))
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(5.))
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_1p5()
+                    .bg(if is_sel { SELECTED } else { CLEAR })
+                    .hover(|s| s.bg(if is_sel { SELECTED } else { CARD_HOVER }))
+                    .on_press(move |_: &()| st.selected_file.set(click_name.clone()))
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .child(
+                                label(status_char.0)
+                                    .font_family("Menlo")
+                                    .text_size(px(10.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(status_char.1),
+                            )
+                            .child(
+                                label(short_name)
+                                    .text_size(px(12.))
+                                    .truncate()
+                                    .min_w(px(0.)),
+                            ),
+                    )
+                    .child(right_meta),
+            ),
         );
     }
 

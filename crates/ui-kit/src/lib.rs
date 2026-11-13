@@ -47,3 +47,5 @@ pub mod tree_group;
 pub use tree_group::tree_group;
 
 pub mod reference_link;
+pub mod tooltip;
+pub use tooltip::{hint_tooltip, tooltip_box};

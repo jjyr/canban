@@ -195,7 +195,7 @@ fn avatar(ui: Ui, event: &Event) -> AnyElement {
             .map(|p| crate::profiles::provider(&p).0)
             .unwrap_or(Icon::Agent);
         return frame()
-            .tooltip(nsh_base::tooltip().child(label(format!("@{profile}"))))
+            .tooltip(hint_tooltip(format!("@{profile}")))
             .child(icon(mark).w(px(16.)).h(px(16.)))
             .into_element();
     }

@@ -106,10 +106,10 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
             .items_center()
             .gap_1()
             .min_w(px(0.))
-            .tooltip(nsh_base::tooltip().child(label(format!(
+            .tooltip(hint_tooltip(format!(
                 "Card #{} · {}#{}",
                 card.number, source.repository, source.number
-            ))))
+            )))
             .child(icon(Icon::GitHub).w(px(12.)).h(px(12.)))
             .child(muted(format!(
                 "{} #{}",
@@ -152,7 +152,7 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
                     .items_center()
                     .gap_1()
                     .min_w(px(0.))
-                    .tooltip(nsh_base::tooltip().child(label(branch.clone())))
+                    .tooltip(hint_tooltip(branch.clone()))
                     .child(icon(Icon::Branch).w(px(12.)).h(px(12.)))
                     .child(
                         muted(crate::components::git_workspace::compact(&branch, 24))
@@ -209,32 +209,29 @@ fn agent_pill(ui: Ui, request: Request) -> impl IntoElement {
     let hint = format!("{provider} · @{profile} is working — open terminal");
     let a11y = hint.clone();
     let id = request.id.clone();
-    view()
-        .flex_shrink_0()
-        .tooltip(nsh_base::tooltip().child(label(hint)))
-        .child(
-            press_target()
-                .h(px(22.))
-                .px_2()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .rounded(px(11.))
-                .bg(SELECTED)
-                .border_1()
-                .border_color(ACCENT)
-                .hover(|s| s.bg(CARD_HOVER))
-                .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
-                .accessibility_label(move || Some(a11y.clone().into()))
-                .child(live_dot(ACCENT))
-                .child(icon(mark).w(px(12.)).h(px(12.)))
-                .child(
-                    text(format!("@{profile}"))
-                        .text_size(px(CAPTION_SIZE))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(ACCENT)
-                        .truncate(),
-                )
-                .on_press(move |_: &()| crate::terminals::open_request(ui, &id)),
-        )
+    view().flex_shrink_0().tooltip(hint_tooltip(hint)).child(
+        press_target()
+            .h(px(22.))
+            .px_2()
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .rounded(px(11.))
+            .bg(SELECTED)
+            .border_1()
+            .border_color(ACCENT)
+            .hover(|s| s.bg(CARD_HOVER))
+            .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
+            .accessibility_label(move || Some(a11y.clone().into()))
+            .child(live_dot(ACCENT))
+            .child(icon(mark).w(px(12.)).h(px(12.)))
+            .child(
+                text(format!("@{profile}"))
+                    .text_size(px(CAPTION_SIZE))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(ACCENT)
+                    .truncate(),
+            )
+            .on_press(move |_: &()| crate::terminals::open_request(ui, &id)),
+    )
 }

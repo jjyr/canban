@@ -63,7 +63,7 @@ impl ThemeColor {
             return AdaptiveColor::TRANSPARENT;
         }
         let color = if self.0 == 17 {
-            rgb(current_theme().chrome()[1]).to_hsla().lighten(0.025)
+            rgb(current_theme().chrome()[1]).to_hsla().lighten(0.05)
         } else {
             rgb(current_theme().chrome()[self.0]).to_hsla()
         };

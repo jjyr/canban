@@ -67,10 +67,12 @@ fn controls() -> impl IntoElement {
                 )
                 .child(
                     panel()
-                        .child(label("Buttons · hover / press / keyboard focus"))
+                        .child(label("Buttons & shared tooltips · hover / press / keyboard focus"))
                         .child(
                             view()
                                 .flex_row()
+                                .flex_wrap()
+                                .items_center()
                                 .gap_3()
                                 .child(action("Primary", Variant::Primary, move |_| {
                                     count.set(count.get_untracked() + 1)
@@ -80,7 +82,19 @@ fn controls() -> impl IntoElement {
                                 }))
                                 .child(action("Danger", Variant::Danger, move |_| {
                                     count.set(count.get_untracked() + 1)
-                                })),
+                                }))
+                                .child(
+                                    view()
+                                        .px_2p5()
+                                        .py_1()
+                                        .rounded(px(5.))
+                                        .bg(INSET)
+                                        .hover(|s| s.bg(CARD_HOVER))
+                                        .tooltip(hint_tooltip(
+                                            "Styled tooltip surface · readable over dense Card text",
+                                        ))
+                                        .child(muted("Hover for shared tooltip")),
+                                ),
                         )
                         .child(muted(move || format!("Press count: {}", count.get()))),
                 )

@@ -15,6 +15,10 @@ pub fn reference_link(
         .label(title)
         .text_color(ACCENT)
         .underline()
+        .px_1()
+        .rounded(px(4.))
+        .bg(CLEAR)
+        .hover(|s| s.bg(SELECTED))
         .cursor_pointer()
         .on_press(move |_: &PressEvent| navigate())
         .tooltip(
@@ -32,6 +36,7 @@ pub fn reference_link(
                         .bg(SURFACE)
                         .border_1()
                         .border_color(BORDER)
+                        .shadow_md()
                         .child(preview),
                 ),
         )

@@ -306,23 +306,17 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                             .flex_1()
                                             .min_w(px(0.))
                                             .tooltip(
-                                                nsh_base::tooltip()
-                                                    .placement(Placement::Right)
-                                                    .px_3()
-                                                    .py_2()
-                                                    .bg(SURFACE)
-                                                    .border_1()
-                                                    .border_color(BORDER)
-                                                    .child(label(format!(
-                                                        "Managed worktree `{}`\nBase: {}\n{}",
-                                                        wt.branch,
-                                                        if wt.base_branch.is_empty() {
-                                                            "default"
-                                                        } else {
-                                                            wt.base_branch.as_str()
-                                                        },
-                                                        wt.path
-                                                    ))),
+                                                hint_tooltip(format!(
+                                                    "Managed worktree `{}`\nBase: {}\n{}",
+                                                    wt.branch,
+                                                    if wt.base_branch.is_empty() {
+                                                        "default"
+                                                    } else {
+                                                        wt.base_branch.as_str()
+                                                    },
+                                                    wt.path
+                                                ))
+                                                .placement(Placement::Right),
                                             )
                                             .child(
                                                 canban_ui_kit::press_target()

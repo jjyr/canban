@@ -132,21 +132,14 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
         .flex_shrink_0()
         .window_drag(false)
         .tooltip(
-            nsh_base::tooltip()
-                .placement(Placement::Bottom)
-                .px_3()
-                .py_2()
-                .rounded(px(RADIUS))
-                .bg(SURFACE)
-                .border_1()
-                .border_color(BORDER)
-                .child(label(move || {
-                    let (actionable, unread, active, max) = stats.get();
-                    format!(
-                        "Activity & Notifications · ⌘I\n{} needs you · {} unread · {} / {} running",
-                        actionable, unread, active, max
-                    )
-                })),
+            hint_tooltip(move || {
+                let (actionable, unread, active, max) = stats.get();
+                format!(
+                    "Activity & Notifications · ⌘I\n{} needs you · {} unread · {} / {} running",
+                    actionable, unread, active, max
+                )
+            })
+            .placement(Placement::Bottom),
         )
         .child(dynamic(move || {
             let (actionable, unread, active, max) = stats.get();
@@ -1022,16 +1015,7 @@ fn row_view(
                         reference.focus();
                     }
                 })
-                .tooltip(
-                    nsh_base::tooltip()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(RADIUS))
-                        .bg(SURFACE)
-                        .border_1()
-                        .border_color(BORDER)
-                        .child(label(hint)),
-                )
+                .tooltip(hint_tooltip(hint))
                 .child(main.on_press(move |_: &()| activate(ui, &activate_row))),
         )
         .child(actions)

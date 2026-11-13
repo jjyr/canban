@@ -482,17 +482,7 @@ fn usage_summary(ui: Ui, now: u64) -> View {
 
         area = area.child(
             view()
-                .tooltip(
-                    nsh_base::tooltip()
-                        .placement(Placement::Top)
-                        .px_3()
-                        .py_2()
-                        .rounded(px(RADIUS))
-                        .bg(SURFACE)
-                        .border_1()
-                        .border_color(BORDER)
-                        .child(tip),
-                )
+                .tooltip(tooltip_box().placement(Placement::Top).child(tip))
                 .child(
                     canban_ui_kit::press_target()
                         .min_h(px(28.))

@@ -275,15 +275,7 @@ pub fn rail(ui: Ui) -> impl IntoElement {
             view()
                 .w(px(40.))
                 .h(px(40.))
-                .tooltip(
-                    nsh_base::tooltip()
-                        .placement(Placement::Right)
-                        .px_3()
-                        .py_2()
-                        .bg(SURFACE)
-                        .rounded(px(RADIUS))
-                        .child(label(move || hint(&ui.update.get()))),
-                )
+                .tooltip(hint_tooltip(move || hint(&ui.update.get())).placement(Placement::Right))
                 .child(
                     canban_ui_kit::press_target()
                         .w_full()

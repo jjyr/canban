@@ -273,12 +273,10 @@ pub fn controls(
                             .px_2()
                             .rounded(px(6.))
                             .bg(INSET)
-                            .tooltip(nsh_base::tooltip().child(label(
-                                move || match item.get().state {
-                                    State::Failed(e) => e,
-                                    _ => item.get().name,
-                                },
-                            )))
+                            .tooltip(hint_tooltip(move || match item.get().state {
+                                State::Failed(e) => e,
+                                _ => item.get().name,
+                            }))
                             .gap_1()
                             .child(
                                 muted(move || {
