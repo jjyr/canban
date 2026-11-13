@@ -6,6 +6,7 @@ pub enum Target {
     Card(String),
     Agent(String),
     Terminal(String),
+    Worktree(String),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
@@ -103,6 +104,22 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
             ],
         });
     }
+    for wt in &s.worktrees {
+        let owner = project(&wt.project_id);
+        rows.push(Candidate {
+            id: format!("worktree:{}", wt.id),
+            title: format!("⎇ {}", wt.branch),
+            detail: format!("Worktree · {owner} · base {}", wt.base_branch),
+            kind: "Worktree",
+            target: Target::Worktree(wt.id.clone()),
+            fields: vec![
+                wt.branch.clone(),
+                owner,
+                wt.path.clone(),
+                wt.base_branch.clone(),
+            ],
+        });
+    }
     for row in &mut rows {
         row.fields.push(row.kind.into());
     }
@@ -113,8 +130,9 @@ fn kind_rank(kind: &str) -> u8 {
         "Project" => 0,
         "Agent" => 1,
         "Card" => 2,
-        "Terminal" => 3,
-        _ => 4,
+        "Worktree" => 3,
+        "Terminal" => 4,
+        _ => 5,
     }
 }
 

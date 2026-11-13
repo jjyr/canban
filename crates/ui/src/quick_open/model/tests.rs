@@ -187,3 +187,51 @@ fn command_queries_require_gt_prefix_and_match_agent_setup_commands() {
     assert!(!gt_setup.is_empty());
     assert_eq!(gt_setup[0].id, "go-agent-setup");
 }
+
+#[test]
+fn command_catalog_ids_are_unique_and_cover_notifications_card_terminal_and_worktrees() {
+    let mut ids = std::collections::BTreeSet::new();
+    for cmd in crate::commands::CATALOG {
+        assert!(
+            ids.insert(cmd.id),
+            "duplicate command id in CATALOG: {}",
+            cmd.id
+        );
+    }
+
+    let notif = crate::quick_open::matching_commands(">notifications");
+    assert!(notif.iter().any(|c| c.id == "toggle-notifications"));
+    assert!(notif.iter().any(|c| c.id == "mark-all-read"));
+
+    let split = crate::quick_open::matching_commands(">card live terminal");
+    assert!(split.iter().any(|c| c.id == "toggle-card-terminal"));
+
+    let wt = crate::quick_open::matching_commands(">worktree");
+    assert!(wt.iter().any(|c| c.id == "new-worktree"));
+
+    let merge = crate::quick_open::matching_commands(">quick merge");
+    assert!(merge.iter().any(|c| c.id == "quick-merge-card"));
+}
+
+#[test]
+fn quick_open_indexes_standalone_managed_worktrees() {
+    let mut s = fixture();
+    s.worktrees.push(ManagedWorktree {
+        id: "wt-1".into(),
+        project_id: "p1".into(),
+        branch: "feat/standalone-spike".into(),
+        base_branch: "main".into(),
+        base_commit: None,
+        path: "/example/p1-wt".into(),
+        location: WorkLocation {
+            machine: "local".into(),
+            directory: "/example/p1-wt".into(),
+        },
+        created_at: 2,
+    });
+    let rows = candidates(&s);
+    let matched = ranked(&rows, "standalone-spike", &[], false);
+    assert!(!matched.is_empty());
+    assert_eq!(matched[0].kind, "Worktree");
+    assert_eq!(matched[0].target, Target::Worktree("wt-1".into()));
+}

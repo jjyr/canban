@@ -369,15 +369,6 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .min_h(px(0.))
         .p_5()
         .gap_4()
-        .child(subpage_header(
-            "Back to Board",
-            move || {
-                ui.current_project()
-                    .map(|p| format!("{} / GitHub repository", p.name))
-                    .unwrap_or_else(|| "GitHub repository".into())
-            },
-            move |_| ui.navigate("board"),
-        ))
         .child(scroll().flex_1().child(dynamic(move || {
             let _ = ui.project.get();
             if let Some(p) = ui.current_project() {

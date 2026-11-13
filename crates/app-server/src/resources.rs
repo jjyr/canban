@@ -142,6 +142,7 @@ impl AppServer {
             .unwrap()
             .clone();
         let filtered = Snapshot {
+            worktrees: Vec::new(),
             workflow_sources: Vec::new(),
             configuration_sessions: Vec::new(),
             event_subscriptions: Vec::new(),

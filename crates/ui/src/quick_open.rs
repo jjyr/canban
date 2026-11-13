@@ -39,6 +39,86 @@ pub fn is_command_query(raw_query: &str) -> bool {
     raw_query.trim_start().starts_with('>')
 }
 
+struct DynamicCommand {
+    id: String,
+    title: String,
+    detail: String,
+    icon: Icon,
+    keywords: String,
+}
+
+fn contextual_commands(ui: Ui, raw_query: &str) -> Vec<(usize, SearchChoice)> {
+    let trimmed = raw_query.trim_start();
+    let cmd_query = trimmed.strip_prefix('>').unwrap_or(trimmed).trim();
+    let mut dynamic_cmds = Vec::<DynamicCommand>::new();
+
+    if let Some(card) = ui.current_card().filter(|c| c.active())
+        && let Some(project) = ui.current_project()
+    {
+        for stage in &project.workflow.stages {
+            if stage.id != card.stage {
+                dynamic_cmds.push(DynamicCommand {
+                    id: format!("cmd:move-card:{}", stage.id),
+                    title: format!("Move Card #{} to {}", card.number, stage.name),
+                    detail: format!("{} · Card Stage", project.name),
+                    icon: Icon::Board,
+                    keywords: format!("move stage {} #{}", stage.name, card.number),
+                });
+            }
+        }
+    }
+
+    let snapshot = ui.snapshot.get();
+    for wt in &snapshot.worktrees {
+        let project_name = snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == wt.project_id)
+            .map(|p| p.name.as_str())
+            .unwrap_or("Project");
+        dynamic_cmds.push(DynamicCommand {
+            id: format!("cmd:worktree-shell:{}", wt.id),
+            title: format!("Open Shell in Worktree {}", wt.branch),
+            detail: format!("{project_name} · Worktrees"),
+            icon: Icon::Terminal,
+            keywords: format!("worktree shell terminal {}", wt.branch),
+        });
+        dynamic_cmds.push(DynamicCommand {
+            id: format!("cmd:worktree-promote:{}", wt.id),
+            title: format!("Promote Worktree {} to Board Card…", wt.branch),
+            detail: format!("{project_name} · Worktrees"),
+            icon: Icon::Board,
+            keywords: format!("worktree promote card {}", wt.branch),
+        });
+        dynamic_cmds.push(DynamicCommand {
+            id: format!("cmd:worktree-diff:{}", wt.id),
+            title: format!("Compare Worktree {} in Diff & Review", wt.branch),
+            detail: format!("{project_name} · Worktrees"),
+            icon: Icon::Compare,
+            keywords: format!("worktree diff review compare {}", wt.branch),
+        });
+    }
+
+    dynamic_cmds
+        .into_iter()
+        .filter_map(|dc| {
+            let fields = vec![dc.title.clone(), dc.detail.clone(), dc.keywords.clone()];
+            let score = canban_ui_kit::search::score(&fields, cmd_query)?;
+            Some((
+                score,
+                SearchChoice {
+                    attention: 0,
+                    selected: false,
+                    id: dc.id,
+                    title: dc.title,
+                    detail: dc.detail,
+                    icon: dc.icon,
+                },
+            ))
+        })
+        .collect()
+}
+
 pub fn bindings(ui: Ui) {
     on_key_with(
         "mod+o",
@@ -112,25 +192,49 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                 let raw_query = ui.search_query.get();
                 let command_mode = !ui.project_picker.get() && is_command_query(&raw_query);
                 if command_mode {
-                    return matching_commands(&raw_query)
-                        .into_iter()
-                        .map(|c| SearchChoice {
-                            attention: 0,
-                            selected: false,
-                            id: format!("cmd:{}", c.id),
-                            title: c.title.into(),
-                            detail: if c.display.is_empty() {
-                                c.context.into()
-                            } else {
-                                format!("{} · {}", c.display, c.context)
-                            },
-                            icon: if c.id.contains("agent") {
-                                Icon::Agent
-                            } else {
-                                Icon::Keyboard
-                            },
-                        })
-                        .collect();
+                    let mut scored: Vec<(usize, usize, SearchChoice)> =
+                        matching_commands_with_scores(&raw_query)
+                            .into_iter()
+                            .enumerate()
+                            .map(|(idx, (score, c))| {
+                                (
+                                    score,
+                                    idx,
+                                    SearchChoice {
+                                        attention: 0,
+                                        selected: false,
+                                        id: format!("cmd:{}", c.id),
+                                        title: c.title.into(),
+                                        detail: if c.display.is_empty() || c.display == c.context {
+                                            c.context.into()
+                                        } else {
+                                            format!("{} · {}", c.display, c.context)
+                                        },
+                                        icon: if c.id.contains("agent") {
+                                            Icon::Agent
+                                        } else if c.id.contains("worktree") {
+                                            Icon::Branch
+                                        } else if c.id.contains("terminal") {
+                                            Icon::Terminal
+                                        } else if c.id.contains("notifications")
+                                            || c.id == "mark-all-read"
+                                        {
+                                            Icon::Overview
+                                        } else {
+                                            Icon::Keyboard
+                                        },
+                                    },
+                                )
+                            })
+                            .collect();
+                    let base = scored.len();
+                    for (offset, (score, choice)) in
+                        contextual_commands(ui, &raw_query).into_iter().enumerate()
+                    {
+                        scored.push((score.saturating_add(1), base + offset, choice));
+                    }
+                    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+                    return scored.into_iter().map(|(_, _, ch)| ch).collect();
                 }
                 rows.get()
                     .into_iter()
@@ -158,6 +262,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                             "Project" => Icon::Projects,
                             "Card" => Icon::Board,
                             "Terminal" => Icon::Terminal,
+                            "Worktree" => Icon::Branch,
                             _ => Icon::Agent,
                         },
                     })
@@ -196,7 +301,7 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                     if ui.project_picker.get() {
                         "Search projects…".into()
                     } else {
-                        "Search projects, cards, agents… or type > for commands".into()
+                        "Search projects, cards, worktrees, agents… or type > for commands".into()
                     }
                 },
                 view()
@@ -242,5 +347,24 @@ pub fn activate(ui: Ui, row: Candidate) {
             ui.open_card(id);
         }
         Target::Agent(id) | Target::Terminal(id) => ui.open_terminal(id),
+        Target::Worktree(wt_id) => {
+            let s = ui.snapshot.get_untracked();
+            if let Some(wt) = s.worktrees.iter().find(|w| w.id == wt_id) {
+                if let Some(live) = crate::terminals::entries(&s)
+                    .into_iter()
+                    .find(|e| e.listed() && crate::terminals::worktrees::entry_in_worktree(e, wt))
+                {
+                    ui.open_terminal(live.saved.id);
+                } else {
+                    ui.project.set(wt.project_id.clone());
+                    ui.terminal_folds.update(|folds| {
+                        folds.remove(&format!("project:{}", wt.project_id));
+                        folds.remove(&format!("wt:{}", wt.id));
+                    });
+                    ui.terminal_sidebar.set(true);
+                    ui.navigate("terminals");
+                }
+            }
+        }
     }
 }

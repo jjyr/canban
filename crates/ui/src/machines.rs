@@ -265,14 +265,12 @@ pub fn project_location(ui: Ui) -> impl IntoElement {
         .unwrap_or_else(|| "Work location".into());
     let expected = initial.clone();
     let id = p.map(|p| p.id).unwrap_or_default();
+    let _ = title;
     view()
         .flex_1()
         .min_h(px(0.))
         .p_5()
         .gap_4()
-        .child(subpage_header("Back to Board", title, move |_| {
-            ui.navigate("board")
-        }))
         .child(
             scroll().flex_1().min_h(px(0.)).child(
                 settings_section(

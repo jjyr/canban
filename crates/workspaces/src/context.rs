@@ -98,6 +98,14 @@ impl Ops {
                 }
             }
         }
+        for wt in s
+            .worktrees
+            .iter()
+            .filter(|wt| wt.location.machine == *machine)
+        {
+            roots.push((wt.path.clone(), wt.project_id.clone()));
+            roots.push((wt.location.directory.clone(), wt.project_id.clone()));
+        }
         let mut paths = roots
             .iter()
             .map(|(p, _)| p.clone())

@@ -54,6 +54,8 @@ pub fn resume(ui: Ui, id: &str) {
         return;
     }
     let origin = ui.location();
+    let in_card = ui.page.get_untracked() == "card" && ui.card.get_untracked() == row.card.id;
+    let card_for_open = row.card.id.clone();
     let req = row.request.as_ref().unwrap();
     dispatch_then(
         ui,
@@ -63,7 +65,11 @@ pub fn resume(ui: Ui, id: &str) {
             if ui.location() == origin
                 && let Some(request) = value["request_id"].as_str()
             {
-                open_after_launch(ui, row.id.clone(), request.into());
+                if in_card {
+                    ui.open_card_with_terminal(card_for_open, Some(row.id.clone()));
+                } else {
+                    open_after_launch(ui, row.id.clone(), request.into());
+                }
             }
         },
     );

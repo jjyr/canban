@@ -186,6 +186,9 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                     )
                     .into_element();
                 }
+                if popup == "notifications" {
+                    return crate::overview::popover(ui).into_element();
+                }
                 if popup != "theme" {
                     return view().into_element();
                 }

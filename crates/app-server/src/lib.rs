@@ -595,6 +595,7 @@ mod resources;
 mod runtime;
 mod sessions;
 mod terminals;
+mod worktrees;
 
 pub fn default_home() -> Result<PathBuf> {
     if let Some(v) = std::env::var_os("CANBAN_HOME") {

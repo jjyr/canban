@@ -396,7 +396,7 @@ fn downgrade_cannot_discard_user_workflow_definitions() {
     assert!(error.to_string().contains("YAML workflow sources"));
     assert_eq!(
         canban_storage::migrations::database_version(&home).unwrap(),
-        12
+        canban_storage::migrations::CURRENT
     );
     let store = Store::open(&home).unwrap();
     assert!(

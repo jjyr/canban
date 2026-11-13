@@ -217,9 +217,9 @@ pub fn header(ui: Ui) -> impl IntoElement {
         let controls = if ui.terminal_sidebar.get() {
             0.
         } else {
-            64. + (nsh_core::element::desktop::title_bar().left.0.max(78.) - 56.).max(0.)
+            96. + (crate::frame::chrome_left_padding() - 56.).max(0.)
         };
-        (w - (w * 0.4).min(420.) - 88. - controls).max(40.)
+        (w - (w * 0.35).min(340.) - 196. - controls).max(40.)
     });
     let strip = element_ref();
     let active = computed(move || ui.terminal_selection.get());
@@ -262,9 +262,10 @@ pub fn header(ui: Ui) -> impl IntoElement {
             px(if ui.terminal_sidebar.get() {
                 0.
             } else {
-                (nsh_core::element::desktop::title_bar().left.0.max(78.) - 56.).max(0.)
+                (crate::frame::chrome_left_padding() - 56.).max(0.)
             })
         })
+        .pr(px(10.))
         .child(when(
             move || !ui.terminal_sidebar.get(),
             move || super::controls(ui),
@@ -337,7 +338,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                 .justify_end()
                 .gap_2()
                 .min_w(px(0.))
-                .w(move || px((width.get() * 0.4).min(420.)))
+                .w(move || px((width.get() * 0.35).min(340.)))
                 .flex_shrink_0();
             if let Some(card) = e.card.clone() {
                 context = context.child(
@@ -478,7 +479,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                 .element_ref(&anchor),
             )
         }))
-        .child(view().w(px(10.)).h_full().window_drag(true))
+        .child(crate::overview::trigger_pill(ui))
 }
 pub fn rename_dialog(ui: Ui) -> impl IntoElement {
     when(

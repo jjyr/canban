@@ -706,6 +706,60 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
             "canban/very-long-worktree-and-branch-name/context-navigation-acceptance-42".into(),
         ),
     });
+    let proj_id = s.projects[0].id.clone();
+    s.worktrees.push(canban_types::ManagedWorktree {
+        id: "gallery-wt-spike".into(),
+        project_id: proj_id.clone(),
+        branch: "feat/standalone-spike".into(),
+        base_branch: "main".into(),
+        base_commit: None,
+        path: "/tmp/gallery/worktrees/standalone-spike".into(),
+        location: canban_types::WorkLocation {
+            machine: "local".into(),
+            directory: "/tmp/gallery/worktrees/standalone-spike".into(),
+        },
+        created_at: canban_types::now(),
+    });
+    s.worktrees.push(canban_types::ManagedWorktree {
+        id: "gallery-wt-retained".into(),
+        project_id: proj_id.clone(),
+        branch: "chore/retained-experiment".into(),
+        base_branch: "main".into(),
+        base_commit: None,
+        path: "/tmp/gallery/worktrees/retained-experiment".into(),
+        location: canban_types::WorkLocation {
+            machine: "local".into(),
+            directory: "/tmp/gallery/worktrees/retained-experiment".into(),
+        },
+        created_at: canban_types::now(),
+    });
+    s.terminals.push(canban_types::TerminalEntry {
+        id: "gallery-wt-shell".into(),
+        conversation_id: None,
+        number: number + 4,
+        name: Some("feat/standalone-spike".into()),
+        manual_number: Some(4),
+        runtime: Some(canban_types::TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("gallery".into()),
+            terminal: Some("wt-shell".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+        }),
+        created_at: 0,
+    });
+    s.terminal_contexts.push(canban_types::TerminalContext {
+        machine: "local".into(),
+        terminal_id: "gallery-wt-shell".into(),
+        core_id: "gallery".into(),
+        terminal: "wt-shell".into(),
+        cwd: Some("/tmp/gallery/worktrees/standalone-spike".into()),
+        project_id: Some(proj_id),
+        card_id: None,
+        branch: Some("feat/standalone-spike".into()),
+    });
     s
 }
 

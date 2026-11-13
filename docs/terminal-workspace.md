@@ -7,25 +7,27 @@ Multi-machine update, 2026-11-09: see [current execution/location and service co
 
 Implemented user-approved direction, 2026-11-08. Native/runtime acceptance is recorded below. This supersedes the Terminal portion of the earlier Card-focused split layout. Review retains its own delivery interface.
 
-## Product layout (updated user-approved direction)
+## Product layout (updated 2026-11-13: unified chrome + Managed Branch Worktrees)
 
 ```text
-+----------------------------------+----------------------------------------------------------+
-| traffic lights [<] [>] list      | [#42 ... x] [Terminal 1 x] [+]    Card / branch [...]    |
-+----------------------------------+----------------------------------------------------------+
-| rail | Project groups            |                                                          |
-|      | [Show inactive]           | Native Terminal                                          |
-|      | v Canban [+]              |                                                          |
-|      |   #42 Card title  Develop |                                                          |
-|      |   [icon] Codex   Working  |                                                          |
-|      |   Local                   |                                                          |
-|      | v Other                   |                                                          |
-|      |   Terminal 1     Active   |                                                          |
-|      |   Build machine           |                                                          |
-+----------------------------------+----------------------------------------------------------+
++------------------------------------+---------------------------------------------------------------+
+| traffic lights [<] [>] [☰]         | [#42 ... x] [Terminal 1 x] [+]    Card/branch [...] [⚡2·●3/8] |
++------------------------------------+---------------------------------------------------------------+
+| rail | Project groups              |                                                               |
+|      | [Show inactive]             | Native Terminal                                               |
+|      | v Canban [+]                |                                                               |
+|      |   #42 Card title    Develop |                                                               |
+|      |   [icon] Codex     Working  |                                                               |
+|      |   Local                     |                                                               |
+|      |   ⎇ feat/login  [Diff][...] |  <-- Canban-managed standalone branch worktree (retained)     |
+|      |     Terminal 2      Active  |                                                               |
+|      | v Other                     |                                                               |
+|      |   Terminal 1       Active   |                                                               |
+|      |   Build machine             |                                                               |
++------------------------------------+---------------------------------------------------------------+
 ```
 
-The window chrome follows the same left/right divider as the content. The left panel owns the native traffic-light clearance, source navigation and sidebar controls; the right panel owns tabs, current Card and branch, and a compact actions menu. Resizing the left panel moves its full-height divider. With the list hidden, tab controls clear the native window buttons. NSH owns window dragging, system double-click behavior, traffic-light geometry and resizable panels. Terminal content has no separate title, toolbar, tab strip, placeholder asking to select a conversation, or permanent technical status footer.
+The window chrome follows the same left/right divider as the content while aligning with the unified 42-point chrome geometry across all screens: native traffic-light clearance and `<` / `>` Back/Forward sit at the exact same horizontal coordinates as every other page, followed by the sidebar toggle (`☰`), so `<` / `>` never jump when switching to or from `Terminals`. The right panel owns tabs, `+` (New Shell or New Managed Branch Worktree), current Card/Worktree and branch context, compact actions, and the global right-end **Activity & Notifications** trigger pill (`[⚡ N · ● active/max]`, `Command+I`). Resizing the left panel moves its full-height divider. With the list hidden, tab controls clear the native window buttons and `<` / `>`. NSH owns window dragging, system double-click behavior, traffic-light geometry and resizable panels. Terminal content has no separate title, toolbar, tab strip, placeholder asking to select a conversation, or permanent technical status footer.
 
 ## Shared navigation and execution boundaries
 
@@ -203,6 +205,17 @@ Executed acceptance: wide and narrow native Gallery layouts passed title expansi
 ## Project Workflow configuration Agents
 
 Project-owned configuration Agents are an additional stable owner, independent of Card assignments or inferred directories. The tree groups these entries under **Project / Configuration / Workflows · Profile**. They reuse the native viewer and terminal lifecycle controls; **Back to Workflows** returns to the Project editor. Starting/continuing/resuming is explicit in **Edit with agent**. Continue only focuses a retained binding; Resume uses exact provider history. Closing a queued entry cancels admission. See [the configuration contract](product/workflow-engine.md#edit-with-agent).
+
+## Standalone Managed Branch Worktrees (2026-11-13)
+
+Users frequently want to spin up an isolated Git branch worktree inside a Project for ad-hoc exploration, direct coding, or interactive CLI Agent work without first authoring a Board Card. Canban manages these standalone checkouts as durable `ManagedWorktree` records (SQLite schema v13, `Snapshot.worktrees`, `DESKTOP_API` 19+):
+
+- **Creation (`worktree.create`):** Triggered from a Project's `+` menu in `Terminals`, the top `+` menu, or Command Palette (`New Managed Branch Worktree…`). Users choose the Project, enter a branch name (validated by `git check-ref-format --branch`), optionally pick a base branch and upstream sync, and choose what to open immediately: a login **Shell** in the new worktree or a configured **Agent CLI** command running interactively in that directory. Worktrees are allocated under `<execution-home>/worktrees/<namespace>/<leaf>` on the Project's current execution machine (local or remote SSH) using the same collision-safe `canban-workspaces` allocator as Card worktrees.
+- **Retention across tab closes:** Closing the last Terminal tab inside a `ManagedWorktree` (`Command+W` / tab `X`) terminates only that PTY tab (`terminal.close`) and **retains the `ManagedWorktree`** in the Project's `Terminals` sidebar tree (`⎇ <branch>`). Users can reopen a Shell or Agent CLI inside it at any time with one click, without losing uncommitted edits or local commits.
+- **Diff, Promote to Card, and Delete:**
+  - **Open in Diff & Review:** Opens `Diff & Review` comparing the worktree's branch against its `base_branch`.
+  - **Promote to Card (`worktree.promote`):** Creates a new Board `Card` in the owning Project bound directly to the existing `branch`, `path`, `base_commit`, and `location`, atomically transferring ownership from `ManagedWorktree` to the new `Card` without moving files or interrupting open Shells.
+  - **Delete Worktree (`worktree.remove`):** Refuses removal while any live Terminal PTY is observed inside the worktree. Checks `git status --porcelain` (`worktree.status`); clean worktrees remove immediately (`git worktree remove`), while dirty worktrees surface a warning requiring explicit `force: true` confirmation before discarding uncommitted changes and deleting the `ManagedWorktree` record.
 
 ## Unified Terminal navigation
 

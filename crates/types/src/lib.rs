@@ -304,6 +304,18 @@ impl Project {
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ManagedWorktree {
+    pub id: String,
+    pub project_id: String,
+    pub branch: String,
+    pub base_branch: String,
+    #[serde(default)]
+    pub base_commit: Option<String>,
+    pub path: String,
+    pub location: WorkLocation,
+    pub created_at: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WorkspaceBinding {
     pub location: WorkLocation,
     pub path: String,
@@ -720,6 +732,8 @@ pub struct Snapshot {
     pub github: GitHubAccount,
     #[serde(default)]
     pub github_issues: Vec<GitHubIssueSnapshot>,
+    #[serde(default)]
+    pub worktrees: Vec<ManagedWorktree>,
     #[serde(default)]
     pub terminals: Vec<TerminalEntry>,
     /// Ephemeral Herdr observations, never persisted as Terminal ownership.

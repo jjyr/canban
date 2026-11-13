@@ -112,13 +112,16 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 return native("canban/terminal")
                     .prop("theme", crate::utilities::terminal_theme)
                     .prop("font", move || crate::utilities::terminal_font(ui))
-                    .prop("ui_command_keys", json!(["o","n","/","t","w","[","]","{","}"]))
+                    .prop("ui_command_keys", json!(["o","n","/","i","j","t","w","[","]","{","}"]))
                     .prop("focus", move || {
                         json!({
                             "ticket": ui.terminal_focus.get(),
                             "enabled": !ui.quick_open.get()
                                 && ui.utility_popup.get().is_empty()
                                 && ui.terminal_rename.get().is_none()
+                                && ui.worktree_modal.get().is_none()
+                                && ui.worktree_promote.get().is_none()
+                                && ui.worktree_remove_confirm.get().is_none()
                         })
                     })
                     .key(id)
@@ -135,13 +138,16 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             native("canban/terminal")
                 .prop("theme", crate::utilities::terminal_theme)
                 .prop("font", move || crate::utilities::terminal_font(ui))
-                .prop("ui_command_keys", json!(["o","n","/","t","w","[","]","{","}"]))
+                .prop("ui_command_keys", json!(["o","n","/","i","j","t","w","[","]","{","}"]))
                 .prop("focus", move || {
                     json!({
                         "ticket": ui.terminal_focus.get(),
                         "enabled": !ui.quick_open.get()
                             && ui.utility_popup.get().is_empty()
                             && ui.terminal_rename.get().is_none()
+                            && ui.worktree_modal.get().is_none()
+                            && ui.worktree_promote.get().is_none()
+                            && ui.worktree_remove_confirm.get().is_none()
                     })
                 })
                 .key(id)
