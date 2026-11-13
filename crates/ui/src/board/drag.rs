@@ -50,6 +50,7 @@ struct Session {
 }
 #[derive(Clone, Copy)]
 pub(super) struct BoardDrag {
+    owner: Owner,
     ui: Ui,
     trace: bool,
     pub cards: Signal<Vec<Card>>,
@@ -84,16 +85,52 @@ pub(super) fn settle(value: AnimatedValue, to: f32) -> Option<AnimationEnd> {
     }
 }
 async fn wait_motion((x, y): MotionEnd) {
-    if let Some(end) = x {
-        end.await;
+    if x.is_none() && y.is_none() {
+        return;
     }
-    if let Some(end) = y {
-        end.await;
+    let done = signal(false);
+    spawn(async move {
+        if let Some(end) = x {
+            end.await;
+        }
+        if let Some(end) = y {
+            end.await;
+        }
+        let _ = done.try_set(true);
+    });
+    let deadline = Instant::now() + Duration::from_millis(450);
+    while done.try_get() == Some(false) && Instant::now() < deadline {
+        timer(Duration::from_millis(16)).await;
     }
+}
+pub(super) fn can_start_drag(phase: u8, card_move_pending: bool) -> bool {
+    phase == 0 && !card_move_pending
+}
+/// Whether NSH's pan gesture remains mounted on Board rows.
+/// Keep `PanEnd` mounted during active gesture phases (`1` and `2`) so mouse release
+/// delivers `on_pan_end`; disable during landing (`3`) or while `card.move` is in flight.
+pub(super) fn is_row_pan_enabled(
+    phase: u8,
+    lifted_id: &str,
+    row_id: &str,
+    card_move_pending: bool,
+) -> bool {
+    if card_move_pending || phase == 3 {
+        return false;
+    }
+    phase == 0 || lifted_id == row_id
+}
+pub(super) fn should_abort_unmounted_row(
+    phase: Option<u8>,
+    lifted_id: Option<&str>,
+    unmounted_id: &str,
+) -> bool {
+    lifted_id == Some(unmounted_id) && matches!(phase, Some(1 | 2))
 }
 impl BoardDrag {
     pub fn new(ui: Ui, project: Project) -> Self {
         let this = Self {
+            owner: Owner::current(),
             ui,
             trace: std::env::var_os("CANBAN_BOARD_TRACE").is_some(),
             cards: signal(Vec::new()),
@@ -290,8 +327,23 @@ impl BoardDrag {
         }
         self.metrics.with(|m| m.dirty = false);
     }
+    fn spawn_owned(self, future: impl std::future::Future<Output = ()> + 'static) {
+        self.owner.run(|| {
+            spawn(future);
+        });
+    }
+    pub fn row_unmounted(self, id: &str) {
+        if should_abort_unmounted_row(self.phase.try_get(), self.lifted.try_get().as_deref(), id) {
+            self.clear();
+        }
+    }
     pub fn start(self, card: Card, reference: ElementRef) {
-        if self.phase.get_untracked() != 0 || self.ui.pending.get_untracked() {
+        if !can_start_drag(
+            self.phase.get_untracked(),
+            self.ui
+                .pending_methods
+                .with_untracked(|m| m.contains("card.move")),
+        ) {
             return;
         }
         self.phase.set(1);
@@ -327,7 +379,7 @@ impl BoardDrag {
             original_y,
             end: None,
         }));
-        spawn(async move {
+        self.spawn_owned(async move {
             let Some(mut source) = reference.measure().await else {
                 self.clear();
                 return;
@@ -513,7 +565,7 @@ impl BoardDrag {
             before_card_id: before,
         };
         let motion = self.land();
-        let received = signal(None::<bool>);
+        let received = self.owner.run(|| signal(None::<bool>));
         if let Some(handler) = self.ui.board_move.get() {
             handler(intent);
             received.set(Some(true));
@@ -527,7 +579,7 @@ impl BoardDrag {
                 },
             );
         }
-        spawn(async move {
+        self.spawn_owned(async move {
             wait_motion(motion).await;
             while received.try_get() == Some(None) {
                 timer(Duration::from_millis(16)).await;
@@ -575,7 +627,7 @@ impl BoardDrag {
         } else {
             (None, None)
         };
-        spawn(async move {
+        self.spawn_owned(async move {
             wait_motion(motion).await;
             if self.phase.try_get().is_some() {
                 self.clear();
@@ -611,5 +663,39 @@ impl BoardDrag {
                 .child(card_tile(self.ui, card))
                 .into_element(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drag_eligibility_scopes_pending_check_to_card_move_and_idle_phase() {
+        assert!(can_start_drag(0, false));
+        assert!(!can_start_drag(0, true));
+        for active_phase in [1, 2, 3] {
+            assert!(!can_start_drag(active_phase, false));
+            assert!(!can_start_drag(active_phase, true));
+        }
+        // The lifted row MUST keep pan_enabled during phases 1 and 2 so NSH preserves EventKind::PanEnd!
+        assert!(is_row_pan_enabled(0, "", "c1", false));
+        assert!(!is_row_pan_enabled(0, "", "c1", true));
+        assert!(is_row_pan_enabled(1, "c1", "c1", false));
+        assert!(is_row_pan_enabled(2, "c1", "c1", false));
+        assert!(!is_row_pan_enabled(1, "c1", "c2", false));
+        assert!(!is_row_pan_enabled(2, "c1", "c2", false));
+        assert!(!is_row_pan_enabled(3, "c1", "c1", false));
+    }
+
+    #[test]
+    fn unmounted_dragged_row_aborts_active_gesture_without_interrupting_landing_or_peers() {
+        assert!(should_abort_unmounted_row(Some(1), Some("c1"), "c1"));
+        assert!(should_abort_unmounted_row(Some(2), Some("c1"), "c1"));
+        // Do not clear during phase 3 (landing / awaiting card.move completion) or for peer rows.
+        assert!(!should_abort_unmounted_row(Some(3), Some("c1"), "c1"));
+        assert!(!should_abort_unmounted_row(Some(0), Some("c1"), "c1"));
+        assert!(!should_abort_unmounted_row(Some(2), Some("c1"), "c2"));
+        assert!(!should_abort_unmounted_row(None, Some("c1"), "c1"));
     }
 }

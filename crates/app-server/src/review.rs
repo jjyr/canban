@@ -121,7 +121,7 @@ impl AppServer {
         drop(_gate);
         if value["state"] == "merged" {
             let _ = self.try_auto_archive_merged(&card.id);
-            let _ = self.pump_deliveries();
+            self.request_deliveries();
         }
         self.emit("review", Some(card.id));
         Ok(value)

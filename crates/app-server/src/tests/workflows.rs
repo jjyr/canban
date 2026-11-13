@@ -3502,3 +3502,196 @@ fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_fo
         "from c2\n"
     );
 }
+
+#[test]
+fn live_card_move_from_backlog_to_review_returns_immediately_while_delivery_merges_in_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let remote = dir.path().join("remote.git");
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&remote).unwrap();
+    std::fs::create_dir_all(&source).unwrap();
+
+    let git = |cwd: &std::path::Path, args: &[&str]| -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout)
+            .unwrap()
+            .trim_end_matches('\n')
+            .to_owned()
+    };
+
+    git(&remote, &["init", "--bare", "-b", "main"]);
+    git(&source, &["init", "-b", "main"]);
+    git(&source, &["config", "user.name", "Tester"]);
+    git(&source, &["config", "user.email", "tester@example.invalid"]);
+    git(&source, &["config", "commit.gpgsign", "false"]);
+    git(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    std::fs::write(source.join("README.md"), "# Initial\n").unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "init"]);
+    git(&source, &["push", "-u", "origin", "main"]);
+    let initial_sha = git(&source, &["rev-parse", "refs/heads/main"]);
+
+    // Gate `git push origin main` on the bare remote so Queue Merge blocks on network/push I/O
+    // until released, simulating a slow upstream remote during Backlog -> Review drag.
+    let push_started = dir.path().join("push-started");
+    let push_release = dir.path().join("push-release");
+    let hook = remote.join("hooks/pre-receive");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.02; done\nexit 0\n",
+            push_started.display(),
+            push_release.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    super::terminal_cases::core(&app, dir.path());
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Live Async Delivery", "directory": source}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let c1: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Dragged from Backlog to Review", "body": "Ready branch"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let c2: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Peer Card remains interactive", "body": "Peer"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Prepare a committed worktree on c1 while c1 is still in `backlog`.
+    let ops = canban_workspaces::Ops::local();
+    let wt1 = ops.prepare(&app.home, &p, &c1).unwrap();
+    let branch1 = ops
+        .current_branch(wt1.to_str().unwrap())
+        .expect("worktree branch");
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c1.id)?;
+            card.worktree = Some(wt1.to_str().unwrap().into());
+            card.branch = Some(branch1);
+            db.save(&card)
+        })
+        .unwrap();
+    git(&wt1, &["config", "user.name", "Tester"]);
+    git(&wt1, &["config", "user.email", "tester@example.invalid"]);
+    git(&wt1, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(wt1.join("dragged.txt"), "backlog-to-review\n").unwrap();
+    git(&wt1, &["add", "dragged.txt"]);
+    git(&wt1, &["commit", "-m", "feat: ready in backlog"]);
+
+    let running = app.start().unwrap();
+    let endpoint = app.endpoint();
+
+    // Drag c1 directly from `backlog` to `review` over the live Unix socket RPC.
+    let started = std::time::Instant::now();
+    let moved: Card = serde_json::from_value(
+        rpc(
+            &endpoint,
+            "card.move",
+            json!({"card_id": c1.id, "revision": c1.revision, "stage": "review", "before_card_id": null}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let move_elapsed = started.elapsed();
+    assert_eq!(moved.stage, "review");
+    assert!(
+        move_elapsed < Duration::from_millis(500),
+        "live `card.move` to `review` must not block on Git fetch/merge/push (took {move_elapsed:?})"
+    );
+
+    // Wait until the background delivery worker enters the gated `git push`.
+    let wait_push = std::time::Instant::now();
+    while !push_started.exists() {
+        assert!(
+            wait_push.elapsed() < Duration::from_secs(5),
+            "background delivery worker did not start pushing within 5s"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // While c1 is actively pushing in the background:
+    // 1. Snapshot exposes c1 in `merging_cards` so the Board shows live `Merging`.
+    // 2. Peer Card RPCs (reordering/opening/updating) remain fast and unblocked.
+    let mid_snap = app.snapshot().unwrap();
+    assert!(
+        mid_snap.merging_cards.contains(&c1.id),
+        "c1 should be tracked in `merging_cards` while background delivery runs"
+    );
+    let peer_started = std::time::Instant::now();
+    let updated_peer: Card = serde_json::from_value(
+        rpc(
+            &endpoint,
+            "card.update",
+            json!({"card_id": c2.id, "revision": c2.revision, "title": "Peer updated immediately"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(updated_peer.revision, c2.revision + 1);
+    assert!(
+        peer_started.elapsed() < Duration::from_millis(500),
+        "peer RPC must remain fast while another Card merges in background"
+    );
+
+    // Release the remote push gate and verify background delivery finishes cleanly.
+    std::fs::write(&push_release, "ok").unwrap();
+    let wait_done = std::time::Instant::now();
+    loop {
+        let snap = app.snapshot().unwrap();
+        let card = snap.cards.iter().find(|c| c.id == c1.id).unwrap();
+        if let Some(delivery) = &card.delivery
+            && snap.merging_cards.is_empty()
+        {
+            let merged_sha = git(&source, &["rev-parse", "refs/heads/main"]);
+            assert_ne!(merged_sha, initial_sha);
+            assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), merged_sha);
+            assert_eq!(delivery.commit, merged_sha);
+            break;
+        }
+        assert!(
+            wait_done.elapsed() < Duration::from_secs(5),
+            "background delivery did not complete after releasing push gate"
+        );
+        std::thread::sleep(Duration::from_millis(15));
+    }
+
+    rpc(&endpoint, "app.shutdown", json!({})).unwrap();
+    drop(running);
+}

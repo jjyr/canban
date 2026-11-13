@@ -119,6 +119,20 @@ impl AppServer {
             let _ = tx.try_send(());
         }
     }
+    pub(super) fn wake_delivery(&self) {
+        if let Some(tx) = self.delivery_wake.lock().unwrap().as_ref() {
+            let _ = tx.try_send(());
+        }
+    }
+    /// Wakes the background delivery worker when the service runtime is active;
+    /// runs synchronously for in-memory `AppServer::open` callers and unit tests.
+    pub(crate) fn request_deliveries(&self) {
+        if let Some(tx) = self.delivery_wake.lock().unwrap().clone() {
+            let _ = tx.try_send(());
+        } else {
+            let _ = self.pump_deliveries();
+        }
+    }
     pub(super) fn runtime_inventory(&self) -> Result<(String, Vec<Value>)> {
         #[cfg(test)]
         if !self.observer_running.load(Ordering::SeqCst) {
@@ -380,17 +394,83 @@ impl AppServer {
             )?;
             db.save(&a)
         })?;
-        let _ = self.pump_deliveries();
+        self.request_deliveries();
         let _ = self.try_auto_archive_merged(&run.card_id);
         self.emit("runtime", Some(run.card_id.clone()));
         Ok(())
+    }
+    fn start_delivery_worker(self: &Arc<Self>, drx: mpsc::Receiver<()>) {
+        let weak = Arc::downgrade(self);
+        std::thread::spawn(move || {
+            loop {
+                let Some(server) = weak.upgrade() else {
+                    break;
+                };
+                if server.stopped() {
+                    break;
+                }
+                let mut wait: Option<Duration> = None;
+                if canban_updater::handoff::active(&server.home) {
+                    wait = Some(Duration::from_millis(250));
+                } else {
+                    if let Err(e) = server.pump_deliveries() {
+                        eprintln!("Canban delivery: {e:#}");
+                    }
+                    let _ = server.pump_admissions();
+                    let s = server.snapshot().unwrap_or_default();
+                    if s.requests.iter().any(|r| r.state == "queued") {
+                        server.wake_runtime();
+                    }
+                    let mut due = |at: u64| {
+                        let duration = Duration::from_millis(at.saturating_sub(now()).max(1));
+                        wait = Some(wait.map_or(duration, |w| w.min(duration)));
+                    };
+                    if s.workflow_runs
+                        .iter()
+                        .any(|r| r.state == "waiting_delivery" && r.queue_pause_reason().is_some())
+                    {
+                        due(now().saturating_add(2_000));
+                    }
+                    for a in &s.attempts {
+                        if a.terminal.is_some()
+                            && a.connection_state == "connected"
+                            && !a.agent_stopped()
+                            && let Some(run) = s
+                                .workflow_runs
+                                .iter()
+                                .find(|r| r.card_id == a.card_id && r.state == "waiting_delivery")
+                        {
+                            let anchor = a
+                                .completed_at
+                                .max(Some(run.updated_at))
+                                .unwrap_or(a.created_at);
+                            due(anchor.saturating_add(Self::DELIVERY_AGENT_SETTLE_MS + 1));
+                        }
+                    }
+                }
+                drop(server);
+                match wait {
+                    Some(d) => {
+                        let _ = drx.recv_timeout(d);
+                    }
+                    None => {
+                        if drx.recv().is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
     }
     pub(super) fn start_runtime(self: &Arc<Self>) {
         let (tx, rx) = mpsc::sync_channel(1);
         canban_herdr::activity::subscribe(tx.clone());
         *self.runtime_wake.lock().unwrap() = Some(tx);
+        let (dtx, drx) = mpsc::sync_channel(1);
+        *self.delivery_wake.lock().unwrap() = Some(dtx);
         self.start_observer();
         self.start_context_workers();
+        self.start_delivery_worker(drx);
         let weak = Arc::downgrade(self);
         std::thread::spawn(move || {
             let mut retry = Instant::now() + Duration::from_secs(1);

@@ -47,6 +47,7 @@ pub struct AppServer {
     check_slots: Mutex<std::collections::BTreeSet<String>>,
     check_signal: std::sync::Condvar,
     runtime_wake: Mutex<Option<mpsc::SyncSender<()>>>,
+    delivery_wake: Mutex<Option<mpsc::SyncSender<()>>>,
     contexts: Mutex<directory::ContextQueue>,
     context_signal: std::sync::Condvar,
     remote_workers: Mutex<std::collections::HashSet<String>>,
@@ -66,6 +67,7 @@ impl Drop for Running {
     fn drop(&mut self) {
         self.server.stop.store(true, Ordering::SeqCst);
         self.server.wake_runtime();
+        self.server.wake_delivery();
         self.server.context_signal.notify_all();
     }
 }
@@ -395,6 +397,7 @@ impl AppServer {
             check_slots: Mutex::new(Default::default()),
             check_signal: std::sync::Condvar::new(),
             runtime_wake: Mutex::new(None),
+            delivery_wake: Mutex::new(None),
             contexts: Mutex::new(Default::default()),
             context_signal: std::sync::Condvar::new(),
             remote_workers: Mutex::new(Default::default()),
@@ -602,9 +605,9 @@ impl AppServer {
             }
             Ok(result)
         })?;
-        let _ = self.pump_deliveries();
         let _ = self.pump_admissions();
         self.emit("application", p["card_id"].as_str().map(str::to_owned));
+        self.request_deliveries();
         Ok(result)
     }
 }
