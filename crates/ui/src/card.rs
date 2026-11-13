@@ -115,7 +115,8 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         let _ = ui.reminders.get();
         let _ = crate::reminders::foreground();
         let page = ui.page.get();
-        let _ = ui.card_tab.get();
+        let _ = ui.card_terminal_open.get();
+        let _ = ui.narrow.get();
         let _ = ui.quick_open.get();
         let _ = ui.utility_popup.get();
         let _ = ui.native_modal.get();
@@ -166,27 +167,33 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             reading.unread.update(|n| *n += 1);
         }
     });
+    let had_live_terminal = stored(
+        !crate::terminals::card_live_entries(&ui.snapshot.get_untracked(), &card.id).is_empty(),
+    );
+    let live_watch_card = card.id.clone();
+    effect(move || {
+        let s = ui.snapshot.get();
+        let live = crate::terminals::card_live_entries(&s, &live_watch_card);
+        let was_live = had_live_terminal.replace(!live.is_empty());
+        if !was_live
+            && !live.is_empty()
+            && ui.page.get_untracked() == "card"
+            && ui.card.get_untracked() == live_watch_card
+        {
+            let recent = ui
+                .terminal_recent
+                .with(|m| m.get(&live_watch_card).cloned());
+            if let Some(first) =
+                crate::terminals::default_card_terminal(&s, &live_watch_card, recent.as_deref())
+            {
+                crate::terminals::select_card_tab(ui, &live_watch_card, first);
+                ui.card_terminal_open.set(true);
+            }
+        }
+    });
     let show_terminal = computed(move || {
         ui.page.get() == "card" && ui.card_terminal_open.get() && ui.card_id() == ui.card.get()
     });
-    let active_terminal = computed({
-        let cid = card.id.clone();
-        move || {
-            if show_terminal.get() || ui.page.get() == "review" || ui.card_id() != ui.card.get() {
-                return String::new();
-            }
-            let sel = ui.card_tab.get();
-            if sel.is_empty() {
-                return String::new();
-            }
-            crate::terminals::card_live_entries(&ui.snapshot.get(), &cid)
-                .into_iter()
-                .find(|e| e.saved.id == sel)
-                .map(|e| e.saved.id)
-                .unwrap_or_default()
-        }
-    });
-    let showing_terminal = computed(move || !active_terminal.get().is_empty());
     let scroll_key_for_column = scroll_key;
     let reader_column = move || {
         let scroll_key = scroll_key_for_column.clone();
@@ -201,8 +208,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     if ui.card_terminal_focused.get_untracked() {
                         ui.card_terminal_focused.set(false);
                     }
-                    if !showing_terminal.get_untracked()
-                        && let Some(root) = reading.composer.node()
+                    if let Some(root) = reading.composer.node()
                         && event
                             .points
                             .iter()
@@ -220,116 +226,102 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             .min_h(px(0.))
             .bg(SURFACE)
             .child(header::render(ui, draft, reading))
-            .child(dynamic(move || {
-                if showing_terminal.get() {
-                    view()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .min_h(px(0.))
-                        .child(crate::terminals::viewer::embedded(ui, active_terminal))
-                        .into_element()
-                } else {
-                    let scroll_key = scroll_key.clone();
-                    view()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .min_h(px(0.))
-                        .child(
-                            scroll()
-                                .flex_1()
-                                .min_h(px(0.))
-                                .element_ref(&reading.scroll)
-                                .content_offset(saved)
-                                .on_layout(move |b: &Bounds<Points>| {
-                                    reading.reader.height(ui, b.size.height.0)
-                                })
-                                .on_scroll(move |e: &ScrollEvent| {
-                                    reading.reader.viewport(ui, e.offset.y.0, e.size.height.0);
-                                    capture_scroll(ui, scroll_key.clone(), e);
-                                    let before = viewport_height.replace(e.size.height.0);
-                                    if before > 0.
-                                        && (before - e.size.height.0).abs() > 0.5
-                                        && reading.follow.get_untracked()
-                                    {
-                                        reading.latest();
-                                        return;
-                                    }
-                                    let bottom =
-                                        e.content_size.height.0 - e.offset.y.0 - e.size.height.0
-                                            <= 48.;
-                                    reading.follow.set(bottom);
-                                    if bottom {
-                                        reading.unread.set(0);
-                                    }
-                                })
-                                .child(
-                                    view()
-                                        .element_ref(&reading.content)
-                                        .w_full()
-                                        .max_w(px(920.))
-                                        .self_center()
-                                        .p_3()
-                                        .gap_3()
-                                        .on_layout(move |_: &Bounds<Points>| {
-                                            if reading.follow.get_untracked()
-                                                && !draft.with_untracked(|d| d.editing)
-                                            {
-                                                reading.scroll.scroll_to_end(false);
-                                            }
-                                        })
-                                        .child(task::render(ui, draft, reading))
-                                        .child(details::render(ui, draft))
-                                        .child(when(
-                                            move || draft.with(|d| d.workspace_details),
-                                            move || {
-                                                view()
-                                                    .gap_2()
-                                                    .child(
-                                                        view()
-                                                            .flex_row()
-                                                            .items_center()
-                                                            .justify_between()
-                                                            .child(label("Workspace"))
-                                                            .child(chrome_button(
-                                                                Icon::Close,
-                                                                "Hide workspace details",
-                                                                move |_| {
-                                                                    draft.update(|d| {
-                                                                        d.workspace_details = false
-                                                                    })
-                                                                },
-                                                            )),
-                                                    )
-                                                    .child(crate::components::git_workspace::panel(
-                                                        ui,
-                                                    ))
-                                            },
-                                        ))
-                                        .child(timeline::render(ui, reading)),
-                                ),
-                        )
-                        .child(when(
-                            move || reading.unread.get() > 0 || unread_updates.get() > 0,
-                            move || {
-                                compact_action(
-                                    move || {
-                                        if unread_updates.get() > 0 {
-                                            format!("{} unread ↓", unread_updates.get())
-                                        } else {
-                                            format!("{} new ↓", reading.unread.get())
+            .child(
+                view()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .min_h(px(0.))
+                    .child(
+                        scroll()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .element_ref(&reading.scroll)
+                            .content_offset(saved)
+                            .on_layout(move |b: &Bounds<Points>| {
+                                reading.reader.height(ui, b.size.height.0)
+                            })
+                            .on_scroll(move |e: &ScrollEvent| {
+                                reading.reader.viewport(ui, e.offset.y.0, e.size.height.0);
+                                capture_scroll(ui, scroll_key.clone(), e);
+                                let before = viewport_height.replace(e.size.height.0);
+                                if before > 0.
+                                    && (before - e.size.height.0).abs() > 0.5
+                                    && reading.follow.get_untracked()
+                                {
+                                    reading.latest();
+                                    return;
+                                }
+                                let bottom =
+                                    e.content_size.height.0 - e.offset.y.0 - e.size.height.0 <= 48.;
+                                reading.follow.set(bottom);
+                                if bottom {
+                                    reading.unread.set(0);
+                                }
+                            })
+                            .child(
+                                view()
+                                    .element_ref(&reading.content)
+                                    .w_full()
+                                    .max_w(px(920.))
+                                    .self_center()
+                                    .p_3()
+                                    .gap_3()
+                                    .on_layout(move |_: &Bounds<Points>| {
+                                        if reading.follow.get_untracked()
+                                            && !draft.with_untracked(|d| d.editing)
+                                        {
+                                            reading.scroll.scroll_to_end(false);
                                         }
-                                    },
-                                    Variant::Quiet,
-                                    move |_| reading.latest(),
-                                )
-                                .self_center()
-                            },
-                        ))
-                        .child(workflow::render(ui))
-                        .child(composer::render(ui, draft, reading))
-                        .into_element()
-                }
-            }))
+                                    })
+                                    .child(task::render(ui, draft, reading))
+                                    .child(details::render(ui, draft))
+                                    .child(when(
+                                        move || draft.with(|d| d.workspace_details),
+                                        move || {
+                                            view()
+                                                .gap_2()
+                                                .child(
+                                                    view()
+                                                        .flex_row()
+                                                        .items_center()
+                                                        .justify_between()
+                                                        .child(label("Workspace"))
+                                                        .child(chrome_button(
+                                                            Icon::Close,
+                                                            "Hide workspace details",
+                                                            move |_| {
+                                                                draft.update(|d| {
+                                                                    d.workspace_details = false
+                                                                })
+                                                            },
+                                                        )),
+                                                )
+                                                .child(crate::components::git_workspace::panel(ui))
+                                        },
+                                    ))
+                                    .child(timeline::render(ui, reading)),
+                            ),
+                    )
+                    .child(when(
+                        move || reading.unread.get() > 0 || unread_updates.get() > 0,
+                        move || {
+                            compact_action(
+                                move || {
+                                    if unread_updates.get() > 0 {
+                                        format!("{} unread ↓", unread_updates.get())
+                                    } else {
+                                        format!("{} new ↓", reading.unread.get())
+                                    }
+                                },
+                                Variant::Quiet,
+                                move |_| reading.latest(),
+                            )
+                            .self_center()
+                        },
+                    ))
+                    .child(workflow::render(ui))
+                    .child(composer::render(ui, draft, reading)),
+            )
             .into_element()
     };
 

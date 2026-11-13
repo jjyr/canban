@@ -23,7 +23,6 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
             ("Workspace details…", 2),
         ] {
             items.push(MenuItem::new(title).on_select(move || {
-                ui.card_tab.set(String::new());
                 if let Some(mut d) = draft.try_get() {
                     match kind {
                         0 => {
@@ -271,17 +270,50 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                             || ui.current_card().is_none_or(|c| c.archived_at.is_some())
                     },
                     move |_| {
-                        if let Some(c) = ui.current_card() {
+                        let Some(c) = ui.current_card() else {
+                            return;
+                        };
+                        if ui.page.get_untracked() == "review" {
                             crate::terminals::create_in_card(ui, c.project_id, c.id, true);
+                            return;
                         }
+                        if !ui.card_terminal_open.get_untracked() {
+                            let s = ui.snapshot.get_untracked();
+                            let live = crate::terminals::card_live_entries(&s, &c.id);
+                            let recent = ui.terminal_recent.with(|m| m.get(&c.id).cloned());
+                            let existing_agent = recent
+                                .as_deref()
+                                .and_then(|rid| {
+                                    live.iter().find(|e| {
+                                        e.saved.id == rid
+                                            && (e.agent.is_some()
+                                                || e.saved.agent_engine.is_some())
+                                    })
+                                })
+                                .or_else(|| {
+                                    live.iter().find(|e| {
+                                        e.agent.is_some() || e.saved.agent_engine.is_some()
+                                    })
+                                })
+                                .map(|e| e.saved.id.clone());
+                            if let Some(id) = existing_agent {
+                                crate::terminals::select_card_tab(ui, &c.id, id);
+                                ui.card_terminal_open.set(true);
+                                ui.card_terminal_focused.set(true);
+                                return;
+                            }
+                        }
+                        crate::terminals::create_in_card(ui, c.project_id, c.id, true);
                     },
                 ))
                 .child(chrome_button_disabled(
                     Icon::Terminal,
-                    "Open Terminal",
+                    "Toggle Terminal · ⌘J",
                     move || {
                         ui.pending.get()
-                            || ui.current_card().is_none_or(|c| c.archived_at.is_some())
+                            || ui.current_card().is_none_or(|c| {
+                                c.archived_at.is_some() && !ui.card_terminal_open.get()
+                            })
                     },
                     move |_| {
                         if let Some(c) = ui.current_card() {
@@ -289,30 +321,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                                 crate::terminals::open_card(ui, &c.id);
                                 return;
                             }
-                            if ui.card_terminal_open.get_untracked() {
-                                ui.card_terminal_open.set(false);
-                                ui.card_terminal_focused.set(false);
-                            }
-                            let live = crate::terminals::card_live_entries(
-                                &ui.snapshot.get_untracked(),
-                                &c.id,
-                            );
-                            if ui.card_tab.get_untracked().is_empty() && !live.is_empty() {
-                                let recent = ui.terminal_recent.with(|m| m.get(&c.id).cloned());
-                                let target = recent
-                                    .filter(|rid| live.iter().any(|e| &e.saved.id == rid))
-                                    .or_else(|| live.last().map(|e| e.saved.id.clone()))
-                                    .unwrap_or_default();
-                                if !target.is_empty() {
-                                    ui.terminal_recent.with(|m| {
-                                        m.insert(c.id.clone(), target.clone());
-                                    });
-                                }
-                                ui.card_tab.set(target);
-                                ui.terminal_focus.update(|v| *v += 1);
-                            } else {
-                                crate::terminals::create_in_card(ui, c.project_id, c.id, false);
-                            }
+                            crate::card::terminal::toggle(ui);
                         }
                     },
                 ))
@@ -459,7 +468,6 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         .child(icon(Icon::Paperclip).w(px(12.)).h(px(12.)))
                         .child(muted(attachment_count.to_string()))
                         .on_press(move |_: &()| {
-                            ui.card_tab.set(String::new());
                             draft.update(|d| d.details = !d.details);
                             reading.top();
                         }),
@@ -548,228 +556,5 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             }
             row
         }))
-        .child(tab_bar(ui))
         .child(quick_merge::confirm_dialog(ui))
-}
-
-fn card_tab_title(e: &crate::terminals::Entry) -> String {
-    if let Some(name) = &e.saved.name {
-        return name.clone();
-    }
-    if let Some(profile) = e.profile() {
-        format!("{profile} · {}", e.display_status())
-    } else {
-        e.title()
-    }
-}
-
-fn tab_bar(ui: Ui) -> impl IntoElement {
-    when(
-        move || {
-            ui.page.get() != "review"
-                && !ui.card_terminal_open.get()
-                && ui.current_card().is_some_and(|c| {
-                    !crate::terminals::card_live_entries(&ui.snapshot.get(), &c.id).is_empty()
-                })
-        },
-        move || {
-            view()
-                .mt_1()
-                .mx(px(-12.))
-                .mb(px(-8.))
-                .h(px(34.))
-                .border_t_1()
-                .border_color(BORDER)
-                .bg(INSET)
-                .flex_row()
-                .items_center()
-                .gap_0()
-                .child(
-                    scroll()
-                        .horizontal()
-                        .scrollbar(false)
-                        .flex_1()
-                        .min_w(px(0.))
-                        .h_full()
-                        .child(dynamic(move || {
-                            let Some(card) = ui.current_card() else {
-                                return view();
-                            };
-                            let s = ui.snapshot.get();
-                            let live = crate::terminals::card_live_entries(&s, &card.id);
-                            let selected_tab = ui.card_tab.get();
-                            let card_selected = selected_tab.is_empty()
-                                || !live.iter().any(|e| e.saved.id == selected_tab);
-                            let unread = ui
-                                .reminder_counts
-                                .with(|all| all.get(&card.id).copied().unwrap_or_default());
-
-                            let mut strip = view().h_full().flex_row().items_center().gap_0();
-                            strip = strip.child(
-                                view()
-                                    .h_full()
-                                    .focusable(true)
-                                    .cursor_pointer()
-                                    .px_3()
-                                    .flex_shrink_0()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_1p5()
-                                    .bg(if card_selected { SURFACE } else { CLEAR })
-                                    .hover(move |st| {
-                                        st.bg(if card_selected { SURFACE } else { CARD_HOVER })
-                                    })
-                                    .border_r_1()
-                                    .border_color(BORDER)
-                                    .role(AccessibilityRole::Tab)
-                                    .accessibility_state(move || nsh_core::AccessibilityState {
-                                        selected: card_selected,
-                                        ..Default::default()
-                                    })
-                                    .label("Card tab")
-                                    .child(label("Card").font_weight(if card_selected {
-                                        FontWeight::SEMIBOLD
-                                    } else {
-                                        FontWeight::NORMAL
-                                    }))
-                                    .child(reminder_count(
-                                        move || unread.total,
-                                        move || unread.pending > 0,
-                                    ))
-                                    .on_press(move |_: &nsh_core::PressEvent| {
-                                        ui.card_tab.set(String::new());
-                                    }),
-                            );
-
-                            for e in live {
-                                let id = e.saved.id.clone();
-                                let close_id = id.clone();
-                                let menu_id = id.clone();
-                                let rename_id = id.clone();
-                                let card_id = card.id.clone();
-                                let is_sel = selected_tab == id;
-                                let text = card_tab_title(&e);
-                                let hint = e.hint();
-                                let mark = e.provider().map(|(ic, _)| ic).unwrap_or(Icon::Terminal);
-                                let dot_color = if e.needs_attention() {
-                                    ATTENTION
-                                } else if e.ended() || e.inactive() {
-                                    MUTED
-                                } else {
-                                    SUCCESS
-                                };
-                                strip = strip.child(
-                                    view()
-                                        .h_full()
-                                        .max_w(px(230.))
-                                        .flex_shrink_0()
-                                        .flex_row()
-                                        .items_center()
-                                        .gap_0()
-                                        .pr_0p5()
-                                        .bg(if is_sel { SURFACE } else { CLEAR })
-                                        .hover(move |st| {
-                                            st.bg(if is_sel { SURFACE } else { CARD_HOVER })
-                                        })
-                                        .border_r_1()
-                                        .border_color(BORDER)
-                                        .tooltip(
-                                            hint_tooltip(hint.clone()).placement(Placement::Bottom),
-                                        )
-                                        .child(
-                                            view()
-                                                .h_full()
-                                                .focusable(true)
-                                                .cursor_pointer()
-                                                .flex_1()
-                                                .min_w(px(0.))
-                                                .overflow_hidden()
-                                                .px_2p5()
-                                                .bg(CLEAR)
-                                                .flex_row()
-                                                .items_center()
-                                                .gap_1p5()
-                                                .role(AccessibilityRole::Tab)
-                                                .accessibility_state(move || {
-                                                    nsh_core::AccessibilityState {
-                                                        selected: is_sel,
-                                                        ..Default::default()
-                                                    }
-                                                })
-                                                .label(format!("Tab {text}"))
-                                                .child(
-                                                    view()
-                                                        .w(px(5.))
-                                                        .h(px(5.))
-                                                        .rounded(px(3.))
-                                                        .bg(dot_color)
-                                                        .flex_shrink_0()
-                                                        .pointer_events(PointerEvents::None),
-                                                )
-                                                .child(
-                                                    icon(mark)
-                                                        .w(px(13.))
-                                                        .h(px(13.))
-                                                        .flex_shrink_0(),
-                                                )
-                                                .child(
-                                                    label(text.clone())
-                                                        .font_weight(if is_sel {
-                                                            FontWeight::SEMIBOLD
-                                                        } else {
-                                                            FontWeight::NORMAL
-                                                        })
-                                                        .truncate()
-                                                        .min_w(px(0.)),
-                                                )
-                                                .on_press_down(
-                                                    move |event: &nsh_core::PressEvent| {
-                                                        if event.clicks >= 2 {
-                                                            ui.terminal_rename
-                                                                .set(Some(rename_id.clone()));
-                                                        }
-                                                    },
-                                                )
-                                                .on_context_menu(
-                                                    move |event: &nsh_core::ContextMenuEvent| {
-                                                        ui.spawn(crate::terminals::tabs::menu(
-                                                            ui,
-                                                            menu_id.clone(),
-                                                            Some(event.page_position),
-                                                        ));
-                                                    },
-                                                )
-                                                .on_press(move |_: &nsh_core::PressEvent| {
-                                                    ui.terminal_recent.with(|m| {
-                                                        m.insert(card_id.clone(), id.clone());
-                                                    });
-                                                    ui.card_tab.set(id.clone());
-                                                    ui.terminal_focus.update(|v| *v += 1);
-                                                }),
-                                        )
-                                        .child(chrome_button(
-                                            Icon::Close,
-                                            format!("Close terminal {}", e.title()),
-                                            move |_| crate::terminals::close_entry(ui, &close_id),
-                                        )),
-                                );
-                            }
-                            strip
-                        })),
-                )
-                .child(view().px_1().flex_shrink_0().child(chrome_button_disabled(
-                    Icon::Plus,
-                    "New terminal",
-                    move || {
-                        ui.pending.get()
-                            || ui.current_card().is_none_or(|c| c.archived_at.is_some())
-                    },
-                    move |_| {
-                        if let Some(c) = ui.current_card() {
-                            crate::terminals::create_in_card(ui, c.project_id, c.id, false);
-                        }
-                    },
-                )))
-        },
-    )
 }

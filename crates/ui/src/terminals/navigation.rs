@@ -3,7 +3,6 @@ use super::*;
 
 pub fn history(ui: Ui, row: &OverviewRow) {
     ui.open_card(row.card.id.clone());
-    ui.card_tab.set(String::new());
     if let Some(req) = &row.request {
         ui.request.set(req.id.clone());
     }
@@ -15,11 +14,17 @@ pub fn open_request(ui: Ui, id: &str) {
             .set("This execution is no longer available".into());
         return;
     };
+    let conversation = canban_types::Conversation::key(&req.card_id, &req.profile.id);
     if let Some(terminal) = live_request(&snapshot, id) {
-        ui.open_terminal(terminal);
+        ui.open_card_with_terminal(req.card_id.clone(), Some(terminal));
+    } else if matches!(req.state.as_str(), "queued" | "starting")
+        && super::card_live_entries(&snapshot, &req.card_id)
+            .iter()
+            .any(|e| e.saved.id == conversation)
+    {
+        ui.open_card_with_terminal(req.card_id.clone(), Some(conversation));
     } else {
         ui.open_card(req.card_id.clone());
-        ui.card_tab.set(String::new());
         ui.request.set(req.id.clone());
     }
 }
@@ -93,12 +98,8 @@ pub fn open_card(ui: Ui, card: &str) {
             .set("This Card is no longer available".into());
         return;
     };
-    let live = super::card_live_entries(&snapshot, card);
     let recent = ui.terminal_recent.with(|m| m.get(card).cloned());
-    if let Some(id) = recent
-        .filter(|rid| live.iter().any(|e| &e.saved.id == rid))
-        .or_else(|| live.last().map(|e| e.saved.id.clone()))
-    {
+    if let Some(id) = super::default_card_terminal(&snapshot, card, recent.as_deref()) {
         ui.open_terminal(id);
         return;
     }

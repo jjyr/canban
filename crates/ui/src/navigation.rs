@@ -136,19 +136,21 @@ pub fn go(ui: Ui, forward: bool) {
             ui.new_draft.set(target.new_draft);
         }
         ui.project.set(target.project);
-        let default_card_tab =
-            if target.page == "card" && !target.card.is_empty() && target.request.is_empty() {
-                let live =
-                    crate::terminals::card_live_entries(&ui.snapshot.get_untracked(), &target.card);
-                let recent = ui.terminal_recent.with(|m| m.get(&target.card).cloned());
-                recent
-                    .filter(|rid| live.iter().any(|e| &e.saved.id == rid))
-                    .or_else(|| live.last().map(|e| e.saved.id.clone()))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
+        let default_card_tab = if target.page == "card" && !target.card.is_empty() {
+            let recent = ui.terminal_recent.with(|m| m.get(&target.card).cloned());
+            crate::terminals::default_card_terminal(
+                &ui.snapshot.get_untracked(),
+                &target.card,
+                recent.as_deref(),
+            )
+            .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let has_card_terminal = !default_card_tab.is_empty();
         ui.card_tab.set(default_card_tab);
+        ui.card_terminal_open.set(has_card_terminal);
+        ui.card_terminal_focused.set(false);
         ui.card.set(target.card);
         ui.request.set(target.request);
         ui.card_standalone.set(target.standalone);

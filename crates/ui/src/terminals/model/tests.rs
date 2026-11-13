@@ -476,3 +476,73 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             .all(|e| e.saved.id != "shell-backlog")
     );
 }
+
+#[test]
+fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
+    let mut s = fixture();
+    s.terminals = crate::terminals::entries(&s)
+        .into_iter()
+        .map(|e| e.saved)
+        .collect();
+    s.terminals.push(TerminalEntry {
+        id: "agent-second".into(),
+        conversation_id: None,
+        number: 2,
+        name: None,
+        manual_number: Some(1),
+        origin_card_id: Some("c1".into()),
+        agent_engine: Some("agy".into()),
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("core".into()),
+            terminal: Some("pty-agy".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+        }),
+        created_at: 2,
+    });
+    s.terminals.push(TerminalEntry {
+        id: "shell-ended".into(),
+        conversation_id: None,
+        number: 3,
+        name: None,
+        manual_number: Some(2),
+        origin_card_id: Some("c1".into()),
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("core".into()),
+            terminal: Some("pty-ended".into()),
+            state: "finished".into(),
+            connection: "connected".into(),
+            error: None,
+        }),
+        created_at: 3,
+    });
+
+    let first_id = Conversation::key("c1", "codex");
+    // Without a recent override, auto-expansion selects the FIRST active entry, not the last.
+    assert_eq!(
+        crate::terminals::default_card_terminal(&s, "c1", None),
+        Some(first_id.clone())
+    );
+    // Ended recent entries are ignored in favor of the first active entry.
+    assert_eq!(
+        crate::terminals::default_card_terminal(&s, "c1", Some("shell-ended")),
+        Some(first_id)
+    );
+    // An active recent entry on the same Card is preserved.
+    assert_eq!(
+        crate::terminals::default_card_terminal(&s, "c1", Some("agent-second")),
+        Some("agent-second".into())
+    );
+    // A Card with no active terminals does not auto-expand.
+    s.attempts[1].observed = Some(json!({"state":"finished"}));
+    assert_eq!(
+        crate::terminals::default_card_terminal(&s, "c2", None),
+        None
+    );
+}

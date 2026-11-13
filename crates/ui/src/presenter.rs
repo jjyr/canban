@@ -444,7 +444,6 @@ impl Ui {
     }
     pub fn terminal_card(self, card: String) {
         self.open_card(card);
-        self.card_tab.set(String::new());
         self.card_standalone.set(true);
     }
     pub fn show_search(self, projects: bool) {
@@ -493,7 +492,6 @@ impl Ui {
     pub fn open_card(self, id: String) {
         self.request.set(String::new());
         self.card_event.set(None);
-        self.card_terminal_open.set(false);
         self.card_terminal_focused.set(false);
         self.card_standalone.set(
             matches!(
@@ -513,21 +511,21 @@ impl Ui {
         }) {
             self.project.set(project);
         }
-        let default_tab = {
-            let live = crate::terminals::card_live_entries(&self.snapshot.get_untracked(), &id);
-            let recent = self.terminal_recent.with(|m| m.get(&id).cloned());
-            recent
-                .filter(|rid| live.iter().any(|e| &e.saved.id == rid))
-                .or_else(|| live.last().map(|e| e.saved.id.clone()))
-                .unwrap_or_default()
-        };
-        if !default_tab.is_empty() {
+        let recent = self.terminal_recent.with(|m| m.get(&id).cloned());
+        let default_tab = crate::terminals::default_card_terminal(
+            &self.snapshot.get_untracked(),
+            &id,
+            recent.as_deref(),
+        )
+        .unwrap_or_default();
+        let has_live = !default_tab.is_empty();
+        if has_live {
             self.terminal_recent.with(|m| {
                 m.insert(id.clone(), default_tab.clone());
             });
-            self.terminal_focus.update(|v| *v += 1);
         }
         self.card_tab.set(default_tab);
+        self.card_terminal_open.set(has_live);
         self.card.set(id);
         self.expanded.set(false);
         self.focused_card.set(false);
@@ -548,10 +546,23 @@ impl Ui {
                 }
             });
         }
-        self.open_card(card_id);
-        self.card_terminal_open.set(true);
-        self.card_terminal_focused.set(true);
-        self.terminal_focus.update(|v| *v += 1);
+        self.open_card(card_id.clone());
+        if let Some(conv) = conversation {
+            self.card_tab.set(conv);
+        }
+        if !self.card_tab.get_untracked().is_empty() {
+            self.card_terminal_open.set(true);
+            self.card_terminal_focused.set(true);
+            self.terminal_focus.update(|v| *v += 1);
+            return;
+        }
+        if let Some(c) = self
+            .snapshot
+            .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned())
+            .filter(|c| c.archived_at.is_none())
+        {
+            crate::terminals::create_in_card(self, c.project_id, c.id, true);
+        }
     }
     pub fn back(self) {
         crate::navigation::go(self, false);
