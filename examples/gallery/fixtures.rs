@@ -1027,15 +1027,13 @@ pub fn agent_config() -> canban_types::Config {
     }
     cfg.profiles.push(Profile {
         id: "qa".into(),
-        name: None,
         enabled: true,
         identity: true,
         preset: Some("codex".into()),
-        argv: None,
-        resume_argv: None,
-        exit: None,
-        session_instruction: None,
+        model: Some("gpt-6.1-sol".into()),
+        effort: Some("high".into()),
         role_instruction: "Run end-to-end acceptance checks and verify edge cases.".into(),
+        ..Default::default()
     });
     cfg
 }
@@ -1058,6 +1056,10 @@ pub fn agent_catalog() -> serde_json::Value {
                 "path": if inst { json!(format!("/opt/homebrew/bin/{}", entry.binary)) } else { serde_json::Value::Null },
                 "configured": inst,
                 "enabled": en,
+                "models": entry.default_models,
+                "supported_efforts": entry.supported_efforts,
+                "supports_model": !entry.model_args.is_empty(),
+                "supports_effort": !entry.effort_args.is_empty(),
             })
         })
         .collect();

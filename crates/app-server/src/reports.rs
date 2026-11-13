@@ -19,13 +19,15 @@ impl AppServer {
         let key = strp(&p, "request_key")?;
         let fingerprint = canban_context::digest(&serde_json::to_vec(&p)?);
         // Validate association and duplicate key before publishing any report file.
-        let (req, attempt, card) = {
+        let (req, attempt, card, project) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
             let req: Request = db.get(request_id)?;
             let attempt: Attempt = db.get(&Attempt::key(request_id, number))?;
             let card: Card = db.get(&req.card_id)?;
-            (req, attempt, card)
+            let project: Project = db.get(&req.project_id)?;
+            let project = self.bound_project(&project, &card);
+            (req, attempt, card, project)
         };
         if attempt.state == "continued" {
             if let Some(old) = self
@@ -41,6 +43,17 @@ impl AppServer {
                 return Ok(json!({"accepted":true,"duplicate":true}));
             }
             bail!("This assignment was superseded; use the current request and attempt binding");
+        }
+        // Checkpoint any uncommitted deliverable changes on the Card branch when an Agent
+        // finishes its turn without running `git commit` itself (never fails the report).
+        if state == "completed" && card.worktree.is_some() {
+            let commit_msg = format!("Canban #{}: {}", card.number, card.title);
+            if let Ok(Some(_)) = self
+                .ops(&project.work_location().machine)
+                .commit_card_worktree_if_dirty(&project, &card, &commit_msg)
+            {
+                self.git_changed(&project.work_location().machine);
+            }
         }
         let report_id = id();
         let path = if let Some(body) = p["body"].as_str() {

@@ -21,7 +21,7 @@ Canban endpoint: {}
    - 哪些事件或操作会启动它，适用于哪些 Card（包括外部 PR 与本地/协作者 Card 的规则差异，如 `/card/source_trust`）；
    - 各步骤使用哪个 Agent、各步骤 Prompt 如何设置；
    - 如何影响看板列（默认 Backlog 手动收集、Develop 自动执行、Review 进入 Queue Merge 自动合并并同步上游，或通过 `columns:` 定义的 4 列及更多自定义列）；
-   - 条件分支、人工审批（`approval`）、自动合并队列（`deliver`，含 `sync_upstream: true/false` 是否同步上游或仅本地合并，以及 Hold auto-merge）、返工（`on_changes_requested`）和结束方式；
+   - 条件分支、人工审批（`approval`）、自动合并队列（`deliver`，含 `sync_upstream: true/false` 是否同步上游或仅本地合并，以及 Hold auto-merge；合并冲突会自动交给 `on_changes_requested` 指向的 Agent 解决，`max_conflict_attempts` 默认 3）、容量准入（`admit`：`agent_slot` 等待空闲 Agent，`max_ready` 限制列内已规划待开工的 Card 数，按看板顺序放行）、返工（`on_changes_requested`）和结束方式；
    - 不同 Workflow 之间的衔接、重叠或冲突。
 4. 区分已生效配置、未发布修改和已停用规则。
 5. 简要说明如何修改这些 YAML（包括内置策略、分步骤 Prompt 覆盖、自定义多列看板），以及如何校验和发布。
@@ -172,12 +172,20 @@ Canban endpoint: {}
                 } else {
                     "Continue the existing Project Workflows configuration conversation. Re-read current sources and active revisions before any modification. Wait for the user's next instruction.".into()
                 };
+                let cwd = self.home.join("projects").join(&session.project_id);
+                std::fs::create_dir_all(&cwd)?;
+                let cwd_str = cwd.to_string_lossy().into_owned();
+                let project_dir = project
+                    .map(|p| p.directory.as_str())
+                    .unwrap_or(cwd_str.as_str());
                 let mut argv = canban_profiles::command(
                     &profile,
                     session.provider_session_id.as_deref(),
                     fresh,
                     &[
                         ("home", &self.home.to_string_lossy()),
+                        ("cwd", &cwd_str),
+                        ("project_dir", project_dir),
                         ("cli", &self.cli.to_string_lossy()),
                         ("prompt", &prompt),
                     ],
@@ -189,8 +197,6 @@ Canban endpoint: {}
                 if !is_herdr_template {
                     argv[0] = canban_profiles::executable(&argv[0]);
                 }
-                let cwd = self.home.join("projects").join(&session.project_id);
-                std::fs::create_dir_all(&cwd)?;
                 let env = std::collections::BTreeMap::from([
                     (
                         "CANBAN_HOME".into(),
@@ -214,7 +220,7 @@ Canban endpoint: {}
                 let receipt = client.launch_on(
                     "local",
                     argv,
-                    &cwd.to_string_lossy(),
+                    &cwd_str,
                     env,
                     std::collections::BTreeMap::from([
                         ("canban.configuration".into(), session.id.clone()),

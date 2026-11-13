@@ -71,6 +71,8 @@ pub fn stage<'a>(flow: &'a Workflow, id: &str) -> Result<&'a Stage> {
 mod definition;
 pub use definition::{matches, validate_definition};
 
+pub mod migrations;
 pub mod runtime;
 
 pub mod source;
+pub mod stages;

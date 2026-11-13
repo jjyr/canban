@@ -5,14 +5,15 @@ Status: implemented and active (reconciled 2026-11-12; SQLite schema 12, desktop
 ## Core design principles
 
 1. **Single source of truth and one runtime:** Declarative YAML stored in SQLite (`workflow_sources` + immutable `workflow_revisions`) is the sole workflow definition and authoring model. There is no secondary `Stage`-callback executor, JSON `WorkflowDefinition` authoring RPC, or `legacy_definition` runtime fallback; all programmatic and interactive workflow submissions pass YAML directly (`workflow.check`, `workflow.apply`, `project.create.workflow_yaml`). Manual YAML edits, Visual Studio option toggles, and **Edit with agent** submissions all pass through the same schema validation, optimistic concurrency revision checks, and transactional publication path.
-2. **Graph-derived, non-destructive UI:** Visual Studio controls and Step Inspectors are **derived directly from the active YAML graph** (`source::derive_options`), never hardcoded to fixed preset templates. Toggling an option (such as Backlog Auto-Analyze, Backlog Auto-Start Develop, Manual Review, or Upstream Sync) applies a surgical graph patch to the relevant trigger/step while preserving custom Board columns (4+ stages), custom steps (such as an optional `@reviewer` step), custom prompts, and unrelated rules.
+2. **Graph-derived, non-destructive UI:** Visual Studio renders one Stage lane per Board column directly from the active YAML graph (`canban_workflow_engine::stages`); there are no column-specific preset panels. Every step is configured inline on its card, and structural edits (add/move/disable/delete steps, set Stage exits, add/rename/reorder/remove columns) splice only the affected edges while preserving custom columns, custom steps, prompts, rework/branch references and unrelated rules. The older option helpers (`source::derive_options` / `set_*`) remain for CLI/tests but no longer drive Studio.
 3. **Pragmatic default flow (human-controlled intake, automated delivery):** New Projects default to three Board columns (`Backlog -> Develop -> Review`, extensible via YAML `columns`):
-   - **Backlog (quiet intake):** Joining Backlog does **not** automatically analyze or move Cards by default, avoiding unintended compute spend on rough ideas. Teams wanting hands-free pipelines can enable **Backlog Auto-Analyze** (`agent:plan`) and/or **Backlog Auto-Start Develop** (which waits for analysis to finish when both are enabled).
+   - **Backlog (quiet intake):** Joining Backlog does **not** automatically analyze or move Cards by default, avoiding unintended compute spend on rough ideas. Teams wanting hands-free pipelines can enable **Backlog Auto-Analyze** (`agent:plan`) and/or **Backlog Auto-Start Develop** (which waits for analysis to finish when both are enabled). Auto-Start Develop can be **Immediately** or **When Agent free**: the latter inserts `admit:develop` (`uses: admit`, `agent_slot: true`) so planned Cards stay in Backlog until a global automatic Agent slot is free, and—when analysis is enabled—`admit:plan` (`agent_slot: false`, `max_ready: K`, default 2) so at most K planned Cards wait in Backlog. Waiting Cards are admitted in Board order (drag to prioritize).
    - **Develop (automated implementation):** Entering Develop automatically runs `@developer` (`agent:develop`) in an isolated managed worktree and moves the Card to `Review` (`move:develop`).
    - **Review (Queue Merge & upstream sync):** By default Review omits a redundant `@reviewer` Agent pass (users can add one via YAML or Studio) and enters **Queue Merge (`deliver:review`)**, which commits/merges the clean worktree into the target branch and syncs upstream (`sync_upstream: true` by default). Teams can switch Review to **Manual Review** (`approval:review`) or **Merge Only (No Sync)** (`sync_upstream: false`).
 4. **Safe-by-default delivery and human override:**
    - **Source-trust branching:** Even when Queue Merge is active, untrusted external PRs (`card.source_trust == "external_pr"`) are routed by `condition:external_pr` to a required human approval gate (`approval:review`) by default.
-   - **Per-Card hold and graceful fallback:** Users can toggle **Hold auto-merge** (`card.hold_auto_merge`) on any Card at any time. Whenever a Card is held, has active/uncertain Agent terminals, encounters a merge conflict/dirty target checkout, or fails upstream remote push (`review.upstream_sync_failed`), `deliver` never forces an unsafe operation—it pauses as an inspectable human decision gate (`waiting_approval`), allowing manual resolution or rework feedback to the Agent.
+   - **Per-Card hold and graceful fallback:** Users can toggle **Hold auto-merge** (`card.hold_auto_merge`) on any Card at any time. Whenever a Card is held, has active/uncertain Agent terminals, encounters a dirty target checkout, or fails upstream remote push (`review.upstream_sync_failed`), `deliver` never forces an unsafe operation—it pauses as an inspectable human decision gate (`waiting_approval`), allowing manual resolution or rework feedback to the Agent.
+   - **Merge-queue algorithm:** Deliveries run one at a time (global review gate). Each attempt syncs the target from upstream, commits the reviewed Card worktree, merges the target into the Card worktree, then fast-forwards the Project target branch and pushes. A clean (fast-forward or conflict-free three-way) merge delivers immediately. A textual **merge conflict** leaves the Card worktree mid-merge and routes the run to the step's `on_changes_requested` Agent (`review.merge_conflict`) with the conflicted files and target head, up to `max_conflict_attempts` (default 3, `0` disables) per run; the Agent resolves/commits and the run re-enters Queue Merge. Beyond the budget, or without a rework target, it pauses for a human. If the target branch advances during delivery (`review.merge_retry`), the run simply stays queued and retries.
 5. **Board stage decoupled from workflow progress:** Columns represent business stage position; `WorkflowRun` steps represent execution progress. Planning and approvals can run while a Card stays in `Backlog`. Workflow-owned `card.move` transitions carry causal ancestry (`origin: "workflow"`, `workflow_run_id`) and continue the active `WorkflowRun` without re-triggering duplicate column-entry Agents.
 6. **Deterministic boundaries (Engine vs. Scheduler, explicit completion, frozen revisions):**
    - **Engine vs. Scheduler:** Workflow Engine determines *what* happens next and enqueues `Request`s; Scheduler owns *when* terminals launch under the global concurrency budget and conversation reuse rules.
@@ -123,7 +124,7 @@ issue-planning.yaml  • |
 YAML 1.2 parsing uses `serde_yaml_ng` with `deny_unknown_fields`. Duplicate keys, unknown fields, missing step targets, undeclared column/Profile IDs, and automatic cycles fail validation before publication.
 
 ```yaml
-schema: 1
+schema: 2
 id: delivery:example
 name: Development
 enabled: true
@@ -151,7 +152,6 @@ steps:
     uses: agent
     with:
       profile: developer
-      instruction: Implement the card task in the supplied working directory. Explain your changes and validation in your report.
     next: move:develop
   - id: move:develop
     name: Move to Review
@@ -190,15 +190,29 @@ workspace:
 max_steps: 100
 ```
 
+### Stages, disabled steps and relative moves
+
+Studio presents every Board column as a **Stage**: an ordered pipeline of step cards plus an exit. Three optional YAML annotations make that structure explicit (all compiled away; the runtime interpreter is unchanged):
+
+- `stage: <column>` on a step records the Stage it belongs to. When absent, the Stage is inferred by walking each column's entry rule and switching lanes after `card.move` (Studio writes the annotation on the first edit).
+- `enabled: false` skips a step at compile time. References (`next`, rework, condition branches, trigger starts) continue at its successor; a disabled `condition` follows `otherwise`; a skipped tail resolves to an implicit terminal.
+- `card.move` accepts `column: $next` (the column after the step's Stage) and `next: $entry` (continue at the target column's entry rule start, or end the run). Studio exits default to `$next`/`$entry`, so reordering or inserting columns keeps exits pointing at the following Stage.
+
+Structural edits (`canban_workflow_engine::stages`: insert/move/remove/disable steps, set exits, add/rename/reorder/remove columns) splice only the affected edges, preserving rework and branch references. Publishing a revision that **deletes the step a run is currently executing** marks the run `stop_after_step`: the step finishes, then the run ends as `cancelled` (`workflow.stopped`). **Removing a column** moves its active Cards to the first column (`card.stage_changed`, reason `column_removed`) instead of rejecting the publication.
+
+Studio UI: Stage lanes are generated from the graph (no column-specific panels). Each step card is configured inline with a form derived from its `uses` (Agent profile, admission gate, Queue merge sync/branch/conflict attempts/rework, approval message, notify text, move target); prompts open in a dialog. Cards can be dragged by their ⋮⋮ handle within or across Stages, toggled On/Off, or deleted; Stage headers support rename, ← → reordering and two-step delete; `+ Add step` offers step templates; each Stage footer sets its exit (Next stage / Stay).
+
 ### Supported step types
 
 | `uses` | `with` arguments and behavior |
 | --- | --- |
-| `agent` | optional `profile` (falls back to global `default_agent`), required `instruction`. Enqueues a `Request` bound to `run_id` and `<step_id>:<visit>`. |
+| `agent` | optional `profile` (falls back to global `default_agent`), optional `instruction` (resolves to the built-in step/role default prompt at compile time when omitted). Enqueues a `Request` bound to `run_id` and `<step_id>:<visit>`. |
 | `card.move` | `column` (must exist in effective columns). Emits `card.stage_changed` with `origin: "workflow"`. |
 | `condition` | JSON `pointer` into `{inputs, outputs, card}` (e.g. `/card/source_trust`), exact `equals`, `then`, and `otherwise` step IDs. |
 | `approval` | `title`, optional `on_changes_requested` rework step ID. Pauses the run in `waiting_approval` and sets `Card.human_gate`. |
-| `deliver` | optional `target_branch`, optional `sync_upstream` (boolean, default `true`), optional `on_changes_requested` rework step ID. Enters `waiting_delivery` for Queue Merge, or pauses at `waiting_approval` when held/blocked. |
+| `deliver` | optional `target_branch`, optional `sync_upstream` (boolean, default `true`), optional `max_conflict_attempts` (integer, default `3`), optional `on_changes_requested` rework step ID (also the automatic merge-conflict resolver). Enters `waiting_delivery` for Queue Merge, or pauses at `waiting_approval` when held/blocked. |
+| `card.move` | `column` (column ID or `$next`), optional `next` (`$entry` continues at the target column's entry). |
+| `admit` | optional `agent_slot` (boolean, default `true`: wait for a free global automatic Agent slot), optional `max_ready` (1..100: at most K Cards that passed this gate may remain in its column). Enters `waiting_capacity`; the AppServer admission pump releases runs in Board order before each scheduler dispatch. |
 | `notify` | `message`. Appends a `workflow.notification` Timeline event. |
 | `complete` | Terminal node ending the `WorkflowRun` (`completed`). |
 
@@ -236,6 +250,7 @@ All clients share the same AppServer validation and publication boundary (`canba
 | `workflow.start` | `card_id`, `workflow_id`, `entry` -> explicit manual run start |
 | `workflow.runs` / `workflow.run` | Inspect active and historical `WorkflowRun`s |
 | `workflow.decide` | `run_id`, `visit`, `revision`, `decision: "approve" \| "rework"`, optional `feedback` |
+| `workflow.deliver` | `card_id`, `revision` -> manually trigger or retry Queue Merge (approving a paused `deliver` gate or starting a fresh run at the Project's active `deliver` step) |
 | `card.hold_auto_merge` | `card_id`, `revision`, optional `hold: bool` -> pause or resume Queue Merge on a Card |
 | `workflow.stop` | `run_id` -> cancel future run progression |
 | `event.list` / `subscription.*` | Durable journal pagination and `save` / `list` / `deliveries` / `ack` / `retry` |
@@ -246,7 +261,11 @@ CLI file transport helpers (`canban workflow submit --check` / `submit` / `expor
 
 ## Migration and verification summary
 
-- **Schema 11–12 migration:** Upgrades legacy Project `Workflow` stage templates, queued/running `Request`s, and pending human gates into SQLite `development.yaml` revisions and `WorkflowRun` checkpoints without relaunching Agents or recreating worktrees. Downgrade refuses to discard user-authored YAML sources or active configuration sessions.
+- **SQLite schema 11–12 migration:** Upgrades legacy Project `Workflow` stage templates, queued/running `Request`s, and pending human gates into SQLite `development.yaml` revisions and `WorkflowRun` checkpoints without relaunching Agents or recreating worktrees. Downgrade refuses to discard user-authored YAML sources or active configuration sessions.
+- **Linear Workflow YAML schema migrations (`crates/workflow-engine/src/migrations.rs`, `BASELINE = 1`, `CURRENT = 2`):**
+  - Authoring, compilation, and Studio UI target `CURRENT` exclusively instead of retaining legacy branches across modules.
+  - `source::parse` upgrades older supported `Document.schema` inputs (`1..=CURRENT`) in memory, `workflow.apply` / `project.create` canonicalize older submitted YAML to `CURRENT`, and `AppServer` startup (`authoring::initialize`) automatically publishes a migrated `WorkflowRevision` for any active `WorkflowSource` still on an older `schema`—keeping historical revisions intact and leaving active `WorkflowRun`s pinned to their captured `definition_revision`.
+  - **Workflow schema 2:** Strips unmodified v1 built-in Agent prompts from `with.instruction` so built-in prompts resolve at compile time while user-customized prompts stay explicit in YAML.
 - **Verification suite:**
   - `mise run test` & `cargo clippy --workspace --all-targets -- -D warnings`: Unit and integration coverage in `crates/workflow-engine/src/source.rs` and `crates/app-server/src/tests/workflows.rs`, including default `development.yaml` (`Backlog` quiet intake, `Develop` auto-run, `Review` Queue Merge with `sync_upstream: true` against bare Git remotes vs. `sync_upstream: false` local-only merge), Backlog Auto-Analyze + Auto-Start Develop sequencing, Manual Review gates, external PR trust branching, rework feedback, and 4-column custom workflow preservation.
   - `mise run acceptance` & `mise run acceptance-workflows`: Isolated Herdr Core + real PTY end-to-end execution, restart checkpointing, optimistic `revision_conflict` protection, and CLI export/submit checks.

@@ -9,6 +9,12 @@
 use canban_types::{ExitAction, Profile};
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelOption {
+    pub id: String,
+    pub label: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CatalogEntry {
     pub id: String,
@@ -20,6 +26,14 @@ pub struct CatalogEntry {
     pub exit: ExitAction,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_instruction: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effort_args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_efforts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_models: Vec<ModelOption>,
 }
 
 impl CatalogEntry {
@@ -30,6 +44,8 @@ impl CatalogEntry {
             enabled: true,
             identity: false,
             preset: None,
+            model: None,
+            effort: None,
             role_instruction: String::new(),
             argv: Some(self.argv.clone()),
             resume_argv: (!self.resume_argv.is_empty()).then(|| self.resume_argv.clone()),
@@ -41,6 +57,16 @@ impl CatalogEntry {
 
 fn s(items: &[&str]) -> Vec<String> {
     items.iter().map(|v| (*v).to_owned()).collect()
+}
+
+fn m(items: &[(&str, &str)]) -> Vec<ModelOption> {
+    items
+        .iter()
+        .map(|(id, label)| ModelOption {
+            id: (*id).to_owned(),
+            label: (*label).to_owned(),
+        })
+        .collect()
 }
 
 fn bind_session_instruction(var_hint: Option<&str>) -> String {
@@ -84,6 +110,16 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
                 text: "/exit".into(),
             },
             session_instruction: Some(bind_session_instruction(Some("CODEX_THREAD_ID"))),
+            model_args: s(&["-m", "{model}"]),
+            effort_args: s(&["-c", "model_reasoning_effort=\"{effort}\""]),
+            supported_efforts: s(&["low", "medium", "high", "xhigh", "max"]),
+            default_models: m(&[
+                ("gpt-6.1-sol", "GPT-6.1-Sol"),
+                ("gpt-6-astra", "GPT-6-Astra"),
+                ("gpt-6.1-terra", "GPT-6.1 Terra"),
+                ("gpt-5.4", "GPT-5.4"),
+                ("gpt-5.3-codex", "GPT-5.3 Codex"),
+            ]),
         },
         CatalogEntry {
             id: "claude".into(),
@@ -96,17 +132,44 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
                 text: "/exit".into(),
             },
             session_instruction: Some(bind_session_instruction(None)),
+            model_args: s(&["--model", "{model}"]),
+            effort_args: s(&["--effort", "{effort}"]),
+            supported_efforts: s(&["low", "medium", "high", "xhigh", "max"]),
+            default_models: m(&[
+                ("opus", "Claude Opus (Latest)"),
+                ("sonnet", "Claude Sonnet (Latest)"),
+                ("haiku", "Claude Haiku (Latest)"),
+                ("fable", "Claude Fable (Latest)"),
+            ]),
         },
         CatalogEntry {
             id: "agy".into(),
             display_name: "Antigravity".into(),
             binary: "agy".into(),
             resumable: true,
-            argv: s(&["agy", "--add-dir", "{home}", "-i", "{prompt}"]),
+            argv: s(&[
+                "agy",
+                "--add-dir",
+                "{home}",
+                "--add-dir",
+                "{cwd}",
+                "--add-dir",
+                "{project_dir}",
+                "--settings",
+                "{agy_trusted_settings}",
+                "-i",
+                "{prompt}",
+            ]),
             resume_argv: s(&[
                 "agy",
                 "--add-dir",
                 "{home}",
+                "--add-dir",
+                "{cwd}",
+                "--add-dir",
+                "{project_dir}",
+                "--settings",
+                "{agy_trusted_settings}",
                 "--conversation",
                 "{session_id}",
                 "-i",
@@ -114,6 +177,22 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             ]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["--model", "{model}"]),
+            effort_args: s(&["--effort", "{effort}"]),
+            supported_efforts: s(&["low", "medium", "high", "xhigh", "max"]),
+            default_models: m(&[
+                ("gemini-4-carbon-high", "Gemini 4 Carbon (High)"),
+                ("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)"),
+                ("gemini-4-carbon-low", "Gemini 4 Carbon (Low)"),
+                ("gemini-4-argon-high", "Gemini 4 Argon (High)"),
+                ("gemini-4-argon-medium", "Gemini 4 Argon (Medium)"),
+                ("gemini-pro-orchestrator", "Orchestrator"),
+                ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
+                ("claude-opus-5-5-high", "Claude Opus 5.5 (High)"),
+                ("claude-opus-5-5-medium", "Claude Opus 5.5 (Medium)"),
+                ("claude-sonnet-5-5-high", "Claude Sonnet 5.5 (High)"),
+                ("claude-sonnet-5-5-medium", "Claude Sonnet 5.5 (Medium)"),
+            ]),
         },
         CatalogEntry {
             id: "gemini".into(),
@@ -140,6 +219,13 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             ]),
             exit: ExitAction::Manual,
             session_instruction: Some(bind_session_instruction(None)),
+            model_args: s(&["-m", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: m(&[
+                ("gemini-2.5-pro", "Gemini 2.5 Pro"),
+                ("gemini-2.5-flash", "Gemini 2.5 Flash"),
+            ]),
         },
         CatalogEntry {
             id: "opencode".into(),
@@ -156,6 +242,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             ]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["-m", "{model}"]),
+            effort_args: s(&["--variant", "{effort}"]),
+            supported_efforts: s(&["low", "medium", "high", "max"]),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "cursor".into(),
@@ -166,6 +256,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["cursor-agent", "--resume", "{session_id}", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["--model", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "pi".into(),
@@ -176,6 +270,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["pi", "--session", "{session_id}", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["--model", "{model}"]),
+            effort_args: s(&["--thinking", "{effort}"]),
+            supported_efforts: s(&["low", "medium", "high", "xhigh"]),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "omp".into(),
@@ -186,6 +284,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["omp", "--resume={session_id}", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["--model", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "copilot".into(),
@@ -196,6 +298,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["copilot", "--resume={session_id}", "-i", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["--model", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "droid".into(),
@@ -206,6 +312,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["droid", "--resume", "{session_id}", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["-m", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "amp".into(),
@@ -216,6 +326,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: Vec::new(),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: Vec::new(),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "kimi".into(),
@@ -226,6 +340,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["kimi", "--session", "{session_id}", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["--model", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "kiro".into(),
@@ -236,6 +354,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: Vec::new(),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["--model", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "qwen".into(),
@@ -246,6 +368,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["qwen", "--resume", "{session_id}", "-i", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["-m", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "devin".into(),
@@ -256,6 +382,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["devin", "--resume", "{session_id}", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: Vec::new(),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "cline".into(),
@@ -266,6 +396,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: Vec::new(),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: Vec::new(),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "grok".into(),
@@ -276,6 +410,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["grok", "--resume", "{session_id}", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["-m", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "hermes".into(),
@@ -286,6 +424,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["hermes", "--resume", "{session_id}", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["-m", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "kilo".into(),
@@ -296,6 +438,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["kilo", "--session", "{session_id}", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["-m", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "qodercli".into(),
@@ -306,6 +452,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["qodercli", "--resume", "{session_id}", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["--model", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "letta".into(),
@@ -316,6 +466,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["letta", "--conversation", "{session_id}", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["-m", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "mastracode".into(),
@@ -326,6 +480,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: s(&["mastracode", "--thread", "{session_id}", "{prompt}"]),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: s(&["--model", "{model}"]),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "maki".into(),
@@ -336,6 +494,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: Vec::new(),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: Vec::new(),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
         CatalogEntry {
             id: "muse".into(),
@@ -346,6 +508,10 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             resume_argv: Vec::new(),
             exit: ExitAction::Manual,
             session_instruction: None,
+            model_args: Vec::new(),
+            effort_args: Vec::new(),
+            supported_efforts: Vec::new(),
+            default_models: Vec::new(),
         },
     ]
 }
@@ -389,10 +555,26 @@ pub fn herdr_template_profile(template_name: &str) -> Profile {
         enabled: true,
         identity: false,
         preset: Some(format!("herdr:{template_name}")),
+        model: None,
+        effort: None,
         role_instruction: String::new(),
         argv: Some(vec![template_name.to_owned(), "{prompt}".into()]),
         resume_argv: None,
         exit: Some(ExitAction::Manual),
         session_instruction: None,
     }
+}
+
+/// Look up catalog metadata (`model_args`, `effort_args`, `supported_efforts`, `default_models`)
+/// for a profile's preset or launch binary.
+pub fn catalog_entry_for_profile(profile: &Profile) -> Option<CatalogEntry> {
+    let list = builtin_catalog();
+    if let Some(preset) = profile.preset.as_deref() {
+        let key = preset.strip_prefix("herdr:").unwrap_or(preset);
+        if let Some(hit) = list.iter().find(|e| e.id == key || e.binary == key) {
+            return Some(hit.clone());
+        }
+    }
+    let bin = profile.command_name();
+    list.into_iter().find(|e| e.binary == bin || e.id == bin)
 }

@@ -414,7 +414,9 @@ fn run() -> Result<()> {
             | "card.archive"
             | "update.install"
             | "workflow.decide"
+            | "workflow.deliver"
             | "workflow.stop"
+            | "card.hold_auto_merge"
     ) && p.get("execution").is_none()
     {
         let request = std::env::var("CANBAN_REQUEST_ID").ok();

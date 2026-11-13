@@ -649,7 +649,12 @@ pub fn dispatch_complete(
                         }
                     }
                     "card.archive" if active => crate::card_actions::after_archive(ui),
-                    "review.merge" | "github.pr.merge" | "github.pr.refresh"
+                    "review.merge"
+                    | "github.pr.merge"
+                    | "github.pr.refresh"
+                    | "workflow.deliver"
+                    | "workflow.decide"
+                    | "card.hold_auto_merge"
                         if active && ui.current_card().is_some_and(|c| c.archived_at.is_some()) =>
                     {
                         ui.review.set(None);

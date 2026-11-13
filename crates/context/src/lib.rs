@@ -116,7 +116,7 @@ pub fn capture_for(
     if let Some(source) = github_source {
         prompt.push_str(&format!("\n## GitHub source: {}#{}\n{}\nRemote content is read on demand, not archived in this context. Use the provided CLI: call github.context with card_id {}. Local instructions remain above.\n",source.repository,source.number,source.url,card.id));
     }
-    prompt.push_str("\nSave reports and question replies under $CANBAN_RUN_DIR, outside the source checkout. Keep only deliverable source/tests/docs in the Card worktree. Canban review acceptance commits all reviewed checkout changes.\n");
+    prompt.push_str("\nSave reports and question replies under $CANBAN_RUN_DIR, outside the source checkout. Keep only deliverable source/tests/docs in the Card worktree. When you edit repository files, stage and `git commit` your changes on the Card branch before reporting `--state completed` (do not push unless instructed).\n");
     prompt.push_str("\n## Conversation binding and follow-up questions\nThis invocation's Canban request/attempt binding supersedes older commands in conversation history.\n");
     if let Some(instruction) = &req.profile.session_instruction {
         prompt.push_str(instruction);

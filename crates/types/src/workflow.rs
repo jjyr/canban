@@ -55,6 +55,13 @@ pub enum WorkflowStep {
         next: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rework: Option<String>,
+        /// Automatic merge-conflict hand-offs to `rework` per run before pausing for a human.
+        /// `0` disables automatic conflict rework.
+        #[serde(
+            default = "default_max_conflict_attempts",
+            skip_serializing_if = "is_default_max_conflict_attempts"
+        )]
+        max_conflict_attempts: u32,
     },
     Condition {
         pointer: String,
@@ -66,6 +73,19 @@ pub enum WorkflowStep {
         message: String,
         next: Option<String>,
     },
+    /// Capacity gate: the run waits (`waiting_capacity`) until the scheduler admits it.
+    /// Admission follows Board order within the Card's column.
+    Admit {
+        /// Wait for a free global automatic Agent slot (`scheduler.max_agents`).
+        #[serde(default = "default_sync_upstream", skip_serializing_if = "is_true")]
+        agent_slot: bool,
+        /// At most this many Cards that passed this gate may remain in the gate's column
+        /// (for example: keep at most K planned Cards waiting in Backlog).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_ready: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
+    },
     Complete,
 }
 impl WorkflowStep {
@@ -75,6 +95,7 @@ impl WorkflowStep {
             | Self::Move { next, .. }
             | Self::Approval { next, .. }
             | Self::Deliver { next, .. }
+            | Self::Admit { next, .. }
             | Self::Notify { next, .. } => next.as_deref(),
             _ => None,
         }
@@ -239,6 +260,15 @@ pub struct ConfigurationSession {
 
 fn default_sync_upstream() -> bool {
     true
+}
+
+/// Default automatic merge-conflict rework attempts for a `deliver` step.
+pub const DEFAULT_MAX_CONFLICT_ATTEMPTS: u32 = 3;
+fn default_max_conflict_attempts() -> u32 {
+    DEFAULT_MAX_CONFLICT_ATTEMPTS
+}
+fn is_default_max_conflict_attempts(v: &u32) -> bool {
+    *v == DEFAULT_MAX_CONFLICT_ATTEMPTS
 }
 
 fn is_true(v: &bool) -> bool {
