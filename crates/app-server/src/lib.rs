@@ -152,7 +152,7 @@ fn enqueue(
     card: &mut Card,
     project: &Project,
     stage: &Stage,
-    trigger: &str,
+    trigger: RequestTrigger,
     explicit: Option<&str>,
     instruction: Option<String>,
 ) -> Result<Option<Request>> {
@@ -188,7 +188,7 @@ fn enqueue(
         &project.id,
         &card.id,
         &stage.id,
-        trigger,
+        trigger.clone(),
         profile,
         instruction.unwrap_or_else(|| stage.instruction.clone()),
         if explicit.is_some() {

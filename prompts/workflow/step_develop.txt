@@ -1,0 +1,4 @@
+Evaluate the Card against the current codebase before editing:
+- Actionable: implement and validate the changes on the Card branch, commit deliverables, and report `--state completed`.
+- Already implemented, obsolete, or not applicable: make no unnecessary edits and report `--state backlog` explaining why.
+- Ambiguous or awaiting a human decision: report `--state blocked` with specific questions.

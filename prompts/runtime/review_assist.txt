@@ -1,0 +1,5 @@
+You are assisting with a code review in repository `{{project_name}}` (directory: `{{cwd}}`).
+
+Please inspect the relevant files, address or respond to each review item below, and summarize your changes.
+
+{{formatted_review}}
