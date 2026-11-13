@@ -5,6 +5,40 @@ pub fn timeline() -> Event {
     Event {id:"gallery-event".into(),project_id:"gallery-project".into(),card_id:"gallery-card".into(),sequence:1,kind:"comment.created".into(),actor:"user".into(),message:"A **shared component**, rendered from deterministic fixture data.\n\n中文输入、选择、复制与长文本。".into(),request_id:None,data:json!({}),created_at:canban_types::now()}
 }
 
+pub fn timeline_connected() -> [Event; 4] {
+    let base = canban_types::now();
+    let mk = |seq: u64, kind: &str, actor: &str, msg: &str, mins_ago: u64| Event {
+        id: format!("gallery-tl-{seq}"),
+        project_id: "gallery-project".into(),
+        card_id: "gallery-card".into(),
+        sequence: seq,
+        kind: kind.into(),
+        actor: actor.into(),
+        message: msg.into(),
+        request_id: None,
+        data: json!({}),
+        created_at: base.saturating_sub(mins_ago * 60_000),
+    };
+    [
+        mk(
+            1,
+            "comment.created",
+            "user",
+            "Connect narrative replies and key milestones along one vertical spine.",
+            45,
+        ),
+        mk(2, "card.stage_changed", "user", "backlog → develop", 40),
+        mk(3, "review.merged", "system", "Auto-merged into main", 12),
+        mk(
+            4,
+            "comment.replied",
+            "agent:developer",
+            "Shipped with collapsible intermediate status updates · 中文与长文本对齐正常。",
+            5,
+        ),
+    ]
+}
+
 pub fn archive() -> canban_types::Snapshot {
     use canban_types::*;
     let mut s = workspace();
@@ -233,6 +267,13 @@ pub fn workspace() -> canban_types::Snapshot {
         github: None,
         delivery_mode: Default::default(),
         agent_overrides: Default::default(),
+        tags: vec![
+            "search".into(),
+            "ux".into(),
+            "agent".into(),
+            "terminal".into(),
+            "bug".into(),
+        ],
         location: None,
         id: "gallery-project".into(),
         name: "Canban workspace".into(),
@@ -268,7 +309,13 @@ pub fn workspace() -> canban_types::Snapshot {
             request_key: "gallery-merged-today".into(),
             merged_at: now(),
         });
-        s.cards.push(Card{source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:"## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.".into(),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery,created_at:now()});
+        let tag_suffix = match i {
+            1 => "\n\nTags: #search #ux #agent #bug",
+            2 => "\n\nTags: #agent #terminal",
+            3 => "\n\nTags: #ux",
+            _ => "",
+        };
+        s.cards.push(Card{source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery,created_at:now()});
     }
     s.notes.push(Note{id:"note-1".into(),project_id:"gallery-project".into(),title:"Search ideas.md".into(),body:"# Search experience\n\nFind a Card without remembering its number.\n\nSee [Architecture](note:note-2).".into(),revision:1,created_at:now(),updated_at:now(),links:vec!["note-2".into()],card_ids:vec!["card-1".into()]});
     s.notes.push(Note {
@@ -564,6 +611,19 @@ pub fn overview() -> canban_types::Snapshot {
                 request_id: Some(req.id.clone()),
                 next_stage: None,
             });
+            s.reports.push(Report {
+                id: format!("overview-report-{i}"),
+                request_id: req.id.clone(),
+                project_id: card.project_id.clone(),
+                card_id: card.id.clone(),
+                attempt: 1,
+                state: "completed".into(),
+                message: "Completed changes and verified all workspace tests".into(),
+                path: None,
+                request_key: format!("key-{i}"),
+                fingerprint: format!("fp-{i}"),
+                created_at: now() - 60_000,
+            });
         }
         if *state != "queued" {
             let mut run:Attempt=serde_json::from_value(json!({"id":Attempt::key(&req.id,1),"request_id":req.id,"project_id":card.project_id,"card_id":card.id,"number":1,"state":req.state,"core_id":"gallery-core","terminal":format!("t{}",i+1),"cwd":"/example/card-worktree","input_path":"input.md","output_path":null,"observed":{"state":if matches!(*state,"closed"|"exited") {"finished"} else {"live"},"status":{"state":if *state=="review" {"done"} else {state},"kind":"permission","title":"Allow repository command?","msg":"Agent requests permission to run git status in the Card worktree."}},"error":null,"created_at":now()-180_000,"provider_session_id":format!("session-{i}"),"connection_state":if *state=="unknown" {"unavailable"} else {"connected"}})).unwrap();
@@ -637,6 +697,29 @@ pub fn overview() -> canban_types::Snapshot {
         s.events.push(event);
     }
     s.cards[2].body=(0..20).map(|i|format!("### Context {i}\n\nLong task context tests direct navigation to an unread reply.\n\n")).collect();
+    let mut stage_done = timeline();
+    stage_done.id = "overview-unread-stage".into();
+    stage_done.sequence = 10;
+    stage_done.card_id = s.cards[3].id.clone();
+    stage_done.project_id = s.cards[3].project_id.clone();
+    stage_done.kind = "execution.reported".into();
+    stage_done.actor = "agent:developer".into();
+    stage_done.message = "completed: Unit tests passed; queued for next stage".into();
+    stage_done.data = json!({"report_id": "overview-stage-rep", "state": "completed"});
+    s.events.push(stage_done);
+
+    let mut merge_card = base.clone();
+    merge_card.id = "overview-merge-conflict".into();
+    merge_card.number = 9;
+    merge_card.title = "Refactor event bus".into();
+    merge_card.stage = "review".into();
+    merge_card.human_gate = Some(HumanGate {
+        reason: "Merge conflict with main; auto-merge paused".into(),
+        request_id: None,
+        next_stage: None,
+    });
+    s.cards.push(merge_card);
+
     let mut recovery = base;
     recovery.id = "workspace-recovery".into();
     recovery.title = "Reconnect the execution machine".into();
@@ -679,6 +762,27 @@ pub fn search() -> canban_types::Snapshot {
         c.attention = None;
         s.cards.push(c);
     }
+    let mut archived = base.clone();
+    archived.id = "search-archived".into();
+    archived.number = 900;
+    archived.title = "Archived fixture · hidden from Quick Open".into();
+    archived.archived_at = Some(canban_types::now());
+    archived.human_gate = None;
+    archived.attention = None;
+    s.cards.push(archived);
+    let mut merged = base;
+    merged.id = "search-merged".into();
+    merged.number = 901;
+    merged.title = "Merged fixture · hidden from Quick Open".into();
+    merged.human_gate = None;
+    merged.attention = None;
+    merged.delivery = Some(canban_types::Delivery {
+        target_branch: "main".into(),
+        commit: "abc1234".into(),
+        request_key: "gallery-search-merged".into(),
+        merged_at: canban_types::now(),
+    });
+    s.cards.push(merged);
     s
 }
 
@@ -1117,25 +1221,89 @@ pub fn board_cards() -> canban_types::Snapshot {
 pub fn conversation() -> canban_types::Snapshot {
     let mut s = workspace();
     s.cards[0].body = "## Goal\nKeep the Card conversation readable while task context stays available.\n\n- [x] Full Markdown description\n- [ ] Keep selection and undo through background updates\n\n> Description, comments and events share one scroll owner.\n\n| Surface | Behavior |\n| --- | --- |\n| Editor | Write / Preview |\n| Agent | Type @ to choose |\n\n```rust\nlet context = card.history();\n```\n\n[Canban](https://github.com/jjyr/canban) · **Readable** and _editable_.\n".into();
-    for i in 1..=32 {
+    let base = canban_types::now();
+    let mut seq = 1_u64;
+    s.events.retain(|e| e.card_id != "card-1");
+    let mut push = |kind: &str, actor: &str, msg: String, mins_ago: u64| {
         s.events.push(Event {
-            id: format!("conversation-{i}"),
+            id: format!("conversation-{seq}"),
             project_id: "gallery-project".into(),
             card_id: "card-1".into(),
-            sequence: i + 1,
-            kind: if i % 4 == 0 {
+            sequence: seq,
+            kind: kind.into(),
+            actor: actor.into(),
+            message: msg,
+            request_id: None,
+            data: json!({}),
+            created_at: base.saturating_sub(mins_ago * 60_000),
+        });
+        seq += 1;
+    };
+
+    // Filtered bookkeeping noise (never crowds the Timeline).
+    push("card.created", "user", "Card created".into(), 120);
+    push("card.updated", "user", "Card updated".into(), 118);
+    push(
+        "comment.created",
+        "user",
+        "请把时间线连起来，隐藏创建/更新噪音，并支持连续小状态折叠。".into(),
+        90,
+    );
+    push("card.stage_changed", "user", "backlog → develop".into(), 88);
+    push("execution.queued", "system", "Queued @developer".into(), 88);
+    push(
+        "execution.started",
+        "system",
+        "@developer started".into(),
+        87,
+    );
+    push(
+        "execution.reported",
+        "agent:developer",
+        "Implemented the connected vertical spine and collapsible milestone groups.\n\n- Filtered `card.created`, `card.updated` and heartbeat noise\n- Grouped adjacent transitions under a `+N earlier` pill".into(),
+        60,
+    );
+    // Consecutive milestone run: collapses to the latest row (`Auto-merged into main · +3 earlier`).
+    push(
+        "card.stage_changed",
+        "system",
+        "develop → review".into(),
+        58,
+    );
+    push(
+        "github.pr_published",
+        "system",
+        "Opened PR #42 · Optimize Card timeline".into(),
+        57,
+    );
+    push(
+        "review.merge_conflict",
+        "system",
+        "Merge conflict with main; Agent resolved it (attempt 1/3)".into(),
+        52,
+    );
+    push(
+        "review.merged",
+        "system",
+        "Auto-merged into main and synced to origin/main".into(),
+        48,
+    );
+
+    for i in 1..=20 {
+        push(
+            if i % 4 == 0 {
                 "execution.started"
+            } else if i % 2 == 0 {
+                "comment.replied"
             } else {
                 "comment.created"
-            }
-            .into(),
-            actor: if i % 2 == 0 {
+            },
+            if i % 2 == 0 {
                 "agent:developer"
             } else {
                 "user"
-            }
-            .into(),
-            message: if i % 4 == 0 {
+            },
+            if i % 4 == 0 {
                 "Agent execution started".into()
             } else {
                 format!(
@@ -1143,10 +1311,8 @@ pub fn conversation() -> canban_types::Snapshot {
                     "Keep this reading position while new activity arrives. ".repeat(4)
                 )
             },
-            request_id: None,
-            data: json!({}),
-            created_at: canban_types::now(),
-        });
+            45_u64.saturating_sub(i * 2),
+        );
     }
     s
 }

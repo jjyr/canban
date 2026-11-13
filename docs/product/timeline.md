@@ -31,13 +31,18 @@ The default Develop -> Review transition follows explicit completion. In the uni
 
 ## Current native presentation
 
-The Card reader uses one message style for human and Agent prose, compact
-individual decision/failure rows, and collapsed adjacent routine events grouped
-by request. Long Markdown folds by visual height, without truncating its source.
-Execution details expand at the corresponding request in the history rather
-than preceding the entire conversation. Ordering, unread positions and exact
-request identities remain unchanged. See [Card conversation](../card-conversation.md)
-for the implemented rules and local-only quick reply scope.
+The Card reader connects human/Agent narrative cards and semantic milestone
+badges along one continuous vertical spine, collapsing runs of two or more
+consecutive milestones onto their latest row with an inline `+N earlier`
+disclosure pill. Routine metadata mutations (`card.created`, `card.updated`,
+column bookkeeping, transient merge-start notices, heartbeat disconnects and
+resolved runtime input prompts) stay stored for triggers/audit while omitted
+from the Activity projection unless explicitly deep-linked. Long Markdown folds
+by visual height, without truncating its source. Execution details expand at
+the corresponding request in the history rather than preceding the entire
+conversation. Ordering, unread positions and exact request identities remain
+unchanged. See [Card conversation](../card-conversation.md) for the implemented
+rules and local-only quick reply scope.
 
 ## Shared facts and Card history
 

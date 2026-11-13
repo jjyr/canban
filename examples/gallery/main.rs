@@ -1,6 +1,6 @@
 //! Standalone native component gallery. Never opens a Canban home or runtime.
 mod fixtures;
-use canban_ui::{components::timeline_item, presenter::Ui, profiles, review};
+use canban_ui::{presenter::Ui, profiles, review};
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::json;
@@ -184,11 +184,72 @@ fn controls() -> impl IntoElement {
                         .child(markdown.render(input, markdown.source(input, "Gallery Markdown", "Write Markdown…"), false, signal(220.)))
                         .child(canban_ui_kit::markdown::reader(move || input.get())),
                 )
-                .child(
+                .child({
+                    let tl_expanded = signal(false);
                     panel()
-                        .child(label("Shared product Timeline item"))
-                        .child(timeline_item(ui, fixtures::timeline())),
-                )
+                        .child(label("Connected Card Timeline · vertical spine & milestone folding"))
+                        .child(dynamic(move || {
+                            use canban_ui::components::timeline_item::{
+                                MilestoneFold, Spine, render_connected,
+                            };
+                            let [e1, e2, e3, e4] = fixtures::timeline_connected();
+                            let open = tl_expanded.get();
+                            let fold = MilestoneFold {
+                                hidden_count: 1,
+                                expanded: open,
+                                hidden_alert: false,
+                                toggle: std::rc::Rc::new(move || tl_expanded.update(|v| *v = !*v)),
+                            };
+                            let mut stack = view().gap_0().child(render_connected(
+                                ui,
+                                e1,
+                                true,
+                                Spine {
+                                    first: true,
+                                    last: false,
+                                },
+                                None,
+                                None,
+                            ));
+                            if open {
+                                stack = stack.child(render_connected(
+                                    ui,
+                                    e2,
+                                    false,
+                                    Spine {
+                                        first: false,
+                                        last: false,
+                                    },
+                                    None,
+                                    None,
+                                ));
+                            }
+                            stack
+                                .child(render_connected(
+                                    ui,
+                                    e3,
+                                    false,
+                                    Spine {
+                                        first: false,
+                                        last: false,
+                                    },
+                                    Some(fold),
+                                    None,
+                                ))
+                                .child(render_connected(
+                                    ui,
+                                    e4,
+                                    true,
+                                    Spine {
+                                        first: false,
+                                        last: true,
+                                    },
+                                    None,
+                                    None,
+                                ))
+                                .into_element()
+                        }))
+                })
                 .child(canban_ui::components::scheduling::settings(ui))
                 .child(canban_ui::agents_setup::canban_skill_onboarding_section(ui))
                 .child(profiles::registry(profile_fixture))
@@ -500,14 +561,14 @@ pub fn Gallery() -> impl IntoElement {
             card.stage = "backlog".into();
             snapshot.cards.push(card);
         }
-        snapshot.cards[0].body = "## Body Markdown\n\n**Bold body** and *italic body*.\n\nLocal: [Related Card](card:card-2)\n\nProfile: @developer\n\n[Example website](https://example.com/) and [GitHub Issue](https://github.com/jjyr/canban/issues/1)\n\nLiteral: `@developer #2`".into();
+        snapshot.cards[0].body = "## Body Markdown\n\n**Bold body** and *italic body*.\n\nLocal: [Related Card](card:card-2) · Tag: #search\n\nProfile: @developer\n\n[Example website](https://example.com/) and [GitHub Issue](https://github.com/jjyr/canban/issues/1)\n\nLiteral: `@developer #2 #search`".into();
         let mut comment = fixtures::timeline();
         comment.id = "reference-comment".into();
         comment.card_id = "card-1".into();
         comment.kind = "comment.created".into();
         comment.actor = "user".into();
         comment.request_id = None;
-        comment.message = "### Comment Markdown\n\n**Bold comment** and *italic comment*.\n\n[Comment local](card:card-2) · @developer · [Comment website](https://example.com/)".into();
+        comment.message = "### Comment Markdown\n\n**Bold comment** and *italic comment*.\n\n[Comment local](card:card-2) · @developer · #ux · [Comment website](https://example.com/)".into();
         comment.data = json!({"body":comment.message});
         snapshot.events.retain(|e| e.card_id != "card-1");
         snapshot.events.push(comment);
@@ -651,6 +712,52 @@ pub fn Gallery() -> impl IntoElement {
                             e.message = "completed: Stage completed automatically".into();
                             e.data = json!({"report_id": format!("auto-{seq}"), "state": "completed"});
                             s.events.push(e);
+                        });
+                    }))
+                    .child(action("Silent idle #1", Variant::Quiet, move |_| {
+                        ui.snapshot.update(|s| {
+                            let turn = s
+                                .attempts
+                                .iter()
+                                .find(|a| a.id == "idle-attempt-1")
+                                .and_then(|a| a.observed.as_ref())
+                                .and_then(|v| v["turn"].as_u64())
+                                .unwrap_or(0)
+                                + 1;
+                            if !s.requests.iter().any(|r| r.id == "idle-req-1") {
+                                let req: canban_types::Request = serde_json::from_value(json!({
+                                    "id": "idle-req-1",
+                                    "project_id": "gallery-project",
+                                    "card_id": "card-1",
+                                    "stage": "develop",
+                                    "trigger": "interactive",
+                                    "profile": canban_types::Config::default().profiles[0],
+                                    "instruction": "Interactive check",
+                                    "state": "running",
+                                    "attempt": 1,
+                                    "created_at": 1
+                                }))
+                                .unwrap();
+                                s.requests.push(req);
+                            }
+                            s.attempts.retain(|a| a.id != "idle-attempt-1");
+                            let attempt: canban_types::Attempt = serde_json::from_value(json!({
+                                "id": "idle-attempt-1",
+                                "request_id": "idle-req-1",
+                                "project_id": "gallery-project",
+                                "card_id": "card-1",
+                                "number": 1,
+                                "state": "running",
+                                "terminal": "pty-idle-1",
+                                "cwd": "/tmp",
+                                "input_path": "in",
+                                "connection_state": "connected",
+                                "observed": {"state": "live", "turn": turn, "status": {"state": "idle"}},
+                                "lifecycle": {"observed_at": canban_types::now(), "idle_since": canban_types::now()},
+                                "created_at": 1
+                            }))
+                            .unwrap();
+                            s.attempts.push(attempt);
                         });
                     }))
                     .child(action("Return #1 to Backlog", Variant::Quiet, move |_| {

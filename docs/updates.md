@@ -1,13 +1,13 @@
 # Internal releases and desktop updates
 
-Status: implemented on macOS arm64, updated 2026-11-11. Local fixture and native acceptance are recorded below; GitHub publication has not been exercised.
+Status: implemented on macOS arm64, updated 2026-11-14. Local fixture and native acceptance are recorded below; GitHub publication uses manual workflow dispatch.
 
 ## Product boundary
 
-A push to GitHub `main` (including a merged PR) triggers the release workflow. Releases do not become Cards or workflow stages. The installed AppServer checks for published internal releases once per rolling 24 hours and on explicit request. Automatic checks persist their start time before networking, including failed attempts, so restarting does not trigger another check within the interval. First launch or an overdue restart checks immediately. Manual checks bypass the interval; interrupted checks remain inspectable and may be retried manually. The compact navigation rail reserves its bottom for a highlighted Update button when a newer compatible release exists. Clicking it downloads and immediately installs/restarts; it never waits for automatic Agent tasks to complete. Download/progress/error/retry share the same operation path. Settings offers a manual check and current version details.
+Releases are triggered manually via `mise run release` (or GitHub Actions `workflow_dispatch`), rather than automatically on every push to `main` (superseded 2026-11-14). Releases do not become Cards or workflow stages. The installed AppServer checks for published internal releases once per rolling 24 hours and on explicit request. Automatic checks persist their start time before networking, including failed attempts, so restarting does not trigger another check within the interval. First launch or an overdue restart checks immediately. Manual checks bypass the interval; interrupted checks remain inspectable and may be retried manually. The compact navigation rail reserves its bottom for a highlighted Update button when a newer compatible release exists. Clicking it downloads and immediately installs/restarts; it never waits for automatic Agent tasks to complete. Download/progress/error/retry share the same operation path. Settings offers a manual check and current version details.
 
 ```text
-PR merge / push main -> GitHub Actions -> versioned GitHub Prerelease
+mise run release / workflow_dispatch -> GitHub Actions -> versioned GitHub Prerelease
                                              |
                           automatic / manual version check
                                              |
@@ -86,7 +86,7 @@ The in-app updater remains the release installation path. A newer App installed
 externally can also activate its bundled backend through the explicit startup
 action below. Opening an App never silently replaces an answering backend.
 
-`mise run build` packages UI, CLI and updater together. `mise run build-release` produces optimized, ad-hoc-signed binaries; it does not publish. `mise run install-app` (alias `mise run install`) builds the release bundle and atomically installs it into `/Applications/Canban.app`. `.github/workflows/release.yml` builds the triggering SHA on a macOS arm64 runner, uploads `Canban-macos-aarch64.tar.zst` plus `manifest-macos-aarch64.json`, and publishes the completed draft as a prerelease. Packaging includes existing third-party notices. Developer ID signing/notarization is not implemented.
+`mise run build` packages UI, CLI and updater together. `mise run build-release` produces optimized, ad-hoc-signed binaries; it does not publish. `mise run install-app` (alias `mise run install`) builds the release bundle and atomically installs it into `/Applications/Canban.app`. `mise run release` dispatches `.github/workflows/release.yml` via `workflow_dispatch` (defaulting to `--ref main`, with optional `-- --ref <branch>` and `-- --watch`, authenticating through `GH_TOKEN`/`GITHUB_TOKEN` or `gh auth token`). `.github/workflows/release.yml` runs only on `workflow_dispatch`, builds the triggering SHA on a macOS arm64 runner, uploads `Canban-macos-aarch64.tar.zst` plus `manifest-macos-aarch64.json`, and publishes the completed draft as a prerelease. Packaging includes existing third-party notices. Developer ID signing/notarization is not implemented.
 
 Development uses `mise run dev`, which derives an isolated checkout/branch home
 and disables channel updates; it does not replace the installed `~/.canban`

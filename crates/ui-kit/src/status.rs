@@ -1,5 +1,5 @@
 //! Semantic status; consumers map product state to a generic visual tone.
-use super::tokens::*;
+use super::{Icon, icon_tinted, tokens::*};
 use nsh_core::prelude::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tone {
@@ -8,6 +8,47 @@ pub enum Tone {
     Success,
     Attention,
     Danger,
+}
+pub fn tone_colors(tone: Tone) -> (ThemeColor, ThemeColor) {
+    match tone {
+        Tone::Neutral => (INSET, MUTED),
+        Tone::Info => (SELECTED, ACCENT),
+        Tone::Success => (SUCCESS_SURFACE, SUCCESS),
+        Tone::Attention => (ATTENTION_SURFACE, ATTENTION),
+        Tone::Danger => (DANGER_SURFACE, DANGER),
+    }
+}
+/// 28x28 rounded semantic icon tile for event-first activity and notification rows.
+/// An optional live indicator anchors at the bottom-right corner without hiding the glyph.
+pub fn tone_icon_badge(kind: Icon, tone: Tone, live: bool) -> View {
+    let (bg, fg) = tone_colors(tone);
+    let mut tile = view()
+        .relative()
+        .flex_shrink_0()
+        .w(px(28.))
+        .h(px(28.))
+        .rounded(px(7.))
+        .bg(bg)
+        .items_center()
+        .justify_center()
+        .pointer_events(PointerEvents::None)
+        .child(icon_tinted(kind, fg).w(px(15.)).h(px(15.)));
+    if live {
+        tile = tile.child(
+            view()
+                .absolute()
+                .right(px(-2.))
+                .bottom(px(-2.))
+                .w(px(10.))
+                .h(px(10.))
+                .rounded_full()
+                .bg(SURFACE)
+                .items_center()
+                .justify_center()
+                .child(view().w(px(6.)).h(px(6.)).rounded_full().bg(SUCCESS)),
+        );
+    }
+    tile
 }
 /// Compact numeric attention badge, with no zero/empty state label.
 pub fn attention_count(count: impl Fn() -> usize + Copy + 'static) -> impl IntoElement {
@@ -63,13 +104,7 @@ pub fn live_status(value: impl IntoReactive<SharedString>, tone: Tone) -> impl I
     status_chip(value, tone, true)
 }
 fn status_chip(value: impl IntoReactive<SharedString>, tone: Tone, live: bool) -> impl IntoElement {
-    let (bg, fg) = match tone {
-        Tone::Neutral => (INSET, MUTED),
-        Tone::Info => (SELECTED, ACCENT),
-        Tone::Success => (SUCCESS_SURFACE, SUCCESS),
-        Tone::Attention => (ATTENTION_SURFACE, ATTENTION),
-        Tone::Danger => (DANGER_SURFACE, DANGER),
-    };
+    let (bg, fg) = tone_colors(tone);
     let mut chip = view()
         .self_start()
         .flex_row()

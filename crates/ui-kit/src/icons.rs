@@ -65,6 +65,13 @@ pub enum Icon {
     Expand,
     Collapse,
     Paperclip,
+    ShieldAlert,
+    CircleHelp,
+    CirclePause,
+    Eye,
+    GitMerge,
+    TriangleAlert,
+    MessageSquare,
 }
 impl Icon {
     fn source(self) -> &'static str {
@@ -130,6 +137,13 @@ impl Icon {
             Self::Expand => include_str!("../assets/lucide/maximize-2.svg"),
             Self::Collapse => include_str!("../assets/lucide/minimize-2.svg"),
             Self::Paperclip => include_str!("../assets/lucide/paperclip.svg"),
+            Self::ShieldAlert => include_str!("../assets/lucide/shield-alert.svg"),
+            Self::CircleHelp => include_str!("../assets/lucide/circle-help.svg"),
+            Self::CirclePause => include_str!("../assets/lucide/circle-pause.svg"),
+            Self::Eye => include_str!("../assets/lucide/eye.svg"),
+            Self::GitMerge => include_str!("../assets/lucide/git-merge.svg"),
+            Self::TriangleAlert => include_str!("../assets/lucide/triangle-alert.svg"),
+            Self::MessageSquare => include_str!("../assets/lucide/message-square.svg"),
         }
     }
 }
