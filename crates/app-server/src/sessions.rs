@@ -102,7 +102,7 @@ impl AppServer {
                 db.save(&context)?;
             }
             let stage=canban_workflow_engine::stage(&project.workflow,&card.stage)?;
-            let req=enqueue(db,&config,&mut card,&project,stage,"interactive",Some(&profile.id),Some("Initialize this Card conversation and briefly say you are ready. Do not report completion for this initialization. Wait for the user's next instruction; when that requested work is complete, explicitly report its outcome.".into()))?.context("Agent was not queued")?;
+            let req=enqueue(db,&config,&mut card,&project,stage,"interactive",Some(&profile.id),Some("The user sent this Card to you for discussion. Read the Card context, then reply with a brief summary of your understanding and any open questions. Do not start implementing and do not report completion for this initialization. Wait for the user's next instruction; when that requested work is complete, explicitly report its outcome.".into()))?.context("Agent was not queued")?;
             context.last_request_id=Some(req.id.clone());db.save(&context)?;
             Ok(json!({"request_id":req.id,"reused":false}))
         })

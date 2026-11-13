@@ -62,13 +62,14 @@ pub fn render(ui: Ui, event: Event, narrative: bool) -> impl IntoElement {
         .actor
         .strip_prefix("agent:")
         .map(|a| format!("@{a}"))
-        .unwrap_or(event.actor.clone());
-    let initials = actor
-        .trim_start_matches('@')
-        .chars()
-        .take(2)
-        .collect::<String>()
-        .to_uppercase();
+        .unwrap_or_else(|| {
+            if event.actor == "user" {
+                github_login(ui).unwrap_or_else(|| "Me".into())
+            } else {
+                event.actor.clone()
+            }
+        });
+    let face = avatar(ui, &event);
     let mut heading = view()
         .flex_row()
         .flex_wrap()
@@ -141,16 +142,83 @@ pub fn render(ui: Ui, event: Event, narrative: bool) -> impl IntoElement {
         .items_start()
         .gap_2()
         .py_1()
-        .child(
-            view()
-                .w(px(28.))
-                .h(px(28.))
-                .rounded(px(14.))
-                .bg(INSET)
-                .items_center()
-                .justify_center()
-                .child(muted(initials)),
-        )
+        .child(face)
         .child(row)
         .into_element()
+}
+const AVATAR: f32 = 28.;
+/// The signed-in GitHub account, when connected.
+fn github_login(ui: Ui) -> Option<String> {
+    ui.snapshot.with_untracked(|s| {
+        s.github
+            .login
+            .clone()
+            .filter(|l| s.github.state == "connected" && !l.is_empty())
+    })
+}
+/// Agents use their provider icon; the local user uses the GitHub avatar when
+/// signed in ("ME" while signed out or before the image loads); other actors
+/// keep two-letter initials.
+fn avatar(ui: Ui, event: &Event) -> AnyElement {
+    let frame = || {
+        view()
+            .relative()
+            .flex_shrink_0()
+            .w(px(AVATAR))
+            .h(px(AVATAR))
+            .rounded(px(AVATAR / 2.))
+            .overflow_hidden()
+            .bg(INSET)
+            .items_center()
+            .justify_center()
+    };
+    let initials = |value: &str| {
+        text(value.to_owned())
+            .text_size(px(10.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(MUTED)
+    };
+    if let Some(profile) = event.actor.strip_prefix("agent:") {
+        let mark = ui
+            .snapshot
+            .with_untracked(|s| {
+                event
+                    .request_id
+                    .as_ref()
+                    .and_then(|id| s.requests.iter().find(|r| &r.id == id))
+                    .map(|r| r.profile.clone())
+            })
+            .or_else(|| {
+                ui.profiles
+                    .with_untracked(|all| all.iter().find(|p| p.id == profile).cloned())
+            })
+            .map(|p| crate::profiles::provider(&p).0)
+            .unwrap_or(Icon::Agent);
+        return frame()
+            .tooltip(nsh_base::tooltip().child(label(format!("@{profile}"))))
+            .child(icon(mark).w(px(16.)).h(px(16.)))
+            .into_element();
+    }
+    if event.actor == "user" {
+        let mut face = frame().child(initials("ME"));
+        if let Some(login) = github_login(ui) {
+            face = face.child(
+                image(format!("https://github.com/{login}.png?size=64"))
+                    .absolute()
+                    .top(px(0.))
+                    .left(px(0.))
+                    .w(px(AVATAR))
+                    .h(px(AVATAR)),
+            );
+        }
+        return face.into_element();
+    }
+    let short = event
+        .actor
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .take(2)
+        .collect::<String>()
+        .to_uppercase();
+    frame().child(initials(&short)).into_element()
 }

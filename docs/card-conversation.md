@@ -7,17 +7,16 @@ Status: Card reading/editing redesign implemented 2026-11-10. See the dated veri
 ```text
 +---------------------------------------------------------------+
 | Project / Card #42 OR GitHub Issue/PR repository#42   GitHub ↗ |
-| Card title                                  Terminal ...  X   | fixed
+| Card title                             Send to Agent ...  X   | fixed
 | Workflow: Review    branch                  Review / Continue |
 +---------------------------------------------------------------+
 | Description (GitHub source + distinct local context)     Edit | scroll
 | References: Issue/PR links from saved content, when present     |
 | Delivery PR: explicit delivery relation, when present          |
 | Activity                                                      |
-| JJ [ Author · time                                            |
+| ME [ Author · time                                            |
 |      Markdown reply                                         ] |
-|    > developer · 2 execution events                            |
-| AG [ Author · time                       Details / Terminal   |
+| ✦  [ @developer · time                   Details / Terminal   |
 |      Markdown report · Show full report                     ] |
 | · Failure or human decision stays individually visible         |
 +-------------------- New activity (N) --------------------------+
@@ -110,13 +109,13 @@ Attachment references are readable links to Card-managed resources. Images refer
 
 ## Timeline and reading behavior
 
-Description, events, comments, replies and reports share one vertical scroll owner. First open starts at the description. Routine events are compact rows in sequence order, without a separate Activity disclosure. Narrative bodies share the UI Kit Markdown reader (headings, lists, quotes, code, tables, links and images). File-backed reports load once per keyed row, including archived resources. A report echoed as a reply remains a compact history event when the request and non-null resource path match; a report without a path remains a visible message. Late echoes update that row's presentation without duplicating the report body.
+Description, events, comments, replies and reports share one vertical scroll owner. First open starts at the description. Activity shows conversation, stage moves, decisions, merges and problems as compact rows in sequence order. Process bookkeeping is not shown (updated 2026-11-13, Card #16): `card.updated`, `execution.queued/started/attached/continued`, idle-close progress, `workflow.started` and similar events stay durable for triggers and history but are filtered from the Card Activity projection; a deep link to such an event still reveals it. Comment avatars use the signed-in GitHub account picture for the local user ("ME" while signed out or loading) and the provider icon for Agent messages. Narrative bodies share the UI Kit Markdown reader (headings, lists, quotes, code, tables, links and images). File-backed reports load once per keyed row, including archived resources. A report echoed as a reply is hidden when the request and report identity/resource path match; a report without a path remains a visible message. Late echoes update that row's presentation without duplicating the report body.
 
 The Card saves its reading offset per route. Scrolling away stops following; new activity exposes an explicit jump-to-latest action. At the bottom, new replies and loaded report growth stay visible. Composer growth leaves a reader's offset intact. Draft/offset retention is in-memory for the window lifetime. Agent/Terminal operations and human approval boundaries remain separate from reading and commenting.
 
 ## Terminal boundary
 
-Clicking an existing live Agent status or Timeline Agent name navigates to its conversation. An exited Agent status is labeled Resume and explicitly restores its exact session; it does not open an ended-session page. Live navigation does not resume or start an Agent. **Open Card Terminals** selects an existing Card conversation if available; otherwise it opens a Card-context empty Terminal view without selecting an unrelated tab or starting a process.
+Clicking an existing live Agent status or Timeline Agent name navigates to its conversation. An exited Agent status is labeled Resume and explicitly restores its exact session; it does not open an ended-session page. Live navigation does not resume or start an Agent. **Send to Agent** (robot icon in the Card header, Board Card hover and Card menu; updated 2026-11-13) explicitly invokes `agent.open` for the default Agent: it opens a live conversation, resumes an exited one, or starts a new interactive invocation whose prompt asks the Agent to read the Card context, summarize it and wait for discussion. The Board tile no longer has a Terminal button; a running Agent appears as a pulsing `@profile` pill that opens that request's live Terminal.
 
 The Terminal chrome offers **Choose Card Agent** for an active associated Card. The empty Card view offers **Choose Agent**. This explicit action invokes the existing `agent.open` Start/Resume boundary. Ended sessions retain Resume/Start fresh; interrupt, close and history remain Terminal controls. **Back to source** returns to the Card and its draft. Closing a Terminal continues to use the existing unified lifecycle close operation.
 

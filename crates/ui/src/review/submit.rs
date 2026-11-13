@@ -42,23 +42,7 @@ fn summary_editor(value: Signal<String>) -> View {
 }
 
 fn default_profile_id(ui: Ui) -> String {
-    let def = ui.default_agent.get_untracked();
-    ui.profiles
-        .with_untracked(|profiles| {
-            profiles
-                .iter()
-                .find(|p| p.id == def)
-                .or_else(|| profiles.iter().find(|p| p.id == "developer"))
-                .or_else(|| profiles.first())
-                .map(|p| p.id.clone())
-        })
-        .unwrap_or_else(|| {
-            if def.is_empty() {
-                "developer".into()
-            } else {
-                def
-            }
-        })
+    crate::sessions::default_profile(ui)
 }
 
 pub fn context_label_untracked(ui: Ui) -> String {

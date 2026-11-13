@@ -214,12 +214,13 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     move || ui.page.get() != "review",
                     move || crate::editor::expand(ui),
                 ))
-                .child(chrome_button(
-                    Icon::Terminal,
-                    "Open Card Terminals",
+                .child(chrome_button_disabled(
+                    Icon::Agent,
+                    "Send to Agent",
+                    move || !ui.current_card().is_some_and(|c| c.active()),
                     move |_| {
                         if let Some(c) = ui.current_card() {
-                            crate::terminals::open_card(ui, &c.id);
+                            crate::sessions::send_card(ui, &c.id);
                         }
                     },
                 ))

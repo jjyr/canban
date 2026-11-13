@@ -4,7 +4,11 @@ use crate::{components::card_tile, drafts::*, presenter::*};
 use canban_types::{Card, Stage};
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
-pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement {
+/// Narrowest column before the Board scrolls or switches to one stage.
+pub(super) const COLUMN_MIN: f32 = 220.;
+/// Widest column; wider windows keep Card proportions instead of stretching.
+const COLUMN_MAX: f32 = 420.;
+pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> impl IntoElement {
     let id = stage.id.clone();
     let row_stage = id.clone();
     let height_stage = id.clone();
@@ -29,162 +33,166 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage) -> impl IntoElement
     let list_stage = id.clone();
     let count_stage = id.clone();
     let is_backlog = stage.id == "backlog";
-    view()
+    let mut root = view()
         .w(px(260.))
         .flex_1()
-        .min_w(px(220.))
+        .min_w(px(COLUMN_MIN))
         .min_h(px(0.))
-        .gap_3()
-        .child(
-            view()
-                .flex_row()
-                .min_h(px(30.))
-                .justify_between()
-                .items_center()
-                .gap_2()
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .min_w(px(0.))
-                        .child(
-                            label(stage.name)
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .truncate(),
-                        )
-                        .child(
-                            view()
-                                .px_1p5()
-                                .py_0p5()
-                                .rounded(px(10.))
-                                .bg(INSET)
-                                .child(muted(move || {
-                                    state
-                                        .cards
-                                        .with(|all| {
-                                            all.iter().filter(|c| c.stage == count_stage).count()
-                                        })
-                                        .to_string()
-                                })),
-                        ),
-                )
-                .child(when(
-                    move || is_backlog,
-                    move || chrome_button(Icon::Plus, "Add Card", move |_| ui.new_card()),
-                )),
-        )
-        .child(
-            view()
-                .element_ref(&viewport)
-                .flex_1()
-                .min_h(px(0.))
-                .relative()
-                .on_layout(move |_: &Bounds<Points>| state.dirty())
-                .child(
-                    scroll()
-                        .element_ref(&scroll_ref)
-                        .flex_1()
-                        .on_scroll(move |e: &ScrollEvent| {
-                            state.scrolled(&id, e.offset.y.0);
-                            capture_scroll(ui, key.clone(), e);
-                        })
-                        .child(
-                            view()
-                                .relative()
-                                .w_full()
-                                .on_layout(move |_: &Bounds<Points>| {
-                                    if !restored.replace(true) && position.y.0 > 0. {
-                                        // Rows start at zero and receive measured transforms.
-                                        // Restore only after their first native layout: mounting
-                                        // already scrolled can leave their text layers empty.
-                                        spawn(async move {
-                                            next_frame().await;
-                                            scroll_ref.scroll_to(position, false);
-                                        });
-                                    }
-                                })
-                                .h(move || {
-                                    px(state.layout.with(|l| {
-                                        l.heights.get(&height_stage).copied().unwrap_or(0.) + 2.
-                                    }))
-                                })
-                                .child(
-                                    view()
-                                        .absolute()
-                                        .left(px(0.))
-                                        .right(px(0.))
-                                        .top(px(0.))
-                                        .pointer_events(PointerEvents::None)
-                                        .bind_translate_y(&gap_y)
-                                        .rounded(px(RADIUS))
-                                        .bg(INSET)
-                                        .opacity(move || {
-                                            if state.layout.with(|l| {
-                                                l.gap.as_ref().is_some_and(|(s, _, _)| {
-                                                    s == &gap_visible_stage
-                                                })
-                                            }) {
-                                                0.8_f32
-                                            } else {
-                                                0.0_f32
-                                            }
-                                        })
-                                        .h(move || {
-                                            px(state.layout.with(|l| {
-                                                l.gap
-                                                    .as_ref()
-                                                    .filter(|(s, _, _)| s == &gap_height_stage)
-                                                    .map(|(_, _, h)| *h)
-                                                    .unwrap_or(0.)
-                                            }))
-                                        }),
-                                )
-                                .child(each(
-                                    move || {
-                                        let mut cards = state.cards.with(|all| {
-                                            all.iter()
-                                                .filter(|c| c.stage == list_stage)
-                                                .cloned()
-                                                .collect::<Vec<_>>()
-                                        });
-                                        cards.sort_by(Card::board_cmp);
-                                        cards
-                                    },
-                                    |c| c.id.clone(),
-                                    move |card, _| row(ui, state, card),
-                                )),
-                        ),
-                )
-                .child(when(
-                    move || {
-                        state
-                            .cards
-                            .with(|all| !all.iter().any(|c| c.stage == empty_stage))
-                            && state
-                                .layout
-                                .with(|l| l.gap.as_ref().is_none_or(|(s, _, _)| s != &row_stage))
-                    },
-                    move || {
+        .gap_3();
+    if !compact {
+        root = root.max_w(px(COLUMN_MAX));
+    }
+    // Compact mode shows the stage tabs above the column instead.
+    root.children((!compact).then(move || {
+        view()
+            .flex_row()
+            .min_h(px(30.))
+            .justify_between()
+            .items_center()
+            .gap_2()
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .min_w(px(0.))
+                    .child(
+                        label(stage.name)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .truncate(),
+                    )
+                    .child(
                         view()
-                            .pointer_events(PointerEvents::None)
-                            .absolute()
-                            .top(px(0.))
-                            .left(px(0.))
-                            .right(px(0.))
-                            .py_5()
-                            .px_3()
-                            .rounded(px(RADIUS))
-                            .border_1()
-                            .border_color(BORDER)
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded(px(10.))
                             .bg(INSET)
-                            .opacity(0.65)
-                            .items_center()
-                            .justify_center()
-                            .child(muted("No cards"))
-                    },
-                )),
-        )
+                            .child(muted(move || {
+                                state
+                                    .cards
+                                    .with(|all| {
+                                        all.iter().filter(|c| c.stage == count_stage).count()
+                                    })
+                                    .to_string()
+                            })),
+                    ),
+            )
+            .child(when(
+                move || is_backlog,
+                move || chrome_button(Icon::Plus, "Add Card", move |_| ui.new_card()),
+            ))
+    }))
+    .child(
+        view()
+            .element_ref(&viewport)
+            .flex_1()
+            .min_h(px(0.))
+            .relative()
+            .on_layout(move |_: &Bounds<Points>| state.dirty())
+            .child(
+                scroll()
+                    .element_ref(&scroll_ref)
+                    .flex_1()
+                    .on_scroll(move |e: &ScrollEvent| {
+                        state.scrolled(&id, e.offset.y.0);
+                        capture_scroll(ui, key.clone(), e);
+                    })
+                    .child(
+                        view()
+                            .relative()
+                            .w_full()
+                            .on_layout(move |_: &Bounds<Points>| {
+                                if !restored.replace(true) && position.y.0 > 0. {
+                                    // Rows start at zero and receive measured transforms.
+                                    // Restore only after their first native layout: mounting
+                                    // already scrolled can leave their text layers empty.
+                                    spawn(async move {
+                                        next_frame().await;
+                                        scroll_ref.scroll_to(position, false);
+                                    });
+                                }
+                            })
+                            .h(move || {
+                                px(state.layout.with(|l| {
+                                    l.heights.get(&height_stage).copied().unwrap_or(0.) + 2.
+                                }))
+                            })
+                            .child(
+                                view()
+                                    .absolute()
+                                    .left(px(0.))
+                                    .right(px(0.))
+                                    .top(px(0.))
+                                    .pointer_events(PointerEvents::None)
+                                    .bind_translate_y(&gap_y)
+                                    .rounded(px(RADIUS))
+                                    .bg(INSET)
+                                    .opacity(move || {
+                                        if state.layout.with(|l| {
+                                            l.gap
+                                                .as_ref()
+                                                .is_some_and(|(s, _, _)| s == &gap_visible_stage)
+                                        }) {
+                                            0.8_f32
+                                        } else {
+                                            0.0_f32
+                                        }
+                                    })
+                                    .h(move || {
+                                        px(state.layout.with(|l| {
+                                            l.gap
+                                                .as_ref()
+                                                .filter(|(s, _, _)| s == &gap_height_stage)
+                                                .map(|(_, _, h)| *h)
+                                                .unwrap_or(0.)
+                                        }))
+                                    }),
+                            )
+                            .child(each(
+                                move || {
+                                    let mut cards = state.cards.with(|all| {
+                                        all.iter()
+                                            .filter(|c| c.stage == list_stage)
+                                            .cloned()
+                                            .collect::<Vec<_>>()
+                                    });
+                                    cards.sort_by(Card::board_cmp);
+                                    cards
+                                },
+                                |c| c.id.clone(),
+                                move |card, _| row(ui, state, card),
+                            )),
+                    ),
+            )
+            .child(when(
+                move || {
+                    state
+                        .cards
+                        .with(|all| !all.iter().any(|c| c.stage == empty_stage))
+                        && state
+                            .layout
+                            .with(|l| l.gap.as_ref().is_none_or(|(s, _, _)| s != &row_stage))
+                },
+                move || {
+                    view()
+                        .pointer_events(PointerEvents::None)
+                        .absolute()
+                        .top(px(0.))
+                        .left(px(0.))
+                        .right(px(0.))
+                        .py_5()
+                        .px_3()
+                        .rounded(px(RADIUS))
+                        .border_1()
+                        .border_color(BORDER)
+                        .bg(INSET)
+                        .opacity(0.65)
+                        .items_center()
+                        .justify_center()
+                        .child(muted("No cards"))
+                },
+            )),
+    )
 }
 fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
     let reference = element_ref();

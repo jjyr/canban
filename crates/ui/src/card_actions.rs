@@ -81,11 +81,12 @@ pub fn items(ui: Ui, card: Card) -> Vec<MenuItem> {
             )
         }),
     ];
-    let terminal_card = card.id.clone();
+    let agent_card = card.id.clone();
     items.insert(
         0,
-        MenuItem::new("Open Card Terminals")
-            .on_select(move || crate::terminals::open_card(ui, &terminal_card)),
+        MenuItem::new("Send to Agent")
+            .disabled(inactive || ui.pending.get_untracked())
+            .on_select(move || crate::sessions::send_card(ui, &agent_card)),
     );
     // GitHub removal excludes a source from intake; local Cards only archive.
     if card.removed_at.is_none() && card.github_issue().is_some() {

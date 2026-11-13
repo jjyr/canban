@@ -40,8 +40,8 @@ replace or null tombstone. Tombstones prevent late saves from resurrecting
 discarded text, and identical retries are idempotent. Desktop API level is 7.
 
 One background writer coalesces checkpoints around 300 ms; ordinary application
-exit requests a final flush. Saving feedback distinguishes pending, saved and
-failed writes, with an explicit retry action. A crash before a checkpoint or a
+exit requests a final flush. Successful autosave is silent (no "Saving draft…" flicker, 2026-11-13); only
+failed writes are shown, with an explicit retry action. A crash before a checkpoint or a
 failed write can leave recent input unpersisted. Concurrent-window conflicts are
 reported rather than silently overwriting another saved draft. Card revisions
 remain separate; a rejected Card save shows the latest saved description beside

@@ -195,6 +195,14 @@ impl BoardDrag {
             m.dirty = true;
         });
     }
+    /// Forget unmounted columns (single-stage compact Board) so drag hit
+    /// testing only targets visible stages.
+    pub fn retain(self, stages: &[String]) {
+        self.metrics.with(|m| {
+            m.columns.retain(|stage, _| stages.contains(stage));
+            m.dirty = true;
+        });
+    }
     pub fn dirty(self) {
         self.metrics.with(|m| m.dirty = true);
     }

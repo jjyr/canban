@@ -711,6 +711,8 @@ pub fn board_cards() -> canban_types::Snapshot {
         next_stage: None,
     });
     s.cards[1].attention = None;
+    // Running Card: status chips, branch and the pulsing Agent share one footer.
+    s.cards[1].branch = Some("canban/gallery/2".into());
     let profile = Config::default()
         .profiles
         .into_iter()
