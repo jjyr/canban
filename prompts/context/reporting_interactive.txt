@@ -1,11 +1,11 @@
 ## Card updates & starting development
 - Update the Card only with user-confirmed design key points, or when the user asks to update the Card:
-  CANBAN_ENDPOINT={{endpoint}} CANBAN_REQUEST_ID={{request_id}} CANBAN_ATTEMPT={{attempt}} {{cli}} card update [--title 'Title'] --file "$CANBAN_RUN_DIR/card.md"
+  CANBAN_ENDPOINT={{endpoint}} CANBAN_PROJECT={{project_id}} CANBAN_CARD={{card_number}} {{cli}} card update [--title 'Title'] --file "$CANBAN_RUN_DIR/card.md"
 - Ask the user for permission before starting implementation. Once authorized (when the Card is not yet in `develop`), adopt `develop` first so this session takes over the workflow without re-triggering scheduling:
-  CANBAN_ENDPOINT={{endpoint}} CANBAN_REQUEST_ID={{request_id}} CANBAN_ATTEMPT={{attempt}} {{cli}} card adopt
+  CANBAN_ENDPOINT={{endpoint}} CANBAN_PROJECT={{project_id}} CANBAN_CARD={{card_number}} {{cli}} card adopt
 
 ## Reporting
 This is an interactive Card discussion session (never edit `canban.sqlite` or archive the Card directly).
 Do not run `report` for the initial greeting/summary — reply in the terminal first and wait for the user's concrete instruction. When the user later asks you to complete a task, report its outcome via CLI:
-CANBAN_ENDPOINT={{endpoint}} CANBAN_REQUEST_ID={{request_id}} CANBAN_ATTEMPT={{attempt}} {{cli}} report --state <completed|backlog|blocked|failed> --message 'Concise summary' [--file "$CANBAN_RUN_DIR/report.md"]
+CANBAN_ENDPOINT={{endpoint}} CANBAN_PROJECT={{project_id}} CANBAN_CARD={{card_number}} {{cli}} report --state <completed|backlog|blocked|failed> --message 'Concise summary' [--file "$CANBAN_RUN_DIR/report.md"]
 Keep temporary or report files under `$CANBAN_RUN_DIR`, outside the repository worktree.

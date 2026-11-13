@@ -4,12 +4,17 @@ Provider and Agent SVG icons in `crates/ui-kit/assets/providers/`:
    `amp.svg`, `cline.svg`, `copilot.svg`, `cursor.svg`, `devin.svg`,
    `gemini.svg`, `grok.svg`, `hermes.svg`, `kilo.svg`, `kimi.svg`, `kiro.svg`,
    `mastracode.svg` [Mastra], `muse.svg` [Meta mark], `opencode.svg`, `pi.svg`,
-   `qodercli.svg`, `qwen.svg`):
+   `qodercli.svg`, `qwen.svg`, and the multi-color variants under `color/`:
+   `agy.svg` [`antigravity-color.svg`], `copilot.svg` [`copilot-color.svg`],
+   `devin.svg` [`devin-color.svg`], `gemini.svg` [`gemini-color.svg`],
+   `kimi.svg` [`kimi-color.svg`], `muse.svg` [`meta-color.svg`],
+   `qodercli.svg` [`qoder-color.svg`], `qwen.svg` [`qwen-color.svg`]):
    Source: https://github.com/lobehub/lobe-icons (`packages/static-svg/icons`,
-   revision 79b551cf26aab9ea4ac701fb807160950a5b860f and `meta.svg` at
-   bcdb7c82792a854c2967f7328e11a30205ea584d), simplified to 24px `currentColor`
-   monochrome masks via Herdr UI. Brand marks identify their respective products
-   and remain their owners' trademarks.
+   revision 79b551cf26aab9ea4ac701fb807160950a5b860f and `meta.svg` /
+   `meta-color.svg` at bcdb7c82792a854c2967f7328e11a30205ea584d), simplified to
+   24px `currentColor` monochrome masks via Herdr UI alongside 24px multi-color
+   brand marks for Card comment avatars. Brand marks identify their respective
+   products and remain their owners' trademarks.
 
    MIT License
 

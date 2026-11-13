@@ -1,6 +1,6 @@
 //! Shared Lucide vector icons and accessible 40-point navigation actions.
 use super::tokens::*;
-use nsh_core::element::ImageSrc;
+use nsh_core::element::{ImageSrc, rgb};
 use nsh_core::prelude::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Icon {
@@ -148,6 +148,43 @@ impl Icon {
             Self::MessageSquare => include_str!("../assets/lucide/message-square.svg"),
         }
     }
+
+    fn colored_source(self) -> Option<&'static str> {
+        match self {
+            Self::Agy => Some(include_str!("../assets/providers/color/agy.svg")),
+            Self::Gemini => Some(include_str!("../assets/providers/color/gemini.svg")),
+            Self::Copilot => Some(include_str!("../assets/providers/color/copilot.svg")),
+            Self::Devin => Some(include_str!("../assets/providers/color/devin.svg")),
+            Self::Kimi => Some(include_str!("../assets/providers/color/kimi.svg")),
+            Self::Qwen => Some(include_str!("../assets/providers/color/qwen.svg")),
+            Self::Qoder => Some(include_str!("../assets/providers/color/qodercli.svg")),
+            Self::Muse => Some(include_str!("../assets/providers/color/muse.svg")),
+            _ => None,
+        }
+    }
+
+    /// Vibrant brand palette for single-hue provider marks on dark surfaces.
+    fn brand_rgb(self) -> Option<u32> {
+        match self {
+            Self::Codex => Some(0x10a37f),
+            Self::Claude => Some(0xd97757),
+            Self::OpenCode => Some(0x60a5fa),
+            Self::Cursor => Some(0x38bdf8),
+            Self::Pi => Some(0x2dd4bf),
+            Self::Omp => Some(0xfb923c),
+            Self::Droid => Some(0xa3e635),
+            Self::Amp => Some(0xf34e3f),
+            Self::Kiro => Some(0xa855f7),
+            Self::Cline => Some(0x22d3ee),
+            Self::Grok => Some(0xf97316),
+            Self::Hermes => Some(0xfbbf24),
+            Self::Kilo => Some(0xf8f676),
+            Self::Letta => Some(0xc084fc),
+            Self::Mastra => Some(0x34d399),
+            Self::Maki => Some(0xf472b6),
+            _ => None,
+        }
+    }
 }
 /// Lucide 0.468.0 SVGs, vendored with their license. NSH renders native vectors
 /// and resolves currentColor from the same adaptive semantic tokens as text.
@@ -161,6 +198,33 @@ pub fn icon_tinted(kind: Icon, tint: impl IntoReactive<AdaptiveColor>) -> Svg {
         .flex_shrink_0()
         .text_color(tint)
         .pointer_events(PointerEvents::None)
+}
+/// Full-color provider mark for rich identity surfaces such as Card comment
+/// avatars. Multi-color SVGs render synchronously as native vector drawings
+/// (preserving their authored solid fills and linear/radial gradients),
+/// single-hue brand marks use their chromatic brand color, and generic icons
+/// fall back to theme `ACCENT`.
+pub fn icon_colored(kind: Icon, size: f32) -> Svg {
+    if let Some(markup) = kind.colored_source() {
+        return svg(ImageSrc::svg_markup(markup))
+            .w(px(size))
+            .h(px(size))
+            .flex_shrink_0()
+            .pointer_events(PointerEvents::None);
+    }
+    if let Some(hex) = kind.brand_rgb() {
+        let color = rgb(hex).to_hsla();
+        return icon_tinted(
+            kind,
+            AdaptiveColor {
+                light: color,
+                dark: color,
+            },
+        )
+        .w(px(size))
+        .h(px(size));
+    }
+    icon_tinted(kind, ACCENT).w(px(size)).h(px(size))
 }
 pub fn icon_action(
     kind: Icon,
@@ -231,4 +295,98 @@ pub fn icon_action(
                 }))
                 .on_press(press),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROVIDER_ICONS: &[Icon] = &[
+        Icon::Agent,
+        Icon::Codex,
+        Icon::Claude,
+        Icon::Agy,
+        Icon::Gemini,
+        Icon::OpenCode,
+        Icon::Cursor,
+        Icon::Pi,
+        Icon::Omp,
+        Icon::Copilot,
+        Icon::Droid,
+        Icon::Amp,
+        Icon::Kimi,
+        Icon::Kiro,
+        Icon::Qwen,
+        Icon::Devin,
+        Icon::Cline,
+        Icon::Grok,
+        Icon::Hermes,
+        Icon::Kilo,
+        Icon::Qoder,
+        Icon::Letta,
+        Icon::Mastra,
+        Icon::Maki,
+        Icon::Muse,
+    ];
+
+    #[test]
+    fn every_agent_icon_has_chromatic_color_and_rasterizes_cleanly() {
+        for &kind in PROVIDER_ICONS {
+            if let Some(markup) = kind.colored_source() {
+                assert!(
+                    !markup.contains("<mask") && !markup.contains("<filter"),
+                    "{kind:?} colored SVG must stay mask/filter-free for synchronous vector drawing"
+                );
+                let drawing = nsh_core::svg::drawing(markup)
+                    .unwrap_or_else(|e| panic!("{kind:?} colored SVG failed drawing(): {e:?}"));
+                assert!(
+                    !drawing.ops.is_empty(),
+                    "{kind:?} colored SVG produced an empty vector drawing"
+                );
+                let raster = nsh_core::svg::rasterize(markup.as_bytes(), 32)
+                    .unwrap_or_else(|e| panic!("{kind:?} colored SVG failed to rasterize: {e:?}"));
+                assert_eq!(raster.width, 32, "{kind:?}");
+                assert_eq!(raster.height, 32, "{kind:?}");
+                let has_chromatic_pixel =
+                    raster
+                        .pixels
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .any(|&[r, g, b, a]| {
+                            a >= 32
+                                && (r.abs_diff(g) >= 16
+                                    || g.abs_diff(b) >= 16
+                                    || r.abs_diff(b) >= 16)
+                        });
+                assert!(
+                    has_chromatic_pixel,
+                    "{kind:?} colored SVG must contain chromatic (non-greyscale) pixels"
+                );
+            } else if kind == Icon::Agent {
+                let raster = nsh_core::svg::rasterize(kind.source().as_bytes(), 32)
+                    .unwrap_or_else(|e| panic!("{kind:?} SVG failed to rasterize: {e:?}"));
+                assert!(raster.pixels.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
+            } else {
+                let hex = kind
+                    .brand_rgb()
+                    .unwrap_or_else(|| panic!("{kind:?} must define colored_source or brand_rgb"));
+                let [r, g, b] = [
+                    ((hex >> 16) & 0xff) as u8,
+                    ((hex >> 8) & 0xff) as u8,
+                    (hex & 0xff) as u8,
+                ];
+                assert!(
+                    r.abs_diff(g) >= 16 || g.abs_diff(b) >= 16 || r.abs_diff(b) >= 16,
+                    "{kind:?} brand_rgb #{hex:06x} must not be greyscale"
+                );
+                let raster = nsh_core::svg::rasterize(kind.source().as_bytes(), 32)
+                    .unwrap_or_else(|e| panic!("{kind:?} SVG failed to rasterize: {e:?}"));
+                assert!(
+                    raster.pixels.as_chunks::<4>().0.iter().any(|px| px[3] > 0),
+                    "{kind:?}"
+                );
+            }
+        }
+    }
 }

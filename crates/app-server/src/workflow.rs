@@ -14,18 +14,18 @@ pub(super) fn reported(
     db: Db<'_>,
     config: &Config,
     card: &mut Card,
-    request: &Request,
+    attempt: Option<&Attempt>,
     report: &Report,
 ) -> Result<()> {
-    engine::reported(db, config, card, request, report, enqueue)
+    engine::reported(db, config, card, attempt, report, enqueue)
 }
 pub(super) fn advance(
     db: Db<'_>,
     config: &Config,
     card: &mut Card,
-    request: &Request,
+    attempt: Option<&Attempt>,
 ) -> Result<()> {
-    engine::advance(db, config, card, request, enqueue)
+    engine::advance(db, config, card, attempt, enqueue)
 }
 fn approve(
     db: Db<'_>,
@@ -59,7 +59,7 @@ pub(super) fn adopt_stage(
     db: Db<'_>,
     config: &Config,
     card: &mut Card,
-    request: &mut Request,
+    attempt: Option<&mut Attempt>,
     stage: &str,
     event: Option<String>,
 ) -> Result<Option<WorkflowRun>> {
@@ -106,7 +106,7 @@ pub(super) fn adopt_stage(
                 &entry,
                 event,
                 w.workflow_id.starts_with("delivery:"),
-                request,
+                attempt,
                 enqueue,
             )?;
             return Ok(Some(run));
@@ -427,25 +427,30 @@ impl AppServer {
                 let mut run = run;
                 if run.state == "waiting_approval" {
                     approve(db, &config, &mut card, &mut run, false, None)?;
-                } else if let Some(id) = gate.request_id {
-                    let mut req: Request = db.get(&id)?;
-                    if req.state == "completed" {
+                } else if let Some(aid) = gate.attempt_id {
+                    let prev: Attempt = db.get(&aid)?;
+                    if prev.state == "completed" {
                         card.human_gate = None;
                         card.attention = None;
-                        advance(db, &config, &mut card, &req)?;
+                        advance(db, &config, &mut card, Some(&prev))?;
                     } else {
                         ensure!(
-                            !db.list::<Attempt>()?.iter().any(|a| a.request_id == req.id
-                                && a.terminal.is_some()
-                                && a.observed.as_ref().is_none_or(|v| v["state"] != "finished")),
+                            prev.terminal.is_none()
+                                || prev
+                                    .observed
+                                    .as_ref()
+                                    .is_some_and(|v| v["state"] == "finished"),
                             "Answer the live Agent first, or end it before retrying"
                         );
                         ensure!(
-                            matches!(req.state.as_str(), "blocked" | "failed" | "needs_report"),
+                            matches!(
+                                prev.state.as_str(),
+                                "blocked" | "failed" | "needs_report" | "missing"
+                            ),
                             "Inspect the uncertain execution before retrying"
                         );
-                        req.state = "queued".into();
-                        db.save(&req)?;
+                        let retry = crate::sessions::retry_attempt(db, &card, &prev)?;
+                        run.attempt_id = Some(retry.id);
                         run.state = "waiting_agent".into();
                         db.save(&run)?;
                         card.human_gate = None;
@@ -475,21 +480,25 @@ impl AppServer {
             } else {
                 card.human_gate = None;
                 card.attention = None;
-                if let Some(id) = gate.request_id {
-                    let mut req: Request = db.get(&id)?;
+                if let Some(aid) = gate.attempt_id {
+                    let prev: Attempt = db.get(&aid)?;
                     ensure!(
-                        req.state != "unknown",
+                        prev.state != "unknown",
                         "Inspect uncertain launch before retrying"
                     );
-                    if matches!(req.state.as_str(), "blocked" | "failed" | "needs_report") {
+                    if matches!(
+                        prev.state.as_str(),
+                        "blocked" | "failed" | "needs_report" | "missing"
+                    ) {
                         ensure!(
-                            !db.list::<Attempt>()?.iter().any(|a| a.request_id == req.id
-                                && a.terminal.is_some()
-                                && a.observed.as_ref().is_none_or(|v| v["state"] != "finished")),
+                            prev.terminal.is_none()
+                                || prev
+                                    .observed
+                                    .as_ref()
+                                    .is_some_and(|v| v["state"] == "finished"),
                             "Answer the live Agent first, or end it before retrying"
                         );
-                        req.state = "queued".into();
-                        db.save(&req)?;
+                        crate::sessions::retry_attempt(db, &card, &prev)?;
                     }
                 }
             }

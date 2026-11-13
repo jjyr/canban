@@ -12,9 +12,9 @@ pub fn summary(ui: Ui) -> impl IntoElement {
             canban_scheduler::active_count(&snapshot),
             ui.max_agents.get(),
             snapshot
-                .requests
+                .attempts
                 .iter()
-                .filter(|r| r.state == "queued")
+                .filter(|a| a.state == "queued")
                 .count(),
             rows.iter().filter(|r| r.group == "Idle").count(),
             rows.iter().filter(|r| r.actionable()).count(),

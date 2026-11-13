@@ -1755,10 +1755,7 @@ fn agent_auto_phrase(step_id: &str, profile: Option<&str>, column: &str) -> Stri
         || lower_col == "develop"
     {
         "Auto develop".into()
-    } else if prof == Some("reviewer")
-        || lower_step.contains("review")
-        || lower_col == "review"
-    {
+    } else if prof == Some("reviewer") || lower_step.contains("review") || lower_col == "review" {
         "Auto review".into()
     } else if let Some(p) = prof {
         format!("Auto @{p}")
@@ -2007,10 +2004,7 @@ pub fn column_automation(
                     extra_count += 1;
                 }
                 wf_has_auto = true;
-                wf_lines.push(format!(
-                    "• On {} → {entry}",
-                    sub.selector.types.join(", ")
-                ));
+                wf_lines.push(format!("• On {} → {entry}", sub.selector.types.join(", ")));
             }
         }
 
@@ -2304,8 +2298,14 @@ steps:
         assert!(dev.tooltip.contains("Moves Card to Review"));
         let rev = column_automation("review", &srcs0, &revs0, &[]).unwrap();
         assert_eq!(rev.label, "Auto merge");
-        assert!(rev.tooltip.contains("External PR → Requires human approval"));
-        assert!(rev.tooltip.contains("Queue merge into target branch + syncs upstream"));
+        assert!(
+            rev.tooltip
+                .contains("External PR → Requires human approval")
+        );
+        assert!(
+            rev.tooltip
+                .contains("Queue merge into target branch + syncs upstream")
+        );
         assert!(rev.tooltip.contains("Merge conflicts → @merger (up to 3×)"));
 
         // 2. Backlog auto-plan + admission gate, and Review switched to manual approval (must hide!).
@@ -2423,6 +2423,10 @@ steps:
         let rev_agent = column_automation("review", &[sc], &[rc], &[]).unwrap();
         assert_eq!(rev_agent.label, "Auto review");
         assert!(rev_agent.tooltip.contains("Runs @reviewer"));
-        assert!(rev_agent.tooltip.contains("Pauses for approval: Final sign-off"));
+        assert!(
+            rev_agent
+                .tooltip
+                .contains("Pauses for approval: Final sign-off")
+        );
     }
 }

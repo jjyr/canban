@@ -24,26 +24,26 @@ pub fn set_theme(name: &str) {
 }
 fn sync_nsh_tokens() {
     let mut t = nsh_base::Theme::default();
-    t.background = BACKGROUND.resolve();
-    t.foreground = TEXT.resolve();
-    t.card = SURFACE.resolve();
-    t.card_foreground = TEXT.resolve();
-    t.popover = SURFACE.resolve();
-    t.popover_foreground = TEXT.resolve();
-    t.primary = ACCENT.resolve();
-    t.primary_foreground = ON_ACCENT.resolve();
-    t.secondary = INSET.resolve();
-    t.secondary_foreground = TEXT.resolve();
-    t.muted = INSET.resolve();
-    t.muted_foreground = MUTED.resolve();
-    t.accent = SELECTED.resolve();
-    t.accent_foreground = TEXT.resolve();
-    t.destructive = DANGER.resolve();
-    t.border = BORDER.resolve();
-    t.input = INSET.resolve();
-    t.ring = ACCENT.resolve();
-    t.radius = px(RADIUS);
-    t.font_mono = Some(MONO_FONT.into());
+    t.set_color("background", BACKGROUND.resolve());
+    t.set_color("foreground", TEXT.resolve());
+    t.set_color("card", SURFACE.resolve());
+    t.set_color("card-foreground", TEXT.resolve());
+    t.set_color("popover", SURFACE.resolve());
+    t.set_color("popover-foreground", TEXT.resolve());
+    t.set_color("primary", ACCENT.resolve());
+    t.set_color("primary-foreground", ON_ACCENT.resolve());
+    t.set_color("secondary", INSET.resolve());
+    t.set_color("secondary-foreground", TEXT.resolve());
+    t.set_color("muted", INSET.resolve());
+    t.set_color("muted-foreground", MUTED.resolve());
+    t.set_color("accent", SELECTED.resolve());
+    t.set_color("accent-foreground", TEXT.resolve());
+    t.set_color("destructive", DANGER.resolve());
+    t.set_color("border", BORDER.resolve());
+    t.set_color("input", INSET.resolve());
+    t.set_color("ring", ACCENT.resolve());
+    t.set_number("radius", RADIUS);
+    t.set_font("font-mono", MONO_FONT);
     nsh_core::element::set_tokens(t);
 }
 pub fn current_theme() -> &'static canban_themes::Theme {

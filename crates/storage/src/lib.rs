@@ -146,21 +146,6 @@ impl Record for Event {
         self.sequence
     }
 }
-impl Record for Request {
-    const TABLE: &'static str = "requests";
-    fn id(&self) -> &str {
-        &self.id
-    }
-    fn project(&self) -> Option<&str> {
-        Some(&self.project_id)
-    }
-    fn card(&self) -> Option<&str> {
-        Some(&self.card_id)
-    }
-    fn state(&self) -> &str {
-        &self.state
-    }
-}
 impl Record for Attempt {
     const TABLE: &'static str = "attempts";
     fn id(&self) -> &str {
@@ -174,6 +159,9 @@ impl Record for Attempt {
     }
     fn state(&self) -> &str {
         &self.state
+    }
+    fn number(&self) -> u64 {
+        u64::from(self.number)
     }
 }
 
@@ -421,14 +409,14 @@ impl Db<'_> {
                 "local"
             });
         }
-        if let Some(request) = event
-            .request_id
-            .as_ref()
-            .and_then(|id| self.get::<Request>(id).ok())
-            && let Some(run) = request.workflow_run_id
+        if event.data.get("workflow_run_id").is_none()
+            && let Some(attempt) = event.data["attempt_id"]
+                .as_str()
+                .and_then(|id| self.get::<Attempt>(id).ok())
+            && let Some(run) = attempt.workflow_run_id
         {
             event.data["workflow_run_id"] = serde_json::json!(run);
-            event.data["workflow_step"] = serde_json::json!(request.workflow_step);
+            event.data["workflow_step"] = serde_json::json!(attempt.workflow_step);
         }
         if event.data.get("workflow_run_id").is_some() && event.data["origin"] == "local" {
             event.data["origin"] = serde_json::json!("workflow");
@@ -470,7 +458,6 @@ impl Db<'_> {
                 .filter(|c| c.removed_at.is_none())
                 .collect(),
             events: self.list()?,
-            requests: self.list()?,
             attempts: self.list()?,
             reports: self.list()?,
             notes: self.list()?,

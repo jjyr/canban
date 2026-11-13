@@ -7,6 +7,7 @@ use serde_json::json;
 
 fn controls() -> impl IntoElement {
     let ui = Ui::new();
+    ui.apply_config(&fixtures::agent_config());
     let input = signal("Card 现在编辑用中文时 mixed English @developer 与 `code` 对齐测试".into());
     let profile_fixture = signal(canban_types::Config::default().profiles);
     let count = signal(0_u32);
@@ -15,6 +16,7 @@ fn controls() -> impl IntoElement {
     let group_open = signal(true);
     let nav_selected = signal(0_usize);
     let gutter_scroll = element_ref();
+    let split_width = signal(240.0_f32);
     view().flex_1().min_h(px(0.0)).p_5().gap_4().bg(BACKGROUND)
     .child(heading("Component Gallery"))
     .child(muted("Production components · local fixtures · no AppServer or Agent required"))
@@ -54,6 +56,61 @@ fn controls() -> impl IntoElement {
                                 icon_action(kind, format!("{kind:?}"), move || i == 1,
                                     move || if i == 2 { 3 } else { 0 }, |_| {}).into_element()
                             ).collect::<Vec<_>>())),
+                )
+                .child(
+                    panel()
+                        .child(label("Colored Agent comment avatars · brand & multi-color provider marks"))
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap_2()
+                                .children(
+                                    [
+                                        ("@codex", Icon::Codex),
+                                        ("@claude", Icon::Claude),
+                                        ("@agy", Icon::Agy),
+                                        ("@gemini", Icon::Gemini),
+                                        ("@copilot", Icon::Copilot),
+                                        ("@devin", Icon::Devin),
+                                        ("@cursor", Icon::Cursor),
+                                        ("@opencode", Icon::OpenCode),
+                                        ("@amp", Icon::Amp),
+                                        ("@kimi", Icon::Kimi),
+                                        ("@kiro", Icon::Kiro),
+                                        ("@qwen", Icon::Qwen),
+                                        ("@qoder", Icon::Qoder),
+                                        ("@muse", Icon::Muse),
+                                        ("@cline", Icon::Cline),
+                                        ("@grok", Icon::Grok),
+                                        ("@hermes", Icon::Hermes),
+                                        ("@kilo", Icon::Kilo),
+                                        ("@pi", Icon::Pi),
+                                        ("@omp", Icon::Omp),
+                                        ("@droid", Icon::Droid),
+                                        ("@letta", Icon::Letta),
+                                        ("@mastra", Icon::Mastra),
+                                        ("@maki", Icon::Maki),
+                                        ("@agent", Icon::Agent),
+                                    ]
+                                    .into_iter()
+                                    .map(|(handle, mark)| {
+                                        view()
+                                            .w(px(28.))
+                                            .h(px(28.))
+                                            .rounded(px(14.))
+                                            .bg(INSET)
+                                            .border_1()
+                                            .border_color(BORDER)
+                                            .items_center()
+                                            .justify_center()
+                                            .tooltip(hint_tooltip(handle))
+                                            .child(icon_colored(mark, 16.))
+                                            .into_element()
+                                    })
+                                    .collect::<Vec<_>>(),
+                                ),
+                        ),
                 )
                 .child(
                     panel()
@@ -192,7 +249,7 @@ fn controls() -> impl IntoElement {
                             use canban_ui::components::timeline_item::{
                                 MilestoneFold, Spine, render_connected,
                             };
-                            let [e1, e2, e3, e4] = fixtures::timeline_connected();
+                            let [e1, e2, e3, e4, e5] = fixtures::timeline_connected();
                             let open = tl_expanded.get();
                             let fold = MilestoneFold {
                                 hidden_count: 1,
@@ -242,6 +299,17 @@ fn controls() -> impl IntoElement {
                                     true,
                                     Spine {
                                         first: false,
+                                        last: false,
+                                    },
+                                    None,
+                                    None,
+                                ))
+                                .child(render_connected(
+                                    ui,
+                                    e5,
+                                    true,
+                                    Spine {
+                                        first: false,
                                         last: true,
                                     },
                                     None,
@@ -284,6 +352,37 @@ fn controls() -> impl IntoElement {
                                     "Acknowledgements",
                                     move || nav_selected.get() == 2,
                                     move |_| nav_selected.set(2),
+                                )),
+                        ),
+                )
+                .child(
+                    panel()
+                        .child(label("Resizable horizontal split · 1pt BORDER hairline + 3pt ACCENT hover/drag"))
+                        .child(
+                            view()
+                                .h(px(120.))
+                                .rounded(px(RADIUS))
+                                .border_1()
+                                .border_color(BORDER)
+                                .overflow_hidden()
+                                .child(split(
+                                    view()
+                                        .flex_1()
+                                        .p_3()
+                                        .bg(SURFACE)
+                                        .child(label("Left pane"))
+                                        .child(muted("Drag the boundary to resize"))
+                                        .into_element(),
+                                    view()
+                                        .flex_1()
+                                        .p_3()
+                                        .bg(BACKGROUND)
+                                        .child(label("Right pane"))
+                                        .child(muted("Full-height 1pt BORDER divider"))
+                                        .into_element(),
+                                    split_width,
+                                    160.0,
+                                    160.0,
                                 )),
                         ),
                 )
@@ -498,18 +597,19 @@ pub fn Gallery() -> impl IntoElement {
             };
             snapshot.github_issues.push(canban_types::GitHubIssueSnapshot { id:"source".into(),project_id:snapshot.cards[0].project_id.clone(),source,title:snapshot.cards[0].title.clone(),body:"## GitHub description\n\nThis is the remote source. Local context remains separate.".into(),state:if pr {"draft".into()} else {"open".into()},author_id:1,author_login:"octocat".into(),labels:vec![],assignees:vec![],updated_at:String::new(),synced_at:canban_types::now() });
         }
-        let mut request = canban_scheduler::request(
+        let mut attempt = canban_scheduler::attempt(
             &snapshot.cards[0].project_id,
             "card-1",
+            1,
             "develop",
             "stage_entry",
             canban_types::Config::default().profiles[0].clone(),
             "Card conversation fixture".into(),
             None,
         );
-        request.id = "card-fixture-request".into();
-        request.state = "completed".into();
-        snapshot.requests.push(request);
+        attempt.id = "card-fixture-request".into();
+        attempt.state = "completed".into();
+        snapshot.attempts.push(attempt);
         snapshot.events.retain(|e| e.card_id != "card-1");
         for (index, kind) in [
             "comment.created",
@@ -533,11 +633,9 @@ pub fn Gallery() -> impl IntoElement {
             } else {
                 "agent:developer".into()
             };
-            event.request_id = if index == 0 || index == 5 {
-                None
-            } else {
-                Some("card-fixture-request".into())
-            };
+            if index != 0 && index != 5 {
+                event.data = json!({"attempt_id": "card-fixture-request"});
+            }
             event.message = match index { 0 => "Please preserve the review decision and local discussion scope.".into(), 3 => "## Implementation report\n\n".to_owned() + &"A readable paragraph with **Markdown** and a stable reference [Issue #42](https://github.com/acme/app/issues/42).\n\n".repeat(18), 4 => "Execution failed: check the terminal before continuing.".into(), _ => kind.replace('.', " ") };
             snapshot.events.push(event);
         }
@@ -567,7 +665,6 @@ pub fn Gallery() -> impl IntoElement {
         comment.card_id = "card-1".into();
         comment.kind = "comment.created".into();
         comment.actor = "user".into();
-        comment.request_id = None;
         comment.message = "### Comment Markdown\n\n**Bold comment** and *italic comment*.\n\n[Comment local](card:card-2) · @developer · #ux · [Comment website](https://example.com/)".into();
         comment.data = json!({"body":comment.message});
         snapshot.events.retain(|e| e.card_id != "card-1");
@@ -724,29 +821,16 @@ pub fn Gallery() -> impl IntoElement {
                                 .and_then(|v| v["turn"].as_u64())
                                 .unwrap_or(0)
                                 + 1;
-                            if !s.requests.iter().any(|r| r.id == "idle-req-1") {
-                                let req: canban_types::Request = serde_json::from_value(json!({
-                                    "id": "idle-req-1",
-                                    "project_id": "gallery-project",
-                                    "card_id": "card-1",
-                                    "stage": "develop",
-                                    "trigger": "interactive",
-                                    "profile": canban_types::Config::default().profiles[0],
-                                    "instruction": "Interactive check",
-                                    "state": "running",
-                                    "attempt": 1,
-                                    "created_at": 1
-                                }))
-                                .unwrap();
-                                s.requests.push(req);
-                            }
                             s.attempts.retain(|a| a.id != "idle-attempt-1");
                             let attempt: canban_types::Attempt = serde_json::from_value(json!({
                                 "id": "idle-attempt-1",
-                                "request_id": "idle-req-1",
                                 "project_id": "gallery-project",
                                 "card_id": "card-1",
                                 "number": 1,
+                                "stage": "develop",
+                                "trigger": "interactive",
+                                "profile": canban_types::Config::default().profiles[0],
+                                "instruction": "Interactive check",
                                 "state": "running",
                                 "terminal": "pty-idle-1",
                                 "cwd": "/tmp",
@@ -1208,11 +1292,9 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Idle & Attention Terminals",Variant::Secondary,move |_|{
                     let mut snapshot=fixtures::terminal_workspace();
                     for card in &mut snapshot.cards {card.human_gate=None;card.attention=None;}
-                    for (idx, r) in snapshot.requests.iter_mut().enumerate() {
-                        r.state = if idx == 0 { "running".into() } else { "completed".into() };
-                    }
                     for (idx, a) in snapshot.attempts.iter_mut().enumerate() {
-                        if !a.finished() {
+                        if a.terminal.is_some() && !a.finished() {
+                            a.state = if idx == 0 { "running".into() } else { "completed".into() };
                             let status = if idx == 0 { "idle" } else { "done" };
                             a.observed=Some(json!({"state":"live","turn":1,"status":{"state":status}}));
                             a.connection_state="connected".into();

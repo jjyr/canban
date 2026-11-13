@@ -22,7 +22,7 @@ pub use status::{
 };
 
 pub mod icons;
-pub use icons::{Icon, icon, icon_action, icon_tinted};
+pub use icons::{Icon, icon, icon_action, icon_colored, icon_tinted};
 pub mod search_dialog;
 pub use search_dialog::{SearchChoice, search_dialog};
 

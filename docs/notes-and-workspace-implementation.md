@@ -61,7 +61,7 @@ canban note revision NOTE_ID 3
 
 Create/write reads standard input if `--file` is omitted or is `-`. A normal path is an input/output convenience, not canonical Note storage. Agents must read the current revision before writing and re-read after a conflict.
 
-For Note mutations, the CLI injects `execution.request_id` and `execution.attempt_number` from the execution environment. AppServer validates that the request belongs to the same Project and the attempt is current. The event records `@profile`, Card, request and attempt; a matching Card Timeline row links back to the Note. Generic `canban call` Note mutations use the same injection. Unbound edits record the user actor. Reads do not append events. This is local provenance, not a new authentication boundary.
+For Note mutations, the CLI records the user or explicit `@profile` actor when `CANBAN_PROFILE_ID` is present in the execution environment. Unbound edits record the user actor. Reads do not append events. This is local provenance, not a new authentication boundary.
 
 ## Links, history and context
 

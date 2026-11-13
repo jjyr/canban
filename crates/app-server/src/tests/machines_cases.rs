@@ -7,8 +7,8 @@ fn remote_reports_wait_through_handoff_without_consuming_or_duplicating_completi
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let run = admit(&app, &app.snapshot().unwrap().requests[0]);
-    let report = json!({"request_key":"remote-upgrade-report","execution":{"request_id":run.request_id,"attempt_number":run.number},"state":"completed","message":"done"});
+    let _run = admit(&app, &app.snapshot().unwrap().attempts[0]);
+    let report = json!({"request_key":"remote-upgrade-report","project_id":p.id,"card":c.number,"state":"completed","message":"done"});
     std::fs::write(app.home.join("updates/install.json"), b"interrupted").unwrap();
     assert!(
         app.remote_call("execution.report", report.clone())
@@ -55,7 +55,7 @@ fn location_edits_retarget_queued_work_but_not_existing_attempts_or_resumes() {
         json!({"project_id":p.id,"location":{"directory":next,"machine":"local"}}),
     )
     .unwrap();
-    assert!(app.snapshot().unwrap().requests[0].location.is_none());
+    assert!(app.snapshot().unwrap().attempts[0].location.is_none());
     app.tick().unwrap();
     let s = app.snapshot().unwrap();
     let run = s.attempts[0].clone();
@@ -66,7 +66,7 @@ fn location_edits_retarget_queued_work_but_not_existing_attempts_or_resumes() {
     assert_eq!(run.cwd, next.canonicalize().unwrap().to_str().unwrap());
     app.call(
         "agent.bind",
-        json!({"request_id":run.request_id,"attempt":run.number,"session_id":"provider-1"}),
+        json!({"project_id":p.id,"card":c.number,"profile_id":"developer","session_id":"provider-1"}),
     )
     .unwrap();
     std::fs::write(dir.path().join("finished"), "").unwrap();
@@ -84,18 +84,15 @@ fn location_edits_retarget_queued_work_but_not_existing_attempts_or_resumes() {
     .unwrap();
     let s = app.snapshot().unwrap();
     let resume = s
-        .requests
+        .attempts
         .iter()
         .find(|r| r.resume_from.as_deref() == Some(&run.id))
         .unwrap();
     assert!(resume.location.is_none());
+    let resume_id = resume.id.clone();
     app.tick().unwrap();
     let s = app.snapshot().unwrap();
-    let a = s
-        .attempts
-        .iter()
-        .find(|a| a.request_id == resume.id)
-        .unwrap();
+    let a = s.attempts.iter().find(|a| a.id == resume_id).unwrap();
     assert_eq!(a.location, run.location);
     assert_eq!(a.cwd, run.cwd);
     assert_eq!(a.provider_session_id.as_deref(), Some("provider-1"));
@@ -124,13 +121,13 @@ fn changed_environment_never_reviews_an_unrelated_checkout() {
     .unwrap();
     app.tick().unwrap();
     let s = app.snapshot().unwrap();
-    let run = s.attempts[0].clone();
+    let _run = s.attempts[0].clone();
     app.call(
         "project.location",
         json!({"project_id":p.id,"directory":dir.path().join("other")}),
     )
     .unwrap();
-    app.call("execution.report",json!({"execution":{"request_id":run.request_id,"attempt_number":run.number},"state":"completed","message":"done","request_key":"finish-once"})).unwrap();
+    app.call("execution.report",json!({"project_id":p.id,"card":c.number,"state":"completed","message":"done","request_key":"finish-once"})).unwrap();
     std::fs::write(dir.path().join("finished"), "").unwrap();
     app.tick().unwrap();
     let s = app.snapshot().unwrap();
@@ -140,7 +137,19 @@ fn changed_environment_never_reviews_an_unrelated_checkout() {
         c.workspace.as_ref().unwrap().location.directory,
         p.directory
     );
-    assert_eq!(s.attempts.len(), 1); // no Agent launched in the unrelated directory
+    assert_eq!(s.attempts.len(), 2); // 1 completed developer + 1 failed reviewer (never launched in unrelated directory)
+    assert!(
+        s.attempts
+            .iter()
+            .all(|a| a.terminal.as_deref() != Some("t2"))
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("launches"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    ); // no Agent launched in the unrelated directory
 }
 #[test]
 fn appserver_rejects_a_second_owner_and_supports_explicit_shutdown() {
@@ -165,8 +174,8 @@ fn remote_completion_keeps_terminal_without_an_exit_intent_or_clock_comparison()
     )
     .unwrap();
     let s = app.snapshot().unwrap();
-    let a = admit(&app, &s.requests[0]);
-    app.call("execution.report",json!({"execution":{"request_id":a.request_id,"attempt_number":a.number},"state":"completed","message":"Done","request_key":"remote-retain"})).unwrap();
+    let a = admit(&app, &s.attempts[0]);
+    app.call("execution.report",json!({"project_id":c.project_id,"card":c.number,"state":"completed","message":"Done","request_key":"remote-retain"})).unwrap();
     app.observe_lifecycle(
         &a,
         &json!({"state":"live","status":{"state":"done"},"turn":6,"status_ms":100}),
@@ -209,14 +218,11 @@ fn offline_work_does_not_starve_local_boards_or_fall_back_for_terminals() {
     .unwrap();
     app.tick().unwrap();
     let s = app.snapshot().unwrap();
-    let remote = s.requests.iter().find(|r| r.card_id == c.id).unwrap();
+    let remote = s.attempts.iter().find(|r| r.card_id == c.id).unwrap();
     assert_eq!(remote.state, "queued");
     assert!(remote.location.is_none());
-    assert!(
-        s.attempts.iter().any(
-            |a| json!(a.card_id) == c2["id"] && a.location.as_ref().unwrap().machine == "local"
-        )
-    );
+    assert!(s.attempts.iter().any(|a| json!(a.card_id) == c2["id"]
+        && a.location.as_ref().is_some_and(|l| l.machine == "local")));
     assert!(
         app.call("terminal.create", json!({"machine":"remote-owner"}))
             .is_err()
@@ -265,10 +271,10 @@ fn provider_session_ids_are_scoped_to_the_owning_machine() {
             .unwrap();
     }
     let s = app.snapshot().unwrap();
-    let first = admit(&app, &s.requests[0]);
-    let other = admit(&app, &s.requests[1]);
-    app.call("agent.bind",json!({"request_id":first.request_id,"attempt":first.number,"session_id":"short-provider-id"})).unwrap();
-    assert!(app.call("agent.bind",json!({"request_id":other.request_id,"attempt":other.number,"session_id":"short-provider-id"})).is_err());
+    let _first = admit(&app, &s.attempts[0]);
+    let other = admit(&app, &s.attempts[1]);
+    app.call("agent.bind",json!({"project_id":p.id,"card":c.number,"profile_id":"codex","session_id":"short-provider-id"})).unwrap();
+    assert!(app.call("agent.bind",json!({"project_id":p.id,"card":second["number"],"profile_id":"codex","session_id":"short-provider-id"})).is_err());
     app.store
         .lock()
         .unwrap()
@@ -281,5 +287,5 @@ fn provider_session_ids_are_scoped_to_the_owning_machine() {
             db.save(&a)
         })
         .unwrap();
-    app.call("agent.bind",json!({"request_id":other.request_id,"attempt":other.number,"session_id":"short-provider-id"})).unwrap();
+    app.call("agent.bind",json!({"project_id":p.id,"card":second["number"],"profile_id":"codex","session_id":"short-provider-id"})).unwrap();
 }

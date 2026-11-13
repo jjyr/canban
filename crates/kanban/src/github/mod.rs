@@ -234,7 +234,6 @@ fn event(
         kind,
         actor,
         text,
-        None,
         data,
     ))?;
     Ok(())

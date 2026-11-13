@@ -29,7 +29,7 @@ impl AppServer {
                         run.close_requested_at = Some(now());
                         db.save(&run)?;
                         let card: Card = db.get(&run.card_id)?;
-                        log(db, &card, "execution.close_requested", "user", "Terminal closed by user", Some(run.request_id.clone()), json!({"attempt":run.number}))?;
+                        log(db, &card, "execution.close_requested", "user", "Terminal closed by user", Some(run.id.clone()), json!({"attempt":run.number}))?;
                         invocation = Some(run.id);
                 }
             } else if let Some(runtime) = &mut item.runtime
@@ -99,6 +99,99 @@ impl AppServer {
         let r = item.runtime.as_ref()?;
         Some((r.core_id.clone()?, r.terminal.clone()?))
     }
+    pub(super) fn ensure_card_worktree(
+        &self,
+        card_id: &str,
+        attempt_id: Option<String>,
+    ) -> Result<(Card, Project)> {
+        let (card, mut project) = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let c: Card = db.get(card_id)?;
+            let proj: Project = db.get(&c.project_id)?;
+            let mut bound = self.bound_project(&proj, &c);
+            if let Some(wf_run) = db
+                .list::<WorkflowRun>()?
+                .into_iter()
+                .find(|r| r.card_id == c.id && r.active())
+            {
+                bound.workflow.workspace = wf_run.definition.workspace;
+            } else if let Some(primary) = db
+                .list::<WorkflowSource>()?
+                .into_iter()
+                .filter(|f| f.project_id == proj.id)
+                .find(|f| f.filename == "development.yaml")
+                && let Ok(rev) = db.get::<WorkflowRevision>(&primary.revision_id)
+            {
+                bound.workflow.workspace = rev.definition.workspace;
+            }
+            (c, bound)
+        };
+        if !card.active() || card.merged() {
+            return Ok((card, project));
+        }
+        let location = card
+            .workspace
+            .as_ref()
+            .map(|w| w.location.clone())
+            .unwrap_or_else(|| project.work_location());
+        self.resolve_machine(&location.machine, true)?;
+        let ops = self.ops(&location.machine);
+        let exec_home = self.execution_home(&location.machine)?;
+        project.directory = location.directory.clone();
+        project.location = Some(location.clone());
+        let source_dir = Path::new(&location.directory);
+        if project.workflow.workspace.create_worktree
+            && project.workflow.workspace.sync_base
+            && (!ops.has_push_remote(&project) || ops.current_branch(&location.directory).is_none())
+        {
+            project.workflow.workspace.sync_base = false;
+        }
+        let mut prepared = card.clone();
+        let cwd = ops.prepare(&exec_home, &project, &prepared)?;
+        let _ = source_dir;
+        self.git_changed(&location.machine);
+        prepared.worktree = Some(cwd.to_string_lossy().into_owned());
+        let info = ops.info(&project, &prepared)?;
+        let workspace = WorkspaceBinding {
+            location: location.clone(),
+            path: cwd.to_string_lossy().into_owned(),
+            branch: info.branch.clone(),
+            base_commit: info.base_commit.clone(),
+            target_branch: project.target_branch.clone(),
+        };
+        let created_worktree = cwd != Path::new(&location.directory);
+        let mut saved_card = card;
+        if created_worktree || saved_card.worktree.is_some() {
+            self.store.lock().unwrap().write(|db| {
+                let mut current: Card = db.get(&saved_card.id)?;
+                if current.workspace.as_ref() != Some(&workspace) {
+                    if let Some(old) = current.workspace.replace(workspace.clone())
+                        && old.location != workspace.location
+                    {
+                        current.workspace_history.push(old);
+                        current.delivery = None;
+                    }
+                    current.worktree = Some(workspace.path.clone());
+                    current.branch = workspace.branch.clone();
+                    current.base_commit = workspace.base_commit.clone();
+                    log(
+                        db,
+                        &current,
+                        "workspace.prepared",
+                        "system",
+                        "Card workspace prepared",
+                        attempt_id,
+                        json!({"workspace":workspace}),
+                    )?;
+                    db.save(&current)?;
+                }
+                saved_card = current;
+                Ok(())
+            })?;
+        }
+        Ok((saved_card, project))
+    }
     pub(super) fn create_terminal(&self, p: Value) -> Result<Value> {
         let _gate = self.terminal_gate.lock().unwrap();
         let inherited = p["inherit_terminal_id"]
@@ -128,6 +221,44 @@ impl AppServer {
                 "Standalone Agent CLI launch requires a user action"
             );
         }
+        let explicit_card_arg = p["card_id"].as_str().is_some_and(|s| !s.trim().is_empty())
+            || super::parse_card_number(&p["card"]).is_some();
+        // Prepare the Card's dedicated worktree upfront (outside the SQLite write lock)
+        // whenever opening a Terminal from an active unmerged Card without an explicit cwd.
+        let pre_card_id = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            if explicit_card_arg {
+                Some(super::resolve_card(db, &p)?.id)
+            } else {
+                inherited
+                    .as_ref()
+                    .and_then(|v| v["card_id"].as_str())
+                    .filter(|s| !s.is_empty())
+                    .and_then(|cid| db.get::<Card>(cid).ok().map(|c| c.id))
+            }
+        };
+        if p["cwd"].as_str().is_none_or(|s| s.is_empty())
+            && p["setup_argv"].is_null()
+            && let Some(cid) = &pre_card_id
+        {
+            let (check_card, same_machine) = {
+                let store = self.store.lock().unwrap();
+                let db = store.db();
+                let c: Card = db.get(cid)?;
+                let proj: Project = db.get(&c.project_id)?;
+                let loc = c
+                    .workspace
+                    .as_ref()
+                    .map(|w| w.location.clone())
+                    .unwrap_or_else(|| proj.work_location());
+                let same = p["machine"].as_str().is_none_or(|m| m == loc.machine);
+                (c, same)
+            };
+            if check_card.active() && !check_card.merged() && same_machine {
+                let _ = self.ensure_card_worktree(cid, None)?;
+            }
+        }
         let mut launch = None;
         let saved = self.mutate("terminal.create", &p, |db| {
             let mut project = p["project_id"]
@@ -135,11 +266,11 @@ impl AppServer {
                 .filter(|id| !id.is_empty())
                 .map(|id| db.get::<Project>(id))
                 .transpose()?;
-            let mut card = p["card_id"]
-                .as_str()
-                .filter(|id| !id.is_empty())
-                .map(|id| db.get::<Card>(id))
-                .transpose()?;
+            let mut card = if explicit_card_arg {
+                Some(super::resolve_card(db, &p)?)
+            } else {
+                None
+            };
             if card.is_none()
                 && let Some(cid) = inherited.as_ref().and_then(|v| v["card_id"].as_str())
                 && !cid.is_empty()
@@ -238,7 +369,7 @@ impl AppServer {
                     _ => prof.preset.clone().unwrap_or(cmd),
                 }
             });
-            let origin_card_id = if p["card_id"].as_str().is_some_and(|s| !s.is_empty()) {
+            let origin_card_id = if explicit_card_arg {
                 card.as_ref().map(|c| c.id.clone())
             } else {
                 None
@@ -271,10 +402,10 @@ impl AppServer {
                 .map(|proj| proj.directory.clone())
                 .unwrap_or_else(|| cwd.clone());
             // Persist the launch intent before network IO, but cwd is only an argument.
-            launch = Some((item.clone(), cwd, project_dir, agent_profile));
+            launch = Some((item.clone(), cwd, project_dir, agent_profile, project, card));
             Ok(serde_json::to_value(item)?)
         })?;
-        let Some((mut item, cwd, project_dir, agent_profile)) = launch else {
+        let Some((mut item, cwd, project_dir, agent_profile, project, card)) = launch else {
             return Ok(serde_json::to_value(TerminalEntry::from_json(saved)?)?);
         };
         let runtime = item.runtime.as_mut().unwrap();
@@ -289,14 +420,70 @@ impl AppServer {
                     .into(),
             );
             let host = canban_herdr::host::Host::new(self.config(), &runtime.machine);
+            let exec_home = self.execution_home(&runtime.machine)?;
+            let remote = runtime.machine != "local";
+            let is_setup = p["setup_argv"].is_array();
             let mut env = std::collections::BTreeMap::new();
+            let mut labels =
+                std::collections::BTreeMap::from([("canban.terminal".into(), item.id.clone())]);
+            if !is_setup {
+                let endpoint = if remote {
+                    format!("spool:{}", exec_home.join("rpc").display())
+                } else {
+                    self.endpoint().to_string_lossy().into_owned()
+                };
+                let cli_path = if remote {
+                    exec_home.join("bin/canban")
+                } else {
+                    self.cli.clone()
+                };
+                env.insert(
+                    "CANBAN_HOME".into(),
+                    exec_home.to_string_lossy().into_owned(),
+                );
+                env.insert("CANBAN_ENDPOINT".into(), endpoint);
+                env.insert("CANBAN_CLI".into(), cli_path.to_string_lossy().into_owned());
+                if let Some(proj) = &project {
+                    env.insert("CANBAN_PROJECT".into(), proj.id.clone());
+                    labels.insert("canban.project".into(), proj.id.clone());
+                }
+                if let Some(c) = &card {
+                    env.entry("CANBAN_PROJECT".into())
+                        .or_insert_with(|| c.project_id.clone());
+                    labels
+                        .entry("canban.project".into())
+                        .or_insert_with(|| c.project_id.clone());
+                    env.insert("CANBAN_CARD".into(), c.number.to_string());
+                    labels.insert("canban.card".into(), c.number.to_string());
+                    labels.insert("canban.card_id".into(), c.id.clone());
+                    let scratch = canban_context::scratch_dir(&exec_home, &c.project_id, &c.id);
+                    if !remote {
+                        let _ = std::fs::create_dir_all(&scratch);
+                    }
+                    env.insert(
+                        "CANBAN_RUN_DIR".into(),
+                        scratch.to_string_lossy().into_owned(),
+                    );
+                    if remote {
+                        let _ = self.stage_remote(&host, &exec_home, c);
+                    }
+                }
+            }
             let argv = if let Some(profile) = &agent_profile {
-                let exec_home = self.execution_home(&runtime.machine)?;
+                env.insert("CANBAN_PROFILE_ID".into(), profile.id.clone());
                 let session_id = profile
                     .command()
                     .iter()
                     .any(|s| s.contains("{session_id}"))
                     .then(super::runtime::uuid_session_id);
+                if let Some(sid) = &session_id {
+                    env.insert("CANBAN_SESSION_ID".into(), sid.clone());
+                }
+                let cli_for_cmd = if remote {
+                    exec_home.join("bin/canban")
+                } else {
+                    self.cli.clone()
+                };
                 let mut argv = if let Some(prompt) = p["prompt"].as_str().filter(|s| !s.is_empty())
                 {
                     canban_profiles::command(
@@ -308,7 +495,7 @@ impl AppServer {
                             ("cwd", &cwd),
                             ("project_dir", &project_dir),
                             ("prompt", prompt),
-                            ("cli", &self.cli.to_string_lossy()),
+                            ("cli", &cli_for_cmd.to_string_lossy()),
                         ],
                     )?
                 } else {
@@ -319,7 +506,7 @@ impl AppServer {
                             ("home", &exec_home.to_string_lossy()),
                             ("cwd", &cwd),
                             ("project_dir", &project_dir),
-                            ("cli", &self.cli.to_string_lossy()),
+                            ("cli", &cli_for_cmd.to_string_lossy()),
                         ],
                     )?
                 };
@@ -334,17 +521,6 @@ impl AppServer {
                         let program = host.python("import os,shutil,json,sys;h=os.path.expanduser('~');p=os.environ.get('PATH','')+os.pathsep+os.path.join(h,'.local/bin')+os.pathsep+os.path.join(h,'.cargo/bin');print(json.dumps(shutil.which(sys.argv[1],path=p) or sys.argv[1]))", &[&argv[0]])?;
                         argv[0] = program.as_str().context("No remote executable")?.into();
                     }
-                }
-                if runtime.machine == "local" {
-                    env.insert(
-                        "CANBAN_HOME".into(),
-                        self.home.to_string_lossy().into_owned(),
-                    );
-                    env.insert(
-                        "CANBAN_ENDPOINT".into(),
-                        self.endpoint().to_string_lossy().into_owned(),
-                    );
-                    env.insert("CANBAN_CLI".into(), self.cli.to_string_lossy().into_owned());
                 }
                 argv
             } else {
@@ -368,13 +544,7 @@ impl AppServer {
                     vec![shell, "-l".into()]
                 }
             };
-            let receipt = client.launch_on(
-                &runtime.machine,
-                argv,
-                &cwd,
-                env,
-                std::collections::BTreeMap::from([("canban.terminal".into(), item.id.clone())]),
-            )?;
+            let receipt = client.launch_on(&runtime.machine, argv, &cwd, env, labels)?;
             let address = receipt["address"]
                 .as_str()
                 .context("Terminal launch receipt has no address")?

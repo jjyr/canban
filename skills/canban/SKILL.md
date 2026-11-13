@@ -14,7 +14,7 @@ Canban injects `CANBAN_CLI` and task environment variables when launching an Age
    test -n "${CANBAN_CLI:-}" && test -n "${CANBAN_ENDPOINT:-}"
    ```
    If unset, you are outside a Canban-launched session (or pass `--home` / `--endpoint` explicitly when the user asks).
-2. **Always use current environment variables**: Use `"$CANBAN_CLI"`, `"$CANBAN_ENDPOINT"`, `"$CANBAN_REQUEST_ID"`, `"$CANBAN_ATTEMPT"`, and `"$CANBAN_RUN_DIR"` from the current process environment. Never copy stale `CANBAN_REQUEST_ID` or `CANBAN_ATTEMPT` values from earlier conversation turns.
+2. **Always use current environment variables**: Use `"$CANBAN_CLI"`, `"$CANBAN_ENDPOINT"`, `"$CANBAN_CARD"`, `"$CANBAN_PROJECT"`, and `"$CANBAN_RUN_DIR"` from the current process environment. Never copy stale `CANBAN_CARD` or `CANBAN_PROJECT` values from earlier conversation turns.
 3. **Never touch storage directly**: Never read or edit `canban.sqlite` directly, and do not archive Cards unless explicitly asked.
 4. **Keep scratch and Markdown payloads outside Git**: Write report, reply, and Card body files under `"${CANBAN_RUN_DIR:-/tmp}"` (for example `"$CANBAN_RUN_DIR/report.md"`), never inside the repository worktree.
 
@@ -25,10 +25,10 @@ Canban injects `CANBAN_CLI` and task environment variables when launching an Age
 | `CANBAN_CLI` | Absolute path to the matching `canban` executable (or remote bridge wrapper). |
 | `CANBAN_ENDPOINT` | AppServer Unix socket path (or `spool:...` on remote execution hosts). |
 | `CANBAN_HOME` | Active Canban application home directory. |
-| `CANBAN_REQUEST_ID` | Current execution Request ID (present on Card/comment/workflow runs). |
-| `CANBAN_ATTEMPT` | Current execution Attempt number (`1`, `2`, …). |
-| `CANBAN_RUN_DIR` | Per-attempt scratch directory outside the repository worktree for Markdown payloads. |
-| `CANBAN_PROFILE_ID` | Active `@identity` or Agent profile ID. |
+| `CANBAN_CARD` | Short Card number (for example `42`), injected into both scheduled Agent runs and manual Card Terminals. |
+| `CANBAN_PROJECT` | Active Project ID (CLI commands also infer the Project from a git repository or Card worktree CWD when omitted). |
+| `CANBAN_RUN_DIR` | Scratch directory outside the repository worktree for Markdown payloads. |
+| `CANBAN_PROFILE_ID` | Active `@identity` or Agent profile ID (when applicable). |
 
 ## Core Execution Commands
 
@@ -59,7 +59,13 @@ When a human posts a follow-up question with a Question ID against an already ru
 "$CANBAN_CLI" reply --to <QUESTION_ID> --file "$CANBAN_RUN_DIR/reply.md"
 ```
 
-### Update the current Card (`card update`)
+### Inspect or update the current Card (`card show` / `card update`)
+
+Read the current Card JSON (uses `CANBAN_CARD` + `CANBAN_PROJECT` automatically, or pass `--card <NUMBER>`):
+
+```sh
+"$CANBAN_CLI" card show
+```
 
 Update the Card title or Markdown description only with user-confirmed design decisions or when explicitly requested:
 
@@ -103,9 +109,9 @@ Call any public AppServer JSON-RPC method via `"$CANBAN_CLI" call <METHOD> '<JSO
 # Create a follow-up Card in Backlog
 "$CANBAN_CLI" call card.create '{"project_id":"<PROJECT_ID>","title":"Follow-up task","body":"Details..."}'
 
-# Inspect an execution request or captured terminal output
-"$CANBAN_CLI" call execution.get '{"request_id":"<REQUEST_ID>"}'
-"$CANBAN_CLI" call execution.output '{"request_id":"<REQUEST_ID>","attempt_number":1}'
+# Inspect the latest execution attempt or captured terminal output
+"$CANBAN_CLI" call execution.get '{"card":<CARD_NUMBER>,"project_id":"<PROJECT_ID>"}'
+"$CANBAN_CLI" call execution.output '{"attempt_id":"<ATTEMPT_ID>"}'
 ```
 
 ## Authoring Workflows (CLI)

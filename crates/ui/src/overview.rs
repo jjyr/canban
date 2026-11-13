@@ -275,7 +275,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     let active_slots = canban_scheduler::active_count(&s);
                                     let max_slots = ui.max_agents.get();
                                     let queued_count =
-                                        s.requests.iter().filter(|r| r.state == "queued").count();
+                                        s.attempts.iter().filter(|a| a.state == "queued").count();
                                     let scope = project_scope.get();
                                     let valid_scope = if !scope.is_empty()
                                         && s.projects.iter().any(|p| p.id == scope)
@@ -418,7 +418,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
 fn destination(ui: Ui, row: &OverviewRow, review: bool) {
     close(ui);
     ui.open_card(row.card.id.clone());
-    if let Some(id) = row.outcome_request_id() {
+    if let Some(id) = row.outcome_attempt_id() {
         ui.request.set(id.into());
     }
     if review {
@@ -595,12 +595,18 @@ fn classify_reason(
                 {
                     let detail = clean_wait_detail(&w.title, &w.message);
                     match w.kind.as_str() {
-                        "permission" | "approval" | "command" | "tool" | "bash" | "file" => {
-                            (Icon::ShieldAlert, Tone::Attention, "Permission required", detail)
-                        }
-                        "auth" | "login" | "signin" | "sign_in" => {
-                            (Icon::CircleHelp, Tone::Attention, "Sign-in required", detail)
-                        }
+                        "permission" | "approval" | "command" | "tool" | "bash" | "file" => (
+                            Icon::ShieldAlert,
+                            Tone::Attention,
+                            "Permission required",
+                            detail,
+                        ),
+                        "auth" | "login" | "signin" | "sign_in" => (
+                            Icon::CircleHelp,
+                            Tone::Attention,
+                            "Sign-in required",
+                            detail,
+                        ),
                         "question" | "prompt" | "answer" => {
                             (Icon::CircleHelp, Tone::Attention, "Answer needed", detail)
                         }
@@ -622,9 +628,9 @@ fn classify_reason(
                     Some("Inspect live terminal".into()),
                 )
             } else if row
-                .request
+                .attempt
                 .as_ref()
-                .is_some_and(|r| r.trigger.is_automatic())
+                .is_some_and(|a| a.trigger.is_automatic())
             {
                 (
                     Icon::TriangleAlert,
@@ -642,14 +648,24 @@ fn classify_reason(
             }
         }
         "review" => {
-            let outcome_id = row.outcome_request_id();
+            let outcome_id = row.outcome_attempt_id();
             let report_detail = outcome_id
-                .and_then(|rid| {
+                .and_then(|aid| {
                     snapshot
                         .reports
                         .iter()
                         .rev()
-                        .find(|r| r.request_id == rid && !r.message.trim().is_empty())
+                        .find(|r| {
+                            r.attempt_id.as_deref() == Some(aid) && !r.message.trim().is_empty()
+                        })
+                        .map(|r| strip_machine_prefix(&r.message))
+                })
+                .or_else(|| {
+                    snapshot
+                        .reports
+                        .iter()
+                        .rev()
+                        .find(|r| r.card_id == row.card.id && !r.message.trim().is_empty())
                         .map(|r| strip_machine_prefix(&r.message))
                 })
                 .filter(|s| !s.is_empty());
@@ -676,9 +692,9 @@ fn classify_reason(
         "task" => {
             let msg = strip_machine_prefix(&reason.message);
             let outcome_state = row
-                .outcome_request_id()
-                .and_then(|rid| snapshot.requests.iter().find(|r| r.id == rid))
-                .map(|r| r.state.as_str());
+                .outcome_attempt_id()
+                .and_then(|aid| snapshot.attempts.iter().find(|a| a.id == aid))
+                .map(|a| a.state.as_str());
             if is_merge_gate_reason(&msg) || (row.card.hold_auto_merge && !row.card.merged()) {
                 let is_fail = msg.to_lowercase().contains("fail");
                 let headline = if msg.to_lowercase().contains("conflict") {
@@ -730,9 +746,19 @@ fn classify_reason(
                     .map(single_line)
                     .filter(|s| !s.is_empty())
                     .or_else(|| Some(format!("Connection {}", a.connection_state)));
-                (Icon::TriangleAlert, Tone::Danger, "Agent disconnected", detail)
+                (
+                    Icon::TriangleAlert,
+                    Tone::Danger,
+                    "Agent disconnected",
+                    detail,
+                )
             } else if msg.to_lowercase().contains("exited") {
-                (Icon::TriangleAlert, Tone::Danger, "Agent exited early", Some(msg))
+                (
+                    Icon::TriangleAlert,
+                    Tone::Danger,
+                    "Agent exited early",
+                    Some(msg),
+                )
             } else {
                 (
                     Icon::TriangleAlert,
@@ -744,9 +770,15 @@ fn classify_reason(
         }
         "question" => {
             let msg = single_line(&reason.message);
-            let detail = (!msg.is_empty() && !msg.eq_ignore_ascii_case("question delivery uncertain"))
-                .then_some(msg);
-            (Icon::TriangleAlert, Tone::Danger, "Reply undelivered", detail)
+            let detail = (!msg.is_empty()
+                && !msg.eq_ignore_ascii_case("question delivery uncertain"))
+            .then_some(msg);
+            (
+                Icon::TriangleAlert,
+                Tone::Danger,
+                "Reply undelivered",
+                detail,
+            )
         }
         _ => {
             let msg = strip_machine_prefix(&reason.message);
@@ -809,15 +841,15 @@ fn describe_row(snapshot: &canban_types::Snapshot, row: &OverviewRow) -> RowEven
     }
 
     let profile_icon = row
-        .request
+        .attempt
         .as_ref()
-        .map(|r| crate::profiles::provider(&r.profile).0)
+        .map(|a| crate::profiles::provider(&a.profile).0)
         .unwrap_or(Icon::Agent);
     let stage_detail = row
-        .request
+        .attempt
         .as_ref()
-        .filter(|r| !r.stage.is_empty())
-        .map(|r| format!("Stage: {}", r.stage));
+        .filter(|a| !a.stage.is_empty())
+        .map(|a| format!("Stage: {}", a.stage));
 
     if let Some(a) = &row.attempt {
         if a.finished() {
@@ -1077,7 +1109,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     .count();
             let active_slots = canban_scheduler::active_count(&s);
             let max_slots = ui.max_agents.get();
-            let queued_count = s.requests.iter().filter(|r| r.state == "queued").count();
+            let queued_count = s.attempts.iter().filter(|a| a.state == "queued").count();
             let scope = project_scope.get();
             let valid_scope = if !scope.is_empty() && !s.projects.iter().any(|p| p.id == scope) {
                 String::new()
@@ -1382,7 +1414,12 @@ fn config_session_row(
         .gap_1p5()
         .min_w(px(0.))
         .overflow_hidden()
-        .child(muted(context_parts.join(" · ")).flex_1().min_w(px(0.)).truncate());
+        .child(
+            muted(context_parts.join(" · "))
+                .flex_1()
+                .min_w(px(0.))
+                .truncate(),
+        );
 
     let hint = format!("{headline} · {status_text}\n{context_title} · {project_name}");
 
@@ -1459,7 +1496,7 @@ fn row_view(
     let reference = element_ref();
     let activate_row = row.clone();
     let event = ui.snapshot.with(|s| describe_row(s, &row));
-    let profile_tag = row.request.as_ref().map(|r| format!("@{}", r.profile.id));
+    let profile_tag = row.attempt.as_ref().map(|a| format!("@{}", a.profile.id));
     let remote_machine = row
         .attempt
         .as_ref()
@@ -1580,15 +1617,11 @@ fn row_view(
     {
         let id = row.id.clone();
         let cid = row.card.id.clone();
-        actions = actions.child(compact_action(
-            "Terminal",
-            Variant::Quiet,
-            move |_| {
-                ui.overview_selection.set(id.clone());
-                close(ui);
-                ui.open_card_with_terminal(cid.clone(), Some(id.clone()));
-            },
-        ));
+        actions = actions.child(compact_action("Terminal", Variant::Quiet, move |_| {
+            ui.overview_selection.set(id.clone());
+            close(ui);
+            ui.open_card_with_terminal(cid.clone(), Some(id.clone()));
+        }));
     }
     let primary_variant = if row.actionable() {
         Variant::Secondary
@@ -1682,7 +1715,8 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
             "{event_summary}\n#{} {}\n{project}",
             card.number, card.title
         );
-        let extra_pill = (unread_count > 1).then(|| badge(format!("+{}", unread_count - 1)).into_element());
+        let extra_pill =
+            (unread_count > 1).then(|| badge(format!("+{}", unread_count - 1)).into_element());
 
         rows = rows.child(
             view()
@@ -1783,21 +1817,15 @@ mod tests {
     fn describe_row_promotes_permission_and_cleans_redundant_prefixes() {
         let mut s = canban_types::Snapshot::default();
         let card = base_card();
-        let req = canban_scheduler::request(
-            "p1",
-            "c1",
-            "develop",
-            "stage_entry",
-            canban_types::Config::default().profiles[0].clone(),
-            "task".into(),
-            None,
-        );
         let mut attempt: canban_types::Attempt = serde_json::from_value(json!({
             "id": "r1:1",
-            "request_id": req.id,
             "project_id": "p1",
             "card_id": "c1",
             "number": 1,
+            "stage": "develop",
+            "trigger": "stage_entry",
+            "profile": canban_types::Config::default().profiles[0],
+            "instruction": "task",
             "state": "running",
             "terminal": "t1",
             "cwd": "/tmp",
@@ -1824,7 +1852,6 @@ mod tests {
             since: 1,
         });
         s.cards.push(card);
-        s.requests.push(req);
         s.attempts.push(attempt);
 
         let rows = overview(&s);
@@ -1843,28 +1870,30 @@ mod tests {
         let mut s = canban_types::Snapshot::default();
         let mut card = base_card();
         card.stage = "review".into();
-        let mut req = canban_scheduler::request(
+        let mut att = canban_scheduler::attempt(
             "p1",
             "c1",
+            1,
             "review",
             "stage_entry",
             canban_types::Config::default().profiles[0].clone(),
             "review".into(),
             None,
         );
-        req.id = "req-rev".into();
-        req.state = "completed".into();
+        att.id = "att-rev".into();
+        att.state = "completed".into();
         card.human_gate = Some(canban_types::HumanGate {
             reason: "Agent report ready; human review required".into(),
-            request_id: Some("req-rev".into()),
+            attempt_id: Some("att-rev".into()),
             next_stage: None,
         });
         s.reports.push(canban_types::Report {
             id: "rep-1".into(),
-            request_id: "req-rev".into(),
+            attempt_id: Some("att-rev".into()),
+            workflow_run_id: None,
+            actor: "agent:developer".into(),
             project_id: "p1".into(),
             card_id: "c1".into(),
-            attempt: 1,
             state: "completed".into(),
             message: "Implemented event-first hierarchy and semantic icons".into(),
             path: None,
@@ -1873,7 +1902,7 @@ mod tests {
             created_at: 2,
         });
         s.cards.push(card);
-        s.requests.push(req);
+        s.attempts.push(att);
 
         let rows = overview(&s);
         let ev = describe_row(&s, &rows[0]);
@@ -1897,8 +1926,8 @@ mod tests {
             Some("Merge conflict with main after 2 attempts")
         );
 
-        // Failed request gate surfaces Danger TriangleAlert + Agent failed.
-        s.requests[0].state = "failed".into();
+        // Failed attempt gate surfaces Danger TriangleAlert + Agent failed.
+        s.attempts[0].state = "failed".into();
         s.cards[0].human_gate.as_mut().unwrap().reason =
             "failed: Build failed due to missing symbol".into();
         let rows = overview(&s);
@@ -1924,7 +1953,6 @@ mod tests {
             kind: "comment.replied".into(),
             actor: "agent:agy".into(),
             message: "已整理好 ASCII 方案，请确认".into(),
-            request_id: None,
             data: json!({"question_id": "q1"}),
             created_at: 1,
         });
@@ -1944,7 +1972,6 @@ mod tests {
             kind: "execution.reported".into(),
             actor: "agent:developer".into(),
             message: "completed: All unit tests passed".into(),
-            request_id: None,
             data: json!({"report_id": "r2", "state": "completed"}),
             created_at: 2,
         });
@@ -1965,7 +1992,6 @@ mod tests {
             kind: "execution.reported".into(),
             actor: "agent:developer".into(),
             message: "Returned to Backlog: Already implemented in main".into(),
-            request_id: None,
             data: json!({"report_id": "r3", "state": "backlog"}),
             created_at: 3,
         });

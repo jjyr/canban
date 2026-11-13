@@ -22,23 +22,20 @@ pub(super) fn idle_candidate(
     {
         return false;
     }
-    let Some(req) = snapshot.requests.iter().find(|r| r.id == run.request_id) else {
-        return false;
-    };
-    if (canban_scheduler::automatic(req) || req.workflow_run_id.is_some())
-        && !matches!(req.state.as_str(), "completed" | "backlog")
+    if (canban_scheduler::automatic(run) || run.workflow_run_id.is_some())
+        && !matches!(run.state.as_str(), "completed" | "backlog")
     {
         return false;
     }
     if !matches!(
-        req.state.as_str(),
+        run.state.as_str(),
         "running" | "working" | "completed" | "backlog"
     ) {
         return false;
     }
     if snapshot.cards.iter().any(|c| {
         c.id == run.card_id
-            && !matches!(req.state.as_str(), "completed" | "backlog")
+            && !matches!(run.state.as_str(), "completed" | "backlog")
             && (c.attention.is_some() || c.human_gate.is_some())
     }) {
         return false;
@@ -46,7 +43,7 @@ pub(super) fn idle_candidate(
     if snapshot
         .questions
         .iter()
-        .any(|q| q.card_id == run.card_id && q.profile_id == req.profile.id && q.state != "replied")
+        .any(|q| q.card_id == run.card_id && q.profile_id == run.profile.id && q.state != "replied")
     {
         return false;
     }
@@ -126,7 +123,7 @@ impl AppServer {
                         "execution.input_required",
                         "herdr",
                         &notice.message,
-                        Some(a.request_id.clone()),
+                        Some(a.id.clone()),
                         json!({"wait":w,"attempt":a.number}),
                     )?;
                     a.lifecycle.waiting = Some(w);
@@ -142,7 +139,7 @@ impl AppServer {
                     "execution.input_resolved",
                     "herdr",
                     "Runtime input wait ended; workflow approval is unchanged",
-                    Some(a.request_id.clone()),
+                    Some(a.id.clone()),
                     json!({"wait_id":w.id,"attempt":a.number}),
                 )?;
             }
@@ -187,10 +184,7 @@ impl AppServer {
             {
                 continue;
             }
-            let Some(request) = snapshot.requests.iter().find(|r| r.id == run.request_id) else {
-                continue;
-            };
-            let exit_action = request.profile.exit.clone();
+            let exit_action = run.profile.exit.clone();
             let close_note = match &exit_action {
                 Some(ExitAction::Input { .. }) => {
                     "Closing an idle Agent using its normal exit command"
@@ -226,7 +220,7 @@ impl AppServer {
                     "execution.idle_close_requested",
                     "system",
                     close_note,
-                    Some(a.request_id.clone()),
+                    Some(a.id.clone()),
                     json!({"attempt":a.number}),
                 )?;
                 Ok(true)
@@ -263,7 +257,7 @@ impl AppServer {
                     a.error = Some(format!("Idle exit was not confirmed: {e:#}. Inspect before retrying; no forced kill was sent."));
                     let card:Card=db.get(&a.card_id)?;
                     db.save(&canban_notifications::attention(&a.project_id,&a.card_id,a.error.as_deref().unwrap()))?;
-                    log(db,&card,"execution.idle_close_failed","system",a.error.as_deref().unwrap(),Some(a.request_id.clone()),json!({"attempt":a.number}))?;
+                    log(db,&card,"execution.idle_close_failed","system",a.error.as_deref().unwrap(),Some(a.id.clone()),json!({"attempt":a.number}))?;
                     db.save(&a)
                 })?;
             }

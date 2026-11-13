@@ -125,7 +125,8 @@ pub struct WorkflowRun {
     pub state: String,
     pub step: Option<String>,
     pub visit: u32,
-    pub request_id: Option<String>,
+    #[serde(default)]
+    pub attempt_id: Option<String>,
     pub trigger_event_id: Option<String>,
     pub input_digest: String,
     pub inputs: Value,

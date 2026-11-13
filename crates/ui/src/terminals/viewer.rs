@@ -16,10 +16,10 @@ fn context(ui: Ui) -> impl IntoElement {
                 Tone::Info,
             ));
         }
-        let req = row.request.as_ref().unwrap();
+        let att = row.attempt.as_ref().unwrap();
         body = body
             .child(label("Assignment"))
-            .child(read_text(req.instruction.clone()));
+            .child(read_text(att.instruction.clone()));
         let snapshot = ui.snapshot.get();
         for a in snapshot
             .attempts
@@ -53,7 +53,7 @@ fn context(ui: Ui) -> impl IntoElement {
             .reports
             .iter()
             .rev()
-            .find(|r| Some(r.request_id.as_str()) == row.outcome_request_id())
+            .find(|r| r.attempt_id.as_deref() == row.outcome_attempt_id())
         {
             body = body
                 .child(label("Saved outcome"))

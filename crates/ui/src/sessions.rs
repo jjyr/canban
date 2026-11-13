@@ -27,9 +27,7 @@ pub fn open(ui: Ui, card: String, profile: String) {
         "agent.open",
         json!({"card_id":card,"profile_id":profile}),
         move |v| {
-            if ui.location() == origin
-                && let Some(_request) = v["request_id"].as_str()
-            {
+            if ui.location() == origin && v["attempt_id"].as_str().is_some() {
                 ui.open_card_with_terminal(card_for_open, Some(conversation));
             }
         },

@@ -28,14 +28,14 @@ impl Entry {
         })
     }
     pub fn profile(&self) -> Option<&str> {
-        Some(&self.agent.as_ref()?.request.as_ref()?.profile.id)
+        Some(&self.agent.as_ref()?.attempt.as_ref()?.profile.id)
     }
     pub fn provider(&self) -> Option<(Icon, String)> {
         if let Some(profile) = self
             .agent
             .as_ref()
-            .and_then(|r| r.request.as_ref())
-            .map(|r| &r.profile)
+            .and_then(|r| r.attempt.as_ref())
+            .map(|a| &a.profile)
         {
             return Some(crate::profiles::provider(profile));
         }
@@ -230,8 +230,8 @@ impl Entry {
             .card
             .human_gate
             .as_ref()
-            .and_then(|g| g.request_id.as_ref())
-            .is_some_and(|r| Some(r.as_str()) == row.request.as_ref().map(|r| r.id.as_str()));
+            .and_then(|g| g.attempt_id.as_ref())
+            .is_some_and(|a| Some(a.as_str()) == row.attempt.as_ref().map(|a| a.id.as_str()));
         !waiting && matches!(self.status().as_str(), "idle" | "done")
     }
     pub fn listed(&self) -> bool {
@@ -242,12 +242,7 @@ impl Entry {
             row.attempt
                 .as_ref()
                 .map(|a| a.runtime_status())
-                .unwrap_or_else(|| {
-                    row.request
-                        .as_ref()
-                        .map(|r| r.state.as_str())
-                        .unwrap_or("unknown")
-                })
+                .unwrap_or("unknown")
                 .into()
         } else if let Some(r) = &self.saved.runtime {
             if r.connection != "connected" && r.state != "finished" {
@@ -394,13 +389,13 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                 .or_else(|| card.as_ref().map(|c| c.project_id.clone()))
         });
         let inferred_card = agent.is_none() && t.origin_card_id.is_none() && card.is_some();
-        let stage = agent.as_ref().and_then(|a| a.request.as_ref()).map(|r| {
+        let stage = agent.as_ref().and_then(|a| a.attempt.as_ref()).map(|att| {
             s.projects
                 .iter()
-                .find(|p| p.id == r.project_id)
-                .and_then(|p| p.workflow.stages.iter().find(|stage| stage.id == r.stage))
+                .find(|p| p.id == att.project_id)
+                .and_then(|p| p.workflow.stages.iter().find(|stage| stage.id == att.stage))
                 .map(|stage| stage.name.clone())
-                .unwrap_or_else(|| r.stage.clone())
+                .unwrap_or_else(|| att.stage.clone())
         });
         out.push(Entry {
             project_name: project_id

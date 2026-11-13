@@ -759,20 +759,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .min_h(px(0.))
                 .min_w(px(0.))
                 .child(
-                    nsh_base::h_resizable()
-                        .flex_1()
-                        .min_h(px(0.))
-                        .handle_accessibility_label("Resize Terminal sidebar")
-                        .render_handle(|_: &nsh_base::ResizeHandleContext| {
-                            view()
-                                .w(px(5.))
-                                .h_full()
-                                .items_center()
-                                .justify_center()
-                                .hover(|s| s.bg(ACCENT))
-                                .active(|s| s.bg(ACCENT))
-                                .child(view().w(px(1.)).h_full().bg(BORDER))
-                        })
+                    canban_ui_kit::split::horizontal_group("Resize Terminal sidebar")
                         .on_resize(move |sizes: &Vec<Points>| {
                             if !ui.narrow.get_untracked()
                                 && ui.terminal_sidebar.get_untracked()

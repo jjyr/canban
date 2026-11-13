@@ -12,7 +12,7 @@ pub(super) fn conversation(db: Db<'_>, card: &Card, profile: &Profile) -> Result
         profile_id: profile.id.clone(),
         provider: profile.command_name(),
         provider_session_id: None,
-        last_request_id: None,
+        last_attempt_id: None,
         created_at: now(),
     };
     db.save(&item)?;
@@ -20,34 +20,109 @@ pub(super) fn conversation(db: Db<'_>, card: &Card, profile: &Profile) -> Result
     Ok(item)
 }
 
+pub(super) fn retry_attempt(db: Db<'_>, card: &Card, previous: &Attempt) -> Result<Attempt> {
+    if previous.state == "unknown" {
+        let mut old = previous.clone();
+        old.state = "superseded".into();
+        db.save(&old)?;
+    }
+    let number = u32::try_from(db.counter(&format!("card-attempt:{}", card.id))?)?;
+    let mut next = canban_scheduler::attempt(
+        &previous.project_id,
+        &card.id,
+        number,
+        &previous.stage,
+        previous.trigger.clone(),
+        previous.profile.clone(),
+        previous.instruction.clone(),
+        previous.on_completed.clone(),
+    );
+    next.workflow_run_id = previous.workflow_run_id.clone();
+    next.workflow_step = previous.workflow_step.clone();
+    next.require_human_review = previous.require_human_review;
+    next.conversation_id = previous.conversation_id.clone();
+    next.resume_from = previous
+        .provider_session_id
+        .as_ref()
+        .map(|_| previous.id.clone())
+        .or_else(|| previous.resume_from.clone());
+    db.save(&next)?;
+    if let Some(cid) = &next.conversation_id
+        && let Ok(mut ctx) = db.get::<Conversation>(cid)
+    {
+        ctx.last_attempt_id = Some(next.id.clone());
+        db.save(&ctx)?;
+    }
+    if let Some(run_id) = &next.workflow_run_id
+        && let Ok(mut wf_run) = db.get::<WorkflowRun>(run_id)
+        && wf_run.active()
+        && wf_run.attempt_id.as_deref() == Some(&previous.id)
+    {
+        wf_run.attempt_id = Some(next.id.clone());
+        db.save(&wf_run)?;
+    }
+    Ok(next)
+}
+
 impl AppServer {
     pub(super) fn bind_session(&self, p: Value) -> Result<Value> {
+        let config = self.config();
         self.mutate("agent.bind", &p, |db| {
-            let request: Request = db.get(strp(&p, "request_id")?)?;
-            let number = u32::try_from(p["attempt"].as_u64().context("attempt required")?)?;
-            ensure!(
-                number == request.attempt,
-                "Cannot bind an obsolete invocation"
-            );
-            let mut run: Attempt = db.get(&Attempt::key(&request.id, number))?;
-            let card: Card = db.get(&request.card_id)?;
-            let mut context = conversation(db, &card, &request.profile)?;
             let session = strp(&p, "session_id")?;
             ensure!(
                 !session.is_empty() && session.len() < 512,
                 "Invalid provider session ID"
             );
+            let attempts = db.list::<Attempt>()?;
+            let (card, profile, mut run_opt) = if let Some(aid) = p["attempt_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let run: Attempt = db.get(aid)?;
+                ensure!(
+                    run.state != "continued",
+                    "Cannot bind an obsolete invocation"
+                );
+                let card: Card = db.get(&run.card_id)?;
+                let prof = run.profile.clone();
+                (card, prof, Some(run))
+            } else {
+                let card = super::resolve_card(db, &p)?;
+                let project: Project = db.get(&card.project_id)?;
+                let requested_prof = p["profile_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let active_run = attempts
+                    .iter()
+                    .rev()
+                    .find(|a| {
+                        a.card_id == card.id
+                            && a.state != "continued"
+                            && !a.finished()
+                            && requested_prof.is_none_or(|pid| a.profile.id == pid)
+                    })
+                    .cloned();
+                let prof = if let Some(run) = &active_run {
+                    run.profile.clone()
+                } else {
+                    canban_scheduler::select_in_project(&config, Some(&project), requested_prof)?
+                };
+                (card, prof, active_run)
+            };
+            let mut context = conversation(db, &card, &profile)?;
             if let Some(old) = &context.provider_session_id {
                 ensure!(
                     old == session,
                     "Provider conversation changed unexpectedly; inspect the selected terminal"
                 );
             }
-            let attempts = db.list::<Attempt>()?;
-            let machine = run
-                .location
+            let machine = run_opt
                 .as_ref()
+                .and_then(|r| r.location.as_ref())
                 .map(|l| l.machine.as_str())
+                .or_else(|| card.workspace.as_ref().map(|w| w.location.machine.as_str()))
                 .unwrap_or("local");
             ensure!(
                 !db.list::<Conversation>()?.iter().any(|c| c.id != context.id
@@ -65,17 +140,19 @@ impl AppServer {
                 "Provider session is already bound to another Card/profile on this machine"
             );
             context.provider_session_id = Some(session.into());
-            run.provider_session_id = Some(session.into());
-            run.conversation_id = Some(context.id.clone());
             db.save(&context)?;
-            db.save(&run)?;
+            if let Some(ref mut run) = run_opt {
+                run.provider_session_id = Some(session.into());
+                run.conversation_id = Some(context.id.clone());
+                db.save(run)?;
+            }
             Ok(json!({"bound":true,"conversation_id":context.id,"session_id":session}))
         })
     }
     pub(super) fn open_agent(&self, p: Value) -> Result<Value> {
         let config = self.config();
         self.mutate("agent.open", &p, |db| {
-            let mut card: Card = db.get(strp(&p, "card_id")?)?;
+            let mut card = super::resolve_card(db, &p)?;
             ensure!(
                 card.archived_at.is_none(),
                 "Restore this Card before opening its Agent"
@@ -108,20 +185,21 @@ impl AppServer {
                     "Profile has no resume command"
                 );
             }
-            if let Some(id) = &context.last_request_id {
-                let req: Request = db.get(id)?;
-                let run = db.get::<Attempt>(&Attempt::key(&req.id, req.attempt)).ok();
-                let live = run.as_ref().is_some_and(|a| {
-                    a.terminal.is_some()
-                        && a.observed.as_ref().is_none_or(|v| v["state"] != "finished")
-                });
-                if (matches!(req.state.as_str(), "queued" | "starting" | "unknown")
+            if let Some(id) = &context.last_attempt_id
+                && let Ok(att) = db.get::<Attempt>(id)
+            {
+                let live = att.terminal.is_some()
+                    && att
+                        .observed
+                        .as_ref()
+                        .is_none_or(|v| v["state"] != "finished");
+                if (matches!(att.state.as_str(), "queued" | "starting" | "unknown")
                     && !(card.human_gate.is_some()
-                        && req.state == "queued"
-                        && canban_scheduler::automatic(&req)))
+                        && att.state == "queued"
+                        && canban_scheduler::automatic(&att)))
                     || live
                 {
-                    return Ok(json!({"request_id":req.id,"reused":true,"attempt":run}));
+                    return Ok(json!({"attempt_id":att.id,"reused":true,"attempt":att}));
                 }
             }
             if p["fresh"] == true || context.provider != profile.command_name() {
@@ -136,37 +214,37 @@ impl AppServer {
             ))
             .trim_end()
             .to_owned();
-            let req = enqueue(
+            let att = enqueue(
                 db,
                 &config,
                 &mut card,
                 &project,
                 stage,
-                RequestTrigger::Interactive,
+                ExecutionTrigger::Interactive,
                 Some(&profile.id),
                 Some(init_prompt),
             )?
             .context("Agent was not queued")?;
-            context.last_request_id = Some(req.id.clone());
+            context.last_attempt_id = Some(att.id.clone());
             db.save(&context)?;
-            Ok(json!({"request_id":req.id,"reused":false}))
+            Ok(json!({"attempt_id":att.id,"reused":false,"attempt":att}))
         })
     }
     pub(super) fn continue_assignment(
         &self,
-        req: &Request,
+        att: &Attempt,
         old: &Attempt,
         snapshot: &Snapshot,
     ) -> Result<()> {
         let project = snapshot
             .projects
             .iter()
-            .find(|p| p.id == req.project_id)
+            .find(|p| p.id == att.project_id)
             .context("Project missing")?;
         let card = snapshot
             .cards
             .iter()
-            .find(|c| c.id == req.card_id)
+            .find(|c| c.id == att.card_id)
             .context("Card missing")?;
         let location = old
             .location
@@ -189,8 +267,7 @@ impl AppServer {
             &self.home,
             project,
             card,
-            req,
-            req.attempt,
+            att,
             snapshot,
             &endpoint.to_string_lossy(),
             &cli,
@@ -214,10 +291,17 @@ impl AppServer {
             "Retained Agent is no longer idle"
         );
         self.capture_output(old)?;
-        let mut run = old.clone();
-        run.id = Attempt::key(&req.id, req.attempt);
-        run.request_id = req.id.clone();
-        run.number = req.attempt;
+        let mut run = att.clone();
+        run.runtime_home = old.runtime_home.clone();
+        run.workspace = old.workspace.clone();
+        run.location = old.location.clone();
+        run.owner_core_id = old.owner_core_id.clone();
+        run.core_id = old.core_id.clone();
+        run.terminal = old.terminal.clone();
+        run.cwd = old.cwd.clone();
+        run.conversation_id = old.conversation_id.clone();
+        run.provider_session_id = old.provider_session_id.clone();
+        run.connection_state = old.connection_state.clone();
         run.state = "running".into();
         run.input_path = input.clone();
         run.output_path = None;
@@ -228,28 +312,26 @@ impl AppServer {
         run.completion_turn = None;
         run.turn_ended_at = None;
         run.close_requested_at = None;
-        run.created_at = now();
         run.observed = Some(json!({"state":"live","status":{"state":"working"}}));
+        run.lifecycle = old.lifecycle.clone();
         run.lifecycle.observed_at = Some(now());
         run.lifecycle.waiting = None;
         run.lifecycle.idle_since = None;
+        run.lifecycle.close_reason.clear();
         self.store.lock().unwrap().write(|db| {
             let mut previous: Attempt = db.get(&old.id)?;
             previous.state = "continued".into();
             db.save(&previous)?;
             db.save(&run)?;
-            let mut current: Request = db.get(&req.id)?;
-            current.state = "running".into();
-            db.save(&current)?;
-            let mut context = conversation(db, card, &req.profile)?;
-            context.last_request_id = Some(req.id.clone());
+            let mut context = conversation(db, card, &att.profile)?;
+            context.last_attempt_id = Some(run.id.clone());
             db.save(&context)?;
             for mut q in db
                 .list::<Question>()?
                 .into_iter()
-                .filter(|q| q.request_id == req.id && q.attempt == 0)
+                .filter(|q| q.attempt_id.as_deref() == Some(&run.id) && q.state == "pending")
             {
-                q.attempt = req.attempt;
+                q.state = "delivered".into();
                 db.save(&q)?;
             }
             log(
@@ -258,14 +340,14 @@ impl AppServer {
                 "execution.continued",
                 "system",
                 "Started a new assignment in the retained Agent terminal",
-                Some(req.id.clone()),
-                json!({"previous_attempt":old.id,"attempt":req.attempt}),
+                Some(run.id.clone()),
+                json!({"previous_attempt":old.id,"attempt":run.number}),
             )
         })?;
         let prompt = std::fs::read_to_string(self.home.join(&input))?;
-        let run_dir = canban_context::run_dir(&runtime_home, req, req.attempt);
-        let req_quoted = canban_context::shell_quote(&req.id);
-        let attempt_str = req.attempt.to_string();
+        let run_dir = canban_context::run_dir(&runtime_home, &run);
+        let proj_quoted = canban_context::shell_quote(&card.project_id);
+        let card_number = card.number.to_string();
         let run_dir_quoted = canban_context::shell_quote(&run_dir.to_string_lossy());
         let text = canban_context::render_template(
             include_str!(concat!(
@@ -274,8 +356,8 @@ impl AppServer {
             ))
             .trim_end(),
             &[
-                ("request_id", &req_quoted),
-                ("attempt", &attempt_str),
+                ("project_id", &proj_quoted),
+                ("card_number", &card_number),
                 ("run_dir", &run_dir_quoted),
                 ("prompt", &prompt),
             ],
@@ -285,10 +367,7 @@ impl AppServer {
                 let mut run: Attempt = db.get(&run.id)?;
                 run.state = "unknown".into();
                 run.error = Some(format!("Assignment delivery uncertain: {e:#}"));
-                db.save(&run)?;
-                let mut r: Request = db.get(&req.id)?;
-                r.state = "unknown".into();
-                db.save(&r)
+                db.save(&run)
             })?;
             return Err(e);
         }
@@ -317,7 +396,7 @@ impl AppServer {
         let saved = self.mutate(method, &p, |db| {
             let card: Card = db.get(&run.card_id)?;
             log(db, &card, "execution.control_requested", "user",
-                "User requested terminal control", Some(run.request_id.clone()),
+                "User requested terminal control", Some(run.id.clone()),
                 json!({"attempt":run.number,"action":method}))?;
             execute = true;
             Ok(json!({"state":"unknown","message":"Control requested; inspect the terminal before repeating an uncertain action"}))
@@ -356,7 +435,7 @@ impl AppServer {
                 },
                 "user",
                 "Terminal control delivery observed",
-                Some(run.request_id.clone()),
+                Some(run.id.clone()),
                 json!({"attempt":run.number,"result":result}),
             )?;
             Ok(())
@@ -365,27 +444,32 @@ impl AppServer {
         Ok(result)
     }
     pub(super) fn reply(&self, p: Value) -> Result<Value> {
-        let question: Question = self
-            .store
-            .lock()
-            .unwrap()
-            .db()
-            .get(strp(&p, "question_id")?)?;
-        let request: Request = self
-            .store
-            .lock()
-            .unwrap()
-            .db()
-            .get(strp(&p, "request_id")?)?;
-        ensure!(
-            question.request_id == request.id
-                && p["attempt"].as_u64() == Some(u64::from(question.attempt)),
-            "Reply belongs to another invocation"
-        );
+        let (question, attempt_opt) = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let q: Question = db.get(strp(&p, "question_id")?)?;
+            if p["card_id"].as_str().is_some_and(|s| !s.trim().is_empty())
+                || super::parse_card_number(&p["card"]).is_some()
+            {
+                let resolved = super::resolve_card(db, &p)?;
+                ensure!(resolved.id == q.card_id, "Question belongs to another Card");
+            }
+            let att = q
+                .attempt_id
+                .as_ref()
+                .and_then(|aid| db.get::<Attempt>(aid).ok());
+            (q, att)
+        };
         let body = strp(&p, "body")?;
-        let file = canban_context::run_dir(&self.home, &request, question.attempt)
-            .join("replies")
-            .join(format!("{}.md", question.id));
+        let file = if let Some(att) = &attempt_opt {
+            canban_context::run_dir(&self.home, att)
+                .join("replies")
+                .join(format!("{}.md", question.id))
+        } else {
+            canban_context::card_dir(&self.home, &question.project_id, &question.card_id)
+                .join("replies")
+                .join(format!("{}.md", question.id))
+        };
         // The transaction's operation key makes repeated reply publication idempotent.
         self.mutate("agent.reply", &p, |db| {
             let mut q: Question = db.get(&question.id)?;
@@ -402,7 +486,7 @@ impl AppServer {
                 "comment.replied",
                 &format!("agent:{}", q.profile_id),
                 body,
-                Some(request.id.clone()),
+                q.attempt_id.clone(),
                 json!({"reply_to":q.comment_id,"question_id":q.id,"path":q.reply_path}),
             )?;
             Ok(json!({"accepted":true,"question_id":q.id}))

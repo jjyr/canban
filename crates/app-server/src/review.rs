@@ -3,7 +3,6 @@ pub(super) fn activity_warning(db: Db<'_>, card: &Card) -> Result<Option<String>
     Ok(canban_types::agent_activity_warning(
         &card.id,
         &db.list::<Attempt>()?,
-        &db.list::<Request>()?,
     ))
 }
 impl AppServer {
@@ -96,11 +95,11 @@ impl AppServer {
                     }
                     if !completed_deliver
                         && let Some(gate) = gate
-                        && let Some(request) = gate.request_id
+                        && let Some(aid) = gate.attempt_id
                     {
-                        let request: Request = db.get(&request)?;
-                        if request.state == "completed" {
-                            crate::workflow::advance(db, &self.config(), &mut current, &request)?;
+                        let att: Attempt = db.get(&aid)?;
+                        if att.state == "completed" {
+                            crate::workflow::advance(db, &self.config(), &mut current, Some(&att))?;
                         }
                     }
                     log(db,&current,"review.merged","user",&format!("Merged into {}",plan.target_branch),None,json!({"commit":commit,"target_branch":plan.target_branch,"request_key":key}))?;
@@ -373,7 +372,7 @@ impl AppServer {
     /// `Ok(false)` when this run still holds the head of the queue (settling, conflict handed
     /// to `@merger`, or waiting on a transient main-checkout condition).
     fn execute_workflow_delivery(&self, run_id: &str) -> Result<bool> {
-        let (card, project, run, has_pending_requests, settling_agent) = {
+        let (card, project, run, has_pending_attempts, settling_agent) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
             let Ok(run) = db.get::<WorkflowRun>(run_id) else {
@@ -388,16 +387,16 @@ impl AppServer {
             }
             let project: Project = db.get(&card.project_id)?;
             let project = self.bound_project(&project, &card);
-            let requests = db.list::<Request>()?;
-            let has_pending_requests = requests.iter().any(|r| {
-                r.card_id == card.id
+            let attempts = db.list::<Attempt>()?;
+            let has_pending_attempts = attempts.iter().any(|a| {
+                a.card_id == card.id
                     && matches!(
-                        r.state.as_str(),
+                        a.state.as_str(),
                         "queued" | "starting" | "running" | "working" | "unknown"
                     )
             });
             let now_ms = now();
-            let settling_agent = db.list::<Attempt>()?.into_iter().any(|a| {
+            let settling_agent = attempts.into_iter().any(|a| {
                 if a.card_id != card.id || a.terminal.is_none() || a.agent_stopped() {
                     return false;
                 }
@@ -410,7 +409,7 @@ impl AppServer {
                     .unwrap_or(a.created_at);
                 now_ms.saturating_sub(anchor) < Self::DELIVERY_AGENT_SETTLE_MS
             });
-            (card, project, run, has_pending_requests, settling_agent)
+            (card, project, run, has_pending_attempts, settling_agent)
         };
         let config = self.config();
         if card.hold_auto_merge {
@@ -451,7 +450,7 @@ impl AppServer {
             self.emit("application", Some(card.id));
             return Ok(true);
         }
-        if has_pending_requests || settling_agent {
+        if has_pending_attempts || settling_agent {
             return Ok(false);
         }
         let _merging = self.track_merging(&card.id);

@@ -9,7 +9,6 @@ pub struct OverviewRow {
     pub group: String,
     pub card: Card,
     pub project_name: String,
-    pub request: Option<Request>,
     pub attempt: Option<Attempt>,
     pub reasons: Vec<OverviewReason>,
     pub history: Vec<String>,
@@ -24,7 +23,7 @@ impl OverviewRow {
         !self.reasons.is_empty()
     }
     /// A follow-up invocation must not hide the result awaiting human handling.
-    pub fn outcome_request_id(&self) -> Option<&str> {
+    pub fn outcome_attempt_id(&self) -> Option<&str> {
         if self
             .reasons
             .iter()
@@ -33,11 +32,11 @@ impl OverviewRow {
                 .card
                 .human_gate
                 .as_ref()
-                .and_then(|g| g.request_id.as_deref())
+                .and_then(|g| g.attempt_id.as_deref())
         {
             return Some(id);
         }
-        self.request.as_ref().map(|r| r.id.as_str())
+        self.attempt.as_ref().map(|a| a.id.as_str())
     }
 }
 
@@ -51,53 +50,41 @@ pub const GROUPS: [&str; 6] = [
 ];
 
 pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
-    let mut requests: BTreeMap<String, Vec<&Request>> = BTreeMap::new();
-    for r in &snapshot.requests {
-        requests
-            .entry(Conversation::key(&r.card_id, &r.profile.id))
+    let mut attempts: BTreeMap<String, Vec<&Attempt>> = BTreeMap::new();
+    for a in &snapshot.attempts {
+        attempts
+            .entry(Conversation::key(&a.card_id, &a.profile.id))
             .or_default()
-            .push(r);
+            .push(a);
     }
-    let attempt = |r: &Request| {
-        snapshot
-            .attempts
-            .iter()
-            .filter(|a| a.request_id == r.id)
-            .max_by_key(|a| a.number)
-    };
     let mut rows = Vec::new();
-    for (key, mut rs) in requests {
-        rs.sort_by_key(|r| r.created_at);
+    for (key, mut rs) in attempts {
+        rs.sort_by_key(|a| (a.created_at, a.number));
         // Retained live/uncertain invocations take precedence over queued followups.
-        let req = rs
+        let run = *rs
             .iter()
             .rev()
-            .find(|r| {
-                attempt(r).is_some_and(|a| {
-                    !a.finished() && (a.terminal.is_some() || a.state == "unknown")
-                })
-            })
+            .find(|a| !a.finished() && (a.terminal.is_some() || a.state == "unknown"))
             .or_else(|| {
                 rs.iter()
                     .rev()
-                    .find(|r| matches!(r.state.as_str(), "queued" | "starting" | "unknown"))
+                    .find(|a| matches!(a.state.as_str(), "queued" | "starting" | "unknown"))
             })
             .unwrap_or_else(|| rs.last().unwrap());
-        let Some(card) = snapshot.cards.iter().find(|c| c.id == req.card_id) else {
+        let Some(card) = snapshot.cards.iter().find(|c| c.id == run.card_id) else {
             continue;
         };
-        let run = attempt(req);
         let mut reasons = Vec::new();
         let gate = card.human_gate.as_ref().filter(|g| {
-            g.request_id
+            g.attempt_id
                 .as_ref()
-                .is_some_and(|id| rs.iter().any(|r| &r.id == id))
+                .is_some_and(|id| rs.iter().any(|a| &a.id == id))
         });
         let review = gate.is_some_and(|g| {
             snapshot
-                .requests
+                .attempts
                 .iter()
-                .any(|r| Some(&r.id) == g.request_id.as_ref() && r.state == "completed")
+                .any(|a| Some(&a.id) == g.attempt_id.as_ref() && a.state == "completed")
         }) && card.archived_at.is_none();
         if card.archived_at.is_none()
             && let Some(g) = gate
@@ -107,10 +94,14 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                 message: g.reason.clone(),
             });
         }
-        let runtime = run.map(|a| a.runtime_status()).unwrap_or("unknown");
-        if let Some(a) = run {
+        let runtime = if run.terminal.is_some() || run.observed.is_some() {
+            run.runtime_status()
+        } else {
+            "unknown"
+        };
+        if run.terminal.is_some() || run.observed.is_some() {
             if runtime == "blocked" {
-                let msg = a
+                let msg = run
                     .lifecycle
                     .waiting
                     .as_ref()
@@ -121,21 +112,22 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                     message: msg,
                 });
             }
-            let awaiting_first_status = a.connection_state == "connected"
-                && a.observed
+            let awaiting_first_status = run.connection_state == "connected"
+                && run
+                    .observed
                     .as_ref()
                     .is_some_and(|v| v["status"]["state"].as_str().is_none())
-                && now().saturating_sub(a.created_at) < 3_000;
-            if !a.finished()
-                && (runtime == "unknown" && a.state != "starting" && !awaiting_first_status
-                    || a.close_state == "error")
+                && now().saturating_sub(run.created_at) < 3_000;
+            if !run.finished()
+                && (runtime == "unknown" && run.state != "starting" && !awaiting_first_status
+                    || run.close_state == "error")
             {
                 reasons.push(OverviewReason {
                     source: "recovery".into(),
-                    message: a.error.clone().unwrap_or_else(|| {
+                    message: run.error.clone().unwrap_or_else(|| {
                         format!(
                             "Runtime status unavailable ({}) · inspect original terminal",
-                            a.connection_state
+                            run.connection_state
                         )
                     }),
                 });
@@ -144,12 +136,12 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                     source: "runtime".into(),
                     message: "Agent reported an error; inspect terminal".into(),
                 });
-            } else if !a.finished()
-                && a.close_state.is_empty()
+            } else if !run.finished()
+                && run.close_state.is_empty()
                 && matches!(runtime, "idle" | "done")
-                && matches!(req.state.as_str(), "running" | "working")
+                && matches!(run.state.as_str(), "running" | "working")
             {
-                let msg = if req.trigger.is_automatic() {
+                let msg = if run.trigger.is_automatic() {
                     "Agent stopped without reporting an outcome — inspect terminal".into()
                 } else {
                     "Agent finished its turn and is waiting for your input".into()
@@ -159,15 +151,15 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                     message: msg,
                 });
             }
-        } else if matches!(req.state.as_str(), "unknown" | "needs_report" | "blocked") {
+        } else if matches!(run.state.as_str(), "unknown" | "needs_report" | "blocked") {
             reasons.push(OverviewReason {
                 source: "recovery".into(),
-                message: format!("Execution {} · inspect before retrying", req.state),
+                message: format!("Execution {} · inspect before retrying", run.state),
             });
         }
         // An unresolved delivery must be visible independently of the Card gate.
         for q in snapshot.questions.iter().filter(|q| {
-            q.card_id == card.id && q.profile_id == req.profile.id && q.state == "delivery_unknown"
+            q.card_id == card.id && q.profile_id == run.profile.id && q.state == "delivery_unknown"
         }) {
             reasons.push(OverviewReason {
                 source: "question".into(),
@@ -181,13 +173,15 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
             "Needs attention"
         } else if review {
             "Ready for review"
-        } else if req.state == "queued" && run.is_none_or(|a| a.finished()) {
+        } else if run.state == "queued" {
             "Queued"
-        } else if matches!(runtime, "working" | "unknown") && run.is_some_and(|a| !a.finished())
-            || req.state == "starting"
+        } else if matches!(runtime, "working" | "unknown")
+            && (run.terminal.is_some() || run.observed.is_some())
+            && !run.finished()
+            || run.state == "starting"
         {
             "Working"
-        } else if matches!(runtime, "idle" | "done") {
+        } else if matches!(runtime, "idle" | "done") && !run.finished() {
             "Idle"
         } else {
             "Closed"
@@ -202,15 +196,9 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                 .find(|p| p.id == card.project_id)
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| card.project_id.clone()),
-            request: Some((*req).clone()),
-            attempt: run.cloned(),
+            attempt: Some(run.clone()),
             reasons,
-            history: snapshot
-                .attempts
-                .iter()
-                .filter(|a| rs.iter().any(|r| a.request_id == r.id))
-                .map(|a| a.id.clone())
-                .collect(),
+            history: rs.iter().map(|a| a.id.clone()).collect(),
         });
     }
     // Configuration/routing/recovery can fail before there is an invocation.
@@ -237,7 +225,6 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                 .find(|p| p.id == card.project_id)
                 .map(|p| p.name.clone())
                 .unwrap_or_default(),
-            request: None,
             attempt: None,
             history: vec![],
             reasons: vec![OverviewReason {
@@ -255,9 +242,9 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
         (
             GROUPS.iter().position(|g| *g == r.group).unwrap_or(6),
             std::cmp::Reverse(
-                r.request
+                r.attempt
                     .as_ref()
-                    .map(|r| r.created_at)
+                    .map(|a| a.created_at)
                     .unwrap_or(r.card.created_at),
             ),
             r.id.clone(),

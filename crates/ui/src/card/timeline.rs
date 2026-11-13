@@ -32,8 +32,8 @@ pub fn entries(events: &[Event]) -> Vec<(Event, bool)> {
                 && (event.data["comment_replied"] == true
                     || events.iter().any(|other| {
                         other.kind == "comment.replied"
-                            && other.request_id == event.request_id
-                            && event.request_id.is_some()
+                            && other.data["attempt_id"] == event.data["attempt_id"]
+                            && event.data["attempt_id"].as_str().is_some()
                             && ((event.data["report_id"].as_str().is_some()
                                 && other.data["report_id"] == event.data["report_id"])
                                 || (event.data["path"].as_str().is_some()
@@ -99,11 +99,13 @@ fn noise(kind: &str) -> bool {
 /// Transient runtime input waits (e.g. folder trust or sign-in prompts) are
 /// actionable while active, but become historical noise once resolved.
 fn resolved_input_wait(event: &Event, events: &[Event]) -> bool {
+    let Some(attempt_id) = event.data["attempt_id"].as_str() else {
+        return false;
+    };
     event.kind == "execution.input_required"
-        && event.request_id.is_some()
         && events.iter().any(|other| {
             other.sequence > event.sequence
-                && other.request_id == event.request_id
+                && other.data["attempt_id"].as_str() == Some(attempt_id)
                 && matches!(
                     other.kind.as_str(),
                     "execution.input_resolved"
@@ -146,7 +148,6 @@ fn visible(events: &[Event], target: Option<u64>) -> Vec<(Event, bool)> {
     }
     deduped
 }
-
 /// Groups consecutive milestone updates into collapsible runs and computes
 /// continuous vertical spine flags across the projected Timeline.
 pub(crate) fn project_rows(
@@ -226,37 +227,37 @@ pub(crate) fn project_rows(
     rows
 }
 
-fn execution(ui: Ui, reading: Reading, request_id: String) -> impl IntoElement {
+fn execution(ui: Ui, reading: Reading, attempt_id: String) -> impl IntoElement {
     dynamic(move || {
-        let request = ui.request.get();
-        if request != request_id {
+        let selected = ui.request.get();
+        if selected != attempt_id {
             return view().into_element();
         }
-        let req = ui.snapshot.with(|s| {
-            s.requests
+        let run = ui.snapshot.with(|s| {
+            s.attempts
                 .iter()
-                .find(|r| r.id == request && r.card_id == ui.card_id())
+                .find(|a| a.id == selected && a.card_id == ui.card_id())
                 .cloned()
         });
-        if let Some(req) = req {
-            let request_id = req.id.clone();
+        if let Some(run) = run {
+            let attempt_id = run.id.clone();
             let target = element_ref();
             let pending = stored(false);
             view()
                 .element_ref(&target)
                 .on_layout(move |_: &Bounds<Points>| {
-                    if reading.revealed_request.get() == request_id || pending.replace(true) {
+                    if reading.revealed_request.get() == attempt_id || pending.replace(true) {
                         return;
                     }
-                    let request_id = request_id.clone();
+                    let attempt_id = attempt_id.clone();
                     ui.spawn(async move {
                         next_frame().await;
                         next_frame().await;
                         if let Some(bounds) = reading.bounds(target).await
-                            && ui.request.get_untracked() == request_id
+                            && ui.request.get_untracked() == attempt_id
                             && ui.card_id() == ui.card.get_untracked()
                         {
-                            reading.revealed_request.replace(request_id);
+                            reading.revealed_request.replace(attempt_id);
                             reading.follow.set(false);
                             reading.scroll.scroll_to(
                                 Point::new(px(0.), px((bounds.origin.y.0 - 12.).max(0.))),
@@ -275,7 +276,7 @@ fn execution(ui: Ui, reading: Reading, request_id: String) -> impl IntoElement {
                         ui.clear_output();
                     },
                 ))
-                .child(crate::components::run_panel(ui, req))
+                .child(crate::components::run_panel(ui, run))
                 .child(when(
                     move || !ui.output.get().is_empty(),
                     move || crate::components::output_panel(ui),
@@ -329,18 +330,24 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
                             }),
                         }
                     });
-                    // One detail owner per request, placed inside the right column of its
+                    // One detail owner per attempt, placed inside the right column of its
                     // earliest rendered row so the vertical spine stays unbroken.
-                    let trailing_detail = row.event.request_id.clone().and_then(|request| {
-                        let first = rows.with(|all| {
-                            all.iter()
-                                .filter(|r| r.event.request_id.as_ref() == Some(&request))
-                                .map(|r| r.event.sequence)
-                                .min()
+                    let trailing_detail = row.event.data["attempt_id"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .and_then(|attempt_id| {
+                            let first = rows.with(|all| {
+                                all.iter()
+                                    .filter(|r| {
+                                        r.event.data["attempt_id"].as_str()
+                                            == Some(attempt_id.as_str())
+                                    })
+                                    .map(|r| r.event.sequence)
+                                    .min()
+                            });
+                            (first == Some(sequence))
+                                .then(|| execution(ui, reading, attempt_id).into_element())
                         });
-                        (first == Some(sequence))
-                            .then(|| execution(ui, reading, request).into_element())
-                    });
                     view()
                         .element_ref(&target)
                         .on_layout(move |_: &Bounds<Points>| {
@@ -378,14 +385,14 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
             },
         )))
         .child(dynamic(move || {
-            let request = ui.request.get();
-            if !request.is_empty()
+            let attempt_id = ui.request.get();
+            if !attempt_id.is_empty()
                 && !rows.with(|all| {
                     all.iter()
-                        .any(|r| r.event.request_id.as_ref() == Some(&request))
+                        .any(|r| r.event.data["attempt_id"].as_str() == Some(&attempt_id))
                 })
             {
-                execution(ui, reading, request).into_element()
+                execution(ui, reading, attempt_id).into_element()
             } else {
                 view().into_element()
             }
@@ -396,7 +403,7 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
 mod tests {
     use super::*;
 
-    fn make_event(seq: u64, kind: &str, request: &str, message: &str) -> Event {
+    fn make_event(seq: u64, kind: &str, attempt: &str, message: &str) -> Event {
         Event {
             id: format!("e{seq}"),
             sequence: seq,
@@ -405,8 +412,11 @@ mod tests {
             kind: kind.into(),
             actor: "agent:developer".into(),
             message: message.into(),
-            request_id: (!request.is_empty()).then(|| request.into()),
-            data: serde_json::json!({}),
+            data: if attempt.is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::json!({"attempt_id": attempt})
+            },
             created_at: 1,
         }
     }
@@ -591,8 +601,7 @@ mod tests {
             kind: "execution.reported".into(),
             actor: "agent:developer".into(),
             message: "completed: Answer".into(),
-            request_id: Some("r".into()),
-            data: serde_json::json!({"report_id":"result"}),
+            data: serde_json::json!({"report_id":"result","attempt_id":"r"}),
             created_at: 1,
         };
         let reply = Event {
@@ -617,8 +626,7 @@ mod tests {
             kind: "execution.reported".into(),
             actor: "agent:developer".into(),
             message: "completed: Answer".into(),
-            request_id: Some("r".into()),
-            data: serde_json::json!({"report_id":"result","path":null}),
+            data: serde_json::json!({"report_id":"result","path":null,"attempt_id":"r"}),
             created_at: 1,
         };
         let reply = Event {
@@ -643,8 +651,7 @@ mod tests {
             kind: "comment.replied".into(),
             actor: "agent:agy".into(),
             message: "Detailed answer".into(),
-            request_id: Some("r".into()),
-            data: serde_json::json!({"question_id":"q:agy","path":"replies/q.md"}),
+            data: serde_json::json!({"question_id":"q:agy","path":"replies/q.md","attempt_id":"r"}),
             created_at: 1,
         };
         let report = Event {
@@ -652,7 +659,7 @@ mod tests {
             sequence: 2,
             kind: "execution.reported".into(),
             message: "completed: Summary".into(),
-            data: serde_json::json!({"report_id":"rep1","path":null,"state":"completed","comment_replied":true}),
+            data: serde_json::json!({"report_id":"rep1","path":null,"state":"completed","comment_replied":true,"attempt_id":"r"}),
             ..reply.clone()
         };
         let rows = visible(&[reply, report], None);
@@ -670,9 +677,8 @@ mod tests {
             kind: "execution.reported".into(),
             actor: "agent:developer".into(),
             message: "Blocked".into(),
-            request_id: Some("r".into()),
             created_at: 1,
-            data: serde_json::json!({}),
+            data: serde_json::json!({"attempt_id":"r"}),
         };
         let reply = Event {
             id: "reply".into(),
@@ -697,9 +703,8 @@ mod tests {
             kind: kind.into(),
             actor: "user".into(),
             message: kind.into(),
-            request_id: Some("r".into()),
             created_at: 1,
-            data: serde_json::json!({"path":"report.md"}),
+            data: serde_json::json!({"path":"report.md","attempt_id":"r"}),
         };
         let mut events = vec![
             make("comment.created", 1),

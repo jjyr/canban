@@ -300,11 +300,11 @@ fn render_milestone(
                 .children(fold.map(fold_pill)),
         );
 
-    if let Some(request) = event.request_id.clone()
+    if let Some(attempt_id) = event.data["attempt_id"].as_str().map(str::to_owned)
         && matches!(style, MilestoneStyle::Danger | MilestoneStyle::Attention)
     {
         line = line.child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
-            crate::terminals::open_request(ui, &request)
+            crate::terminals::open_request(ui, &attempt_id)
         }));
     }
     line = line.child(
@@ -411,14 +411,14 @@ fn render_narrative(
         .child(label(actor).font_weight(FontWeight::MEDIUM))
         .child(muted(crate::components::activity::age(event.created_at)))
         .child(view().flex_1());
-    if let Some(request) = event.request_id.clone() {
-        let details = request.clone();
+    if let Some(attempt_id) = event.data["attempt_id"].as_str().map(str::to_owned) {
+        let details = attempt_id.clone();
         heading = heading
             .child(compact_action("Details", Variant::Quiet, move |_| {
                 ui.request.set(details.clone())
             }))
             .child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
-                crate::terminals::open_request(ui, &request)
+                crate::terminals::open_request(ui, &attempt_id)
             }));
     }
     let measured = signal(0f32);
@@ -510,8 +510,33 @@ fn github_login(ui: Ui) -> Option<String> {
     })
 }
 
-/// Agents use their provider icon; the local user uses the GitHub avatar when
-/// signed in ("ME" while signed out or before the image loads); other actors
+fn agent_avatar_icon(ui: Ui, event: &Event, profile: &str) -> Icon {
+    if let Some(mark) = ui.snapshot.with_untracked(|s| {
+        event.data["attempt_id"]
+            .as_str()
+            .and_then(|id| s.attempts.iter().find(|a| a.id == id))
+            .map(|a| crate::profiles::provider(&a.profile).0)
+    }) {
+        return mark;
+    }
+    let found = ui
+        .all_profiles
+        .with_untracked(|all| all.iter().find(|p| p.id == profile).cloned())
+        .or_else(|| {
+            ui.profiles
+                .with_untracked(|all| all.iter().find(|p| p.id == profile).cloned())
+        });
+    if let Some(p) = found {
+        return ui.snapshot.with_untracked(|s| {
+            let project = s.projects.iter().find(|proj| proj.id == event.project_id);
+            crate::profiles::effective_provider(&p, project).0
+        });
+    }
+    crate::profiles::agent_icon(profile)
+}
+
+/// Agents use their colored provider icon; the local user uses the GitHub avatar
+/// when signed in ("ME" while signed out or before the image loads); other actors
 /// keep two-letter initials.
 fn avatar(ui: Ui, event: &Event) -> AnyElement {
     let frame = || {
@@ -535,24 +560,10 @@ fn avatar(ui: Ui, event: &Event) -> AnyElement {
             .text_color(MUTED)
     };
     if let Some(profile) = event.actor.strip_prefix("agent:") {
-        let mark = ui
-            .snapshot
-            .with_untracked(|s| {
-                event
-                    .request_id
-                    .as_ref()
-                    .and_then(|id| s.requests.iter().find(|r| &r.id == id))
-                    .map(|r| r.profile.clone())
-            })
-            .or_else(|| {
-                ui.profiles
-                    .with_untracked(|all| all.iter().find(|p| p.id == profile).cloned())
-            })
-            .map(|p| crate::profiles::provider(&p).0)
-            .unwrap_or(Icon::Agent);
+        let mark = agent_avatar_icon(ui, event, profile);
         return frame()
             .tooltip(hint_tooltip(format!("@{profile}")))
-            .child(icon(mark).w(px(16.)).h(px(16.)))
+            .child(icon_colored(mark, 16.))
             .into_element();
     }
     if event.actor == "user" {
@@ -577,4 +588,131 @@ fn avatar(ui: Ui, event: &Event) -> AnyElement {
         .collect::<String>()
         .to_uppercase();
     frame().child(initials(&short)).into_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nsh_core::{ApproxTextEngine, Core, geometry::size};
+
+    fn sample_event(actor: &str, attempt_id: Option<&str>) -> Event {
+        Event {
+            id: "ev-1".into(),
+            project_id: "proj-1".into(),
+            card_id: "card-1".into(),
+            sequence: 1,
+            kind: "comment.replied".into(),
+            actor: actor.into(),
+            message: "Done".into(),
+            data: match attempt_id {
+                Some(id) => json!({"attempt_id": id}),
+                None => json!({}),
+            },
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn agent_avatar_icon_resolves_attempt_override_disabled_and_direct_engine() {
+        #[component]
+        fn ProbeRoot() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut cfg = Config::default();
+            if let Some(claude) = cfg.profiles.iter_mut().find(|p| p.id == "claude") {
+                claude.enabled = false;
+            }
+            ui.apply_config(&cfg);
+
+            // Disabled profile in `all_profiles` still keeps its provider icon on historical comments.
+            assert_eq!(
+                agent_avatar_icon(ui, &sample_event("agent:claude", None), "claude"),
+                Icon::Claude
+            );
+
+            // Identity profile (`@developer`) defaults to Codex, then respects Project `agent_overrides`.
+            assert_eq!(
+                agent_avatar_icon(ui, &sample_event("agent:developer", None), "developer"),
+                Icon::Codex
+            );
+            let mut project = Project {
+                github: None,
+                delivery_mode: DeliveryMode::default(),
+                agent_overrides: Default::default(),
+                tags: Vec::new(),
+                id: "proj-1".into(),
+                name: "Canban".into(),
+                directory: "/tmp/proj".into(),
+                location: None,
+                workflow: Workflow::default(),
+                target_branch: None,
+                created_at: 0,
+            };
+            project
+                .agent_overrides
+                .insert("developer".into(), "agy".into());
+            let mut snap = Snapshot::default();
+            snap.projects.push(project);
+            ui.snapshot.set(snap);
+            assert_eq!(
+                agent_avatar_icon(ui, &sample_event("agent:developer", None), "developer"),
+                Icon::Agy
+            );
+
+            // Explicit Attempt snapshot takes precedence over later Project overrides.
+            let mut gemini_profile = cfg
+                .profiles
+                .iter()
+                .find(|p| p.id == "developer")
+                .unwrap()
+                .clone();
+            gemini_profile.preset = Some("gemini".into());
+            let mut att = canban_scheduler::attempt(
+                "proj-1",
+                "card-1",
+                1,
+                "develop",
+                "comment",
+                gemini_profile,
+                "Reply".into(),
+                None,
+            );
+            att.id = "att-gemini".into();
+            ui.snapshot.update(|s| s.attempts.push(att));
+            assert_eq!(
+                agent_avatar_icon(
+                    ui,
+                    &sample_event("agent:developer", Some("att-gemini")),
+                    "developer"
+                ),
+                Icon::Gemini
+            );
+
+            // Direct engine actor without a registered Profile entry resolves via `agent_icon`,
+            // and unknown custom names fall back to `Icon::Agent`.
+            let empty_ui = Ui::new();
+            assert_eq!(
+                agent_avatar_icon(empty_ui, &sample_event("agent:copilot", None), "copilot"),
+                Icon::Copilot
+            );
+            assert_eq!(
+                agent_avatar_icon(
+                    empty_ui,
+                    &sample_event("agent:custom-bot", None),
+                    "custom-bot"
+                ),
+                Icon::Agent
+            );
+
+            view()
+                .child(timeline_item(ui, sample_event("agent:developer", None)))
+                .child(timeline_item(ui, sample_event("agent:claude", None)))
+                .child(timeline_item(empty_ui, sample_event("agent:copilot", None)))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(800.0), px(600.0)));
+        core.mount_root(&nsh_core::element::Root::of::<ProbeRoot>());
+        let batch = core.commit().expect("initial mount batch");
+        assert!(!batch.items.is_empty());
+    }
 }

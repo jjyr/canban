@@ -35,17 +35,18 @@ fn fixture() -> Snapshot {
         links: vec![],
         card_ids: vec![],
     });
-    let mut req = canban_scheduler::request(
+    let mut att = canban_scheduler::attempt(
         "p1",
         "c1",
+        1,
         "develop",
         "interactive",
         Config::default().profiles[0].clone(),
         "Discuss".into(),
         None,
     );
-    req.id = "request".into();
-    s.requests.push(req);
+    att.id = "attempt-1".into();
+    s.attempts.push(att);
     s
 }
 #[test]
@@ -68,10 +69,11 @@ fn fuzzy_search_matches_subsequences_multiple_terms_and_unicode() {
 #[test]
 fn candidates_distinguish_duplicate_numbers_and_keep_one_agent_conversation() {
     let mut s = fixture();
-    let mut next = s.requests[0].clone();
+    let mut next = s.attempts[0].clone();
     next.id = "follow-up".into();
+    next.number = 2;
     next.created_at += 1;
-    s.requests.push(next);
+    s.attempts.push(next);
     let rows = candidates(&s);
     let cards = rows
         .iter()
@@ -240,17 +242,18 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
         .into_iter()
         .enumerate()
     {
-        let mut req = canban_scheduler::request(
+        let mut att = canban_scheduler::attempt(
             "p1",
             &card.id,
+            1,
             "review",
             "interactive",
             profile.clone(),
             "Inspect".into(),
             None,
         );
-        req.id = format!("req-hidden-{idx}");
-        s.requests.push(req);
+        att.id = format!("req-hidden-{idx}");
+        s.attempts.push(att);
         s.terminals.push(TerminalEntry {
             id: format!("term-hidden-{idx}"),
             conversation_id: None,
