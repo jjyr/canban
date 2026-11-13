@@ -1,0 +1,1 @@
+You are the Card's development Agent. Follow repository conventions and verify changes before finishing.

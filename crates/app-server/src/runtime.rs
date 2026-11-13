@@ -501,15 +501,42 @@ impl AppServer {
                 // A question that raced task completion follows the same conversation
                 // after close. It is never silently redirected to the Reviewer.
                 let config = self.config();
-                self.store.lock().unwrap().write(|db|{
-                    let mut q:Question=db.get(&question.id)?;
-                    if q.state=="replied"{return Ok(());}
-                    let mut card:Card=db.get(&q.card_id)?;
-                    if !card.active(){return Ok(());}
-                    let project:Project=db.get(&card.project_id)?;
-                    let stage=canban_workflow_engine::stage(&project.workflow,&card.stage)?;
-                    let request=enqueue(db,&config,&mut card,&project,stage,&format!("comment:{}",q.comment_id),Some(&q.profile_id),Some(format!("Answer this retained question, publish its reply, then report completion.\n{}",q.body)))?.context("Could not retain question")?;
-                    q.request_id=request.id;q.attempt=0;q.state="pending".into();db.save(&q)
+                self.store.lock().unwrap().write(|db| {
+                    let mut q: Question = db.get(&question.id)?;
+                    if q.state == "replied" {
+                        return Ok(());
+                    }
+                    let mut card: Card = db.get(&q.card_id)?;
+                    if !card.active() {
+                        return Ok(());
+                    }
+                    let project: Project = db.get(&card.project_id)?;
+                    let stage = canban_workflow_engine::stage(&project.workflow, &card.stage)?;
+                    let instruction = canban_context::render_template(
+                        include_str!(concat!(
+                            env!("CARGO_MANIFEST_DIR"),
+                            "/../../prompts/runtime/comment_task.txt"
+                        ))
+                        .trim_end(),
+                        &[("body", &q.body)],
+                    );
+                    let request = enqueue(
+                        db,
+                        &config,
+                        &mut card,
+                        &project,
+                        stage,
+                        RequestTrigger::Comment {
+                            comment_id: q.comment_id.clone(),
+                        },
+                        Some(&q.profile_id),
+                        Some(instruction),
+                    )?
+                    .context("Could not retain question")?;
+                    q.request_id = request.id;
+                    q.attempt = 0;
+                    q.state = "pending".into();
+                    db.save(&q)
                 })?;
                 continue;
             }
@@ -547,15 +574,21 @@ impl AppServer {
                 q.attempt = run.number;
                 db.save(&q)
             })?;
-            let text = format!(
-                "Canban question {} (additional input; keep your original task and completion callback):\n{}\nPublish the answer using \"$CANBAN_CLI\" reply --to {} --file /absolute/path/to/answer.md. A reply does not complete your original task.",
-                question.id,
-                question.body,
-                canban_context::shell_quote(&question.id)
-            );
-            let text = format!(
-                "{text}\nExecution binding for this question: CANBAN_REQUEST_ID={} CANBAN_ATTEMPT={}",
-                req.id, run.number
+            let qid_quoted = canban_context::shell_quote(&question.id);
+            let run_number = run.number.to_string();
+            let text = canban_context::render_template(
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../prompts/runtime/live_question_delivery.txt"
+                ))
+                .trim_end(),
+                &[
+                    ("question_id", &question.id),
+                    ("question_body", &question.body),
+                    ("question_id_quoted", &qid_quoted),
+                    ("request_id", &req.id),
+                    ("attempt", &run_number),
+                ],
             );
             let result = (|| -> Result<Value> {
                 ensure!(

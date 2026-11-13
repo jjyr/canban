@@ -70,9 +70,12 @@ fn m(items: &[(&str, &str)]) -> Vec<ModelOption> {
 }
 
 fn bind_session_instruction(env_var: &str) -> String {
-    format!(
-        "Before other work, run \"$CANBAN_CLI\" bind-session --session-id \"${env_var}\" to bind this invocation to its actual provider history. Do not reuse a thread ID quoted in earlier conversation history."
-    )
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../prompts/profiles/bind_session.txt"
+    ))
+    .trim_end()
+    .replace("{{env_var}}", env_var)
 }
 
 /// Returns all 24 built-in Herdr CLI agents in recommended onboarding order.

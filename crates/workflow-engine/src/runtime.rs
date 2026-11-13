@@ -9,7 +9,7 @@ pub type Queue = for<'a> fn(
     &mut Card,
     &Project,
     &Stage,
-    &str,
+    RequestTrigger,
     Option<&str>,
     Option<String>,
 ) -> Result<Option<Request>>;
@@ -262,9 +262,9 @@ fn drive(
                     require_human_review: false,
                 };
                 let trigger = if run.inputs["legacy"] == true {
-                    "stage_entry"
+                    RequestTrigger::StageEntry
                 } else {
-                    "workflow"
+                    RequestTrigger::Workflow
                 };
                 if let Some(mut req) =
                     queue(db, config, card, &project, &stage, trigger, None, None)?

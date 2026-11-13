@@ -79,12 +79,54 @@ impl AppServer {
             } else {
                 format!("{state}: {}", report.message)
             };
-            log(db,&card,"execution.reported",&format!("agent:{}",req.profile.id),&reported_msg,Some(req.id.clone()),json!({"report_id":report.id,"path":report.path,"attempt":number,"state":state}))?;
-            if matches!(state, "completed" | "backlog") && req.trigger.starts_with("comment:") {
-                let reply_msg = if state == "backlog" { &reported_msg } else { &report.message };
-                for mut q in db.list::<Question>()?.into_iter().filter(|q|q.request_id==req.id && q.state!="replied") {
-                    q.state="replied".into();q.reply_path=report.path.clone();db.save(&q)?;
-                    log(db,&card,"comment.replied",&format!("agent:{}",req.profile.id),reply_msg,Some(req.id.clone()),json!({"reply_to":q.comment_id,"question_id":q.id,"path":report.path,"report_id":report.id}))?;
+            let comment_questions = if req.trigger.is_comment() {
+                db.list::<Question>()?
+                    .into_iter()
+                    .filter(|q| q.request_id == req.id)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            let comment_already_replied = state == "completed"
+                && !comment_questions.is_empty()
+                && comment_questions.iter().all(|q| q.state == "replied");
+            log(
+                db,
+                &card,
+                "execution.reported",
+                &format!("agent:{}", req.profile.id),
+                &reported_msg,
+                Some(req.id.clone()),
+                json!({
+                    "report_id": report.id,
+                    "path": report.path,
+                    "attempt": number,
+                    "state": state,
+                    "comment_replied": comment_already_replied,
+                }),
+            )?;
+            if matches!(state, "completed" | "backlog") && req.trigger.is_comment() {
+                let reply_msg = if state == "backlog" {
+                    &reported_msg
+                } else {
+                    &report.message
+                };
+                for mut q in comment_questions
+                    .into_iter()
+                    .filter(|q| q.state != "replied")
+                {
+                    q.state = "replied".into();
+                    q.reply_path = report.path.clone();
+                    db.save(&q)?;
+                    log(
+                        db,
+                        &card,
+                        "comment.replied",
+                        &format!("agent:{}", req.profile.id),
+                        reply_msg,
+                        Some(req.id.clone()),
+                        json!({"reply_to":q.comment_id,"question_id":q.id,"path":report.path,"report_id":report.id}),
+                    )?;
                 }
             }
             let current=req.attempt==number;

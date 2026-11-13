@@ -1008,9 +1008,17 @@ impl AppServer {
             return Ok(saved);
         };
 
-        let prompt = format!(
-            "You are assisting with a code review in repository `{}` (directory: `{}`).\n\nPlease inspect the relevant files, address or respond to each review item below, and summarize your changes.\n\n{}",
-            project.name, cwd, formatted_review
+        let prompt = canban_context::render_template(
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../prompts/runtime/review_assist.txt"
+            ))
+            .trim_end(),
+            &[
+                ("project_name", &project.name),
+                ("cwd", &cwd),
+                ("formatted_review", formatted_review),
+            ],
         );
         let client = canban_herdr::Client {
             config: self.config(),
