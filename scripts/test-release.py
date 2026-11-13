@@ -88,4 +88,26 @@ class Releases(unittest.TestCase):
             with patch.object(release,'api',api),patch.object(sys,'argv',['release.py','publish','--directory',directory]),patch.dict(os.environ,{'CANBAN_RELEASE_COMMIT':'c'*40,'CANBAN_RELEASE_VERSION':'20261110-1'}):
                 with self.assertRaisesRegex(RuntimeError,'Injected upload failure'):release.main()
         self.assertFalse(any(method=='PATCH' for method,_ in calls))
+    def test_workflow_is_manual_only(self):
+        workflow=pathlib.Path(__file__).resolve().parents[1]/'.github/workflows/release.yml'
+        content=workflow.read_text()
+        self.assertIn('workflow_dispatch:',content)
+        self.assertNotIn('push:',content)
+    def test_dispatch_triggers_workflow_discovers_run_and_supports_watch(self):
+        calls=[];subproc=[]
+        now=release.datetime.datetime.now(release.datetime.timezone.utc).isoformat().replace('+00:00','Z')
+        def api(method,path,body=None,**kwargs):
+            calls.append((method,path,body,kwargs.get('token')))
+            if method=='POST' and path=='/repos/fixture/app/actions/workflows/release.yml/dispatches':return None
+            if method=='GET' and '/actions/workflows/release.yml/runs?' in path:
+                return {'workflow_runs':[{'id':987,'run_number':12,'head_sha':'abcdef1234567','html_url':'https://github.com/fixture/app/actions/runs/987','created_at':now}]}
+            raise AssertionError((method,path))
+        def fake_run(argv,**kwargs):
+            subproc.append(argv)
+            return type('Result',(),{'returncode':0,'stdout':'gh-token-xyz\n'})()
+        with patch.object(release,'api',api),patch.object(release.shutil,'which',return_value='/usr/local/bin/gh'),patch.object(release.subprocess,'run',side_effect=fake_run),patch.dict(os.environ,{},clear=True),patch.object(sys,'argv',['release.py','dispatch','--repo','fixture/app','--ref','release/branch','--watch']):
+            release.main()
+        self.assertEqual(calls[0],('POST','/repos/fixture/app/actions/workflows/release.yml/dispatches',{'ref':'release/branch'},'gh-token-xyz'))
+        self.assertIn('branch=release%2Fbranch',calls[1][1])
+        self.assertEqual(subproc,[['/usr/local/bin/gh','auth','token'],['/usr/local/bin/gh','run','watch','987','--repo','fixture/app','--exit-status']])
 if __name__=='__main__':unittest.main()

@@ -136,6 +136,7 @@ mod tests {
             github: None,
             delivery_mode: Default::default(),
             agent_overrides: Default::default(),
+            tags: Default::default(),
             id: "project".into(),
             name: "Test".into(),
             location: None,

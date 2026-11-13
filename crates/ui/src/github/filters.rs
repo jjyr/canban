@@ -5,6 +5,17 @@ pub fn matches(ui: Ui, c: &Card, snapshot: &Snapshot) -> bool {
         .github
         .filters
         .with_untracked(|m| m.get(&c.project_id).cloned().unwrap_or_default());
+    if !filter.tags.is_empty() {
+        let local_tags = ui.local_tags.get_untracked();
+        let known = crate::tags::known_map(snapshot, &local_tags, Some(&c.project_id));
+        let card_tags = crate::tags::card_tags(c, &known);
+        if !filter.tags.iter().all(|wanted| {
+            let w = wanted.to_lowercase();
+            card_tags.iter().any(|t| t.to_lowercase() == w)
+        }) {
+            return false;
+        }
+    }
     let source = c.github_issue();
     if filter.source == "local" && source.is_some() || filter.source == "github" && source.is_none()
     {
@@ -58,15 +69,26 @@ pub fn toolbar(ui: Ui) -> impl IntoElement {
         });
         let author = signal(initial.author);
         let save = id.clone();
+        let clear_id = id.clone();
+        let tag_btn_id = id.clone();
+        let chips_id = id.clone();
         effect(move || {
-            let filter = BoardFilter {
-                source: source.get(),
-                kind: kind.get(),
-                state: state.get(),
-                author: author.get(),
-            };
+            let s = source.get();
+            let k = kind.get();
+            let st = state.get();
+            let a = author.get();
             ui.github.filters.update(|m| {
-                m.insert(save.clone(), filter);
+                let existing_tags = m.get(&save).map(|f| f.tags.clone()).unwrap_or_default();
+                m.insert(
+                    save.clone(),
+                    BoardFilter {
+                        source: s,
+                        kind: k,
+                        state: st,
+                        author: a,
+                        tags: existing_tags,
+                    },
+                );
             });
         });
         let mut source_seg = segmented();
@@ -147,14 +169,130 @@ pub fn toolbar(ui: Ui) -> impl IntoElement {
                 ("merged", "Merged"),
             ],
         ))
+        .child(tag_picker_button(ui, tag_btn_id))
+        .child(active_tag_chips(ui, chips_id))
         .child(action("Clear", Variant::Quiet, move |_| {
+            let cid = clear_id.clone();
             batch(move || {
                 source.set("all".into());
                 kind.set("all".into());
                 state.set("all".into());
                 author.set(String::new());
+                crate::tags::clear_board_tags(ui, &cid);
             })
         }))
         .into_element()
+    })
+}
+
+fn tag_picker_button(ui: Ui, project_id: String) -> impl IntoElement {
+    let label_pid = project_id.clone();
+    let visible_pid = project_id.clone();
+    when(
+        move || {
+            let s = ui.snapshot.get();
+            let lt = ui.local_tags.get();
+            let _ = ui.github.filters.get();
+            !crate::tags::ordered_known(&s, &lt, Some(&visible_pid)).is_empty()
+                || !crate::tags::active_board_tags(ui, &visible_pid).is_empty()
+        },
+        move || {
+            let label_pid = label_pid.clone();
+            let menu_pid = project_id.clone();
+            compact_action(
+                move || {
+                    let _ = ui.github.filters.get();
+                    let active = crate::tags::active_board_tags(ui, &label_pid);
+                    if active.is_empty() {
+                        "Tag ▾".to_owned()
+                    } else {
+                        format!("Tag ({}) ▾", active.len())
+                    }
+                },
+                Variant::Secondary,
+                move |_| {
+                    let pid = menu_pid.clone();
+                    let tags = crate::tags::ordered_known(
+                        &ui.snapshot.get_untracked(),
+                        &ui.local_tags.get_untracked(),
+                        Some(&pid),
+                    );
+                    let active = crate::tags::active_board_tags(ui, &pid);
+                    let mut items = Vec::new();
+                    let clear_pid = pid.clone();
+                    items.push(
+                        nsh_core::element::desktop::MenuItem::new("All tags")
+                            .on_select(move || crate::tags::clear_board_tags(ui, &clear_pid)),
+                    );
+                    if !tags.is_empty() {
+                        items.push(nsh_core::element::desktop::MenuItem::separator());
+                    }
+                    for tag in tags {
+                        let is_active = active
+                            .iter()
+                            .any(|t| t.to_lowercase() == tag.to_lowercase());
+                        let item_label = if is_active {
+                            format!("✓ #{tag}")
+                        } else {
+                            format!("#{tag}")
+                        };
+                        let item_pid = pid.clone();
+                        items.push(
+                            nsh_core::element::desktop::MenuItem::new(item_label).on_select(
+                                move || crate::tags::toggle_board_filter(ui, &item_pid, &tag),
+                            ),
+                        );
+                    }
+                    ui.spawn(async move {
+                        nsh_core::element::desktop::popup_menu(items).await;
+                    });
+                },
+            )
+        },
+    )
+}
+
+fn active_tag_chips(ui: Ui, project_id: String) -> impl IntoElement {
+    dynamic(move || {
+        let _ = ui.github.filters.get();
+        let active = crate::tags::active_board_tags(ui, &project_id);
+        view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_1p5()
+            .children(active.into_iter().map(|tag| {
+                let pid = project_id.clone();
+                let remove_tag = tag.clone();
+                compact_action(format!("#{tag} ×"), Variant::Secondary, move |_| {
+                    crate::tags::toggle_board_filter(ui, &pid, &remove_tag)
+                })
+                .into_element()
+            }))
+    })
+}
+
+/// Compact Board filter bar for local Projects whenever one or more `#tag` filters are active.
+pub fn tag_bar(ui: Ui) -> impl IntoElement {
+    dynamic(move || {
+        let id = ui.project.get();
+        let _ = ui.github.filters.get();
+        let active = crate::tags::active_board_tags(ui, &id);
+        if active.is_empty() {
+            return view().into_element();
+        }
+        let clear_id = id.clone();
+        view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .child(muted("Filtered by"))
+            .child(active_tag_chips(ui, id.clone()))
+            .child(tag_picker_button(ui, id))
+            .child(compact_action("Clear", Variant::Quiet, move |_| {
+                crate::tags::clear_board_tags(ui, &clear_id)
+            }))
+            .into_element()
     })
 }

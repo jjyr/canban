@@ -210,9 +210,11 @@ pub fn reminders(s: &Snapshot) -> Vec<Reminder> {
 /// Audible notification identities, deliberately narrower than visual `Reminder` badges.
 ///
 /// Sounds chime only for:
-/// 1. Human intervention / replies: runtime input/permission waits, task/review/approval
-///    `human_gate` or `attention`, Agent `blocked` or `backlog` reports, and explicit
-///    `comment.replied` answers to `@agent` questions.
+/// 1. Human intervention / replies: runtime input/permission waits (`wait:*`),
+///    task/review/approval `human_gate` or `attention`, Agent `blocked` or `backlog`
+///    reports, and explicit `comment.replied` answers to `@agent` questions.
+///    Runtime `idle` / `done` status transitions remain visual indicators only and
+///    do not play a sound, avoiding false chimes when Agents pause transiently.
 /// 2. Agent failures: `failed` reports, `execution.failed`, `execution.missing`, runtime
 ///    errors, recovery states, and uncertain question deliveries.
 /// 3. Merge failures / held deliveries: `review.merge_failed`, `review.upstream_sync_failed`,
@@ -231,12 +233,14 @@ pub fn sound_items_with_reminders(s: &Snapshot, reminder_items: &[Reminder]) -> 
     let active = |id: &str| s.cards.iter().any(|c| c.id == id && c.active());
     let mut ids = std::collections::BTreeSet::<String>::new();
 
-    // Every pending item (permission/input wait, human_gate, attention, runtime error,
-    // recovery, delivery_unknown) requires user intervention and is audible.
+    // Pending items (permission/input wait, human_gate, attention, runtime error,
+    // recovery, delivery_unknown) require user intervention and are audible, except
+    // runtime `idle:*` items which stay visual-only because some Agents report idle
+    // transiently during active turns.
     // Unread-only items are audible only when they are explicit `@agent` question replies
     // or `backlog` / `blocked` / `failed` reports — never automated `completed` stage steps.
     for item in reminder_items {
-        if item.pending || unread_item_is_audible(s, item) {
+        if (item.pending && !item.id.starts_with("idle:")) || unread_item_is_audible(s, item) {
             ids.insert(item.id.clone());
         }
     }
@@ -279,18 +283,8 @@ pub fn sound_items_with_reminders(s: &Snapshot, reminder_items: &[Reminder]) -> 
         if runtime.state == "finished" || runtime.connection != "connected" {
             continue;
         }
-        match runtime.agent_status.as_deref() {
-            Some(st @ ("blocked" | "error")) => {
-                ids.insert(format!("terminal-attn:{}:{st}", t.id));
-            }
-            Some("idle" | "done") if runtime.agent_turn.unwrap_or(0) > 0 => {
-                ids.insert(format!(
-                    "terminal-idle:{}:{}",
-                    t.id,
-                    runtime.agent_turn.unwrap_or(0)
-                ));
-            }
-            _ => {}
+        if let Some(st @ ("blocked" | "error")) = runtime.agent_status.as_deref() {
+            ids.insert(format!("terminal-attn:{}:{st}", t.id));
         }
     }
 

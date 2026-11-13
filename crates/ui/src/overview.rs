@@ -253,7 +253,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                 )
                 .child(
                     panel()
-                        .w(px(480.))
+                        .w(px(520.))
                         .max_w(Percentage(0.95))
                         .p_0()
                         .gap_0()
@@ -333,6 +333,8 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     top = top.child(right);
 
                                     if s.projects.len() > 1 {
+                                        let all_rows = overview(&s);
+                                        let entries = crate::terminals::entries(&s);
                                         let all_selected = valid_scope.is_none();
                                         let mut filter_seg = segmented().child(compact_segment(
                                             "All",
@@ -344,8 +346,48 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                             let pid = p.id.clone();
                                             let is_selected =
                                                 valid_scope.as_deref() == Some(pid.as_str());
+                                            let actionable_cards: std::collections::BTreeSet<_> =
+                                                all_rows
+                                                    .iter()
+                                                    .filter(|r| {
+                                                        r.card.project_id == pid && r.actionable()
+                                                    })
+                                                    .map(|r| r.card.id.clone())
+                                                    .collect();
+                                            let proj_alerts = all_rows
+                                                .iter()
+                                                .filter(|r| {
+                                                    r.card.project_id == pid && r.actionable()
+                                                })
+                                                .count()
+                                                + entries
+                                                    .iter()
+                                                    .filter(|e| {
+                                                        e.listed()
+                                                            && e.project_id.as_deref()
+                                                                == Some(pid.as_str())
+                                                            && (e.needs_attention()
+                                                                || e.status() == "blocked")
+                                                            && is_special_agent_terminal(&s, e)
+                                                    })
+                                                    .count()
+                                                + s.cards
+                                                    .iter()
+                                                    .filter(|c| {
+                                                        c.project_id == pid
+                                                            && counts
+                                                                .get(&c.id)
+                                                                .is_some_and(|n| n.unread > 0)
+                                                            && !actionable_cards.contains(&c.id)
+                                                    })
+                                                    .count();
+                                            let seg_label = if proj_alerts > 0 {
+                                                format!("{} · {proj_alerts}", p.name)
+                                            } else {
+                                                p.name.clone()
+                                            };
                                             filter_seg = filter_seg.child(compact_segment(
-                                                p.name.clone(),
+                                                seg_label,
                                                 None,
                                                 move || is_selected,
                                                 move |_| project_scope.set(pid.clone()),
@@ -385,7 +427,8 @@ fn destination(ui: Ui, row: &OverviewRow, review: bool) {
 }
 
 pub fn show_card_attention(ui: Ui, card: &str) {
-    let rows: Vec<_> = overview(&ui.snapshot.get_untracked())
+    let snapshot = ui.snapshot.get_untracked();
+    let rows: Vec<_> = overview(&snapshot)
         .into_iter()
         .filter(|r| r.card.id == card && r.actionable())
         .collect();
@@ -399,7 +442,12 @@ pub fn show_card_attention(ui: Ui, card: &str) {
         for reason in &row.reasons {
             let saved = row.clone();
             let source = reason.source.clone();
-            items.push(MenuItem::new(reason.message.clone()).on_select(move || {
+            let (_, _, headline, detail) = classify_reason(&snapshot, &row, reason);
+            let menu_label = match detail {
+                Some(d) => format!("{headline} · {d}"),
+                None => headline.into(),
+            };
+            items.push(MenuItem::new(menu_label).on_select(move || {
                 if source == "runtime" {
                     close(ui);
                     ui.open_card_with_terminal(saved.card.id.clone(), Some(saved.id.clone()));
@@ -418,10 +466,18 @@ pub fn show_card_attention(ui: Ui, card: &str) {
     }
 }
 
+fn runtime_blocked_with_terminal(row: &OverviewRow) -> bool {
+    row.reasons.iter().any(|r| r.source == "runtime")
+        && row.attempt.as_ref().map(|a| a.runtime_status()) == Some("blocked")
+        && crate::terminals::model::binding(row).is_some()
+}
+
 fn activate(ui: Ui, row: &OverviewRow) {
     ui.overview_selection.set(row.id.clone());
     close(ui);
-    if row.reasons.iter().any(|r| r.source == "review") {
+    if runtime_blocked_with_terminal(row) {
+        ui.open_card_with_terminal(row.card.id.clone(), Some(row.id.clone()));
+    } else if row.reasons.iter().any(|r| r.source == "review") {
         destination(ui, row, true);
     } else if row.reasons.iter().any(|r| r.source != "runtime") {
         destination(ui, row, false);
@@ -433,79 +489,570 @@ fn activate(ui: Ui, row: &OverviewRow) {
 }
 
 fn primary(row: &OverviewRow) -> &'static str {
-    if row.reasons.iter().any(|r| r.source == "review") {
+    if runtime_blocked_with_terminal(row) {
+        "Card & Terminal →"
+    } else if row.reasons.iter().any(|r| r.source == "review") {
         "Review →"
     } else if row.reasons.iter().any(|r| r.source != "runtime") {
-        "Open Card →"
+        "Card →"
     } else if crate::terminals::model::binding(row).is_some() {
         "Card & Terminal →"
     } else if crate::terminals::model::closed(row) {
-        "View history →"
+        "History →"
     } else {
-        "Open Card →"
+        "Card →"
     }
 }
 
-fn summary(row: &OverviewRow) -> String {
-    if !row.reasons.is_empty() {
-        return row
-            .reasons
-            .iter()
-            .map(|r| r.message.clone())
-            .collect::<Vec<_>>()
-            .join(" · ");
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RowEvent {
+    icon: Icon,
+    tone: Tone,
+    live: bool,
+    headline: String,
+    detail: Option<String>,
+}
+
+fn single_line(s: &str) -> String {
+    s.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn strip_machine_prefix(s: &str) -> String {
+    let mut text = single_line(s);
+    for prefix in [
+        "completed: ",
+        "blocked: ",
+        "failed: ",
+        "backlog: ",
+        "Returned to Backlog: ",
+    ] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            text = rest.trim().to_owned();
+            break;
+        }
     }
-    if let Some(a) = &row.attempt {
-        if a.finished() {
-            return "Agent ended · saved history available".into();
+    if matches!(
+        text.as_str(),
+        "completed" | "blocked" | "failed" | "backlog" | "Returned to Backlog"
+    ) {
+        return String::new();
+    }
+    text
+}
+
+fn clean_wait_detail(title: &str, message: &str) -> Option<String> {
+    let t = single_line(title);
+    let m = single_line(message);
+    let generic_title = t.is_empty()
+        || t.eq_ignore_ascii_case("agent needs input")
+        || t.eq_ignore_ascii_case("permission required")
+        || t.eq_ignore_ascii_case("input required")
+        || t.eq_ignore_ascii_case("sign-in required")
+        || t.eq_ignore_ascii_case("answer required");
+    let combined = match (generic_title, m.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => m,
+        (false, true) => t,
+        (false, false) => {
+            if m.to_lowercase().contains(&t.to_lowercase()) {
+                m
+            } else if t.to_lowercase().contains(&m.to_lowercase()) {
+                t
+            } else {
+                format!("{t} · {m}")
+            }
         }
-        if a.connection_state != "connected" {
-            return "Connection unavailable · original Terminal retained".into();
+    };
+    (!combined.is_empty()).then_some(combined)
+}
+
+fn is_merge_gate_reason(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("merge")
+        || lower.contains("conflict")
+        || lower.contains("upstream")
+        || lower.contains("fast-forward")
+        || lower.contains("diverged")
+}
+
+fn classify_reason(
+    snapshot: &canban_types::Snapshot,
+    row: &OverviewRow,
+    reason: &canban_notifications::OverviewReason,
+) -> (Icon, Tone, &'static str, Option<String>) {
+    match reason.source.as_str() {
+        "runtime" => {
+            let runtime = row.attempt.as_ref().map(|a| a.runtime_status());
+            if runtime == Some("blocked") {
+                if let Some(w) = row
+                    .attempt
+                    .as_ref()
+                    .and_then(|a| a.lifecycle.waiting.as_ref())
+                {
+                    let detail = clean_wait_detail(&w.title, &w.message);
+                    match w.kind.as_str() {
+                        "permission" | "approval" | "command" | "tool" | "bash" | "file" => {
+                            (Icon::ShieldAlert, Tone::Attention, "Permission required", detail)
+                        }
+                        "auth" | "login" | "signin" | "sign_in" => {
+                            (Icon::CircleHelp, Tone::Attention, "Sign-in required", detail)
+                        }
+                        "question" | "prompt" | "answer" => {
+                            (Icon::CircleHelp, Tone::Attention, "Answer needed", detail)
+                        }
+                        _ => (Icon::CircleHelp, Tone::Attention, "Input needed", detail),
+                    }
+                } else {
+                    (
+                        Icon::CircleHelp,
+                        Tone::Attention,
+                        "Input needed",
+                        Some("Waiting in terminal".into()),
+                    )
+                }
+            } else if runtime == Some("error") {
+                (
+                    Icon::TriangleAlert,
+                    Tone::Danger,
+                    "Terminal error",
+                    Some("Inspect live terminal".into()),
+                )
+            } else if row
+                .request
+                .as_ref()
+                .is_some_and(|r| r.trigger.is_automatic())
+            {
+                (
+                    Icon::TriangleAlert,
+                    Tone::Danger,
+                    "Stopped before reporting",
+                    Some("Inspect terminal".into()),
+                )
+            } else {
+                (
+                    Icon::CircleHelp,
+                    Tone::Attention,
+                    "Waiting for your input",
+                    Some("Agent finished its turn".into()),
+                )
+            }
         }
-        if let Some(v) = &a.observed
-            && let Some(message) = v["status"]["msg"]
-                .as_str()
-                .filter(|s| !s.trim().is_empty())
-                .or_else(|| {
-                    v["status"]["title"]
-                        .as_str()
-                        .filter(|s| !s.trim().is_empty())
+        "review" => {
+            let outcome_id = row.outcome_request_id();
+            let report_detail = outcome_id
+                .and_then(|rid| {
+                    snapshot
+                        .reports
+                        .iter()
+                        .rev()
+                        .find(|r| r.request_id == rid && !r.message.trim().is_empty())
+                        .map(|r| strip_machine_prefix(&r.message))
                 })
-        {
-            return format!("Agent: {}", message.lines().collect::<Vec<_>>().join(" "));
+                .filter(|s| !s.is_empty());
+            let gate_text = strip_machine_prefix(&reason.message);
+            let generic_gate = gate_text.is_empty()
+                || gate_text.eq_ignore_ascii_case("agent report ready; human review required")
+                || gate_text.eq_ignore_ascii_case("human review required")
+                || gate_text.eq_ignore_ascii_case("review changes")
+                || gate_text.eq_ignore_ascii_case("ready for review")
+                || gate_text.eq_ignore_ascii_case("review required");
+            if row.card.hold_auto_merge && !row.card.merged() || is_merge_gate_reason(&gate_text) {
+                let headline = if gate_text.to_lowercase().contains("conflict") {
+                    "Merge conflict"
+                } else {
+                    "Merge paused"
+                };
+                let detail = (!generic_gate).then_some(gate_text).or(report_detail);
+                (Icon::GitMerge, Tone::Attention, headline, detail)
+            } else {
+                let detail = report_detail.or_else(|| (!generic_gate).then_some(gate_text));
+                (Icon::Eye, Tone::Attention, "Ready for review", detail)
+            }
+        }
+        "task" => {
+            let msg = strip_machine_prefix(&reason.message);
+            let outcome_state = row
+                .outcome_request_id()
+                .and_then(|rid| snapshot.requests.iter().find(|r| r.id == rid))
+                .map(|r| r.state.as_str());
+            if is_merge_gate_reason(&msg) || (row.card.hold_auto_merge && !row.card.merged()) {
+                let is_fail = msg.to_lowercase().contains("fail");
+                let headline = if msg.to_lowercase().contains("conflict") {
+                    "Merge conflict"
+                } else if is_fail {
+                    "Merge failed"
+                } else {
+                    "Merge paused"
+                };
+                let tone = if is_fail {
+                    Tone::Danger
+                } else {
+                    Tone::Attention
+                };
+                (
+                    Icon::GitMerge,
+                    tone,
+                    headline,
+                    (!msg.is_empty()).then_some(msg),
+                )
+            } else if matches!(outcome_state, Some("failed" | "needs_report"))
+                || msg.to_lowercase().contains("exited without")
+                || msg.to_lowercase().contains("unavailable")
+                || msg.to_lowercase().contains("failed")
+            {
+                (
+                    Icon::TriangleAlert,
+                    Tone::Danger,
+                    "Agent failed",
+                    (!msg.is_empty()).then_some(msg),
+                )
+            } else {
+                (
+                    Icon::CirclePause,
+                    Tone::Attention,
+                    "Needs decision",
+                    (!msg.is_empty()).then_some(msg),
+                )
+            }
+        }
+        "recovery" => {
+            let msg = single_line(&reason.message);
+            if let Some(a) = &row.attempt
+                && a.connection_state != "connected"
+            {
+                let detail = a
+                    .error
+                    .as_deref()
+                    .map(single_line)
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| Some(format!("Connection {}", a.connection_state)));
+                (Icon::TriangleAlert, Tone::Danger, "Agent disconnected", detail)
+            } else if msg.to_lowercase().contains("exited") {
+                (Icon::TriangleAlert, Tone::Danger, "Agent exited early", Some(msg))
+            } else {
+                (
+                    Icon::TriangleAlert,
+                    Tone::Danger,
+                    "Recovery needed",
+                    (!msg.is_empty()).then_some(msg),
+                )
+            }
+        }
+        "question" => {
+            let msg = single_line(&reason.message);
+            let detail = (!msg.is_empty() && !msg.eq_ignore_ascii_case("question delivery uncertain"))
+                .then_some(msg);
+            (Icon::TriangleAlert, Tone::Danger, "Reply undelivered", detail)
+        }
+        _ => {
+            let msg = strip_machine_prefix(&reason.message);
+            (
+                Icon::Info,
+                Tone::Attention,
+                "Needs attention",
+                (!msg.is_empty()).then_some(msg),
+            )
         }
     }
-    match row.group.as_str() {
-        "Queued" => "Waiting for execution admission",
-        "Working" => "Agent working",
-        "Idle" => "Agent idle",
-        "Closed" => "Saved conversation",
-        _ => "View saved request",
-    }
-    .into()
 }
 
-fn row_visual(row: &OverviewRow) -> (Icon, ThemeColor) {
+fn reason_priority(source: &str, row: &OverviewRow) -> u8 {
+    match source {
+        "runtime" => {
+            if row.attempt.as_ref().map(|a| a.runtime_status()) == Some("blocked") {
+                0
+            } else {
+                1
+            }
+        }
+        "recovery" => 2,
+        "question" => 3,
+        "task" => 4,
+        "review" => 5,
+        _ => 6,
+    }
+}
+
+fn describe_row(snapshot: &canban_types::Snapshot, row: &OverviewRow) -> RowEvent {
+    if !row.reasons.is_empty() {
+        let mut ordered: Vec<_> = row.reasons.iter().collect();
+        ordered.sort_by_key(|r| reason_priority(&r.source, row));
+        let (icon, tone, headline, mut detail) = classify_reason(snapshot, row, ordered[0]);
+        if ordered.len() > 1 {
+            let extras: Vec<_> = ordered[1..]
+                .iter()
+                .map(|r| {
+                    let (_, _, h, d) = classify_reason(snapshot, row, r);
+                    match d {
+                        Some(d) => format!("{h}: {d}"),
+                        None => h.to_owned(),
+                    }
+                })
+                .collect();
+            let extra_str = extras.join(" · ");
+            detail = Some(match detail {
+                Some(d) => format!("{d} · {extra_str}"),
+                None => extra_str,
+            });
+        }
+        return RowEvent {
+            icon,
+            tone,
+            live: false,
+            headline: headline.into(),
+            detail,
+        };
+    }
+
     let profile_icon = row
         .request
         .as_ref()
-        .map(|r| crate::profiles::provider(&r.profile).0);
-    if row.reasons.iter().any(|r| r.source == "review") {
-        (Icon::Check, ATTENTION)
-    } else if row.reasons.iter().any(|r| r.source == "recovery") {
-        (Icon::Info, DANGER)
-    } else if row.reasons.iter().any(|r| r.source == "runtime") {
-        (Icon::Terminal, ATTENTION)
-    } else if row.actionable() {
-        (Icon::Info, ATTENTION)
-    } else {
-        match row.group.as_str() {
-            "Working" => (profile_icon.unwrap_or(Icon::Agent), ACCENT),
-            "Queued" => (Icon::History, MUTED),
-            "Idle" => (profile_icon.unwrap_or(Icon::Agent), MUTED),
-            _ => (Icon::History, MUTED),
+        .map(|r| crate::profiles::provider(&r.profile).0)
+        .unwrap_or(Icon::Agent);
+    let stage_detail = row
+        .request
+        .as_ref()
+        .filter(|r| !r.stage.is_empty())
+        .map(|r| format!("Stage: {}", r.stage));
+
+    if let Some(a) = &row.attempt {
+        if a.finished() {
+            let failed = matches!(a.state.as_str(), "failed" | "needs_report");
+            return RowEvent {
+                icon: if failed {
+                    Icon::TriangleAlert
+                } else {
+                    Icon::History
+                },
+                tone: if failed { Tone::Danger } else { Tone::Neutral },
+                live: false,
+                headline: if failed {
+                    "Exited with error".into()
+                } else {
+                    "Session ended".into()
+                },
+                detail: a
+                    .error
+                    .as_deref()
+                    .map(single_line)
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| Some("Saved history available".into())),
+            };
+        }
+        if a.connection_state != "connected" {
+            return RowEvent {
+                icon: Icon::TriangleAlert,
+                tone: Tone::Danger,
+                live: false,
+                headline: "Disconnected".into(),
+                detail: Some("Original terminal retained".into()),
+            };
+        }
+        if row.group == "Working" {
+            let live_msg = a
+                .observed
+                .as_ref()
+                .and_then(|v| {
+                    v["status"]["msg"]
+                        .as_str()
+                        .filter(|s| !s.trim().is_empty())
+                        .or_else(|| {
+                            v["status"]["title"]
+                                .as_str()
+                                .filter(|s| !s.trim().is_empty())
+                        })
+                })
+                .map(single_line);
+            return RowEvent {
+                icon: profile_icon,
+                tone: Tone::Info,
+                live: true,
+                headline: "Working".into(),
+                detail: live_msg.or(stage_detail),
+            };
         }
     }
+
+    match row.group.as_str() {
+        "Working" => RowEvent {
+            icon: profile_icon,
+            tone: Tone::Info,
+            live: true,
+            headline: "Starting".into(),
+            detail: stage_detail,
+        },
+        "Queued" => RowEvent {
+            icon: Icon::History,
+            tone: Tone::Neutral,
+            live: false,
+            headline: "Queued".into(),
+            detail: Some("Waiting for open slot".into()),
+        },
+        "Idle" => RowEvent {
+            icon: profile_icon,
+            tone: Tone::Neutral,
+            live: false,
+            headline: "Idle".into(),
+            detail: Some("Ready for follow-up".into()),
+        },
+        _ => RowEvent {
+            icon: Icon::History,
+            tone: Tone::Neutral,
+            live: false,
+            headline: "Closed".into(),
+            detail: Some("Saved conversation".into()),
+        },
+    }
+}
+
+fn describe_unread_update(
+    snapshot: &canban_types::Snapshot,
+    card_id: &str,
+    latest: Option<&canban_notifications::Reminder>,
+) -> RowEvent {
+    let raw_msg = latest.map(|i| i.message.as_str()).unwrap_or("");
+    let matched_event = latest.and_then(|rem| {
+        snapshot
+            .events
+            .iter()
+            .filter(|e| e.card_id == card_id && e.sequence == rem.sequence)
+            .max_by_key(|e| e.created_at)
+    });
+    let agent_tag = matched_event
+        .and_then(|e| e.actor.strip_prefix("agent:"))
+        .map(|a| format!("@{a}"));
+
+    if let Some(ev) = matched_event {
+        if ev.kind == "comment.replied" {
+            let headline = match &agent_tag {
+                Some(tag) => format!("{tag} replied"),
+                None => "Agent replied".into(),
+            };
+            let detail = strip_machine_prefix(raw_msg);
+            return RowEvent {
+                icon: Icon::MessageSquare,
+                tone: Tone::Info,
+                live: false,
+                headline,
+                detail: (!detail.is_empty()).then_some(detail),
+            };
+        }
+        if ev.kind == "execution.reported" {
+            let state = ev.data["state"].as_str().unwrap_or("completed");
+            let detail = strip_machine_prefix(raw_msg);
+            let detail_opt = (!detail.is_empty()).then_some(detail);
+            return match state {
+                "backlog" => RowEvent {
+                    icon: Icon::Undo,
+                    tone: Tone::Neutral,
+                    live: false,
+                    headline: "Returned to Backlog".into(),
+                    detail: detail_opt,
+                },
+                "blocked" => RowEvent {
+                    icon: Icon::CirclePause,
+                    tone: Tone::Attention,
+                    live: false,
+                    headline: "Agent blocked".into(),
+                    detail: detail_opt,
+                },
+                "failed" => RowEvent {
+                    icon: Icon::TriangleAlert,
+                    tone: Tone::Danger,
+                    live: false,
+                    headline: "Agent failed".into(),
+                    detail: detail_opt,
+                },
+                _ => RowEvent {
+                    icon: Icon::Check,
+                    tone: Tone::Success,
+                    live: false,
+                    headline: match &agent_tag {
+                        Some(tag) => format!("Stage completed · {tag}"),
+                        None => "Stage completed".into(),
+                    },
+                    detail: detail_opt,
+                },
+            };
+        }
+    }
+
+    let detail = strip_machine_prefix(raw_msg);
+    RowEvent {
+        icon: Icon::MessageSquare,
+        tone: Tone::Info,
+        live: false,
+        headline: "New update".into(),
+        detail: (!detail.is_empty()).then_some(detail),
+    }
+}
+
+fn event_headline_row(
+    headline: String,
+    tone: Tone,
+    detail: Option<String>,
+    trailing_pill: Option<AnyElement>,
+) -> View {
+    let headline_color = match tone {
+        Tone::Neutral => TEXT,
+        other => tone_colors(other).1,
+    };
+    let mut line = view()
+        .flex_row()
+        .w_full()
+        .items_center()
+        .gap_1p5()
+        .min_w(px(0.))
+        .overflow_hidden()
+        .child(
+            label(headline)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(headline_color)
+                .flex_shrink_0(),
+        );
+    if let Some(detail) = detail.filter(|d| !d.is_empty()) {
+        line = line
+            .child(muted("·").flex_shrink_0())
+            .child(label(detail).flex_1().min_w(px(0.)).truncate());
+    } else {
+        line = line.child(view().flex_1().min_w(px(0.)));
+    }
+    if let Some(pill) = trailing_pill {
+        line = line.child(view().flex_shrink_0().child(pill));
+    }
+    line
+}
+
+fn card_context_row(
+    card_number: u64,
+    card_title: String,
+    project_name: Option<String>,
+    profile_tag: Option<String>,
+    trailing_pills: Vec<AnyElement>,
+) -> View {
+    let mut parts = vec![format!("#{card_number} {card_title}")];
+    if let Some(proj) = project_name.filter(|p| !p.is_empty()) {
+        parts.push(proj);
+    }
+    if let Some(profile) = profile_tag.filter(|p| !p.is_empty()) {
+        parts.push(profile);
+    }
+    let mut line = view()
+        .flex_row()
+        .w_full()
+        .items_center()
+        .gap_1p5()
+        .min_w(px(0.))
+        .overflow_hidden()
+        .child(muted(parts.join(" · ")).flex_1().min_w(px(0.)).truncate());
+    for pill in trailing_pills {
+        line = line.child(view().flex_shrink_0().child(pill));
+    }
+    line
 }
 
 pub fn screen(ui: Ui) -> impl IntoElement {
@@ -682,15 +1229,16 @@ fn activity_body(
         }
         any_rendered = true;
 
+        let show_project = scope.is_none();
         let build_rows = |members: Vec<OverviewRow>,
                           configurations: Vec<crate::terminals::Entry>| {
             let mut stack = view().min_w(px(0.));
             for row in members {
                 let selected = ui.overview_selection.get() == row.id;
-                stack = stack.child(row_view(ui, row, selected, focus_restored));
+                stack = stack.child(row_view(ui, row, selected, focus_restored, show_project));
             }
             for entry in configurations {
-                stack = stack.child(config_session_row(ui, entry));
+                stack = stack.child(config_session_row(ui, entry, show_project));
             }
             stack
         };
@@ -757,100 +1305,139 @@ fn activity_body(
 
 /// Production row reused by Gallery. Destination controls remain available without hover.
 pub fn agent_row(ui: Ui, row: OverviewRow, selected: bool) -> impl IntoElement {
-    row_view(ui, row, selected, stored(true))
+    row_view(ui, row, selected, stored(true), true)
 }
 
-fn config_session_row(ui: Ui, entry: crate::terminals::Entry) -> impl IntoElement {
+fn config_session_row(
+    ui: Ui,
+    entry: crate::terminals::Entry,
+    show_project: bool,
+) -> impl IntoElement {
     let id = entry.saved.id.clone();
     let id_btn = id.clone();
     let is_config = ui
         .snapshot
         .with_untracked(|s| s.configuration_sessions.iter().any(|c| c.id == id));
-    let needs_attn = entry.needs_attention() || entry.status() == "blocked";
+    let status_word = entry.status();
+    let needs_attn = entry.needs_attention() || status_word == "blocked";
     let status_text = entry
         .attention_reason()
         .unwrap_or_else(|| entry.display_status());
     let project_name = entry.project_name.clone();
-    let row_title = if is_config {
+    let (row_icon, tone, live, headline, detail) = if status_word == "blocked" {
+        (
+            Icon::CircleHelp,
+            Tone::Attention,
+            false,
+            "Input needed".to_owned(),
+            Some(status_text.clone()),
+        )
+    } else if needs_attn {
+        (
+            Icon::TriangleAlert,
+            Tone::Danger,
+            false,
+            "Session attention".to_owned(),
+            Some(status_text.clone()),
+        )
+    } else if is_config {
+        (
+            Icon::Trigger,
+            Tone::Info,
+            true,
+            "Configuring workflows".to_owned(),
+            Some(status_text.clone()),
+        )
+    } else {
+        (
+            entry.provider().map(|(ic, _)| ic).unwrap_or(Icon::Agent),
+            Tone::Info,
+            true,
+            "Working".to_owned(),
+            Some(status_text.clone()),
+        )
+    };
+    let context_title = if is_config {
         "Edit Project Workflows".into()
-    } else if let Some(c) = &entry.card {
-        format!("#{} {} · {}", c.number, c.title, entry.title())
     } else {
         entry.title()
-    };
-    let subtitle = if is_config {
-        format!("Workflow configuration session · {status_text}")
-    } else {
-        status_text
-    };
-    let row_icon = if is_config {
-        Icon::Trigger
-    } else {
-        entry.provider().map(|(ic, _)| ic).unwrap_or(Icon::Agent)
     };
     let card_dest = entry.card.as_ref().map(|c| c.id.clone());
     let card_dest_btn = card_dest.clone();
 
+    let mut context_parts = vec![match &entry.card {
+        Some(c) => format!("#{} {}", c.number, c.title),
+        None => context_title.clone(),
+    }];
+    if show_project && !project_name.is_empty() {
+        context_parts.push(project_name.clone());
+    }
+    if let Some((_, prov_name)) = entry.provider() {
+        context_parts.push(prov_name.to_owned());
+    }
+    let context_line = view()
+        .flex_row()
+        .w_full()
+        .items_center()
+        .gap_1p5()
+        .min_w(px(0.))
+        .overflow_hidden()
+        .child(muted(context_parts.join(" · ")).flex_1().min_w(px(0.)).truncate());
+
+    let hint = format!("{headline} · {status_text}\n{context_title} · {project_name}");
+
     view()
         .flex_row()
         .items_center()
-        .gap_3()
-        .py_2p5()
-        .px_2()
+        .gap_2()
+        .py_0p5()
         .min_w(px(0.))
         .border_b_1()
         .border_color(BORDER)
         .child(
-            canban_ui_kit::press_target()
+            view()
                 .flex_1()
                 .min_w(px(0.))
-                .items_start()
-                .flex_row()
-                .gap_2p5()
-                .bg(CLEAR)
-                .rounded(px(RADIUS))
-                .hover(|s| s.bg(CARD_HOVER))
-                .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
-                .on_press(move |_: &()| {
-                    close(ui);
-                    if let Some(cid) = &card_dest {
-                        ui.open_card_with_terminal(cid.clone(), Some(id.clone()));
-                    } else {
-                        ui.open_terminal(id.clone());
-                    }
-                })
+                .tooltip(hint_tooltip(hint))
                 .child(
-                    view().pt_0p5().child(
-                        icon_tinted(row_icon, if needs_attn { ATTENTION } else { ACCENT })
-                            .w(px(15.))
-                            .h(px(15.)),
-                    ),
-                )
-                .child(
-                    view()
-                        .flex_1()
+                    canban_ui_kit::press_target()
+                        .w_full()
                         .min_w(px(0.))
-                        .gap_1()
+                        .items_center()
+                        .flex_row()
+                        .gap_2p5()
+                        .py_2()
+                        .px_2()
+                        .bg(CLEAR)
+                        .rounded(px(RADIUS))
+                        .hover(|s| s.bg(CARD_HOVER))
+                        .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
+                        .on_press(move |_: &()| {
+                            close(ui);
+                            if let Some(cid) = &card_dest {
+                                ui.open_card_with_terminal(cid.clone(), Some(id.clone()));
+                            } else {
+                                ui.open_terminal(id.clone());
+                            }
+                        })
+                        .child(tone_icon_badge(row_icon, tone, live))
                         .child(
                             view()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
+                                .flex_1()
                                 .min_w(px(0.))
-                                .child(label(row_title).font_weight(FontWeight::MEDIUM).truncate())
-                                .child(badge(project_name)),
-                        )
-                        .child(
-                            muted(subtitle)
-                                .text_color(if needs_attn { ATTENTION } else { MUTED })
-                                .truncate()
-                                .min_w(px(0.)),
+                                .gap_1()
+                                .child(event_headline_row(headline, tone, detail, None))
+                                .child(context_line),
                         ),
                 ),
         )
         .child(compact_action(
             "Terminal →",
-            Variant::Secondary,
+            if needs_attn {
+                Variant::Secondary
+            } else {
+                Variant::Quiet
+            },
             move |_| {
                 close(ui);
                 if let Some(cid) = &card_dest_btn {
@@ -867,11 +1454,11 @@ fn row_view(
     row: OverviewRow,
     selected: bool,
     focus_restored: Stored<bool>,
+    show_project: bool,
 ) -> impl IntoElement {
     let reference = element_ref();
     let activate_row = row.clone();
-    let text = summary(&row);
-    let (kind_icon, kind_color) = row_visual(&row);
+    let event = ui.snapshot.with(|s| describe_row(s, &row));
     let profile_tag = row.request.as_ref().map(|r| format!("@{}", r.profile.id));
     let remote_machine = row
         .attempt
@@ -885,48 +1472,41 @@ fn row_view(
         .as_ref()
         .and_then(|a| a.lifecycle.waiting.as_ref().map(|w| w.since))
         .map(|since| {
-            format!(
-                "Waiting {}",
-                crate::components::activity::age(since).trim_end_matches(" ago")
-            )
+            crate::components::activity::age(since)
+                .trim_end_matches(" ago")
+                .to_owned()
         });
     let unread = ui
         .reminder_counts
         .with(|m| m.get(&row.card.id).map(|c| c.unread).unwrap_or(0));
 
+    let event_summary = match &event.detail {
+        Some(d) if !d.is_empty() => format!("{} · {d}", event.headline),
+        _ => event.headline.clone(),
+    };
     let metadata_str = match &profile_tag {
-        Some(p) => format!("{p} · {}", row.project_name),
+        Some(p) => format!("{} · {p}", row.project_name),
         None => row.project_name.clone(),
     };
     let hint = format!(
-        "#{} {}\n{metadata_str}\n{text}",
+        "{event_summary}\n#{} {}\n{metadata_str}",
         row.card.number, row.card.title
     );
 
-    let mut meta_pills = view().flex_row().items_center().gap_1p5().flex_shrink_0();
-    if let Some(p) = profile_tag.clone() {
-        meta_pills = meta_pills.child(muted(p));
-    }
-    meta_pills = meta_pills.child(
-        muted(row.project_name.clone())
-            .max_w(px(if ui.narrow.get() { 110. } else { 200. }))
-            .truncate(),
-    );
+    let top_trailing = waiting_age.map(|wait| status(wait, Tone::Attention).into_element());
+    let mut context_pills = Vec::new();
     if let Some(machine) = remote_machine {
-        meta_pills = meta_pills.child(badge(machine));
+        context_pills.push(badge(machine).into_element());
     }
-    if let Some(wait) = waiting_age {
-        meta_pills = meta_pills.child(status(wait, Tone::Attention));
-    }
-    if unread > 0 && row.actionable() {
-        meta_pills = meta_pills.child(status(format!("{unread} unread"), Tone::Info));
+    if unread > 0 && row.actionable() && top_trailing.is_none() {
+        context_pills.push(badge(format!("{unread} unread")).into_element());
     }
 
     let main = canban_ui_kit::press_target()
         .element_ref(&reference)
-        .flex_1()
+        .w_full()
         .min_w(px(0.))
-        .items_start()
+        .items_center()
         .flex_row()
         .gap_2p5()
         .py_2()
@@ -936,46 +1516,30 @@ fn row_view(
         .hover(|s| s.bg(CARD_HOVER))
         .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
         .accessibility_label(format!(
-            "#{} {} · {metadata_str} · {} · {}",
+            "{event_summary} · #{} {} · {metadata_str} · {}",
             row.card.number,
             row.card.title,
-            text,
             primary(&row)
         ))
-        .child(
-            view()
-                .pt_0p5()
-                .child(icon_tinted(kind_icon, kind_color).w(px(15.)).h(px(15.))),
-        )
+        .child(tone_icon_badge(event.icon, event.tone, event.live))
         .child(
             view()
                 .flex_1()
                 .min_w(px(0.))
                 .gap_1()
-                .child(
-                    view()
-                        .flex_row()
-                        .w_full()
-                        .items_center()
-                        .gap_2()
-                        .min_w(px(0.))
-                        .child(muted(format!("#{}", row.card.number)).flex_shrink_0())
-                        .child(
-                            label(row.card.title.clone())
-                                .font_weight(FontWeight::MEDIUM)
-                                .flex_1()
-                                .min_w(px(0.))
-                                .truncate(),
-                        )
-                        .child(meta_pills),
-                )
-                .child(
-                    muted(text)
-                        .text_color(if row.actionable() { ATTENTION } else { MUTED })
-                        .truncate()
-                        .w_full()
-                        .min_w(px(0.)),
-                ),
+                .child(event_headline_row(
+                    event.headline,
+                    event.tone,
+                    event.detail,
+                    top_trailing,
+                ))
+                .child(card_context_row(
+                    row.card.number,
+                    row.card.title.clone(),
+                    show_project.then(|| row.project_name.clone()),
+                    profile_tag,
+                    context_pills,
+                )),
         );
 
     let button_row = row.clone();
@@ -1010,13 +1574,14 @@ fn row_view(
             .disabled(move || ui.pending.get()),
         );
     }
-    if row.reasons.iter().any(|r| r.source != "runtime")
+    if !runtime_blocked_with_terminal(&row)
+        && row.reasons.iter().any(|r| r.source != "runtime")
         && crate::terminals::model::binding(&row).is_some()
     {
         let id = row.id.clone();
         let cid = row.card.id.clone();
         actions = actions.child(compact_action(
-            "Card & Terminal",
+            "Terminal",
             Variant::Quiet,
             move |_| {
                 ui.overview_selection.set(id.clone());
@@ -1063,6 +1628,7 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
     let counts = ui.reminder_counts.get();
     let s = ui.snapshot.get();
     let items = ui.reminders.get();
+    let show_project = scope.is_none();
     let actionable: std::collections::BTreeSet<_> = overview(&s)
         .iter()
         .filter(|r| r.actionable())
@@ -1090,9 +1656,7 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
             .iter()
             .filter(|i| i.card_id == id && i.unread)
             .max_by_key(|i| i.sequence);
-        let message = latest
-            .map(|i| i.message.lines().collect::<Vec<_>>().join(" "))
-            .unwrap_or_default();
+        let event = describe_unread_update(&s, &id, latest);
         let sequence = latest.map(|i| i.sequence);
         let max_seq = s
             .events
@@ -1110,6 +1674,16 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
             .unwrap_or("")
             .to_owned();
 
+        let event_summary = match &event.detail {
+            Some(d) if !d.is_empty() => format!("{} · {d}", event.headline),
+            _ => event.headline.clone(),
+        };
+        let hint = format!(
+            "{event_summary}\n#{} {}\n{project}",
+            card.number, card.title
+        );
+        let extra_pill = (unread_count > 1).then(|| badge(format!("+{}", unread_count - 1)).into_element());
+
         rows = rows.child(
             view()
                 .flex_row()
@@ -1120,60 +1694,52 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
                 .border_b_1()
                 .border_color(BORDER)
                 .child(
-                    canban_ui_kit::press_target()
+                    view()
                         .flex_1()
                         .min_w(px(0.))
-                        .items_start()
-                        .flex_row()
-                        .gap_2p5()
-                        .py_2()
-                        .px_2()
-                        .rounded(px(RADIUS))
-                        .bg(CLEAR)
-                        .hover(|s| s.bg(CARD_HOVER))
-                        .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
-                        .on_press(move |_: &()| {
-                            close(ui);
-                            ui.open_card(id.clone());
-                            ui.card_event.set(sequence);
-                        })
+                        .tooltip(hint_tooltip(hint))
                         .child(
-                            view()
-                                .pt_1p5()
-                                .child(view().w(px(8.)).h(px(8.)).rounded_full().bg(ACCENT)),
-                        )
-                        .child(
-                            view()
-                                .flex_1()
+                            canban_ui_kit::press_target()
+                                .w_full()
                                 .min_w(px(0.))
-                                .gap_1()
+                                .items_center()
+                                .flex_row()
+                                .gap_2p5()
+                                .py_2()
+                                .px_2()
+                                .rounded(px(RADIUS))
+                                .bg(CLEAR)
+                                .hover(|s| s.bg(CARD_HOVER))
+                                .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
+                                .accessibility_label(format!(
+                                    "{event_summary} · #{} {} · {project} · Card →",
+                                    card.number, card.title
+                                ))
+                                .on_press(move |_: &()| {
+                                    close(ui);
+                                    ui.open_card(id.clone());
+                                    ui.card_event.set(sequence);
+                                })
+                                .child(tone_icon_badge(event.icon, event.tone, false))
                                 .child(
                                     view()
-                                        .flex_row()
-                                        .w_full()
-                                        .items_center()
-                                        .gap_2()
+                                        .flex_1()
                                         .min_w(px(0.))
-                                        .child(muted(format!("#{}", card.number)).flex_shrink_0())
-                                        .child(
-                                            label(card.title.clone())
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .flex_1()
-                                                .min_w(px(0.))
-                                                .truncate(),
-                                        )
-                                        .child(
-                                            muted(project)
-                                                .max_w(px(140.))
-                                                .truncate()
-                                                .flex_shrink_0(),
-                                        )
-                                        .child(status(
-                                            format!("{unread_count} unread"),
-                                            Tone::Info,
+                                        .gap_1()
+                                        .child(event_headline_row(
+                                            event.headline,
+                                            event.tone,
+                                            event.detail,
+                                            extra_pill,
+                                        ))
+                                        .child(card_context_row(
+                                            card.number,
+                                            card.title.clone(),
+                                            show_project.then_some(project),
+                                            None,
+                                            Vec::new(),
                                         )),
-                                )
-                                .child(muted(message).truncate().w_full().min_w(px(0.))),
+                                ),
                         ),
                 )
                 .child(compact_action("✓ Read", Variant::Quiet, move |_| {
@@ -1193,4 +1759,225 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
             .tone(Tone::Info)
             .child(rows),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_card() -> canban_types::Card {
+        serde_json::from_value(json!({
+            "id": "c1",
+            "project_id": "p1",
+            "number": 46,
+            "title": "优化提醒的条目",
+            "body": "",
+            "stage": "develop",
+            "revision": 1,
+            "created_at": 1
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn describe_row_promotes_permission_and_cleans_redundant_prefixes() {
+        let mut s = canban_types::Snapshot::default();
+        let card = base_card();
+        let req = canban_scheduler::request(
+            "p1",
+            "c1",
+            "develop",
+            "stage_entry",
+            canban_types::Config::default().profiles[0].clone(),
+            "task".into(),
+            None,
+        );
+        let mut attempt: canban_types::Attempt = serde_json::from_value(json!({
+            "id": "r1:1",
+            "request_id": req.id,
+            "project_id": "p1",
+            "card_id": "c1",
+            "number": 1,
+            "state": "running",
+            "terminal": "t1",
+            "cwd": "/tmp",
+            "input_path": "in",
+            "connection_state": "connected",
+            "observed": {
+                "state": "live",
+                "status": {
+                    "state": "blocked",
+                    "kind": "permission",
+                    "title": "Allow command?",
+                    "msg": "cargo test --workspace"
+                }
+            },
+            "created_at": 1
+        }))
+        .unwrap();
+        attempt.lifecycle.observed_at = Some(u64::MAX);
+        attempt.lifecycle.waiting = Some(canban_types::RuntimeWait {
+            id: "w1".into(),
+            kind: "permission".into(),
+            title: "Allow command?".into(),
+            message: "cargo test --workspace".into(),
+            since: 1,
+        });
+        s.cards.push(card);
+        s.requests.push(req);
+        s.attempts.push(attempt);
+
+        let rows = overview(&s);
+        let ev = describe_row(&s, &rows[0]);
+        assert_eq!(ev.icon, Icon::ShieldAlert);
+        assert_eq!(ev.tone, Tone::Attention);
+        assert_eq!(ev.headline, "Permission required");
+        assert_eq!(
+            ev.detail.as_deref(),
+            Some("Allow command? · cargo test --workspace")
+        );
+    }
+
+    #[test]
+    fn describe_row_distinguishes_review_merge_conflict_and_failure_states() {
+        let mut s = canban_types::Snapshot::default();
+        let mut card = base_card();
+        card.stage = "review".into();
+        let mut req = canban_scheduler::request(
+            "p1",
+            "c1",
+            "review",
+            "stage_entry",
+            canban_types::Config::default().profiles[0].clone(),
+            "review".into(),
+            None,
+        );
+        req.id = "req-rev".into();
+        req.state = "completed".into();
+        card.human_gate = Some(canban_types::HumanGate {
+            reason: "Agent report ready; human review required".into(),
+            request_id: Some("req-rev".into()),
+            next_stage: None,
+        });
+        s.reports.push(canban_types::Report {
+            id: "rep-1".into(),
+            request_id: "req-rev".into(),
+            project_id: "p1".into(),
+            card_id: "c1".into(),
+            attempt: 1,
+            state: "completed".into(),
+            message: "Implemented event-first hierarchy and semantic icons".into(),
+            path: None,
+            request_key: "k1".into(),
+            fingerprint: "f1".into(),
+            created_at: 2,
+        });
+        s.cards.push(card);
+        s.requests.push(req);
+
+        let rows = overview(&s);
+        let ev = describe_row(&s, &rows[0]);
+        assert_eq!(ev.icon, Icon::Eye);
+        assert_eq!(ev.tone, Tone::Attention);
+        assert_eq!(ev.headline, "Ready for review");
+        assert_eq!(
+            ev.detail.as_deref(),
+            Some("Implemented event-first hierarchy and semantic icons")
+        );
+
+        // Merge conflict gate surfaces GitMerge icon + Merge conflict headline.
+        s.cards[0].human_gate.as_mut().unwrap().reason =
+            "Merge conflict with main after 2 attempts".into();
+        let rows = overview(&s);
+        let merge_ev = describe_row(&s, &rows[0]);
+        assert_eq!(merge_ev.icon, Icon::GitMerge);
+        assert_eq!(merge_ev.headline, "Merge conflict");
+        assert_eq!(
+            merge_ev.detail.as_deref(),
+            Some("Merge conflict with main after 2 attempts")
+        );
+
+        // Failed request gate surfaces Danger TriangleAlert + Agent failed.
+        s.requests[0].state = "failed".into();
+        s.cards[0].human_gate.as_mut().unwrap().reason =
+            "failed: Build failed due to missing symbol".into();
+        let rows = overview(&s);
+        let fail_ev = describe_row(&s, &rows[0]);
+        assert_eq!(fail_ev.icon, Icon::TriangleAlert);
+        assert_eq!(fail_ev.tone, Tone::Danger);
+        assert_eq!(fail_ev.headline, "Agent failed");
+        assert_eq!(
+            fail_ev.detail.as_deref(),
+            Some("Build failed due to missing symbol")
+        );
+    }
+
+    #[test]
+    fn describe_unread_update_strips_machine_prefixes_and_maps_semantic_icons() {
+        let mut s = canban_types::Snapshot::default();
+        s.cards.push(base_card());
+        s.events.push(canban_types::Event {
+            id: "e1".into(),
+            project_id: "p1".into(),
+            card_id: "c1".into(),
+            sequence: 1,
+            kind: "comment.replied".into(),
+            actor: "agent:agy".into(),
+            message: "已整理好 ASCII 方案，请确认".into(),
+            request_id: None,
+            data: json!({"question_id": "q1"}),
+            created_at: 1,
+        });
+        let items = canban_notifications::reminders(&s);
+        let ev = describe_unread_update(&s, "c1", items.first());
+        assert_eq!(ev.icon, Icon::MessageSquare);
+        assert_eq!(ev.tone, Tone::Info);
+        assert_eq!(ev.headline, "@agy replied");
+        assert_eq!(ev.detail.as_deref(), Some("已整理好 ASCII 方案，请确认"));
+
+        // Stage completed report strips `completed: ` prefix.
+        s.events.push(canban_types::Event {
+            id: "e2".into(),
+            project_id: "p1".into(),
+            card_id: "c1".into(),
+            sequence: 2,
+            kind: "execution.reported".into(),
+            actor: "agent:developer".into(),
+            message: "completed: All unit tests passed".into(),
+            request_id: None,
+            data: json!({"report_id": "r2", "state": "completed"}),
+            created_at: 2,
+        });
+        let items = canban_notifications::reminders(&s);
+        let latest = items.iter().max_by_key(|i| i.sequence);
+        let done_ev = describe_unread_update(&s, "c1", latest);
+        assert_eq!(done_ev.icon, Icon::Check);
+        assert_eq!(done_ev.tone, Tone::Success);
+        assert_eq!(done_ev.headline, "Stage completed · @developer");
+        assert_eq!(done_ev.detail.as_deref(), Some("All unit tests passed"));
+
+        // Returned to Backlog strips `Returned to Backlog: ` prefix.
+        s.events.push(canban_types::Event {
+            id: "e3".into(),
+            project_id: "p1".into(),
+            card_id: "c1".into(),
+            sequence: 3,
+            kind: "execution.reported".into(),
+            actor: "agent:developer".into(),
+            message: "Returned to Backlog: Already implemented in main".into(),
+            request_id: None,
+            data: json!({"report_id": "r3", "state": "backlog"}),
+            created_at: 3,
+        });
+        let items = canban_notifications::reminders(&s);
+        let latest = items.iter().max_by_key(|i| i.sequence);
+        let backlog_ev = describe_unread_update(&s, "c1", latest);
+        assert_eq!(backlog_ev.icon, Icon::Undo);
+        assert_eq!(backlog_ev.tone, Tone::Neutral);
+        assert_eq!(backlog_ev.headline, "Returned to Backlog");
+        assert_eq!(
+            backlog_ev.detail.as_deref(),
+            Some("Already implemented in main")
+        );
+    }
 }
