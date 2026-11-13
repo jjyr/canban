@@ -15,6 +15,7 @@ fn controls() -> impl IntoElement {
     let group_open = signal(true);
     let nav_selected = signal(0_usize);
     let gutter_scroll = element_ref();
+    let split_width = signal(240.0_f32);
     view().flex_1().min_h(px(0.0)).p_5().gap_4().bg(BACKGROUND)
     .child(heading("Component Gallery"))
     .child(muted("Production components · local fixtures · no AppServer or Agent required"))
@@ -283,6 +284,37 @@ fn controls() -> impl IntoElement {
                                     "Acknowledgements",
                                     move || nav_selected.get() == 2,
                                     move |_| nav_selected.set(2),
+                                )),
+                        ),
+                )
+                .child(
+                    panel()
+                        .child(label("Resizable horizontal split · 1pt BORDER hairline + 3pt ACCENT hover/drag"))
+                        .child(
+                            view()
+                                .h(px(120.))
+                                .rounded(px(RADIUS))
+                                .border_1()
+                                .border_color(BORDER)
+                                .overflow_hidden()
+                                .child(split(
+                                    view()
+                                        .flex_1()
+                                        .p_3()
+                                        .bg(SURFACE)
+                                        .child(label("Left pane"))
+                                        .child(muted("Drag the boundary to resize"))
+                                        .into_element(),
+                                    view()
+                                        .flex_1()
+                                        .p_3()
+                                        .bg(BACKGROUND)
+                                        .child(label("Right pane"))
+                                        .child(muted("Full-height 1pt BORDER divider"))
+                                        .into_element(),
+                                    split_width,
+                                    160.0,
+                                    160.0,
                                 )),
                         ),
                 )
