@@ -334,6 +334,7 @@ mod tests {
             github: None,
             delivery_mode: Default::default(),
             agent_overrides: std::collections::BTreeMap::from([("developer".into(), "agy".into())]),
+            tags: Default::default(),
             id: "p".into(),
             name: "P".into(),
             directory: "/tmp".into(),

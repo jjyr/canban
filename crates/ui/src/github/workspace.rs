@@ -35,6 +35,7 @@ pub struct BoardFilter {
     pub kind: String,
     pub author: String,
     pub state: String,
+    pub tags: Vec<String>,
 }
 
 impl Default for Browser {

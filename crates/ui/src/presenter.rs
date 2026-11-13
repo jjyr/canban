@@ -65,6 +65,7 @@ pub struct Ui {
     pub quick_open: Signal<bool>,
     pub project_picker: Signal<bool>,
     pub search_query: Signal<String>,
+    pub local_tags: Signal<BTreeSet<String>>,
     pub recent_destinations: Stored<Vec<String>>,
     pub link_previews: Stored<BTreeMap<String, crate::links::CachedPreview>>,
     pub snapshot: Signal<Snapshot>,
@@ -303,6 +304,7 @@ impl Ui {
             quick_open: signal(false),
             project_picker: signal(false),
             search_query: signal(String::new()),
+            local_tags: signal(BTreeSet::new()),
             recent_destinations: stored(Vec::new()),
             link_previews: stored(BTreeMap::new()),
             idle_minutes: signal(
@@ -453,6 +455,15 @@ impl Ui {
         self.utility_popup.set(String::new());
         self.search_query.set(String::new());
         self.project_picker.set(projects);
+        self.quick_open.set(true);
+    }
+    pub fn open_tag_search(self, raw_tag: &str) {
+        let Some(tag) = canban_types::normalize_tag(raw_tag) else {
+            return;
+        };
+        self.utility_popup.set(String::new());
+        self.project_picker.set(false);
+        self.search_query.set(format!("#{tag}"));
         self.quick_open.set(true);
     }
     pub fn select_project(self, id: String) {
@@ -773,7 +784,8 @@ pub fn dispatch_complete(
                         | "notifications.read_all"
                         | "comment.add"
                         | "card.move"
-                        | "project.create" => ui.status.set("Saved".into()),
+                        | "project.create"
+                        | "tag.create" => ui.status.set("Saved".into()),
                         "card.create" | "github.issue.add" => {
                             if let Some(number) = value["number"].as_u64() {
                                 ui.notify(format!("Created Card #{number}"));

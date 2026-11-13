@@ -299,6 +299,8 @@ pub struct Project {
     pub delivery_mode: DeliveryMode,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub agent_overrides: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     pub id: String,
     pub name: String,
     pub directory: String,
@@ -319,6 +321,25 @@ pub struct WorkLocation {
 }
 pub fn local_machine() -> String {
     "local".into()
+}
+pub const MAX_TAG_CHARS: usize = 48;
+/// Normalize a `#tag` or `tag` token when it is a valid indexing tag name.
+/// Pure ASCII numbers remain Card/Issue references (`#18`), never tags.
+pub fn normalize_tag(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().strip_prefix('#').unwrap_or(raw.trim());
+    if trimmed.is_empty() || trimmed.chars().count() > MAX_TAG_CHARS {
+        return None;
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return None;
+    }
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(trimmed.to_owned())
 }
 impl Project {
     pub fn work_location(&self) -> WorkLocation {

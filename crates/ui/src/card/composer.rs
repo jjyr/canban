@@ -107,9 +107,16 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         comment,
         computed(move || ui.current_card().map(|c| c.project_id).unwrap_or_default()),
         "Card comment",
-        "Write a comment… @Agent or #Card / Issue / PR",
+        "Write a comment… @Agent, #Card or #tag",
     );
     let source = source.on_completion_accept(move |event: &EditorCompletionAcceptEvent| {
+        let project_id = ui
+            .current_card()
+            .map(|c| c.project_id)
+            .unwrap_or_else(|| ui.project.get_untracked());
+        if crate::references::accept_tag(ui, &project_id, event).is_some() {
+            return;
+        }
         let id = event.item.label.to_string();
         if event
             .item
