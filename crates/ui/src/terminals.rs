@@ -235,6 +235,8 @@ fn gallery_create_entry(
             state: "running".into(),
             connection: "connected".into(),
             error: None,
+            agent_status: None,
+            agent_turn: None,
         }),
     };
     let inherited_location = current(ui).and_then(|e| e.location);

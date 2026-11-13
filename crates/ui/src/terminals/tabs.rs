@@ -122,6 +122,59 @@ fn tab(ui: Ui, e: Entry, capacity: f32) -> impl IntoElement {
     let rename = id.clone();
     let selected = ui.terminal_selection.get() == id;
     let hint = e.hint();
+    let attention = e.attention_reason();
+    let mut tab_button = view()
+        .h_full()
+        .focusable(true)
+        .flex_1()
+        .min_w(px(0.))
+        .overflow_hidden()
+        .px_2()
+        .bg(CLEAR)
+        .items_center()
+        .justify_center()
+        .role(AccessibilityRole::Tab)
+        .cursor_pointer()
+        .accessibility_state(move || nsh_core::AccessibilityState {
+            selected,
+            ..Default::default()
+        })
+        .label(format!("Tab {hint}"))
+        .flex_row()
+        .gap_2();
+    if attention.is_some() {
+        tab_button = tab_button.child(
+            icon_tinted(Icon::Info, ATTENTION)
+                .w(px(13.))
+                .h(px(13.))
+                .flex_shrink_0(),
+        );
+    } else if e.agent.is_some() {
+        tab_button = tab_button.child(
+            view()
+                .w(px(5.))
+                .h(px(5.))
+                .rounded(px(3.))
+                .bg(if e.ended() || e.inactive() {
+                    MUTED
+                } else {
+                    SUCCESS
+                })
+                .flex_shrink_0()
+                .pointer_events(PointerEvents::None),
+        );
+    }
+    tab_button = tab_button
+        .child(super::labels::tab(&e))
+        .on_press_down(move |event: &nsh_core::PressEvent| {
+            if event.clicks >= 2 {
+                ui.terminal_rename.set(Some(rename.clone()));
+            }
+        })
+        .on_context_menu(move |event: &nsh_core::ContextMenuEvent| {
+            ui.spawn(menu(ui, context.clone(), Some(event.page_position)));
+        })
+        .on_press(move |_: &nsh_core::PressEvent| ui.open_terminal(id.clone()));
     view()
         .w(px(super::labels::tab_width(&e).min(capacity)))
         .h_full()
@@ -136,51 +189,7 @@ fn tab(ui: Ui, e: Entry, capacity: f32) -> impl IntoElement {
         .border_r_1()
         .border_color(BORDER)
         .tooltip(hint_tooltip(hint.clone()).placement(Placement::Bottom))
-        .child(
-            view()
-                .h_full()
-                .focusable(true)
-                .flex_1()
-                .min_w(px(0.))
-                .overflow_hidden()
-                .px_2()
-                .bg(CLEAR)
-                .items_center()
-                .justify_center()
-                .role(AccessibilityRole::Tab)
-                .cursor_pointer()
-                .accessibility_state(move || nsh_core::AccessibilityState {
-                    selected,
-                    ..Default::default()
-                })
-                .label(format!("Tab {hint}"))
-                .flex_row()
-                .gap_2()
-                .child(
-                    view()
-                        .w(px(5.))
-                        .h(px(5.))
-                        .rounded(px(3.))
-                        .bg(if e.needs_attention() {
-                            ATTENTION
-                        } else if e.ended() || e.inactive() {
-                            MUTED
-                        } else {
-                            SUCCESS
-                        })
-                        .pointer_events(PointerEvents::None),
-                )
-                .child(super::labels::tab(&e))
-                .on_press_down(move |event: &nsh_core::PressEvent| {
-                    if event.clicks >= 2 {
-                        ui.terminal_rename.set(Some(rename.clone()));
-                    }
-                })
-                .on_context_menu(move |event: &nsh_core::ContextMenuEvent| {
-                    ui.spawn(menu(ui, context.clone(), Some(event.page_position)));
-                })
-                .on_press(move |_: &nsh_core::PressEvent| ui.open_terminal(id.clone())),
-        )
+        .child(tab_button)
         .child(chrome_button(
             Icon::Close,
             format!("Close terminal {}", e.title()),

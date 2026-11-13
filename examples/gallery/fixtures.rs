@@ -362,6 +362,8 @@ pub fn workspace_with_card_terminals() -> canban_types::Snapshot {
             state: "running".into(),
             connection: "connected".into(),
             error: None,
+            agent_status: None,
+            agent_turn: None,
         }),
         created_at: now(),
     });
@@ -381,6 +383,8 @@ pub fn workspace_with_card_terminals() -> canban_types::Snapshot {
             state: "running".into(),
             connection: "connected".into(),
             error: None,
+            agent_status: None,
+            agent_turn: None,
         }),
         created_at: now(),
     });
@@ -748,6 +752,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
             state: "running".into(),
             connection: "connected".into(),
             error: None,
+            agent_status: None,
+            agent_turn: None,
         }),
         created_at: 0,
     });
@@ -834,6 +840,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
             state: "running".into(),
             connection: "connected".into(),
             error: None,
+            agent_status: None,
+            agent_turn: None,
         }),
         created_at: 0,
     });

@@ -105,7 +105,7 @@ fn runtime_wait_episodes_are_durable_deduplicated_and_never_approve_task_gates()
     );
 }
 #[test]
-fn idle_reclamation_uses_actual_interaction_even_when_the_terminal_is_open() {
+fn idle_reclamation_covers_all_inactive_managed_agents_including_manual_exit_profiles() {
     let (_d, app, _p, c) = setup();
     app.call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
         .unwrap();
@@ -125,22 +125,27 @@ fn idle_reclamation_uses_actual_interaction_even_when_the_terminal_is_open() {
     run.lifecycle.last_interaction_at = Some(now());
     assert!(!idle_candidate(&s, &run, 15, now(), false));
     run.lifecycle.last_interaction_at = None;
+    // Unfinished automatic stage assignments stay alive for user inspection instead of silent reclamation.
     s.requests[0].trigger = "stage_entry".into();
     assert!(!idle_candidate(&s, &run, 15, now(), false));
+    // Once the automatic assignment completes, it becomes inactive and eligible even without
+    // `provider_session_id`, `resume_argv`, or `ExitAction::Input` (e.g. `agy`, `gemini`).
+    s.requests[0].state = "completed".into();
+    run.provider_session_id = None;
+    s.requests[0].profile.resume_argv = None;
+    s.requests[0].profile.exit = Some(ExitAction::Manual);
+    assert!(idle_candidate(&s, &run, 15, now(), false));
+    s.requests[0].state = "running".into();
     s.requests[0].trigger = "interactive".into();
     for status in ["working", "unknown", "blocked", "error"] {
         observed(&mut run, status);
         assert!(!idle_candidate(&s, &run, 15, now(), false));
     }
     observed(&mut run, "idle");
-    run.provider_session_id = None;
-    assert!(!idle_candidate(&s, &run, 15, now(), false));
-    run.provider_session_id = Some("exact-session".into());
-    s.requests[0].profile.resume_argv = None;
-    assert!(!idle_candidate(&s, &run, 15, now(), false));
+    assert!(idle_candidate(&s, &run, 15, now(), false));
 }
 #[test]
-fn overview_is_global_deduplicates_conversations_and_keeps_review_independent_of_runtime_done() {
+fn overview_is_global_deduplicates_conversations_and_surfaces_unfinished_idle_agents() {
     let (_d, app, p, c) = setup();
     app.call(
         "card.move",
@@ -152,10 +157,16 @@ fn overview_is_global_deduplicates_conversations_and_keeps_review_independent_of
     let mut s = app.snapshot().unwrap();
     observed(&mut run, "done");
     s.attempts = vec![run.clone()];
+    // Unfinished assignment whose Agent stopped at the prompt immediately alerts the user.
+    let rows = canban_notifications::overview(&s);
+    assert_eq!(rows[0].group, "Needs attention");
+    assert!(rows[0].actionable());
+    assert_eq!(rows[0].reasons[0].source, "runtime");
+    // Once reported `completed` without a human gate, the live idle terminal is quiet (`Idle`).
+    s.requests[0].state = "completed".into();
     let rows = canban_notifications::overview(&s);
     assert_eq!(rows[0].group, "Idle");
     assert!(!rows[0].actionable());
-    s.requests[0].state = "completed".into();
     s.cards[0].human_gate = Some(HumanGate {
         reason: "Review report".into(),
         request_id: Some(req.id.clone()),

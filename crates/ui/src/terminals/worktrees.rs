@@ -48,6 +48,8 @@ pub fn open_shell(ui: Ui, wt: &ManagedWorktree) {
                 state: "running".into(),
                 connection: "connected".into(),
                 error: None,
+                agent_status: None,
+                agent_turn: None,
             }),
         };
         let ctx = canban_types::TerminalContext {

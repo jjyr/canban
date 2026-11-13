@@ -945,6 +945,10 @@ pub struct TerminalRuntime {
     pub state: String,
     pub connection: String,
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_turn: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TerminalContext {

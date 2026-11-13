@@ -16,7 +16,7 @@ impl AppServer {
             let mut item: TerminalEntry = db.get(terminal_id)?;
             if let Ok(mut configuration)=db.get::<ConfigurationSession>(terminal_id) && configuration.state=="queued" {
                 configuration.state="cancelled".into();db.save(&configuration)?;
-                item.runtime=Some(TerminalRuntime{machine:"local".into(),owner_core_id:None,core_id:None,terminal:None,state:"finished".into(),connection:"connected".into(),error:None});db.save(&item)?;
+                item.runtime=Some(TerminalRuntime{machine:"local".into(),owner_core_id:None,core_id:None,terminal:None,state:"finished".into(),connection:"connected".into(),error:None,agent_status:None,agent_turn:None});db.save(&item)?;
             }
             if let Some(conversation) = &item.conversation_id {
                 let row = canban_notifications::overview(&db.snapshot()?).into_iter().find(|r| &r.id == conversation);
@@ -261,6 +261,8 @@ impl AppServer {
                     state: "starting".into(),
                     connection: "checking".into(),
                     error: None,
+                    agent_status: None,
+                    agent_turn: None,
                 }),
             };
             db.save(&item)?;
@@ -642,6 +644,10 @@ impl AppServer {
                         runtime.error = None;
                         if v["state"] == "finished" {
                             runtime.state = "finished".into();
+                            runtime.agent_status = None;
+                        } else {
+                            runtime.agent_status = v["status"]["state"].as_str().map(str::to_owned);
+                            runtime.agent_turn = v["turn"].as_u64();
                         }
                     }
                     (Ok((core, _)), _) if runtime.core_id.as_ref().is_some_and(|id| id != core) => {
@@ -761,6 +767,8 @@ mod tests {
                 state: "running".into(),
                 connection: "connected".into(),
                 error: None,
+                agent_status: None,
+                agent_turn: None,
             }),
         };
         app.store

@@ -367,14 +367,6 @@ pub const CATALOG: &[Command] = &[
         keywords: "tree panel hide show",
     },
     Command {
-        id: "toggle-inactive-terminals",
-        title: "Show or Hide Closed Terminals",
-        key: "",
-        display: "Terminals",
-        context: "Terminals",
-        keywords: "inactive finished history",
-    },
-    Command {
         id: "rename-terminal",
         title: "Rename Current Terminal Tab…",
         key: "",
@@ -698,10 +690,6 @@ pub fn execute(ui: Ui, id: &str) {
         "toggle-terminal-sidebar" => {
             ui.navigate("terminals");
             ui.terminal_sidebar.update(|v| *v = !*v);
-        }
-        "toggle-inactive-terminals" => {
-            ui.navigate("terminals");
-            ui.terminal_inactive.update(|v| *v = !*v);
         }
         "rename-terminal" => {
             if ui.page.get_untracked() == "card" && ui.card_terminal_open.get_untracked() {

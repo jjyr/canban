@@ -95,6 +95,12 @@ pub fn mark_all_read(ui: Ui, project_scope: Option<String>) {
     );
 }
 
+fn is_special_agent_terminal(s: &canban_types::Snapshot, e: &crate::terminals::Entry) -> bool {
+    e.agent.is_none()
+        && (s.configuration_sessions.iter().any(|c| c.id == e.saved.id)
+            || e.saved.agent_engine.is_some())
+}
+
 fn attention_summary(ui: Ui) -> (usize, usize, usize, usize) {
     let s = ui.snapshot.get();
     let counts = ui.reminder_counts.get();
@@ -110,7 +116,7 @@ fn attention_summary(ui: Ui) -> (usize, usize, usize, usize) {
             .filter(|e| {
                 e.listed()
                     && (e.needs_attention() || e.status() == "blocked")
-                    && s.configuration_sessions.iter().any(|c| c.id == e.saved.id)
+                    && is_special_agent_terminal(&s, e)
             })
             .count();
     let unread_cards = s
@@ -519,7 +525,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     .filter(|e| {
                         e.listed()
                             && (e.needs_attention() || e.status() == "blocked")
-                            && s.configuration_sessions.iter().any(|c| c.id == e.saved.id)
+                            && is_special_agent_terminal(&s, e)
                     })
                     .count();
             let active_slots = canban_scheduler::active_count(&s);
@@ -658,9 +664,13 @@ fn activity_body(
                         && scope
                             .as_deref()
                             .is_none_or(|pid| e.project_id.as_deref() == Some(pid))
-                        && (group == "Needs you")
-                            == (e.needs_attention() || e.status() == "blocked")
-                        && s.configuration_sessions.iter().any(|c| c.id == e.saved.id)
+                        && if group == "Needs you" {
+                            (e.needs_attention() || e.status() == "blocked")
+                                && is_special_agent_terminal(&s, e)
+                        } else {
+                            !(e.needs_attention() || e.status() == "blocked")
+                                && s.configuration_sessions.iter().any(|c| c.id == e.saved.id)
+                        }
                 })
                 .collect()
         } else {
@@ -753,9 +763,33 @@ pub fn agent_row(ui: Ui, row: OverviewRow, selected: bool) -> impl IntoElement {
 fn config_session_row(ui: Ui, entry: crate::terminals::Entry) -> impl IntoElement {
     let id = entry.saved.id.clone();
     let id_btn = id.clone();
+    let is_config = ui
+        .snapshot
+        .with_untracked(|s| s.configuration_sessions.iter().any(|c| c.id == id));
     let needs_attn = entry.needs_attention() || entry.status() == "blocked";
-    let status_text = entry.display_status();
+    let status_text = entry
+        .attention_reason()
+        .unwrap_or_else(|| entry.display_status());
     let project_name = entry.project_name.clone();
+    let row_title = if is_config {
+        "Edit Project Workflows".into()
+    } else if let Some(c) = &entry.card {
+        format!("#{} {} · {}", c.number, c.title, entry.title())
+    } else {
+        entry.title()
+    };
+    let subtitle = if is_config {
+        format!("Workflow configuration session · {status_text}")
+    } else {
+        status_text
+    };
+    let row_icon = if is_config {
+        Icon::Trigger
+    } else {
+        entry.provider().map(|(ic, _)| ic).unwrap_or(Icon::Agent)
+    };
+    let card_dest = entry.card.as_ref().map(|c| c.id.clone());
+    let card_dest_btn = card_dest.clone();
 
     view()
         .flex_row()
@@ -779,11 +813,15 @@ fn config_session_row(ui: Ui, entry: crate::terminals::Entry) -> impl IntoElemen
                 .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
                 .on_press(move |_: &()| {
                     close(ui);
-                    ui.open_terminal(id.clone());
+                    if let Some(cid) = &card_dest {
+                        ui.open_card_with_terminal(cid.clone(), Some(id.clone()));
+                    } else {
+                        ui.open_terminal(id.clone());
+                    }
                 })
                 .child(
                     view().pt_0p5().child(
-                        icon_tinted(Icon::Trigger, if needs_attn { ATTENTION } else { ACCENT })
+                        icon_tinted(row_icon, if needs_attn { ATTENTION } else { ACCENT })
                             .w(px(15.))
                             .h(px(15.)),
                     ),
@@ -799,15 +837,11 @@ fn config_session_row(ui: Ui, entry: crate::terminals::Entry) -> impl IntoElemen
                                 .items_center()
                                 .gap_2()
                                 .min_w(px(0.))
-                                .child(
-                                    label("Edit Project Workflows")
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .truncate(),
-                                )
+                                .child(label(row_title).font_weight(FontWeight::MEDIUM).truncate())
                                 .child(badge(project_name)),
                         )
                         .child(
-                            muted(format!("Workflow configuration session · {status_text}"))
+                            muted(subtitle)
                                 .text_color(if needs_attn { ATTENTION } else { MUTED })
                                 .truncate()
                                 .min_w(px(0.)),
@@ -819,7 +853,11 @@ fn config_session_row(ui: Ui, entry: crate::terminals::Entry) -> impl IntoElemen
             Variant::Secondary,
             move |_| {
                 close(ui);
-                ui.open_terminal(id_btn.clone());
+                if let Some(cid) = &card_dest_btn {
+                    ui.open_card_with_terminal(cid.clone(), Some(id_btn.clone()));
+                } else {
+                    ui.open_terminal(id_btn.clone());
+                }
             },
         ))
 }

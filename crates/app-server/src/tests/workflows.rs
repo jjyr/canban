@@ -687,6 +687,8 @@ fn configuration_sessions_have_project_ownership_reuse_and_exact_history_resume(
                 state: "finished".into(),
                 connection: "connected".into(),
                 error: None,
+                agent_status: None,
+                agent_turn: None,
             });
             db.save(&t)
         })
@@ -740,6 +742,8 @@ fn configuration_open_uses_configured_default_agent_and_auto_fresh_fallback() {
                 state: "finished".into(),
                 connection: "connected".into(),
                 error: None,
+                agent_status: None,
+                agent_turn: None,
             });
             db.save(&t)
         })

@@ -274,12 +274,17 @@ impl AppServer {
                             current.close_state = "closed".into();
                             if current.lifecycle.close_reason == "idle" {
                                 current.state = "idle_closed".into();
+                                let closed_msg = if current.provider_session_id.is_some() {
+                                    "Idle Agent exited; exact conversation retained for resume"
+                                } else {
+                                    "Idle Agent terminal closed; Card history retained"
+                                };
                                 log(
                                     db,
                                     &db.get::<Card>(&run.card_id)?,
                                     "execution.idle_closed",
                                     "system",
-                                    "Idle Agent exited; exact conversation retained for resume",
+                                    closed_msg,
                                     Some(run.request_id.clone()),
                                     json!({"attempt":run.number}),
                                 )?;
@@ -333,23 +338,104 @@ impl AppServer {
                 }
             }
         }
-        self.store.lock().unwrap().write(|db| {
-            for mut run in db.list::<Attempt>()?.into_iter().filter(|a| a.close_state == "closing" && a.close_requested_at.is_some_and(|t| now().saturating_sub(t) > 30_000)) {
-                run.close_state = "error".into();
-                run.error = Some("Agent did not exit after the normal exit request. Inspect its terminal or use End session.".into());
-                let mut card: Card = db.get(&run.card_id)?;
-                if run.lifecycle.close_reason == "idle" {
-                    db.save(&canban_notifications::attention(&card.project_id,&card.id,run.error.as_deref().unwrap()))?;
-                    log(db,&card,"execution.idle_close_failed","system",run.error.as_deref().unwrap(),Some(run.request_id.clone()),json!({"attempt":run.number}))?;
+        let timed_out_closing: Vec<Attempt> = self
+            .store
+            .lock()
+            .unwrap()
+            .db()
+            .list::<Attempt>()?
+            .into_iter()
+            .filter(|a| {
+                a.close_state == "closing"
+                    && a.close_requested_at
+                        .is_some_and(|t| now().saturating_sub(t) > 30_000)
+            })
+            .collect();
+        for run in timed_out_closing {
+            if run.lifecycle.close_reason == "idle" {
+                let fallback = (|| -> Result<bool> {
+                    let Some(terminal) = run.terminal.as_deref() else {
+                        return Ok(false);
+                    };
+                    if client.status()?["core"]["id"].as_str() != run.core_id.as_deref() {
+                        return Ok(false);
+                    }
+                    let actual = client.get(terminal)?;
+                    if actual["state"] == "finished" {
+                        return Ok(true);
+                    }
+                    if actual["state"] != "live"
+                        || !matches!(actual["status"]["state"].as_str(), Some("idle" | "done"))
+                    {
+                        return Ok(false);
+                    }
+                    let _ = self.capture_output(&run);
+                    client.call("terminal.kill", json!({"terminal": terminal}))?;
+                    Ok(true)
+                })();
+                match fallback {
+                    Ok(true) => {
+                        self.store.lock().unwrap().write(|db| {
+                            let mut current: Attempt = db.get(&run.id)?;
+                            if current.close_state == "closing" {
+                                current.close_requested_at = Some(now());
+                                db.save(&current)?;
+                            }
+                            Ok(())
+                        })?;
+                        continue;
+                    }
+                    Ok(false) => {
+                        // Agent resumed working or Core changed while closing; cancel the idle close cleanly.
+                        self.store.lock().unwrap().write(|db| {
+                            let mut current: Attempt = db.get(&run.id)?;
+                            if current.close_state == "closing" {
+                                current.close_state.clear();
+                                current.close_requested_at = None;
+                                current.lifecycle.close_reason.clear();
+                                db.save(&current)?;
+                            }
+                            Ok(())
+                        })?;
+                        continue;
+                    }
+                    Err(_) => {}
+                }
+            }
+            self.store.lock().unwrap().write(|db| {
+                let mut current: Attempt = db.get(&run.id)?;
+                if current.close_state != "closing" {
+                    return Ok(());
+                }
+                current.close_state = "error".into();
+                current.error = Some(
+                    "Agent did not exit after the normal exit request. Inspect its terminal or use End session."
+                        .into(),
+                );
+                let mut card: Card = db.get(&current.card_id)?;
+                if current.lifecycle.close_reason == "idle" {
+                    db.save(&canban_notifications::attention(
+                        &card.project_id,
+                        &card.id,
+                        current.error.as_deref().unwrap(),
+                    ))?;
+                    log(
+                        db,
+                        &card,
+                        "execution.idle_close_failed",
+                        "system",
+                        current.error.as_deref().unwrap(),
+                        Some(current.request_id.clone()),
+                        json!({"attempt":current.number}),
+                    )?;
                 } else {
-                    attention(db, &mut card, run.error.as_deref().unwrap())?;
+                    attention(db, &mut card, current.error.as_deref().unwrap())?;
                     card.revision += 1;
                     db.save(&card)?;
                 }
-                db.save(&run)?;
-            }
-            Ok(())
-        })?;
+                db.save(&current)
+            })?;
+        }
         self.deliver_questions(&client)?;
         self.close_idle(&client)?;
         let _ = self.pump_admissions();
