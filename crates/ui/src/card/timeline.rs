@@ -9,15 +9,16 @@ pub fn entries(events: &[Event]) -> Vec<(Event, bool)> {
         .into_iter()
         .map(|event| {
             let echoed_report = event.kind == "execution.reported"
-                && events.iter().any(|other| {
-                    other.kind == "comment.replied"
-                        && other.request_id == event.request_id
-                        && event.request_id.is_some()
-                        && ((event.data["report_id"].as_str().is_some()
-                            && other.data["report_id"] == event.data["report_id"])
-                            || (event.data["path"].as_str().is_some()
-                                && other.data["path"] == event.data["path"]))
-                });
+                && (event.data["comment_replied"] == true
+                    || events.iter().any(|other| {
+                        other.kind == "comment.replied"
+                            && other.request_id == event.request_id
+                            && event.request_id.is_some()
+                            && ((event.data["report_id"].as_str().is_some()
+                                && other.data["report_id"] == event.data["report_id"])
+                                || (event.data["path"].as_str().is_some()
+                                    && other.data["path"] == event.data["path"]))
+                    }));
             let narrative = matches!(event.kind.as_str(), "comment.created" | "comment.replied")
                 || event.kind == "execution.reported" && !echoed_report;
             (event.clone(), narrative)
@@ -294,6 +295,32 @@ mod tests {
         let rows = entries(&[report, reply]);
         assert!(!rows[0].1);
         assert!(rows[1].1);
+    }
+    #[test]
+    fn comment_report_after_explicit_reply_is_hidden_from_activity() {
+        let reply = Event {
+            id: "reply".into(),
+            sequence: 1,
+            project_id: "p".into(),
+            card_id: "c".into(),
+            kind: "comment.replied".into(),
+            actor: "agent:agy".into(),
+            message: "Detailed answer".into(),
+            request_id: Some("r".into()),
+            data: serde_json::json!({"question_id":"q:agy","path":"replies/q.md"}),
+            created_at: 1,
+        };
+        let report = Event {
+            id: "report".into(),
+            sequence: 2,
+            kind: "execution.reported".into(),
+            message: "completed: Summary".into(),
+            data: serde_json::json!({"report_id":"rep1","path":null,"state":"completed","comment_replied":true}),
+            ..reply.clone()
+        };
+        let rows = visible(&[reply, report], None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0.kind, "comment.replied");
     }
     #[test]
     fn reports_without_a_resource_path_are_never_hidden_as_reply_echoes() {

@@ -1,0 +1,1 @@
+Before other work, run "$CANBAN_CLI" bind-session --session-id "${{env_var}}" to bind this invocation to its actual provider history. Do not reuse a thread ID quoted in earlier conversation history.

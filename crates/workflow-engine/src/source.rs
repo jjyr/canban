@@ -403,10 +403,26 @@ pub fn encode(document: &Document) -> Result<String> {
     Ok(serde_yaml_ng::to_string(document)?)
 }
 
-pub const DEFAULT_PLAN_PROMPT: &str = "Analyze the Card against the codebase without modifying files. If it is already implemented or obsolete, report `--state backlog` with a clear explanation; if requirements need clarification, report `--state blocked`; otherwise submit a concise implementation plan (files, risks, validation) with `--state completed`.";
-pub const DEFAULT_DEVELOP_PROMPT: &str = "Evaluate the Card against the current codebase before editing:\n- Actionable: implement and validate the changes on the Card branch, commit deliverables, and report `--state completed`.\n- Already implemented, obsolete, or not applicable: make no unnecessary edits and report `--state backlog` explaining why.\n- Ambiguous or awaiting a human decision: report `--state blocked` with specific questions.";
-pub const DEFAULT_REVIEW_PROMPT: &str = "Review the Card diff and earlier results without unrelated edits. Verify correctness, edge cases, and validation coverage, then report findings and remaining concerns with `--state completed` (or `--state blocked` if critical issues require human attention).";
-pub const DEFAULT_MERGE_PROMPT: &str = "Run pre-merge checks and tests in the working directory, verify there are no blockers or unintended changes, and summarize readiness in your report.";
+pub const DEFAULT_PLAN_PROMPT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../prompts/workflow/step_plan.txt"
+))
+.trim_ascii_end();
+pub const DEFAULT_DEVELOP_PROMPT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../prompts/workflow/step_develop.txt"
+))
+.trim_ascii_end();
+pub const DEFAULT_REVIEW_PROMPT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../prompts/workflow/step_review.txt"
+))
+.trim_ascii_end();
+pub const DEFAULT_MERGE_PROMPT: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../prompts/workflow/step_merge.txt"
+))
+.trim_ascii_end();
 
 pub fn default_step_prompt(step_id: &str, profile: Option<&str>) -> &'static str {
     let lower = step_id.to_ascii_lowercase();

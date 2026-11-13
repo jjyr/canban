@@ -3,6 +3,9 @@ use super::*;
 pub struct AppClient {
     pub home: PathBuf,
     endpoint: PathBuf,
+    cli: PathBuf,
+    explicit_endpoint: bool,
+    respawn_lock: Mutex<()>,
     config: RwLock<Config>,
     server_notice: Option<String>,
 }
@@ -48,23 +51,7 @@ impl AppClient {
             }
         }
         if rpc(&endpoint, "app.ping", json!({})).is_err() && explicit.is_none() {
-            std::fs::create_dir_all(&home)?;
-            let log = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(home.join("server.log"))?;
-            use std::os::unix::process::CommandExt;
-            // Separate process group, lifetime owned by the service, not its UI.
-            std::process::Command::new(cli)
-                .arg("--home")
-                .arg(&home)
-                .arg("serve")
-                .env_remove("CANBAN_ENDPOINT")
-                .stdin(std::process::Stdio::null())
-                .stdout(log.try_clone()?)
-                .stderr(log)
-                .process_group(0)
-                .spawn()?;
+            Self::spawn_daemon(&home, cli)?;
         }
         let mut state = None;
         let mut server_notice = None;
@@ -102,12 +89,71 @@ impl AppClient {
         Ok(Arc::new(Self {
             home: PathBuf::from(strp(&state, "home")?),
             endpoint,
+            cli: cli.to_path_buf(),
+            explicit_endpoint: explicit.is_some(),
+            respawn_lock: Mutex::new(()),
             config: RwLock::new(serde_json::from_value(state["config"].clone())?),
             server_notice,
         }))
     }
+    fn spawn_daemon(home: &Path, cli: &Path) -> Result<()> {
+        std::fs::create_dir_all(home)?;
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(home.join("server.log"))?;
+        use std::os::unix::process::CommandExt;
+        // Separate process group, lifetime owned by the service, not its UI.
+        std::process::Command::new(cli)
+            .arg("--home")
+            .arg(home)
+            .arg("serve")
+            .env_remove("CANBAN_ENDPOINT")
+            .stdin(std::process::Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log)
+            .process_group(0)
+            .spawn()?;
+        Ok(())
+    }
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
-        rpc(&self.endpoint, method, params)
+        match rpc(&self.endpoint, method, params.clone()) {
+            Ok(v) => Ok(v),
+            Err(first_err) => {
+                let connect_failed = first_err
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| {
+                        matches!(
+                            io.kind(),
+                            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                        )
+                    });
+                if !connect_failed
+                    || self.explicit_endpoint
+                    || !self.cli.exists()
+                    || instance::read_executable(&self.cli)
+                        .ok()
+                        .flatten()
+                        .is_some()
+                    || canban_updater::handoff::active(&self.home)
+                {
+                    return Err(first_err);
+                }
+                let _guard = self.respawn_lock.lock().unwrap();
+                if rpc(&self.endpoint, "app.ping", json!({})).is_err()
+                    && !canban_updater::handoff::active(&self.home)
+                {
+                    let _ = Self::spawn_daemon(&self.home, &self.cli);
+                    for _ in 0..50 {
+                        if rpc(&self.endpoint, "app.ping", json!({})).is_ok() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+                rpc(&self.endpoint, method, params)
+            }
+        }
     }
     pub fn server_notice(&self) -> Option<&str> {
         self.server_notice.as_deref()
