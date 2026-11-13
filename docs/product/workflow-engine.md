@@ -114,7 +114,7 @@ issue-planning.yaml  • |
 
 ### Board column hints and Card stepper
 
-- **Column headers** display concise client-derived badges (`@developer`, `Queue merge · Sync`, `Queue merge · Local`, `Review`, etc.) via `source::column_summary` and a **workflow-node** icon. Clicking opens a native Popover (`source::column_details`) listing active triggers and flow effects with a **View workflows** link.
+- **Column headers** display a read-only, client-derived automation pill (`⚡ Auto develop`, `⚡ Auto merge`, `⚡ Auto plan`, `⚡ Auto start`, `⚡ Auto @<profile>`, etc.) on the right side via `source::column_automation` (`Icon::Zap`). Hovering shows a styled tooltip (`tooltip_box`) summarizing the active workflow file, step actions, external-PR gating, upstream sync, and conflict retries; clicking does not navigate. Quiet/manual columns without automatic actions (including approval-only manual Review or default Backlog) stay blank. Compact single-stage mode (`stage_tabs`) omits the pill to preserve switcher width.
 - **Card detail** renders active/recent `WorkflowRun`s as a **Step Progress Stepper** (`✓ Analyze task → ● Implement → ○ Queue merge`), exposing clickable report links, an inline **Hold auto-merge / Resume auto-merge** button when a run includes `deliver`, and a **Request changes** feedback box that injects rework instructions into the next Agent step visit.
 
 ---

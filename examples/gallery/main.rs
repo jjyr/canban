@@ -1164,6 +1164,12 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Card states · Card open", Variant::Quiet, move |_| {
                     scene.set("workspace".into());ui.snapshot.set(fixtures::board_cards());ui.card.set("card-2".into());ui.page.set("card".into());
                 }))
+                .child(action("Column automations", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::automation_board());
+                    ui.card.set(String::new());
+                    ui.page.set("board".into());
+                }))
                 .child(action("Usage fixtures", Variant::Quiet, move |_| {
                     ui.usage.set(json!({"machine":"local","updated_at":canban_types::now(),"readings":[{"provider":"codex","auth":"present","account":"demo@example.invalid","windows":[{"name":"Session","used":22,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+5*86400) as i64,0).unwrap().to_rfc3339()}]},{"provider":"claude","auth":"present","account":"other@example.invalid","stale":true,"error":"HTTP 429","windows":[{"name":"Weekly","used":68,"resets_at":chrono::DateTime::from_timestamp((canban_types::now()/1000+7*86400) as i64,0).unwrap().to_rfc3339()}]}]}));
                 }))

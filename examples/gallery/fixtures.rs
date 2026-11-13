@@ -335,6 +335,33 @@ pub fn workspace() -> canban_types::Snapshot {
         data: json!({}),
         created_at: now(),
     });
+    let default_doc = canban_workflow_engine::source::default_document(
+        "delivery:gallery-project",
+        WorkspaceSettings::default(),
+    );
+    let default_yaml = canban_workflow_engine::source::encode(&default_doc).unwrap();
+    let default_def = default_doc.compile().unwrap();
+    s.workflow_revisions.push(WorkflowRevision {
+        source_yaml: Some(default_yaml),
+        id: "delivery:gallery-project:1".into(),
+        project_id: "gallery-project".into(),
+        workflow_id: "delivery:gallery-project".into(),
+        revision: 1,
+        definition: default_def,
+        created_at: now(),
+    });
+    s.workflow_sources.push(WorkflowSource {
+        id: "gallery-project:development.yaml".into(),
+        project_id: "gallery-project".into(),
+        filename: "development.yaml".into(),
+        workflow_id: "delivery:gallery-project".into(),
+        revision: 1,
+        hash: "gallery-default".into(),
+        revision_id: "delivery:gallery-project:1".into(),
+        enabled: true,
+        columns: default_doc.columns,
+        rules: default_doc.on,
+    });
     s
 }
 
@@ -1434,50 +1461,70 @@ pub fn workflow() -> canban_types::WorkflowRun {
     })).unwrap()
 }
 
-/// Active column rules over real Card text, including the first/last columns.
-/// Exercises popover stacking, clipping, dismissal and overflow with production UI.
+/// Active column rules across all columns (including Backlog next to `+` and custom `+N`
+/// multi-workflow tooltips) over real Card text.
 pub fn automation_board() -> canban_types::Snapshot {
     use canban_types::*;
     let mut snapshot = workspace();
+    snapshot.workflow_sources.clear();
+    snapshot.workflow_revisions.clear();
+    let mut primary = canban_workflow_engine::source::default_document(
+        "delivery:gallery-project",
+        WorkspaceSettings::default(),
+    );
+    canban_workflow_engine::source::set_backlog_options(&mut primary, true, true);
+    canban_workflow_engine::source::set_backlog_admission(&mut primary, true, Some(2));
+    let primary_yaml = canban_workflow_engine::source::encode(&primary).unwrap();
+    snapshot.workflow_revisions.push(WorkflowRevision {
+        source_yaml: Some(primary_yaml),
+        id: "delivery:gallery-project:1".into(),
+        project_id: "gallery-project".into(),
+        workflow_id: "delivery:gallery-project".into(),
+        revision: 1,
+        definition: primary.compile().unwrap(),
+        created_at: now(),
+    });
+    snapshot.workflow_sources.push(WorkflowSource {
+        id: "gallery-project:development.yaml".into(),
+        project_id: "gallery-project".into(),
+        filename: "development.yaml".into(),
+        workflow_id: "delivery:gallery-project".into(),
+        revision: 1,
+        hash: "gallery".into(),
+        revision_id: "delivery:gallery-project:1".into(),
+        enabled: true,
+        columns: primary.columns.clone(),
+        rules: primary.on.clone(),
+    });
+
     let raw = include_str!("../workflows/plan-and-develop.yaml");
-    let mut document = canban_workflow_engine::source::parse(raw).unwrap();
-    for column in ["backlog", "review"] {
-        document.on.insert(
-            column.into(),
-            serde_json::from_value(json!({
-                "event":"card.column_entered", "start_at":"plan", "match":{"column":column}
-            }))
-            .unwrap(),
-        );
-    }
-    for index in 0..5 {
-        let workflow_id = format!("gallery-automation-{index}");
-        let revision_id = format!("{workflow_id}:1");
-        let mut definition = document.compile().unwrap();
-        definition.id = workflow_id.clone();
-        definition.name = format!("Plan and deliver · automation {}", index + 1);
-        snapshot.workflow_revisions.push(WorkflowRevision {
-            source_yaml: Some(raw.into()),
-            id: revision_id.clone(),
-            project_id: "gallery-project".into(),
-            workflow_id: workflow_id.clone(),
-            revision: 1,
-            definition,
-            created_at: now(),
-        });
-        snapshot.workflow_sources.push(WorkflowSource {
-            id: workflow_id.clone(),
-            project_id: "gallery-project".into(),
-            filename: format!("automation-{index}.yaml"),
-            workflow_id,
-            revision: 1,
-            hash: "gallery".into(),
-            revision_id,
-            enabled: true,
-            columns: document.columns.clone(),
-            rules: document.on.clone(),
-        });
-    }
+    let document = canban_workflow_engine::source::parse(raw).unwrap();
+    let workflow_id = "gallery-automation-extra".to_owned();
+    let revision_id = format!("{workflow_id}:1");
+    let mut definition = document.compile().unwrap();
+    definition.id = workflow_id.clone();
+    definition.name = "Extra Develop helper".into();
+    snapshot.workflow_revisions.push(WorkflowRevision {
+        source_yaml: Some(raw.into()),
+        id: revision_id.clone(),
+        project_id: "gallery-project".into(),
+        workflow_id: workflow_id.clone(),
+        revision: 1,
+        definition,
+        created_at: now(),
+    });
+    snapshot.workflow_sources.push(WorkflowSource {
+        id: workflow_id.clone(),
+        project_id: "gallery-project".into(),
+        filename: "extra-develop.yaml".into(),
+        workflow_id,
+        revision: 1,
+        hash: "gallery".into(),
+        revision_id,
+        enabled: true,
+        columns: document.columns,
+        rules: document.on,
+    });
     snapshot
 }
 
