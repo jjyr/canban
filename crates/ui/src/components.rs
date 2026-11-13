@@ -3,7 +3,7 @@ pub mod git_workspace;
 pub mod scheduling;
 pub use activity::{activity_header, empty};
 mod card_tile;
-pub(crate) mod timeline_item;
+pub mod timeline_item;
 use crate::presenter::*;
 use canban_types::Event;
 use canban_types::*;

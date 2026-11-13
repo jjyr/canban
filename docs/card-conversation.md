@@ -72,17 +72,23 @@ remote object. No new persisted relationship/schema is introduced.
 ## Conversation presentation
 
 Human and Agent messages use the same identity marker, author/time header and
-bordered Markdown body. Long bodies fold at a visual height while retaining the
-complete Markdown document; **Read full report / Show less** toggles the body.
-The main reader is bounded to 920 points in wide layouts.
+bordered Markdown body along a single continuous 28-point vertical spine. Long
+bodies fold at a visual height while retaining the complete Markdown document;
+**Read full report / Show less** toggles the body. The main reader is bounded
+to 920 points in wide layouts.
 
-Only adjacent routine queued/started/attached/report-echo facts for the same
-request collapse into an execution group. Comments, failures, questions, review
-decisions and unknown event kinds break groups and remain visible. Durable
-sequence order and report/reply identity deduplication are preserved. Opening
-a targeted event expands its group. Selected execution details appear beside
-that request's earliest event (or at the end if its events are absent), retaining
-exact historical request identity and explicit Terminal navigation.
+Narrative messages (comments, explicit replies and un-echoed execution reports)
+pair full 28-point avatars with bordered cards, while milestone updates (stage
+transitions, approvals, PR publications, merges, unresolved input waits and
+failures) render as compact semantic badge nodes centered on the same spine
+axis. Consecutive milestone updates collapse to their latest entry with an
+inline **`+N earlier` / `Hide N earlier`** disclosure pill (and an attention dot
+when a folded step includes an alert), breaking cleanly at narrative messages.
+Durable sequence order and report/reply identity deduplication are preserved.
+Opening a targeted event expands its folded milestone group automatically.
+Selected execution details expand inside the right column of that request's
+earliest rendered row (or at the end if its events are absent) so the vertical
+spine remains continuous.
 
 Routine Workflow blocks no longer precede the discussion. Approval/rework
 controls appear above the fixed composer only when required; Stop lives in the
@@ -112,7 +118,7 @@ Attachment references are readable links to Card-managed resources. Images refer
 
 ## Timeline and reading behavior
 
-Description, events, comments, replies and reports share one vertical scroll owner. First open starts at the description. Activity shows conversation, stage moves, decisions, merges and problems as compact rows in sequence order. Process bookkeeping is not shown (updated 2026-11-13, Card #16): `card.updated`, `execution.queued/started/attached/continued`, idle-close progress, `workflow.started` and similar events stay durable for triggers and history but are filtered from the Card Activity projection; a deep link to such an event still reveals it. Comment avatars use the signed-in GitHub account picture for the local user ("ME" while signed out or loading) and the provider icon for Agent messages. Narrative bodies share the UI Kit Markdown reader (headings, lists, quotes, code, tables, links and images). File-backed reports load once per keyed row, including archived resources. A report echoed as a reply is hidden when the request and report identity/resource path match; a report without a path remains a visible message. Late echoes update that row's presentation without duplicating the report body.
+Description, events, comments, replies and reports share one vertical scroll owner. First open starts at the description. Activity connects conversation, stage moves, decisions, merges and unresolved problems along a vertical spine in sequence order, hiding the section heading completely when no visible activity exists yet. Process bookkeeping and low-value card metadata mutations are not shown (updated 2026-11-14, Card #42): `card.created`, `card.updated`, `card.column_entered/left`, `execution.queued/started/attached/continued/disconnected/reconnected/archived`, resolved `execution.input_required` prompts, idle-close progress, `review.merge_started` and `workflow.started/completed/stopped` stay durable for triggers and history but are filtered from the Card Activity projection; a deep link to any such event still reveals it, and consecutive milestone rows collapse into their latest update with an inline `+N earlier` toggle. Comment avatars use the signed-in GitHub account picture for the local user ("ME" while signed out or loading) and the provider icon for Agent messages. Narrative bodies share the UI Kit Markdown reader (headings, lists, quotes, code, tables, links and images). File-backed reports load once per keyed row, including archived resources. A report echoed as a reply is hidden when the request and report identity/resource path match; a report without a path remains a visible message. Late echoes update that row's presentation without duplicating the report body.
 
 The Card saves its reading offset per route. Scrolling away stops following; new activity exposes an explicit jump-to-latest action. At the bottom, new replies and loaded report growth stay visible. Composer growth leaves a reader's offset intact. Draft/offset retention is in-memory for the window lifetime. Agent/Terminal operations and human approval boundaries remain separate from reading and commenting.
 

@@ -144,35 +144,211 @@ fn duplicate_titles_sort_by_visible_owner_before_internal_identity() {
 }
 
 #[test]
-fn card_numbers_use_numeric_order_and_unarchived_before_archived() {
-    let card = |id: &str, num: u64, archived: bool| Candidate {
+fn card_numbers_use_numeric_order() {
+    let card = |id: &str, num: u64| Candidate {
         id: id.into(),
         title: format!("#{num} Task"),
-        detail: if archived {
-            "Card · Canban · done · Archived".into()
-        } else {
-            "Card · Canban · backlog".into()
-        },
+        detail: "Card · Canban · backlog".into(),
         kind: "Card",
         target: Target::Card(id.into()),
         fields: vec![format!("#{num} Task"), "Card".into()],
         tags: Vec::new(),
     };
-    let rows = vec![
-        card("c1", 1, false),
-        card("c10", 10, false),
-        card("c2", 2, false),
-        card("c11", 11, true),
-    ];
-    // Empty query surfaces newest unarchived cards first, archived last.
+    let rows = vec![card("c1", 1), card("c10", 10), card("c2", 2)];
+    // Empty query surfaces newest active cards first.
     let initial = ranked(&rows, "", &[], false);
     let ids: Vec<_> = initial.iter().map(|r| r.id.as_str()).collect();
-    assert_eq!(ids, vec!["c10", "c2", "c1", "c11"]);
+    assert_eq!(ids, vec!["c10", "c2", "c1"]);
 
     // Text query sorts matching cards in natural ascending card number (#1, #2, #10), never #1, #10, #2.
     let matched = ranked(&rows, "Task", &[], false);
     let matched_ids: Vec<_> = matched.iter().map(|r| r.id.as_str()).collect();
-    assert_eq!(matched_ids, vec!["c1", "c2", "c10", "c11"]);
+    assert_eq!(matched_ids, vec!["c1", "c2", "c10"]);
+}
+
+#[test]
+fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
+    let mut s = fixture();
+    let profile = Config::default().profiles[0].clone();
+
+    let mut archived: Card = serde_json::from_value(json!({
+        "id": "c-archived",
+        "project_id": "p1",
+        "number": 90,
+        "title": "Archived secret needle",
+        "body": "",
+        "stage": "review",
+        "revision": 1,
+        "archived_at": 100,
+        "created_at": 1
+    }))
+    .unwrap();
+    let mut removed = archived.clone();
+    removed.id = "c-removed".into();
+    removed.number = 91;
+    removed.title = "Removed secret needle".into();
+    removed.archived_at = None;
+    removed.removed_at = Some(100);
+
+    let mut local_merged = archived.clone();
+    local_merged.id = "c-local-merged".into();
+    local_merged.number = 92;
+    local_merged.title = "Local merged secret needle".into();
+    local_merged.archived_at = None;
+    local_merged.delivery = Some(Delivery {
+        target_branch: "main".into(),
+        commit: "abc1234".into(),
+        request_key: "merge-1".into(),
+        merged_at: 200,
+    });
+
+    let mut pr_merged: Card = serde_json::from_value(json!({
+        "id": "c-pr-merged",
+        "project_id": "p1",
+        "number": 93,
+        "title": "PR merged secret needle",
+        "body": "",
+        "stage": "review",
+        "revision": 1,
+        "created_at": 1,
+        "pull_request": {
+            "repository": "jjyr/canban",
+            "repository_id": 1,
+            "number": 55,
+            "url": "https://github.com/jjyr/canban/pull/55",
+            "state": "closed",
+            "head": "def5678",
+            "head_branch": "canban/93",
+            "base_branch": "main",
+            "merged": true,
+            "checks": "success",
+            "workspace": {
+                "location": {"machine": "local", "directory": "/example/p1"},
+                "path": "/example/p1"
+            }
+        }
+    }))
+    .unwrap();
+
+    // Ensure archived/merged flags are as expected on the Card type.
+    assert!(!archived.active());
+    assert!(!removed.active());
+    assert!(local_merged.active() && local_merged.merged());
+    assert!(pr_merged.active() && pr_merged.merged());
+
+    for (idx, card) in [&archived, &removed, &local_merged, &pr_merged]
+        .into_iter()
+        .enumerate()
+    {
+        let mut req = canban_scheduler::request(
+            "p1",
+            &card.id,
+            "review",
+            "interactive",
+            profile.clone(),
+            "Inspect".into(),
+            None,
+        );
+        req.id = format!("req-hidden-{idx}");
+        s.requests.push(req);
+        s.terminals.push(TerminalEntry {
+            id: format!("term-hidden-{idx}"),
+            conversation_id: None,
+            number: 50 + idx as u64,
+            name: Some(format!("Shell needle {idx}")),
+            manual_number: Some(50 + idx as u64),
+            origin_card_id: Some(card.id.clone()),
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some(format!("pty-{idx}")),
+                state: "live".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+            }),
+            created_at: 1,
+        });
+    }
+    // Also check a closed standalone terminal on an active unmerged card is omitted.
+    s.terminals.push(TerminalEntry {
+        id: "term-ended".into(),
+        conversation_id: None,
+        number: 60,
+        name: Some("Ended shell needle".into()),
+        manual_number: Some(60),
+        origin_card_id: Some("c1".into()),
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("core".into()),
+            terminal: Some("pty-ended".into()),
+            state: "finished".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+        }),
+        created_at: 1,
+    });
+    // Whereas a live standalone terminal on an active unmerged card remains searchable.
+    s.terminals.push(TerminalEntry {
+        id: "term-live".into(),
+        conversation_id: None,
+        number: 61,
+        name: Some("Active shell".into()),
+        manual_number: Some(61),
+        origin_card_id: Some("c1".into()),
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("core".into()),
+            terminal: Some("pty-live".into()),
+            state: "live".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+        }),
+        created_at: 1,
+    });
+
+    archived.branch = Some("feat/archived-branch".into());
+    pr_merged.branch = Some("feat/merged-branch".into());
+    s.cards.extend([archived, removed, local_merged, pr_merged]);
+
+    let rows = candidates(&s);
+    for hidden_id in ["c-archived", "c-removed", "c-local-merged", "c-pr-merged"] {
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.target == Target::Card(hidden_id.into())),
+            "unexpected Card candidate {hidden_id}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r.target == Target::Agent(format!("{hidden_id}:codex"))),
+            "unexpected Agent candidate for {hidden_id}"
+        );
+    }
+    assert!(ranked(&rows, "secret needle", &[], false).is_empty());
+    assert!(ranked(&rows, "Shell needle", &[], false).is_empty());
+    assert!(ranked(&rows, "Ended shell needle", &[], false).is_empty());
+    assert!(ranked(&rows, "#90", &[], false).is_empty());
+    assert!(ranked(&rows, "#92", &[], false).is_empty());
+    assert!(ranked(&rows, "#93", &[], false).is_empty());
+    assert!(ranked(&rows, "archived-branch", &[], false).is_empty());
+    assert!(ranked(&rows, "merged-branch", &[], false).is_empty());
+
+    let live_term = ranked(&rows, "Active shell", &[], false);
+    assert_eq!(live_term.len(), 1);
+    assert_eq!(live_term[0].target, Target::Terminal("term-live".into()));
 }
 
 #[test]
@@ -265,4 +441,35 @@ fn hash_tag_search_matches_tagged_cards_without_false_matching_title_subsequence
 
     // Numeric `#42` still works as a Card number query rather than a tag filter.
     assert_eq!(ranked(&rows, "Tools #42", &[], false).len(), 1);
+
+    // Archived and merged tagged Cards are excluded from `#tag` Quick Open results.
+    let mut archived_tagged: Card = serde_json::from_value(json!({
+        "id": "c-archived-tag",
+        "project_id": "p1",
+        "number": 94,
+        "title": "Archived tagged card",
+        "body": "Old #bug report",
+        "stage": "review",
+        "revision": 1,
+        "archived_at": 100,
+        "created_at": 1
+    }))
+    .unwrap();
+    let mut merged_tagged = archived_tagged.clone();
+    merged_tagged.id = "c-merged-tag".into();
+    merged_tagged.number = 95;
+    merged_tagged.title = "Merged tagged card".into();
+    merged_tagged.archived_at = None;
+    merged_tagged.delivery = Some(Delivery {
+        target_branch: "main".into(),
+        commit: "abc1234".into(),
+        request_key: "merge-tag".into(),
+        merged_at: 200,
+    });
+    archived_tagged.body = "Old #bug report".into();
+    s.cards.extend([archived_tagged, merged_tagged]);
+    let rows_with_historical = candidates(&s);
+    let matched_after = ranked(&rows_with_historical, "#bug", &[], false);
+    let after_ids: Vec<_> = matched_after.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(after_ids, vec!["card:c2", "card:c3"]);
 }
