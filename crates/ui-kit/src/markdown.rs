@@ -306,7 +306,7 @@ impl MarkdownInput {
             ))
     }
     fn tab(self, title: &'static str, is_preview: bool) -> impl IntoElement {
-        nsh_base::button()
+        crate::press_target()
             .h(px(27.))
             .px(px(10.))
             .items_center()

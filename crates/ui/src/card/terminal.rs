@@ -210,7 +210,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                             },
                         ))
                         .child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .element_ref(&anchor)
                                 .h(px(26.))
                                 .px_2()

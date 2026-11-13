@@ -9,7 +9,7 @@ pub fn entry_card(
 ) -> nsh_base::ButtonElement {
     let title = title.to_owned();
     let accessible = title.clone();
-    nsh_base::button()
+    crate::press_target()
         .w_full()
         .max_w(px(640.))
         .min_w(px(0.))

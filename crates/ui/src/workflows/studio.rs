@@ -798,7 +798,7 @@ fn stage_lane(ctx: Ctx, lane: ReadSignal<LaneModel>) -> impl IntoElement {
                     move || !renaming.get(),
                     move || {
                         let id = id_rename.clone();
-                        nsh_base::button()
+                        press_target()
                             .min_w(px(0.))
                             .accessibility_label(|| Some("Rename stage".into()))
                             .on_press(move |_: &()| {
@@ -1098,6 +1098,7 @@ fn step_card(ctx: Ctx, node: ReadSignal<StepModel>, lane_id: String) -> impl Int
         .px_0p5()
         .py_1()
         .rounded(px(4.))
+        .cursor_pointer()
         .hover(|s| s.bg(INSET))
         .label("Drag to reorder or move to another stage")
         .child(icon(Icon::Grip).w(px(12.)).h(px(12.)).opacity(0.7))
@@ -1106,7 +1107,7 @@ fn step_card(ctx: Ctx, node: ReadSignal<StepModel>, lane_id: String) -> impl Int
         .on_pan_start(move |_: &PanEvent| ctx.drag.start(id_drag.clone(), x, y))
         .on_pan_end(move |_: &PanEvent| ctx.drag.end(ctx, x, y));
 
-    let title_button = nsh_base::button()
+    let title_button = press_target()
         .flex_1()
         .min_w(px(0.))
         .accessibility_label(move || Some(node.with(|n| format!("Configure {}", n.title)).into()))

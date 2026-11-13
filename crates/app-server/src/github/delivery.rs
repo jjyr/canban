@@ -532,6 +532,7 @@ impl AppServer {
         if !execute {
             return Ok(receipt);
         }
+        let _merging = self.track_merging(&card.id);
         let pr = saved_pr.unwrap();
         let result = (|| -> Result<Value> {
             let client = self.github_client()?.refreshing();
@@ -620,6 +621,7 @@ impl AppServer {
             )?;
             Ok(())
         })?;
+        drop(_merging);
         drop(_guard);
         if value["state"] == "merged" {
             self.sync_merged_target(&card, Some(&pr.base_branch));

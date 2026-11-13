@@ -354,7 +354,7 @@ fn account_button(ui: Ui) -> impl IntoElement {
                     .child(label(tip)),
             )
             .child(
-                nsh_base::button()
+                canban_ui_kit::press_target()
                     .h(px(28.))
                     .px_2p5()
                     .flex_row()
@@ -974,7 +974,7 @@ fn list_row(ui: Ui, row: Value) -> AnyElement {
         );
     }
 
-    let main_click = nsh_base::button()
+    let main_click = canban_ui_kit::press_target()
         .flex_1()
         .min_w(px(0.))
         .py_2p5()

@@ -52,14 +52,21 @@ pub(crate) fn start(ui: Ui, card: Card) {
     ui.pending_methods.update(|s| {
         s.insert(PREVIEW);
     });
+    ui.merging_cards.update(|ids| {
+        ids.insert(card.id.clone());
+    });
     ui.operation_error.set(String::new());
     ui.status.set("Checking merge…".into());
     let card_id = card.id.clone();
+    let merging_id = card.id.clone();
     let params = json!({"card_id": card_id, "target_branch": target});
     ui.spawn(async move {
         let result = blocking(move || app.call(PREVIEW, params)).await;
         ui.pending_methods.update(|s| {
             s.remove(PREVIEW);
+        });
+        ui.merging_cards.update(|ids| {
+            ids.remove(&merging_id);
         });
         let preview = match result {
             Ok(Ok(value)) => serde_json::from_value::<ReviewPreview>(value)

@@ -645,9 +645,9 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                                 latest.body.clear();
                             }
                         }
-                        // If navigation did not leave this form (for example an
-                        // expansion during submission), continue with a fresh
-                        // draft identity, keeping all post-submit input.
+                        // Remain on New Card with a fresh draft identity so
+                        // users can create multiple Cards consecutively while
+                        // preserving any post-submit input.
                         let still_here = draft.try_get().is_some()
                             && ui.page.get_untracked() == "new-card"
                             && ui.new_draft.get_untracked() == key;
@@ -656,6 +656,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
                             drafts::put(ui, next.clone(), latest);
                             drafts::remove(ui, &key);
                             ui.new_draft.set(next);
+                            crate::navigation::replace(ui);
                         } else if latest.has_content(&key) {
                             drafts::put(ui, key, latest);
                         } else {

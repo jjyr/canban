@@ -5,7 +5,7 @@ pub mod input;
 mod scrollbar;
 pub mod surface;
 pub mod tokens;
-pub use button::{Variant, action, action_with_icon, compact_action};
+pub use button::{Variant, action, action_with_icon, compact_action, press_target};
 pub use checkbox::checkbox;
 pub use input::{bound_field, field};
 pub use surface::{badge, heading, label, muted, panel, read_text};
@@ -15,7 +15,7 @@ pub mod split;
 pub mod status;
 pub use navigation::{navigation, subpage_header};
 pub use split::split;
-pub use status::{Tone, attention_count, live_dot, notice, reminder_count, status};
+pub use status::{Tone, attention_count, live_dot, live_status, notice, reminder_count, status};
 
 pub mod icons;
 pub use icons::{Icon, icon, icon_action, icon_tinted};

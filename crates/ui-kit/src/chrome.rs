@@ -35,7 +35,7 @@ pub fn chrome_action(
     press: impl Fn(&()) + 'static,
 ) -> nsh_base::ButtonElement {
     let title = title.into();
-    nsh_base::button()
+    crate::press_target()
         .disabled_style(|s| s.opacity(0.4))
         .w(px(30.))
         .h(px(30.))
@@ -74,7 +74,7 @@ pub fn utility_button(
                 .child(label(hint)),
         )
         .child(
-            nsh_base::button()
+            crate::press_target()
                 .w(px(30.))
                 .h(px(28.))
                 .items_center()

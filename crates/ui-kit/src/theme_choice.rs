@@ -16,7 +16,7 @@ pub fn theme_choice(
         .on_mouse_enter(move |_: &MouseEvent| preview(true))
         .on_mouse_leave(move |_: &MouseEvent| preview(false))
         .child(
-            nsh_base::button()
+            crate::press_target()
                 .w_full()
                 .disabled(disabled)
                 .min_h(px(48.))

@@ -66,32 +66,48 @@ pub fn empty(title: &str, description: &str) -> impl IntoElement {
         .child(muted(description.to_owned()))
 }
 
-/// Quiet Cards have no placeholder status; delivery, human gates and failed
-/// Agents remain visible as compact chips.
-pub fn card_status(
+/// Whether a Card is actively merging or queued in a workflow delivery step.
+pub fn is_merging(snapshot: &canban_types::Snapshot, card: &canban_types::Card) -> bool {
+    if !card.active() || card.merged() {
+        return false;
+    }
+    if snapshot.merging_cards.iter().any(|id| id == &card.id) {
+        return true;
+    }
+    !card.hold_auto_merge
+        && snapshot
+            .workflow_runs
+            .iter()
+            .any(|r| r.card_id == card.id && r.state == "waiting_delivery")
+}
+
+/// Semantic status descriptors `(label, tone, live)` for a Card on the Board.
+pub fn card_status_specs(
     snapshot: &canban_types::Snapshot,
     card: &canban_types::Card,
-) -> Vec<AnyElement> {
-    let mut chips = Vec::new();
+    ui_merging: bool,
+) -> Vec<(String, Tone, bool)> {
+    let mut specs = Vec::new();
+    let merging = is_merging(snapshot, card) || card.active() && !card.merged() && ui_merging;
     if card.merged() {
-        chips.push(status("Merged", Tone::Success).into_element());
+        specs.push(("Merged".into(), Tone::Success, false));
+    } else if merging {
+        specs.push(("Merging".into(), Tone::Info, true));
     }
     if card.human_gate.is_some() || card.attention.is_some() {
-        chips.push(
-            status(
-                if card.hold_auto_merge && !card.merged() {
-                    "Merge held"
-                } else if card.human_gate.is_some() && card.stage == "review" {
-                    "Needs review"
-                } else {
-                    "Needs attention"
-                },
-                Tone::Attention,
-            )
-            .into_element(),
-        );
+        specs.push((
+            if card.hold_auto_merge && !card.merged() {
+                "Merge held".into()
+            } else if card.human_gate.is_some() && card.stage == "review" {
+                "Needs review".into()
+            } else {
+                "Needs attention".into()
+            },
+            Tone::Attention,
+            false,
+        ));
     } else if card.hold_auto_merge && !card.merged() {
-        chips.push(status("Merge held", Tone::Neutral).into_element());
+        specs.push(("Merge held".into(), Tone::Neutral, false));
     }
     let mut latest = std::collections::BTreeMap::new();
     for request in snapshot
@@ -105,9 +121,39 @@ pub fn card_status(
         }
     }
     for request in latest.values().filter(|r| r.state == "failed") {
-        chips.push(status(format!("@{} failed", request.profile.id), Tone::Danger).into_element());
+        specs.push((
+            format!("@{} failed", request.profile.id),
+            Tone::Danger,
+            false,
+        ));
     }
-    chips
+    specs
+}
+
+/// Quiet Cards have no placeholder status; delivery, human gates and failed
+/// Agents remain visible as compact chips.
+pub fn card_status(
+    snapshot: &canban_types::Snapshot,
+    card: &canban_types::Card,
+) -> Vec<AnyElement> {
+    card_status_with_merging(snapshot, card, false)
+}
+
+pub fn card_status_with_merging(
+    snapshot: &canban_types::Snapshot,
+    card: &canban_types::Card,
+    ui_merging: bool,
+) -> Vec<AnyElement> {
+    card_status_specs(snapshot, card, ui_merging)
+        .into_iter()
+        .map(|(text, tone, live)| {
+            if live {
+                live_status(text, tone).into_element()
+            } else {
+                status(text, tone).into_element()
+            }
+        })
+        .collect()
 }
 
 /// Agents currently executing for this Card: newest request per profile.
@@ -167,5 +213,115 @@ mod tests {
             .map(|r| r.id)
             .collect();
         assert_eq!(ids, vec!["new", "rev"]);
+    }
+
+    #[test]
+    fn card_status_projects_merging_indicator_for_queue_and_active_merges() {
+        let mut snapshot = canban_types::Snapshot::default();
+        let mut card: canban_types::Card = serde_json::from_value(serde_json::json!({
+            "id": "c",
+            "project_id": "p",
+            "number": 26,
+            "title": "Show merging indicator on Board",
+            "body": "",
+            "stage": "review",
+            "revision": 1,
+            "created_at": 1
+        }))
+        .unwrap();
+
+        // Quiet unmerged Card has no placeholder status.
+        assert!(card_status_specs(&snapshot, &card, false).is_empty());
+
+        // UI-initiated merge (e.g. quick merge preview/merge in flight) shows live Merging.
+        assert_eq!(
+            card_status_specs(&snapshot, &card, true),
+            vec![("Merging".into(), Tone::Info, true)]
+        );
+
+        // AppServer active merge (`merging_cards`) shows live Merging without a workflow run.
+        snapshot.merging_cards = vec!["c".into()];
+        assert!(is_merging(&snapshot, &card));
+        assert_eq!(
+            card_status_specs(&snapshot, &card, false),
+            vec![("Merging".into(), Tone::Info, true)]
+        );
+        snapshot.merging_cards.clear();
+
+        // Workflow Queue Merge (`waiting_delivery`) shows live Merging.
+        let run: canban_types::WorkflowRun = serde_json::from_value(serde_json::json!({
+            "id": "run-1",
+            "project_id": "p",
+            "card_id": "c",
+            "workflow_id": "delivery",
+            "definition_revision": 1,
+            "definition": {
+                "id": "delivery",
+                "name": "Delivery",
+                "entries": {"review": "deliver"},
+                "steps": {
+                    "deliver": {
+                        "type": "deliver",
+                        "sync_upstream": true,
+                        "max_conflict_attempts": 3,
+                        "next": "done"
+                    },
+                    "done": {"type": "complete"}
+                }
+            },
+            "state": "waiting_delivery",
+            "step": "deliver",
+            "visit": 1,
+            "request_id": null,
+            "trigger_event_id": null,
+            "input_digest": "d",
+            "inputs": {},
+            "outputs": {},
+            "history": [],
+            "error": null,
+            "created_at": 0,
+            "updated_at": 0
+        }))
+        .unwrap();
+        snapshot.workflow_runs = vec![run];
+        assert!(is_merging(&snapshot, &card));
+        assert_eq!(
+            card_status_specs(&snapshot, &card, false),
+            vec![("Merging".into(), Tone::Info, true)]
+        );
+
+        // Holding auto-merge suppresses `waiting_delivery` Merging in favor of Merge held.
+        card.hold_auto_merge = true;
+        assert!(!is_merging(&snapshot, &card));
+        assert_eq!(
+            card_status_specs(&snapshot, &card, false),
+            vec![("Merge held".into(), Tone::Neutral, false)]
+        );
+        card.hold_auto_merge = false;
+
+        // Paused workflow (`waiting_approval`) does not claim Merging.
+        snapshot.workflow_runs[0].state = "waiting_approval".into();
+        assert!(!is_merging(&snapshot, &card));
+        assert!(card_status_specs(&snapshot, &card, false).is_empty());
+
+        // Once merged, Merged takes precedence over any transient merging marker.
+        snapshot.merging_cards = vec!["c".into()];
+        card.delivery = Some(canban_types::Delivery {
+            target_branch: "main".into(),
+            commit: "abc1234".into(),
+            request_key: "k".into(),
+            merged_at: 2,
+        });
+        assert!(!is_merging(&snapshot, &card));
+        assert_eq!(
+            card_status_specs(&snapshot, &card, true),
+            vec![("Merged".into(), Tone::Success, false)]
+        );
+
+        // Archived Cards never report as merging.
+        card.delivery = None;
+        card.archived_at = Some(3);
+        assert!(!is_merging(&snapshot, &card));
+        assert!(card_status_specs(&snapshot, &card, true).is_empty());
     }
 }

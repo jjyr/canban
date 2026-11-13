@@ -204,6 +204,7 @@ pub fn search_dialog(
                                             body = body.child(muted(c.detail));
                                         }
                                         view()
+                                            .cursor_pointer()
                                             .rounded(px(RADIUS))
                                             .px_3()
                                             .py_2()

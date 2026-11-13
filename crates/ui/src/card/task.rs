@@ -185,7 +185,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         .current_card()
                         .is_some_and(|c| c.github_issue().is_some());
                     if body_text.trim().is_empty() && !has_github_issue {
-                        return nsh_base::button()
+                        return canban_ui_kit::press_target()
                             .self_start()
                             .py_1()
                             .px_2()

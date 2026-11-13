@@ -167,7 +167,7 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
             } else {
                 INSET
             };
-            let mut btn = nsh_base::button()
+            let mut btn = canban_ui_kit::press_target()
                 .h(px(28.))
                 .px_2p5()
                 .rounded(px(RADIUS))
@@ -774,7 +774,7 @@ fn config_session_row(ui: Ui, entry: crate::terminals::Entry) -> impl IntoElemen
         .border_b_1()
         .border_color(BORDER)
         .child(
-            nsh_base::button()
+            canban_ui_kit::press_target()
                 .flex_1()
                 .min_w(px(0.))
                 .items_start()
@@ -891,7 +891,7 @@ fn row_view(
         meta_pills = meta_pills.child(status(format!("{unread} unread"), Tone::Info));
     }
 
-    let main = nsh_base::button()
+    let main = canban_ui_kit::press_target()
         .element_ref(&reference)
         .flex_1()
         .min_w(px(0.))
@@ -1098,7 +1098,7 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
                 .border_b_1()
                 .border_color(BORDER)
                 .child(
-                    nsh_base::button()
+                    canban_ui_kit::press_target()
                         .flex_1()
                         .min_w(px(0.))
                         .items_start()

@@ -167,6 +167,7 @@ impl AppServer {
             github: Default::default(),
             github_issues: Vec::new(),
             terminal_contexts: Vec::new(),
+            merging_cards: Vec::new(),
             terminals: snapshot
                 .terminals
                 .iter()

@@ -85,7 +85,7 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
             ));
         })
         .child(
-            nsh_base::button()
+            canban_ui_kit::press_target()
                 .w_full()
                 .min_h(px(if e.agent.is_some() { 72. } else { 48. }))
                 .px_2()
@@ -214,7 +214,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                         let collapsed = folds.contains(&key);
                         let mut group = view().gap_1().pt_2();
                         let mut heading = view().flex_row().items_center().min_w(px(0.)).child(
-                            nsh_base::button()
+                            canban_ui_kit::press_target()
                                 .flex_1()
                                 .min_w(px(0.))
                                 .min_h(px(32.))
@@ -325,7 +325,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                                     ))),
                                             )
                                             .child(
-                                                nsh_base::button()
+                                                canban_ui_kit::press_target()
                                                     .w_full()
                                                     .min_w(px(0.))
                                                     .min_h(px(32.))

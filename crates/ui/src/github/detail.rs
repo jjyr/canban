@@ -821,7 +821,7 @@ fn files(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyElement {
                     _ => TEXT,
                 };
 
-                let mut line_btn = nsh_base::button()
+                let mut line_btn = canban_ui_kit::press_target()
                     .w_full()
                     .px_2()
                     .py_0p5()
