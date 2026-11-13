@@ -180,6 +180,49 @@ pub fn resume(home: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Explicitly trigger `--recover` from the native Recovery window.
+/// Copies the latest `canban-updater` into the job directory so bundle renames stay safe,
+/// and registers `ui_pid` as `recovery_ui` so the worker closes the Recovery window cleanly.
+pub fn recover(home: &Path, bundled_updater: Option<&Path>, ui_pid: Option<u32>) -> Result<()> {
+    let guard = lock(home, "upgrade.lock")?;
+    let mut j = journal(home)?;
+    if let Some(pid) = ui_pid {
+        j.recovery_ui = worker::process(pid).ok();
+        j.save()?;
+    }
+    let job_dir = home.join("updates/jobs").join(&j.token);
+    std::fs::create_dir_all(&job_dir)?;
+    let helper = if let Some(src) = bundled_updater.filter(|p| p.is_file()) {
+        let dest = job_dir.join("canban-updater-recover");
+        std::fs::copy(src, &dest)?;
+        dest
+    } else {
+        let saved = job_dir.join("canban-updater");
+        ensure!(
+            saved.is_file(),
+            "Saved updater helper is missing at {}",
+            saved.display()
+        );
+        saved
+    };
+    let log = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(home.join("updates/updater.log"))?;
+    drop(guard);
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new(helper)
+        .arg("--home")
+        .arg(home)
+        .arg("--recover")
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .process_group(0)
+        .spawn()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod guard_tests {
     use super::*;
