@@ -183,6 +183,107 @@ pub fn reminders(s: &Snapshot) -> Vec<Reminder> {
         .collect()
 }
 
+/// Audible notification identities, deliberately narrower than visual `Reminder` badges.
+///
+/// Sounds chime only for:
+/// 1. Human intervention / replies: runtime input/permission waits, task/review/approval
+///    `human_gate` or `attention`, Agent `blocked` or `backlog` reports, and explicit
+///    `comment.replied` answers to `@agent` questions.
+/// 2. Agent failures: `failed` reports, `execution.failed`, `execution.missing`, runtime
+///    errors, recovery states, and uncertain question deliveries.
+/// 3. Merge failures / held deliveries: `review.merge_failed`, `review.upstream_sync_failed`,
+///    `github.pr_merge_attention`, or exhausted conflict budgets / held deliveries (`human_gate`).
+///    Automatic in-budget `review.merge_conflict` rework stays silent.
+/// 4. Completed merges: automatic `review.merged` (non-user actor) and GitHub PR merge
+///    reconciliation (`github.pr_delivered` / non-user `github.pr_merged`).
+///
+/// Ordinary automated `completed` stage reports without a human gate or `@agent` question
+/// reply remain unread badges in UI without playing a sound.
+pub fn sound_items(s: &Snapshot) -> Vec<String> {
+    sound_items_with_reminders(s, &reminders(s))
+}
+
+pub fn sound_items_with_reminders(s: &Snapshot, reminder_items: &[Reminder]) -> Vec<String> {
+    let active = |id: &str| s.cards.iter().any(|c| c.id == id && c.active());
+    let mut ids = std::collections::BTreeSet::<String>::new();
+
+    // Every pending item (permission/input wait, human_gate, attention, runtime error,
+    // recovery, delivery_unknown) requires user intervention and is audible.
+    // Unread-only items are audible only when they are explicit `@agent` question replies
+    // or `backlog` / `blocked` / `failed` reports — never automated `completed` stage steps.
+    for item in reminder_items {
+        if item.pending || unread_item_is_audible(s, item) {
+            ids.insert(item.id.clone());
+        }
+    }
+
+    for e in &s.events {
+        if !active(&e.card_id) {
+            continue;
+        }
+        match e.kind.as_str() {
+            "execution.failed" | "execution.missing" => {
+                ids.insert(format!("event:{}", e.id));
+            }
+            "review.merge_failed"
+            | "review.upstream_sync_failed"
+            | "github.pr_merge_attention" => {
+                ids.insert(format!("event:{}", e.id));
+            }
+            "review.merged" | "github.pr_merged" | "github.pr_delivered" if e.actor != "user" => {
+                let key = e.data["request_key"]
+                    .as_str()
+                    .filter(|k| !k.is_empty())
+                    .map(|k| format!("merged:{}:{k}", e.card_id))
+                    .or_else(|| {
+                        e.data["number"]
+                            .as_u64()
+                            .map(|n| format!("merged:{}:pr:{n}", e.card_id))
+                    })
+                    .unwrap_or_else(|| format!("merged:{}:{}", e.card_id, e.id));
+                ids.insert(key);
+            }
+            _ => {}
+        }
+    }
+
+    ids.into_iter().collect()
+}
+
+fn unread_item_is_audible(s: &Snapshot, item: &Reminder) -> bool {
+    if !item.unread {
+        return false;
+    }
+    if item.id.starts_with("reply:") {
+        return true;
+    }
+    let Some(report_id) = item.id.strip_prefix("report:") else {
+        return false;
+    };
+    let mut is_audible = false;
+    for e in &s.events {
+        if e.card_id != item.card_id {
+            continue;
+        }
+        if e.kind == "execution.reported" {
+            let eid = e.data["report_id"].as_str().unwrap_or(&e.id);
+            if eid == report_id
+                && matches!(
+                    e.data["state"].as_str(),
+                    Some("backlog" | "blocked" | "failed")
+                )
+            {
+                is_audible = true;
+                break;
+            }
+        } else if e.kind == "comment.replied" && message_id(s, e).as_deref() == Some(&item.id) {
+            is_audible = true;
+            break;
+        }
+    }
+    is_audible
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReminderCount {
     pub total: usize,
@@ -207,21 +308,27 @@ pub struct DeliveryTracker {
     seen: Option<std::collections::BTreeSet<String>>,
 }
 impl DeliveryTracker {
-    pub fn baseline(&mut self, items: &[Reminder]) {
+    pub fn baseline<T: AsRef<str>>(&mut self, items: &[T]) {
         self.seen
             .get_or_insert_with(Default::default)
-            .extend(items.iter().map(|i| i.id.clone()));
+            .extend(items.iter().map(|i| i.as_ref().to_owned()));
     }
-    pub fn observe(&mut self, items: &[Reminder]) -> Vec<String> {
+    pub fn observe<T: AsRef<str>>(&mut self, items: &[T]) -> Vec<String> {
         let Some(seen) = &mut self.seen else {
             self.baseline(items);
             return Vec::new();
         };
         items
             .iter()
-            .filter(|i| seen.insert(i.id.clone()))
-            .map(|i| i.id.clone())
+            .filter(|i| seen.insert(i.as_ref().to_owned()))
+            .map(|i| i.as_ref().to_owned())
             .collect()
+    }
+}
+
+impl AsRef<str> for Reminder {
+    fn as_ref(&self) -> &str {
+        &self.id
     }
 }
 

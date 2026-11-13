@@ -517,6 +517,90 @@ pub fn Gallery() -> impl IntoElement {
                             append("card-1", 1)
                         });
                     }))
+                    .child(action("Silent stage done #1", Variant::Quiet, move |_| {
+                        ui.snapshot.update(|s| {
+                            let seq = s
+                                .events
+                                .iter()
+                                .filter(|e| e.card_id == "card-1")
+                                .map(|e| e.sequence)
+                                .max()
+                                .unwrap_or(0)
+                                + 1;
+                            let mut e = fixtures::timeline();
+                            e.id = format!("auto-completed-{seq}");
+                            e.card_id = "card-1".into();
+                            e.sequence = seq;
+                            e.actor = "agent:developer".into();
+                            e.kind = "execution.reported".into();
+                            e.message = "completed: Stage completed automatically".into();
+                            e.data = json!({"report_id": format!("auto-{seq}"), "state": "completed"});
+                            s.events.push(e);
+                        });
+                    }))
+                    .child(action("Return #1 to Backlog", Variant::Quiet, move |_| {
+                        ui.snapshot.update(|s| {
+                            let seq = s
+                                .events
+                                .iter()
+                                .filter(|e| e.card_id == "card-1")
+                                .map(|e| e.sequence)
+                                .max()
+                                .unwrap_or(0)
+                                + 1;
+                            let mut e = fixtures::timeline();
+                            e.id = format!("backlog-{seq}");
+                            e.card_id = "card-1".into();
+                            e.sequence = seq;
+                            e.actor = "agent:developer".into();
+                            e.kind = "execution.reported".into();
+                            e.message = "Returned to Backlog: Already implemented".into();
+                            e.data = json!({"report_id": format!("backlog-{seq}"), "state": "backlog"});
+                            s.events.push(e);
+                        });
+                    }))
+                    .child(action("Auto-merge #1", Variant::Quiet, move |_| {
+                        ui.snapshot.update(|s| {
+                            let seq = s
+                                .events
+                                .iter()
+                                .filter(|e| e.card_id == "card-1")
+                                .map(|e| e.sequence)
+                                .max()
+                                .unwrap_or(0)
+                                + 1;
+                            let mut e = fixtures::timeline();
+                            e.id = format!("merged-{seq}");
+                            e.card_id = "card-1".into();
+                            e.sequence = seq;
+                            e.actor = "system".into();
+                            e.kind = "review.merged".into();
+                            e.message = "Auto-merged into main".into();
+                            e.data = json!({"target_branch": "main", "request_key": format!("auto-merge-{seq}")});
+                            s.events.push(e);
+                        });
+                    }))
+                    .child(action("Merge failed #1", Variant::Quiet, move |_| {
+                        ui.snapshot.update(|s| {
+                            let seq = s
+                                .events
+                                .iter()
+                                .filter(|e| e.card_id == "card-1")
+                                .map(|e| e.sequence)
+                                .max()
+                                .unwrap_or(0)
+                                + 1;
+                            let mut e = fixtures::timeline();
+                            e.id = format!("merge-failed-{seq}");
+                            e.card_id = "card-1".into();
+                            e.sequence = seq;
+                            e.actor = "system".into();
+                            e.kind = "review.merge_failed".into();
+                            e.message = "Auto-merge failed: dirty target branch".into();
+                            e.data = json!({"target_branch": "main"});
+                            s.events.push(e);
+                        });
+                    }))
                     .child(action("Board", Variant::Quiet, move |_| {
                         ui.navigate("board")
                     }))

@@ -70,6 +70,7 @@ pub struct Ui {
     pub snapshot: Signal<Snapshot>,
     pub snapshot_ready: Signal<bool>,
     pub reminders: Memo<Vec<canban_notifications::Reminder>>,
+    pub sound_items: Memo<Vec<String>>,
     pub reminder_counts: Memo<BTreeMap<String, canban_notifications::ReminderCount>>,
     pub notification_delivery: Stored<canban_notifications::DeliveryTracker>,
     pub notification_resync: Stored<bool>,
@@ -238,6 +239,9 @@ impl Ui {
     pub fn new() -> Self {
         let snapshot = signal(Snapshot::default());
         let reminders = computed(move || canban_notifications::reminders(&snapshot.get()));
+        let sound_items = computed(move || {
+            canban_notifications::sound_items_with_reminders(&snapshot.get(), &reminders.get())
+        });
         let reminder_counts = computed(move || canban_notifications::counts(&reminders.get()));
         Self {
             owner: Owner::current(),
@@ -286,6 +290,7 @@ impl Ui {
             snapshot,
             snapshot_ready: signal(false),
             reminders,
+            sound_items,
             reminder_counts,
             notification_delivery: stored(Default::default()),
             notification_resync: stored(true),
@@ -591,7 +596,7 @@ pub fn refresh(ui: Ui) {
             Ok(Ok((snapshot, config, saved_project))) => {
                 if ui.notification_resync.replace(false) {
                     ui.notification_delivery
-                        .with(|t| t.baseline(&canban_notifications::reminders(&snapshot)));
+                        .with(|t| t.baseline(&canban_notifications::sound_items(&snapshot)));
                 }
                 ui.apply_config(&config);
                 if ui.project.get_untracked().is_empty()

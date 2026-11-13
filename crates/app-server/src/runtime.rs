@@ -841,17 +841,73 @@ impl AppServer {
             }
         }
         let terminal = client.launch_on(&location.machine, argv, &run.cwd, env, labels)?;
+        let core_id = strp(&core["core"], "id")?.to_owned();
+        let terminal_address = strp(&terminal, "address")?.to_owned();
         run.owner_core_id = if remote {
             Some(location.machine.clone())
         } else {
-            core["core"]["id"].as_str().map(str::to_owned)
+            Some(core_id.clone())
         };
-        run.core_id = Some(strp(&core["core"], "id")?.into());
-        run.terminal = Some(strp(&terminal, "address")?.into());
+        run.core_id = Some(core_id.clone());
+        run.terminal = Some(terminal_address.clone());
         let delivery_error=terminal.get("first_message").filter(|v|v["sent"]==false).map(|v|format!("Herdr did not deliver the initial task: {v}. Inspect this terminal before retrying."));
         run.observed = Some(canban_herdr::observation(&terminal));
+        run.lifecycle.observed_at = Some(now());
+        run.connection_state = "connected".into();
         run.state = "running".into();
-        self.store.lock().unwrap().write(|db|{let current:Attempt=db.get(&run.id)?;if current.state!="starting"{run.state=current.state;}db.save(&run)?;let mut r:Request=db.get(&req.id)?;if r.state=="starting"{r.state="running".into();db.save(&r)?;}let c:Card=db.get(&req.card_id)?;log(db,&c,"execution.started","system",&format!("@{} started",req.profile.id),Some(req.id.clone()),json!({"attempt":req.attempt,"terminal":run.terminal,"core_id":run.core_id,"owner_core_id":run.owner_core_id,"location":run.location,"cwd":run.cwd}))})?;
+        // Seed the in-memory inventory immediately so a runtime tick racing ahead
+        // of Herdr's async "created" subscription event does not transiently mark
+        // the freshly launched terminal missing/unavailable.
+        {
+            let mut inv = self.inventory.lock().unwrap();
+            if inv.core == core_id {
+                let key = inv.address(&terminal_address);
+                inv.records.entry(key.clone()).or_insert_with(|| {
+                    let mut seeded = terminal.clone();
+                    seeded["address"] = json!(key);
+                    if seeded["state"].is_null() {
+                        seeded["state"] = json!("live");
+                    }
+                    if seeded["cwd"].is_null() {
+                        seeded["cwd"] = json!(run.cwd);
+                    }
+                    seeded
+                });
+            }
+        }
+        self.store.lock().unwrap().write(|db| {
+            let current: Attempt = db.get(&run.id)?;
+            if current.state != "starting" {
+                run.state = current.state;
+                run.completed_at = current.completed_at;
+                run.completion_turn = current.completion_turn;
+                run.close_state = current.close_state;
+                run.turn_ended_at = current.turn_ended_at;
+                run.error = current.error;
+            }
+            if current.provider_session_id.is_some() {
+                run.provider_session_id = current.provider_session_id;
+            }
+            if current.response_path.is_some() {
+                run.response_path = current.response_path;
+            }
+            db.save(&run)?;
+            let mut r: Request = db.get(&req.id)?;
+            if r.state == "starting" {
+                r.state = "running".into();
+                db.save(&r)?;
+            }
+            let c: Card = db.get(&req.card_id)?;
+            log(
+                db,
+                &c,
+                "execution.started",
+                "system",
+                &format!("@{} started", req.profile.id),
+                Some(req.id.clone()),
+                json!({"attempt":req.attempt,"terminal":run.terminal,"core_id":run.core_id,"owner_core_id":run.owner_core_id,"location":run.location,"cwd":run.cwd}),
+            )
+        })?;
         self.store.lock().unwrap().write(|db| {
             for q in snapshot
                 .questions
