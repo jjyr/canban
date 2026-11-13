@@ -42,6 +42,7 @@ pub struct CbGeometry {
 pub struct CbKeyEvent {
     pub action: u8,
     pub composing: u8,
+    pub unidentified: u8,
     pub keycode: u16,
     pub mods: u16,
     pub consumed_mods: u16,
@@ -114,6 +115,8 @@ unsafe extern "C" {
     fn cb_terminal_set_font(view: *mut c_void, family: *const i8, size: f64);
     fn cb_terminal_list_fonts_json() -> *mut i8;
     fn cb_terminal_free_cstring(ptr: *mut i8);
+    #[cfg(test)]
+    fn cb_terminal_test_mutable_ime_buffers(view: *mut c_void) -> bool;
 }
 
 pub fn installed_fonts() -> crate::InstalledFonts {
@@ -720,9 +723,14 @@ extern "C" fn cb_key(host_ptr: *mut c_void, ev: CbKeyEvent) -> bool {
         std::str::from_utf8(unsafe { std::slice::from_raw_parts(ev.utf8_ptr, ev.utf8_len) })
             .unwrap_or("")
     };
+    let key = if ev.unidentified != 0 {
+        GHOSTTY_KEY_UNIDENTIFIED
+    } else {
+        macos_key(ev.keycode)
+    };
     let encoded = state.model.encode_key(KeyInput {
         action,
-        key: macos_key(ev.keycode),
+        key,
         mods: ev.mods,
         consumed_mods: ev.consumed_mods,
         composing: ev.composing != 0,
@@ -1239,6 +1247,84 @@ mod tests {
             }),
             b"\x1bb"
         );
+    }
+
+    #[test]
+    fn kitty_report_all_preserves_cjk_commit_and_synthetic_unicode_events() {
+        let mut host = Host::new();
+        host.state.lock().unwrap().connected = true;
+        // Enable Kitty keyboard protocol flags = 15 (disambiguate | report_events | report_alternates | report_all).
+        host.state.lock().unwrap().model.write(b"\x1b[>15u");
+        let (tx, rx) = mpsc::channel();
+        host.input = Some(tx);
+        let ptr = &mut host as *mut Host as *mut c_void;
+
+        // Direct UTF-8 text commit (e.g. WeType / Pinyin candidate, CJK punctuation "，", or multi-char paste/IME)
+        // must send exact UTF-8 bytes rather than CSI-u keycode 'a' (97).
+        let cjk = "你好，terminal！".as_bytes();
+        cb_text(ptr, cjk.as_ptr(), cjk.len());
+        assert!(matches!(rx.try_recv(), Ok(Input::Bytes(bytes)) if bytes == cjk));
+
+        // Synthetic CGEvent Unicode key (keyCode = 0 with unidentified = 1) must not map to GHOSTTY_KEY_A.
+        let ch = b"h";
+        assert!(cb_key(
+            ptr,
+            CbKeyEvent {
+                action: 1,
+                composing: 0,
+                unidentified: 1,
+                keycode: 0,
+                mods: 0,
+                consumed_mods: 0,
+                unshifted_cp: u32::from(b'h'),
+                utf8_ptr: ch.as_ptr(),
+                utf8_len: ch.len(),
+            },
+        ));
+        assert!(matches!(rx.try_recv(), Ok(Input::Bytes(bytes)) if bytes == b"\x1b[104u"));
+
+        // Physical 'a' key with CapsLock active still encodes as CSI-u 'a' with CapsLock consumed.
+        let upper_a = b"A";
+        assert!(cb_key(
+            ptr,
+            CbKeyEvent {
+                action: 1,
+                composing: 0,
+                unidentified: 0,
+                keycode: 0x00,
+                mods: GHOSTTY_MODS_CAPS_LOCK as u16,
+                consumed_mods: GHOSTTY_MODS_CAPS_LOCK as u16,
+                unshifted_cp: u32::from(b'a'),
+                utf8_ptr: upper_a.as_ptr(),
+                utf8_len: upper_a.len(),
+            },
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Input::Bytes(bytes)) if bytes == b"\x1b[97;65u" || bytes == b"\x1b[97::65;65u" || bytes.starts_with(b"\x1b[97")
+        ));
+    }
+
+    #[test]
+    fn mutable_ime_buffers_are_snapshotted_before_imk_truncates_them() {
+        let mut host = Box::new(Host::new());
+        host.state.lock().unwrap().connected = true;
+        host.state.lock().unwrap().model.write(b"\x1b[>15u");
+        let (tx, rx) = mpsc::channel();
+        host.input = Some(tx);
+
+        let raw_view = unsafe { cb_terminal_new(&mut *host as *mut _ as *mut c_void, callbacks()) };
+        assert!(!raw_view.is_null());
+        let ok = unsafe { cb_terminal_test_mutable_ime_buffers(raw_view as *mut c_void) };
+        unsafe {
+            cb_terminal_detach(raw_view as *mut c_void);
+            drop(Retained::from_raw(raw_view));
+        }
+        assert!(ok, "mutable IMK strings must be copied before truncation");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Input::Bytes(bytes)) if bytes == "你好！".as_bytes()
+        ));
     }
 
     #[test]

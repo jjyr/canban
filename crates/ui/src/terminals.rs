@@ -403,7 +403,8 @@ fn controls(ui: Ui) -> impl IntoElement {
             "Show / hide terminal list",
             move |_| {
                 ui.terminal_sidebar
-                    .set(!ui.terminal_sidebar.get_untracked())
+                    .set(!ui.terminal_sidebar.get_untracked());
+                ui.terminal_focus.update(|v| *v += 1);
             },
         ))
         .child(when(|| true, move || crate::navigation::controls(ui)))
