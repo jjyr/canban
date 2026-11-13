@@ -650,6 +650,12 @@ pub fn Gallery() -> impl IntoElement {
         ui.open_terminal("gallery-manual".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("card-terminals") {
+        canban_ui::frame::configure_window_chrome();
+        ui.snapshot.set(fixtures::workspace_with_card_terminals());
+        ui.open_card("card-2".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("agent-setup") {
         ui.onboarded.set(false);
         ui.page.set("agent-setup".into());
@@ -760,9 +766,14 @@ pub fn Gallery() -> impl IntoElement {
                     ui.select_project("gallery-project".into());
                 }))
                 .child(action("Card conversation", Variant::Secondary, move |_| {
-                    scene.set("workspace".into()); ui.snapshot.set(fixtures::conversation());
-                    ui.card_terminal_open.set(false);
-                    ui.card.set("card-1".into()); ui.page.set("card".into());
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::conversation());
+                    ui.open_card("card-1".into());
+                }))
+                .child(action("Card Terminals", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::workspace_with_card_terminals());
+                    ui.open_card("card-2".into());
                 }))
                 .child(action("Card + Live Terminal", Variant::Secondary, move |_| {
                     scene.set("workspace".into());

@@ -370,6 +370,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
 fn destination(ui: Ui, row: &OverviewRow, review: bool) {
     close(ui);
     ui.open_card(row.card.id.clone());
+    ui.card_tab.set(String::new());
     if let Some(id) = row.outcome_request_id() {
         ui.request.set(id.into());
     }
@@ -1097,6 +1098,7 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
                         .on_press(move |_: &()| {
                             close(ui);
                             ui.open_card(id.clone());
+                            ui.card_tab.set(String::new());
                             ui.card_event.set(sequence);
                         })
                         .child(
@@ -1144,6 +1146,7 @@ fn unread_updates(ui: Ui, scope: Option<&str>) -> Option<SectionGroup> {
                 .child(compact_action("Card →", Variant::Secondary, move |_| {
                     close(ui);
                     ui.open_card(id_btn.clone());
+                    ui.card_tab.set(String::new());
                     ui.card_event.set(sequence);
                 })),
         );
