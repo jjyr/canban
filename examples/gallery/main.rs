@@ -603,6 +603,23 @@ pub fn Gallery() -> impl IntoElement {
         ui.page.set("board".into());
         return canban_ui::frame::screen(ui).into_element();
     }
+    // Card header quick merge: `card-quick-merge` shows the header Merge action;
+    // `card-quick-merge-warning` opens the running-Agent confirmation it raises.
+    if matches!(
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
+        Ok("card-quick-merge" | "card-quick-merge-warning")
+    ) {
+        ui.card_standalone.set(true);
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("card-quick-merge-warning") {
+            let mut preview = fixtures::review();
+            preview.warning = Some(
+                "Card Agent is still running; merging now only includes current worktree changes"
+                    .into(),
+            );
+            ui.quick_merge.set(Some(preview));
+        }
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminals") {
         canban_ui::frame::configure_window_chrome();
         ui.snapshot.set(fixtures::terminal_workspace());

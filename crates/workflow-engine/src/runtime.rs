@@ -156,11 +156,13 @@ pub fn start(
             .any(|r| r.card_id == card.id && r.active()),
         "Card already has an active workflow"
     );
-    let step = flow
-        .entries
-        .get(entry)
-        .context("Unknown workflow entry")?
-        .clone();
+    let step = if let Some(s) = flow.entries.get(entry) {
+        s.clone()
+    } else if flow.steps.contains_key(entry) {
+        entry.to_owned()
+    } else {
+        bail!("Unknown workflow entry")
+    };
     let mut run = WorkflowRun {
         id: id(),
         project_id: card.project_id.clone(),
@@ -194,6 +196,14 @@ fn drive(
     queue: Queue,
 ) -> Result<()> {
     while run.state == "running" {
+        if let Some(removed) = run.inputs["stop_after_step"].as_str()
+            && run.step.as_deref() != Some(removed)
+        {
+            run.step = None;
+            run.state = "cancelled".into();
+            record(db, run, "workflow.stopped", "Step removed from workflow")?;
+            break;
+        }
         if run.visit > run.definition.max_steps {
             run.state = "failed".into();
             run.error = Some("Workflow execution limit reached".into());
@@ -219,13 +229,19 @@ fn drive(
                 next: continuation,
             } => {
                 let project: Project = db.get(&card.project_id)?;
+                let rework_label = if run.inputs["rework_origin"] == "merge_conflict" {
+                    "Merge conflict to resolve before delivery"
+                } else {
+                    "Human rework feedback for this visit"
+                };
                 let rework_note = run.inputs["rework_feedback"]
                     .as_str()
                     .filter(|s| !s.trim().is_empty())
-                    .map(|s| format!("\n\nHuman rework feedback for this visit:\n{}", s.trim()))
+                    .map(|s| format!("\n\n{rework_label}:\n{}", s.trim()))
                     .unwrap_or_default();
                 if run.inputs.get("rework_feedback").is_some() {
                     run.inputs["rework_feedback"] = Value::Null;
+                    run.inputs["rework_origin"] = Value::Null;
                 }
                 let stage = Stage {
                     id: card.stage.clone(),
@@ -380,6 +396,11 @@ fn drive(
                 ))?;
                 record(db, run, "workflow.notified", &message)?;
                 next(run, to);
+            }
+            WorkflowStep::Admit { next: to, .. } => {
+                // The AppServer admission pump releases runs in Board order.
+                run.inputs["pending_next"] = json!(to);
+                run.state = "waiting_capacity".into();
             }
             WorkflowStep::Complete => {
                 run.history
@@ -601,6 +622,104 @@ pub fn complete_delivery(
     next(run, to);
     drive(db, config, card, run, queue)
 }
+/// Releases a run waiting at an `admit` gate. The caller (admission pump) decides
+/// capacity and Board order; this only records the decision and continues.
+pub fn admit(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    queue: Queue,
+) -> Result<()> {
+    ensure!(
+        run.state == "waiting_capacity",
+        "Workflow is not waiting for capacity"
+    );
+    let key = run.step.clone().context("Missing Admit step")?;
+    let Some(WorkflowStep::Admit {
+        max_ready, next: to, ..
+    }) = run.definition.steps.get(&key).cloned()
+    else {
+        bail!("Current step is not an Admit gate");
+    };
+    if max_ready.is_some() {
+        run.inputs["ready_gate"] = json!({"step": key, "column": card.stage});
+    }
+    record(db, run, "workflow.admitted", "Capacity available")?;
+    next(run, to);
+    drive(db, config, card, run, queue)
+}
+
+/// Routes a delivery merge conflict to the Deliver step's rework target so an
+/// Agent resolves it in the Card worktree. Returns `false` (caller should hold
+/// for a human) when no rework path exists or the attempt budget is spent.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Transaction-scoped conflict context plus queue adapter"
+)]
+pub fn rework_conflict(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    target_branch: &str,
+    target_head: &str,
+    files: &[String],
+    queue: Queue,
+) -> Result<bool> {
+    if run.state != "waiting_delivery" {
+        return Ok(false);
+    }
+    let key = run.step.clone().context("Missing Deliver step")?;
+    let Some(WorkflowStep::Deliver {
+        rework: Some(to),
+        max_conflict_attempts,
+        ..
+    }) = run.definition.steps.get(&key).cloned()
+    else {
+        return Ok(false);
+    };
+    let attempts = run.inputs["conflict_attempts"].as_u64().unwrap_or(0) as u32;
+    if attempts >= max_conflict_attempts {
+        return Ok(false);
+    }
+    let note = format!(
+        "Queue merge found conflicts integrating `{target_branch}` ({target_head}) into this Card worktree.\n\
+         Conflicted files: {}\n\
+         The worktree may still be mid-merge. Resolve every conflict while preserving both this Card's intent and the target branch changes, \
+         run the relevant tests, and commit the merge (if no merge is in progress, run `git merge {target_branch}` first). \
+         Do not push; Queue merge will retry delivery automatically after you report completion.",
+        files.join(", ")
+    );
+    run.inputs["conflict_attempts"] = json!(attempts + 1);
+    run.inputs["rework_feedback"] = json!(note);
+    run.inputs["rework_origin"] = json!("merge_conflict");
+    run.outputs.insert(
+        key.clone(),
+        json!({"state":"conflict","target_branch":target_branch,"target_head":target_head,"files":files,"attempt":attempts + 1}),
+    );
+    run.history.push(json!({"step":key,"visit":run.visit,"decision":"merge_conflict","files":files,"at":now()}));
+    card.human_gate = None;
+    card.attention = None;
+    card.revision += 1;
+    run.input_digest = digest(db, card);
+    log(
+        db,
+        card,
+        "review.merge_conflict",
+        "system",
+        &format!(
+            "Merge conflict with {target_branch}; Agent will resolve it (attempt {}/{max_conflict_attempts})",
+            attempts + 1
+        ),
+        None,
+        json!({"workflow_run_id":run.id,"target_branch":target_branch,"target_head":target_head,"files":files,"attempt":attempts + 1}),
+    )?;
+    next(run, Some(to));
+    drive(db, config, card, run, queue)?;
+    Ok(true)
+}
+
 pub fn hold_delivery(
     db: Db<'_>,
     card: &mut Card,

@@ -1,7 +1,130 @@
 //! Herdr-backed Agent catalog probing, Onboarding quick setup, Global Identity &
 //! Agent management, and Project-level identity backend overrides.
 use super::*;
-use std::collections::{BTreeMap, BTreeSet};
+use canban_profiles::ModelOption;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
+
+fn probe_codex_cached_models(defaults: &[ModelOption]) -> Vec<ModelOption> {
+    let mut out = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let cache_path = std::path::PathBuf::from(home).join(".codex/models_cache.json");
+        if let Ok(bytes) = std::fs::read(&cache_path)
+            && let Ok(val) = serde_json::from_slice::<Value>(&bytes)
+            && let Some(models) = val["models"].as_array()
+        {
+            for m in models {
+                if m["visibility"].as_str() == Some("hide") {
+                    continue;
+                }
+                let Some(slug) = m["slug"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                    continue;
+                };
+                let label = m["display_name"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(slug);
+                if !out.iter().any(|x: &ModelOption| x.id == slug) {
+                    out.push(ModelOption {
+                        id: slug.to_owned(),
+                        label: label.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+    for def in defaults {
+        if !out.iter().any(|x| x.id == def.id) {
+            out.push(def.clone());
+        }
+    }
+    out
+}
+
+fn probe_agy_models(agy_path: &str, defaults: &[ModelOption]) -> Vec<ModelOption> {
+    type CacheMap = BTreeMap<String, (Instant, Vec<ModelOption>)>;
+    static CACHE: OnceLock<Mutex<CacheMap>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    if let Ok(guard) = cache.lock()
+        && let Some((ts, cached)) = guard.get(agy_path)
+        && ts.elapsed() < Duration::from_secs(300)
+        && !cached.is_empty()
+    {
+        return cached.clone();
+    }
+
+    let path_owned = agy_path.to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let res = std::process::Command::new(&path_owned)
+            .arg("models")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        let _ = tx.send(res);
+    });
+
+    let mut parsed = Vec::new();
+    if let Ok(Ok(output)) = rx.recv_timeout(Duration::from_millis(2500))
+        && output.status.success()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with("Fetching ") {
+                continue;
+            }
+            if let Some((id, label)) = trimmed.split_once('\t') {
+                let id = id.trim();
+                let label = label.trim();
+                if !id.is_empty() && !parsed.iter().any(|m: &ModelOption| m.id == id) {
+                    parsed.push(ModelOption {
+                        id: id.to_owned(),
+                        label: if label.is_empty() {
+                            id.to_owned()
+                        } else {
+                            label.to_owned()
+                        },
+                    });
+                }
+            }
+        }
+    }
+
+    if parsed.is_empty() {
+        return defaults.to_vec();
+    }
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(agy_path.to_owned(), (Instant::now(), parsed.clone()));
+    }
+    parsed
+}
+
+fn models_for_entry(
+    entry: &canban_profiles::CatalogEntry,
+    machine: &str,
+    installed_path: Option<&str>,
+) -> Vec<ModelOption> {
+    if machine == "local" {
+        match entry.id.as_str() {
+            "agy" => {
+                if let Some(path) = installed_path {
+                    return probe_agy_models(path, &entry.default_models);
+                }
+            }
+            "codex" => {
+                return probe_codex_cached_models(&entry.default_models);
+            }
+            _ => {}
+        }
+    }
+    entry.default_models.clone()
+}
 
 fn validate_profile_id(id: &str) -> Result<()> {
     ensure!(
@@ -70,6 +193,9 @@ impl AppServer {
 
         let presets = canban_profiles::presets(&self.home).unwrap_or_default();
         let builtin_ids: BTreeSet<String> = catalog.iter().map(|e| e.id.clone()).collect();
+        let raw_config = self
+            .load_unmigrated_config()
+            .unwrap_or_else(|_| config.clone());
 
         let mut agents = Vec::new();
         for entry in &catalog {
@@ -78,6 +204,7 @@ impl AppServer {
                 .iter()
                 .find(|prof| prof.id == entry.id && !prof.is_identity());
             let installed_path = probed.get(&entry.binary).cloned();
+            let models = models_for_entry(entry, &machine, installed_path.as_deref());
             agents.push(json!({
                 "id": entry.id,
                 "display_name": existing.and_then(|p| p.name.clone()).unwrap_or_else(|| entry.display_name.clone()),
@@ -88,6 +215,10 @@ impl AppServer {
                 "path": installed_path,
                 "configured": existing.is_some(),
                 "enabled": existing.is_some_and(|p| p.enabled),
+                "models": models,
+                "supported_efforts": entry.supported_efforts,
+                "supports_model": !entry.model_args.is_empty(),
+                "supports_effort": !entry.effort_args.is_empty(),
             }));
         }
 
@@ -106,6 +237,17 @@ impl AppServer {
                 .cloned()
                 .unwrap_or_else(|| preset_id.clone());
             let installed_path = probed.get(&bin).cloned();
+            let meta = canban_profiles::catalog_entry_for_profile(preset_prof);
+            let models = meta
+                .as_ref()
+                .map(|m| models_for_entry(m, &machine, installed_path.as_deref()))
+                .unwrap_or_default();
+            let supported_efforts = meta
+                .as_ref()
+                .map(|m| m.supported_efforts.clone())
+                .unwrap_or_default();
+            let supports_effort = meta.as_ref().is_some_and(|m| !m.effort_args.is_empty())
+                || preset_prof.command().iter().any(|a| a.contains("{effort}"));
             agents.push(json!({
                 "id": preset_id,
                 "display_name": preset_prof.name.clone().unwrap_or_else(|| preset_id.clone()),
@@ -116,6 +258,10 @@ impl AppServer {
                 "path": installed_path,
                 "configured": existing.is_some(),
                 "enabled": existing.is_some_and(|p| p.enabled),
+                "models": models,
+                "supported_efforts": supported_efforts,
+                "supports_model": true,
+                "supports_effort": supports_effort,
             }));
         }
 
@@ -141,6 +287,18 @@ impl AppServer {
             } else {
                 probed.get(&bin).cloned()
             };
+            let meta = canban_profiles::catalog_entry_for_profile(prof);
+            let models = meta
+                .as_ref()
+                .map(|m| models_for_entry(m, &machine, installed_path.as_deref()))
+                .unwrap_or_default();
+            let supported_efforts = meta
+                .as_ref()
+                .map(|m| m.supported_efforts.clone())
+                .unwrap_or_default();
+            let supports_effort = !is_herdr_tpl
+                && (meta.as_ref().is_some_and(|m| !m.effort_args.is_empty())
+                    || prof.command().iter().any(|a| a.contains("{effort}")));
             agents.push(json!({
                 "id": prof.id,
                 "display_name": prof.name.clone().unwrap_or_else(|| prof.id.clone()),
@@ -151,6 +309,10 @@ impl AppServer {
                 "path": installed_path,
                 "configured": true,
                 "enabled": prof.enabled,
+                "models": models,
+                "supported_efforts": supported_efforts,
+                "supports_model": !is_herdr_tpl,
+                "supports_effort": supports_effort,
             }));
         }
 
@@ -160,6 +322,7 @@ impl AppServer {
             "agents": agents,
             "herdr_templates": herdr_templates,
             "config": config,
+            "raw_profiles": raw_config.profiles,
         }))
     }
 
@@ -294,6 +457,7 @@ impl AppServer {
                 .and_then(|prof| prof.preset.clone())
                 .unwrap_or(chosen_engine);
             if let Some(existing) = raw.profiles.iter_mut().find(|prof| prof.id == role_id) {
+                let engine_changed = existing.preset.as_deref() != Some(preset_ref.as_str());
                 existing.identity = true;
                 existing.enabled = true;
                 existing.preset = Some(preset_ref);
@@ -301,6 +465,10 @@ impl AppServer {
                 existing.resume_argv = None;
                 existing.exit = None;
                 existing.session_instruction = None;
+                if engine_changed {
+                    existing.model = None;
+                    existing.effort = None;
+                }
                 if existing.role_instruction.trim().is_empty() {
                     existing.role_instruction = default_role_instruction(role_id).into();
                 }
@@ -337,11 +505,16 @@ impl AppServer {
                     enabled_ids.contains(engine_id),
                     "Identity @{role_id} cannot use disabled Agent '{engine_id}'"
                 );
+                let engine_changed = existing.preset.as_deref() != Some(preset_ref.as_str());
                 existing.preset = Some(preset_ref);
                 existing.argv = None;
                 existing.resume_argv = None;
                 existing.exit = None;
                 existing.session_instruction = None;
+                if engine_changed {
+                    existing.model = None;
+                    existing.effort = None;
+                }
             }
         }
 
@@ -455,12 +628,37 @@ impl AppServer {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned);
+                let existing_opts = raw
+                    .profiles
+                    .iter()
+                    .find(|x| x.id == id)
+                    .map(|x| (x.model.clone(), x.effort.clone()));
+                let next_model = if p.get("model").is_some() {
+                    p["model"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                } else {
+                    existing_opts.as_ref().and_then(|(m, _)| m.clone())
+                };
+                let next_effort = if p.get("effort").is_some() {
+                    p["effort"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                } else {
+                    existing_opts.as_ref().and_then(|(_, e)| e.clone())
+                };
                 let new_prof = Profile {
                     id: id.to_owned(),
                     name: display,
                     enabled: p["enabled"].as_bool().unwrap_or(true),
                     identity: false,
                     preset,
+                    model: next_model,
+                    effort: next_effort,
                     role_instruction: String::new(),
                     argv: final_argv,
                     resume_argv: (!resume_argv.is_empty()).then_some(resume_argv),
@@ -471,6 +669,53 @@ impl AppServer {
                     *existing = new_prof;
                 } else {
                     raw.profiles.push(new_prof);
+                }
+            }
+            "set_profile_options" => {
+                let id = strp(&p, "id")?.trim().trim_start_matches('@');
+                validate_profile_id(id)?;
+                if !raw.profiles.iter().any(|x| x.id == id) {
+                    let catalog = canban_profiles::builtin_catalog();
+                    let presets = canban_profiles::presets(&self.home).unwrap_or_default();
+                    if let Some(entry) = catalog.iter().find(|e| e.id == id) {
+                        raw.profiles.push(Profile {
+                            id: entry.id.clone(),
+                            name: Some(entry.display_name.clone()),
+                            enabled: true,
+                            identity: false,
+                            preset: Some(entry.id.clone()),
+                            ..Default::default()
+                        });
+                    } else if presets.contains_key(id) {
+                        raw.profiles.push(Profile {
+                            id: id.to_owned(),
+                            enabled: true,
+                            identity: false,
+                            preset: Some(id.to_owned()),
+                            ..Default::default()
+                        });
+                    } else {
+                        bail!("Unknown profile @{id}");
+                    }
+                }
+                let prof = raw
+                    .profiles
+                    .iter_mut()
+                    .find(|x| x.id == id)
+                    .with_context(|| format!("Unknown profile @{id}"))?;
+                if p.get("model").is_some() {
+                    prof.model = p["model"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
+                }
+                if p.get("effort").is_some() {
+                    prof.effort = p["effort"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
                 }
             }
             "upsert_identity" => {
@@ -492,6 +737,18 @@ impl AppServer {
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned);
+                let explicit_model = p.get("model").map(|v| {
+                    v.as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                });
+                let explicit_effort = p.get("effort").map(|v| {
+                    v.as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                });
                 // Ensure the chosen engine is resolved / present if built-in
                 let catalog = canban_profiles::builtin_catalog();
                 if !raw
@@ -516,6 +773,7 @@ impl AppServer {
                     .and_then(|x| x.preset.clone())
                     .unwrap_or_else(|| engine.to_owned());
                 if let Some(existing) = raw.profiles.iter_mut().find(|x| x.id == id) {
+                    let engine_changed = existing.preset.as_deref() != Some(preset_ref.as_str());
                     existing.identity = true;
                     existing.enabled = enabled;
                     if display.is_some() {
@@ -526,6 +784,16 @@ impl AppServer {
                     existing.resume_argv = None;
                     existing.exit = None;
                     existing.session_instruction = None;
+                    if let Some(m) = explicit_model {
+                        existing.model = m;
+                    } else if engine_changed {
+                        existing.model = None;
+                    }
+                    if let Some(e) = explicit_effort {
+                        existing.effort = e;
+                    } else if engine_changed {
+                        existing.effort = None;
+                    }
                     if p.get("role_instruction").is_some() {
                         existing.role_instruction = role_instruction;
                     }
@@ -536,6 +804,8 @@ impl AppServer {
                         enabled,
                         identity: true,
                         preset: Some(preset_ref),
+                        model: explicit_model.flatten(),
+                        effort: explicit_effort.flatten(),
                         role_instruction: if role_instruction.is_empty() {
                             format!("You are the Card's {id} Agent.")
                         } else {

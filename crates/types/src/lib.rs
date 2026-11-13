@@ -126,6 +126,10 @@ pub struct Profile {
     pub identity: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     #[serde(default)]
     pub role_instruction: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,6 +149,8 @@ impl Default for Profile {
             enabled: true,
             identity: false,
             preset: None,
+            model: None,
+            effort: None,
             role_instruction: String::new(),
             argv: None,
             resume_argv: None,
@@ -493,7 +499,7 @@ impl Attempt {
                 .as_ref()
                 .is_some_and(|v| v["state"] == "finished")
     }
-    /// True when the terminal exited or Herdr reports the Agent has stopped its turn.
+    /// True when the terminal exited or Herdr reports the Agent is no longer running a turn.
     pub fn agent_stopped(&self) -> bool {
         if self.finished() {
             return true;
@@ -506,9 +512,9 @@ impl Attempt {
             .as_ref()
             .and_then(|v| v["status"]["state"].as_str())
         {
-            Some("idle" | "done") => true,
+            Some("idle" | "done" | "blocked" | "error") => true,
             Some(_) => false,
-            None => self.state == "completed",
+            None => matches!(self.state.as_str(), "completed" | "blocked" | "failed"),
         }
     }
     /// A stale or disconnected status must not release scheduling capacity.
@@ -532,6 +538,50 @@ impl Attempt {
     pub fn key(request: &str, number: u32) -> String {
         format!("{request}:{number}")
     }
+}
+
+/// Merge-time caution about Agent work on a Card, or `None` when every Agent has
+/// stopped its turn. Shared by AppServer previews and the live UI (which must
+/// re-evaluate it as Herdr status changes; a preview snapshot goes stale once an
+/// Agent that reported while finishing its turn becomes idle).
+pub fn agent_activity_warning(
+    card_id: &str,
+    attempts: &[Attempt],
+    requests: &[Request],
+) -> Option<String> {
+    // Continued assignments are `finished()`: runtime ownership moved to the next one.
+    let live = attempts
+        .iter()
+        .filter(|a| a.card_id == card_id && a.terminal.is_some() && !a.agent_stopped());
+    let mut uncertain = false;
+    for a in live {
+        if a.connection_state == "connected" {
+            return Some(
+                "Card Agent is still running; merging now only includes current worktree changes"
+                    .into(),
+            );
+        }
+        uncertain = true;
+    }
+    if uncertain {
+        return Some(
+            "Card Agent status is unavailable (terminal disconnected); merging now only includes current worktree changes"
+                .into(),
+        );
+    }
+    let pending: Vec<_> = requests
+        .iter()
+        .filter(|r| r.card_id == card_id && matches!(r.state.as_str(), "queued" | "starting" | "unknown"))
+        .collect();
+    if pending.is_empty() {
+        return None;
+    }
+    let what = pending
+        .iter()
+        .map(|r| format!("@{} {}", r.profile.id, r.state))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("Card still has pending Agent work ({what})"))
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Conversation {
@@ -931,3 +981,58 @@ pub struct GitHubPr {
 
 mod workflow;
 pub use workflow::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sample_attempt(card_id: &str, state: &str, connection: &str, observed: Option<Value>) -> Attempt {
+        serde_json::from_value(json!({
+            "id": "req-1:1",
+            "request_id": "req-1",
+            "project_id": "proj-1",
+            "card_id": card_id,
+            "number": 1,
+            "state": state,
+            "core_id": "core-1",
+            "terminal": "t1",
+            "cwd": "/tmp",
+            "input_path": "in.md",
+            "created_at": 1,
+            "connection_state": connection,
+            "observed": observed,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn agent_activity_warning_clears_as_soon_as_live_snapshot_becomes_idle() {
+        let mut attempts = vec![sample_attempt(
+            "card-1",
+            "completed",
+            "connected",
+            Some(json!({"state": "live", "status": {"state": "working"}})),
+        )];
+        let requests = Vec::new();
+        // Right at `execution.report`, Herdr can still report `"working"` mid-turn.
+        assert!(
+            agent_activity_warning("card-1", &attempts, &requests)
+                .unwrap()
+                .contains("still running")
+        );
+
+        // Once Herdr transitions to any non-running turn state, live evaluation clears it.
+        for stopped in ["idle", "done", "blocked", "error"] {
+            attempts[0].observed = Some(json!({"state": "live", "status": {"state": stopped}}));
+            assert_eq!(agent_activity_warning("card-1", &attempts, &requests), None);
+        }
+
+        // Providers without deep status hooks also clear once the execution reported an outcome.
+        for outcome in ["completed", "blocked", "failed"] {
+            attempts[0].state = outcome.into();
+            attempts[0].observed = Some(json!({"state": "live"}));
+            assert_eq!(agent_activity_warning("card-1", &attempts, &requests), None);
+        }
+    }
+}

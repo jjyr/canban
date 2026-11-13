@@ -424,13 +424,12 @@ impl AppServer {
                     p["execution"].is_null(),
                     "Holding or resuming auto-merge requires a user invocation"
                 );
-                self.mutate(method, &p, |db| {
+                let hold_arg = p["hold"].as_bool();
+                let res = self.mutate(method, &p, |db| {
                     let mut c: Card = db.get(strp(&p, "card_id")?)?;
                     revise(&c, &p)?;
                     ensure!(c.active(), "Restore the Card before changing auto-merge");
-                    let hold = p["hold"]
-                        .as_bool()
-                        .unwrap_or(!c.hold_auto_merge);
+                    let hold = hold_arg.unwrap_or(!c.hold_auto_merge);
                     c.hold_auto_merge = hold;
                     c.revision += 1;
                     log(
@@ -473,7 +472,11 @@ impl AppServer {
                     }
                     db.save(&c)?;
                     Ok(serde_json::to_value(c)?)
-                })
+                })?;
+                if res["hold_auto_merge"] == false {
+                    let _ = self.pump_deliveries();
+                }
+                Ok(res)
             }
             "card.workspace" => {
                 let (card, project) = {

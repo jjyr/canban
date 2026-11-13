@@ -69,6 +69,7 @@ typedef struct {
 typedef struct {
   uint8_t action;
   uint8_t composing;
+  uint8_t unidentified;
   uint16_t keycode;
   uint16_t mods;
   uint16_t consumed_mods;
@@ -717,6 +718,8 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   CTFontRef _fontItalic;
   CTFontRef _fontBoldItalic;
   CFMutableDictionaryRef _fallbackCache;
+  uint64_t _physicalKeyDownLo;
+  uint64_t _physicalKeyDownHi;
 }
 @property(nonatomic, copy) NSString *fontFamily;
 @property(nonatomic) CGFloat fontSize;
@@ -735,6 +738,9 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 @property(nonatomic) NSRange markedRangeVal;
 @property(nonatomic) NSRange selectedRangeVal;
 @property(nonatomic, strong) NSMutableArray<NSString *> *keyTextAccumulator;
+@property(nonatomic) BOOL didDoCommand;
+@property(nonatomic) BOOL didUpdateMarkedText;
+@property(nonatomic) SEL pendingCommandSelector;
 
 @property(nonatomic, strong) NSTimer *animTimer;
 @property(nonatomic) NSTimeInterval lastBlinkTime;
@@ -1128,7 +1134,31 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 
 - (void)windowFocusDidChange:(NSNotification *)note {
   (void)note;
+  if (!self.window || !self.window.isKeyWindow) {
+    _physicalKeyDownLo = 0;
+    _physicalKeyDownHi = 0;
+    [self.inputContext discardMarkedText];
+    [self unmarkText];
+  } else if (self.window.firstResponder == self) {
+    [self.inputContext activate];
+  }
   [self updateFocusState];
+}
+
+- (void)requestAutoFocusIfEligible {
+  if (!_autoFocus || !_host || !self.window || self.isHiddenOrHasHiddenAncestor)
+    return;
+  NSResponder *first = self.window.firstResponder;
+  if (first == self)
+    return;
+  if ([first isKindOfClass:[NSText class]])
+    return;
+  if ([first isKindOfClass:[NSView class]] &&
+      ![NSStringFromClass([first class]) hasPrefix:@"Nsh"]) {
+    // Another dedicated native control (e.g. NSTextField / WKWebView) holds focus.
+    return;
+  }
+  [self.window makeFirstResponder:self];
 }
 
 - (void)viewDidMoveToWindow {
@@ -1152,13 +1182,29 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
                name:NSWindowDidResignKeyNotification
              object:self.window];
     if (_autoFocus) {
-      [self.window makeFirstResponder:self];
+      [self requestAutoFocusIfEligible];
+      __weak CanbanTerminal *weakSelf = self;
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [weakSelf requestAutoFocusIfEligible];
+      });
     }
     _pendingLayoutRedraws = 3;
     [self pollSnapshotForceFull:YES];
   } else {
     [self.animTimer invalidate];
     self.animTimer = nil;
+  }
+  [self updateFocusState];
+}
+
+- (void)viewDidUnhide {
+  [super viewDidUnhide];
+  if (_autoFocus) {
+    [self requestAutoFocusIfEligible];
+    __weak CanbanTerminal *weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [weakSelf requestAutoFocusIfEligible];
+    });
   }
   [self updateFocusState];
 }
@@ -1204,8 +1250,11 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 - (BOOL)becomeFirstResponder {
   BOOL ok = [super becomeFirstResponder];
   if (ok) {
+    [self.inputContext activate];
+    [self updateFocusState];
+    __weak CanbanTerminal *weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-      [self updateFocusState];
+      [weakSelf updateFocusState];
     });
   }
   return ok;
@@ -1214,8 +1263,22 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 - (BOOL)resignFirstResponder {
   BOOL ok = [super resignFirstResponder];
   if (ok) {
+    _physicalKeyDownLo = 0;
+    _physicalKeyDownHi = 0;
+    [self.inputContext discardMarkedText];
+    [self unmarkText];
+    NSEvent *ev = [NSApp currentEvent];
+    BOOL keyboardTabStop = (ev && ev.type == NSEventTypeKeyDown &&
+                            (ev.keyCode == 0x30 || ev.keyCode == 0x35));
+    __weak CanbanTerminal *weakSelf = self;
     dispatch_async(dispatch_get_main_queue(), ^{
-      [self updateFocusState];
+      CanbanTerminal *strong = weakSelf;
+      if (!strong)
+        return;
+      if (!keyboardTabStop && strong.autoFocus) {
+        [strong requestAutoFocusIfEligible];
+      }
+      [strong updateFocusState];
     });
   }
   return ok;
@@ -1842,11 +1905,38 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   return YES;
 }
 
+- (BOOL)isSyntheticUnicodeEvent:(NSEvent *)event {
+  if (event.keyCode != 0)
+    return NO;
+  NSString *chars = event.characters;
+  if (!chars || chars.length == 0)
+    return NO;
+  NSEventModifierFlags flags = event.modifierFlags;
+  if (flags & (NSEventModifierFlagControl | NSEventModifierFlagOption |
+               NSEventModifierFlagCommand)) {
+    return NO;
+  }
+  if (chars.length == 1) {
+    unichar ch = [chars characterAtIndex:0];
+    if (ch == 'a' || ch == 'A')
+      return NO;
+  }
+  return YES;
+}
+
 - (uint32_t)unshiftedCodepointForEvent:(NSEvent *)event {
+  if ([self isSyntheticUnicodeEvent:event]) {
+    uint32_t cp = cb_first_scalar(event.characters);
+    if (cp >= 'A' && cp <= 'Z') {
+      return cp + ('a' - 'A');
+    }
+    return cp;
+  }
   NSEventModifierFlags cleanFlags =
       event.modifierFlags &
       ~(NSEventModifierFlagShift | NSEventModifierFlagControl |
-        NSEventModifierFlagOption | NSEventModifierFlagCommand);
+        NSEventModifierFlagOption | NSEventModifierFlagCommand |
+        NSEventModifierFlagCapsLock);
   NSString *s = nil;
   @try {
     s = [event charactersByApplyingModifiers:cleanFlags];
@@ -1860,6 +1950,9 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 }
 
 - (NSString *)translatedCharactersForEvent:(NSEvent *)event {
+  if ([self isSyntheticUnicodeEvent:event]) {
+    return event.characters ?: @"";
+  }
   NSEventModifierFlags cleanFlags =
       event.modifierFlags &
       ~(NSEventModifierFlagControl | NSEventModifierFlagOption |
@@ -1876,6 +1969,22 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   return s;
 }
 
+- (void)setPhysicalKey:(uint16_t)kcode down:(BOOL)down {
+  if (kcode < 64) {
+    if (down) {
+      _physicalKeyDownLo |= (1ULL << kcode);
+    } else {
+      _physicalKeyDownLo &= ~(1ULL << kcode);
+    }
+  } else if (kcode < 128) {
+    if (down) {
+      _physicalKeyDownHi |= (1ULL << (kcode - 64));
+    } else {
+      _physicalKeyDownHi &= ~(1ULL << (kcode - 64));
+    }
+  }
+}
+
 - (void)keyDown:(NSEvent *)event {
   if (!_host || !_cb.key)
     return;
@@ -1884,13 +1993,49 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   _cursorBlinkVisible = YES;
   _lastBlinkTime = [NSProcessInfo processInfo].systemUptime;
 
+  NSEventModifierFlags rawFlags = event.modifierFlags;
+  uint16_t mods = cb_mods_from_flags(rawFlags);
+  uint16_t consumedMods =
+      (mods & (CB_MODS_SHIFT | CB_MODS_CAPS_LOCK));
+  uint8_t action = event.isARepeat ? 2 : 1;
+  BOOL syntheticUnicode = [self isSyntheticUnicodeEvent:event];
+  uint32_t unshiftedCp = [self unshiftedCodepointForEvent:event];
+  BOOL markedBefore = [self hasMarkedText];
+
+  uint16_t kcode = event.keyCode;
+  [self setPhysicalKey:kcode down:NO];
+
+  // Control/Command key combinations outside active IME composition are terminal
+  // control sequences, never CJK preedit text. Bypassing InputMethodKit here
+  // avoids IME interception and prevents XPC Mach-port stalls on Ctrl+C / Ctrl+D.
+  if (!markedBefore &&
+      (rawFlags & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) != 0) {
+    NSString *chars = [self translatedCharactersForEvent:event];
+    NSData *utf8 = [chars dataUsingEncoding:NSUTF8StringEncoding];
+    CbKeyEvent kev = {0};
+    kev.action = action;
+    kev.composing = 0;
+    kev.unidentified = syntheticUnicode ? 1 : 0;
+    kev.keycode = event.keyCode;
+    kev.mods = mods;
+    kev.consumed_mods = consumedMods;
+    kev.unshifted_cp = unshiftedCp;
+    kev.utf8_ptr = utf8 ? (const uint8_t *)utf8.bytes : NULL;
+    kev.utf8_len = utf8 ? utf8.length : 0;
+    if (!syntheticUnicode) {
+      [self setPhysicalKey:kcode down:YES];
+    }
+    _cb.key(_host, kev);
+    [self pollSnapshotForceFull:NO];
+    return;
+  }
+
   // Both Option keys act as Alt: strip Option only when translating text for key-encoding
   // while keeping the exact original NSEvent pointer whenever Option is not held so macOS
-  // CJK InputMethodKit sees an untouched native event.
+  // CJK InputMethodKit (including third-party XPC IMEs like WeType/Sogou/Rime) sees an
+  // untouched CGEvent-backed NSEvent.
   NSEvent *translationEvent = event;
-  NSEventModifierFlags rawFlags = event.modifierFlags;
-  if ((rawFlags & NSEventModifierFlagOption) &&
-      !(rawFlags & (NSEventModifierFlagControl | NSEventModifierFlagCommand))) {
+  if (!markedBefore && (rawFlags & NSEventModifierFlagOption) != 0) {
     NSEventModifierFlags stripped = rawFlags & ~NSEventModifierFlagOption;
     NSString *chars = [self translatedCharactersForEvent:event];
     NSEvent *synth = [NSEvent keyEventWithType:event.type
@@ -1908,16 +2053,21 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
     }
   }
 
-  BOOL markedBefore = [self hasMarkedText];
   self.keyTextAccumulator = [NSMutableArray arrayWithCapacity:2];
+  self.didDoCommand = NO;
+  self.didUpdateMarkedText = NO;
+  self.pendingCommandSelector = NULL;
+
   [self interpretKeyEvents:@[ translationEvent ]];
+
   NSArray<NSString *> *accum = self.keyTextAccumulator;
   self.keyTextAccumulator = nil;
-
-  uint16_t mods = cb_mods_from_flags(rawFlags);
-  uint16_t consumedMods = (mods & CB_MODS_SHIFT);
-  uint8_t action = event.isARepeat ? 2 : 1;
-  uint32_t unshiftedCp = [self unshiftedCodepointForEvent:event];
+  BOOL didCommand = self.didDoCommand;
+  BOOL updatedMarked = self.didUpdateMarkedText;
+  SEL cmdSel = self.pendingCommandSelector;
+  self.didDoCommand = NO;
+  self.didUpdateMarkedText = NO;
+  self.pendingCommandSelector = NULL;
 
   if (accum.count > 0) {
     for (NSString *str in accum) {
@@ -1926,8 +2076,14 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
       NSData *utf8 = [str dataUsingEncoding:NSUTF8StringEncoding];
       if (!utf8 || utf8.length == 0)
         continue;
-      if (markedBefore) {
-        // Committed directly from IME preedit session (e.g. Pinyin candidate selection).
+      BOOL plainSingleAsciiKey =
+          (!markedBefore && !updatedMarked && ![self hasMarkedText] &&
+           !syntheticUnicode && str.length == 1 &&
+           [str characterAtIndex:0] >= 0x20 && [str characterAtIndex:0] < 0x7f);
+      if (!plainSingleAsciiKey) {
+        // Commit IME text, CJK punctuation, multi-scalar insertions, and synthetic
+        // CGEvent Unicode strings directly as UTF-8 so Kitty report_all mode never
+        // replaces them with the underlying physical keycode (e.g. keyCode 0 -> 'a').
         if (_cb.text) {
           _cb.text(_host, (const uint8_t *)utf8.bytes, utf8.length);
         }
@@ -1935,33 +2091,51 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
         CbKeyEvent kev = {0};
         kev.action = action;
         kev.composing = 0;
+        kev.unidentified = 0;
         kev.keycode = event.keyCode;
         kev.mods = mods;
         kev.consumed_mods = consumedMods;
         kev.unshifted_cp = unshiftedCp;
         kev.utf8_ptr = (const uint8_t *)utf8.bytes;
         kev.utf8_len = utf8.length;
+        [self setPhysicalKey:kcode down:YES];
         _cb.key(_host, kev);
       }
     }
+  } else if (cmdSel == @selector(paste:)) {
+    [self paste:nil];
+  } else if (cmdSel == @selector(copy:)) {
+    [self copy:nil];
+  } else if (cmdSel == @selector(selectAll:)) {
+    [self selectAll:nil];
+  } else if ((markedBefore || updatedMarked || [self hasMarkedText]) &&
+             !didCommand) {
+    // The active IME consumed this keystroke for preedit or candidate navigation
+    // (e.g. Pinyin buffer edit, Space/1..9 commit, or Escape cancel). Do not leak
+    // raw Backspace/Enter/Escape/Arrows to the PTY.
   } else {
-    BOOL composing = ([self hasMarkedText] || markedBefore);
+    BOOL composing = ([self hasMarkedText] || markedBefore || updatedMarked);
     NSString *chars = [self translatedCharactersForEvent:event];
     NSData *utf8 = [chars dataUsingEncoding:NSUTF8StringEncoding];
     CbKeyEvent kev = {0};
     kev.action = action;
     kev.composing = composing ? 1 : 0;
+    kev.unidentified = syntheticUnicode ? 1 : 0;
     kev.keycode = event.keyCode;
     kev.mods = mods;
     kev.consumed_mods = consumedMods;
     kev.unshifted_cp = unshiftedCp;
     kev.utf8_ptr = utf8 ? (const uint8_t *)utf8.bytes : NULL;
     kev.utf8_len = utf8 ? utf8.length : 0;
+    if (!composing && !syntheticUnicode) {
+      [self setPhysicalKey:kcode down:YES];
+    }
     _cb.key(_host, kev);
   }
 
   [self pollSnapshotForceFull:NO];
-  if (markedBefore != [self hasMarkedText] || [self hasMarkedText]) {
+  if (markedBefore != [self hasMarkedText] || [self hasMarkedText] ||
+      updatedMarked) {
     [self setNeedsDisplay:YES];
   }
 }
@@ -1969,11 +2143,28 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 - (void)keyUp:(NSEvent *)event {
   if (!_host || !_cb.key)
     return;
+  uint16_t kcode = event.keyCode;
+  BOOL wasPhysicalDown = NO;
+  if (kcode < 64) {
+    uint64_t mask = (1ULL << kcode);
+    wasPhysicalDown = (_physicalKeyDownLo & mask) != 0;
+    _physicalKeyDownLo &= ~mask;
+  } else if (kcode < 128) {
+    uint64_t mask = (1ULL << (kcode - 64));
+    wasPhysicalDown = (_physicalKeyDownHi & mask) != 0;
+    _physicalKeyDownHi &= ~mask;
+  } else {
+    wasPhysicalDown = YES;
+  }
+  if (!wasPhysicalDown || [self hasMarkedText] ||
+      [self isSyntheticUnicodeEvent:event])
+    return;
   uint16_t mods = cb_mods_from_flags(event.modifierFlags);
   CbKeyEvent kev = {0};
   kev.action = 0; // release
-  kev.composing = [self hasMarkedText] ? 1 : 0;
-  kev.keycode = event.keyCode;
+  kev.composing = 0;
+  kev.unidentified = 0;
+  kev.keycode = kcode;
   kev.mods = mods;
   kev.consumed_mods = 0;
   kev.unshifted_cp = [self unshiftedCodepointForEvent:event];
@@ -2040,9 +2231,15 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 
 - (void)insertText:(id)string replacementRange:(NSRange)replacementRange {
   (void)replacementRange;
-  NSString *text = [string isKindOfClass:[NSAttributedString class]]
-                       ? [(NSAttributedString *)string string]
-                       : [string description];
+  NSString *raw = [string isKindOfClass:[NSAttributedString class]]
+                      ? [(NSAttributedString *)string string]
+                      : ([string isKindOfClass:[NSString class]]
+                             ? (NSString *)string
+                             : [string description]);
+  // NSTextInputContext / IMKInputSession (e.g. WeType) passes a reusable mutable
+  // CFMutableString (__NSCFString) and truncates it before interpretKeyEvents:
+  // returns; snapshot an immutable copy immediately.
+  NSString *text = [raw copy];
   [self unmarkText];
   if (!text || text.length == 0)
     return;
@@ -2061,7 +2258,8 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 
 - (void)doCommandBySelector:(SEL)selector {
   if (self.keyTextAccumulator != nil) {
-    // Handled uniformly after interpretKeyEvents: via GhosttyKeyEncoder in keyDown:.
+    self.didDoCommand = YES;
+    self.pendingCommandSelector = selector;
     return;
   }
   if (selector == @selector(paste:)) {
@@ -2077,10 +2275,13 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
         selectedRange:(NSRange)selectedRange
      replacementRange:(NSRange)replacementRange {
   (void)replacementRange;
-  NSString *text = [string isKindOfClass:[NSAttributedString class]]
-                       ? [(NSAttributedString *)string string]
-                       : [string description];
-  self.markedTextStr = text ?: @"";
+  self.didUpdateMarkedText = YES;
+  NSString *raw = [string isKindOfClass:[NSAttributedString class]]
+                      ? [(NSAttributedString *)string string]
+                      : ([string isKindOfClass:[NSString class]]
+                             ? (NSString *)string
+                             : [string description]);
+  self.markedTextStr = [raw copy] ?: @"";
   if (self.markedTextStr.length > 0) {
     self.markedRangeVal = NSMakeRange(0, self.markedTextStr.length);
     self.selectedRangeVal = selectedRange;
@@ -2093,6 +2294,9 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 
 - (void)unmarkText {
   BOOL had = [self hasMarkedText];
+  if (had) {
+    self.didUpdateMarkedText = YES;
+  }
   self.markedTextStr = nil;
   self.markedRangeVal = NSMakeRange(NSNotFound, 0);
   self.selectedRangeVal = NSMakeRange(0, 0);
@@ -2102,7 +2306,10 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 }
 
 - (NSRange)selectedRange {
-  return self.selectedRangeVal;
+  if ([self hasMarkedText]) {
+    return self.selectedRangeVal;
+  }
+  return NSMakeRange(0, 0);
 }
 
 - (NSRange)markedRange {
@@ -2116,8 +2323,11 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 
 - (NSAttributedString *)attributedSubstringForProposedRange:(NSRange)range
                                                 actualRange:(NSRangePointer)actualRange {
-  if (![self hasMarkedText])
+  if (![self hasMarkedText]) {
+    if (actualRange)
+      *actualRange = NSMakeRange(0, 0);
     return nil;
+  }
   NSRange clamped =
       NSIntersectionRange(range, NSMakeRange(0, self.markedTextStr.length));
   if (actualRange)
@@ -2134,18 +2344,28 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 
 - (NSRect)firstRectForCharacterRange:(NSRange)range
                          actualRange:(NSRangePointer)actualRange {
-  if (actualRange)
-    *actualRange = range;
+  if (actualRange) {
+    if ([self hasMarkedText]) {
+      *actualRange =
+          NSIntersectionRange(range, NSMakeRange(0, self.markedTextStr.length));
+    } else {
+      *actualRange = NSMakeRange(0, 0);
+    }
+  }
   CGFloat cw = _cellWidth > 0.0 ? _cellWidth : 8.0;
   CGFloat ch = _cellHeight > 0.0 ? _cellHeight : 18.0;
   CGFloat cx = kPadX;
   CGFloat cy = kPadY;
-  if (_snap && _snap->cursor.visible) {
-    cx = kPadX + (CGFloat)_snap->cursor.x * cw;
-    cy = kPadY + (CGFloat)_snap->cursor.y * ch;
+  if (_snap && _snap->cols > 0 && _snap->rows > 0) {
+    uint16_t curX = _snap->cursor.x < _snap->cols ? _snap->cursor.x
+                                                  : (_snap->cols - 1);
+    uint16_t curY = _snap->cursor.y < _snap->rows ? _snap->cursor.y
+                                                  : (_snap->rows - 1);
+    cx = kPadX + (CGFloat)curX * cw;
+    cy = kPadY + (CGFloat)curY * ch;
   }
-  if ([self hasMarkedText] && range.location > 0 &&
-      range.location <= self.markedTextStr.length) {
+  if ([self hasMarkedText] && range.location != NSNotFound &&
+      range.location > 0 && range.location <= self.markedTextStr.length) {
     NSUInteger colsOffset = 0;
     for (NSUInteger i = 0; i < range.location; i++) {
       colsOffset += (NSUInteger)cb_char_cells([self.markedTextStr characterAtIndex:i]);
@@ -2161,7 +2381,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 
 - (NSUInteger)characterIndexForPoint:(NSPoint)point {
   (void)point;
-  return NSNotFound;
+  return 0;
 }
 
 #pragma mark - Mouse, Selection, Links, ScrollWheel & Accessibility
@@ -2607,15 +2827,12 @@ void cb_terminal_auto_focus(void *view, bool enabled) {
   CanbanTerminal *term = (__bridge CanbanTerminal *)view;
   term.autoFocus = enabled ? YES : NO;
   if (enabled) {
-    if (term.window && term.window.firstResponder != term) {
-      [term.window makeFirstResponder:term];
-    }
+    [term requestAutoFocusIfEligible];
     __weak CanbanTerminal *weakTerm = term;
     dispatch_async(dispatch_get_main_queue(), ^{
       CanbanTerminal *strong = weakTerm;
-      if (strong && strong.autoFocus && strong.window &&
-          strong.window.firstResponder != strong) {
-        [strong.window makeFirstResponder:strong];
+      if (strong && strong.autoFocus) {
+        [strong requestAutoFocusIfEligible];
       }
     });
   }
@@ -2706,5 +2923,57 @@ char *cb_terminal_list_fonts_json(void) {
 void cb_terminal_free_cstring(char *ptr) {
   if (ptr) {
     free(ptr);
+  }
+}
+
+bool cb_terminal_test_mutable_ime_buffers(void *view) {
+  if (!view)
+    return false;
+  @autoreleasepool {
+    CanbanTerminal *term = (__bridge CanbanTerminal *)view;
+    NSRange notFound = NSMakeRange(NSNotFound, 0);
+
+    // 1. Simulate IMKInputSession (e.g. WeType) passing a reusable mutable
+    // NSMutableString during interpretKeyEvents: and clearing it before
+    // keyDown: reads keyTextAccumulator.
+    term.keyTextAccumulator = [NSMutableArray arrayWithCapacity:2];
+    NSMutableString *mutAscii = [NSMutableString stringWithString:@"x"];
+    [term insertText:mutAscii replacementRange:notFound];
+    [mutAscii setString:@""];
+
+    NSMutableAttributedString *mutAttr =
+        [[NSMutableAttributedString alloc] initWithString:@"你好"];
+    [term insertText:mutAttr replacementRange:notFound];
+    [[mutAttr mutableString] setString:@""];
+
+    NSArray<NSString *> *accum = term.keyTextAccumulator;
+    term.keyTextAccumulator = nil;
+    if (accum.count != 2 || ![accum[0] isEqualToString:@"x"] ||
+        ![accum[1] isEqualToString:@"你好"]) {
+      return false;
+    }
+
+    // 2. Simulate setMarkedText: with a reusable mutable attributed string
+    // followed by immediate IMK buffer truncation.
+    NSMutableAttributedString *mutMarked =
+        [[NSMutableAttributedString alloc] initWithString:@"nihao"];
+    [term setMarkedText:mutMarked
+           selectedRange:NSMakeRange(5, 0)
+        replacementRange:notFound];
+    [[mutMarked mutableString] setString:@""];
+    if (![term hasMarkedText] ||
+        ![term.markedTextStr isEqualToString:@"nihao"]) {
+      return false;
+    }
+
+    // 3. Direct async insertText: outside keyDown: commits UTF-8 via _cb.text
+    // and clears marked text even if the caller mutates its buffer afterward.
+    NSMutableString *commitBuf = [NSMutableString stringWithString:@"你好！"];
+    [term insertText:commitBuf replacementRange:notFound];
+    [commitBuf setString:@""];
+    if ([term hasMarkedText]) {
+      return false;
+    }
+    return true;
   }
 }

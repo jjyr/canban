@@ -1,6 +1,9 @@
 //! Resolve editable presets and explicit overrides; no provider dispatch at runtime.
 pub mod catalog;
-pub use catalog::{CatalogEntry, builtin_catalog, display_name, herdr_template_profile};
+pub use catalog::{
+    CatalogEntry, ModelOption, builtin_catalog, catalog_entry_for_profile, display_name,
+    herdr_template_profile,
+};
 
 use anyhow::{Context, Result, bail, ensure};
 use canban_types::{Config, ExitAction, Profile, Project};
@@ -51,7 +54,20 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
     config.hc = executable(&config.hc);
     let snapshot_profiles = config.profiles.clone();
     for profile in &mut config.profiles {
+        profile.model = profile
+            .model
+            .take()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        profile.effort = profile
+            .effort
+            .take()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
         if let Some(name) = &profile.preset {
+            let peer_agent = snapshot_profiles
+                .iter()
+                .find(|p| p.id == *name && !p.is_identity());
             if let Some(tpl) = name.strip_prefix("herdr:") {
                 ensure!(
                     !tpl.trim().is_empty(),
@@ -74,10 +90,21 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
                 if profile.session_instruction.is_none() {
                     profile.session_instruction = preset.session_instruction.clone();
                 }
-            } else if let Some(peer) = snapshot_profiles
-                .iter()
-                .find(|p| p.id == *name && !p.is_identity())
-            {
+                if profile.model.is_none() {
+                    profile.model = peer_agent
+                        .and_then(|p| p.model.as_deref().map(str::trim))
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .or_else(|| preset.model.clone());
+                }
+                if profile.effort.is_none() {
+                    profile.effort = peer_agent
+                        .and_then(|p| p.effort.as_deref().map(str::trim))
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .or_else(|| preset.effort.clone());
+                }
+            } else if let Some(peer) = peer_agent {
                 let peer_preset = peer.preset.as_deref().and_then(|pn| presets.get(pn));
                 if profile.argv.is_none() {
                     profile.argv = peer
@@ -102,6 +129,24 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
                         .session_instruction
                         .clone()
                         .or_else(|| peer_preset.and_then(|pp| pp.session_instruction.clone()));
+                }
+                if profile.model.is_none() {
+                    profile.model = peer
+                        .model
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .or_else(|| peer_preset.and_then(|pp| pp.model.clone()));
+                }
+                if profile.effort.is_none() {
+                    profile.effort = peer
+                        .effort
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .or_else(|| peer_preset.and_then(|pp| pp.effort.clone()));
                 }
             } else {
                 bail!("Unknown preset {name} for @{}", profile.id);
@@ -179,12 +224,27 @@ pub fn apply_project_override(
     let Ok(engine) = resolve_engine(config, target, None) else {
         return profile.clone();
     };
+    let next_preset = engine.preset.clone().or_else(|| Some(target.to_owned()));
+    let same_engine = profile.preset.as_deref() == next_preset.as_deref()
+        || profile.preset.as_deref() == Some(target)
+        || profile.command_name() == engine.command_name();
     let mut out = profile.clone();
-    out.preset = engine.preset.or_else(|| Some(target.to_owned()));
+    out.preset = next_preset;
     out.argv = engine.argv;
     out.resume_argv = engine.resume_argv;
     out.exit = Some(engine.exit.unwrap_or(ExitAction::Manual));
     out.session_instruction = engine.session_instruction;
+    if same_engine {
+        if out.model.is_none() {
+            out.model = engine.model;
+        }
+        if out.effort.is_none() {
+            out.effort = engine.effort;
+        }
+    } else {
+        out.model = engine.model;
+        out.effort = engine.effort;
+    }
     out
 }
 
@@ -283,6 +343,46 @@ pub fn migrate(value: &mut Value) -> Result<bool> {
     Ok(changed)
 }
 
+fn expand_template(arg: &str, replacements: &[(&str, &str)]) -> String {
+    let mut rest = arg;
+    let mut out = String::new();
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        rest = &rest[open..];
+        if let Some(close) = rest.find('}') {
+            let key = &rest[1..close];
+            if let Some((_, value)) = replacements.iter().find(|(name, _)| *name == key) {
+                out.push_str(value);
+            } else {
+                out.push_str(&rest[..=close]);
+            }
+            rest = &rest[close + 1..];
+        } else {
+            out.push_str(rest);
+            rest = "";
+            break;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn push_trusted_dir(dirs: &mut Vec<String>, candidate: &str) {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if !dirs.iter().any(|d| d == trimmed) {
+        dirs.push(trimmed.to_owned());
+    }
+    if let Ok(canon) = std::fs::canonicalize(trimmed) {
+        let canon_str = canon.to_string_lossy().into_owned();
+        if !dirs.iter().any(|d| d == &canon_str) {
+            dirs.push(canon_str);
+        }
+    }
+}
+
 /// Expand arguments as individual values; never interpret a shell command.
 pub fn command(
     profile: &Profile,
@@ -290,47 +390,127 @@ pub fn command(
     fresh: bool,
     vars: &[(&str, &str)],
 ) -> Result<Vec<String>> {
-    let args = if !fresh && session.is_some() {
+    let base_args: Vec<String> = if !fresh && session.is_some() {
         ensure!(
             !profile.resume_command().is_empty(),
             "Profile @{} does not support Resume; choose Start with retained Card context explicitly",
             profile.id
         );
-        profile.resume_command()
+        profile.resume_command().to_vec()
     } else {
-        profile.command()
+        profile.command().to_vec()
     };
-    ensure!(!args.is_empty(), "Profile @{} has no command", profile.id);
+    ensure!(
+        !base_args.is_empty(),
+        "Profile @{} has no command",
+        profile.id
+    );
+
+    let lookup = |key: &str| -> Option<&str> {
+        vars.iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+            .filter(|v| !v.trim().is_empty())
+    };
+    let home_val = lookup("home").unwrap_or("");
+    let cwd_val = lookup("cwd").or(lookup("project_dir")).unwrap_or(home_val);
+    let project_dir_val = lookup("project_dir").unwrap_or(cwd_val);
+
+    let mut trusted_dirs = Vec::new();
+    push_trusted_dir(&mut trusted_dirs, cwd_val);
+    push_trusted_dir(&mut trusted_dirs, project_dir_val);
+    push_trusted_dir(&mut trusted_dirs, home_val);
+    let agy_trusted_settings = serde_json::to_string(&json!({
+        "trustedWorkspaces": trusted_dirs,
+    }))?;
+
+    let model_val = profile
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let effort_val = profile
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let is_herdr_template = profile
+        .preset
+        .as_deref()
+        .is_some_and(|s| s.starts_with("herdr:"));
+    let uses_model_placeholder = base_args.iter().any(|a| a.contains("{model}"));
+    let uses_effort_placeholder = base_args.iter().any(|a| a.contains("{effort}"));
+    let catalog_meta = catalog_entry_for_profile(profile);
+
+    let mut args = Vec::with_capacity(base_args.len() + 4);
+    args.push(base_args[0].clone());
+    if !is_herdr_template {
+        if let Some(m) = model_val
+            && !uses_model_placeholder
+        {
+            let tpl = catalog_meta
+                .as_ref()
+                .filter(|c| !c.model_args.is_empty())
+                .map(|c| c.model_args.clone())
+                .unwrap_or_else(|| vec!["--model".into(), "{model}".into()]);
+            for item in tpl {
+                args.push(expand_template(&item, &[("model", m)]));
+            }
+        }
+        if let Some(eff) = effort_val
+            && !uses_effort_placeholder
+        {
+            let tpl = catalog_meta
+                .as_ref()
+                .filter(|c| !c.effort_args.is_empty())
+                .map(|c| c.effort_args.clone())
+                .unwrap_or_else(|| vec!["--effort".into(), "{effort}".into()]);
+            for item in tpl {
+                args.push(expand_template(&item, &[("effort", eff)]));
+            }
+        }
+    }
+    args.extend_from_slice(&base_args[1..]);
+
     // Substitute only the original argument template. Text inserted by a
     // prompt/session value must not be interpreted as another placeholder.
-    let mut replacements = vars.to_vec();
+    let mut replacements: Vec<(&str, &str)> = Vec::with_capacity(vars.len() + 6);
+    for &(k, v) in vars {
+        if !matches!(k, "cwd" | "project_dir") {
+            replacements.push((k, v));
+        }
+    }
+    replacements.push(("cwd", cwd_val));
+    replacements.push(("project_dir", project_dir_val));
+    replacements.push(("agy_trusted_settings", &agy_trusted_settings));
+    replacements.push(("model", model_val.unwrap_or("")));
+    replacements.push(("effort", effort_val.unwrap_or("")));
     replacements.push(("session_id", session.unwrap_or("")));
-    Ok(args
+
+    // Deduplicate consecutive or repeated `--add-dir <value>` pairs and omit empty `--add-dir ""` pairs.
+    let expanded: Vec<String> = args
         .iter()
-        .map(|arg| {
-            let mut rest = arg.as_str();
-            let mut out = String::new();
-            while let Some(open) = rest.find('{') {
-                out.push_str(&rest[..open]);
-                rest = &rest[open..];
-                if let Some(close) = rest.find('}') {
-                    let key = &rest[1..close];
-                    if let Some((_, value)) = replacements.iter().find(|(name, _)| *name == key) {
-                        out.push_str(value);
-                    } else {
-                        out.push_str(&rest[..=close]);
-                    }
-                    rest = &rest[close + 1..];
-                } else {
-                    out.push_str(rest);
-                    rest = "";
-                    break;
-                }
+        .map(|arg| expand_template(arg, &replacements))
+        .collect();
+    let mut final_args = Vec::with_capacity(expanded.len());
+    let mut seen_add_dirs: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < expanded.len() {
+        if expanded[i] == "--add-dir" && i + 1 < expanded.len() {
+            let dir = expanded[i + 1].trim();
+            if !dir.is_empty() && !seen_add_dirs.iter().any(|d| d == dir) {
+                seen_add_dirs.push(dir.to_owned());
+                final_args.push("--add-dir".into());
+                final_args.push(expanded[i + 1].clone());
             }
-            out.push_str(rest);
-            out
-        })
-        .collect())
+            i += 2;
+            continue;
+        }
+        final_args.push(expanded[i].clone());
+        i += 1;
+    }
+    Ok(final_args)
 }
 
 #[cfg(test)]
@@ -486,6 +666,176 @@ mod tests {
             .insert("developer".into(), "herdr:my-tpl".into());
         let tpl_override = apply_project_override(&c, Some(&proj), dev);
         assert_eq!(tpl_override.command()[0], "my-tpl");
+    }
+
+    #[test]
+    fn agy_command_passes_deduplicated_add_dirs_and_session_trusted_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_dir = dir.path().join("home");
+        let proj_dir = dir.path().join("repo");
+        let worktree_dir = home_dir.join("worktrees/repo/card-1");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.profiles.push(Profile {
+            id: "agy".into(),
+            preset: Some("agy".into()),
+            model: Some("gemini-4-carbon-high".into()),
+            effort: Some("high".into()),
+            ..Default::default()
+        });
+        cfg.profiles.push(Profile {
+            id: "agy-dev".into(),
+            identity: true,
+            preset: Some("agy".into()),
+            role_instruction: "Build carefully.".into(),
+            ..Default::default()
+        });
+        let cfg = resolve(cfg, dir.path()).unwrap();
+        let agy_dev = cfg.profiles.iter().find(|p| p.id == "agy-dev").unwrap();
+        // Identity inherits model & effort from @agy when not explicitly set on the identity
+        assert_eq!(agy_dev.model.as_deref(), Some("gemini-4-carbon-high"));
+        assert_eq!(agy_dev.effort.as_deref(), Some("high"));
+
+        let home_s = home_dir.to_string_lossy().into_owned();
+        let cwd_s = worktree_dir.to_string_lossy().into_owned();
+        let proj_s = proj_dir.to_string_lossy().into_owned();
+        let argv = command(
+            agy_dev,
+            None,
+            true,
+            &[
+                ("home", &home_s),
+                ("cwd", &cwd_s),
+                ("project_dir", &proj_s),
+                ("prompt", "hello"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(argv[0], "agy");
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--model", "gemini-4-carbon-high"])
+        );
+        assert!(argv.windows(2).any(|w| w == ["--effort", "high"]));
+        assert!(argv.windows(2).any(|w| w == ["--add-dir", home_s.as_str()]));
+        assert!(argv.windows(2).any(|w| w == ["--add-dir", cwd_s.as_str()]));
+        assert!(argv.windows(2).any(|w| w == ["--add-dir", proj_s.as_str()]));
+
+        let settings_idx = argv.iter().position(|a| a == "--settings").unwrap();
+        let settings_val: Value = serde_json::from_str(&argv[settings_idx + 1]).unwrap();
+        let trusted = settings_val["trustedWorkspaces"].as_array().unwrap();
+        let canon_cwd = std::fs::canonicalize(&worktree_dir)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let canon_proj = std::fs::canonicalize(&proj_dir)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            trusted
+                .iter()
+                .any(|v| v.as_str() == Some(canon_cwd.as_str()))
+        );
+        assert!(
+            trusted
+                .iter()
+                .any(|v| v.as_str() == Some(canon_proj.as_str()))
+        );
+
+        // When cwd == project_dir, --add-dir is deduplicated cleanly
+        let dedup_argv = command(
+            agy_dev,
+            Some("conv-123"),
+            false,
+            &[
+                ("home", &home_s),
+                ("cwd", &proj_s),
+                ("project_dir", &proj_s),
+                ("prompt", "resume task"),
+            ],
+        )
+        .unwrap();
+        let add_dir_count = dedup_argv.iter().filter(|a| *a == "--add-dir").count();
+        assert_eq!(add_dir_count, 2); // home + proj_s only!
+        assert!(
+            dedup_argv
+                .windows(2)
+                .any(|w| w == ["--conversation", "conv-123"])
+        );
+    }
+
+    #[test]
+    fn codex_and_claude_model_and_effort_flags_expand_in_start_and_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.profiles[0].model = Some("gpt-6.1-sol".into());
+        cfg.profiles[0].effort = Some("xhigh".into());
+        cfg.profiles[1].model = Some("opus".into());
+        cfg.profiles[1].effort = Some("max".into());
+        // Override @developer explicitly while @reviewer inherits from @codex
+        cfg.profiles[2].model = Some("gpt-5.4".into());
+        cfg.profiles[2].effort = Some("medium".into());
+
+        let cfg = resolve(cfg, dir.path()).unwrap();
+        let dev = cfg.profiles.iter().find(|p| p.id == "developer").unwrap();
+        let rev = cfg.profiles.iter().find(|p| p.id == "reviewer").unwrap();
+        let claude = cfg.profiles.iter().find(|p| p.id == "claude").unwrap();
+        assert_eq!(dev.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(dev.effort.as_deref(), Some("medium"));
+        assert_eq!(rev.model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(rev.effort.as_deref(), Some("xhigh"));
+
+        let dev_resume = command(
+            dev,
+            Some("thread-1"),
+            false,
+            &[("home", "/tmp/h"), ("prompt", "go")],
+        )
+        .unwrap();
+        assert_eq!(dev_resume[0], "codex");
+        assert_eq!(
+            &dev_resume[1..5],
+            &["-m", "gpt-5.4", "-c", "model_reasoning_effort=\"medium\""]
+        );
+        assert!(dev_resume.windows(2).any(|w| w == ["resume", "thread-1"]));
+
+        let claude_start = command(
+            claude,
+            Some("sess-1"),
+            true,
+            &[("home", "/tmp/h"), ("prompt", "go")],
+        )
+        .unwrap();
+        assert_eq!(claude_start[0], "claude");
+        assert_eq!(&claude_start[1..5], &["--model", "opus", "--effort", "max"]);
+
+        // Cross-provider project override replaces incompatible model/effort with target engine's
+        let mut cfg_with_agy = cfg.clone();
+        cfg_with_agy.profiles.push(Profile {
+            id: "agy".into(),
+            preset: Some("agy".into()),
+            model: Some("gemini-4-carbon-high".into()),
+            effort: Some("high".into()),
+            ..Default::default()
+        });
+        let proj = Project {
+            github: None,
+            delivery_mode: Default::default(),
+            agent_overrides: BTreeMap::from([("developer".into(), "agy".into())]),
+            id: "p1".into(),
+            name: "Demo".into(),
+            directory: "/tmp".into(),
+            location: None,
+            workflow: Default::default(),
+            target_branch: None,
+            created_at: 0,
+        };
+        let dev_on_agy = apply_project_override(&cfg_with_agy, Some(&proj), dev);
+        assert_eq!(dev_on_agy.model.as_deref(), Some("gemini-4-carbon-high"));
+        assert_eq!(dev_on_agy.effort.as_deref(), Some("high"));
     }
 }
 

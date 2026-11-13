@@ -8,10 +8,13 @@ UI and played through NSH, without a system-sound dependency or network access.
 
 ## App icon
 
-`app-icon.svg` is the original Canban app icon: an Agent's robot hand handing
-the viewer a three-column Kanban board, with the just-finished Review card
-highlighted. It is a flat geometric 1024×1024 vector on the macOS icon grid
-(824-point rounded square, transparent margin).
+`app-icon.svg` is the original Canban app icon, "Terminal Kanban": a solid
+neon-cyan prompt chevron followed by an underscore split into the three Board
+columns, the last segment being the orange cursor where the Agent works. It
+borrows the Tron palette (dark void, ice cyan, a single orange accent, restrained
+two-layer glow) while keeping the geometry minimal for legibility at small
+sizes. It is a 1024×1024 vector on the macOS icon grid (824-point rounded
+square, transparent margin).
 
 `scripts/package.py` renders this SVG with `rsvg-convert` (Homebrew `librsvg`),
 then uses macOS `iconutil` to generate `Contents/Resources/AppIcon.icns` with
