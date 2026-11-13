@@ -404,6 +404,102 @@ impl Ops {
         );
         Ok(None)
     }
+    /// Create or attach a standalone Canban-managed branch worktree under `<home>/worktrees`.
+    pub fn create_branch_worktree(
+        &self,
+        home: &Path,
+        project: &Project,
+        branch: &str,
+        base_branch: Option<&str>,
+        sync_base: bool,
+    ) -> Result<(PathBuf, String, String)> {
+        let source = Path::new(&project.directory);
+        let branch = branch.trim();
+        ensure!(!branch.is_empty(), "Branch name is required");
+        ensure!(
+            self.git(source, &["rev-parse", "--verify", "HEAD"])?
+                .status
+                .success(),
+            "Initialize a Git repository with at least one commit before creating a worktree"
+        );
+        self.checked(source, &["check-ref-format", "--branch", branch])?;
+        let base = base_branch
+            .map(str::trim)
+            .filter(|b| !b.is_empty())
+            .map(str::to_owned)
+            .or_else(|| project.workflow.workspace.base_branch.clone())
+            .or_else(|| project.target_branch.clone())
+            .or_else(|| self.current_branch(&project.directory))
+            .context("Choose a base branch for the worktree")?;
+        self.checked(source, &["check-ref-format", "--branch", &base])?;
+        if sync_base {
+            let remote = if project.workflow.workspace.remote.trim().is_empty() {
+                "origin"
+            } else {
+                project.workflow.workspace.remote.as_str()
+            };
+            if self.has_push_remote(project) {
+                self.sync_base(source, &base, remote)?;
+            }
+        }
+        let start_ref = format!("refs/heads/{base}");
+        let base_commit = self.checked(source, &["rev-parse", "--verify", &start_ref])?;
+        let target = self.create_standalone(home, project, branch, &start_ref)?;
+        Ok((target, base, base_commit))
+    }
+    /// Inspect clean/dirty status and current branch of a standalone worktree.
+    pub fn worktree_status(&self, path: &Path) -> Result<(String, bool, Option<String>)> {
+        if !self.host.is_dir(path) {
+            return Ok(("missing".into(), false, None));
+        }
+        if !self
+            .git(path, &["rev-parse", "--verify", "HEAD"])?
+            .status
+            .success()
+        {
+            return Ok(("directory".into(), false, None));
+        }
+        let branch = self.current_branch(path.to_str().unwrap_or_default());
+        let dirty = !self
+            .checked(path, &["status", "--porcelain", "--untracked-files=all"])?
+            .is_empty();
+        Ok(("available".into(), dirty, branch))
+    }
+    /// Remove a standalone managed worktree directory from Git.
+    pub fn remove_worktree(
+        &self,
+        home: &Path,
+        source: &Path,
+        path: &Path,
+        force: bool,
+    ) -> Result<()> {
+        ensure!(
+            path.starts_with(home.join("worktrees")),
+            "Refusing to remove an unmanaged directory outside worktrees: {}",
+            path.display()
+        );
+        if !self.host.exists(path) {
+            let _ = self.git(source, &["worktree", "prune"]);
+            return Ok(());
+        }
+        if !force {
+            let dirty = !self
+                .checked(path, &["status", "--porcelain", "--untracked-files=all"])?
+                .is_empty();
+            ensure!(
+                !dirty,
+                "Worktree contains uncommitted changes; confirm force deletion or commit/stash changes first"
+            );
+        }
+        let path_str = path.to_str().context("Invalid worktree path")?;
+        let args: Vec<&str> = if force {
+            vec!["worktree", "remove", "--force", path_str]
+        } else {
+            vec!["worktree", "remove", path_str]
+        };
+        self.checked(source, &args)?;
+        Ok(())
+    }
 }
 pub fn prepare(home: &Path, project: &Project, card: &Card) -> Result<PathBuf> {
     Ops::local().prepare(home, project, card)

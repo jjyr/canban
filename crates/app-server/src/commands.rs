@@ -49,9 +49,13 @@ impl AppServer {
         if method.starts_with("draft.") {
             return self.draft_call(method, p);
         }
+        if method.starts_with("worktree.") {
+            return self.worktree_call(method, p);
+        }
         let config = self.config();
         match method {
             "notifications.read" => self.read_card(p),
+            "notifications.read_all" => self.read_all_cards(p),
             "notifications.list" => Ok(serde_json::to_value(canban_notifications::reminders(
                 &self.snapshot()?,
             ))?),

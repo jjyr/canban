@@ -32,7 +32,11 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             ));
         }
     });
-    let full = computed(move || ui.narrow.get() || ui.card_standalone.get());
+    let full = computed(move || {
+        ui.narrow.get()
+            || ui.card_standalone.get()
+            || (ui.page.get() == "card" && ui.card_terminal_open.get())
+    });
     canban_ui_kit::split::reveal_split(
         board::screen(ui).into_element(),
         move || {

@@ -71,19 +71,19 @@ editor, modal, window-title and terminal checks.
 | [Runtime observation cost](runtime-observation-cost.md) | Historical polling baseline and prototype; superseded by event-driven runtime observation |
 | [Agent lifecycle implementation](agent-overview-and-lifecycle.md) | Status-aware global budget, idle reclamation, global Overview and isolated/native validation |
 | [Terminal interaction and navigation](terminal-interaction.md) | Delayed idle exit, live inactive filtering, input pipeline, global Back/Forward and current acceptance |
-| [Dedicated Terminal workspace](terminal-workspace.md) | Independent Terminals, live directory context, Project grouping, split chrome, Agent resume and isolated PTY acceptance |
-| [Project entry, grouped Overview and Settings](workspace-entry-and-settings.md) | Clickable empty Board, native directory chooser, filter-free Overview and unified Settings groups |
-| [Compact navigation and Quick Open](quick-open-and-navigation.md) | Implemented icon rail, Command+O fuzzy search, candidate navigation and native acceptance |
+| [Dedicated Terminal workspace](terminal-workspace.md) | Independent Terminals, Managed Branch Worktrees, live directory context, Project grouping, split chrome, Agent resume and isolated PTY acceptance |
+| [Project entry, grouped Overview and Settings](workspace-entry-and-settings.md) | Clickable empty Board, native directory chooser, historical Overview grouping and unified Settings groups |
+| [Compact navigation and Quick Open](quick-open-and-navigation.md) | Unified 42pt chrome, 56pt icon rail, Command+O fuzzy search, full Command Palette (`>`) parity and native acceptance |
 | [Archive browser](archive.md) | Global Project/conversation hierarchy, debounced fuzzy search and recovery |
 | [Card creation and editing](card-editor.md) | Shared right-pane/expanded Markdown editor, durable drafts, references and keyboard acceptance |
-| [Card conversation workspace](card-conversation.md) | Compact Card header, scrolling task/Timeline, explicit recipients, comment shortcuts and Terminal boundary |
+| [Card conversation workspace](card-conversation.md) | Side-by-side Card + Live Terminal workspace, compact Card header, scrolling task/Timeline, explicit recipients and comment shortcuts |
 | [Native UI motion](ui-motion.md) | Shared motion policy, retained Card reveal, editor resizing, native modal fades and regression scenes |
 | [Desktop utilities](desktop-utilities.md) | Implemented Usage/reset countdown, Caffeine, Theme, Shortcuts, target-Project creation and acceptance |
 | [Internal releases and updates](updates.md) | Main-triggered prereleases, daily release checks, local backend activation, paired migrations and recovery |
 | [Development startup](development-startup.md) | Branch-scoped dev/dev-stop, bound homes/bundles, ownership checks, native startup errors and acceptance |
 | [Instance isolation and remaining gaps](instance-isolation.md) | Implemented checkout/branch isolation and explicit installed-backend activation and remaining generic compatibility boundaries |
 | [Herdr UI layout and product references](research/herdr-ui-product-and-layout.md) | Source-backed recommendations for workspace chrome, navigation, Quick Open, contextual feedback and Review |
-| [Global Overview](product/overview.md) | Compact global handling/execution, direct destinations, unread updates and collapsed idle/history |
+| [Global Activity & Notifications](product/overview.md) | Persistent top-right chrome pill & popover (`Command+I`), inline read/merge, 1-step Card+Terminal jump, superseding standalone Overview |
 | [Overview and Terminal refinement](overview-and-terminal-navigation-proposal.md) | Selected design, cross-surface Terminal entry inventory and navigation rules |
 | [Attention handling](product/needs-attention.md) | Task/runtime naming, contextual handling inside Overview, Card/Terminal navigation and resolution rules |
 | [Unified Card reminders](reminders.md) | Per-Card unread/pending items, Project counts, durable visible-read positions and local sound delivery |

@@ -8,6 +8,7 @@ pub fn open(ui: Ui, card: String, profile: String) {
     if ui.pending.get_untracked() {
         return;
     }
+    let in_card = ui.page.get_untracked() == "card" && ui.card.get_untracked() == card;
     let key = canban_types::Conversation::key(&card, &profile);
     if let Some(row) = crate::terminals::model::conversations(&ui.snapshot.get_untracked())
         .into_iter()
@@ -15,6 +16,8 @@ pub fn open(ui: Ui, card: String, profile: String) {
     {
         if crate::terminals::model::closed(&row) {
             crate::terminals::navigation::resume(ui, &key);
+        } else if in_card {
+            ui.open_card_with_terminal(card, Some(key));
         } else {
             ui.open_terminal(key);
         }
@@ -22,6 +25,7 @@ pub fn open(ui: Ui, card: String, profile: String) {
     }
     let origin = ui.location();
     let conversation = canban_types::Conversation::key(&card, &profile);
+    let card_for_open = card.clone();
     dispatch_then(
         ui,
         "agent.open",
@@ -30,7 +34,15 @@ pub fn open(ui: Ui, card: String, profile: String) {
             if ui.location() == origin
                 && let Some(request) = v["request_id"].as_str()
             {
-                crate::terminals::navigation::open_after_launch(ui, conversation, request.into());
+                if in_card {
+                    ui.open_card_with_terminal(card_for_open, Some(conversation));
+                } else {
+                    crate::terminals::navigation::open_after_launch(
+                        ui,
+                        conversation,
+                        request.into(),
+                    );
+                }
             }
         },
     );

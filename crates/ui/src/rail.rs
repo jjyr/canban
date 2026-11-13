@@ -19,33 +19,25 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             || 0,
             move |_| ui.show_search(false),
         ));
-    let rail = rail
-        .child(icon_action(
-            Icon::Board,
-            "Board".into(),
-            move || {
-                matches!(
-                    ui.page.get().as_str(),
-                    "board"
-                        | "card"
-                        | "new-project"
-                        | "new-card"
-                        | "drafts"
-                        | "archive"
-                        | "workflows"
-                        | "project-location"
-                )
-            },
-            || 0,
-            move |_| ui.navigate("board"),
-        ))
-        .child(icon_action(
-            Icon::Overview,
-            "Overview".into(),
-            move || ui.page.get() == "overview",
-            move || ui.reminder_counts.get().len(),
-            move |_| ui.navigate("overview"),
-        ));
+    let rail = rail.child(icon_action(
+        Icon::Board,
+        "Board".into(),
+        move || {
+            matches!(
+                ui.page.get().as_str(),
+                "board"
+                    | "card"
+                    | "new-project"
+                    | "new-card"
+                    | "drafts"
+                    | "archive"
+                    | "workflows"
+                    | "project-location"
+            )
+        },
+        || 0,
+        move |_| ui.navigate("board"),
+    ));
     let rail = rail
         .child(icon_action(
             Icon::Terminal,

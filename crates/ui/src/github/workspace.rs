@@ -379,49 +379,60 @@ fn account_button(ui: Ui) -> impl IntoElement {
     })
 }
 
-pub fn screen(ui: Ui) -> impl IntoElement {
+pub fn chrome_bar(ui: Ui) -> impl IntoElement {
     let b = ui.github;
     view()
         .flex_1()
         .min_w(px(0.))
-        .min_h(px(0.))
-        .p_5()
-        .gap_3()
+        .h_full()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .pl_2()
+        .window_drag(true)
         .child(
             view()
                 .flex_row()
-                .flex_wrap()
                 .items_center()
-                .gap_3()
+                .gap_1p5()
+                .window_drag(false)
+                .child(icon(Icon::GitHub).w(px(14.)).h(px(14.)))
                 .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .child(icon(Icon::GitHub))
-                        .child(heading("GitHub")),
-                )
-                .child(
-                    segmented().children(
-                        [
-                            ("notifications", "Notifications"),
-                            ("issues", "Issues"),
-                            ("prs", "Pull requests"),
-                        ]
-                        .into_iter()
-                        .map(|(id, title)| {
-                            compact_segment(
-                                title,
-                                None,
-                                move || b.tab.get() == id,
-                                move |_| change_tab(ui, id),
-                            )
-                            .into_element()
-                        })
-                        .collect::<Vec<_>>(),
-                    ),
-                )
-                .child(view().flex_1())
+                    label("GitHub")
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(13.5)),
+                ),
+        )
+        .child(
+            view().window_drag(false).child(
+                segmented().children(
+                    [
+                        ("notifications", "Notifications"),
+                        ("issues", "Issues"),
+                        ("prs", "Pull requests"),
+                    ]
+                    .into_iter()
+                    .map(|(id, title)| {
+                        compact_segment(
+                            title,
+                            None,
+                            move || b.tab.get() == id,
+                            move |_| change_tab(ui, id),
+                        )
+                        .into_element()
+                    })
+                    .collect::<Vec<_>>(),
+                ),
+            ),
+        )
+        .child(view().flex_1().h_full().window_drag(true))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .flex_shrink_0()
+                .window_drag(false)
                 .child(account_button(ui))
                 .child(chrome_button_disabled(
                     Icon::Refresh,
@@ -437,6 +448,16 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     },
                 )),
         )
+}
+
+pub fn screen(ui: Ui) -> impl IntoElement {
+    let b = ui.github;
+    view()
+        .flex_1()
+        .min_w(px(0.))
+        .min_h(px(0.))
+        .p_4()
+        .gap_3()
         .child(filter_bar(ui))
         .child(when(
             move || {
@@ -1138,11 +1159,6 @@ pub fn account(ui: Ui) -> impl IntoElement {
         .min_h(px(0.))
         .p_5()
         .gap_4()
-        .child(subpage_header(
-            "Back to GitHub",
-            "GitHub / Account & access",
-            move |_| ui.navigate("github"),
-        ))
         .child(
             scroll().flex_1().min_h(px(0.)).child(
                 view()

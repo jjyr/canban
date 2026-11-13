@@ -539,3 +539,137 @@ fn first_terminal_accepts_empty_inheritance_without_a_project_or_conversation() 
     assert!(s.requests.is_empty() && s.attempts.is_empty());
     assert_eq!(s.terminals.len(), 1);
 }
+
+#[test]
+fn managed_worktree_create_status_promote_remove_and_read_all() {
+    let (dir, app, p, c) = setup();
+    core(&app, dir.path());
+    let src = PathBuf::from(&p.directory);
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("README.md"), "# Seed\n").unwrap();
+    let git = |cwd: &Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&src, &["init", "-b", "main"]);
+    git(&src, &["config", "user.name", "Tester"]);
+    git(&src, &["config", "user.email", "tester@example.invalid"]);
+    git(&src, &["config", "commit.gpgsign", "false"]);
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "seed"]);
+
+    let created = app
+        .call(
+            "worktree.create",
+            json!({
+                "project_id": p.id,
+                "branch": "feat/standalone-spike",
+                "launch": "shell",
+                "request_key": "wt-create-1"
+            }),
+        )
+        .unwrap();
+    let wt: ManagedWorktree = serde_json::from_value(created["worktree"].clone()).unwrap();
+    assert_eq!(wt.branch, "feat/standalone-spike");
+    assert_eq!(wt.base_branch, "main");
+    assert!(Path::new(&wt.path).exists());
+    assert!(created["terminal"]["id"].is_string());
+
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.worktrees.len(), 1);
+    assert_eq!(snap.worktrees[0].id, wt.id);
+
+    // Close the shell tab: worktree record and git checkout remain retained!
+    app.call(
+        "terminal.close",
+        json!({
+            "terminal_id": created["terminal"]["id"],
+            "request_key": "wt-close-shell"
+        }),
+    )
+    .unwrap();
+    app.observe_terminals().unwrap();
+    assert_eq!(app.snapshot().unwrap().worktrees.len(), 1);
+    assert!(Path::new(&wt.path).exists());
+
+    // Dirty guard refuses unforced deletion, then clean status allows removal or promotion.
+    std::fs::write(Path::new(&wt.path).join("spike.txt"), "draft\n").unwrap();
+    let status = app
+        .call("worktree.status", json!({"worktree_id": wt.id}))
+        .unwrap();
+    assert_eq!(status["dirty"], true);
+    assert!(
+        app.call(
+            "worktree.remove",
+            json!({"worktree_id": wt.id, "force": false, "request_key": "wt-rm-refuse"})
+        )
+        .is_err()
+    );
+
+    // Promote transfers checkout ownership to a new Board Card and clears ManagedWorktree.
+    let promoted: Card = serde_json::from_value(
+        app.call(
+            "worktree.promote",
+            json!({
+                "worktree_id": wt.id,
+                "title": "Spike promoted to Card",
+                "body": "Keep uncommitted work intact",
+                "request_key": "wt-promote-1"
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(promoted.branch.as_deref(), Some("feat/standalone-spike"));
+    assert_eq!(promoted.worktree.as_deref(), Some(wt.path.as_str()));
+    assert!(Path::new(&wt.path).join("spike.txt").exists());
+    assert!(app.snapshot().unwrap().worktrees.is_empty());
+
+    // Create a second standalone worktree and remove it with force=true when dirty.
+    let second = app
+        .call(
+            "worktree.create",
+            json!({
+                "project_id": p.id,
+                "branch": "chore/temp-worktree",
+                "launch": "none",
+                "request_key": "wt-create-2"
+            }),
+        )
+        .unwrap();
+    let wt2: ManagedWorktree = serde_json::from_value(second["worktree"].clone()).unwrap();
+    std::fs::write(Path::new(&wt2.path).join("scratch.txt"), "dirty\n").unwrap();
+    let removed = app
+        .call(
+            "worktree.remove",
+            json!({"worktree_id": wt2.id, "force": true, "request_key": "wt-rm-force"}),
+        )
+        .unwrap();
+    assert_eq!(removed["removed"], true);
+    assert!(!Path::new(&wt2.path).exists());
+    assert!(app.snapshot().unwrap().worktrees.is_empty());
+
+    // Verify notifications.read_all marks unread Cards read.
+    app.call(
+        "comment.add",
+        json!({"card_id": c.id, "body": "New update", "request_key": "read-all-comment"}),
+    )
+    .unwrap();
+    let read_res = app
+        .call("notifications.read_all", json!({"project_id": p.id}))
+        .unwrap();
+    assert!(read_res["updated"].as_u64().unwrap() >= 1);
+    let read_again = app
+        .call("notifications.read_all", json!({"project_id": p.id}))
+        .unwrap();
+    assert_eq!(read_again["updated"], 0);
+}

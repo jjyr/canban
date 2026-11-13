@@ -28,6 +28,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         if editing.get()
             && matches!(ui.page.get().as_str(), "card" | "review")
             && ui.card_id() == ui.card.get()
+            && !ui.card_terminal_focused.get()
             && ui.utility_popup.get().is_empty()
             && !ui.quick_open.get()
             && !ui.native_modal.get()
@@ -73,6 +74,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 let current = computed(move || {
                     matches!(ui.page.get().as_str(), "card" | "review")
                         && ui.card_id() == ui.card.get()
+                        && !ui.card_terminal_focused.get()
                 });
                 let (editor, body_view) = crate::editor::body(
                     ui,

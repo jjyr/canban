@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 12;
+pub const CURRENT: u32 = 13;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -31,6 +31,11 @@ const STEPS: &[Migration] = &[
         version: 12,
         up: authoring_up,
         down: authoring_down,
+    },
+    Migration {
+        version: 13,
+        up: managed_worktrees_up,
+        down: managed_worktrees_down,
     },
 ];
 fn workflows_up(tx: &Transaction<'_>) -> Result<()> {
@@ -318,6 +323,23 @@ fn authoring_down(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch("DROP TABLE configuration_sessions; DROP TABLE workflow_sources; DROP TABLE workflow_templates;")?;
     Ok(())
 }
+fn managed_worktrees_up(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS managed_worktrees(id TEXT PRIMARY KEY,project_id TEXT,card_id TEXT,state TEXT NOT NULL,number INTEGER NOT NULL,data TEXT NOT NULL); CREATE INDEX IF NOT EXISTS managed_worktrees_scope ON managed_worktrees(project_id,card_id,state);",
+    )?;
+    Ok(())
+}
+fn managed_worktrees_down(tx: &Transaction<'_>) -> Result<()> {
+    let count: u64 = tx.query_row("SELECT count(*) FROM managed_worktrees", [], |r| r.get(0))?;
+    ensure!(
+        count == 0,
+        "Cannot downgrade while standalone managed worktrees exist; promote or delete them first"
+    );
+    tx.execute_batch(
+        "DROP INDEX IF EXISTS managed_worktrees_scope; DROP TABLE managed_worktrees;",
+    )?;
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -466,5 +488,30 @@ mod tests {
         );
         assert!(batch(&mut c, &steps, 7).is_err());
         assert!(batch(&mut c, &steps, 11).is_err());
+    }
+    #[test]
+    fn managed_worktrees_schema_13_roundtrip_and_downgrade_guard() {
+        let home = tempfile::tempdir().unwrap();
+        let mut store = crate::Store::open(home.path()).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), CURRENT);
+        apply(&mut store.conn, 12).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), 12);
+        apply(&mut store.conn, 13).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), 13);
+        store.conn.execute(
+            "INSERT INTO managed_worktrees(id,project_id,card_id,state,number,data) VALUES('wt-1','p1',NULL,'',0,'{}')",
+            [],
+        ).unwrap();
+        let err = apply(&mut store.conn, 12).unwrap_err();
+        assert!(err.to_string().contains("standalone managed worktrees"));
+        assert_eq!(version(&store.conn).unwrap(), 13);
+        store
+            .conn
+            .execute("DELETE FROM managed_worktrees WHERE id='wt-1'", [])
+            .unwrap();
+        apply(&mut store.conn, 12).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), 12);
+        apply(&mut store.conn, 13).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), 13);
     }
 }

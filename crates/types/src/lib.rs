@@ -304,6 +304,18 @@ impl Project {
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ManagedWorktree {
+    pub id: String,
+    pub project_id: String,
+    pub branch: String,
+    pub base_branch: String,
+    #[serde(default)]
+    pub base_commit: Option<String>,
+    pub path: String,
+    pub location: WorkLocation,
+    pub created_at: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WorkspaceBinding {
     pub location: WorkLocation,
     pub path: String,
@@ -571,7 +583,9 @@ pub fn agent_activity_warning(
     }
     let pending: Vec<_> = requests
         .iter()
-        .filter(|r| r.card_id == card_id && matches!(r.state.as_str(), "queued" | "starting" | "unknown"))
+        .filter(|r| {
+            r.card_id == card_id && matches!(r.state.as_str(), "queued" | "starting" | "unknown")
+        })
         .collect();
     if pending.is_empty() {
         return None;
@@ -715,6 +729,8 @@ pub struct Snapshot {
     pub github: GitHubAccount,
     #[serde(default)]
     pub github_issues: Vec<GitHubIssueSnapshot>,
+    #[serde(default)]
+    pub worktrees: Vec<ManagedWorktree>,
     #[serde(default)]
     pub terminals: Vec<TerminalEntry>,
     /// Ephemeral Herdr observations, never persisted as Terminal ownership.
@@ -987,7 +1003,12 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn sample_attempt(card_id: &str, state: &str, connection: &str, observed: Option<Value>) -> Attempt {
+    fn sample_attempt(
+        card_id: &str,
+        state: &str,
+        connection: &str,
+        observed: Option<Value>,
+    ) -> Attempt {
         serde_json::from_value(json!({
             "id": "req-1:1",
             "request_id": "req-1",
