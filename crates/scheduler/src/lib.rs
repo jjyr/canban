@@ -135,8 +135,7 @@ pub fn retained<'a>(
                 r.id == a.request_id
                     && r.state == "completed"
                     && r.profile.id == request.profile.id
-                    && r.profile.command() == request.profile.command()
-                    && r.profile.resume_command() == request.profile.resume_command()
+                    && r.profile.command_name() == request.profile.command_name()
             })
             && !snapshot
                 .questions
