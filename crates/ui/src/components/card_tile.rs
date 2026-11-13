@@ -6,6 +6,7 @@ use super::*;
 /// #16  Title wraps beside the number       (3) [bot] [>_]
 /// GitHub Issue #12 · open · by author
 /// First body line, truncated
+/// [#search] [#ux] [#agent] +1
 /// Needs review  ⎇ branch            [((●)) ✦ @developer]
 /// ```
 /// The hover buttons open this Card's Agent or quick terminal split directly on the
@@ -150,6 +151,48 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
     if !excerpt.is_empty() {
         tile = tile.child(muted(excerpt.to_owned()).truncate().min_w(px(0.)));
     }
+    let local_tags = ui.local_tags.get_untracked();
+    let known_tags = crate::tags::known_map(&snapshot, &local_tags, Some(&card.project_id));
+    let tags = crate::tags::card_tags(&card, &known_tags);
+    if !tags.is_empty() {
+        let active_tags = ui.github.filters.with_untracked(|all| {
+            all.get(&card.project_id)
+                .map(|f| f.tags.clone())
+                .unwrap_or_default()
+        });
+        let mut tag_row = view()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .min_w(px(0.));
+        for tag in tags.iter().take(crate::tags::MAX_BOARD_TILE_TAGS) {
+            let is_active = active_tags
+                .iter()
+                .any(|t| t.to_lowercase() == tag.to_lowercase());
+            tag_row = tag_row.child(tag_pill(ui, &card.project_id, tag, is_active));
+        }
+        let extra = tags.len().saturating_sub(crate::tags::MAX_BOARD_TILE_TAGS);
+        if extra > 0 {
+            let all_hint = tags
+                .iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            tag_row = tag_row.child(
+                view()
+                    .h(px(20.))
+                    .px_1p5()
+                    .flex_row()
+                    .items_center()
+                    .rounded(px(5.))
+                    .bg(INSET)
+                    .tooltip(hint_tooltip(all_hint))
+                    .child(muted(format!("+{extra}")).text_size(px(11.))),
+            );
+        }
+        tile = tile.child(tag_row);
+    }
     let ui_merging = ui
         .merging_cards
         .with_untracked(|ids| ids.contains(&card.id));
@@ -209,6 +252,42 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
         );
     }
     tile
+}
+
+/// Clickable tag chip on a Board Card: toggles Board filtering by `#tag` without opening the Card.
+fn tag_pill(ui: Ui, project_id: &str, tag: &str, is_active: bool) -> impl IntoElement {
+    let pid = project_id.to_owned();
+    let tag_value = tag.to_owned();
+    let label_text = format!("#{tag}");
+    let hint = if is_active {
+        format!("Clear #{tag} Board filter")
+    } else {
+        format!("Filter Board by #{tag}")
+    };
+    let a11y = hint.clone();
+    view().flex_shrink_0().tooltip(hint_tooltip(hint)).child(
+        press_target()
+            .h(px(20.))
+            .px_1p5()
+            .max_w(px(140.))
+            .flex_row()
+            .items_center()
+            .rounded(px(5.))
+            .bg(if is_active { SELECTED } else { INSET })
+            .border_1()
+            .border_color(if is_active { ACCENT } else { BORDER })
+            .hover(|s| s.bg(CARD_HOVER).border_color(ACCENT))
+            .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
+            .accessibility_label(move || Some(a11y.clone().into()))
+            .child(
+                text(label_text)
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if is_active { ACCENT } else { MUTED })
+                    .truncate(),
+            )
+            .on_press(move |_: &()| crate::tags::toggle_board_filter(ui, &pid, &tag_value)),
+    )
 }
 
 /// Quick action on merged Cards: archive immediately without waiting for tomorrow.

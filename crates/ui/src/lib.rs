@@ -32,6 +32,7 @@ pub mod reminders;
 pub mod sessions;
 pub mod settings;
 pub mod startup;
+pub mod tags;
 pub mod terminals;
 pub mod workflows;
 pub mod workspace;

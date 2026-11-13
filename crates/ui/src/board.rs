@@ -182,6 +182,14 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             move || has_github.get(),
             move || crate::github::filters::toolbar(ui),
         ))
+        .child(when(
+            move || {
+                let _ = ui.github.filters.get();
+                !has_github.get()
+                    && !crate::tags::active_board_tags(ui, &ui.project.get()).is_empty()
+            },
+            move || crate::github::filters::tag_bar(ui),
+        ))
         .child(dynamic(move || {
             let Some(project) = project.get() else {
                 let create = entry_card(

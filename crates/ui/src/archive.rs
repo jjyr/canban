@@ -11,7 +11,12 @@ use nsh_core::prelude::*;
 pub fn screen(ui: Ui) -> impl IntoElement {
     let query = input::debounced(ui.archive_query, std::time::Duration::from_millis(120));
     let archived = computed(move || {
-        model::project_entries(&ui.snapshot.get(), &ui.project.get(), &query.get())
+        model::project_entries_with_tags(
+            &ui.snapshot.get(),
+            &ui.local_tags.get(),
+            &ui.project.get(),
+            &query.get(),
+        )
     });
     let searching = computed(move || !query.get().trim().is_empty());
     let scroll_key = format!("archive:list:{}", ui.project.get_untracked());
@@ -33,7 +38,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .child(
                     field(
                         ui.archive_query,
-                        "Search archived Cards, numbers or Agents…",
+                        "Search archived Cards, #tags, numbers or Agents…",
                     )
                     .label("Search archive")
                     .flex_1()
@@ -98,9 +103,11 @@ fn row(ui: Ui, entry: model::Entry) -> impl IntoElement {
     let title = format!("#{} {}", card.number, card.title);
     let timestamp = card.archived_at.unwrap_or(card.created_at);
     let agents = entry.agents.join(" · ");
+    let tag_meta = crate::tags::format_summary(&entry.tags, crate::tags::MAX_BOARD_TILE_TAGS);
     let meta = format!(
-        "Archived {}{}{}",
+        "Archived {}{}{}{}",
         crate::components::activity::age(timestamp),
+        tag_meta,
         if agents.is_empty() { "" } else { " · " },
         agents
     );

@@ -159,6 +159,14 @@ pub const CATALOG: &[Command] = &[
         keywords: "kanban cards",
     },
     Command {
+        id: "clear-board-filters",
+        title: "Clear Board Filters",
+        key: "",
+        display: "Board",
+        context: "Board",
+        keywords: "tag filter reset show all",
+    },
+    Command {
         id: "go-terminals",
         title: "Go to Terminals",
         key: "",
@@ -471,6 +479,14 @@ pub fn execute(ui: Ui, id: &str) {
         }
         return;
     }
+    if let Some(tag) = id.strip_prefix("filter-tag:") {
+        let pid = ui.project.get_untracked();
+        if !pid.is_empty() {
+            crate::tags::toggle_board_filter(ui, &pid, tag);
+            ui.navigate("board");
+        }
+        return;
+    }
     if let Some(wt_id) = id.strip_prefix("worktree-shell:") {
         if let Some(wt) = ui
             .snapshot
@@ -517,6 +533,15 @@ pub fn execute(ui: Ui, id: &str) {
         }
         "mark-all-read" => crate::overview::mark_all_read(ui, None),
         "go-board" => ui.navigate("board"),
+        "clear-board-filters" => {
+            let pid = ui.project.get_untracked();
+            if !pid.is_empty() {
+                ui.github.filters.update(|m| {
+                    m.remove(&pid);
+                });
+            }
+            ui.navigate("board");
+        }
         "go-terminals" => ui.navigate("terminals"),
         "go-review" => crate::review::open_compare(ui),
         "go-github" => ui.navigate("github"),

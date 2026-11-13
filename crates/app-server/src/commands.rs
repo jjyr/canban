@@ -264,6 +264,7 @@ impl AppServer {
                     github: None,
                     delivery_mode: Default::default(),
                     agent_overrides,
+                    tags: Default::default(),
                     id: id(),
                     name: name.into(),
                     directory: location.directory.clone(),
@@ -288,6 +289,30 @@ impl AppServer {
                     Ok(serde_json::to_value(saved)?)
                 })
             }
+            "tag.create" => self.mutate(method, &p, |db| {
+                let mut project: Project = db.get(strp(&p, "project_id")?)?;
+                let raw = strp(&p, "tag")?;
+                let tag = canban_types::normalize_tag(raw).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Tag must be 1–48 letters, numbers, '-' or '_' and cannot be only digits"
+                    )
+                })?;
+                if !project
+                    .tags
+                    .iter()
+                    .any(|existing| existing.to_lowercase() == tag.to_lowercase())
+                {
+                    project.tags.push(tag.clone());
+                    db.save(&project)?;
+                }
+                let canonical = project
+                    .tags
+                    .iter()
+                    .find(|existing| existing.to_lowercase() == tag.to_lowercase())
+                    .cloned()
+                    .unwrap_or(tag);
+                Ok(json!({"project_id": project.id, "tag": canonical, "tags": project.tags}))
+            }),
             "card.create" => self.mutate(method, &p, |db| {
                 ensure!(
                     p.get("tags").is_none(),

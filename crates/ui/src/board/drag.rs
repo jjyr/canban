@@ -153,6 +153,7 @@ impl BoardDrag {
                 ui.snapshot.get(),
                 ui.github.filters.get(),
                 ui.merging_cards.get(),
+                ui.local_tags.get(),
             );
             if this.phase.get_untracked() == 0 {
                 this.sync();

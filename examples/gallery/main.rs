@@ -487,14 +487,14 @@ pub fn Gallery() -> impl IntoElement {
             card.stage = "backlog".into();
             snapshot.cards.push(card);
         }
-        snapshot.cards[0].body = "## Body Markdown\n\n**Bold body** and *italic body*.\n\nLocal: [Related Card](card:card-2)\n\nProfile: @developer\n\n[Example website](https://example.com/) and [GitHub Issue](https://github.com/jjyr/canban/issues/1)\n\nLiteral: `@developer #2`".into();
+        snapshot.cards[0].body = "## Body Markdown\n\n**Bold body** and *italic body*.\n\nLocal: [Related Card](card:card-2) · Tag: #search\n\nProfile: @developer\n\n[Example website](https://example.com/) and [GitHub Issue](https://github.com/jjyr/canban/issues/1)\n\nLiteral: `@developer #2 #search`".into();
         let mut comment = fixtures::timeline();
         comment.id = "reference-comment".into();
         comment.card_id = "card-1".into();
         comment.kind = "comment.created".into();
         comment.actor = "user".into();
         comment.request_id = None;
-        comment.message = "### Comment Markdown\n\n**Bold comment** and *italic comment*.\n\n[Comment local](card:card-2) · @developer · [Comment website](https://example.com/)".into();
+        comment.message = "### Comment Markdown\n\n**Bold comment** and *italic comment*.\n\n[Comment local](card:card-2) · @developer · #ux · [Comment website](https://example.com/)".into();
         comment.data = json!({"body":comment.message});
         snapshot.events.retain(|e| e.card_id != "card-1");
         snapshot.events.push(comment);

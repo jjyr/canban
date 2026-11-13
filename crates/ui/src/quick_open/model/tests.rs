@@ -7,6 +7,7 @@ fn fixture() -> Snapshot {
             github: None,
             delivery_mode: Default::default(),
             agent_overrides: Default::default(),
+            tags: Default::default(),
             location: None,
             id: id.into(),
             name: name.into(),
@@ -107,6 +108,7 @@ fn project_picker_filters_types_and_recency_does_not_overrule_a_better_match() {
             kind: "Card",
             target: Target::Card("exact".into()),
             fields: vec!["Card".into()],
+            tags: Vec::new(),
         },
         Candidate {
             id: "prefix".into(),
@@ -115,6 +117,7 @@ fn project_picker_filters_types_and_recency_does_not_overrule_a_better_match() {
             kind: "Card",
             target: Target::Card("prefix".into()),
             fields: vec!["Cards".into()],
+            tags: Vec::new(),
         },
     ];
     assert_eq!(
@@ -132,6 +135,7 @@ fn duplicate_titles_sort_by_visible_owner_before_internal_identity() {
         kind: "Card",
         target: Target::Card("z".into()),
         fields: vec!["Architecture.md".into()],
+        tags: Vec::new(),
     };
     let mut b = a.clone();
     b.id = "a".into();
@@ -152,6 +156,7 @@ fn card_numbers_use_numeric_order_and_unarchived_before_archived() {
         kind: "Card",
         target: Target::Card(id.into()),
         fields: vec![format!("#{num} Task"), "Card".into()],
+        tags: Vec::new(),
     };
     let rows = vec![
         card("c1", 1, false),
@@ -234,4 +239,30 @@ fn quick_open_indexes_standalone_managed_worktrees() {
     assert!(!matched.is_empty());
     assert_eq!(matched[0].kind, "Worktree");
     assert_eq!(matched[0].target, Target::Worktree("wt-1".into()));
+}
+
+#[test]
+fn hash_tag_search_matches_tagged_cards_without_false_matching_title_subsequences() {
+    let mut s = fixture();
+    s.projects[0].tags = vec!["bug".into(), "bugfix".into(), "前端".into()];
+    s.cards[0].title = "Fix bug in login".into(); // NO tags on c1!
+    s.cards[0].body = "No tags in this card".into();
+    s.cards[1].title = "Crash on startup".into();
+    s.cards[1].body = "Investigate #bug in startup".into();
+    s.cards[2].body = "Polish #bugfix and #前端".into();
+
+    let rows = candidates(&s);
+    // `#bug` matches `#bug` (exact first) and `#bugfix` (prefix second), NOT untagged `#42 Fix bug in login`!
+    let matched = ranked(&rows, "#bug", &[], false);
+    let matched_ids: Vec<_> = matched.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(matched_ids, vec!["card:c2", "card:c3"]);
+    assert!(matched[0].detail.contains("#bug"));
+
+    // Multi-term `#前端 Canban` narrows to c3.
+    let cjk = ranked(&rows, "#前端 Canban", &[], false);
+    assert_eq!(cjk.len(), 1);
+    assert_eq!(cjk[0].target, Target::Card("c3".into()));
+
+    // Numeric `#42` still works as a Card number query rather than a tag filter.
+    assert_eq!(ranked(&rows, "Tools #42", &[], false).len(), 1);
 }

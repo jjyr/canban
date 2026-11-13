@@ -1,5 +1,6 @@
 //! Local, stable product destinations. Search never starts or resumes an Agent.
 use canban_types::*;
+use std::collections::BTreeSet;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     Project(String),
@@ -16,8 +17,13 @@ pub struct Candidate {
     pub kind: &'static str,
     pub target: Target,
     pub fields: Vec<String>,
+    pub tags: Vec<String>,
 }
 pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
+    candidates_with_tags(s, &BTreeSet::new())
+}
+pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<Candidate> {
+    let known_tags = crate::tags::known_map(s, local_tags, None);
     let project = |id: &str| {
         s.projects
             .iter()
@@ -34,17 +40,29 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
             kind: "Project",
             target: Target::Project(p.id.clone()),
             fields: vec![p.name.clone(), p.directory.clone()],
+            tags: Vec::new(),
         });
     }
-    for c in &s.cards {
+    for c in s.cards.iter().filter(|c| c.removed_at.is_none()) {
         let title = format!("#{} {}", c.number, c.title);
         let owner = project(&c.project_id);
+        let tags = crate::tags::card_tags(c, &known_tags);
+        let mut fields = vec![
+            title.clone(),
+            owner.clone(),
+            c.branch.clone().unwrap_or_default(),
+        ];
+        for tag in &tags {
+            fields.push(format!("#{tag}"));
+            fields.push(tag.clone());
+        }
         rows.push(Candidate {
             id: format!("card:{}", c.id),
-            title: title.clone(),
+            title,
             detail: format!(
-                "Card · {owner} · {}{}",
+                "Card · {owner} · {}{}{}",
                 c.stage,
+                crate::tags::format_summary(&tags, crate::tags::MAX_BOARD_TILE_TAGS),
                 if c.archived_at.is_some() {
                     " · Archived"
                 } else {
@@ -53,7 +71,8 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
             ),
             kind: "Card",
             target: Target::Card(c.id.clone()),
-            fields: vec![title, owner, c.branch.clone().unwrap_or_default()],
+            fields,
+            tags,
         });
     }
     for row in canban_notifications::overview(s) {
@@ -85,6 +104,7 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
                 req.profile.command_name(),
                 row.group,
             ],
+            tags: Vec::new(),
         });
     }
     for e in crate::terminals::entries(s)
@@ -102,6 +122,7 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
                 e.project_name.clone(),
                 e.cwd().unwrap_or_default(),
             ],
+            tags: Vec::new(),
         });
     }
     for wt in &s.worktrees {
@@ -118,6 +139,7 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
                 wt.path.clone(),
                 wt.base_branch.clone(),
             ],
+            tags: Vec::new(),
         });
     }
     for row in &mut rows {
@@ -153,11 +175,22 @@ pub fn ranked(
     projects_only: bool,
 ) -> Vec<Candidate> {
     let empty_query = query.trim().is_empty();
+    let (tag_terms, other_query) = crate::tags::split_tag_query(query);
     let mut scored = rows
         .iter()
         .filter(|r| !projects_only || r.kind == "Project")
         .filter_map(|row| {
-            let total = canban_ui_kit::search::score(&row.fields, query)?;
+            let total = if tag_terms.is_empty() {
+                canban_ui_kit::search::score(&row.fields, query)?
+            } else {
+                let tag_score = crate::tags::score_tags(&row.tags, &tag_terms)?;
+                let other_score = if other_query.is_empty() {
+                    0
+                } else {
+                    canban_ui_kit::search::score(&row.fields, &other_query)?
+                };
+                tag_score + other_score
+            };
             let visit = recent
                 .iter()
                 .position(|id| id == &row.id)

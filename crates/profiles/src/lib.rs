@@ -750,6 +750,7 @@ mod tests {
                 ("developer".into(), "agy".into()),
                 ("reviewer".into(), "gemini".into()), // disabled globally -> ignored!
             ]),
+            tags: Default::default(),
             id: "p1".into(),
             name: "Demo".into(),
             directory: "/tmp".into(),
@@ -931,6 +932,7 @@ mod tests {
             github: None,
             delivery_mode: Default::default(),
             agent_overrides: BTreeMap::from([("developer".into(), "agy".into())]),
+            tags: Default::default(),
             id: "p1".into(),
             name: "Demo".into(),
             directory: "/tmp".into(),

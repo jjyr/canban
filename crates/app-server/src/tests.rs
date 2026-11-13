@@ -2771,3 +2771,53 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
         "non-comment task with a concurrent question retains `## Pending questions` + `reply --to`"
     );
 }
+
+#[test]
+fn project_tags_register_deduplicate_and_reject_invalid_or_numeric_names() {
+    let (_dir, app, project, _card) = setup();
+    assert!(project.tags.is_empty());
+
+    let res = app
+        .call(
+            "tag.create",
+            json!({"project_id": project.id, "tag": "#ui-kit"}),
+        )
+        .unwrap();
+    assert_eq!(res["tag"], "ui-kit");
+    assert_eq!(res["tags"], json!(["ui-kit"]));
+
+    // Case-insensitive deduplication preserves the first canonical casing.
+    let res_dup = app
+        .call(
+            "tag.create",
+            json!({"project_id": project.id, "tag": "UI-KIT"}),
+        )
+        .unwrap();
+    assert_eq!(res_dup["tag"], "ui-kit");
+    assert_eq!(res_dup["tags"], json!(["ui-kit"]));
+
+    // Unicode / CJK tags work cleanly.
+    let res_cjk = app
+        .call(
+            "tag.create",
+            json!({"project_id": project.id, "tag": "#前端"}),
+        )
+        .unwrap();
+    assert_eq!(res_cjk["tags"], json!(["ui-kit", "前端"]));
+
+    // Persisted in Snapshot.
+    let snap = app.snapshot().unwrap();
+    assert_eq!(
+        snap.projects[0].tags,
+        vec!["ui-kit".to_string(), "前端".to_string()]
+    );
+
+    // Pure numbers, empty strings, and punctuation/whitespace are rejected.
+    for bad in ["", "#", "18", "#42", "bad space", "bad/slash"] {
+        assert!(
+            app.call("tag.create", json!({"project_id": project.id, "tag": bad}))
+                .is_err(),
+            "expected {bad:?} to be rejected as a tag"
+        );
+    }
+}
