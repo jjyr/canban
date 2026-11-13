@@ -1,7 +1,7 @@
 //! Reversible Card removal shared by local and external Cards.
 use anyhow::{Result, ensure};
 use canban_storage::Db;
-use canban_types::{Attempt, Card, Request, now};
+use canban_types::{Attempt, Card, now};
 use serde_json::json;
 pub fn remove(db: Db<'_>, card: &mut Card) -> Result<()> {
     ensure!(
@@ -11,18 +11,18 @@ pub fn remove(db: Db<'_>, card: &mut Card) -> Result<()> {
         "End active Card Agents before removing this Card"
     );
     ensure!(
-        !db.list::<Request>()?
-            .iter()
-            .any(|r| r.card_id == card.id && matches!(r.state.as_str(), "starting" | "unknown")),
+        !db.list::<Attempt>()?.iter().any(|a| a.card_id == card.id
+            && a.terminal.is_none()
+            && matches!(a.state.as_str(), "starting" | "unknown")),
         "Resolve uncertain Card executions before removal"
     );
-    for mut r in db
-        .list::<Request>()?
+    for mut a in db
+        .list::<Attempt>()?
         .into_iter()
-        .filter(|r| r.card_id == card.id && r.state == "queued")
+        .filter(|a| a.card_id == card.id && a.state == "queued")
     {
-        r.state = "cancelled".into();
-        db.save(&r)?;
+        a.state = "cancelled".into();
+        db.save(&a)?;
     }
     card.removed_at = Some(now());
     card.revision += 1;
@@ -37,7 +37,6 @@ pub fn remove(db: Db<'_>, card: &mut Card) -> Result<()> {
         } else {
             "Card deleted; history retained for restoration"
         },
-        None,
         json!({}),
     ))?;
     Ok(())

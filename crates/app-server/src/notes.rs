@@ -6,36 +6,79 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) struct Origin {
     actor: String,
     card: Option<String>,
-    request: Option<String>,
-    attempt: Option<u32>,
+    attempt_id: Option<String>,
 }
 fn origin(db: Db<'_>, p: &Value, project: &str) -> Result<Origin> {
+    if let Some(aid) = p["attempt_id"]
+        .as_str()
+        .or_else(|| p["execution"]["attempt_id"].as_str())
+        .filter(|s| !s.is_empty())
+    {
+        let att: Attempt = db.get(aid)?;
+        ensure!(
+            att.project_id == project,
+            "Agent execution belongs to a different Project"
+        );
+        return Ok(Origin {
+            actor: format!("@{}", att.profile.id),
+            card: Some(att.card_id),
+            attempt_id: Some(att.id),
+        });
+    }
     let Some(execution) = p.get("execution").filter(|v| !v.is_null()) else {
+        if let Some(profile) = p["profile_id"].as_str().filter(|s| !s.is_empty()) {
+            let card = super::resolve_card(db, p).ok();
+            if let Some(ref c) = card {
+                ensure!(
+                    c.project_id == project,
+                    "Agent execution belongs to a different Project"
+                );
+            }
+            return Ok(Origin {
+                actor: format!("@{profile}"),
+                card: card.map(|c| c.id),
+                attempt_id: None,
+            });
+        }
         return Ok(Origin {
             actor: "user".into(),
             ..Default::default()
         });
     };
-    let request: Request = db.get(strp(execution, "request_id")?)?;
-    let number = u32::try_from(
-        execution["attempt_number"]
-            .as_u64()
-            .context("execution.attempt_number required")?,
-    )?;
-    ensure!(
-        request.project_id == project,
-        "Agent execution belongs to a different Project"
-    );
-    ensure!(
-        number > 0 && number == request.attempt,
-        "Obsolete Agent invocation"
-    );
-    let _: Attempt = db.get(&Attempt::key(&request.id, number))?;
+    let profile = execution["profile_id"]
+        .as_str()
+        .or_else(|| p["profile_id"].as_str())
+        .filter(|s| !s.is_empty());
+    let card = super::resolve_card(db, execution)
+        .or_else(|_| super::resolve_card(db, p))
+        .ok();
+    if let Some(ref c) = card {
+        ensure!(
+            c.project_id == project,
+            "Agent execution belongs to a different Project"
+        );
+    }
+    let active_attempt = card.as_ref().and_then(|c| {
+        db.list::<Attempt>().ok().and_then(|mut list| {
+            list.retain(|a| {
+                a.card_id == c.id && !a.finished() && profile.is_none_or(|pid| a.profile.id == pid)
+            });
+            list.sort_by_key(|a| a.created_at);
+            list.pop()
+        })
+    });
+    let actor = profile
+        .map(|pid| format!("@{pid}"))
+        .or_else(|| {
+            active_attempt
+                .as_ref()
+                .map(|a| format!("@{}", a.profile.id))
+        })
+        .unwrap_or_else(|| "agent".into());
     Ok(Origin {
-        actor: format!("@{}", request.profile.id),
-        card: Some(request.card_id),
-        request: Some(request.id),
-        attempt: Some(number),
+        actor,
+        card: card.map(|c| c.id),
+        attempt_id: active_attempt.map(|a| a.id),
     })
 }
 fn emit(
@@ -55,8 +98,6 @@ fn emit(
         actor: origin.actor.clone(),
         message,
         card_id: origin.card.clone(),
-        request_id: origin.request.clone(),
-        attempt: origin.attempt,
         revision: note.revision,
         data,
         created_at: now(),
@@ -224,7 +265,7 @@ impl AppServer {
                 if before==after {continue}
                 if let Ok(other)=db.get::<Note>(target) {emit(db,&other,if after{"note.referenced"}else{"note.unreferenced"},format!("{} {}",if after{"Referenced by"}else{"Reference removed from"},n.title),&source,json!({"source_note_id":n.id}))?;}
             }
-            if let Some(card)=&source.card {let card:Card=db.get(card)?;log(db,&card,kind,&source.actor,&format!("Updated Note · {}",n.title),source.request.clone(),json!({"note_id":n.id,"revision":n.revision,"attempt":source.attempt}))?;}
+            if let Some(card)=&source.card {let card:Card=db.get(card)?;log(db,&card,kind,&source.actor,&format!("Updated Note · {}",n.title),source.attempt_id.clone(),json!({"note_id":n.id,"revision":n.revision}))?;}
             Ok(serde_json::to_value(n)?)
         })
     }

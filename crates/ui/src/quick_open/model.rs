@@ -57,12 +57,12 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
         });
     }
     for row in canban_notifications::overview(s) {
-        let Some(req) = &row.request else {
+        let Some(att) = &row.attempt else {
             continue;
         };
         let title = format!(
             "@{} · #{} {}",
-            req.profile.id, row.card.number, row.card.title
+            att.profile.id, row.card.number, row.card.title
         );
         rows.push(Candidate {
             id: format!("agent:{}", row.id),
@@ -82,7 +82,7 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
             fields: vec![
                 title,
                 row.project_name,
-                req.profile.command_name(),
+                att.profile.command_name(),
                 row.group,
             ],
         });

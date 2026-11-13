@@ -372,7 +372,7 @@ impl AppServer {
                 newly_merged = true;
                 current.delivery=Some(Delivery{target_branch:next.base_branch.clone(),commit:remote["merge_commit_sha"].as_str().unwrap_or(&next.head).into(),request_key:format!("github:{}:{}",next.repository_id,next.number),merged_at:now()});
                 current.attention=None;
-                if let Some(gate)=current.human_gate.clone() && let Some(id)=gate.request_id {let request:Request=db.get(&id)?;if request.state=="completed" {current.human_gate=None;crate::workflow::advance(db,&self.config(),&mut current,&request)?;}}
+                if let Some(gate)=current.human_gate.clone() && let Some(id)=gate.attempt_id {let att:Attempt=db.get(&id)?;if att.state=="completed" {current.human_gate=None;crate::workflow::advance(db,&self.config(),&mut current,Some(&att))?;}}
                 log(db,&current,"github.pr_delivered","github","Delivery PR merged",None,json!({"number":next.number,"commit":current.delivery.as_ref().map(|d|&d.commit)}))?;
             }else if next.state=="closed" && !next.merged {current.attention=Some("Delivery PR was closed without merging".into());}
             else if next.head!=old.head && old.number>0 {current.attention=Some("GitHub PR head changed; review the latest commits".into());}
@@ -469,12 +469,12 @@ impl AppServer {
                     });
                     current.attention = None;
                     if let Some(gate) = current.human_gate.clone()
-                        && let Some(id) = gate.request_id
+                        && let Some(id) = gate.attempt_id
                     {
-                        let request: Request = db.get(&id)?;
-                        if request.state == "completed" {
+                        let att: Attempt = db.get(&id)?;
+                        if att.state == "completed" {
                             current.human_gate = None;
-                            crate::workflow::advance(db, &self.config(), &mut current, &request)?;
+                            crate::workflow::advance(db, &self.config(), &mut current, Some(&att))?;
                         }
                     }
                     log(
@@ -576,12 +576,12 @@ impl AppServer {
                 }
                 current.attention = None;
                 if let Some(gate) = current.human_gate.clone()
-                    && let Some(id) = gate.request_id
+                    && let Some(id) = gate.attempt_id
                 {
-                    let request: Request = db.get(&id)?;
-                    if request.state == "completed" {
+                    let att: Attempt = db.get(&id)?;
+                    if att.state == "completed" {
                         current.human_gate = None;
-                        crate::workflow::advance(db, &self.config(), &mut current, &request)?;
+                        crate::workflow::advance(db, &self.config(), &mut current, Some(&att))?;
                     }
                 }
                 log(

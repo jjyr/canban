@@ -56,7 +56,37 @@ impl AppServer {
         })?;
         // Persisted starting intents must not be replayed as fresh launches.
         // A known binding can reconnect. A lost launch reply remains unknown.
-        self.store.lock().unwrap().write(|db|{for mut req in db.list::<Request>()?.into_iter().filter(|r|r.state=="starting"){let run=db.get::<Attempt>(&Attempt::key(&req.id,req.attempt)).ok();req.state=if run.as_ref().and_then(|a|a.terminal.as_ref()).is_some(){"running"}else{"unknown"}.into();db.save(&req)?;if req.state=="unknown"{if let Some(mut run)=run {run.state="unknown".into();db.save(&run)?;}let mut card:Card=db.get(&req.card_id)?;attention(db,&mut card,"Launch interrupted before its receipt was saved. Inspect Herdr before explicitly retrying.")?;card.revision+=1;db.save(&card)?;}}Ok(())})?;
+        self.store.lock().unwrap().write(|db| {
+            for mut run in db
+                .list::<Attempt>()?
+                .into_iter()
+                .filter(|a| a.state == "starting")
+            {
+                run.state = if run.terminal.is_some() {
+                    "running"
+                } else {
+                    "unknown"
+                }
+                .into();
+                db.save(&run)?;
+                if run.state == "unknown" {
+                    let mut card: Card = db.get(&run.card_id)?;
+                    attention(
+                        db,
+                        &mut card,
+                        "Launch interrupted before its receipt was saved. Inspect Herdr before explicitly retrying.",
+                    )?;
+                    if let Some(gate) = &mut card.human_gate
+                        && gate.attempt_id.is_none()
+                    {
+                        gate.attempt_id = Some(run.id.clone());
+                    }
+                    card.revision += 1;
+                    db.save(&card)?;
+                }
+            }
+            Ok(())
+        })?;
         self.store.lock().unwrap().write(|db| {
             for mut q in db.list::<Question>()?.into_iter().filter(|q| q.state == "delivering") {
                 q.state = "delivery_unknown".into();
@@ -265,7 +295,7 @@ impl AppServer {
                                 "execution.reconnected",
                                 "system",
                                 "Reconnected to the original terminal",
-                                Some(run.request_id.clone()),
+                                Some(run.id.clone()),
                                 json!({"terminal":run.terminal}),
                             )?;
                         }
@@ -285,16 +315,9 @@ impl AppServer {
                                     "execution.idle_closed",
                                     "system",
                                     closed_msg,
-                                    Some(run.request_id.clone()),
+                                    Some(run.id.clone()),
                                     json!({"attempt":run.number}),
                                 )?;
-                                let mut req: Request = db.get(&run.request_id)?;
-                                if req.attempt == run.number
-                                    && !matches!(req.state.as_str(), "completed" | "backlog")
-                                {
-                                    req.state = "idle_closed".into();
-                                    db.save(&req)?;
-                                }
                             } else if matches!(
                                 current.state.as_str(),
                                 "running" | "working" | "starting" | "needs_report"
@@ -302,20 +325,13 @@ impl AppServer {
                                 current.state = "failed".into();
                                 current.error =
                                     Some("Agent exited without reporting an outcome".into());
-                                let mut req: Request = db.get(&run.request_id)?;
-                                if req.attempt == run.number
-                                    && !matches!(req.state.as_str(), "completed" | "backlog")
-                                {
-                                    req.state = "failed".into();
-                                    db.save(&req)?;
-                                }
                                 log(
                                     db,
                                     &db.get::<Card>(&run.card_id)?,
                                     "execution.failed",
                                     "system",
                                     current.error.as_deref().unwrap(),
-                                    Some(req.id),
+                                    Some(run.id.clone()),
                                     json!({"attempt":run.number,"exit_code":observed["exit_code"]}),
                                 )?;
                             }
@@ -425,7 +441,7 @@ impl AppServer {
                         "execution.idle_close_failed",
                         "system",
                         current.error.as_deref().unwrap(),
-                        Some(current.request_id.clone()),
+                        Some(current.id.clone()),
                         json!({"attempt":current.number}),
                     )?;
                 } else {
@@ -445,7 +461,7 @@ impl AppServer {
             .projects
             .iter()
             .any(|p| p.work_location().machine != "local")
-            || snapshot.requests.iter().any(|r| r.resume_from.is_some())
+            || snapshot.attempts.iter().any(|a| a.resume_from.is_some())
         {
             let queued_remote =
                 canban_scheduler::next(&snapshot, self.config().scheduler.max_agents).is_some_and(
@@ -471,7 +487,10 @@ impl AppServer {
             } else {
                 Some(self.inventory.lock().unwrap().machines.clone())
             };
-            available.requests.retain(|r| {
+            available.attempts.retain(|r| {
+                if r.state != "queued" {
+                    return true;
+                }
                 let machine = r
                     .resume_from
                     .as_ref()
@@ -499,39 +518,38 @@ impl AppServer {
         if self.observer_running.load(Ordering::SeqCst) && self.runtime_inventory().is_err() {
             return Ok(());
         }
-        let request = canban_scheduler::next(&available, self.config().scheduler.max_agents);
-        if let Some(request) = request {
-            let req = self.store.lock().unwrap().write(|db| {
-                let mut req: Request = db.get(&request.id)?;
-                let card: Card = db.get(&req.card_id)?;
+        let next_attempt = canban_scheduler::next(&available, self.config().scheduler.max_agents);
+        if let Some(next_attempt) = next_attempt {
+            let att = self.store.lock().unwrap().write(|db| {
+                let mut att: Attempt = db.get(&next_attempt.id)?;
+                let card: Card = db.get(&att.card_id)?;
                 let current = db.snapshot()?;
                 if canban_scheduler::active_count(&current) >= self.config().scheduler.max_agents
-                    || !canban_scheduler::eligible(&current, &req)
+                    || !canban_scheduler::eligible(&current, &att)
                 {
                     return Ok(None);
                 }
                 if !card.active() {
-                    req.state = "cancelled".into();
-                    db.save(&req)?;
+                    att.state = "cancelled".into();
+                    db.save(&att)?;
                     return Ok(None);
                 }
-                let project: Project = db.get(&req.project_id)?;
-                req.location = Some(if let Some(id) = &req.resume_from {
+                let project: Project = db.get(&att.project_id)?;
+                att.location = Some(if let Some(id) = &att.resume_from {
                     db.get::<Attempt>(id)?
                         .location
                         .context("Resume location missing")?
                 } else {
                     project.work_location()
                 });
-                req.state = "starting".into();
-                req.attempt += 1;
-                db.save(&req)?;
-                Ok(Some(req))
+                att.state = "starting".into();
+                db.save(&att)?;
+                Ok(Some(att))
             })?;
-            if let Some(req) = req
-                && let Err(e) = self.launch(&req, &snapshot)
+            if let Some(att) = att
+                && let Err(e) = self.launch(&att, &snapshot)
             {
-                self.launch_failed(&req, &format!("{e:#}"))?;
+                self.launch_failed(&att, &format!("{e:#}"))?;
             }
         }
         Ok(())
@@ -554,7 +572,7 @@ impl AppServer {
                 "execution.disconnected",
                 "system",
                 message,
-                Some(run.request_id.clone()),
+                Some(run.id.clone()),
                 json!({"terminal":run.terminal,"connection_state":state}),
             )
         })?;
@@ -568,20 +586,22 @@ impl AppServer {
             .iter()
             .filter(|q| matches!(q.state.as_str(), "pending" | "delivered"))
         {
-            let Some(req) = snapshot
-                .requests
-                .iter()
-                .find(|r| r.id == question.request_id)
-            else {
+            let target_attempt = question
+                .attempt_id
+                .as_ref()
+                .and_then(|aid| snapshot.attempts.iter().find(|a| &a.id == aid))
+                .or_else(|| {
+                    snapshot.attempts.iter().rev().find(|a| {
+                        a.card_id == question.card_id
+                            && a.profile.id == question.profile_id
+                            && a.state != "continued"
+                    })
+                });
+            let Some(att) = target_attempt else {
                 continue;
             };
-            if matches!(req.state.as_str(), "completed" | "backlog" | "idle_closed")
-                && !snapshot.attempts.iter().any(|a| {
-                    a.request_id == req.id
-                        && a.number == req.attempt
-                        && a.terminal.is_some()
-                        && !a.finished()
-                })
+            if matches!(att.state.as_str(), "completed" | "backlog" | "idle_closed")
+                && !(att.terminal.is_some() && !att.finished())
                 && question.state == "pending"
             {
                 // A question that raced task completion follows the same conversation
@@ -606,21 +626,20 @@ impl AppServer {
                         .trim_end(),
                         &[("body", &q.body)],
                     );
-                    let request = enqueue(
+                    let follow_up = enqueue(
                         db,
                         &config,
                         &mut card,
                         &project,
                         stage,
-                        RequestTrigger::Comment {
+                        ExecutionTrigger::Comment {
                             comment_id: q.comment_id.clone(),
                         },
                         Some(&q.profile_id),
                         Some(instruction),
                     )?
                     .context("Could not retain question")?;
-                    q.request_id = request.id;
-                    q.attempt = 0;
+                    q.attempt_id = Some(follow_up.id);
                     q.state = "pending".into();
                     db.save(&q)
                 })?;
@@ -628,40 +647,37 @@ impl AppServer {
             }
             if question.state != "pending"
                 || !matches!(
-                    req.state.as_str(),
+                    att.state.as_str(),
                     "running" | "working" | "blocked" | "completed"
                 )
             {
                 continue;
             }
-            let Some(run) = snapshot
-                .attempts
-                .iter()
-                .find(|a| a.request_id == req.id && a.number == req.attempt)
-            else {
+            let Some(terminal) = &att.terminal else {
                 continue;
             };
-            let Some(terminal) = &run.terminal else {
-                continue;
-            };
-            if run
+            if att
                 .observed
                 .as_ref()
                 .is_some_and(|v| v["state"] == "finished")
             {
                 continue;
             }
-            if run.runtime_status() == "blocked" || run.connection_state != "connected" {
+            if att.runtime_status() == "blocked" || att.connection_state != "connected" {
                 continue;
             }
+            let Some(card) = snapshot.cards.iter().find(|c| c.id == question.card_id) else {
+                continue;
+            };
             self.store.lock().unwrap().write(|db| {
                 let mut q: Question = db.get(&question.id)?;
                 q.state = "delivering".into();
-                q.attempt = run.number;
+                q.attempt_id = Some(att.id.clone());
                 db.save(&q)
             })?;
             let qid_quoted = canban_context::shell_quote(&question.id);
-            let run_number = run.number.to_string();
+            let proj_quoted = canban_context::shell_quote(&card.project_id);
+            let card_number = card.number.to_string();
             let text = canban_context::render_template(
                 include_str!(concat!(
                     env!("CARGO_MANIFEST_DIR"),
@@ -672,13 +688,13 @@ impl AppServer {
                     ("question_id", &question.id),
                     ("question_body", &question.body),
                     ("question_id_quoted", &qid_quoted),
-                    ("request_id", &req.id),
-                    ("attempt", &run_number),
+                    ("project_id", &proj_quoted),
+                    ("card_number", &card_number),
                 ],
             );
             let result = (|| -> Result<Value> {
                 ensure!(
-                    client.status()?["core"]["id"].as_str() == run.core_id.as_deref(),
+                    client.status()?["core"]["id"].as_str() == att.core_id.as_deref(),
                     "Original core identity changed"
                 );
                 client.call("terminal.send", json!({"terminal":terminal,"text":text}))
@@ -693,38 +709,38 @@ impl AppServer {
         }
         Ok(())
     }
-    pub(super) fn launch(&self, req: &Request, snapshot: &Snapshot) -> Result<()> {
+    pub(super) fn launch(&self, att: &Attempt, snapshot: &Snapshot) -> Result<()> {
         let _gate = self.terminal_gate.lock().unwrap();
         ensure!(
             self.store
                 .lock()
                 .unwrap()
                 .db()
-                .get::<Card>(&req.card_id)?
+                .get::<Card>(&att.card_id)?
                 .active(),
             "Card was archived before launch"
         );
-        if let Some(old) = canban_scheduler::retained(snapshot, req) {
-            return self.continue_assignment(req, old, snapshot);
+        if let Some(old) = canban_scheduler::retained(snapshot, att) {
+            return self.continue_assignment(att, old, snapshot);
         }
         let project = snapshot
             .projects
             .iter()
-            .find(|p| p.id == req.project_id)
+            .find(|p| p.id == att.project_id)
             .context("Project missing")?;
         let card = snapshot
             .cards
             .iter()
-            .find(|c| c.id == req.card_id)
+            .find(|c| c.id == att.card_id)
             .context("Card missing")?;
-        let location = req
+        let location = att
             .location
             .clone()
             .context("Execution location was not admitted")?;
         self.resolve_machine(&location.machine, true)?;
         let ops = self.ops(&location.machine);
         let remote = location.machine != "local";
-        let prior = req
+        let prior = att
             .resume_from
             .as_ref()
             .and_then(|id| snapshot.attempts.iter().find(|a| &a.id == id));
@@ -734,7 +750,7 @@ impl AppServer {
             .map(Ok)
             .unwrap_or_else(|| self.execution_home(&location.machine))?;
         let mut project = project.clone();
-        if let Some(id) = &req.workflow_run_id {
+        if let Some(id) = &att.workflow_run_id {
             project.workflow.workspace = self
                 .store
                 .lock()
@@ -806,7 +822,7 @@ impl AppServer {
                         "workspace.prepared",
                         "system",
                         "Card workspace prepared",
-                        Some(req.id.clone()),
+                        Some(att.id.clone()),
                         json!({"workspace":workspace}),
                     )?;
                     db.save(&current)?;
@@ -825,40 +841,31 @@ impl AppServer {
             self.cli.clone()
         };
         let input = canban_context::capture_for(
-            &self.home,
-            &project,
-            &prepared,
-            req,
-            req.attempt,
-            snapshot,
-            &endpoint,
-            &cli,
-            &home,
+            &self.home, &project, &prepared, att, snapshot, &endpoint, &cli, &home,
         )?;
         if remote {
             self.stage_remote(&ops.host, &home, card)?;
         }
         let (mut context, fresh) = self.store.lock().unwrap().write(|db| {
-            let mut c = crate::sessions::conversation(db, card, &req.profile)?;
+            let mut c = crate::sessions::conversation(db, card, &att.profile)?;
             if let Some(old) = prior {
                 c.provider_session_id = old.provider_session_id.clone();
             } else if c
-                .last_request_id
+                .last_attempt_id
                 .as_ref()
-                .and_then(|id| snapshot.requests.iter().find(|r| &r.id == id))
-                .and_then(|r| {
+                .and_then(|id| {
                     snapshot
                         .attempts
                         .iter()
-                        .find(|a| a.request_id == r.id && a.number == r.attempt)
+                        .find(|a| &a.id == id && a.id != att.id)
                 })
-                .is_some_and(|a| a.location.as_ref() != Some(&location))
+                .is_some_and(|a| a.location.as_ref().is_some_and(|l| l != &location))
             {
                 c.provider_session_id = None;
             }
             let fresh = c.provider_session_id.is_none();
             if fresh
-                && req
+                && att
                     .profile
                     .command()
                     .iter()
@@ -866,62 +873,44 @@ impl AppServer {
             {
                 c.provider_session_id = Some(uuid_session_id());
             }
-            c.last_request_id = Some(req.id.clone());
+            c.last_attempt_id = Some(att.id.clone());
             db.save(&c)?;
             Ok((c, fresh))
         })?;
-        let mut run = Attempt {
-            runtime_home: Some(home.to_string_lossy().into_owned()),
-            workspace: Some(workspace),
-            location: req.location.clone(),
-            owner_core_id: None,
-            lifecycle: Lifecycle::default(),
-            id: Attempt::key(&req.id, req.attempt),
-            request_id: req.id.clone(),
-            project_id: req.project_id.clone(),
-            card_id: req.card_id.clone(),
-            number: req.attempt,
-            state: "starting".into(),
-            core_id: None,
-            terminal: None,
-            cwd: cwd.to_string_lossy().into_owned(),
-            input_path: input.clone(),
-            output_path: None,
-            observed: None,
-            error: None,
-            created_at: now(),
-            conversation_id: Some(context.id.clone()),
-            provider_session_id: context.provider_session_id.clone(),
-            close_state: String::new(),
-            turn_ended_at: None,
-            response_path: None,
-            completed_at: None,
-            completion_turn: None,
-            close_requested_at: None,
-            connection_state: String::new(),
-        };
-        self.store.lock().unwrap().write(|db| {
-            db.save(&run)?;
-            for mut q in db
-                .list::<Question>()?
-                .into_iter()
-                .filter(|q| q.request_id == req.id && q.attempt == 0)
-            {
-                q.attempt = req.attempt;
-                db.save(&q)?;
-            }
-            Ok(())
-        })?;
+        let mut run = att.clone();
+        run.runtime_home = Some(home.to_string_lossy().into_owned());
+        run.workspace = Some(workspace);
+        run.owner_core_id = None;
+        run.lifecycle = Lifecycle::default();
+        run.state = "starting".into();
+        run.core_id = None;
+        run.terminal = None;
+        run.cwd = cwd.to_string_lossy().into_owned();
+        run.input_path = input.clone();
+        run.output_path = None;
+        run.observed = None;
+        run.error = None;
+        run.conversation_id = Some(context.id.clone());
+        run.provider_session_id = context.provider_session_id.clone();
+        run.close_state.clear();
+        run.turn_ended_at = None;
+        run.response_path = None;
+        run.completed_at = None;
+        run.completion_turn = None;
+        run.close_requested_at = None;
+        run.connection_state.clear();
+        self.store.lock().unwrap().write(|db| db.save(&run))?;
         let client = canban_herdr::Client {
             config: self.config(),
         };
         let core = client.status()?;
         let env = std::collections::BTreeMap::from([
             ("CANBAN_ENDPOINT".into(), endpoint.clone()),
-            ("CANBAN_REQUEST_ID".into(), req.id.clone()),
+            ("CANBAN_PROJECT".into(), att.project_id.clone()),
+            ("CANBAN_CARD".into(), card.number.to_string()),
             (
                 "CANBAN_RUN_DIR".into(),
-                canban_context::run_dir(&home, req, req.attempt)
+                canban_context::run_dir(&home, &run)
                     .to_string_lossy()
                     .into_owned(),
             ),
@@ -930,20 +919,19 @@ impl AppServer {
                 context.provider_session_id.clone().unwrap_or_default(),
             ),
             // Do not misidentify a child invocation using its launching Agent's ID.
-            ("CANBAN_PROFILE_ID".into(), req.profile.id.clone()),
-            ("CANBAN_ATTEMPT".into(), req.attempt.to_string()),
+            ("CANBAN_PROFILE_ID".into(), att.profile.id.clone()),
             ("CANBAN_CLI".into(), cli.to_string_lossy().into_owned()),
             ("CANBAN_HOME".into(), home.to_string_lossy().into_owned()),
         ]);
         let labels = std::collections::BTreeMap::from([
-            ("canban.project".into(), req.project_id.clone()),
-            ("canban.card".into(), req.card_id.clone()),
-            ("canban.request".into(), req.id.clone()),
-            ("canban.attempt".into(), req.attempt.to_string()),
+            ("canban.project".into(), att.project_id.clone()),
+            ("canban.card".into(), card.number.to_string()),
+            ("canban.card_id".into(), att.card_id.clone()),
+            ("canban.attempt".into(), att.id.clone()),
         ]);
         let prompt = std::fs::read_to_string(self.home.join(input))?;
         let mut argv = canban_profiles::command(
-            &req.profile,
+            &att.profile,
             context.provider_session_id.as_deref(),
             fresh,
             &[
@@ -954,7 +942,7 @@ impl AppServer {
                 ("cli", &cli.to_string_lossy()),
             ],
         )?;
-        let is_herdr_template = req
+        let is_herdr_template = att
             .profile
             .preset
             .as_deref()
@@ -1019,32 +1007,26 @@ impl AppServer {
                 run.response_path = current.response_path;
             }
             db.save(&run)?;
-            let mut r: Request = db.get(&req.id)?;
-            if r.state == "starting" {
-                r.state = "running".into();
-                db.save(&r)?;
-            }
-            let c: Card = db.get(&req.card_id)?;
+            let c: Card = db.get(&att.card_id)?;
             log(
                 db,
                 &c,
                 "execution.started",
                 "system",
-                &format!("@{} started", req.profile.id),
-                Some(req.id.clone()),
-                json!({"attempt":req.attempt,"terminal":run.terminal,"core_id":run.core_id,"owner_core_id":run.owner_core_id,"location":run.location,"cwd":run.cwd}),
+                &format!("@{} started", att.profile.id),
+                Some(run.id.clone()),
+                json!({"attempt":run.number,"terminal":run.terminal,"core_id":run.core_id,"owner_core_id":run.owner_core_id,"location":run.location,"cwd":run.cwd}),
             )
         })?;
         self.store.lock().unwrap().write(|db| {
             for q in snapshot
                 .questions
                 .iter()
-                .filter(|q| q.request_id == req.id && q.state == "pending")
+                .filter(|q| q.attempt_id.as_deref() == Some(&run.id) && q.state == "pending")
             {
                 let mut current: Question = db.get(&q.id)?;
                 if current.state == "pending" {
                     current.state = "delivered".into();
-                    current.attempt = req.attempt;
                     db.save(&current)?;
                 }
             }
@@ -1052,22 +1034,16 @@ impl AppServer {
             context = db.get(&context.id)?;
             Ok(())
         })?;
-        self.emit("execution", Some(req.card_id.clone()));
+        self.emit("execution", Some(att.card_id.clone()));
         if let Some(error) = delivery_error {
             bail!("{error}");
         }
         Ok(())
     }
-    pub(super) fn launch_failed(&self, req: &Request, error: &str) -> Result<()> {
+    pub(super) fn launch_failed(&self, att: &Attempt, error: &str) -> Result<()> {
         self.store.lock().unwrap().write(|db| {
-            let mut r: Request = db.get(&req.id)?;
-            if matches!(r.state.as_str(), "starting" | "running") {
-                r.state = "failed".into();
-                db.save(&r)?;
-            }
-            if let Ok(mut a) = db.get::<Attempt>(&Attempt::key(&req.id, req.attempt))
-                && !matches!(a.state.as_str(), "completed" | "backlog")
-            {
+            let mut a: Attempt = db.get(&att.id)?;
+            if !matches!(a.state.as_str(), "completed" | "backlog") {
                 a.state = if a.state == "unknown"
                     || a.terminal.is_none() && error.contains("timed out")
                 {
@@ -1076,20 +1052,16 @@ impl AppServer {
                     "failed"
                 }
                 .into();
-                if a.state == "unknown" {
-                    r.state = "unknown".into();
-                    db.save(&r)?;
-                }
                 a.error = Some(error.into());
                 db.save(&a)?;
             }
-            let mut c: Card = db.get(&req.card_id)?;
-            if r.state == "unknown" || error.contains("undelivered work") {
+            let mut c: Card = db.get(&att.card_id)?;
+            if a.state == "unknown" || error.contains("undelivered work") {
                 attention(db, &mut c, error)?;
                 if let Some(gate) = &mut c.human_gate
-                    && gate.request_id.is_none()
+                    && gate.attempt_id.is_none()
                 {
-                    gate.request_id = Some(req.id.clone());
+                    gate.attempt_id = Some(a.id.clone());
                 }
             }
             c.revision += 1;
@@ -1100,11 +1072,11 @@ impl AppServer {
                 "execution.failed",
                 "system",
                 error,
-                Some(req.id.clone()),
-                json!({}),
+                Some(a.id.clone()),
+                json!({"attempt":a.number}),
             )
         })?;
-        self.emit("execution", Some(req.card_id.clone()));
+        self.emit("execution", Some(att.card_id.clone()));
         Ok(())
     }
 }

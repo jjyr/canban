@@ -123,13 +123,10 @@ impl AppServer {
             "project.list" => Ok(serde_json::to_value(
                 self.store.lock().unwrap().db().list::<Project>()?,
             )?),
-            "card.get" => Ok(serde_json::to_value(
-                self.store
-                    .lock()
-                    .unwrap()
-                    .db()
-                    .get::<Card>(strp(&p, "card_id")?)?,
-            )?),
+            "card.get" | "card.show" => {
+                let store = self.store.lock().unwrap();
+                Ok(serde_json::to_value(super::resolve_card(store.db(), &p)?)?)
+            }
             "card.list" => {
                 let cards = self.store.lock().unwrap().db().list::<Card>()?;
                 Ok(serde_json::to_value(
@@ -141,7 +138,10 @@ impl AppServer {
                 )?)
             }
             "timeline.list" => {
-                let card = strp(&p, "card_id")?;
+                let card = {
+                    let store = self.store.lock().unwrap();
+                    super::resolve_card(store.db(), &p)?.id
+                };
                 let after = p["after_sequence"].as_u64().unwrap_or(0);
                 let limit = p["limit"].as_u64().unwrap_or(100).clamp(1, 500) as usize;
                 let events = self.store.lock().unwrap().db().list::<Event>()?;
@@ -157,16 +157,37 @@ impl AppServer {
                 )
             }
             "execution.get" => {
-                let request: Request = self
-                    .store
-                    .lock()
-                    .unwrap()
-                    .db()
-                    .get(strp(&p, "request_id")?)?;
                 let s = self.snapshot()?;
-                Ok(
-                    json!({"attempts":s.attempts.into_iter().filter(|a|a.request_id==request.id).collect::<Vec<_>>(),"reports":s.reports.into_iter().filter(|r|r.request_id==request.id).collect::<Vec<_>>(),"request":request}),
-                )
+                if let Some(aid) = p["attempt_id"].as_str().filter(|v| !v.is_empty()) {
+                    let attempt = s
+                        .attempts
+                        .iter()
+                        .find(|a| a.id == aid)
+                        .cloned()
+                        .context("Attempt not found")?;
+                    let reports = s
+                        .reports
+                        .into_iter()
+                        .filter(|r| r.attempt_id.as_deref() == Some(aid))
+                        .collect::<Vec<_>>();
+                    Ok(json!({"attempt":attempt,"attempts":[attempt],"reports":reports}))
+                } else {
+                    let card = {
+                        let store = self.store.lock().unwrap();
+                        super::resolve_card(store.db(), &p)?
+                    };
+                    let attempts = s
+                        .attempts
+                        .into_iter()
+                        .filter(|a| a.card_id == card.id)
+                        .collect::<Vec<_>>();
+                    let reports = s
+                        .reports
+                        .into_iter()
+                        .filter(|r| r.card_id == card.id)
+                        .collect::<Vec<_>>();
+                    Ok(json!({"attempt":attempts.last(),"attempts":attempts,"reports":reports}))
+                }
             }
             "config.get" => Ok(serde_json::to_value(config)?),
             "overview.list" => Ok(serde_json::to_value(canban_notifications::overview(
@@ -176,7 +197,7 @@ impl AppServer {
             "scheduler.status" => {
                 let snapshot = self.snapshot()?;
                 Ok(
-                    json!({"active":canban_scheduler::active_count(&snapshot),"max_agents":config.scheduler.max_agents,"queued":snapshot.requests.iter().filter(|r| r.state=="queued").count()}),
+                    json!({"active":canban_scheduler::active_count(&snapshot),"max_agents":config.scheduler.max_agents,"queued":snapshot.attempts.iter().filter(|a| a.state=="queued").count()}),
                 )
             }
             "scheduler.configure" => {
@@ -329,39 +350,35 @@ impl AppServer {
                         p.get("tags").is_none(),
                         "Routing tags are no longer supported; use a workflow Profile or @profile"
                     );
-                    let exec = p.get("execution").filter(|v| !v.is_null());
-                    let (mut c, actor, req_for_update) = if let Some(execution) = exec {
-                        let req: Request = db.get(strp(execution, "request_id")?)?;
-                        let number = u32::try_from(
-                            execution["attempt_number"]
-                                .as_u64()
-                                .context("execution.attempt_number is required")?,
-                        )?;
-                        ensure!(
-                            number > 0 && number == req.attempt,
-                            "Obsolete Agent invocation"
-                        );
-                        let run: Attempt = db.get(&Attempt::key(&req.id, number))?;
-                        ensure!(
-                            run.state != "continued",
-                            "This assignment was superseded; use the current request and attempt binding"
-                        );
-                        if let Some(explicit_card) = p["card_id"].as_str() {
-                            ensure!(
-                                explicit_card == req.card_id,
-                                "Agent execution can only update its own Card"
-                            );
-                        }
-                        let c: Card = db.get(&req.card_id)?;
-                        if p.get("revision").is_some_and(|v| !v.is_null()) {
-                            revise(&c, &p)?;
-                        }
-                        let actor = format!("agent:{}", req.profile.id);
-                        (c, actor, Some(req))
-                    } else {
-                        let c: Card = db.get(strp(&p, "card_id")?)?;
+                    let mut c = super::resolve_card(db, &p)?;
+                    let has_revision = p.get("revision").is_some_and(|v| !v.is_null());
+                    if has_revision {
                         revise(&c, &p)?;
-                        (c, "user".to_owned(), None)
+                    }
+                    let profile_opt = p["profile_id"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    let is_agent = p["agent"] == true || profile_opt.is_some() || !has_revision;
+                    let active_att = if is_agent {
+                        db.list::<Attempt>()?.into_iter().rev().find(|a| {
+                            a.card_id == c.id
+                                && a.state != "continued"
+                                && !a.finished()
+                                && profile_opt.is_none_or(|pid| a.profile.id == pid)
+                        })
+                    } else {
+                        None
+                    };
+                    let actor = if is_agent {
+                        let pid = active_att
+                            .as_ref()
+                            .map(|a| a.profile.id.as_str())
+                            .or(profile_opt)
+                            .unwrap_or(&config.default_agent);
+                        format!("agent:{pid}")
+                    } else {
+                        "user".to_owned()
                     };
                     emit_card = Some(c.id.clone());
                     ensure!(c.archived_at.is_none(), "Restore the Card before editing");
@@ -389,22 +406,26 @@ impl AppServer {
                         "card.updated",
                         &actor,
                         "Card updated",
-                        req_for_update.as_ref().map(|r| r.id.clone()),
+                        active_att.as_ref().map(|a| a.id.clone()),
                         json!({"title":c.title,"body":c.body,"changed_fields": ([if c.title!=before.title {Some("title")}else{None},if c.body!=before.body {Some("body")}else{None}].into_iter().flatten().collect::<Vec<_>>()),"before_revision":before.revision,"after_revision":c.revision}),
                     )?;
                     db.save(&c)?;
-                    if let Some(req) = &req_for_update
-                        && let Some(run_id) = &req.workflow_run_id
-                        && let Ok(mut wf_run) = db.get::<WorkflowRun>(run_id)
-                        && wf_run.active()
-                        && wf_run.request_id.as_deref() == Some(&req.id)
-                    {
-                        wf_run.inputs["title"] = json!(c.title);
-                        wf_run.inputs["body"] = json!(c.body);
-                        wf_run.input_digest =
-                            canban_workflow_engine::runtime::card_digest(db, &c);
-                        wf_run.updated_at = now();
-                        db.save(&wf_run)?;
+                    if is_agent {
+                        for mut wf_run in db.list::<WorkflowRun>()?.into_iter().filter(|r| {
+                            r.card_id == c.id
+                                && r.active()
+                                && (r.state == "waiting_agent"
+                                    || active_att
+                                        .as_ref()
+                                        .is_some_and(|a| r.attempt_id.as_deref() == Some(&a.id)))
+                        }) {
+                            wf_run.inputs["title"] = json!(c.title);
+                            wf_run.inputs["body"] = json!(c.body);
+                            wf_run.input_digest =
+                                canban_workflow_engine::runtime::card_digest(db, &c);
+                            wf_run.updated_at = now();
+                            db.save(&wf_run)?;
+                        }
                     }
                     Ok(serde_json::to_value(c)?)
                 })?;
@@ -416,38 +437,17 @@ impl AppServer {
                 Ok(res)
             }
             "card.adopt" => {
+                let pre_card_id = {
+                    let store = self.store.lock().unwrap();
+                    super::resolve_card(store.db(), &p)?.id
+                };
+                {
+                    let _gate = self.terminal_gate.lock().unwrap();
+                    let _ = self.ensure_card_worktree(&pre_card_id, None)?;
+                }
                 let mut emit_card = None;
                 let res = self.mutate(method, &p, |db| {
-                    let execution = p
-                        .get("execution")
-                        .filter(|v| !v.is_null())
-                        .context("card.adopt requires an active Agent execution binding")?;
-                    let mut req: Request = db.get(strp(execution, "request_id")?)?;
-                    let number = u32::try_from(
-                        execution["attempt_number"]
-                            .as_u64()
-                            .context("execution.attempt_number is required")?,
-                    )?;
-                    ensure!(
-                        number > 0 && number == req.attempt,
-                        "Obsolete Agent invocation"
-                    );
-                    let run: Attempt = db.get(&Attempt::key(&req.id, number))?;
-                    ensure!(
-                        run.state != "continued" && !run.finished(),
-                        "Only a live Agent invocation can adopt a workflow stage"
-                    );
-                    ensure!(
-                        !matches!(req.state.as_str(), "completed" | "backlog" | "cancelled"),
-                        "Completed or cancelled requests cannot adopt a workflow stage"
-                    );
-                    if let Some(explicit_card) = p["card_id"].as_str() {
-                        ensure!(
-                            explicit_card == req.card_id,
-                            "Agent execution can only adopt a stage on its own Card"
-                        );
-                    }
-                    let mut c: Card = db.get(&req.card_id)?;
+                    let mut c = super::resolve_card(db, &p)?;
                     if p.get("revision").is_some_and(|v| !v.is_null()) {
                         revise(&c, &p)?;
                     }
@@ -461,15 +461,34 @@ impl AppServer {
                     let project: Project = db.get(&c.project_id)?;
                     canban_workflow_engine::stage(&project.workflow, target)?;
                     emit_card = Some(c.id.clone());
+                    let requested_prof = p["profile_id"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty());
+                    let mut live_attempt = db.list::<Attempt>()?.into_iter().rev().find(|a| {
+                        a.card_id == c.id
+                            && a.state != "continued"
+                            && !a.finished()
+                            && requested_prof.is_none_or(|pid| a.profile.id == pid)
+                    });
+                    let profile_label = live_attempt
+                        .as_ref()
+                        .map(|a| a.profile.id.clone())
+                        .or_else(|| requested_prof.map(str::to_owned))
+                        .unwrap_or_else(|| config.default_agent.clone());
+                    let live_id = live_attempt.as_ref().map(|a| a.id.clone());
 
                     if c.stage == target {
-                        if let Some(run_id) = &req.workflow_run_id
-                            && let Ok(existing) = db.get::<WorkflowRun>(run_id)
-                            && existing.active()
+                        if let Some(existing) = db
+                            .list::<WorkflowRun>()?
+                            .into_iter()
+                            .find(|r| r.card_id == c.id && r.active() && r.state == "waiting_agent")
                         {
                             return Ok(json!({
                                 "card": c,
                                 "workflow_run": existing,
+                                "worktree": c.worktree,
+                                "branch": c.branch,
                                 "adopted": true,
                             }));
                         }
@@ -480,31 +499,39 @@ impl AppServer {
                         {
                             workflow::stop_card(db, &c.id, "superseded")?;
                         }
-                        for mut pending in db.list::<Request>()?.into_iter().filter(|r| {
-                            r.card_id == c.id
-                                && r.id != req.id
-                                && r.state == "queued"
-                                && canban_scheduler::automatic(r)
+                        for mut pending in db.list::<Attempt>()?.into_iter().filter(|a| {
+                            a.card_id == c.id
+                                && Some(a.id.as_str()) != live_id.as_deref()
+                                && a.state == "queued"
+                                && canban_scheduler::automatic(a)
                         }) {
                             pending.state = "cancelled".into();
                             db.save(&pending)?;
                         }
-                        let wf_run =
-                            workflow::adopt_stage(db, &config, &mut c, &mut req, target, None)?;
+                        let wf_run = workflow::adopt_stage(
+                            db,
+                            &config,
+                            &mut c,
+                            live_attempt.as_mut(),
+                            target,
+                            None,
+                        )?;
                         db.save(&c)?;
                         return Ok(json!({
                             "card": c,
                             "workflow_run": wf_run,
+                            "worktree": c.worktree,
+                            "branch": c.branch,
                             "adopted": true,
                         }));
                     }
 
                     let from = c.stage.clone();
-                    for mut pending in db.list::<Request>()?.into_iter().filter(|r| {
-                        r.card_id == c.id
-                            && r.id != req.id
-                            && r.state == "queued"
-                            && canban_scheduler::automatic(r)
+                    for mut pending in db.list::<Attempt>()?.into_iter().filter(|a| {
+                        a.card_id == c.id
+                            && Some(a.id.as_str()) != live_id.as_deref()
+                            && a.state == "queued"
+                            && canban_scheduler::automatic(a)
                     }) {
                         pending.state = "cancelled".into();
                         db.save(&pending)?;
@@ -517,25 +544,27 @@ impl AppServer {
                     c.attention = None;
                     c.human_gate = None;
                     db.save(&c)?;
+                    let mut event_data = json!({
+                        "from": from,
+                        "to": target,
+                        "reason": "agent_adopted_stage",
+                    });
+                    if let Some(aid) = &live_id {
+                        event_data["attempt_id"] = json!(aid);
+                    }
                     let event = db.append(canban_timeline::event(
                         &c.project_id,
                         &c.id,
                         "card.stage_changed",
-                        &format!("agent:{}", req.profile.id),
-                        &format!("{from} → {target} (adopted by @{})", req.profile.id),
-                        Some(req.id.clone()),
-                        json!({
-                            "from": from,
-                            "to": target,
-                            "reason": "agent_adopted_stage",
-                            "request_id": req.id,
-                        }),
+                        &format!("agent:{profile_label}"),
+                        &format!("{from} → {target} (adopted by @{profile_label})"),
+                        event_data,
                     ))?;
                     let wf_run = workflow::adopt_stage(
                         db,
                         &config,
                         &mut c,
-                        &mut req,
+                        live_attempt.as_mut(),
                         target,
                         Some(event.id),
                     )?;
@@ -543,6 +572,8 @@ impl AppServer {
                     Ok(json!({
                         "card": c,
                         "workflow_run": wf_run,
+                        "worktree": c.worktree,
+                        "branch": c.branch,
                         "adopted": true,
                     }))
                 })?;
@@ -590,13 +621,13 @@ impl AppServer {
                 }
                 // Ordinary queued work from a stage the user has left must not
                 // start later. Already-running executions are deliberately not drained.
-                for mut request in db.list::<Request>()?.into_iter().filter(|r| {
-                    r.card_id == c.id
-                        && r.state == "queued"
-                        && r.trigger == RequestTrigger::StageEntry
+                for mut attempt in db.list::<Attempt>()?.into_iter().filter(|a| {
+                    a.card_id == c.id
+                        && a.state == "queued"
+                        && a.trigger == ExecutionTrigger::StageEntry
                 }) {
-                    request.state = "cancelled".into();
-                    db.save(&request)?;
+                    attempt.state = "cancelled".into();
+                    db.save(&attempt)?;
                 }
                 c.stage = target.into();
                 c.board_order = None;
@@ -721,7 +752,7 @@ impl AppServer {
                 Ok(serde_json::to_value(card)?)
             }),
             "comment.add" => self.mutate(method, &p, |db| {
-                let mut c: Card = db.get(strp(&p, "card_id")?)?;
+                let mut c = super::resolve_card(db, &p)?;
                 ensure!(c.active(), "Restore the Card before commenting");
                 let body = strp(&p, "body")?;
                 ensure!(!body.trim().is_empty(), "Comment is empty");
@@ -731,7 +762,6 @@ impl AppServer {
                     "comment.created",
                     "user",
                     body,
-                    None,
                     json!({"body":body}),
                 ))?;
                 let project: Project = db.get(&c.project_id)?;
@@ -757,30 +787,24 @@ impl AppServer {
                     let profile =
                         canban_scheduler::select_in_project(&config, Some(&project), Some(&agent))?;
                     let _context = crate::sessions::conversation(db, &c, &profile)?;
-                    let attempts = db.list::<Attempt>()?;
-                    let active = db.list::<Request>()?.into_iter().rev().find(|r| {
-                        r.card_id == c.id
-                            && !(c.human_gate.is_some()
-                                && r.state == "queued"
-                                && canban_scheduler::automatic(r))
-                            && r.profile.id == agent
-                            && matches!(
-                                r.state.as_str(),
-                                "queued" | "starting" | "running" | "working" | "blocked"
-                            )
-                            || r.card_id == c.id
-                                && r.profile.id == agent
-                                && matches!(r.state.as_str(), "completed" | "backlog")
-                                && r.profile == profile
-                                && attempts.iter().any(|a| {
-                                    a.request_id == r.id
-                                        && a.number == r.attempt
-                                        && a.terminal.is_some()
-                                        && !a.finished()
-                                })
+                    let active = db.list::<Attempt>()?.into_iter().rev().find(|a| {
+                        a.card_id == c.id
+                            && a.state != "continued"
+                            && a.profile.id == agent
+                            && (!(c.human_gate.is_some()
+                                && a.state == "queued"
+                                && canban_scheduler::automatic(a))
+                                && matches!(
+                                    a.state.as_str(),
+                                    "queued" | "starting" | "running" | "working" | "blocked"
+                                )
+                                || matches!(a.state.as_str(), "completed" | "backlog")
+                                    && a.profile == profile
+                                    && a.terminal.is_some()
+                                    && !a.finished())
                     });
-                    let req = if let Some(req) = active {
-                        req
+                    let att = if let Some(att) = active {
+                        att
                     } else {
                         let instruction = canban_context::render_template(
                             include_str!(concat!(
@@ -796,7 +820,7 @@ impl AppServer {
                             &mut c,
                             &project,
                             stage,
-                            RequestTrigger::Comment {
+                            ExecutionTrigger::Comment {
                                 comment_id: event.id.clone(),
                             },
                             Some(&agent),
@@ -811,8 +835,7 @@ impl AppServer {
                         profile_id: agent,
                         comment_id: event.id.clone(),
                         body: body.into(),
-                        request_id: req.id.clone(),
-                        attempt: req.attempt,
+                        attempt_id: Some(att.id.clone()),
                         state: "pending".into(),
                         error: None,
                         reply_path: None,
@@ -870,8 +893,8 @@ impl AppServer {
             "agent.end" => self.control_agent(p, true),
             "execution.report" => self.report(p),
             "execution.retry" => self.mutate(method, &p, |db| {
-                let mut req: Request = db.get(strp(&p, "request_id")?)?;
-                let mut c: Card = db.get(&req.card_id)?;
+                let prev: Attempt = db.get(strp(&p, "attempt_id")?)?;
+                let mut c: Card = db.get(&prev.card_id)?;
                 ensure!(
                     p["execution"].is_null(),
                     "Retry requires an explicit user decision"
@@ -879,41 +902,34 @@ impl AppServer {
                 ensure!(c.archived_at.is_none(), "Restore the Card before retrying");
                 ensure!(
                     !matches!(
-                        req.state.as_str(),
+                        prev.state.as_str(),
                         "queued" | "starting" | "running" | "working" | "completed"
                     ),
                     "Execution is not retryable"
                 );
-                if let Ok(mut previous) = db.get::<Attempt>(&Attempt::key(&req.id, req.attempt)) {
-                    ensure!(
-                        previous.terminal.is_none()
-                            || previous
-                                .observed
-                                .as_ref()
-                                .is_some_and(|v| v["state"] == "finished"),
-                        "End the previous Agent before retrying"
-                    );
-                    if previous.state == "unknown" {
-                        previous.state = "superseded".into();
-                        db.save(&previous)?;
-                    }
-                }
-                req.state = "queued".into();
+                ensure!(
+                    prev.terminal.is_none()
+                        || prev
+                            .observed
+                            .as_ref()
+                            .is_some_and(|v| v["state"] == "finished"),
+                    "End the previous Agent before retrying"
+                );
+                let next = crate::sessions::retry_attempt(db, &c, &prev)?;
                 c.human_gate = None;
                 c.attention = None;
                 c.revision += 1;
                 db.save(&c)?;
-                db.save(&req)?;
                 log(
                     db,
                     &c,
                     "execution.retry_queued",
                     "user",
                     "Fresh attempt queued",
-                    Some(req.id.clone()),
-                    json!({}),
+                    Some(next.id.clone()),
+                    json!({"previous_attempt":prev.id,"attempt":next.number}),
                 )?;
-                Ok(serde_json::to_value(req)?)
+                Ok(serde_json::to_value(next)?)
             }),
             "execution.output" => self.output(strp(&p, "attempt_id")?),
             "resource.read" => self.read_resource(strp(&p, "card_id")?, strp(&p, "path")?),

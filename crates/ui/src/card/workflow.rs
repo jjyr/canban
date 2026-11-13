@@ -86,14 +86,14 @@ pub fn render(ui: Ui) -> impl IntoElement {
             has_any_active_run,
             idle_deliver_workflow,
             had_previous_run,
-            req_profiles,
+            att_profiles,
             queue_info,
         ) = ui.snapshot.with(|s| {
-            let req_profiles: std::collections::BTreeMap<String, String> = s
-                .requests
+            let att_profiles: std::collections::BTreeMap<String, String> = s
+                .attempts
                 .iter()
-                .filter(|r| r.card_id == card_id)
-                .map(|r| (r.id.clone(), r.profile.id.clone()))
+                .filter(|a| a.card_id == card_id)
+                .map(|a| (a.id.clone(), a.profile.id.clone()))
                 .collect();
             let card_runs: Vec<_> = s
                 .workflow_runs
@@ -160,7 +160,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                 any_active,
                 idle_deliver,
                 had_prev,
-                req_profiles,
+                att_profiles,
                 queue_info,
             )
         });
@@ -289,9 +289,9 @@ pub fn render(ui: Ui) -> impl IntoElement {
                     });
 
                     let active_profile = run
-                        .request_id
+                        .attempt_id
                         .as_ref()
-                        .and_then(|rid| req_profiles.get(rid))
+                        .and_then(|aid| att_profiles.get(aid))
                         .map(String::as_str);
                     let mut stepper = view().flex_row().flex_wrap().items_center().gap_1();
                     for (idx, step_id) in steps.iter().enumerate() {

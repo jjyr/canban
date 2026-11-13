@@ -105,7 +105,7 @@ Card trigger --> scheduling request
                  +--> attempt 2, if a fresh retry is requested
 ```
 
-Current implementation retains one Conversation per (Card ID, profile ID), not one shared conversation for an Agent name across Cards. Profiles are reusable configuration; each Request/Attempt retains its own task, callback and runtime. Attempts are identified by (request_id, attempt_number). The Conversation stores an opaque exact provider-history ID; Herdr does not supply a universal provider ID. This supersedes the earlier attempt-only Session proposal.
+Current implementation retains one Conversation per (Card ID, profile ID), not one shared conversation for an Agent name across Cards. Profiles are reusable configuration; each `Attempt` retains its own task, callback, sequence `number` on the Card, and runtime binding (`attempt_id`). The Conversation stores an opaque exact provider-history ID; Herdr does not supply a universal provider ID. This supersedes the earlier two-table Request/Attempt split and attempt-only Session proposal.
 
 Save request and attempt identity before starting external work. A queued request has no terminal yet. Once known, save the owning core.id and owner-local terminal.address; save the connection route separately. The core tuple links to a live runtime, while the Canban execution record survives terminal removal. See [runtime identity research](research/herdr-identifiers.md).
 

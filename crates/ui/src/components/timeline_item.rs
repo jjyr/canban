@@ -16,7 +16,7 @@ pub fn render(ui: Ui, event: Event, narrative: bool) -> impl IntoElement {
             .child(muted("·"))
             .child(muted(event.message).flex_1().min_w(px(0.)))
             .child(muted(crate::components::activity::age(event.created_at)));
-        if let Some(request) = event.request_id
+        if let Some(attempt_id) = event.data["attempt_id"].as_str().map(str::to_owned)
             && !matches!(
                 event.kind.as_str(),
                 "execution.queued"
@@ -26,7 +26,7 @@ pub fn render(ui: Ui, event: Event, narrative: bool) -> impl IntoElement {
             )
         {
             row = row.child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
-                crate::terminals::open_request(ui, &request)
+                crate::terminals::open_request(ui, &attempt_id)
             }));
         }
         return row.into_element();
@@ -81,14 +81,14 @@ pub fn render(ui: Ui, event: Event, narrative: bool) -> impl IntoElement {
         .child(label(actor).font_weight(FontWeight::MEDIUM))
         .child(muted(crate::components::activity::age(event.created_at)))
         .child(view().flex_1());
-    if let Some(request) = event.request_id.clone() {
-        let details = request.clone();
+    if let Some(attempt_id) = event.data["attempt_id"].as_str().map(str::to_owned) {
+        let details = attempt_id.clone();
         heading = heading
             .child(compact_action("Details", Variant::Quiet, move |_| {
                 ui.request.set(details.clone())
             }))
             .child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
-                crate::terminals::open_request(ui, &request)
+                crate::terminals::open_request(ui, &attempt_id)
             }));
     }
     let mut row = view()
@@ -182,11 +182,10 @@ fn avatar(ui: Ui, event: &Event) -> AnyElement {
         let mark = ui
             .snapshot
             .with_untracked(|s| {
-                event
-                    .request_id
-                    .as_ref()
-                    .and_then(|id| s.requests.iter().find(|r| &r.id == id))
-                    .map(|r| r.profile.clone())
+                event.data["attempt_id"]
+                    .as_str()
+                    .and_then(|id| s.attempts.iter().find(|a| a.id == id))
+                    .map(|a| a.profile.clone())
             })
             .or_else(|| {
                 ui.profiles

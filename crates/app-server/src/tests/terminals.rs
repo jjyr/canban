@@ -72,7 +72,7 @@ fn close_owns_agent_termination_preserves_session_and_never_reports_completion()
     )
     .unwrap();
     let before = app.snapshot().unwrap();
-    let mut run = admit(&app, &before.requests[0]);
+    let mut run = admit(&app, &before.attempts[0]);
     run.core_id = Some("original".into());
     run.provider_session_id = Some("saved-session".into());
     app.store.lock().unwrap().write(|db| db.save(&run)).unwrap();
@@ -81,7 +81,7 @@ fn close_owns_agent_termination_preserves_session_and_never_reports_completion()
     assert_eq!(closed["state"], "closed");
     assert_eq!(app.call("terminal.close", params).unwrap(), closed);
     let after = app.snapshot().unwrap();
-    assert_eq!(after.requests.len(), before.requests.len());
+    assert_eq!(after.attempts.len(), before.attempts.len());
     assert_eq!(after.cards[0].stage, before.cards[0].stage);
     assert!(after.reports.is_empty());
     assert_eq!(
@@ -144,8 +144,9 @@ fn manual_launch_is_idempotent_and_preserves_workflow_budget_names_and_runtime_o
     .unwrap();
     assert_eq!(launch["cwd"], p.directory);
     assert_eq!(launch["labels"]["canban.terminal"], item.id);
+    assert_eq!(launch["env"]["CANBAN_CARD"], c.number.to_string());
+    assert_eq!(launch["env"]["CANBAN_PROJECT"], p.id);
     let s = app.snapshot().unwrap();
-    assert!(s.requests.is_empty());
     assert!(s.attempts.is_empty());
     assert_eq!(s.events, before);
     assert_eq!(s.cards[0].stage, "backlog");
@@ -259,7 +260,7 @@ fn upgrading_conversations_allocates_stable_numbers_without_runtime_changes() {
     drop(app);
     let upgraded = reopen(dir.path().join("home"));
     let s = upgraded.snapshot().unwrap();
-    assert_eq!(s.requests, before.requests);
+    assert_eq!(s.attempts, before.attempts);
     assert_eq!(s.conversations, before.conversations);
     assert_eq!(s.terminals[0].id, s.conversations[0].id);
     assert_eq!(s.terminals[0].title(), "1");
@@ -320,7 +321,7 @@ fn independent_terminals_inherit_observed_cwd_and_only_derive_project_context() 
         .unwrap();
     assert!(context["cwd"].is_null());
     assert!(context["project_id"].is_null());
-    assert!(app.snapshot().unwrap().requests.is_empty());
+    assert!(app.snapshot().unwrap().attempts.is_empty());
 }
 
 #[test]
@@ -336,7 +337,7 @@ fn agent_directory_context_cannot_reassign_its_card_or_follow_a_stale_binding() 
     std::fs::write(dir.path().join("cwd"), other["directory"].as_str().unwrap()).unwrap();
     app.call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
         .unwrap();
-    let mut run = admit(&app, &app.snapshot().unwrap().requests[0]);
+    let mut run = admit(&app, &app.snapshot().unwrap().attempts[0]);
     run.core_id = Some("original".into());
     app.store.lock().unwrap().write(|db| db.save(&run)).unwrap();
     app.observe_terminals().unwrap();
@@ -493,7 +494,6 @@ fn manual_labels_have_their_own_durable_sequence_and_v5_migration_keeps_runtime_
     let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
     core(&app, dir.path());
     let migrated = app.snapshot().unwrap();
-    assert_eq!(before.requests, migrated.requests);
     assert_eq!(before.attempts, migrated.attempts);
     let one = migrated
         .terminals
@@ -535,7 +535,7 @@ fn first_terminal_accepts_empty_inheritance_without_a_project_or_conversation() 
     assert!(first["runtime"]["terminal"].is_string());
     let s = app.snapshot().unwrap();
     assert!(s.projects.is_empty() && s.conversations.is_empty());
-    assert!(s.requests.is_empty() && s.attempts.is_empty());
+    assert!(s.attempts.is_empty());
     assert_eq!(s.terminals.len(), 1);
 }
 #[test]
@@ -575,6 +575,8 @@ fn ephemeral_agent_terminal_launches_without_prompt_or_resume_and_records_origin
     let launches = std::fs::read_to_string(dir.path().join("launches")).unwrap();
     let launch: Value = serde_json::from_str(launches.lines().last().unwrap()).unwrap();
     assert_eq!(launch["cwd"], p.directory);
+    assert_eq!(launch["env"]["CANBAN_CARD"], c.number.to_string());
+    assert_eq!(launch["env"]["CANBAN_PROJECT"], p.id);
     let argv: Vec<String> = serde_json::from_value(launch["argv"].clone()).unwrap();
     assert!(argv[0].ends_with("agy"));
     assert!(!argv.iter().any(|a| a == "-i"
@@ -587,7 +589,6 @@ fn ephemeral_agent_terminal_launches_without_prompt_or_resume_and_records_origin
     );
 
     let s = app.snapshot().unwrap();
-    assert!(s.requests.is_empty());
     assert!(s.attempts.is_empty());
     assert!(s.conversations.is_empty());
 }
@@ -724,4 +725,120 @@ fn managed_worktree_create_status_promote_remove_and_read_all() {
         .call("notifications.read_all", json!({"project_id": p.id}))
         .unwrap();
     assert_eq!(read_again["updated"], 0);
+}
+
+#[test]
+fn opening_card_shell_and_agent_terminals_immediately_creates_card_worktree_and_injects_card_env() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("source");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("README.md"), "# Seed\n").unwrap();
+    let git = |cwd: &Path, args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&src, &["init", "-b", "main"]);
+    git(&src, &["config", "user.name", "Tester"]);
+    git(&src, &["config", "user.email", "tester@example.invalid"]);
+    git(&src, &["config", "commit.gpgsign", "false"]);
+    git(&src, &["add", "."]);
+    git(&src, &["commit", "-m", "seed"]);
+
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    core(&app, dir.path());
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Card Worktree Terminals", "directory": src}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let c: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Open terminal in Card worktree", "body": "Notes"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(c.worktree.is_none());
+
+    // 1. Opening a Shell terminal from the Card immediately prepares the Card's dedicated git worktree.
+    let shell_entry: TerminalEntry = serde_json::from_value(
+        app.call(
+            "terminal.create",
+            json!({"project_id": p.id, "card_id": c.id, "request_key": "card-shell-wt"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let updated_card = snap.cards.iter().find(|x| x.id == c.id).unwrap();
+    let wt_path = updated_card
+        .worktree
+        .clone()
+        .expect("Card worktree must be created when opening a Card terminal");
+    assert_ne!(Path::new(&wt_path), src.as_path());
+    assert!(Path::new(&wt_path).is_dir());
+    assert!(updated_card.branch.is_some());
+    assert_eq!(
+        snap.events
+            .iter()
+            .filter(|e| e.card_id == c.id && e.kind == "workspace.prepared")
+            .count(),
+        1
+    );
+
+    let launches = std::fs::read_to_string(dir.path().join("launches")).unwrap();
+    let shell_launch: Value = serde_json::from_str(launches.lines().next().unwrap()).unwrap();
+    assert_eq!(shell_launch["cwd"], wt_path);
+    assert_eq!(shell_launch["labels"]["canban.terminal"], shell_entry.id);
+    assert_eq!(shell_launch["env"]["CANBAN_CARD"], c.number.to_string());
+    assert_eq!(shell_launch["env"]["CANBAN_PROJECT"], p.id);
+    assert!(shell_launch["env"]["CANBAN_CLI"].as_str().is_some());
+    assert!(shell_launch["env"]["CANBAN_ENDPOINT"].as_str().is_some());
+    assert!(shell_launch["env"]["CANBAN_RUN_DIR"].as_str().is_some());
+    assert!(shell_launch["env"].get("CANBAN_REQUEST_ID").is_none());
+    assert!(shell_launch["env"].get("CANBAN_ATTEMPT").is_none());
+
+    // 2. Opening an interactive Agent terminal from the same Card reuses that Card worktree and injects CANBAN_CARD.
+    let agent_entry: TerminalEntry = serde_json::from_value(
+        app.call(
+            "terminal.create",
+            json!({"project_id": p.id, "card": c.number, "agent": true, "request_key": "card-agent-wt"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(agent_entry.id.starts_with("agent-"));
+    assert_eq!(agent_entry.origin_card_id.as_deref(), Some(c.id.as_str()));
+
+    let launches = std::fs::read_to_string(dir.path().join("launches")).unwrap();
+    let agent_launch: Value = serde_json::from_str(launches.lines().last().unwrap()).unwrap();
+    assert_eq!(agent_launch["cwd"], wt_path);
+    assert_eq!(agent_launch["env"]["CANBAN_CARD"], c.number.to_string());
+    assert_eq!(agent_launch["env"]["CANBAN_PROJECT"], p.id);
+    assert!(agent_launch["env"].get("CANBAN_REQUEST_ID").is_none());
+    assert!(agent_launch["env"].get("CANBAN_ATTEMPT").is_none());
+    assert_eq!(
+        app.snapshot()
+            .unwrap()
+            .events
+            .iter()
+            .filter(|e| e.card_id == c.id && e.kind == "workspace.prepared")
+            .count(),
+        1,
+        "Reusing the prepared Card worktree must not log duplicate workspace.prepared events"
+    );
+    assert!(app.snapshot().unwrap().attempts.is_empty());
 }

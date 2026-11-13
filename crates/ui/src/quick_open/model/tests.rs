@@ -34,17 +34,18 @@ fn fixture() -> Snapshot {
         links: vec![],
         card_ids: vec![],
     });
-    let mut req = canban_scheduler::request(
+    let mut att = canban_scheduler::attempt(
         "p1",
         "c1",
+        1,
         "develop",
         "interactive",
         Config::default().profiles[0].clone(),
         "Discuss".into(),
         None,
     );
-    req.id = "request".into();
-    s.requests.push(req);
+    att.id = "attempt-1".into();
+    s.attempts.push(att);
     s
 }
 #[test]
@@ -67,10 +68,11 @@ fn fuzzy_search_matches_subsequences_multiple_terms_and_unicode() {
 #[test]
 fn candidates_distinguish_duplicate_numbers_and_keep_one_agent_conversation() {
     let mut s = fixture();
-    let mut next = s.requests[0].clone();
+    let mut next = s.attempts[0].clone();
     next.id = "follow-up".into();
+    next.number = 2;
     next.created_at += 1;
-    s.requests.push(next);
+    s.attempts.push(next);
     let rows = candidates(&s);
     let cards = rows
         .iter()

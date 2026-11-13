@@ -275,7 +275,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     let active_slots = canban_scheduler::active_count(&s);
                                     let max_slots = ui.max_agents.get();
                                     let queued_count =
-                                        s.requests.iter().filter(|r| r.state == "queued").count();
+                                        s.attempts.iter().filter(|a| a.state == "queued").count();
                                     let scope = project_scope.get();
                                     let valid_scope = if !scope.is_empty()
                                         && s.projects.iter().any(|p| p.id == scope)
@@ -376,7 +376,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
 fn destination(ui: Ui, row: &OverviewRow, review: bool) {
     close(ui);
     ui.open_card(row.card.id.clone());
-    if let Some(id) = row.outcome_request_id() {
+    if let Some(id) = row.outcome_attempt_id() {
         ui.request.set(id.into());
     }
     if review {
@@ -487,9 +487,9 @@ fn summary(row: &OverviewRow) -> String {
 
 fn row_visual(row: &OverviewRow) -> (Icon, ThemeColor) {
     let profile_icon = row
-        .request
+        .attempt
         .as_ref()
-        .map(|r| crate::profiles::provider(&r.profile).0);
+        .map(|a| crate::profiles::provider(&a.profile).0);
     if row.reasons.iter().any(|r| r.source == "review") {
         (Icon::Check, ATTENTION)
     } else if row.reasons.iter().any(|r| r.source == "recovery") {
@@ -530,7 +530,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     .count();
             let active_slots = canban_scheduler::active_count(&s);
             let max_slots = ui.max_agents.get();
-            let queued_count = s.requests.iter().filter(|r| r.state == "queued").count();
+            let queued_count = s.attempts.iter().filter(|a| a.state == "queued").count();
             let scope = project_scope.get();
             let valid_scope = if !scope.is_empty() && !s.projects.iter().any(|p| p.id == scope) {
                 String::new()
@@ -872,7 +872,7 @@ fn row_view(
     let activate_row = row.clone();
     let text = summary(&row);
     let (kind_icon, kind_color) = row_visual(&row);
-    let profile_tag = row.request.as_ref().map(|r| format!("@{}", r.profile.id));
+    let profile_tag = row.attempt.as_ref().map(|a| format!("@{}", a.profile.id));
     let remote_machine = row
         .attempt
         .as_ref()

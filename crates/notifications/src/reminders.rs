@@ -50,8 +50,9 @@ pub fn message_id(s: &Snapshot, e: &Event) -> Option<String> {
             if let Some(report) = s.events.iter().find(|r| {
                 r.card_id == e.card_id
                     && r.kind == "execution.reported"
-                    && r.request_id.is_some()
-                    && r.request_id == e.request_id
+                    && (r.data["attempt_id"].as_str().is_some()
+                        && r.data["attempt_id"] == e.data["attempt_id"]
+                        || r.data["path"].as_str().is_some() && r.data["path"] == e.data["path"])
                     && r.data["path"].as_str().is_some()
                     && r.data["path"] == e.data["path"]
             }) && let Some(id) = message_id(s, report)
@@ -103,17 +104,31 @@ pub fn reminders(s: &Snapshot) -> Vec<Reminder> {
                 .card
                 .human_gate
                 .as_ref()
-                .and_then(|g| g.request_id.as_ref())
-                .and_then(|req| {
+                .and_then(|g| g.attempt_id.as_ref())
+                .and_then(|att| {
                     s.events
                         .iter()
                         .filter(|e| {
                             e.card_id == row.card.id
-                                && e.request_id.as_ref() == Some(req)
+                                && e.data["attempt_id"].as_str() == Some(att.as_str())
                                 && e.kind == "execution.reported"
                                 && message_id(s, e).is_some()
                         })
                         .max_by_key(|e| e.sequence)
+                })
+                .or_else(|| {
+                    if row.card.human_gate.is_some() {
+                        s.events
+                            .iter()
+                            .filter(|e| {
+                                e.card_id == row.card.id
+                                    && e.kind == "execution.reported"
+                                    && message_id(s, e).is_some()
+                            })
+                            .max_by_key(|e| e.sequence)
+                    } else {
+                        None
+                    }
                 });
             let id = match reason.source.as_str() {
                 "task" | "review" => report

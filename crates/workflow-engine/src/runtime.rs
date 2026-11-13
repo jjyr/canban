@@ -9,26 +9,30 @@ pub type Queue = for<'a> fn(
     &mut Card,
     &Project,
     &Stage,
-    RequestTrigger,
+    ExecutionTrigger,
     Option<&str>,
     Option<String>,
-) -> Result<Option<Request>>;
+) -> Result<Option<Attempt>>;
 fn log(
     db: Db<'_>,
     c: &Card,
     kind: &str,
     actor: &str,
     message: &str,
-    request: Option<String>,
-    data: Value,
+    attempt_id: Option<&str>,
+    mut data: Value,
 ) -> Result<()> {
+    if let Some(aid) = attempt_id
+        && data.get("attempt_id").is_none()
+    {
+        data["attempt_id"] = json!(aid);
+    }
     db.append(canban_timeline::event(
         &c.project_id,
         &c.id,
         kind,
         actor,
         message,
-        request,
         data,
     ))?;
     Ok(())
@@ -38,7 +42,7 @@ fn attention(db: Db<'_>, card: &mut Card, message: &str) -> Result<()> {
     if card.human_gate.is_none() {
         card.human_gate = Some(HumanGate {
             reason: message.into(),
-            request_id: None,
+            attempt_id: None,
             next_stage: None,
         });
     }
@@ -95,7 +99,7 @@ fn record(db: Db<'_>, run: &WorkflowRun, kind: &str, message: &str) -> Result<()
             "system"
         },
         message,
-        run.request_id.clone(),
+        run.attempt_id.as_deref(),
         json!({"workflow_run_id":run.id,"step":run.step,"visit":run.visit,"state":run.state}),
     )
 }
@@ -105,7 +109,7 @@ fn next(run: &mut WorkflowRun, to: Option<String>) {
             .push(json!({"step":step,"visit":run.visit,"event":"completed","at":now()}));
     }
     run.step = to;
-    run.request_id = None;
+    run.attempt_id = None;
     run.error = None;
     run.state = "running".into();
     run.visit += 1;
@@ -120,13 +124,13 @@ pub fn stop_card(db: Db<'_>, card: &str, state: &str) -> Result<()> {
     {
         run.state = state.into();
         run.updated_at = now();
-        for mut req in db
-            .list::<Request>()?
+        for mut att in db
+            .list::<Attempt>()?
             .into_iter()
-            .filter(|r| r.workflow_run_id.as_deref() == Some(&run.id) && r.state == "queued")
+            .filter(|a| a.workflow_run_id.as_deref() == Some(&run.id) && a.state == "queued")
         {
-            req.state = "cancelled".into();
-            db.save(&req)?;
+            att.state = "cancelled".into();
+            db.save(&att)?;
         }
         db.save(&run)?;
         record(db, &run, "workflow.stopped", state)?;
@@ -177,7 +181,7 @@ pub fn start(
         state: "running".into(),
         step: Some(step),
         visit: 1,
-        request_id: None,
+        attempt_id: None,
         trigger_event_id: event,
         input_digest: digest(db, card),
         inputs: json!({"title":card.title,"body":card.body,"content":card.content,"legacy":legacy}),
@@ -193,13 +197,13 @@ pub fn start(
     Ok(run)
 }
 
-/// Starts `entry` by binding an already-running `Request` directly to the first
-/// `Agent` step reached (evaluating leading `Condition` / `Notify` steps without
-/// enqueuing a duplicate Agent request). If the entry path pauses or finishes at a
-/// non-`Agent` step (`Approval`, `Deliver`, `Admit`, `Complete`), it drives normally.
+/// Starts `entry` by claiming the first `Agent` step reached directly for the caller's
+/// Card Terminal or already-running `Attempt` (evaluating leading `Condition` / `Notify`
+/// steps without enqueuing a duplicate Agent attempt). If the entry path pauses or finishes
+/// at a non-`Agent` step (`Approval`, `Deliver`, `Admit`, `Complete`), it drives normally.
 #[allow(
     clippy::too_many_arguments,
-    reason = "Transaction-scoped adoption captures definition, live request and queue adapter"
+    reason = "Transaction-scoped adoption captures definition, optional live attempt and queue adapter"
 )]
 pub fn start_adopted(
     db: Db<'_>,
@@ -210,7 +214,7 @@ pub fn start_adopted(
     entry: &str,
     event: Option<String>,
     legacy: bool,
-    adopted_request: &mut Request,
+    adopted_attempt: Option<&mut Attempt>,
     queue: Queue,
 ) -> Result<WorkflowRun> {
     ensure!(card.active(), "Restore the Card before starting a workflow");
@@ -242,7 +246,7 @@ pub fn start_adopted(
         state: "running".into(),
         step: Some(step),
         visit: 1,
-        request_id: None,
+        attempt_id: None,
         trigger_event_id: event,
         input_digest: digest(db, card),
         inputs: json!({"title":card.title,"body":card.body,"content":card.content,"legacy":legacy,"adopted":true}),
@@ -255,6 +259,7 @@ pub fn start_adopted(
     db.save(&run)?;
     record(db, &run, "workflow.started", entry)?;
     let mut claimed = false;
+    let mut adopted_attempt = adopted_attempt;
     while run.state == "running" {
         if run.visit > run.definition.max_steps {
             break;
@@ -311,28 +316,30 @@ pub fn start_adopted(
                 run.history
                     .push(json!({"step":key,"visit":run.visit,"at":now(),"event":"entered"}));
                 let step_ref = format!("{key}:{}", run.visit);
-                adopted_request.workflow_run_id = Some(run.id.clone());
-                adopted_request.workflow_step = Some(step_ref);
-                adopted_request.stage = card.stage.clone();
-                if legacy {
-                    let following = run.definition.steps[&key]
-                        .next()
-                        .and_then(|n| run.definition.steps.get(n));
-                    adopted_request.require_human_review =
-                        matches!(following, Some(WorkflowStep::Approval { .. }));
-                    let movement = match following {
-                        Some(WorkflowStep::Approval { next, .. }) => {
-                            next.as_ref().and_then(|n| run.definition.steps.get(n))
-                        }
-                        other => other,
-                    };
-                    adopted_request.on_completed = match movement {
-                        Some(WorkflowStep::Move { column, .. }) => Some(column.clone()),
-                        _ => None,
-                    };
+                if let Some(att) = adopted_attempt.take() {
+                    att.workflow_run_id = Some(run.id.clone());
+                    att.workflow_step = Some(step_ref);
+                    att.stage = card.stage.clone();
+                    if legacy {
+                        let following = run.definition.steps[&key]
+                            .next()
+                            .and_then(|n| run.definition.steps.get(n));
+                        att.require_human_review =
+                            matches!(following, Some(WorkflowStep::Approval { .. }));
+                        let movement = match following {
+                            Some(WorkflowStep::Approval { next, .. }) => {
+                                next.as_ref().and_then(|n| run.definition.steps.get(n))
+                            }
+                            other => other,
+                        };
+                        att.on_completed = match movement {
+                            Some(WorkflowStep::Move { column, .. }) => Some(column.clone()),
+                            _ => None,
+                        };
+                    }
+                    db.save(att)?;
+                    run.attempt_id = Some(att.id.clone());
                 }
-                db.save(adopted_request)?;
-                run.request_id = Some(adopted_request.id.clone());
                 run.state = "waiting_agent".into();
                 run.inputs["title"] = json!(card.title);
                 run.inputs["body"] = json!(card.body);
@@ -425,21 +432,21 @@ fn drive(
                     require_human_review: false,
                 };
                 let trigger = if run.inputs["legacy"] == true {
-                    RequestTrigger::StageEntry
+                    ExecutionTrigger::StageEntry
                 } else {
-                    RequestTrigger::Workflow
+                    ExecutionTrigger::Workflow
                 };
-                if let Some(mut req) =
+                if let Some(mut att) =
                     queue(db, config, card, &project, &stage, trigger, None, None)?
                 {
-                    req.workflow_run_id = Some(run.id.clone());
-                    req.workflow_step = Some(format!("{key}:{}", run.visit));
+                    att.workflow_run_id = Some(run.id.clone());
+                    att.workflow_step = Some(format!("{key}:{}", run.visit));
                     // Retain legacy snapshots for backward recovery; the engine owns progression.
                     if run.inputs["legacy"] == true {
                         let following = run.definition.steps[&key]
                             .next()
                             .and_then(|n| run.definition.steps.get(n));
-                        req.require_human_review =
+                        att.require_human_review =
                             matches!(following, Some(WorkflowStep::Approval { .. }));
                         let movement = match following {
                             Some(WorkflowStep::Approval { next, .. }) => {
@@ -447,14 +454,14 @@ fn drive(
                             }
                             other => other,
                         };
-                        req.on_completed = match movement {
+                        att.on_completed = match movement {
                             Some(WorkflowStep::Move { column, .. }) => Some(column.clone()),
                             _ => None,
                         };
                     }
-                    db.save(&req)?;
-                    db.conn.execute("UPDATE events SET data=json_set(data,'$.data.workflow_run_id',?2,'$.data.workflow_step',?3,'$.data.origin','workflow') WHERE json_extract(data,'$.request_id')=?1 AND json_extract(data,'$.kind')='execution.queued'",[req.id.as_str(),run.id.as_str(),req.workflow_step.as_deref().unwrap_or("")])?;
-                    run.request_id = Some(req.id);
+                    db.save(&att)?;
+                    db.conn.execute("UPDATE events SET data=json_set(data,'$.data.workflow_run_id',?2,'$.data.workflow_step',?3,'$.data.origin','workflow') WHERE json_extract(data,'$.data.attempt_id')=?1 AND json_extract(data,'$.kind')='execution.queued'",[att.id.as_str(),run.id.as_str(),att.workflow_step.as_deref().unwrap_or("")])?;
+                    run.attempt_id = Some(att.id);
                     run.state = "waiting_agent".into();
                     run.inputs["title"] = json!(card.title);
                     run.inputs["body"] = json!(card.body);
@@ -483,7 +490,7 @@ fn drive(
                         "card.stage_changed",
                         "system",
                         &format!("{} → {}", from, card.stage),
-                        run.request_id.clone(),
+                        run.attempt_id.as_deref(),
                         json!({"from":from,"to":card.stage,"entry_id":id(),"reason":"workflow_completed","workflow_run_id":run.id,"step":key}),
                     )?;
                 }
@@ -493,7 +500,7 @@ fn drive(
                 attention(db, card, &title)?;
                 card.human_gate = Some(HumanGate {
                     reason: title.clone(),
-                    request_id: run.request_id.clone(),
+                    attempt_id: run.attempt_id.clone(),
                     next_stage: run.definition.steps[&key].next().and_then(|k| {
                         match &run.definition.steps[k] {
                             WorkflowStep::Move { column, .. } => Some(column.clone()),
@@ -517,7 +524,7 @@ fn drive(
                     attention(db, card, title)?;
                     card.human_gate = Some(HumanGate {
                         reason: title.into(),
-                        request_id: run.request_id.clone(),
+                        attempt_id: run.attempt_id.clone(),
                         next_stage: None,
                     });
                     card.revision += 1;
@@ -596,23 +603,43 @@ pub fn reported(
     db: Db<'_>,
     config: &Config,
     card: &mut Card,
-    request: &Request,
+    attempt: Option<&Attempt>,
     report: &Report,
     queue: Queue,
 ) -> Result<()> {
-    let Some(id) = &request.workflow_run_id else {
+    let run_opt: Option<WorkflowRun> = if let Some(att) = attempt
+        && let Some(id) = &att.workflow_run_id
+    {
+        Some(db.get(id)?)
+    } else if let Some(id) = &report.workflow_run_id {
+        Some(db.get(id)?)
+    } else {
+        db.list::<WorkflowRun>()?.into_iter().find(|r| {
+            r.card_id == card.id
+                && r.active()
+                && matches!(r.state.as_str(), "waiting_agent" | "blocked")
+        })
+    };
+    let Some(mut run) = run_opt else {
         return Ok(());
     };
-    let mut run: WorkflowRun = db.get(id)?;
-    if !run.active() || run.request_id.as_deref() != Some(&request.id) {
+    if !run.active() {
         return Ok(());
     }
+    if let (Some(run_aid), Some(att)) = (&run.attempt_id, attempt)
+        && run_aid != &att.id
+    {
+        return Ok(());
+    }
+    let att_id = attempt.map(|a| a.id.clone());
+    let att_num = attempt.map(|a| a.number);
+    let att_next = attempt.and_then(|a| a.on_completed.clone());
     if report.state != "completed" {
         if report.state == "backlog" {
             if let Some(key) = run.step.clone() {
                 run.outputs.insert(
                     key.clone(),
-                    json!({"report_id":report.id,"path":report.path,"message":report.message,"request_id":request.id,"attempt":report.attempt,"state":"backlog"}),
+                    json!({"report_id":report.id,"path":report.path,"message":report.message,"attempt_id":att_id,"attempt":att_num,"state":"backlog"}),
                 );
                 run.history.push(json!({"step":key,"visit":run.visit,"event":"returned_to_backlog","report_id":report.id,"at":now()}));
             }
@@ -646,53 +673,53 @@ pub fn reported(
     ) {
         run.outputs.insert(
             key.clone(),
-            json!({"report_id":report.id,"path":report.path,"message":report.message,"request_id":request.id,"attempt":report.attempt,"state":"conflict_resolved"}),
+            json!({"report_id":report.id,"path":report.path,"message":report.message,"attempt_id":att_id,"attempt":att_num,"state":"conflict_resolved"}),
         );
         run.history.push(
             json!({"step":key,"visit":run.visit,"event":"conflict_resolved","report_id":report.id,"at":now()}),
         );
         let to = run.definition.steps[&key].next().map(str::to_owned);
         if let Some(gate) = &mut card.human_gate {
-            if gate.request_id.is_none() {
-                gate.request_id = Some(request.id.clone());
+            if gate.attempt_id.is_none() {
+                gate.attempt_id = att_id.clone();
             }
-            gate.next_stage = request.on_completed.clone();
+            gate.next_stage = att_next;
             run.state = "blocked".into();
             run.inputs["pending_next"] = json!(to);
             db.save(&run)?;
             return Ok(());
         }
         run.visit += 1;
-        run.request_id = Some(request.id.clone());
+        run.attempt_id = att_id;
         run.error = None;
         run.state = "running".into();
         return drive(db, config, card, &mut run, queue);
     }
-    run.outputs.insert(key.clone(),json!({"report_id":report.id,"path":report.path,"message":report.message,"request_id":request.id,"attempt":report.attempt}));
+    run.outputs.insert(key.clone(),json!({"report_id":report.id,"path":report.path,"message":report.message,"attempt_id":att_id,"attempt":att_num}));
     run.history.push(
         json!({"step":key,"visit":run.visit,"event":"completed","report_id":report.id,"at":now()}),
     );
     let to = run.definition.steps[&key].next().map(str::to_owned);
     // A previously reported block must still be approved even if the Agent later completes.
     if let Some(gate) = &mut card.human_gate {
-        if gate.request_id.is_none() {
-            gate.request_id = Some(request.id.clone());
+        if gate.attempt_id.is_none() {
+            gate.attempt_id = att_id.clone();
         }
-        gate.next_stage = request.on_completed.clone();
+        gate.next_stage = att_next;
         run.state = "blocked".into();
         run.inputs["pending_next"] = json!(to);
         db.save(&run)?;
         return Ok(());
     }
     next(&mut run, to);
-    // Keep the completing request as decision context when the next node is approval or delivery.
+    // Keep the completing attempt as decision context when the next node is approval or delivery.
     if run.step.as_ref().is_some_and(|k| {
         matches!(
             run.definition.steps[k],
             WorkflowStep::Approval { .. } | WorkflowStep::Deliver { .. }
         )
     }) {
-        run.request_id = Some(request.id.clone());
+        run.attempt_id = att_id;
     }
     drive(db, config, card, &mut run, queue)
 }
@@ -702,18 +729,26 @@ pub fn advance(
     db: Db<'_>,
     config: &Config,
     card: &mut Card,
-    request: &Request,
+    attempt: Option<&Attempt>,
     queue: Queue,
 ) -> Result<()> {
-    if let Some(id) = &request.workflow_run_id {
-        let mut run: WorkflowRun = db.get(id)?;
+    let run_opt: Option<WorkflowRun> = if let Some(att) = attempt
+        && let Some(id) = &att.workflow_run_id
+    {
+        Some(db.get(id)?)
+    } else {
+        db.list::<WorkflowRun>()?
+            .into_iter()
+            .find(|r| r.card_id == card.id && r.active())
+    };
+    if let Some(mut run) = run_opt {
         if !run.active() {
             return Ok(());
         }
         if run.state == "waiting_approval" {
             return approve_with_feedback(db, config, card, &mut run, false, None, queue);
         }
-        if run.state == "blocked" && request.state == "completed" {
+        if run.state == "blocked" && attempt.is_none_or(|a| a.state == "completed") {
             ensure!(
                 digest(db, card) == run.input_digest,
                 "Task changed; request rework instead"
@@ -953,13 +988,13 @@ pub fn rework_conflict(
         on_completed: None,
         require_human_review: false,
     };
-    let Some(mut req) = queue(
+    let Some(mut att) = queue(
         db,
         config,
         card,
         &project,
         &stage,
-        RequestTrigger::Workflow,
+        ExecutionTrigger::Workflow,
         None,
         None,
     )?
@@ -968,14 +1003,14 @@ pub fn rework_conflict(
     };
     run.visit += 1;
     let step_ref = format!("{key}:{}", run.visit);
-    req.workflow_run_id = Some(run.id.clone());
-    req.workflow_step = Some(step_ref.clone());
-    db.save(&req)?;
+    att.workflow_run_id = Some(run.id.clone());
+    att.workflow_step = Some(step_ref.clone());
+    db.save(&att)?;
     db.conn.execute(
-        "UPDATE events SET data=json_set(data,'$.data.workflow_run_id',?2,'$.data.workflow_step',?3,'$.data.origin','workflow') WHERE json_extract(data,'$.request_id')=?1 AND json_extract(data,'$.kind')='execution.queued'",
-        [req.id.as_str(), run.id.as_str(), step_ref.as_str()],
+        "UPDATE events SET data=json_set(data,'$.data.workflow_run_id',?2,'$.data.workflow_step',?3,'$.data.origin','workflow') WHERE json_extract(data,'$.data.attempt_id')=?1 AND json_extract(data,'$.kind')='execution.queued'",
+        [att.id.as_str(), run.id.as_str(), step_ref.as_str()],
     )?;
-    let agent_id = req.profile.id.clone();
+    let agent_id = att.profile.id.clone();
     if let Some(obj) = run.inputs.as_object_mut() {
         obj.remove("queue_pause_reason");
     }
@@ -993,7 +1028,7 @@ pub fn rework_conflict(
     card.human_gate = None;
     card.attention = None;
     card.revision += 1;
-    run.request_id = Some(req.id.clone());
+    run.attempt_id = Some(att.id.clone());
     run.state = "waiting_agent".into();
     run.error = None;
     run.input_digest = digest(db, card);
@@ -1007,7 +1042,7 @@ pub fn rework_conflict(
             "Merge conflict with {target_branch}; @{agent_id} will resolve it (attempt {}/{max_conflict_attempts})",
             attempts + 1
         ),
-        Some(req.id),
+        Some(&att.id),
         json!({"workflow_run_id":run.id,"target_branch":target_branch,"target_head":target_head,"files":files,"attempt":attempts + 1,"profile_id":agent_id}),
     )?;
     db.save(run)?;
@@ -1024,7 +1059,7 @@ pub fn hold_delivery(
     attention(db, card, reason)?;
     card.human_gate = Some(HumanGate {
         reason: reason.into(),
-        request_id: run.request_id.clone(),
+        attempt_id: run.attempt_id.clone(),
         next_stage: None,
     });
     card.revision += 1;
@@ -1052,12 +1087,12 @@ pub fn reconcile(db: Db<'_>) -> Result<()> {
             stop_card(db, &card.id, "cancelled")?;
             continue;
         }
-        if let Some(id) = &run.request_id {
-            let req: Request = db.get(id)?;
+        if let Some(id) = &run.attempt_id {
+            let att: Attempt = db.get(id)?;
             if matches!(run.state.as_str(), "waiting_agent" | "failed")
-                && matches!(req.state.as_str(), "failed" | "unknown" | "needs_report")
+                && matches!(att.state.as_str(), "failed" | "unknown" | "needs_report")
             {
-                run.state = if req.state == "failed" {
+                run.state = if att.state == "failed" {
                     "failed"
                 } else {
                     "waiting_agent"
@@ -1065,10 +1100,10 @@ pub fn reconcile(db: Db<'_>) -> Result<()> {
                 .into();
                 run.error = Some(format!(
                     "Execution {}: inspect or explicitly retry",
-                    req.state
+                    att.state
                 ));
                 db.save(&run)?;
-            } else if run.state == "failed" && req.state == "queued" {
+            } else if run.state == "failed" && att.state == "queued" {
                 run.state = "waiting_agent".into();
                 run.error = None;
                 db.save(&run)?;

@@ -60,7 +60,7 @@ fn references_keep_local_identity_and_require_current_revision() {
         )
         .is_err()
     );
-    assert!(app.snapshot().unwrap().requests.is_empty());
+    assert!(app.snapshot().unwrap().attempts.is_empty());
     assert_eq!(app.snapshot().unwrap().projects[0].id, p.id);
     let removed: Card = serde_json::from_value(
         app.call(
@@ -82,7 +82,6 @@ fn legacy_remote_mirror_moves_to_disposable_cache_without_losing_local_history()
         "comment.added",
         "user",
         "LOCAL_HISTORY",
-        None,
         json!({}),
     );
     let remote = canban_timeline::event(
@@ -91,7 +90,6 @@ fn legacy_remote_mirror_moves_to_disposable_cache_without_losing_local_history()
         "github.comment",
         "github:someone",
         "REMOTE_HISTORY",
-        None,
         json!({"external_revision":"old"}),
     );
     app.store.lock().unwrap().write(|db|{db.append(local)?;let mut legacy=remote;legacy.sequence=db.counter(&format!("timeline:{}",c.id))?;db.conn.execute("INSERT INTO events(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,'',?4,?5)",params![legacy.id,legacy.project_id,legacy.card_id,legacy.sequence,serde_json::to_string(&legacy)?])?;Ok(())}).unwrap();

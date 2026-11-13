@@ -1,5 +1,5 @@
 use anyhow::{Result, ensure};
-use canban_types::{Artifact, Card, Project, Request, RequestTrigger, Snapshot, id};
+use canban_types::{Artifact, Attempt, Card, ExecutionTrigger, Project, Snapshot, id};
 use sha2::{Digest, Sha256};
 use std::{
     io::{Read, Write},
@@ -73,11 +73,13 @@ pub fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 pub fn card_dir(home: &Path, project: &str, card: &str) -> PathBuf {
     home.join("projects").join(project).join("cards").join(card)
 }
-pub fn run_dir(home: &Path, req: &Request, attempt: u32) -> PathBuf {
-    card_dir(home, &req.project_id, &req.card_id)
+pub fn scratch_dir(home: &Path, project: &str, card: &str) -> PathBuf {
+    card_dir(home, project, card).join("scratch")
+}
+pub fn run_dir(home: &Path, run: &Attempt) -> PathBuf {
+    card_dir(home, &run.project_id, &run.card_id)
         .join("runs")
-        .join(&req.id)
-        .join(attempt.to_string())
+        .join(&run.id)
 }
 #[allow(
     clippy::too_many_arguments,
@@ -87,23 +89,19 @@ pub fn capture(
     home: &Path,
     project: &Project,
     card: &Card,
-    req: &Request,
-    attempt: u32,
+    run: &Attempt,
     snapshot: &Snapshot,
     endpoint: &str,
     cli: &Path,
 ) -> Result<String> {
-    capture_for(
-        home, project, card, req, attempt, snapshot, endpoint, cli, home,
-    )
+    capture_for(home, project, card, run, snapshot, endpoint, cli, home)
 }
 #[allow(clippy::too_many_arguments)]
 pub fn capture_for(
     home: &Path,
     project: &Project,
     card: &Card,
-    req: &Request,
-    attempt: u32,
+    run: &Attempt,
     snapshot: &Snapshot,
     endpoint: &str,
     cli: &Path,
@@ -114,7 +112,7 @@ pub fn capture_for(
         context_card.title = format!("{}#{}", source.repository, source.number);
     }
     let card = &context_card;
-    let dir = run_dir(home, req, attempt);
+    let dir = run_dir(home, run);
     let timeline: Vec<_> = snapshot
         .events
         .iter()
@@ -133,12 +131,16 @@ pub fn capture_for(
     let questions: Vec<_> = snapshot
         .questions
         .iter()
-        .filter(|q| q.request_id == req.id && q.state != "replied")
+        .filter(|q| {
+            q.state != "replied"
+                && (q.attempt_id.as_deref() == Some(&run.id)
+                    || q.card_id == card.id && q.profile_id == run.profile.id)
+        })
         .collect();
     let github_source = card.github_issue();
     // Notes are deferred. Keep the manifest field empty for old readers, without
     // injecting saved legacy documents or changing already captured executions.
-    let manifest = serde_json::json!({"schema_version":1,"github_source":github_source,"project":project,"card":card,"request":req,"attempt":attempt,"timeline":timeline,"notes":[],"reports":reports,"artifacts":artifacts,"questions":questions});
+    let manifest = serde_json::json!({"schema_version":2,"github_source":github_source,"project":project,"card":card,"attempt":run,"timeline":timeline,"notes":[],"reports":reports,"artifacts":artifacts,"questions":questions});
     let manifest_path = dir.join("context.json");
     atomic(&manifest_path, &serde_json::to_vec_pretty(&manifest)?)?;
 
@@ -148,16 +150,16 @@ pub fn capture_for(
         prompt.push_str(card.body.trim());
         prompt.push('\n');
     }
-    if req.profile.role_instruction.trim().is_empty() {
-        prompt.push_str(&format!("\n## Role: @{}\n", req.profile.id));
+    if run.profile.role_instruction.trim().is_empty() {
+        prompt.push_str(&format!("\n## Role: @{}\n", run.profile.id));
     } else {
         prompt.push_str(&format!(
             "\n## Role (@{})\n{}\n",
-            req.profile.id,
-            req.profile.role_instruction.trim()
+            run.profile.id,
+            run.profile.role_instruction.trim()
         ));
     }
-    prompt.push_str(&format!("\n## Task\n{}\n", req.instruction.trim()));
+    prompt.push_str(&format!("\n## Task\n{}\n", run.instruction.trim()));
 
     let mut comments: Vec<_> = timeline
         .iter()
@@ -195,11 +197,19 @@ pub fn capture_for(
     if !prior_reports.is_empty() {
         prompt.push_str("\n## Earlier reports\n");
         for r in prior_reports {
-            let role = snapshot
-                .requests
-                .iter()
-                .find(|rq| rq.id == r.request_id)
-                .map(|rq| rq.profile.id.as_str())
+            let role = r
+                .actor
+                .strip_prefix("agent:")
+                .filter(|s| !s.is_empty())
+                .or_else(|| {
+                    r.attempt_id.as_deref().and_then(|aid| {
+                        snapshot
+                            .attempts
+                            .iter()
+                            .find(|a| a.id == aid)
+                            .map(|a| a.profile.id.as_str())
+                    })
+                })
                 .unwrap_or("agent");
             let summary = if r.message.trim().is_empty() {
                 "see report file"
@@ -247,28 +257,28 @@ pub fn capture_for(
         ));
     }
 
-    let reporting_template = match &req.trigger {
-        RequestTrigger::Comment { .. } => REPORTING_COMMENT_TEMPLATE,
-        RequestTrigger::Interactive => REPORTING_INTERACTIVE_TEMPLATE,
-        RequestTrigger::Workflow | RequestTrigger::StageEntry | RequestTrigger::Custom(_) => {
+    let reporting_template = match &run.trigger {
+        ExecutionTrigger::Comment { .. } => REPORTING_COMMENT_TEMPLATE,
+        ExecutionTrigger::Interactive => REPORTING_INTERACTIVE_TEMPLATE,
+        ExecutionTrigger::Workflow | ExecutionTrigger::StageEntry | ExecutionTrigger::Custom(_) => {
             REPORTING_TASK_TEMPLATE
         }
     };
     let endpoint_quoted = shell_quote(endpoint);
-    let req_quoted = shell_quote(&req.id);
-    let attempt_str = attempt.to_string();
+    let project_quoted = shell_quote(&project.id);
+    let card_num_str = card.number.to_string();
     prompt.push('\n');
     prompt.push_str(&render_template(
         reporting_template,
         &[
             ("endpoint", &endpoint_quoted),
-            ("request_id", &req_quoted),
-            ("attempt", &attempt_str),
+            ("project_id", &project_quoted),
+            ("card_number", &card_num_str),
             ("cli", &cli_quoted),
         ],
     ));
 
-    if let Some(instruction) = req
+    if let Some(instruction) = run
         .profile
         .session_instruction
         .as_deref()
@@ -281,7 +291,7 @@ pub fn capture_for(
     }
     // Comment-triggered requests exist solely to answer the comment via a single `report`
     // call; only non-comment assignments render separate `canban reply` items.
-    if !req.trigger.is_comment() && !questions.is_empty() {
+    if !run.trigger.is_comment() && !questions.is_empty() {
         prompt.push_str("\n## Pending questions\n");
         for q in questions {
             let qid_quoted = shell_quote(&q.id);

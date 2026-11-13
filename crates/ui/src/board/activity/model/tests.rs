@@ -14,21 +14,22 @@ fn fixture() -> Snapshot {
     }
     s
 }
-fn request(s: &mut Snapshot, card: &str, profile: usize, state: &str) -> String {
-    let mut r = canban_scheduler::request(
+fn attempt(s: &mut Snapshot, card: &str, profile: usize, state: &str) -> String {
+    let mut a = canban_scheduler::attempt(
         card,
         card,
+        1,
         "develop",
         "stage_entry",
         Config::default().profiles[profile].clone(),
         "Task".into(),
         None,
     );
-    r.id = format!("{card}-{profile}");
-    r.created_at = 10;
-    r.state = state.into();
-    let id = r.id.clone();
-    s.requests.push(r);
+    a.id = format!("{card}-{profile}");
+    a.created_at = 10;
+    a.state = state.into();
+    let id = a.id.clone();
+    s.attempts.push(a);
     id
 }
 fn event(s: &mut Snapshot, project: &str, kind: &str, time: u64) {
@@ -40,7 +41,6 @@ fn event(s: &mut Snapshot, project: &str, kind: &str, time: u64) {
         kind: kind.into(),
         actor: "user".into(),
         message: String::new(),
-        request_id: None,
         data: json!({}),
         created_at: time,
     });
@@ -49,23 +49,23 @@ fn event(s: &mut Snapshot, project: &str, kind: &str, time: u64) {
 #[test]
 fn attention_unifies_review_and_input_by_card_and_ignores_working_and_archived() {
     let mut s = fixture();
-    let blocked = request(&mut s, "attention", 0, "blocked");
-    request(&mut s, "attention", 1, "blocked");
+    let blocked = attempt(&mut s, "attention", 0, "blocked");
+    attempt(&mut s, "attention", 1, "blocked");
     s.cards[0].human_gate = Some(HumanGate {
         reason: "Answer needed".into(),
-        request_id: Some(blocked),
+        attempt_id: Some(blocked),
         next_stage: None,
     });
-    let review = request(&mut s, "review", 0, "completed");
+    let review = attempt(&mut s, "review", 0, "completed");
     // Same Card has a Review gate and another Profile requiring input: still one.
-    request(&mut s, "review", 1, "blocked");
+    attempt(&mut s, "review", 1, "blocked");
     s.cards[1].human_gate = Some(HumanGate {
         reason: "Review needed".into(),
-        request_id: Some(review),
+        attempt_id: Some(review),
         next_stage: None,
     });
-    request(&mut s, "working", 0, "starting");
-    request(&mut s, "working", 1, "queued");
+    attempt(&mut s, "working", 0, "starting");
+    attempt(&mut s, "working", 1, "queued");
     let rows = projects(&s, &[]);
     assert_eq!(
         rows.iter().find(|r| r.id == "attention").unwrap().attention,
