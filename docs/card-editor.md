@@ -50,9 +50,12 @@ the retained draft and allows explicitly adopting that revision before saving.
 New Card drafts have independent identities in navigation history and submission
 fences, retain the target Project and keep
 Local description and GitHub instructions separately. Content-derived request
-keys make retries of an identical create submission idempotent. A completion
-only clears submitted fields, preserving later input and other type-specific
-drafts. Published task readers do not present unsubmitted edits as saved content.
+keys make retries of an identical create submission idempotent. Creating a Card
+from New Card keeps the New Card form open on a fresh draft identity (preserving
+the selected target Project, card kind and any post-submit input, while replacing
+the submitted draft's history entry so Back returns directly to the previous
+route), allowing consecutive Card creation without re-opening New Card. Published
+task readers do not present unsubmitted edits as saved content.
 
 Text, recipients and references persist. Pending attachment bytes, native undo
 history, caret and scroll positions are not restored across application restart.

@@ -25,6 +25,13 @@ impl History {
         self.entries.push(route);
         self.index = self.entries.len() - 1;
     }
+    pub fn replace_current(&mut self, route: Location) {
+        if let Some(current) = self.entries.get_mut(self.index) {
+            *current = route;
+        } else {
+            self.visit(route);
+        }
+    }
     pub fn step(&mut self, forward: bool) -> Option<Location> {
         if forward {
             if self.index + 1 >= self.entries.len() {
@@ -65,13 +72,7 @@ pub fn watch(ui: Ui) {
 }
 pub fn replace(ui: Ui) {
     let route = ui.location();
-    ui.history.update(|h| {
-        if let Some(current) = h.entries.get_mut(h.index) {
-            *current = route;
-        } else {
-            h.visit(route);
-        }
-    });
+    ui.history.update(|h| h.replace_current(route));
 }
 pub fn go(ui: Ui, forward: bool) {
     let mut history = ui.history.get_untracked();
@@ -212,5 +213,21 @@ mod tests {
         h.visit(route("archive"));
         assert!(h.step(true).is_none());
         assert_eq!(h.entries.len(), 3);
+    }
+    #[test]
+    fn consecutive_new_card_replacement_keeps_single_back_step_to_origin() {
+        let mut h = History::default();
+        let board = route("board");
+        let mut first = route("new-card");
+        first.new_draft = "new-card:first".into();
+        let mut second = route("new-card");
+        second.new_draft = "new-card:second".into();
+        h.visit(board.clone());
+        h.visit(first);
+        h.replace_current(second.clone());
+        // Subsequent async history watcher visit is a no-op on the replaced route.
+        h.visit(second);
+        assert_eq!(h.entries.len(), 2);
+        assert_eq!(h.step(false), Some(board));
     }
 }
