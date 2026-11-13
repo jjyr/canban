@@ -54,6 +54,7 @@ impl AppServer {
             return Ok(saved);
         }
         let (card, project, plan) = context.unwrap();
+        let _merging = self.track_merging(&card.id);
         let message = p["message"]
             .as_str()
             .filter(|s| !s.trim().is_empty())
@@ -116,6 +117,7 @@ impl AppServer {
             Ok(value)
         })?;
         self.git_changed(&project.work_location().machine);
+        drop(_merging);
         drop(_gate);
         if value["state"] == "merged" {
             let _ = self.try_auto_archive_merged(&card.id);
@@ -319,6 +321,7 @@ impl AppServer {
         if has_pending_requests {
             return Ok(());
         }
+        let _merging = self.track_merging(&card.id);
         let target_branch = run.inputs["target_branch"].as_str();
         let sync_upstream = run.inputs["sync_upstream"].as_bool().unwrap_or(true);
         let mut workspace_project = project.clone();
@@ -588,6 +591,7 @@ impl AppServer {
             Ok(())
         })?;
         self.git_changed(&project.work_location().machine);
+        drop(_merging);
         drop(_gate);
         if merged_and_completed {
             let _ = self.try_auto_archive_merged(&card.id);

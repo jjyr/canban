@@ -2,11 +2,7 @@ use super::*;
 use nsh_core::element::desktop::{MenuItem, popup_menu};
 use serde_json::json;
 fn close(ui: Ui) {
-    ui.card_terminal_open.set(false);
-    ui.card_terminal_focused.set(false);
-    ui.card.set(String::new());
-    ui.card_standalone.set(false);
-    ui.page.set("board".into());
+    ui.close_card();
 }
 fn review(ui: Ui) {
     if let Some(c) = ui.current_card() {
@@ -386,6 +382,8 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 );
             if c.merged() {
                 row = row.child(status("Merged", Tone::Success));
+            } else if ui.is_card_merging(&s, &c) {
+                row = row.child(live_status("Merging", Tone::Info));
             }
             if let Some(c_active) = Some(&c).filter(|c| c.active() && !c.merged()) {
                 let has_deliver_in_project = s.workflow_revisions.iter().any(|w| {

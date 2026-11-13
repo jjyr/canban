@@ -95,9 +95,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                     .collect::<Vec<_>>();
                 let any_active = !active_visible.is_empty();
                 let had_prev = !card_runs.is_empty();
-                let idle_deliver = if !any_active
-                    && let Some(c) = &card_opt
-                {
+                let idle_deliver = if !any_active && let Some(c) = &card_opt {
                     let enabled_ids: std::collections::BTreeSet<&str> = s
                         .workflow_sources
                         .iter()

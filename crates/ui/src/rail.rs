@@ -36,7 +36,13 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             )
         },
         || 0,
-        move |_| ui.navigate("board"),
+        move |_| {
+            if ui.page.get_untracked() == "card" {
+                ui.close_card();
+            } else {
+                ui.navigate("board");
+            }
+        },
     ));
     let rail = rail
         .child(icon_action(

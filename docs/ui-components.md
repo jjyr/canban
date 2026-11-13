@@ -168,7 +168,9 @@ and a persisted-unread jump affordance. See [unified reminders](reminders.md).
 
 Shared motion now lives in `ui-kit/src/motion.rs`, with a retained native
 `reveal_split` in `split.rs`. `ui/workspace.rs` keeps Board mounted across Card
-open/close and scopes the outgoing Card identity through animation completion.
+open/close, dismisses an open right-hand Card/New Card pane when non-interactive
+Board space is clicked on the left, and scopes the outgoing Card identity
+through animation completion.
 Markdown input resizing and the shared modal adapters reuse this policy. The
 Gallery's `CANBAN_GALLERY_SCENE=motion` covers interruption, switching, resizing,
 reduced motion and Quick Open. See [native motion](ui-motion.md) for contracts
@@ -200,8 +202,9 @@ Native checks covered pending/progress presentation, recovery layout, real packa
 `ui/src/editor.rs` shares Markdown source, preview, reference completion and draft
 feedback between New Card and task editing. `ui/src/references.rs` supplies local
 Card/Profile candidates and bounded GitHub Issue/PR lookups. UI Kit owns the
-Enter/Shift+Enter newline policy, including open completion menus, and scoped
-Command+Enter submission. The right-pane split retains its editor while expanded.
+`Menlo, PingFang SC` editor font cascade, Enter/Tab completion acceptance,
+Enter/Shift+Enter newlines and scoped Command+Enter submission. New Card binds
+guarded Escape dismissal, and the right-pane split retains its editor while expanded.
 
 `ui/src/drafts.rs` owns window projections, `drafts/list.rs` the searchable Drafts
 screen, and `drafts/persistence.rs` one coalescing background writer. AppServer

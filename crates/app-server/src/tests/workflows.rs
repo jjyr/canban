@@ -2477,3 +2477,40 @@ workspace:
     let reminders = canban_notifications::reminders(&after);
     assert!(reminders.iter().any(|r| r.card_id == card.id && r.unread));
 }
+
+#[test]
+fn snapshot_exposes_merging_cards_while_merge_is_in_flight_and_clears_afterward() {
+    let (_dir, app, _p, c) = setup();
+    let rx = app.subscribe();
+    assert!(app.snapshot().unwrap().merging_cards.is_empty());
+
+    let guard = app.track_merging(&c.id);
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.merging_cards, vec![c.id.clone()]);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::Changed { topic: "review", card_id: Some(ref id) }) if id == &c.id
+    ));
+
+    drop(guard);
+    assert!(app.snapshot().unwrap().merging_cards.is_empty());
+
+    // Merged or archived Cards are filtered out even if a guard is still dropping.
+    let guard = app.track_merging(&c.id);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c.id)?;
+            card.delivery = Some(Delivery {
+                target_branch: "main".into(),
+                commit: "1234567".into(),
+                request_key: "k".into(),
+                merged_at: now(),
+            });
+            db.save(&card)
+        })
+        .unwrap();
+    assert!(app.snapshot().unwrap().merging_cards.is_empty());
+    drop(guard);
+}

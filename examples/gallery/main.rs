@@ -7,7 +7,7 @@ use serde_json::json;
 
 fn controls() -> impl IntoElement {
     let ui = Ui::new();
-    let input = signal("中文与 English · long text fixture".into());
+    let input = signal("Card 现在编辑用中文时 mixed English @developer 与 `code` 对齐测试".into());
     let profile_fixture = signal(canban_types::Config::default().profiles);
     let count = signal(0_u32);
     let directory = signal(String::new());
@@ -61,6 +61,16 @@ fn controls() -> impl IntoElement {
                             "Secondary text · long text and narrow windows should remain readable",
                         ))
                         .child(badge("Needs attention"))
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap_2()
+                                .child(live_status("Merging", Tone::Info))
+                                .child(status("Merged", Tone::Success))
+                                .child(status("Needs review", Tone::Attention))
+                                .child(status("Merge held", Tone::Neutral)),
+                        )
                         .child(
                             action("Disabled action", Variant::Secondary, |_| {}).disabled(true),
                         ),

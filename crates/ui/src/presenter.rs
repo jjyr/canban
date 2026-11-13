@@ -102,6 +102,8 @@ pub struct Ui {
     pub toast_epoch: Signal<u64>,
     pub pending: Signal<bool>,
     pub pending_methods: Signal<BTreeSet<&'static str>>,
+    /// Cards with a UI-initiated merge operation currently in flight.
+    pub merging_cards: Signal<BTreeSet<String>>,
     pub refreshing: Signal<bool>,
     pub snapshot_epoch: Signal<u64>,
     pub output: Signal<String>,
@@ -143,6 +145,23 @@ fn ordered_enabled_profiles(all: &[Profile], default_agent: &str) -> Vec<Profile
         (rank, p.id.clone())
     });
     enabled
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceDismiss {
+    CloseNewCard,
+    CloseCard,
+}
+
+pub fn workspace_dismiss_action(page: &str, blocked: bool) -> Option<WorkspaceDismiss> {
+    if blocked {
+        return None;
+    }
+    match page {
+        "new-card" => Some(WorkspaceDismiss::CloseNewCard),
+        "card" => Some(WorkspaceDismiss::CloseCard),
+        _ => None,
+    }
 }
 
 impl Ui {
@@ -190,6 +209,31 @@ impl Ui {
         self.review_request
             .set(self.review_request.get_untracked() + 1);
         self.page.set(page.into());
+    }
+    pub fn has_blocking_overlay(self) -> bool {
+        self.quick_open.get_untracked()
+            || !self.utility_popup.get_untracked().is_empty()
+            || self.native_modal.get_untracked()
+            || self.quick_merge.get_untracked().is_some()
+            || self.terminal_rename.get_untracked().is_some()
+            || self.worktree_modal.get_untracked().is_some()
+            || self.worktree_promote.get_untracked().is_some()
+            || self.worktree_remove_confirm.get_untracked().is_some()
+    }
+    pub fn close_card(self) {
+        self.card_terminal_open.set(false);
+        self.card_terminal_focused.set(false);
+        self.card.set(String::new());
+        self.card_standalone.set(false);
+        self.clear_output();
+        self.page.set("board".into());
+    }
+    pub fn dismiss_workspace_pane(self) {
+        match workspace_dismiss_action(&self.page.get_untracked(), self.has_blocking_overlay()) {
+            Some(WorkspaceDismiss::CloseNewCard) => self.navigate("board"),
+            Some(WorkspaceDismiss::CloseCard) => self.close_card(),
+            None => {}
+        }
     }
     pub fn new() -> Self {
         let snapshot = signal(Snapshot::default());
@@ -304,6 +348,7 @@ impl Ui {
             toast_epoch: signal(0),
             pending: signal(false),
             pending_methods: signal(BTreeSet::new()),
+            merging_cards: signal(BTreeSet::new()),
             refreshing: signal(false),
             snapshot_epoch: signal(0),
             output: signal(String::new()),
@@ -488,6 +533,12 @@ impl Ui {
     pub fn is_method_pending(self, method: &'static str) -> bool {
         self.pending_methods.with(|s| s.contains(method))
     }
+    pub fn is_card_merging(self, snapshot: &Snapshot, card: &Card) -> bool {
+        crate::components::activity::is_merging(snapshot, card)
+            || card.active()
+                && !card.merged()
+                && self.merging_cards.with(|ids| ids.contains(&card.id))
+    }
     pub fn notify(self, message: impl Into<String>) {
         let message = message.into();
         self.status.set(message.clone());
@@ -599,6 +650,17 @@ pub fn dispatch_complete(
     ui.pending_methods.update(|s| {
         s.insert(method);
     });
+    let merging_card = matches!(
+        method,
+        "review.merge" | "github.pr.merge" | "workflow.deliver"
+    )
+    .then(|| params["card_id"].as_str().map(str::to_owned))
+    .flatten();
+    if let Some(ref cid) = merging_card {
+        ui.merging_cards.update(|ids| {
+            ids.insert(cid.clone());
+        });
+    }
     ui.pending.set(true);
     ui.operation_error.set(String::new());
     ui.status.set(format!("{method}…"));
@@ -615,6 +677,11 @@ pub fn dispatch_complete(
         ui.pending_methods.update(|s| {
             s.remove(method);
         });
+        if let Some(ref cid) = merging_card {
+            ui.merging_cards.update(|ids| {
+                ids.remove(cid);
+            });
+        }
         ui.pending
             .set(!ui.pending_methods.with_untracked(BTreeSet::is_empty));
         match result {
@@ -660,8 +727,14 @@ pub fn dispatch_complete(
                         | "notifications.read_all"
                         | "comment.add"
                         | "card.move"
-                        | "project.create"
-                        | "card.create" => ui.status.set("Saved".into()),
+                        | "project.create" => ui.status.set("Saved".into()),
+                        "card.create" | "github.issue.add" => {
+                            if let Some(number) = value["number"].as_u64() {
+                                ui.notify(format!("Created Card #{number}"));
+                            } else {
+                                ui.notify("Card created");
+                            }
+                        }
                         "worktree.create" => ui.notify("Managed worktree created"),
                         "worktree.promote" => ui.notify("Promoted worktree to Card"),
                         "worktree.remove" => ui.notify("Worktree deleted"),
@@ -677,7 +750,9 @@ pub fn dispatch_complete(
                             ui.page.set("board".into());
                         }
                     }
-                    "card.create" | "github.issue.add" | "github.item.add" if active => {
+                    "card.create" | "github.issue.add" | "github.item.add"
+                        if should_open_created_card(active, &source) =>
+                    {
                         if let Some(id) = value["id"].as_str() {
                             ui.open_card(id.into());
                         }
@@ -824,4 +899,54 @@ pub fn copy_text(ui: Ui, value: String) {
             Err(e) => ui.operation_error.set(e.to_string()),
         }
     });
+}
+/// New Card form submissions remain on a fresh New Card draft for consecutive
+/// creation; other active surfaces (e.g. GitHub `+ Add to Board`) open the Card.
+pub(crate) fn should_open_created_card(active: bool, source: &Location) -> bool {
+    active && source.page != "new-card"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn location(page: &str, new_draft: &str) -> Location {
+        Location {
+            new_draft: new_draft.into(),
+            page: page.into(),
+            project: "proj-1".into(),
+            card: String::new(),
+            request: String::new(),
+            terminal: String::new(),
+            standalone: false,
+            terminal_card: String::new(),
+        }
+    }
+
+    #[test]
+    fn workspace_dismiss_closes_only_card_and_new_card_when_unblocked() {
+        assert_eq!(
+            workspace_dismiss_action("card", false),
+            Some(WorkspaceDismiss::CloseCard)
+        );
+        assert_eq!(
+            workspace_dismiss_action("new-card", false),
+            Some(WorkspaceDismiss::CloseNewCard)
+        );
+        assert_eq!(workspace_dismiss_action("board", false), None);
+        assert_eq!(workspace_dismiss_action("review", false), None);
+        assert_eq!(workspace_dismiss_action("card", true), None);
+        assert_eq!(workspace_dismiss_action("new-card", true), None);
+    }
+
+    #[test]
+    fn new_card_submission_stays_on_new_card_for_consecutive_creation() {
+        let new_card = location("new-card", "new-card:first");
+        assert!(!should_open_created_card(true, &new_card));
+        assert!(!should_open_created_card(false, &new_card));
+
+        let github = location("github", "");
+        assert!(should_open_created_card(true, &github));
+        assert!(!should_open_created_card(false, &github));
+    }
 }

@@ -1,7 +1,7 @@
 //! Shared Markdown reading and source editing. NSH owns the rope, selections,
 //! undo stack and caret completion; changing height/preview never remounts it.
 use super::tokens::*;
-use nsh_base::{Editor, EditorApi, EditorCommand, EditorElement, TextViewElement};
+use nsh_base::{Editor, EditorApi, EditorElement, TextViewElement};
 use nsh_core::prelude::*;
 
 pub fn reader(body: impl Fn() -> String + 'static) -> TextViewElement {
@@ -20,7 +20,6 @@ pub struct MarkdownInput {
     pub held: Signal<bool>,
     pub focus_epoch: Signal<u64>,
     preview: Signal<bool>,
-    keys_epoch: Signal<u64>,
 }
 impl Default for MarkdownInput {
     fn default() -> Self {
@@ -36,7 +35,6 @@ impl MarkdownInput {
             held: signal(false),
             focus_epoch: signal(0),
             preview: signal(false),
-            keys_epoch: signal(0),
         }
     }
     /// Expansion changes space without switching the user's Write/Preview mode.
@@ -76,36 +74,18 @@ impl MarkdownInput {
     }
     /// Bind after the native editor has installed its code-editing keys.
     /// Every native focus acquisition (including returning from a system sheet)
-    /// reclaims Cmd+Enter for the host's single submit intent. The timer and
-    /// binding belong to this effect and disappear on blur, hold or disposal.
+    /// reclaims Cmd+Enter for the host's single submit intent while preserving
+    /// NSH's Enter/Tab completion acceptance and Enter/Shift+Enter newlines.
+    /// The timer and binding belong to this effect and disappear on blur, hold or disposal.
     pub fn on_submit(self, allowed: impl Fn() -> bool + 'static, submit: impl Fn() + 'static) {
         let submit = std::rc::Rc::new(submit);
         effect(move || {
             let _ = self.focus_epoch.get();
-            let _ = self.keys_epoch.get();
             if !self.active.get() || self.held.get() || !allowed() {
                 return;
             }
             let submit = submit.clone();
             set_timeout(std::time::Duration::ZERO, move || {
-                for key in ["enter", "shift+enter"] {
-                    on_key_with(
-                        key,
-                        KeyOptions {
-                            when: nsh_core::keymap::When::Always,
-                            repeat: true,
-                            ..Default::default()
-                        },
-                        move |_| {
-                            if !self.preview.get_untracked()
-                                && let Some(api) = self.editor.api::<EditorApi>()
-                            {
-                                api.hide_completions();
-                                api.run(EditorCommand::Newline);
-                            }
-                        },
-                    );
-                }
                 on_key_with(
                     "mod+enter",
                     KeyOptions {
@@ -122,8 +102,7 @@ impl MarkdownInput {
             });
         });
     }
-    /// Answers retain NSH's caret filtering, Tab/click and stale-request checks.
-    /// Reclaim Enter after NSH installs its completion-menu bindings.
+    /// Answers retain NSH's caret filtering, Enter/Tab/click acceptance and stale-request checks.
     pub fn completions(
         self,
         id: u32,
@@ -131,11 +110,7 @@ impl MarkdownInput {
         incomplete: bool,
     ) {
         if let Some(api) = self.editor.api::<EditorApi>() {
-            let has_items = !items.is_empty();
             api.present_completions(id, items, Some(incomplete));
-            if has_items {
-                self.keys_epoch.update(|n| *n += 1);
-            }
         }
     }
     /// NSH Editor's native sink currently consumes text only. Read file/image
@@ -225,7 +200,9 @@ impl MarkdownInput {
             .indent_guides(false)
             .auto_close(false)
             .auto_indent(false)
+            .highlighting(false)
             .read_only(move || self.preview.get())
+            .font_family(MONO_FONT)
             .font_size(px(13.))
             .line_height(px(20.))
             .text_color(TEXT)

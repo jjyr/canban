@@ -797,7 +797,7 @@ pub fn board_cards() -> canban_types::Snapshot {
     s.requests.push(running);
     let mut queued = s.cards[2].clone();
     queued.id = "queued-card".into();
-    queued.number = 4;
+    queued.number = 5;
     queued.title = "Waiting for a free execution slot".into();
     queued.stage = "develop".into();
     let request = canban_scheduler::request(
@@ -811,9 +811,52 @@ pub fn board_cards() -> canban_types::Snapshot {
     );
     s.requests.push(request);
     s.cards.push(queued);
+    let mut merging = s.cards[2].clone();
+    merging.id = "merging-card".into();
+    merging.number = 6;
+    merging.title = "Queue merge into main · syncing upstream".into();
+    merging.stage = "review".into();
+    merging.branch = Some("canban/gallery/6".into());
+    s.workflow_runs.push(
+        serde_json::from_value(json!({
+            "id": "gallery-merging-run",
+            "project_id": "gallery-project",
+            "card_id": "merging-card",
+            "workflow_id": "delivery",
+            "definition_revision": 1,
+            "definition": {
+                "id": "delivery",
+                "name": "Development",
+                "entries": {"review": "deliver:review"},
+                "steps": {
+                    "deliver:review": {
+                        "type": "deliver",
+                        "sync_upstream": true,
+                        "max_conflict_attempts": 3,
+                        "next": "__end"
+                    },
+                    "__end": {"type": "complete"}
+                }
+            },
+            "state": "waiting_delivery",
+            "step": "deliver:review",
+            "visit": 1,
+            "request_id": null,
+            "trigger_event_id": null,
+            "input_digest": "gallery",
+            "inputs": {"sync_upstream": true},
+            "outputs": {},
+            "history": [],
+            "error": null,
+            "created_at": 0,
+            "updated_at": 0
+        }))
+        .unwrap(),
+    );
+    s.cards.push(merging);
     let mut long = s.cards[2].clone();
     long.id = "long-card".into();
-    long.number = 5;
+    long.number = 7;
     long.title="Keep a long Card title readable without repeating the stage, routing configuration or empty execution state".into();
     long.body = String::new();
     s.cards.push(long);

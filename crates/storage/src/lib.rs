@@ -460,6 +460,7 @@ impl Db<'_> {
             worktrees: self.list()?,
             terminals: self.list()?,
             terminal_contexts: Vec::new(),
+            merging_cards: Vec::new(),
             projects: self.list()?,
             cards: self
                 .list::<Card>()?

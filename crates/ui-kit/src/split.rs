@@ -49,6 +49,7 @@ pub fn reveal_split(
     width: Signal<f32>,
     full: Memo<bool>,
     requested: Memo<bool>,
+    on_dismiss: impl Fn() + 'static,
 ) -> impl IntoElement {
     let total = signal(0f32);
     let open = computed(move || requested.get() && total.get() > 0.);
@@ -113,12 +114,19 @@ pub fn reveal_split(
                                 .min_w(px(0.))
                                 .min_h(px(0.))
                                 .overflow_hidden()
+                                .accessible(false)
+                                .focusable(false)
                                 .accessibility_elements_hidden(move || open.get() && full.get())
                                 .pointer_events(move || {
                                     if open.get() && full.get() {
                                         PointerEvents::None
                                     } else {
                                         PointerEvents::Auto
+                                    }
+                                })
+                                .on_press(move || {
+                                    if wide.get_untracked() {
+                                        on_dismiss();
                                     }
                                 })
                                 .child(left),
