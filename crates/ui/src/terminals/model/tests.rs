@@ -4,32 +4,39 @@ fn fixture() -> Snapshot {
     for (project, card) in [("p1", "c1"), ("p2", "c2")] {
         s.projects.push(serde_json::from_value(json!({"id":project,"name":project,"directory":"/tmp/project","workflow":Workflow::default(),"created_at":1})).unwrap());
         s.cards.push(serde_json::from_value(json!({"id":card,"project_id":project,"number":1,"title":"Same title","body":"","stage":"develop","revision":1,"created_at":1})).unwrap());
-        let mut r = canban_scheduler::request(
+        let mut a = canban_scheduler::attempt(
             project,
             card,
+            1,
             "develop",
             "interactive",
             Config::default().profiles[0].clone(),
             "task".into(),
             None,
         );
-        r.id = format!("request-{card}");
-        r.created_at = 1;
-        r.state = "running".into();
-        r.attempt = 1;
-        s.attempts.push(serde_json::from_value(json!({"id":format!("run-{card}"),"request_id":r.id,"project_id":project,"card_id":card,"number":1,"state":"running","core_id":"core","terminal":format!("t-{card}"),"cwd":"/tmp","input_path":"input","created_at":1,"observed":{"state":"live","status":{"state":"working"}},"provider_session_id":format!("provider-{card}")})).unwrap());
-        s.requests.push(r);
+        a.id = format!("run-{card}");
+        a.created_at = 1;
+        a.state = "running".into();
+        a.core_id = Some("core".into());
+        a.terminal = Some(format!("t-{card}"));
+        a.cwd = "/tmp".into();
+        a.input_path = "input".into();
+        a.observed = Some(json!({"state":"live","status":{"state":"working"}}));
+        a.provider_session_id = Some(format!("provider-{card}"));
+        s.attempts.push(a);
     }
     s
 }
 #[test]
 fn tree_keeps_projects_and_profiles_distinct_and_excludes_unassigned_recovery() {
     let mut s = fixture();
-    let mut req = s.requests[0].clone();
-    req.id = "reviewer".into();
-    req.profile.id = "reviewer".into();
-    req.state = "queued".into();
-    s.requests.push(req);
+    let mut att = s.attempts[0].clone();
+    att.id = "reviewer".into();
+    att.profile.id = "reviewer".into();
+    att.state = "queued".into();
+    att.terminal = None;
+    att.observed = None;
+    s.attempts.push(att);
     let mut recovery = s.cards[0].clone();
     recovery.id = "unassigned".into();
     recovery.attention = Some("No profile".into());
@@ -45,24 +52,25 @@ fn tree_keeps_projects_and_profiles_distinct_and_excludes_unassigned_recovery() 
 fn live_invocation_precedes_queued_followup_and_resume_keeps_identity() {
     let mut s = fixture();
     let key = Conversation::key("c1", "codex");
-    let mut next = s.requests[0].clone();
+    let mut next = s.attempts[0].clone();
     next.id = "followup".into();
+    next.number = 2;
     next.created_at = 2;
     next.state = "queued".into();
-    s.requests.push(next);
+    next.terminal = None;
+    next.observed = None;
+    s.attempts.push(next);
     let row = conversations(&s).into_iter().find(|r| r.id == key).unwrap();
-    assert_eq!(row.request.unwrap().id, "request-c1");
+    assert_eq!(row.attempt.unwrap().id, "run-c1");
     s.attempts[0].observed = Some(json!({"state":"finished"}));
     let row = conversations(&s).into_iter().find(|r| r.id == key).unwrap();
-    assert_eq!(row.request.as_ref().unwrap().id, "followup");
+    assert_eq!(row.attempt.as_ref().unwrap().id, "followup");
     assert!(!closed(&row));
     assert!(binding(&row).is_none());
-    let mut a = s.attempts[0].clone();
-    a.id = "new-run".into();
-    a.request_id = "followup".into();
-    a.terminal = Some("new-terminal".into());
-    a.observed = Some(json!({"state":"live"}));
-    s.attempts.push(a);
+    let f = s.attempts.iter_mut().find(|a| a.id == "followup").unwrap();
+    f.state = "running".into();
+    f.terminal = Some("new-terminal".into());
+    f.observed = Some(json!({"state":"live"}));
     let row = conversations(&s).into_iter().find(|r| r.id == key).unwrap();
     assert_eq!(binding(&row).unwrap()["terminal"], "new-terminal");
     assert_eq!(row.history.len(), 2);
@@ -94,7 +102,7 @@ fn closed_archived_and_missing_bindings_never_create_viewers_or_implicit_resume(
         .find(|r| r.card.id == "c2")
         .unwrap();
     assert!(binding(&row).is_none());
-    assert_eq!(s.requests.len(), 2);
+    assert_eq!(s.attempts.len(), 2);
 }
 #[test]
 fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() {
@@ -148,7 +156,7 @@ fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() 
         .unwrap();
     assert!(ended.ended());
     assert!(ended.binding().is_none());
-    assert_eq!(s.requests.len(), 2);
+    assert_eq!(s.attempts.len(), 2);
 }
 #[test]
 fn workspace_shortcuts_are_valid_nsh_keystrokes() {
@@ -234,7 +242,7 @@ fn automatic_labels_follow_execution_stage_and_profile_without_changing_binding(
     let mut s = fixture();
     s.cards[0].stage = "review".into();
     s.cards[0].title = "非常长的任务标题 / a long task title with important details".repeat(8);
-    s.requests[0].profile.id = "developer".into();
+    s.attempts[0].profile.id = "developer".into();
     let key = Conversation::key("c1", "developer");
     let entry = crate::terminals::entries(&s)
         .into_iter()
@@ -255,14 +263,14 @@ fn automatic_labels_follow_execution_stage_and_profile_without_changing_binding(
     assert_eq!(named.title(), "My review desk");
     assert_eq!(named.binding(), binding);
     s.terminals[0].name = None;
-    s.requests[0].profile.argv = Some(vec!["/opt/bin/claude".into()]);
+    s.attempts[0].profile.argv = Some(vec!["/opt/bin/claude".into()]);
     let entry = crate::terminals::entries(&s)
         .into_iter()
         .find(|e| e.saved.id == key)
         .unwrap();
     assert_eq!(entry.provider().unwrap().0, Icon::Claude);
-    s.requests[0].profile.preset = None;
-    s.requests[0].profile.argv = Some(vec!["my-agent".into()]);
+    s.attempts[0].profile.preset = None;
+    s.attempts[0].profile.argv = Some(vec!["my-agent".into()]);
     let entry = crate::terminals::entries(&s)
         .into_iter()
         .find(|e| e.saved.id == key)
@@ -294,7 +302,7 @@ fn input_gating_has_a_specific_lifecycle_label_and_keeps_binding_identity() {
 #[test]
 fn inactive_is_a_live_unattended_conversation_and_closed_entries_leave_inventory() {
     let mut s = fixture();
-    s.requests[0].state = "completed".into();
+    s.attempts[0].state = "completed".into();
     s.attempts[0].observed = Some(json!({"state":"live","status":{"state":"done"}}));
     s.attempts[0].connection_state = "connected".into();
     s.attempts[0].lifecycle.observed_at = Some(now());
@@ -311,7 +319,7 @@ fn inactive_is_a_live_unattended_conversation_and_closed_entries_leave_inventory
     assert!(entry(&s).inactive());
     assert!(!entry(&s).needs_attention());
     // Unfinished assignment sitting idle requires user inspection instead of silent inactive state.
-    s.requests[0].state = "running".into();
+    s.attempts[0].state = "running".into();
     assert!(entry(&s).needs_attention());
     assert!(!entry(&s).inactive());
     s.attempts[0].observed = Some(json!({"state":"finished"}));
@@ -325,14 +333,10 @@ fn inactive_is_a_live_unattended_conversation_and_closed_entries_leave_inventory
 fn card_destination_requires_choice_and_remembers_only_live_selection() {
     use crate::terminals::{entries, navigation::direct};
     let mut s = fixture();
-    let mut r = s.requests[0].clone();
-    r.id = "second-agent".into();
-    r.profile.id = "reviewer".into();
     let mut a = s.attempts[0].clone();
     a.id = "second-attempt".into();
-    a.request_id = r.id.clone();
+    a.profile.id = "reviewer".into();
     a.terminal = Some("second-pty".into());
-    s.requests.push(r);
     s.attempts.push(a);
     let card_entries = |s: &Snapshot| {
         entries(s)
@@ -363,21 +367,18 @@ fn card_destination_requires_choice_and_remembers_only_live_selection() {
 fn historical_request_never_attaches_to_a_newer_profile_invocation() {
     use crate::terminals::navigation::live_request;
     let mut s = fixture();
-    let original = s.requests[0].id.clone();
+    let original = s.attempts[0].id.clone();
     assert!(live_request(&s, &original).is_some());
     s.attempts[0].observed = Some(json!({"state":"finished"}));
-    let mut next = s.requests[0].clone();
-    next.id = "new-request".into();
-    next.created_at = 2;
     let mut attempt = s.attempts[0].clone();
     attempt.id = "new-attempt".into();
-    attempt.request_id = next.id.clone();
+    attempt.number = 2;
+    attempt.created_at = 2;
     attempt.observed = Some(json!({"state":"live","status":{"state":"working"}}));
-    s.requests.push(next);
     s.attempts.push(attempt);
     assert_eq!(live_request(&s, &original), None);
-    assert!(live_request(&s, "new-request").is_some());
-    assert_eq!(live_request(&s, "removed-request"), None);
+    assert!(live_request(&s, "new-attempt").is_some());
+    assert_eq!(live_request(&s, "removed-attempt"), None);
 }
 
 #[test]
@@ -689,13 +690,13 @@ fn card_agent_actions_open_card_with_expanded_agent_terminal_instead_of_terminal
             }),
             created_at: 2,
         });
-        let req_id = s.requests[0].id.clone();
+        let att_id = s.attempts[0].id.clone();
         let conv_id = Conversation::key("c1", "codex");
         ui.snapshot.set(s);
         ui.page.set("board".into());
 
         // 1. Clicking a running Agent pill (`open_request`) from Board jumps to Card + expanded Agent tab.
-        crate::terminals::open_request(ui, &req_id);
+        crate::terminals::open_request(ui, &att_id);
         assert_eq!(ui.page.get_untracked(), "card");
         assert_eq!(ui.card.get_untracked(), "c1");
         assert_eq!(ui.card_tab.get_untracked(), conv_id);

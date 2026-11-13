@@ -178,7 +178,7 @@ pub(crate) fn observe(
         })
         .collect();
     for action in kinds {
-        db.append(canban_timeline::event("","",&format!("github.{kind}.{action}"),&format!("github:{}",value["user"]["id"]),"GitHub source observation",None,json!({"origin":"github","subject":object,"source_kind":format!("github.{kind}"),"repository":repository,"number":number,"item_id":value["id"],"section":section,"reply_to":value["in_reply_to_id"],"changed_fields":changed,"revision":canban_context::digest(&serde_json::to_vec(&new)?),"related_cards":related,"occurred_at":value["updated_at"],"observation":"poll","baseline":old.is_none()&&!collection_known})))?;
+        db.append(canban_timeline::event("","",&format!("github.{kind}.{action}"),&format!("github:{}",value["user"]["id"]),"GitHub source observation",json!({"origin":"github","subject":object,"source_kind":format!("github.{kind}"),"repository":repository,"number":number,"item_id":value["id"],"section":section,"reply_to":value["in_reply_to_id"],"changed_fields":changed,"revision":canban_context::digest(&serde_json::to_vec(&new)?),"related_cards":related,"occurred_at":value["updated_at"],"observation":"poll","baseline":old.is_none()&&!collection_known})))?;
     }
     db.conn.execute("INSERT INTO source_observations(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![item,serde_json::to_string(&new)?])?;
     Ok(())
@@ -305,7 +305,7 @@ pub(crate) fn complete_collection(
         .map(|c| json!({"card_id":c.id,"project_id":c.project_id,"kind":"source"}))
         .collect();
     for removed in before.into_iter().filter(|id| !ids.contains(id)) {
-        db.append(canban_timeline::event("","",&format!("github.{kind}.{}",if section=="checks"{"check_removed"}else if section=="reviews"{"review_removed"}else{"comment_deleted"}),"github","Remote collection item removed",None,json!({"origin":"github","repository":repo,"number":number,"subject":subject(db,repo,kind,number)?,"section":section,"item_id":removed,"related_cards":related,"observation":"complete_poll"})))?;
+        db.append(canban_timeline::event("","",&format!("github.{kind}.{}",if section=="checks"{"check_removed"}else if section=="reviews"{"review_removed"}else{"comment_deleted"}),"github","Remote collection item removed",json!({"origin":"github","repository":repo,"number":number,"subject":subject(db,repo,kind,number)?,"section":section,"item_id":removed,"related_cards":related,"observation":"complete_poll"})))?;
     }
     db.conn.execute("INSERT INTO source_observations(id,data) VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET data=excluded.data",params![key,serde_json::to_string(&ids)?])?;
     Ok(())

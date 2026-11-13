@@ -597,18 +597,19 @@ pub fn Gallery() -> impl IntoElement {
             };
             snapshot.github_issues.push(canban_types::GitHubIssueSnapshot { id:"source".into(),project_id:snapshot.cards[0].project_id.clone(),source,title:snapshot.cards[0].title.clone(),body:"## GitHub description\n\nThis is the remote source. Local context remains separate.".into(),state:if pr {"draft".into()} else {"open".into()},author_id:1,author_login:"octocat".into(),labels:vec![],assignees:vec![],updated_at:String::new(),synced_at:canban_types::now() });
         }
-        let mut request = canban_scheduler::request(
+        let mut attempt = canban_scheduler::attempt(
             &snapshot.cards[0].project_id,
             "card-1",
+            1,
             "develop",
             "stage_entry",
             canban_types::Config::default().profiles[0].clone(),
             "Card conversation fixture".into(),
             None,
         );
-        request.id = "card-fixture-request".into();
-        request.state = "completed".into();
-        snapshot.requests.push(request);
+        attempt.id = "card-fixture-request".into();
+        attempt.state = "completed".into();
+        snapshot.attempts.push(attempt);
         snapshot.events.retain(|e| e.card_id != "card-1");
         for (index, kind) in [
             "comment.created",
@@ -632,11 +633,9 @@ pub fn Gallery() -> impl IntoElement {
             } else {
                 "agent:developer".into()
             };
-            event.request_id = if index == 0 || index == 5 {
-                None
-            } else {
-                Some("card-fixture-request".into())
-            };
+            if index != 0 && index != 5 {
+                event.data = json!({"attempt_id": "card-fixture-request"});
+            }
             event.message = match index { 0 => "Please preserve the review decision and local discussion scope.".into(), 3 => "## Implementation report\n\n".to_owned() + &"A readable paragraph with **Markdown** and a stable reference [Issue #42](https://github.com/acme/app/issues/42).\n\n".repeat(18), 4 => "Execution failed: check the terminal before continuing.".into(), _ => kind.replace('.', " ") };
             snapshot.events.push(event);
         }
@@ -666,7 +665,6 @@ pub fn Gallery() -> impl IntoElement {
         comment.card_id = "card-1".into();
         comment.kind = "comment.created".into();
         comment.actor = "user".into();
-        comment.request_id = None;
         comment.message = "### Comment Markdown\n\n**Bold comment** and *italic comment*.\n\n[Comment local](card:card-2) · @developer · #ux · [Comment website](https://example.com/)".into();
         comment.data = json!({"body":comment.message});
         snapshot.events.retain(|e| e.card_id != "card-1");
@@ -823,29 +821,16 @@ pub fn Gallery() -> impl IntoElement {
                                 .and_then(|v| v["turn"].as_u64())
                                 .unwrap_or(0)
                                 + 1;
-                            if !s.requests.iter().any(|r| r.id == "idle-req-1") {
-                                let req: canban_types::Request = serde_json::from_value(json!({
-                                    "id": "idle-req-1",
-                                    "project_id": "gallery-project",
-                                    "card_id": "card-1",
-                                    "stage": "develop",
-                                    "trigger": "interactive",
-                                    "profile": canban_types::Config::default().profiles[0],
-                                    "instruction": "Interactive check",
-                                    "state": "running",
-                                    "attempt": 1,
-                                    "created_at": 1
-                                }))
-                                .unwrap();
-                                s.requests.push(req);
-                            }
                             s.attempts.retain(|a| a.id != "idle-attempt-1");
                             let attempt: canban_types::Attempt = serde_json::from_value(json!({
                                 "id": "idle-attempt-1",
-                                "request_id": "idle-req-1",
                                 "project_id": "gallery-project",
                                 "card_id": "card-1",
                                 "number": 1,
+                                "stage": "develop",
+                                "trigger": "interactive",
+                                "profile": canban_types::Config::default().profiles[0],
+                                "instruction": "Interactive check",
                                 "state": "running",
                                 "terminal": "pty-idle-1",
                                 "cwd": "/tmp",
@@ -1274,11 +1259,9 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Idle & Attention Terminals",Variant::Secondary,move |_|{
                     let mut snapshot=fixtures::terminal_workspace();
                     for card in &mut snapshot.cards {card.human_gate=None;card.attention=None;}
-                    for (idx, r) in snapshot.requests.iter_mut().enumerate() {
-                        r.state = if idx == 0 { "running".into() } else { "completed".into() };
-                    }
                     for (idx, a) in snapshot.attempts.iter_mut().enumerate() {
-                        if !a.finished() {
+                        if a.terminal.is_some() && !a.finished() {
+                            a.state = if idx == 0 { "running".into() } else { "completed".into() };
                             let status = if idx == 0 { "idle" } else { "done" };
                             a.observed=Some(json!({"state":"live","turn":1,"status":{"state":status}}));
                             a.connection_state="connected".into();

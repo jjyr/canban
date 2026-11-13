@@ -22,7 +22,6 @@ pub fn create(
         "card.created",
         actor,
         "Card created",
-        None,
         serde_json::json!({"title":c.title,"body":c.body}),
     ))?;
     Ok(c)

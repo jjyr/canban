@@ -306,20 +306,12 @@ impl AppServer {
                         .as_ref()
                         .is_some_and(|v| v["state"] == "finished")
             }) {
-                let mut r: Request = db.get(&a.request_id)?;
-                if matches!(r.state.as_str(), "completed" | "backlog") {
-                    continue;
-                }
                 a.state = "failed".into();
                 a.error = Some("Agent exited without reporting an outcome".into());
                 db.save(&a)?;
-                if r.attempt == a.number && r.state == "needs_report" {
-                    r.state = "failed".into();
-                    db.save(&r)?;
-                }
                 let mut c: Card = db.get(&a.card_id)?;
                 if c.human_gate.as_ref().is_some_and(|g| {
-                    g.request_id.as_deref() == Some(&r.id) && REASONS.contains(&g.reason.as_str())
+                    g.attempt_id.as_deref() == Some(&a.id) && REASONS.contains(&g.reason.as_str())
                 }) {
                     c.human_gate = None;
                     if c.attention
@@ -343,7 +335,7 @@ impl AppServer {
                     "execution.failed",
                     "system",
                     "Migrated the automatic missing-report gate to a failed execution",
-                    Some(r.id),
+                    Some(a.id.clone()),
                     json!({"attempt":a.number,"migration":true}),
                 )?;
             }
@@ -376,20 +368,13 @@ impl AppServer {
             );
             a.close_state = "closed".into();
             a.observed = Some(json!({"state":"missing"}));
-            let mut r: Request = db.get(&a.request_id)?;
-            if r.attempt == a.number
-                && !matches!(r.state.as_str(), "completed" | "backlog" | "blocked")
-            {
-                r.state = "failed".into();
-                db.save(&r)?;
-            }
             log(
                 db,
                 &db.get::<Card>(&a.card_id)?,
                 "execution.missing",
                 "herdr",
                 a.error.as_deref().unwrap(),
-                Some(a.request_id.clone()),
+                Some(a.id.clone()),
                 json!({"attempt":a.number}),
             )?;
             db.save(&a)
@@ -418,7 +403,7 @@ impl AppServer {
                     }
                     let _ = server.pump_admissions();
                     let s = server.snapshot().unwrap_or_default();
-                    if s.requests.iter().any(|r| r.state == "queued") {
+                    if s.attempts.iter().any(|a| a.state == "queued") {
                         server.wake_runtime();
                     }
                     let mut due = |at: u64| {
@@ -555,10 +540,10 @@ impl AppServer {
                     canban_scheduler::next(&s, server.config().scheduler.max_agents).is_some();
                 if retry_needed {
                     let current = s
-                        .requests
+                        .attempts
                         .iter()
-                        .filter(|r| r.state == "queued")
-                        .map(|r| r.id.clone())
+                        .filter(|a| a.state == "queued")
+                        .map(|a| a.id.clone())
                         .collect::<Vec<_>>();
                     if current != queued {
                         queued = current;

@@ -66,9 +66,9 @@ pub fn groups_with_tags(
             agents.insert(format!("@{}", c.profile_id));
             providers.insert(c.provider.clone());
         }
-        for r in snapshot.requests.iter().filter(|r| r.card_id == card.id) {
-            agents.insert(format!("@{}", r.profile.id));
-            providers.insert(r.profile.command_name());
+        for a in snapshot.attempts.iter().filter(|a| a.card_id == card.id) {
+            agents.insert(format!("@{}", a.profile.id));
+            providers.insert(a.profile.command_name());
         }
         let agents = agents.into_iter().collect::<Vec<_>>();
         let tags = crate::tags::card_tags(&card, &known_tags);
@@ -196,17 +196,18 @@ mod tests {
     fn fuzzy_terms_numbers_unicode_and_agent_metadata_filter_only_matching_children() {
         let mut s = fixture();
         let profile = Config::default().profiles[0].clone();
-        let mut r = canban_scheduler::request(
+        let mut a = canban_scheduler::attempt(
             "b",
             "three",
+            1,
             "review",
             "stage_entry",
             profile,
             "Review".into(),
             None,
         );
-        r.id = "request".into();
-        s.requests.push(r);
+        a.id = "attempt-1".into();
+        s.attempts.push(a);
         assert_eq!(groups(&s, "cnBn impr srch")[0].entries[0].card.id, "one");
         assert_eq!(groups(&s, "原终恢复 #42")[0].entries[0].card.id, "two");
         assert_eq!(groups(&s, "codex resume")[0].entries[0].card.id, "three");

@@ -61,10 +61,10 @@ enum Cmd {
     BindSession {
         #[arg(long, env = "CANBAN_SESSION_ID")]
         session_id: String,
-        #[arg(long, env = "CANBAN_REQUEST_ID")]
-        request_id: Option<String>,
-        #[arg(long, env = "CANBAN_ATTEMPT")]
-        attempt: Option<u32>,
+        #[arg(long, env = "CANBAN_CARD")]
+        card: Option<u64>,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project: Option<String>,
     },
     /// Publish a reply without completing the current task.
     Reply {
@@ -72,22 +72,18 @@ enum Cmd {
         question_id: String,
         #[arg(long)]
         file: PathBuf,
-        #[arg(long, env = "CANBAN_REQUEST_ID")]
-        request_id: String,
-        #[arg(long, env = "CANBAN_ATTEMPT")]
-        attempt: u32,
+        #[arg(long, env = "CANBAN_CARD")]
+        card: Option<u64>,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project: Option<String>,
     },
     /// Compatibility shim for an older in-flight callback; lifecycle is observed through Herdr.
     #[command(hide = true)]
     AgentNotify {
         provider: String,
         payload: Option<String>,
-        #[arg(long, env = "CANBAN_REQUEST_ID")]
-        request_id: String,
-        #[arg(long, env = "CANBAN_ATTEMPT")]
-        attempt: u32,
     },
-    /// Report your own outcome for the execution injected by Canban.
+    /// Report your own outcome for the Card injected by Canban.
     Report {
         /// Outcome state: completed | backlog | blocked | failed | working
         #[arg(long)]
@@ -96,26 +92,33 @@ enum Cmd {
         message: String,
         #[arg(long)]
         file: Option<PathBuf>,
-        #[arg(long, env = "CANBAN_REQUEST_ID")]
-        request_id: String,
-        #[arg(long, env = "CANBAN_ATTEMPT")]
-        attempt: u32,
+        #[arg(long, env = "CANBAN_CARD")]
+        card: u64,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project: Option<String>,
         #[arg(long)]
         request_key: Option<String>,
     },
 }
 #[derive(Subcommand)]
 enum CardCmd {
+    /// Show the current Card's details and discussion.
+    Show {
+        #[arg(long, env = "CANBAN_CARD")]
+        card: u64,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project: Option<String>,
+    },
     /// Update the current Card's title and/or Markdown body.
     Update {
         #[arg(long)]
         title: Option<String>,
         #[arg(long)]
         file: Option<PathBuf>,
-        #[arg(long, env = "CANBAN_REQUEST_ID")]
-        request_id: String,
-        #[arg(long, env = "CANBAN_ATTEMPT")]
-        attempt: u32,
+        #[arg(long, env = "CANBAN_CARD")]
+        card: u64,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project: Option<String>,
         #[arg(long)]
         request_key: Option<String>,
     },
@@ -123,10 +126,10 @@ enum CardCmd {
     Adopt {
         #[arg(long, default_value = "develop")]
         stage: String,
-        #[arg(long, env = "CANBAN_REQUEST_ID")]
-        request_id: String,
-        #[arg(long, env = "CANBAN_ATTEMPT")]
-        attempt: u32,
+        #[arg(long, env = "CANBAN_CARD")]
+        card: u64,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project: Option<String>,
         #[arg(long)]
         request_key: Option<String>,
     },
@@ -178,6 +181,23 @@ fn input_body(file: Option<PathBuf>) -> Result<String> {
     let mut body = String::new();
     std::io::stdin().read_to_string(&mut body)?;
     Ok(body)
+}
+fn card_scope(card: Option<u64>, project: Option<String>) -> Value {
+    let mut params = json!({});
+    if let Some(n) = card {
+        params["card"] = json!(n);
+    }
+    if let Some(proj) = project.filter(|s| !s.trim().is_empty()) {
+        params["project_id"] = json!(proj);
+    } else if let Ok(cwd) = std::env::current_dir() {
+        params["cwd"] = json!(cwd);
+    }
+    if let Ok(profile) = std::env::var("CANBAN_PROFILE_ID")
+        && !profile.trim().is_empty()
+    {
+        params["profile_id"] = json!(profile);
+    }
+    params
 }
 fn main() {
     if let Err(e) = run() {
@@ -336,20 +356,22 @@ fn run() -> Result<()> {
     let (method, mut p) = match command {
         Cmd::Workflow { .. } => unreachable!(),
         Cmd::Card { command } => match command {
+            CardCmd::Show { card, project } => {
+                ("card.show".into(), card_scope(Some(card), project))
+            }
             CardCmd::Update {
                 title,
                 file,
-                request_id,
-                attempt,
+                card,
+                project,
                 request_key,
             } => {
                 anyhow::ensure!(
                     title.is_some() || file.is_some(),
                     "Supply --title and/or --file to update the Card"
                 );
-                let mut params = json!({
-                    "execution": {"request_id": request_id, "attempt_number": attempt},
-                });
+                let mut params = card_scope(Some(card), project);
+                params["agent"] = json!(true);
                 if let Some(key) = request_key {
                     params["request_key"] = json!(key);
                 }
@@ -363,20 +385,14 @@ fn run() -> Result<()> {
             }
             CardCmd::Adopt {
                 stage,
-                request_id,
-                attempt,
+                card,
+                project,
                 request_key,
             } => {
-                let key =
-                    request_key.unwrap_or_else(|| format!("adopt:{stage}:{request_id}:{attempt}"));
-                (
-                    "card.adopt".into(),
-                    json!({
-                        "request_key": key,
-                        "stage": stage,
-                        "execution": {"request_id": request_id, "attempt_number": attempt},
-                    }),
-                )
+                let mut params = card_scope(Some(card), project);
+                params["request_key"] = json!(request_key.unwrap_or_else(canban_types::id));
+                params["stage"] = json!(stage);
+                ("card.adopt".into(), params)
             }
         },
         Cmd::Note { command } => match command {
@@ -424,8 +440,8 @@ fn run() -> Result<()> {
         ),
         Cmd::BindSession {
             session_id,
-            request_id,
-            attempt,
+            card,
+            project,
         } => {
             if let Ok(configuration) = std::env::var("CANBAN_CONFIGURATION_ID") {
                 (
@@ -433,21 +449,23 @@ fn run() -> Result<()> {
                     json!({"configuration_id":configuration,"generation":std::env::var("CANBAN_CONFIGURATION_GENERATION")?.parse::<u64>()?,"session_id":session_id}),
                 )
             } else {
-                (
-                    "agent.bind".into(),
-                    json!({"session_id":session_id,"request_id":request_id.context("request ID required")?,"attempt":attempt.context("attempt required")?}),
-                )
+                let mut params = card_scope(card, project);
+                params["session_id"] = json!(session_id);
+                ("agent.bind".into(), params)
             }
         }
         Cmd::Reply {
             question_id,
             file,
-            request_id,
-            attempt,
-        } => (
-            "agent.reply".into(),
-            json!({"request_key":format!("reply:{question_id}"),"question_id":question_id,"request_id":request_id,"attempt":attempt,"body":std::fs::read_to_string(file)?}),
-        ),
+            card,
+            project,
+        } => {
+            let mut params = card_scope(card, project);
+            params["request_key"] = json!(format!("reply:{question_id}"));
+            params["question_id"] = json!(question_id);
+            params["body"] = json!(std::fs::read_to_string(file)?);
+            ("agent.reply".into(), params)
+        }
         Cmd::AgentNotify { .. } => {
             // Accept old callbacks without duplicating Herdr's lifecycle channel.
             println!("{{}}");
@@ -459,22 +477,16 @@ fn run() -> Result<()> {
             state,
             message,
             file,
-            request_id,
-            attempt,
+            card,
+            project,
             request_key,
         } => {
-            let key = request_key.unwrap_or_else(|| {
-                if matches!(state.as_str(), "completed" | "backlog") {
-                    format!("{state}:{request_id}:{attempt}")
-                } else {
-                    canban_types::id()
-                }
-            });
-            let body = file.map(std::fs::read_to_string).transpose()?;
-            (
-                "execution.report".into(),
-                json!({"request_key":key,"execution":{"request_id":request_id,"attempt_number":attempt},"state":state,"message":message,"body":body}),
-            )
+            let mut params = card_scope(Some(card), project);
+            params["request_key"] = json!(request_key.unwrap_or_else(canban_types::id));
+            params["state"] = json!(state);
+            params["message"] = json!(message);
+            params["body"] = json!(file.map(std::fs::read_to_string).transpose()?);
+            ("execution.report".into(), params)
         }
         Cmd::Serve | Cmd::BuildInfo | Cmd::Skill | Cmd::Database { .. } => unreachable!(),
     };
@@ -490,6 +502,8 @@ fn run() -> Result<()> {
             | "review.preview"
             | "resource.read"
             | "execution.output"
+            | "card.show"
+            | "card.get"
     ) && p.get("request_key").is_none()
     {
         p["request_key"] = json!(canban_types::id());
@@ -500,8 +514,6 @@ fn run() -> Result<()> {
             | "note.write"
             | "note.rename"
             | "card.continue"
-            | "card.update"
-            | "card.adopt"
             | "card.move"
             | "execution.retry"
             | "review.merge"
@@ -512,12 +524,27 @@ fn run() -> Result<()> {
             | "workflow.stop"
             | "card.hold_auto_merge"
     ) && p.get("execution").is_none()
+        && let Ok(profile) = std::env::var("CANBAN_PROFILE_ID")
+        && !profile.trim().is_empty()
     {
-        let request = std::env::var("CANBAN_REQUEST_ID").ok();
-        let attempt = std::env::var("CANBAN_ATTEMPT").ok();
-        if request.is_some() || attempt.is_some() {
-            p["execution"] = json!({"request_id":request.context("CANBAN_REQUEST_ID missing")?,"attempt_number":attempt.context("CANBAN_ATTEMPT missing")?.parse::<u32>()?});
+        let mut ex = json!({
+            "agent": true,
+            "profile_id": profile,
+        });
+        if let Ok(cwd) = std::env::current_dir() {
+            ex["cwd"] = json!(cwd);
         }
+        if let Ok(card) = std::env::var("CANBAN_CARD")
+            && let Ok(n) = card.trim().trim_start_matches('#').parse::<u64>()
+        {
+            ex["card"] = json!(n);
+        }
+        if let Ok(proj) = std::env::var("CANBAN_PROJECT")
+            && !proj.trim().is_empty()
+        {
+            ex["project_id"] = json!(proj);
+        }
+        p["execution"] = ex;
     }
     let retryable = matches!(method.as_str(), "execution.report" | "agent.reply")
         && endpoint == home.join("app.sock");

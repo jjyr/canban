@@ -210,8 +210,9 @@ fn environment(cmd: &mut Command, j: &Journal) {
         .env("CANBAN_UPGRADE_TOKEN", &j.token)
         .env("CANBAN_APP_ID", &j.app_id)
         .env_remove("CANBAN_ENDPOINT")
-        .env_remove("CANBAN_REQUEST_ID")
-        .env_remove("CANBAN_ATTEMPT");
+        .env_remove("CANBAN_CARD")
+        .env_remove("CANBAN_PROJECT")
+        .env_remove("CANBAN_PROFILE_ID");
 }
 fn spawn_server(j: &Journal) -> Result<Child> {
     let log = OpenOptions::new()

@@ -125,19 +125,19 @@ pub fn card_status_specs(
         specs.push(("Merge held".into(), Tone::Neutral, false));
     }
     let mut latest = std::collections::BTreeMap::new();
-    for request in snapshot
-        .requests
+    for attempt in snapshot
+        .attempts
         .iter()
-        .filter(|r| r.card_id == card.id && r.stage == card.stage)
+        .filter(|a| a.card_id == card.id && a.stage == card.stage)
     {
-        let previous: Option<&&canban_types::Request> = latest.get(&request.profile.id);
-        if previous.is_none_or(|r| r.created_at <= request.created_at) {
-            latest.insert(request.profile.id.clone(), request);
+        let previous: Option<&&canban_types::Attempt> = latest.get(&attempt.profile.id);
+        if previous.is_none_or(|a| a.created_at <= attempt.created_at) {
+            latest.insert(attempt.profile.id.clone(), attempt);
         }
     }
-    for request in latest.values().filter(|r| r.state == "failed") {
+    for attempt in latest.values().filter(|a| a.state == "failed") {
         specs.push((
-            format!("@{} failed", request.profile.id),
+            format!("@{} failed", attempt.profile.id),
             Tone::Danger,
             false,
         ));
@@ -171,23 +171,23 @@ pub fn card_status_with_merging(
         .collect()
 }
 
-/// Agents currently executing for this Card: newest request per profile.
+/// Agents currently executing for this Card: newest attempt per profile.
 pub fn running_agents(
     snapshot: &canban_types::Snapshot,
     card: &canban_types::Card,
-) -> Vec<canban_types::Request> {
+) -> Vec<canban_types::Attempt> {
     let mut profiles = std::collections::BTreeSet::new();
     let mut running: Vec<_> = snapshot
-        .requests
+        .attempts
         .iter()
-        .filter(|r| {
-            r.card_id == card.id && matches!(r.state.as_str(), "starting" | "running" | "working")
+        .filter(|a| {
+            a.card_id == card.id && matches!(a.state.as_str(), "starting" | "running" | "working")
         })
         .collect();
-    running.sort_by_key(|r| std::cmp::Reverse(r.created_at));
+    running.sort_by_key(|a| std::cmp::Reverse(a.created_at));
     running
         .into_iter()
-        .filter(|r| profiles.insert(r.profile.id.clone()))
+        .filter(|a| profiles.insert(a.profile.id.clone()))
         .cloned()
         .collect()
 }
@@ -200,32 +200,33 @@ mod tests {
         let mut snapshot = canban_types::Snapshot::default();
         let card: canban_types::Card = serde_json::from_value(serde_json::json!({"id":"c","project_id":"p","number":1,"title":"T","body":"","stage":"develop","revision":1,"created_at":1})).unwrap();
         let make = |id: &str, profile: &str, state: &str, at: u64| {
-            let mut r = canban_scheduler::request(
+            let mut a = canban_scheduler::attempt(
                 "p",
                 "c",
+                1,
                 "develop",
                 "interactive",
                 canban_types::Config::default().profiles[0].clone(),
                 "task".into(),
                 None,
             );
-            r.id = id.into();
-            r.state = state.into();
-            r.created_at = at;
-            r.profile.id = profile.into();
-            r
+            a.id = id.into();
+            a.state = state.into();
+            a.created_at = at;
+            a.profile.id = profile.into();
+            a
         };
-        snapshot.requests = vec![
+        snapshot.attempts = vec![
             make("old", "developer", "running", 1),
             make("new", "developer", "working", 2),
             make("done", "reviewer", "completed", 3),
             make("rev", "reviewer", "starting", 1),
             make("other", "tester", "running", 5),
         ];
-        snapshot.requests[4].card_id = "elsewhere".into();
+        snapshot.attempts[4].card_id = "elsewhere".into();
         let ids: Vec<_> = running_agents(&snapshot, &card)
             .into_iter()
-            .map(|r| r.id)
+            .map(|a| a.id)
             .collect();
         assert_eq!(ids, vec!["new", "rev"]);
     }
@@ -287,7 +288,7 @@ mod tests {
             "state": "waiting_delivery",
             "step": "deliver",
             "visit": 1,
-            "request_id": null,
+            "attempt_id": null,
             "trigger_event_id": null,
             "input_digest": "d",
             "inputs": {},

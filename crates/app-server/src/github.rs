@@ -45,24 +45,10 @@ impl AppServer {
     }
     pub(super) fn github_call(&self, method: &str, p: Value) -> Result<Value> {
         if method == "github.context" {
-            let snapshot = self.snapshot()?;
-            let card = snapshot
-                .cards
-                .iter()
-                .find(|c| Some(c.id.as_str()) == p["card_id"].as_str())
-                .context("Card not found")?;
-            if let Some(execution) = p["execution"].as_object() {
-                let request: Request = self.store.lock().unwrap().db().get(
-                    execution
-                        .get("request_id")
-                        .and_then(Value::as_str)
-                        .context("Missing request identity")?,
-                )?;
-                ensure!(
-                    request.card_id == card.id,
-                    "Execution belongs to another Card"
-                );
-            }
+            let card = {
+                let store = self.store.lock().unwrap();
+                super::resolve_card(store.db(), &p)?
+            };
             let content = if let Some(source) = card.github_issue() {
                 let path = format!("/repos/{}/issues/{}", source.repository, source.number);
                 if let Some(value) = self

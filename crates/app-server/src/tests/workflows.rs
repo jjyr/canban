@@ -63,9 +63,9 @@ fn upsert_yaml(app: &AppServer, p: &Project, filename: &str, source: &str) -> Re
 fn publish(app: &AppServer, p: &Project, id: &str, instruction: &str) {
     upsert_yaml(app, p, &format!("{id}.yaml"), &plan_yaml(id, instruction)).unwrap();
 }
-fn finish(app: &AppServer, req: &Request, key: &str) {
+fn finish(app: &AppServer, req: &Attempt, key: &str) {
     let a = admit(app, req);
-    app.call("execution.report",json!({"execution":{"request_id":req.id,"attempt_number":a.number},"request_key":key,"state":"completed","message":"Plan ready","body":"Exact plan artifact"})).unwrap();
+    app.call("execution.report",json!({"attempt_id":a.id,"request_key":key,"state":"completed","message":"Plan ready","body":"Exact plan artifact"})).unwrap();
 }
 #[test]
 fn published_revision_is_immediate_for_new_runs_and_frozen_for_active_runs() {
@@ -88,21 +88,21 @@ fn published_revision_is_immediate_for_new_runs_and_frozen_for_active_runs() {
         .unwrap();
     assert_eq!(run["id"], again["id"]);
     publish(&app, &p, "plan", "SECOND");
-    let req = app.snapshot().unwrap().requests[0].clone();
+    let req = app.snapshot().unwrap().attempts[0].clone();
     assert!(req.instruction.contains("FIRST"));
     finish(&app, &req, "plan-result");
     let s = app.snapshot().unwrap();
     assert_eq!(s.cards[0].stage, "backlog");
     assert_eq!(s.workflow_runs[0].state, "waiting_approval");
     assert_eq!(s.workflow_runs[0].definition_revision, 1);
-    assert_eq!(s.requests.len(), 1);
+    assert_eq!(s.attempts.len(), 1);
     assert!(app.call("workflow.decide",json!({"run_id":run["id"],"visit":2,"revision":s.cards[0].revision,"decision":"approve","execution":{}})).is_err());
     app.call("workflow.decide",json!({"run_id":run["id"],"visit":2,"revision":s.cards[0].revision,"decision":"approve","request_key":"approve"})).unwrap();
     let s = app.snapshot().unwrap();
     assert_eq!(s.cards[0].stage, "develop");
-    assert_eq!(s.requests.len(), 2);
+    assert_eq!(s.attempts.len(), 2);
     assert_eq!(s.workflow_runs.len(), 1);
-    assert!(s.requests[1].instruction.contains("report_id"));
+    assert!(s.attempts[1].instruction.contains("report_id"));
     let other: Card = serde_json::from_value(
         app.call("card.create", json!({"project_id":p.id,"title":"Second"}))
             .unwrap(),
@@ -118,7 +118,7 @@ fn published_revision_is_immediate_for_new_runs_and_frozen_for_active_runs() {
     assert!(
         app.snapshot()
             .unwrap()
-            .requests
+            .attempts
             .last()
             .unwrap()
             .instruction
@@ -182,7 +182,7 @@ fn event_workflows_use_final_card_binding_and_failures_do_not_rollback_source_co
     let s = app.snapshot().unwrap();
     assert_eq!(s.workflow_runs.len(), 1);
     assert_eq!(s.workflow_runs[0].card_id, c["id"].as_str().unwrap());
-    assert_eq!(s.requests.len(), 1);
+    assert_eq!(s.attempts.len(), 1);
     assert_eq!(
         app.call(
             "subscription.deliveries",
@@ -205,7 +205,7 @@ fn event_workflows_use_final_card_binding_and_failures_do_not_rollback_source_co
             .iter()
             .any(|e| e.message == "Still committed")
     );
-    assert_eq!(app.snapshot().unwrap().requests.len(), 1);
+    assert_eq!(app.snapshot().unwrap().attempts.len(), 1);
 }
 #[test]
 fn stale_plan_cannot_approve_and_rework_gets_new_step_identity() {
@@ -216,7 +216,7 @@ fn stale_plan_cannot_approve_and_rework_gets_new_step_identity() {
         json!({"workflow_id":"plan","card_id":c.id,"entry":"start"}),
     )
     .unwrap();
-    finish(&app, &app.snapshot().unwrap().requests[0], "done");
+    finish(&app, &app.snapshot().unwrap().attempts[0], "done");
     let s = app.snapshot().unwrap();
     let run = s.workflow_runs[0].clone();
     let card = s.cards[0].clone();
@@ -229,9 +229,9 @@ fn stale_plan_cannot_approve_and_rework_gets_new_step_identity() {
     assert!(app.call("workflow.decide",json!({"run_id":run.id,"visit":run.visit,"revision":updated["revision"],"decision":"approve"})).is_err());
     app.call("workflow.decide",json!({"run_id":run.id,"visit":run.visit,"revision":updated["revision"],"decision":"rework"})).unwrap();
     let s = app.snapshot().unwrap();
-    assert_eq!(s.requests.len(), 2);
+    assert_eq!(s.attempts.len(), 2);
     assert_eq!(s.workflow_runs[0].visit, 3);
-    assert_ne!(s.requests[0].workflow_step, s.requests[1].workflow_step);
+    assert_ne!(s.attempts[0].workflow_step, s.attempts[1].workflow_step);
 }
 #[test]
 fn invalid_graph_cannot_publish_and_active_run_survives_service_restart() {
@@ -243,7 +243,7 @@ fn invalid_graph_cannot_publish_and_active_run_survives_service_restart() {
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let request = app.snapshot().unwrap().requests[0].clone();
+    let request = app.snapshot().unwrap().attempts[0].clone();
     drop(app);
     let mut opened = None;
     for _ in 0..100 {
@@ -260,10 +260,10 @@ fn invalid_graph_cannot_publish_and_active_run_survives_service_restart() {
     }
     let app = opened.expect("Isolated service lock did not release after shutdown");
     let s = app.snapshot().unwrap();
-    assert_eq!(s.requests.len(), 1);
-    assert_eq!(s.requests[0].id, request.id);
-    assert!(s.requests[0].workflow_run_id.is_some());
-    finish(&app, &s.requests[0], "adopted-done");
+    assert_eq!(s.attempts.len(), 1);
+    assert_eq!(s.attempts[0].id, request.id);
+    assert!(s.attempts[0].workflow_run_id.is_some());
+    finish(&app, &s.attempts[0], "adopted-done");
     assert_eq!(app.snapshot().unwrap().cards[0].stage, "review");
 }
 #[test]
@@ -326,7 +326,7 @@ steps:
         )
         .unwrap();
     assert_eq!(run["state"], "completed");
-    assert!(app.snapshot().unwrap().requests.is_empty());
+    assert!(app.snapshot().unwrap().attempts.is_empty());
     assert_eq!(
         app.snapshot().unwrap().notices[0].message,
         "Condition selected"
@@ -453,7 +453,7 @@ fn compatible_continue_records_one_human_approval_fact() {
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    finish(&app, &app.snapshot().unwrap().requests[0], "develop-done");
+    finish(&app, &app.snapshot().unwrap().attempts[0], "develop-done");
     let card = app.snapshot().unwrap().cards[0].clone();
     app.call(
         "card.continue",
@@ -666,7 +666,7 @@ fn configuration_sessions_have_project_ownership_reuse_and_exact_history_resume(
     assert_eq!(first["terminal_id"], again["terminal_id"]);
     assert_eq!(again["reused"], true);
     let s = app.snapshot().unwrap();
-    assert!(s.requests.is_empty());
+    assert!(s.attempts.is_empty());
     assert_eq!(s.cards.len(), 1);
     assert_eq!(s.configuration_sessions.len(), 1);
     let mut c = s.configuration_sessions[0].clone();
@@ -831,7 +831,7 @@ fn closing_a_queued_configuration_agent_cancels_launch_without_creating_a_card()
     .unwrap();
     let snapshot = app.snapshot().unwrap();
     assert_eq!(snapshot.configuration_sessions[0].state, "cancelled");
-    assert!(snapshot.requests.is_empty());
+    assert!(snapshot.attempts.is_empty());
     assert_eq!(snapshot.cards.len(), 1);
 }
 
@@ -889,7 +889,7 @@ steps:
         json!({"card_id":c.id,"revision":1,"stage":"review"}),
     )
     .unwrap();
-    let request = app.snapshot().unwrap().requests[0].clone();
+    let request = app.snapshot().unwrap().attempts[0].clone();
     assert!(!request.require_human_review);
     finish(&app, &request, "edited-default-complete");
     assert!(app.snapshot().unwrap().cards[0].human_gate.is_none());
@@ -997,7 +997,7 @@ workspace:
         json!({"card_id": c.id, "revision": held.revision, "stage": "develop"}),
     )
     .unwrap();
-    let req1 = app.snapshot().unwrap().requests[0].clone();
+    let req1 = app.snapshot().unwrap().attempts[0].clone();
     finish(&app, &req1, "dev-1");
     let snap = app.snapshot().unwrap();
     assert_eq!(snap.cards[0].stage, "review");
@@ -1022,7 +1022,7 @@ workspace:
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
-    let req2 = snap.requests.last().unwrap().clone();
+    let req2 = snap.attempts.last().unwrap().clone();
     assert!(req2.instruction.contains("Please add edge-case unit tests"));
 
     // Unhold auto-merge while agent works, then finish -> auto-merges / completes!
@@ -1076,7 +1076,7 @@ workspace:
     assert_eq!(ext_run.step.as_deref(), Some("approval:review"));
 }
 
-fn finish_closed(app: &AppServer, req: &Request, key: &str) {
+fn finish_closed(app: &AppServer, req: &Attempt, key: &str) {
     let a = admit(app, req);
     app.store
         .lock()
@@ -1091,7 +1091,7 @@ fn finish_closed(app: &AppServer, req: &Request, key: &str) {
             db.save(&run)
         })
         .unwrap();
-    app.call("execution.report",json!({"execution":{"request_id":req.id,"attempt_number":a.number},"request_key":key,"state":"completed","message":"Plan ready","body":"Exact plan artifact"})).unwrap();
+    app.call("execution.report",json!({"attempt_id":a.id,"request_key":key,"state":"completed","message":"Plan ready","body":"Exact plan artifact"})).unwrap();
     app.store
         .lock()
         .unwrap()
@@ -1167,7 +1167,7 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
     .unwrap();
     let snap = app.snapshot().unwrap();
     assert_eq!(snap.cards[0].stage, "backlog");
-    assert!(snap.requests.is_empty());
+    assert!(snap.attempts.is_empty());
     assert!(snap.workflow_runs.is_empty());
 
     // 2. Entering Develop runs @developer automatically, moves to Review (no @reviewer),
@@ -1178,8 +1178,8 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
-    assert_eq!(snap.requests.len(), 1);
-    assert_eq!(snap.requests[0].profile.id, "developer");
+    assert_eq!(snap.attempts.len(), 1);
+    assert_eq!(snap.attempts[0].profile.id, "developer");
 
     let ops = canban_workspaces::Ops::local();
     let wt1 = ops.prepare(&app.home, &p, &snap.cards[0]).unwrap();
@@ -1201,11 +1201,11 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
     git(&wt1, &["config", "commit.gpgsign", "false"]);
     std::fs::write(wt1.join("feature1.txt"), "hello upstream\n").unwrap();
 
-    finish_closed(&app, &snap.requests[0], "dev-c1-done");
+    finish_closed(&app, &snap.attempts[0], "dev-c1-done");
     app.pump_deliveries().unwrap();
     // Ensure only 1 agent request ran (no @reviewer step in default Review).
     let snap = app.snapshot().unwrap();
-    assert_eq!(snap.requests.len(), 1);
+    assert_eq!(snap.attempts.len(), 1);
     let run1 = snap
         .workflow_runs
         .iter()
@@ -1268,7 +1268,7 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
     .unwrap();
     let snap = app.snapshot().unwrap();
     let req2 = snap
-        .requests
+        .attempts
         .iter()
         .find(|r| r.card_id == c2.id)
         .unwrap()
@@ -1381,7 +1381,7 @@ fn backlog_and_review_options_drive_card_lifecycle_and_preserve_custom_stages() 
         "Card stays in Backlog until auto-analysis completes"
     );
     let plan_req = snap
-        .requests
+        .attempts
         .iter()
         .find(|r| r.card_id == c_plan_dev.id)
         .expect("agent:plan request should queue on card.create")
@@ -1401,7 +1401,7 @@ fn backlog_and_review_options_drive_card_lifecycle_and_preserve_custom_stages() 
         "After analysis finishes, Card automatically moves to Develop"
     );
     let dev_req = snap
-        .requests
+        .attempts
         .iter()
         .rfind(|r| r.card_id == c_plan_dev.id)
         .unwrap()
@@ -1459,7 +1459,7 @@ fn backlog_and_review_options_drive_card_lifecycle_and_preserve_custom_stages() 
         "Card immediately moves from Backlog to Develop when analyze=false, auto_develop=true"
     );
     let reqs_for_c2: Vec<_> = snap
-        .requests
+        .attempts
         .iter()
         .filter(|r| r.card_id == c_direct_dev.id)
         .collect();
@@ -1538,7 +1538,7 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
-    let dev = snap.requests[0].clone();
+    let dev = snap.attempts[0].clone();
     let updated_p = snap.projects.iter().find(|x| x.id == p.id).unwrap();
     let ops = canban_workspaces::Ops::local();
     let wt = ops.prepare(&app.home, updated_p, &snap.cards[0]).unwrap();
@@ -1583,7 +1583,7 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
         && e.kind == "review.merge_conflict"
         && e.data["files"] == json!(["README.md"])));
     let resolve = snap
-        .requests
+        .attempts
         .iter()
         .find(|r| r.card_id == c.id && r.id != dev.id)
         .expect("conflict rework request")
@@ -1725,7 +1725,7 @@ fn queue_merge_conflict_respects_custom_deliver_profile_and_rejects_unknown_prof
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
-    let dev = snap.requests[0].clone();
+    let dev = snap.attempts[0].clone();
     let updated_p = snap.projects.iter().find(|x| x.id == p.id).unwrap();
     let ops = canban_workspaces::Ops::local();
     let wt = ops.prepare(&app.home, updated_p, &snap.cards[0]).unwrap();
@@ -1750,7 +1750,7 @@ fn queue_merge_conflict_respects_custom_deliver_profile_and_rejects_unknown_prof
 
     let snap = app.snapshot().unwrap();
     let resolve = snap
-        .requests
+        .attempts
         .iter()
         .find(|r| r.card_id == c.id && r.id != dev.id)
         .expect("custom conflict profile request");
@@ -1813,7 +1813,7 @@ fn queue_merge_conflict_pauses_for_human_after_attempt_budget() {
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
-    let dev = snap.requests[0].clone();
+    let dev = snap.attempts[0].clone();
     let updated_p = snap.projects.iter().find(|x| x.id == p.id).unwrap();
     let ops = canban_workspaces::Ops::local();
     let wt = ops.prepare(&app.home, updated_p, &snap.cards[0]).unwrap();
@@ -1841,7 +1841,7 @@ fn queue_merge_conflict_pauses_for_human_after_attempt_budget() {
         .unwrap();
     assert_eq!(run.state, "waiting_approval");
     assert_eq!(
-        snap.requests.iter().filter(|r| r.card_id == c.id).count(),
+        snap.attempts.iter().filter(|r| r.card_id == c.id).count(),
         1
     );
     assert!(
@@ -1910,7 +1910,7 @@ fn backlog_admission_plans_ahead_k_and_starts_in_board_order_when_agent_free() {
     let snap = app.snapshot().unwrap();
     // K = 1: only the first Card is planning; the rest wait before planning.
     let plan1 = snap
-        .requests
+        .attempts
         .iter()
         .find(|r| r.card_id == c1.id)
         .expect("first Card plans")
@@ -1926,7 +1926,7 @@ fn backlog_admission_plans_ahead_k_and_starts_in_board_order_when_agent_free() {
         let r = run_of(&snap, &c.id);
         assert_eq!(r.state, "waiting_capacity");
         assert_eq!(r.step.as_deref(), Some("admit:plan"));
-        assert!(!snap.requests.iter().any(|q| q.card_id == c.id));
+        assert!(!snap.attempts.iter().any(|q| q.card_id == c.id));
     }
 
     // Planning finishes; the Agent that planned is still occupying the only slot.
@@ -1953,14 +1953,14 @@ fn backlog_admission_plans_ahead_k_and_starts_in_board_order_when_agent_free() {
         snap.cards.iter().find(|c| c.id == c1.id).unwrap().stage,
         "develop"
     );
-    assert!(snap.requests.iter().any(|r| {
+    assert!(snap.attempts.iter().any(|r| {
         r.card_id == c1.id
             && r.workflow_step
                 .as_deref()
                 .is_some_and(|s| s.starts_with("agent:develop:"))
     }));
     assert!(
-        snap.requests.iter().any(|r| r.card_id == c3.id
+        snap.attempts.iter().any(|r| r.card_id == c3.id
             && r.workflow_step
                 .as_deref()
                 .is_some_and(|s| s.starts_with("agent:plan:"))),
@@ -2022,7 +2022,7 @@ fn removing_the_running_step_finishes_it_then_stops_the_run() {
         json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
     )
     .unwrap();
-    let req = app.snapshot().unwrap().requests[0].clone();
+    let req = app.snapshot().unwrap().attempts[0].clone();
     edit_development(&app, &p, |d| {
         canban_workflow_engine::stages::remove_step(d, "agent:develop").unwrap();
     });
@@ -2099,7 +2099,7 @@ fn report_auto_commits_card_worktree_and_workflow_deliver_retries_paused_or_stop
     .unwrap();
     let snap = app.snapshot().unwrap();
     let dev1 = snap
-        .requests
+        .attempts
         .iter()
         .find(|r| r.card_id == c1.id)
         .unwrap()
@@ -2200,7 +2200,7 @@ fn report_auto_commits_card_worktree_and_workflow_deliver_retries_paused_or_stop
     .unwrap();
     let snap = app.snapshot().unwrap();
     let dev2 = snap
-        .requests
+        .attempts
         .iter()
         .find(|r| r.card_id == c2.id)
         .unwrap()
@@ -2262,7 +2262,7 @@ fn report_auto_commits_card_worktree_and_workflow_deliver_retries_paused_or_stop
     );
     let snap = app.snapshot().unwrap();
     let new_req = snap
-        .requests
+        .attempts
         .iter()
         .rfind(|r| r.card_id == c2.id)
         .unwrap()
@@ -2473,7 +2473,7 @@ fn streamlined_prompt_omits_manifest_instruction_and_inlines_context_conditional
     .unwrap();
     let snap = app.snapshot().unwrap();
     let req = snap
-        .requests
+        .attempts
         .iter()
         .find(|r| r.card_id == moved.id && r.state == "queued")
         .unwrap();
@@ -2482,7 +2482,6 @@ fn streamlined_prompt_omits_manifest_instruction_and_inlines_context_conditional
         &p,
         &moved,
         req,
-        1,
         &snap,
         "/tmp/canban-test.sock",
         Path::new("/bin/echo"),
@@ -2510,7 +2509,8 @@ fn streamlined_prompt_omits_manifest_instruction_and_inlines_context_conditional
     app.call(
         "execution.report",
         json!({
-            "execution": {"request_id": attempt.request_id, "attempt_number": 1},
+            "project_id": p.id,
+            "card": moved.number,
             "state": "blocked",
             "message": "Need API spec",
             "body": "# Plan notes\nCheck auth handler.",
@@ -2532,12 +2532,14 @@ fn streamlined_prompt_omits_manifest_instruction_and_inlines_context_conditional
     .unwrap();
     let snap2 = app.snapshot().unwrap();
     let card2 = snap2.cards.iter().find(|x| x.id == c.id).unwrap();
+    let mut next_att = attempt.clone();
+    next_att.id = id();
+    next_att.number = 2;
     let rel_prompt2 = canban_context::capture(
         &app.home,
         &p,
         card2,
-        req,
-        2,
+        &next_att,
         &snap2,
         "/tmp/canban-test.sock",
         Path::new("/bin/echo"),
@@ -2636,7 +2638,7 @@ workspace:
     .unwrap();
     let snap = app.snapshot().unwrap();
     let req = snap
-        .requests
+        .attempts
         .iter()
         .find(|r| r.card_id == card.id && r.stage == "develop" && r.state == "queued")
         .unwrap()
@@ -2648,11 +2650,12 @@ workspace:
         .call(
             "execution.report",
             json!({
-                "execution": {"request_id": attempt.request_id, "attempt_number": 1},
+                "project_id": p.id,
+                "card": card.number,
                 "state": "backlog",
                 "message": "Already removed in PR #42",
                 "body": "Verified `src/v0_shim.rs` no longer exists on `main`.",
-                "request_key": format!("backlog:{}:1", attempt.request_id)
+                "request_key": format!("backlog:{}", attempt.id)
             }),
         )
         .unwrap();
@@ -2673,7 +2676,7 @@ workspace:
     );
     assert!(
         !after
-            .requests
+            .attempts
             .iter()
             .any(|r| r.card_id == card.id && r.state == "queued")
     );
@@ -2786,7 +2789,7 @@ fn queue_merge_waits_for_connected_agent_turn_wrapup_and_falls_back_after_settle
     .unwrap();
     let snap = app.snapshot().unwrap();
     let req1 = snap
-        .requests
+        .attempts
         .iter()
         .find(|r| r.card_id == c1.id)
         .unwrap()
@@ -2830,7 +2833,7 @@ fn queue_merge_waits_for_connected_agent_turn_wrapup_and_falls_back_after_settle
     app.call(
         "execution.report",
         json!({
-            "execution": {"request_id": req1.id, "attempt_number": a1.number},
+            "attempt_id": a1.id,
             "request_key": "c1-report",
             "state": "completed",
             "message": "Implemented feature"
@@ -2896,7 +2899,7 @@ fn queue_merge_waits_for_connected_agent_turn_wrapup_and_falls_back_after_settle
     .unwrap();
     let snap = app.snapshot().unwrap();
     let req2 = snap
-        .requests
+        .attempts
         .iter()
         .find(|r| r.card_id == c2.id)
         .unwrap()
@@ -2937,7 +2940,7 @@ fn queue_merge_waits_for_connected_agent_turn_wrapup_and_falls_back_after_settle
     app.call(
         "execution.report",
         json!({
-            "execution": {"request_id": req2.id, "attempt_number": a2.number},
+            "attempt_id": a2.id,
             "request_key": "c2-report",
             "state": "completed",
             "message": "Done"
@@ -3024,7 +3027,7 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
         .unwrap(),
     )
     .unwrap();
-    let other_card: Card = serde_json::from_value(
+    let _other_card: Card = serde_json::from_value(
         app.call(
             "card.create",
             json!({
@@ -3046,11 +3049,11 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     let req = app
         .snapshot()
         .unwrap()
-        .requests
+        .attempts
         .into_iter()
         .find(|r| r.card_id == card.id)
         .unwrap();
-    assert_eq!(req.trigger, RequestTrigger::Interactive);
+    assert_eq!(req.trigger, ExecutionTrigger::Interactive);
     assert!(req.workflow_run_id.is_none());
 
     let ops = canban_workspaces::Ops::local();
@@ -3074,8 +3077,7 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
         &app.home,
         &p,
         &card,
-        &req,
-        attempt.number,
+        &attempt,
         &app.snapshot().unwrap(),
         "/tmp/test.sock",
         Path::new("/bin/canban"),
@@ -3086,42 +3088,22 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     assert!(prompt.contains("card adopt"));
     assert!(prompt.contains("Ask the user for permission before starting implementation"));
 
-    // Security check: execution cannot update or adopt another Card.
-    assert!(
-        app.call(
-            "card.update",
-            json!({
-                "card_id": other_card.id,
-                "body": "Hijacked",
-                "execution": {"request_id": req.id, "attempt_number": attempt.number}
-            }),
-        )
-        .is_err()
-    );
-    assert!(
-        app.call(
-            "card.adopt",
-            json!({
-                "card_id": other_card.id,
-                "stage": "develop",
-                "execution": {"request_id": req.id, "attempt_number": attempt.number}
-            }),
-        )
-        .is_err()
-    );
+    // Validation check: `card.adopt` requires `--card` (or `CANBAN_CARD`) / `card_id`.
     assert!(
         app.call("card.adopt", json!({"stage": "develop"})).is_err(),
-        "card.adopt requires an active Agent execution binding"
+        "card.adopt requires --card / CANBAN_CARD or card_id"
     );
 
-    // 2. Agent updates Card with user-confirmed design key points via execution binding (no card_id/revision required).
+    // 2. Agent updates Card with user-confirmed design key points via CANBAN_PROJECT + CANBAN_CARD (no revision required).
     let updated_card: Card = serde_json::from_value(
         app.call(
             "card.update",
             json!({
+                "project_id": p.id,
+                "card": card.number,
+                "agent": true,
                 "title": "Confirmed Design Spec",
-                "body": "## Confirmed Design\n- Use `card adopt` without re-triggering scheduling",
-                "execution": {"request_id": req.id, "attempt_number": attempt.number}
+                "body": "## Confirmed Design\n- Use `card adopt` without re-triggering scheduling"
             }),
         )
         .unwrap(),
@@ -3145,9 +3127,10 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
         .call(
             "card.adopt",
             json!({
+                "project_id": p.id,
+                "card": card.number,
                 "stage": "develop",
-                "request_key": "adopt-1",
-                "execution": {"request_id": req.id, "attempt_number": attempt.number}
+                "request_key": "adopt-1"
             }),
         )
         .unwrap();
@@ -3160,19 +3143,20 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
         .call(
             "card.adopt",
             json!({
+                "project_id": p.id,
+                "card": card.number,
                 "stage": "develop",
-                "request_key": "adopt-2",
-                "execution": {"request_id": req.id, "attempt_number": attempt.number}
+                "request_key": "adopt-2"
             }),
         )
         .unwrap();
     assert_eq!(adopt_again["workflow_run"]["id"], json!(run_id));
 
     let after_adopt = app.snapshot().unwrap();
-    // Crucial: NO second Request was queued by `on.develop` (`card.column_entered`)!
+    // Crucial: NO second Attempt was queued by `on.develop` (`card.column_entered`)!
     assert_eq!(
         after_adopt
-            .requests
+            .attempts
             .iter()
             .filter(|r| r.card_id == card.id)
             .count(),
@@ -3180,9 +3164,9 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
         "card.adopt must suppress duplicate column_entered scheduling"
     );
     let bound_req = after_adopt
-        .requests
+        .attempts
         .iter()
-        .find(|r| r.id == req.id)
+        .find(|r| r.id == attempt.id)
         .unwrap();
     assert_eq!(bound_req.workflow_run_id.as_deref(), Some(run_id.as_str()));
     assert_eq!(bound_req.stage, "develop");
@@ -3192,7 +3176,7 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
         .find(|r| r.id == run_id)
         .unwrap();
     assert_eq!(wf_run.state, "waiting_agent");
-    assert_eq!(wf_run.request_id.as_deref(), Some(req.id.as_str()));
+    assert_eq!(wf_run.attempt_id.as_deref(), Some(attempt.id.as_str()));
     assert!(after_adopt.events.iter().any(|e| {
         e.card_id == card.id
             && e.kind == "card.stage_changed"
@@ -3205,8 +3189,10 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     app.call(
         "card.update",
         json!({
-            "body": "## Confirmed Design\n- Use `card adopt`\n- Refresh workflow digest on bound update",
-            "execution": {"request_id": req.id, "attempt_number": attempt.number}
+            "project_id": p.id,
+            "card": card.number,
+            "agent": true,
+            "body": "## Confirmed Design\n- Use `card adopt`\n- Refresh workflow digest on bound update"
         }),
     )
     .unwrap();
@@ -3219,7 +3205,8 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     app.call(
         "execution.report",
         json!({
-            "execution": {"request_id": req.id, "attempt_number": attempt.number},
+            "project_id": p.id,
+            "card": card.number,
             "request_key": "adopt-complete",
             "state": "completed",
             "message": "Implemented directly from interactive session"
@@ -3296,7 +3283,7 @@ fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_fo
     }
     let (c1, c2, c3) = (created[0].clone(), created[1].clone(), created[2].clone());
 
-    let prepare_in_develop = |card: &Card| -> (Request, PathBuf) {
+    let prepare_in_develop = |card: &Card| -> (Attempt, PathBuf) {
         app.call(
             "card.move",
             json!({"card_id": card.id, "revision": card.revision, "stage": "develop"}),
@@ -3304,7 +3291,7 @@ fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_fo
         .unwrap();
         let snap = app.snapshot().unwrap();
         let req = snap
-            .requests
+            .attempts
             .iter()
             .find(|r| r.card_id == card.id)
             .unwrap()
@@ -3386,7 +3373,7 @@ fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_fo
         Some((3, 3))
     );
     assert!(
-        !snap.requests.iter().any(|r| r.profile.id == "merger"),
+        !snap.attempts.iter().any(|r| r.profile.id == "merger"),
         "No @merger request may be created while waiting or for clean merges"
     );
 
@@ -3407,7 +3394,7 @@ fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_fo
     );
     assert!(
         !snap
-            .requests
+            .attempts
             .iter()
             .any(|r| r.card_id == c3.id && r.profile.id == "merger"),
         "Clean merge of c3 must NOT spawn @merger"
@@ -3434,8 +3421,8 @@ fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_fo
         vec![c1.id.clone(), c2.id.clone()],
         "c1 holds head #1 during @merger conflict resolution, with c2 queued at #2"
     );
-    let merger_c1: Vec<&Request> = snap
-        .requests
+    let merger_c1: Vec<&Attempt> = snap
+        .attempts
         .iter()
         .filter(|r| r.card_id == c1.id && r.profile.id == "merger")
         .collect();
@@ -3492,7 +3479,7 @@ fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_fo
     );
     assert!(
         !snap
-            .requests
+            .attempts
             .iter()
             .any(|r| r.card_id == c2.id && r.profile.id == "merger"),
         "Clean merge of c2 must NOT spawn @merger"
@@ -3698,4 +3685,173 @@ fn live_card_move_from_backlog_to_review_returns_immediately_while_delivery_merg
 
     rpc(&endpoint, "app.shutdown", json!({})).unwrap();
     drop(running);
+}
+
+#[test]
+fn manual_card_terminal_updates_adopts_and_reports_via_short_card_number_with_zero_attempts() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "init"]);
+    let remote = dir.path().join("remote.git");
+    std::fs::create_dir_all(&remote).unwrap();
+    git_in(&remote, &["init", "--bare", "-b", "main"]);
+    git_in(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git_in(&source, &["push", "-u", "origin", "main"]);
+
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    super::terminal_cases::core(&app, dir.path());
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Manual Terminal Flow", "directory": source}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Manual Terminal Card", "body": "Draft idea"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // 1. User opens a standalone Agent Terminal from the Card in Backlog -> creates worktree, 0 Attempts!
+    app.call(
+        "terminal.create",
+        json!({"project_id": p.id, "card_id": card.id, "agent": true, "request_key": "open-manual-agent"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    assert!(snap.attempts.is_empty());
+    let wt = PathBuf::from(
+        snap.cards
+            .iter()
+            .find(|c| c.id == card.id)
+            .unwrap()
+            .worktree
+            .clone()
+            .expect("worktree created on terminal.create"),
+    );
+    git_identity(&wt);
+
+    // 2. Agent inside that terminal inspects and updates the Card using only `card` number + `cwd` (no Attempt!).
+    let shown: Card = serde_json::from_value(
+        app.call("card.show", json!({"card": card.number, "cwd": wt}))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(shown.id, card.id);
+
+    let updated: Card = serde_json::from_value(
+        app.call(
+            "card.update",
+            json!({
+                "card": card.number,
+                "cwd": wt,
+                "agent": true,
+                "title": "Confirmed Manual Terminal Spec",
+                "body": "## Design\n- No Request/Attempt required"
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(updated.title, "Confirmed Manual Terminal Spec");
+    assert_eq!(updated.stage, "backlog");
+
+    // 3. User approves starting implementation -> Agent calls `card.adopt` with `card` + `cwd`.
+    // Card moves to `develop`, WorkflowRun enters `waiting_agent` with `attempt_id: None`, and ZERO background Attempts spawn!
+    let adopted = app
+        .call(
+            "card.adopt",
+            json!({
+                "card": card.number,
+                "cwd": wt,
+                "stage": "develop",
+                "request_key": "manual-adopt-1"
+            }),
+        )
+        .unwrap();
+    assert_eq!(adopted["adopted"], true);
+    assert_eq!(adopted["card"]["stage"], "develop");
+    let run_id = adopted["workflow_run"]["id"].as_str().unwrap().to_owned();
+
+    let mid_snap = app.snapshot().unwrap();
+    assert!(
+        mid_snap.attempts.is_empty(),
+        "Adopting from a manual Card terminal must not spawn a background @developer Attempt"
+    );
+    let wf_run = mid_snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.id == run_id)
+        .unwrap();
+    assert_eq!(wf_run.state, "waiting_agent");
+    assert!(wf_run.attempt_id.is_none());
+
+    // Updating the Card again while adopted keeps `WorkflowRun.input_digest` in sync even with `attempt_id: None`.
+    app.call(
+        "card.update",
+        json!({
+            "card": card.number,
+            "cwd": wt,
+            "agent": true,
+            "body": "## Design\n- No Request/Attempt required\n- Digest synced"
+        }),
+    )
+    .unwrap();
+
+    // 4. Agent commits changes in the Card worktree and runs `canban report --state completed` (`card` + `cwd`).
+    std::fs::write(wt.join("manual.txt"), "implemented from manual terminal\n").unwrap();
+    git_in(&wt, &["add", "."]);
+    git_in(
+        &wt,
+        &["commit", "-m", "feat: manual terminal implementation"],
+    );
+
+    app.call(
+        "execution.report",
+        json!({
+            "card": card.number,
+            "cwd": wt,
+            "state": "completed",
+            "message": "Completed in manual terminal",
+            "body": "# Summary\nImplemented and tested.",
+            "request_key": "manual-report-done"
+        }),
+    )
+    .unwrap();
+    app.pump_deliveries().unwrap();
+
+    let final_snap = app.snapshot().unwrap();
+    assert!(
+        final_snap.attempts.is_empty(),
+        "Entire manual terminal lifecycle completed and merged with zero Attempts"
+    );
+    assert_eq!(final_snap.reports.len(), 1);
+    assert!(final_snap.reports[0].attempt_id.is_none());
+    assert_eq!(
+        final_snap.reports[0].workflow_run_id.as_deref(),
+        Some(run_id.as_str())
+    );
+    let final_card = final_snap.cards.iter().find(|c| c.id == card.id).unwrap();
+    assert_eq!(final_card.stage, "review");
+    assert!(
+        final_card.delivery.is_some(),
+        "Manual terminal report must advance adopted workflow through Review Queue Merge"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("manual.txt")).unwrap(),
+        "implemented from manual terminal\n"
+    );
 }

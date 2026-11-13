@@ -74,12 +74,12 @@ pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<
         .into_iter()
         .filter(|row| row.card.active() && !row.card.merged())
     {
-        let Some(req) = &row.request else {
+        let Some(att) = &row.attempt else {
             continue;
         };
         let title = format!(
             "@{} · #{} {}",
-            req.profile.id, row.card.number, row.card.title
+            att.profile.id, row.card.number, row.card.title
         );
         rows.push(Candidate {
             id: format!("agent:{}", row.id),
@@ -99,7 +99,7 @@ pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<
             fields: vec![
                 title,
                 row.project_name,
-                req.profile.command_name(),
+                att.profile.command_name(),
                 row.group,
             ],
             tags: Vec::new(),

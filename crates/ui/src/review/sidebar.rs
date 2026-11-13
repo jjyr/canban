@@ -1075,7 +1075,7 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                 // Re-evaluate against the live snapshot: the preview's warning was
                 // captured when the Diff opened and goes stale once the Agent idles.
                 let live_warning = ui.snapshot.with(|s| {
-                    canban_types::agent_activity_warning(&p.card_id, &s.attempts, &s.requests)
+                    canban_types::agent_activity_warning(&p.card_id, &s.attempts)
                 });
                 if let Some(warning) = live_warning {
                     any = true;

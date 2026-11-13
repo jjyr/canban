@@ -62,7 +62,8 @@ impl Default for WorkspaceSettings {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct HumanGate {
     pub reason: String,
-    pub request_id: Option<String>,
+    #[serde(default)]
+    pub attempt_id: Option<String>,
     pub next_stage: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -456,22 +457,24 @@ pub struct Event {
     pub kind: String,
     pub actor: String,
     pub message: String,
-    pub request_id: Option<String>,
     pub data: Value,
     pub created_at: u64,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RequestTrigger {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ExecutionTrigger {
+    #[default]
     Workflow,
     StageEntry,
     Interactive,
-    Comment { comment_id: String },
+    Comment {
+        comment_id: String,
+    },
     Custom(String),
 }
-impl RequestTrigger {
+impl ExecutionTrigger {
     pub fn parse(raw: &str) -> Self {
         match raw {
-            "workflow" => Self::Workflow,
+            "" | "workflow" => Self::Workflow,
             "stage_entry" => Self::StageEntry,
             "interactive" => Self::Interactive,
             _ if raw.starts_with("comment:") => Self::Comment {
@@ -493,7 +496,7 @@ impl RequestTrigger {
         }
     }
 }
-impl std::fmt::Display for RequestTrigger {
+impl std::fmt::Display for ExecutionTrigger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Workflow => f.write_str("workflow"),
@@ -504,53 +507,47 @@ impl std::fmt::Display for RequestTrigger {
         }
     }
 }
-impl From<&str> for RequestTrigger {
+impl From<&str> for ExecutionTrigger {
     fn from(raw: &str) -> Self {
         Self::parse(raw)
     }
 }
-impl From<String> for RequestTrigger {
+impl From<String> for ExecutionTrigger {
     fn from(raw: String) -> Self {
         Self::parse(&raw)
     }
 }
-impl Serialize for RequestTrigger {
+impl Serialize for ExecutionTrigger {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)
     }
 }
-impl<'de> Deserialize<'de> for RequestTrigger {
+impl<'de> Deserialize<'de> for ExecutionTrigger {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
         Ok(Self::parse(&s))
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Request {
+pub struct Attempt {
     #[serde(default)]
     pub workflow_run_id: Option<String>,
     #[serde(default)]
     pub workflow_step: Option<String>,
     #[serde(default)]
-    pub location: Option<WorkLocation>,
-    #[serde(default)]
     pub resume_from: Option<String>,
-    pub id: String,
-    pub project_id: String,
-    pub card_id: String,
-    pub trigger: RequestTrigger,
+    #[serde(default)]
+    pub trigger: ExecutionTrigger,
+    #[serde(default)]
     pub stage: String,
+    #[serde(default)]
     pub profile: Profile,
+    #[serde(default)]
     pub instruction: String,
+    #[serde(default)]
     pub on_completed: Option<String>,
     #[serde(default)]
     pub require_human_review: bool,
-    pub state: String,
-    pub attempt: u32,
-    pub created_at: u64,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Attempt {
     #[serde(default)]
     pub runtime_home: Option<String>,
     #[serde(default)]
@@ -562,17 +559,24 @@ pub struct Attempt {
     #[serde(default)]
     pub lifecycle: Lifecycle,
     pub id: String,
-    pub request_id: String,
     pub project_id: String,
     pub card_id: String,
+    #[serde(default)]
     pub number: u32,
     pub state: String,
+    #[serde(default)]
     pub core_id: Option<String>,
+    #[serde(default)]
     pub terminal: Option<String>,
+    #[serde(default)]
     pub cwd: String,
+    #[serde(default)]
     pub input_path: String,
+    #[serde(default)]
     pub output_path: Option<String>,
+    #[serde(default)]
     pub observed: Option<Value>,
+    #[serde(default)]
     pub error: Option<String>,
     pub created_at: u64,
     #[serde(default)]
@@ -614,9 +618,12 @@ pub struct RuntimeWait {
 }
 impl Attempt {
     pub fn finished(&self) -> bool {
-        self.state == "continued"
-            || self.connection_state == "missing"
-            || self.terminal.is_none() && self.state == "failed"
+        matches!(
+            self.state.as_str(),
+            "continued" | "cancelled" | "superseded"
+        ) || self.connection_state == "missing"
+            || self.terminal.is_none()
+                && matches!(self.state.as_str(), "failed" | "completed" | "backlog")
             || self
                 .observed
                 .as_ref()
@@ -661,20 +668,13 @@ impl Attempt {
             .and_then(|v| v["status"]["state"].as_str())
             .unwrap_or("unknown")
     }
-    pub fn key(request: &str, number: u32) -> String {
-        format!("{request}:{number}")
-    }
 }
 
 /// Merge-time caution about Agent work on a Card, or `None` when every Agent has
 /// stopped its turn. Shared by AppServer previews and the live UI (which must
 /// re-evaluate it as Herdr status changes; a preview snapshot goes stale once an
 /// Agent that reported while finishing its turn becomes idle).
-pub fn agent_activity_warning(
-    card_id: &str,
-    attempts: &[Attempt],
-    requests: &[Request],
-) -> Option<String> {
+pub fn agent_activity_warning(card_id: &str, attempts: &[Attempt]) -> Option<String> {
     // Continued assignments are `finished()`: runtime ownership moved to the next one.
     let live = attempts
         .iter()
@@ -695,10 +695,12 @@ pub fn agent_activity_warning(
                 .into(),
         );
     }
-    let pending: Vec<_> = requests
+    let pending: Vec<_> = attempts
         .iter()
-        .filter(|r| {
-            r.card_id == card_id && matches!(r.state.as_str(), "queued" | "starting" | "unknown")
+        .filter(|a| {
+            a.card_id == card_id
+                && a.terminal.is_none()
+                && matches!(a.state.as_str(), "queued" | "starting" | "unknown")
         })
         .collect();
     if pending.is_empty() {
@@ -706,7 +708,7 @@ pub fn agent_activity_warning(
     }
     let what = pending
         .iter()
-        .map(|r| format!("@{} {}", r.profile.id, r.state))
+        .map(|a| format!("@{} {}", a.profile.id, a.state))
         .collect::<Vec<_>>()
         .join(", ");
     Some(format!("Card still has pending Agent work ({what})"))
@@ -719,7 +721,8 @@ pub struct Conversation {
     pub profile_id: String,
     pub provider: String,
     pub provider_session_id: Option<String>,
-    pub last_request_id: Option<String>,
+    #[serde(default)]
+    pub last_attempt_id: Option<String>,
     pub created_at: u64,
 }
 impl Conversation {
@@ -735,8 +738,8 @@ pub struct Question {
     pub profile_id: String,
     pub comment_id: String,
     pub body: String,
-    pub request_id: String,
-    pub attempt: u32,
+    #[serde(default)]
+    pub attempt_id: Option<String>,
     pub state: String,
     pub error: Option<String>,
     pub reply_path: Option<String>,
@@ -745,10 +748,14 @@ pub struct Question {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Report {
     pub id: String,
-    pub request_id: String,
+    #[serde(default)]
+    pub attempt_id: Option<String>,
+    #[serde(default)]
+    pub workflow_run_id: Option<String>,
+    #[serde(default)]
+    pub actor: String,
     pub project_id: String,
     pub card_id: String,
-    pub attempt: u32,
     pub state: String,
     pub message: String,
     pub path: Option<String>,
@@ -791,8 +798,6 @@ pub struct NoteEvent {
     pub actor: String,
     pub message: String,
     pub card_id: Option<String>,
-    pub request_id: Option<String>,
-    pub attempt: Option<u32>,
     pub revision: u64,
     pub data: Value,
     pub created_at: u64,
@@ -856,7 +861,6 @@ pub struct Snapshot {
     pub projects: Vec<Project>,
     pub cards: Vec<Card>,
     pub events: Vec<Event>,
-    pub requests: Vec<Request>,
     pub attempts: Vec<Attempt>,
     pub reports: Vec<Report>,
     pub notes: Vec<Note>,
@@ -1176,8 +1180,7 @@ mod tests {
         observed: Option<Value>,
     ) -> Attempt {
         serde_json::from_value(json!({
-            "id": "req-1:1",
-            "request_id": "req-1",
+            "id": "run-1",
             "project_id": "proj-1",
             "card_id": card_id,
             "number": 1,
@@ -1201,10 +1204,9 @@ mod tests {
             "connected",
             Some(json!({"state": "live", "status": {"state": "working"}})),
         )];
-        let requests = Vec::new();
         // Right at `execution.report`, Herdr can still report `"working"` mid-turn.
         assert!(
-            agent_activity_warning("card-1", &attempts, &requests)
+            agent_activity_warning("card-1", &attempts)
                 .unwrap()
                 .contains("still running")
         );
@@ -1212,14 +1214,14 @@ mod tests {
         // Once Herdr transitions to any non-running turn state, live evaluation clears it.
         for stopped in ["idle", "done", "blocked", "error"] {
             attempts[0].observed = Some(json!({"state": "live", "status": {"state": stopped}}));
-            assert_eq!(agent_activity_warning("card-1", &attempts, &requests), None);
+            assert_eq!(agent_activity_warning("card-1", &attempts), None);
         }
 
         // Providers without deep status hooks also clear once the execution reported an outcome.
         for outcome in ["completed", "blocked", "failed"] {
             attempts[0].state = outcome.into();
             attempts[0].observed = Some(json!({"state": "live"}));
-            assert_eq!(agent_activity_warning("card-1", &attempts, &requests), None);
+            assert_eq!(agent_activity_warning("card-1", &attempts), None);
         }
     }
 

@@ -300,11 +300,11 @@ fn render_milestone(
                 .children(fold.map(fold_pill)),
         );
 
-    if let Some(request) = event.request_id.clone()
+    if let Some(attempt_id) = event.data["attempt_id"].as_str().map(str::to_owned)
         && matches!(style, MilestoneStyle::Danger | MilestoneStyle::Attention)
     {
         line = line.child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
-            crate::terminals::open_request(ui, &request)
+            crate::terminals::open_request(ui, &attempt_id)
         }));
     }
     line = line.child(
@@ -411,14 +411,14 @@ fn render_narrative(
         .child(label(actor).font_weight(FontWeight::MEDIUM))
         .child(muted(crate::components::activity::age(event.created_at)))
         .child(view().flex_1());
-    if let Some(request) = event.request_id.clone() {
-        let details = request.clone();
+    if let Some(attempt_id) = event.data["attempt_id"].as_str().map(str::to_owned) {
+        let details = attempt_id.clone();
         heading = heading
             .child(compact_action("Details", Variant::Quiet, move |_| {
                 ui.request.set(details.clone())
             }))
             .child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
-                crate::terminals::open_request(ui, &request)
+                crate::terminals::open_request(ui, &attempt_id)
             }));
     }
     let measured = signal(0f32);
@@ -512,11 +512,10 @@ fn github_login(ui: Ui) -> Option<String> {
 
 fn agent_avatar_icon(ui: Ui, event: &Event, profile: &str) -> Icon {
     if let Some(mark) = ui.snapshot.with_untracked(|s| {
-        event
-            .request_id
-            .as_ref()
-            .and_then(|id| s.requests.iter().find(|r| &r.id == id))
-            .map(|r| crate::profiles::provider(&r.profile).0)
+        event.data["attempt_id"]
+            .as_str()
+            .and_then(|id| s.attempts.iter().find(|a| a.id == id))
+            .map(|a| crate::profiles::provider(&a.profile).0)
     }) {
         return mark;
     }
@@ -596,7 +595,7 @@ mod tests {
     use super::*;
     use nsh_core::{ApproxTextEngine, Core, geometry::size};
 
-    fn sample_event(actor: &str, request_id: Option<&str>) -> Event {
+    fn sample_event(actor: &str, attempt_id: Option<&str>) -> Event {
         Event {
             id: "ev-1".into(),
             project_id: "proj-1".into(),
@@ -605,14 +604,16 @@ mod tests {
             kind: "comment.replied".into(),
             actor: actor.into(),
             message: "Done".into(),
-            request_id: request_id.map(str::to_owned),
-            data: json!({}),
+            data: match attempt_id {
+                Some(id) => json!({"attempt_id": id}),
+                None => json!({}),
+            },
             created_at: 0,
         }
     }
 
     #[test]
-    fn agent_avatar_icon_resolves_request_override_disabled_and_direct_engine() {
+    fn agent_avatar_icon_resolves_attempt_override_disabled_and_direct_engine() {
         #[component]
         fn ProbeRoot() -> impl IntoElement {
             canban_ui_kit::tokens::install_theme();
@@ -638,6 +639,7 @@ mod tests {
                 github: None,
                 delivery_mode: DeliveryMode::default(),
                 agent_overrides: Default::default(),
+                tags: Vec::new(),
                 id: "proj-1".into(),
                 name: "Canban".into(),
                 directory: "/tmp/proj".into(),
@@ -657,7 +659,7 @@ mod tests {
                 Icon::Agy
             );
 
-            // Explicit Request snapshot takes precedence over later Project overrides.
+            // Explicit Attempt snapshot takes precedence over later Project overrides.
             let mut gemini_profile = cfg
                 .profiles
                 .iter()
@@ -665,21 +667,22 @@ mod tests {
                 .unwrap()
                 .clone();
             gemini_profile.preset = Some("gemini".into());
-            let mut req = canban_scheduler::request(
+            let mut att = canban_scheduler::attempt(
                 "proj-1",
                 "card-1",
+                1,
                 "develop",
                 "comment",
                 gemini_profile,
                 "Reply".into(),
                 None,
             );
-            req.id = "req-gemini".into();
-            ui.snapshot.update(|s| s.requests.push(req));
+            att.id = "att-gemini".into();
+            ui.snapshot.update(|s| s.attempts.push(att));
             assert_eq!(
                 agent_avatar_icon(
                     ui,
-                    &sample_event("agent:developer", Some("req-gemini")),
+                    &sample_event("agent:developer", Some("att-gemini")),
                     "developer"
                 ),
                 Icon::Gemini

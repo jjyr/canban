@@ -900,13 +900,9 @@ pub fn column_automation_pill(ui: Ui, column: String) -> impl IntoElement {
                         .placement(Placement::Bottom)
                         .max_w(px(320.))
                         .child(
-                            text(move || {
-                                info.get()
-                                    .map(|a| a.tooltip)
-                                    .unwrap_or_default()
-                            })
-                            .text_size(px(CAPTION_SIZE))
-                            .text_color(TEXT),
+                            text(move || info.get().map(|a| a.tooltip).unwrap_or_default())
+                                .text_size(px(CAPTION_SIZE))
+                                .text_color(TEXT),
                         ),
                 )
                 .child(icon_tinted(Icon::Zap, ACCENT).w(px(11.)).h(px(11.)))

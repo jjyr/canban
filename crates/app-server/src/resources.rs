@@ -91,13 +91,13 @@ impl AppServer {
                 )?;
                 db.save(&c)?;
             }
-            for mut r in db
-                .list::<Request>()?
+            for mut a in db
+                .list::<Attempt>()?
                 .into_iter()
-                .filter(|r| r.card_id == c.id && r.state == "queued")
+                .filter(|a| a.card_id == c.id && a.state == "queued")
             {
-                r.state = "cancelled".into();
-                db.save(&r)?;
+                a.state = "cancelled".into();
+                db.save(&a)?;
             }
             Ok(json!({"ok":true}))
         })?;
@@ -206,11 +206,6 @@ impl AppServer {
                 .into_iter()
                 .filter(|v| v.card_id == card_id)
                 .collect(),
-            requests: snapshot
-                .requests
-                .into_iter()
-                .filter(|v| v.card_id == card_id)
-                .collect(),
             attempts: snapshot
                 .attempts
                 .into_iter()
@@ -304,19 +299,17 @@ impl AppServer {
                 a.close_requested_at = Some(now());
                 a.lifecycle.close_reason = "archive".into();
                 a.connection_state = "connected".into();
-                db.save(&a)?;
-                let mut r: Request = db.get(&run.request_id)?;
-                if !matches!(r.state.as_str(), "completed" | "backlog") {
-                    r.state = "cancelled".into();
-                    db.save(&r)?;
+                if !matches!(a.state.as_str(), "completed" | "backlog") {
+                    a.state = "cancelled".into();
                 }
+                db.save(&a)?;
                 log(
                     db,
                     &db.get::<Card>(card_id)?,
                     "execution.archived",
                     "system",
                     "Closed Card Agent after saving its terminal history",
-                    Some(run.request_id.clone()),
+                    Some(run.id.clone()),
                     json!({"attempt":run.number}),
                 )
             })?;
@@ -455,9 +448,7 @@ impl AppServer {
         );
         let value = client.read(terminal)?;
         let text = value["text"].as_str().context("No terminal text")?;
-        let req: Request = self.store.lock().unwrap().db().get(&run.request_id)?;
-        let path = canban_context::run_dir(&self.home, &req, run.number)
-            .join(format!("output-{}.txt", id()));
+        let path = canban_context::run_dir(&self.home, run).join(format!("output-{}.txt", id()));
         canban_context::atomic(&path, text.as_bytes())?;
         let relative = canban_context::relative(&self.home, &path)?;
         self.store.lock().unwrap().write(|db| {

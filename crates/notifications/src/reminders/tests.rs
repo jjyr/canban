@@ -14,7 +14,6 @@ fn reply(s: &mut Snapshot, id: &str, sequence: u64) {
         kind: "comment.replied".into(),
         actor: "agent:developer".into(),
         message: id.into(),
-        request_id: None,
         data: json!({"question_id":id}),
         created_at: sequence,
     });
@@ -69,19 +68,19 @@ fn counts_count(s: &Snapshot) -> ReminderCount {
 #[test]
 fn report_reply_and_human_gate_share_one_item_even_without_a_resource_file() {
     let mut s = fixture();
-    let r:Request=serde_json::from_value(json!({"id":"r","project_id":"p","card_id":"c","stage":"review","trigger":"stage_entry","profile":Config::default().profiles[0],"instruction":"Review","state":"completed","attempt":1,"created_at":1})).unwrap();
-    s.requests.push(r);
+    let a: Attempt = serde_json::from_value(json!({"id":"r","project_id":"p","card_id":"c","number":1,"stage":"review","trigger":"stage_entry","profile":Config::default().profiles[0],"instruction":"Review","state":"completed","created_at":1})).unwrap();
+    s.attempts.push(a);
     s.cards[0].human_gate = Some(HumanGate {
         reason: "Review needed".into(),
-        request_id: Some("r".into()),
+        attempt_id: Some("r".into()),
         next_stage: None,
     });
     reply(&mut s, "report-event", 1);
     s.events[0].kind = "execution.reported".into();
-    s.events[0].request_id = Some("r".into());
-    s.events[0].data = json!({"report_id":"report","state":"completed","path":null});
+    s.events[0].data =
+        json!({"attempt_id":"r","report_id":"report","state":"completed","path":null});
     reply(&mut s, "echo", 2);
-    s.events[1].data = json!({"report_id":"report","question_id":"q","path":null});
+    s.events[1].data = json!({"attempt_id":"r","report_id":"report","question_id":"q","path":null});
     assert_eq!(
         counts_count(&s),
         ReminderCount {
@@ -129,9 +128,12 @@ fn push_event(
     sequence: u64,
     kind: &str,
     actor: &str,
-    request_id: Option<&str>,
-    data: serde_json::Value,
+    attempt_id: Option<&str>,
+    mut data: serde_json::Value,
 ) {
+    if let Some(aid) = attempt_id {
+        data["attempt_id"] = json!(aid);
+    }
     s.events.push(Event {
         id: id.into(),
         project_id: "p".into(),
@@ -140,7 +142,6 @@ fn push_event(
         kind: kind.into(),
         actor: actor.into(),
         message: id.into(),
-        request_id: request_id.map(str::to_owned),
         data,
         created_at: sequence,
     });
@@ -211,25 +212,19 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
     assert!(delivery.observe(&sound_items(&s)).is_empty());
 
     // 1a. Runtime permission/input wait (`wait:*`)
-    let req: Request = serde_json::from_value(json!({
-        "id":"r1","project_id":"p","card_id":"c","stage":"develop","trigger":"stage_entry",
-        "profile":Config::default().profiles[0],"instruction":"Dev","state":"running","attempt":1,"created_at":1
-    }))
-    .unwrap();
     let attempt: Attempt = serde_json::from_value(json!({
-        "id":"r1:1","request_id":"r1","project_id":"p","card_id":"c","number":1,"state":"running",
+        "id":"r1:1","project_id":"p","card_id":"c","number":1,"stage":"develop","trigger":"stage_entry",
+        "profile":Config::default().profiles[0],"instruction":"Dev","state":"running",
         "terminal":"t1","cwd":"/tmp","input_path":"in","connection_state":"connected",
         "observed":{"state":"live","status":{"state":"blocked","kind":"permission","title":"Run cmd","msg":"ls"}},
         "lifecycle":{"observed_at":canban_types::now(),"waiting":{"id":"w1","kind":"permission","title":"Run cmd","message":"ls","since":1}},
         "created_at":1
     }))
     .unwrap();
-    s.requests.push(req);
     s.attempts.push(attempt);
     assert_eq!(delivery.observe(&sound_items(&s)), vec!["wait:w1"]);
     // Resolving the wait clears it from active sound_items.
     s.attempts.clear();
-    s.requests.clear();
     assert!(sound_items(&s).is_empty());
 
     // 1b. Agent returned to Backlog (`report --state backlog`)
@@ -252,12 +247,12 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
     assert_eq!(delivery.observe(&sound_items(&s)), vec!["reply:q-direct"]);
 
     // 1d. Explicit workflow approval / human gate on completed step
-    let req_rev: Request = serde_json::from_value(json!({
-        "id":"r2","project_id":"p","card_id":"c","stage":"review","trigger":"stage_entry",
-        "profile":Config::default().profiles[0],"instruction":"Rev","state":"completed","attempt":1,"created_at":2
+    let att_rev: Attempt = serde_json::from_value(json!({
+        "id":"r2","project_id":"p","card_id":"c","number":1,"stage":"review","trigger":"stage_entry",
+        "profile":Config::default().profiles[0],"instruction":"Rev","state":"completed","created_at":2
     }))
     .unwrap();
-    s.requests.push(req_rev);
+    s.attempts.push(att_rev);
     push_event(
         &mut s,
         "ev-rev-done",
@@ -269,7 +264,7 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
     );
     s.cards[0].human_gate = Some(HumanGate {
         reason: "Approve deployment".into(),
-        request_id: Some("r2".into()),
+        attempt_id: Some("r2".into()),
         next_stage: None,
     });
     assert_eq!(delivery.observe(&sound_items(&s)), vec!["report:rep-rev"]);
@@ -375,30 +370,25 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
 
     // Interactive Card Agent finishes Turn 1 without closing -> creates pending visual
     // reminder (`idle:r-int:1:1`), but MUST NOT play a notification sound.
-    let req: Request = serde_json::from_value(json!({
-        "id":"r-int","project_id":"p","card_id":"c","stage":"develop","trigger":"interactive",
-        "profile":Config::default().profiles[0],"instruction":"Chat","state":"running","attempt":1,"created_at":1
-    }))
-    .unwrap();
     let attempt: Attempt = serde_json::from_value(json!({
-        "id":"r-int:1","request_id":"r-int","project_id":"p","card_id":"c","number":1,"state":"running",
+        "id":"r-int:1","project_id":"p","card_id":"c","number":1,"stage":"develop","trigger":"interactive",
+        "profile":Config::default().profiles[0],"instruction":"Chat","state":"running",
         "terminal":"t-int","cwd":"/tmp","input_path":"in","connection_state":"connected",
         "observed":{"state":"live","turn":1,"status":{"state":"idle"}},
         "lifecycle":{"observed_at":canban_types::now(),"idle_since":10},
         "created_at":1
     }))
     .unwrap();
-    s.requests.push(req);
     s.attempts.push(attempt);
     assert_eq!(counts_count(&s).pending, 1);
     assert_eq!(reminders(&s)[0].id, "idle:r-int:1:1");
     assert!(sound_items(&s).is_empty());
 
     // Automatic stage Agent transiently entering `idle` before reporting also stays silent.
-    s.requests[0].trigger = RequestTrigger::parse("stage_entry");
+    s.attempts[0].trigger = ExecutionTrigger::parse("stage_entry");
     assert_eq!(counts_count(&s).pending, 1);
     assert!(sound_items(&s).is_empty());
-    s.requests[0].trigger = RequestTrigger::parse("interactive");
+    s.attempts[0].trigger = ExecutionTrigger::parse("interactive");
 
     // User replies -> Agent resumes working -> pending clears.
     s.attempts[0].observed = Some(json!({"state":"live","turn":2,"status":{"state":"working"}}));
@@ -426,7 +416,7 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
     assert!(sound_items(&s).is_empty());
 
     // Once reported `completed`, the live idle terminal becomes quiet (no pending reminder or sound).
-    s.requests[0].state = "completed".into();
+    s.attempts[0].state = "completed".into();
     assert!(reminders(&s).is_empty());
     assert!(sound_items(&s).is_empty());
 

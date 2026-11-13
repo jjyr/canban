@@ -14,7 +14,7 @@ fn runtime_budget_releases_waits_but_reserves_unknown_and_keeps_live_conversatio
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let request = app.snapshot().unwrap().requests[0].clone();
+    let request = app.snapshot().unwrap().attempts[0].clone();
     let mut run = admit(&app, &request);
     let mut snapshot = app.snapshot().unwrap();
     for status in ["blocked", "idle", "done", "error"] {
@@ -55,7 +55,7 @@ fn runtime_wait_episodes_are_durable_deduplicated_and_never_approve_task_gates()
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let req = app.snapshot().unwrap().requests[0].clone();
+    let req = app.snapshot().unwrap().attempts[0].clone();
     let run = admit(&app, &req);
     let value = json!({"state":"live","status":{"state":"blocked","kind":"permission","title":"Run command?","msg":"Allow git status?"}});
     app.observe_lifecycle(&run, &value).unwrap();
@@ -79,7 +79,7 @@ fn runtime_wait_episodes_are_durable_deduplicated_and_never_approve_task_gates()
             .count(),
         2
     );
-    app.call("execution.report",json!({"request_key":"task-block","execution":{"request_id":req.id,"attempt_number":run.number},"state":"blocked","message":"Choose a design"})).unwrap();
+    app.call("execution.report",json!({"request_key":"task-block","project_id":c.project_id,"card":c.number,"state":"blocked","message":"Choose a design"})).unwrap();
     let before = app.snapshot().unwrap().cards[0].human_gate.clone();
     app.observe_lifecycle(
         &s.attempts[0],
@@ -109,39 +109,45 @@ fn idle_reclamation_covers_all_inactive_managed_agents_including_manual_exit_pro
     let (_d, app, _p, c) = setup();
     app.call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
         .unwrap();
-    let req = app.snapshot().unwrap().requests[0].clone();
+    let req = app.snapshot().unwrap().attempts[0].clone();
     let mut run = admit(&app, &req);
     observed(&mut run, "idle");
     run.provider_session_id = Some("exact-session".into());
     run.lifecycle.idle_since = Some(now() - 16 * 60_000);
-    let mut s = app.snapshot().unwrap();
-    s.requests[0].profile.resume_argv = Some(vec!["resume".into(), "{session_id}".into()]);
-    s.requests[0].profile.exit = Some(ExitAction::Input {
+    run.profile.resume_argv = Some(vec!["resume".into(), "{session_id}".into()]);
+    run.profile.exit = Some(ExitAction::Input {
         text: "/exit".into(),
     });
+    let mut s = app.snapshot().unwrap();
+    s.attempts = vec![run.clone()];
     assert!(idle_candidate(&s, &run, 15, now(), false));
     assert!(!idle_candidate(&s, &run, 0, now(), false));
     assert!(idle_candidate(&s, &run, 15, now(), true));
     run.lifecycle.last_interaction_at = Some(now());
+    s.attempts = vec![run.clone()];
     assert!(!idle_candidate(&s, &run, 15, now(), false));
     run.lifecycle.last_interaction_at = None;
     // Unfinished automatic stage assignments stay alive for user inspection instead of silent reclamation.
-    s.requests[0].trigger = "stage_entry".into();
+    run.trigger = "stage_entry".into();
+    s.attempts = vec![run.clone()];
     assert!(!idle_candidate(&s, &run, 15, now(), false));
     // Once the automatic assignment completes, it becomes inactive and eligible even without
     // `provider_session_id`, `resume_argv`, or `ExitAction::Input` (e.g. `agy`, `gemini`).
-    s.requests[0].state = "completed".into();
+    run.state = "completed".into();
     run.provider_session_id = None;
-    s.requests[0].profile.resume_argv = None;
-    s.requests[0].profile.exit = Some(ExitAction::Manual);
+    run.profile.resume_argv = None;
+    run.profile.exit = Some(ExitAction::Manual);
+    s.attempts = vec![run.clone()];
     assert!(idle_candidate(&s, &run, 15, now(), false));
-    s.requests[0].state = "running".into();
-    s.requests[0].trigger = "interactive".into();
+    run.state = "running".into();
+    run.trigger = "interactive".into();
     for status in ["working", "unknown", "blocked", "error"] {
         observed(&mut run, status);
+        s.attempts = vec![run.clone()];
         assert!(!idle_candidate(&s, &run, 15, now(), false));
     }
     observed(&mut run, "idle");
+    s.attempts = vec![run.clone()];
     assert!(idle_candidate(&s, &run, 15, now(), false));
 }
 #[test]
@@ -152,7 +158,7 @@ fn overview_is_global_deduplicates_conversations_and_surfaces_unfinished_idle_ag
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let req = app.snapshot().unwrap().requests[0].clone();
+    let req = app.snapshot().unwrap().attempts[0].clone();
     let mut run = admit(&app, &req);
     let mut s = app.snapshot().unwrap();
     observed(&mut run, "done");
@@ -163,13 +169,14 @@ fn overview_is_global_deduplicates_conversations_and_surfaces_unfinished_idle_ag
     assert!(rows[0].actionable());
     assert_eq!(rows[0].reasons[0].source, "runtime");
     // Once reported `completed` without a human gate, the live idle terminal is quiet (`Idle`).
-    s.requests[0].state = "completed".into();
+    run.state = "completed".into();
+    s.attempts = vec![run.clone()];
     let rows = canban_notifications::overview(&s);
     assert_eq!(rows[0].group, "Idle");
     assert!(!rows[0].actionable());
     s.cards[0].human_gate = Some(HumanGate {
         reason: "Review report".into(),
-        request_id: Some(req.id.clone()),
+        attempt_id: Some(run.id.clone()),
         next_stage: None,
     });
     observed(&mut run, "blocked");
@@ -196,30 +203,30 @@ fn overview_is_global_deduplicates_conversations_and_surfaces_unfinished_idle_ag
     assert_eq!(rows.iter().filter(|r| r.actionable()).count(), 2);
     assert!(
         rows.iter()
-            .any(|r| r.project_name == "Other Project" && r.request.is_none())
+            .any(|r| r.project_name == "Other Project" && r.attempt.is_none())
     );
     let mut newer = req.clone();
     newer.id = "later-request".into();
     newer.created_at += 100;
     newer.state = "queued".into();
-    s.requests.push(newer);
+    s.attempts.push(newer);
     let rows = canban_notifications::overview(&s);
     assert_eq!(rows.len(), 2);
     assert_eq!(
         rows.iter()
-            .find(|r| r.request.is_some())
+            .find(|r| r.attempt.is_some())
             .unwrap()
-            .request
+            .attempt
             .as_ref()
             .unwrap()
             .id,
-        req.id
+        run.id
     );
     s.attempts[0].connection_state = "unavailable".into();
     assert_eq!(
         canban_notifications::overview(&s)
             .iter()
-            .find(|r| r.request.is_some())
+            .find(|r| r.attempt.is_some())
             .unwrap()
             .group,
         "Needs attention"
@@ -249,7 +256,7 @@ fn terminal_exit_resolves_runtime_wait_even_when_root_status_is_unchanged() {
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let req = app.snapshot().unwrap().requests[0].clone();
+    let req = app.snapshot().unwrap().attempts[0].clone();
     let run = admit(&app, &req);
     let blocked = json!({"state":"live","status":{"state":"blocked","kind":"permission"}});
     app.observe_lifecycle(&run, &blocked).unwrap();
@@ -282,26 +289,26 @@ fn a_closing_idle_terminal_cannot_receive_a_new_assignment_and_reserves_its_slot
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let request = app.snapshot().unwrap().requests[0].clone();
+    let request = app.snapshot().unwrap().attempts[0].clone();
     let mut run = admit(&app, &request);
     let mut s = app.snapshot().unwrap();
-    s.requests[0].state = "completed".into();
     run.state = "completed".into();
     run.location = Some(s.projects[0].work_location());
     observed(&mut run, "idle");
+    let orig_bin = run.profile.command()[0].clone();
     s.attempts = vec![run];
     let mut next = request;
     next.id = "next-assignment".into();
     next.state = "queued".into();
     if !s.workflow_runs.is_empty() {
-        s.workflow_runs[0].request_id = Some(next.id.clone());
+        s.workflow_runs[0].attempt_id = Some(next.id.clone());
         s.workflow_runs[0].state = "waiting_agent".into();
     }
     assert!(canban_scheduler::retained(&s, &next).is_some());
     // Evolving preset flags on the same executable (`codex` / `agy`) still reuses the idle session
     // instead of deadlocking `eligible()`, while changing the underlying CLI binary does not.
     next.profile.argv = Some(vec![
-        s.requests[0].profile.command()[0].clone(),
+        orig_bin,
         "--settings".into(),
         "{agy_trusted_settings}".into(),
         "{prompt}".into(),
@@ -325,7 +332,7 @@ fn exited_agent_keeps_task_recovery_but_reads_saved_output_without_a_core() {
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let request = app.snapshot().unwrap().requests[0].clone();
+    let request = app.snapshot().unwrap().attempts[0].clone();
     let mut run = admit(&app, &request);
     run.state = "needs_report".into();
     run.close_state = "closed".into();
@@ -335,24 +342,21 @@ fn exited_agent_keeps_task_recovery_but_reads_saved_output_without_a_core() {
         "{}\nSaved failure context: authentication required",
         "中".repeat(12_000)
     );
-    let path = canban_context::run_dir(&app.home, &request, run.number).join("output.txt");
+    let path = canban_context::run_dir(&app.home, &run).join("output.txt");
     canban_context::atomic(&path, output.as_bytes()).unwrap();
     run.output_path = Some(canban_context::relative(&app.home, &path).unwrap());
     app.store
         .lock()
         .unwrap()
         .write(|db| {
-            let mut req: Request = db.get(&request.id)?;
-            req.state = "needs_report".into();
             let mut card: Card = db.get(&card.id)?;
             card.attention = Some("Agent exited without an explicit outcome".into());
             card.human_gate = Some(HumanGate {
                 reason: card.attention.clone().unwrap(),
-                request_id: Some(req.id.clone()),
+                attempt_id: Some(run.id.clone()),
                 next_stage: None,
             });
             db.save(&card)?;
-            db.save(&req)?;
             db.save(&run)
         })
         .unwrap();
@@ -419,14 +423,14 @@ fn migration_only_clears_the_automatic_exit_gate_and_keeps_explicit_task_gates()
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let request = app.snapshot().unwrap().requests[0].clone();
+    let request = app.snapshot().unwrap().attempts[0].clone();
     let mut run = admit(&app, &request);
     run.state = "needs_report".into();
     run.observed = Some(json!({"state":"finished","exit_code":1}));
     app.store.lock().unwrap().write(|db|{
-        db.save(&run)?;let mut r:Request=db.get(&request.id)?;r.state="needs_report".into();db.save(&r)?;
+        db.save(&run)?;
         let mut c:Card=db.get(&card.id)?;attention(db,&mut c,"Agent exited without an explicit outcome. Inspect the retained output before resuming.")?;
-        c.human_gate.as_mut().unwrap().request_id=Some(r.id);db.save(&c)
+        c.human_gate.as_mut().unwrap().attempt_id=Some(run.id.clone());db.save(&c)
     }).unwrap();
     app.migrate_exit_failures().unwrap();
     let s = app.snapshot().unwrap();
@@ -443,7 +447,7 @@ fn migration_only_clears_the_automatic_exit_gate_and_keeps_explicit_task_gates()
             db.save(&run)?;
             let mut c: Card = db.get(&card.id)?;
             attention(db, &mut c, "Need a product decision")?;
-            c.human_gate.as_mut().unwrap().request_id = Some(request.id.clone());
+            c.human_gate.as_mut().unwrap().attempt_id = Some(run.id.clone());
             db.save(&c)
         })
         .unwrap();
@@ -466,14 +470,14 @@ fn authoritative_missing_resolves_terminal_input_but_keeps_task_decisions_and_kn
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let request = app.snapshot().unwrap().requests[0].clone();
+    let request = app.snapshot().unwrap().attempts[0].clone();
     let run = admit(&app, &request);
     app.observe_lifecycle(
         &run,
         &json!({"state":"live","status":{"state":"blocked","kind":"permission","title":"Allow?"}}),
     )
     .unwrap();
-    app.call("execution.report",json!({"execution":{"request_id":request.id,"attempt_number":run.number},"state":"blocked","message":"Choose the target environment","request_key":"explicit-task-gate"})).unwrap();
+    app.call("execution.report",json!({"project_id":card.project_id,"card":card.number,"state":"blocked","message":"Choose the target environment","request_key":"explicit-task-gate"})).unwrap();
     let run = app.snapshot().unwrap().attempts[0].clone();
     app.runtime_missing(&run).unwrap();
     let s = app.snapshot().unwrap();

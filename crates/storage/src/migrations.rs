@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 13;
+pub const CURRENT: u32 = 14;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -36,6 +36,11 @@ const STEPS: &[Migration] = &[
         version: 13,
         up: managed_worktrees_up,
         down: managed_worktrees_down,
+    },
+    Migration {
+        version: 14,
+        up: remove_requests_up,
+        down: remove_requests_down,
     },
 ];
 fn workflows_up(tx: &Transaction<'_>) -> Result<()> {
@@ -340,6 +345,381 @@ fn managed_worktrees_down(tx: &Transaction<'_>) -> Result<()> {
     )?;
     Ok(())
 }
+type TableRow = (String, Option<String>, Option<String>, String, i64, String);
+
+fn remove_requests_up(tx: &Transaction<'_>) -> Result<()> {
+    use rusqlite::params;
+    use serde_json::{Value, json};
+    let has_requests: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='requests')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_requests {
+        return Ok(());
+    }
+    let req_rows: Vec<TableRow> = {
+        let mut q = tx.prepare(
+            "SELECT id, project_id, card_id, state, number, data FROM requests ORDER BY rowid",
+        )?;
+        q.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<std::result::Result<_, _>>()?
+    };
+    let mut req_by_id = std::collections::HashMap::<String, Value>::new();
+    for (id, _, _, _, _, data) in &req_rows {
+        if let Ok(v) = serde_json::from_str::<Value>(data) {
+            req_by_id.insert(id.clone(), v);
+        }
+    }
+    let att_rows: Vec<(String, String)> = {
+        let mut q = tx.prepare("SELECT id, data FROM attempts ORDER BY rowid")?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    let mut req_to_attempt = std::collections::HashMap::<String, (String, u64)>::new();
+    let mut has_attempt = std::collections::HashSet::<String>::new();
+    for (att_id, raw) in att_rows {
+        let mut att: Value = serde_json::from_str(&raw)?;
+        let req_id = att
+            .as_object_mut()
+            .and_then(|o| o.remove("request_id"))
+            .and_then(|v| v.as_str().map(str::to_owned));
+        let num = att["number"].as_u64().unwrap_or(1);
+        if let Some(rid) = req_id {
+            has_attempt.insert(rid.clone());
+            if req_to_attempt
+                .get(&rid)
+                .is_none_or(|(_, old_num)| num >= *old_num)
+            {
+                req_to_attempt.insert(rid.clone(), (att_id.clone(), num));
+            }
+            if let Some(req) = req_by_id.get(&rid)
+                && let Some(obj) = att.as_object_mut()
+            {
+                for k in [
+                    "workflow_run_id",
+                    "workflow_step",
+                    "resume_from",
+                    "trigger",
+                    "stage",
+                    "profile",
+                    "instruction",
+                    "on_completed",
+                    "require_human_review",
+                ] {
+                    if let Some(v) = req.get(k) {
+                        obj.insert(k.into(), v.clone());
+                    }
+                }
+                if obj.get("location").is_none_or(Value::is_null)
+                    && let Some(loc) = req.get("location")
+                {
+                    obj.insert("location".into(), loc.clone());
+                }
+            }
+        }
+        let state = att["state"].as_str().unwrap_or("").to_owned();
+        tx.execute(
+            "UPDATE attempts SET state=?2, number=?3, data=?4 WHERE id=?1",
+            params![att_id, state, num as i64, serde_json::to_string(&att)?],
+        )?;
+    }
+    for (rid, project_id, card_id, state, _, raw) in &req_rows {
+        if has_attempt.contains(rid) {
+            continue;
+        }
+        let req: Value = serde_json::from_str(raw)?;
+        req_to_attempt.insert(rid.clone(), (rid.clone(), 0));
+        let att = json!({
+            "id": rid,
+            "project_id": req["project_id"],
+            "card_id": req["card_id"],
+            "number": 0,
+            "state": req["state"],
+            "workflow_run_id": req.get("workflow_run_id").cloned().unwrap_or(Value::Null),
+            "workflow_step": req.get("workflow_step").cloned().unwrap_or(Value::Null),
+            "location": req.get("location").cloned().unwrap_or(Value::Null),
+            "resume_from": req.get("resume_from").cloned().unwrap_or(Value::Null),
+            "trigger": req.get("trigger").cloned().unwrap_or_else(|| json!("workflow")),
+            "stage": req.get("stage").cloned().unwrap_or_else(|| json!("")),
+            "profile": req.get("profile").cloned().unwrap_or_else(|| json!({})),
+            "instruction": req.get("instruction").cloned().unwrap_or_else(|| json!("")),
+            "on_completed": req.get("on_completed").cloned().unwrap_or(Value::Null),
+            "require_human_review": req.get("require_human_review").cloned().unwrap_or(json!(false)),
+            "cwd": "",
+            "input_path": "",
+            "created_at": req["created_at"],
+        });
+        tx.execute(
+            "INSERT INTO attempts(id, project_id, card_id, state, number, data) VALUES(?1, ?2, ?3, ?4, 0, ?5)",
+            params![rid, project_id, card_id, state, serde_json::to_string(&att)?],
+        )?;
+    }
+    let map_req = |rid: &str| -> String {
+        req_to_attempt
+            .get(rid)
+            .map(|(aid, _)| aid.clone())
+            .unwrap_or_else(|| rid.to_owned())
+    };
+    let rewrite = |table: &str, f: &dyn Fn(&mut Value)| -> Result<()> {
+        let rows: Vec<(String, String)> = {
+            let mut q = tx.prepare(&format!("SELECT id, data FROM {table}"))?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (id, raw) in rows {
+            let mut v: Value = serde_json::from_str(&raw)?;
+            let before = v.clone();
+            f(&mut v);
+            if v != before {
+                tx.execute(
+                    &format!("UPDATE {table} SET data=?2 WHERE id=?1"),
+                    params![id, serde_json::to_string(&v)?],
+                )?;
+            }
+        }
+        Ok(())
+    };
+    rewrite("workflow_runs", &|v| {
+        if let Some(obj) = v.as_object_mut()
+            && let Some(rid) = obj.remove("request_id")
+        {
+            obj.insert(
+                "attempt_id".into(),
+                rid.as_str()
+                    .map(|s| json!(map_req(s)))
+                    .unwrap_or(Value::Null),
+            );
+        }
+    })?;
+    rewrite("cards", &|v| {
+        if let Some(gate) = v.get_mut("human_gate").and_then(Value::as_object_mut)
+            && let Some(rid) = gate.remove("request_id")
+        {
+            gate.insert(
+                "attempt_id".into(),
+                rid.as_str()
+                    .map(|s| json!(map_req(s)))
+                    .unwrap_or(Value::Null),
+            );
+        }
+    })?;
+    rewrite("conversations", &|v| {
+        if let Some(obj) = v.as_object_mut()
+            && let Some(rid) = obj.remove("last_request_id")
+        {
+            obj.insert(
+                "last_attempt_id".into(),
+                rid.as_str()
+                    .map(|s| json!(map_req(s)))
+                    .unwrap_or(Value::Null),
+            );
+        }
+    })?;
+    rewrite("questions", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            let rid = obj.remove("request_id");
+            let att = obj.remove("attempt").and_then(|n| n.as_u64());
+            let aid = rid.as_ref().and_then(Value::as_str).map(|s| {
+                if let Some(n) = att.filter(|n| *n > 0) {
+                    format!("{s}:{n}")
+                } else {
+                    map_req(s)
+                }
+            });
+            obj.insert(
+                "attempt_id".into(),
+                aid.map(|s| json!(s)).unwrap_or(Value::Null),
+            );
+        }
+    })?;
+    rewrite("reports", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            let rid = obj.remove("request_id");
+            let att = obj.remove("attempt").and_then(|n| n.as_u64());
+            let actor = rid
+                .as_ref()
+                .and_then(Value::as_str)
+                .and_then(|s| req_by_id.get(s))
+                .and_then(|r| r["profile"]["id"].as_str())
+                .map(|p| format!("agent:{p}"))
+                .unwrap_or_else(|| "agent".into());
+            let aid = rid.as_ref().and_then(Value::as_str).map(|s| {
+                if let Some(n) = att.filter(|n| *n > 0) {
+                    format!("{s}:{n}")
+                } else {
+                    map_req(s)
+                }
+            });
+            obj.entry("actor".to_owned())
+                .or_insert_with(|| json!(actor));
+            obj.insert(
+                "attempt_id".into(),
+                aid.map(|s| json!(s)).unwrap_or(Value::Null),
+            );
+        }
+    })?;
+    rewrite("events", &|v| {
+        if let Some(obj) = v.as_object_mut()
+            && let Some(rid) = obj.remove("request_id")
+            && let Some(s) = rid.as_str()
+            && let Some(data) = obj.get_mut("data").and_then(Value::as_object_mut)
+        {
+            data.entry("attempt_id".to_owned())
+                .or_insert_with(|| json!(map_req(s)));
+        }
+    })?;
+    rewrite("note_events", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("request_id");
+            obj.remove("attempt");
+        }
+    })?;
+    tx.execute_batch("DROP INDEX IF EXISTS requests_scope; DROP TABLE requests;")?;
+    Ok(())
+}
+fn remove_requests_down(tx: &Transaction<'_>) -> Result<()> {
+    use rusqlite::params;
+    use serde_json::{Value, json};
+    tx.execute_batch(
+        "CREATE TABLE requests (id TEXT PRIMARY KEY, project_id TEXT, card_id TEXT, state TEXT NOT NULL, number INTEGER NOT NULL, data TEXT NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(card_id) REFERENCES cards(id)); CREATE INDEX requests_scope ON requests(project_id,card_id,state);",
+    )?;
+    let att_rows: Vec<TableRow> = {
+        let mut q = tx.prepare(
+            "SELECT id, project_id, card_id, state, number, data FROM attempts ORDER BY rowid",
+        )?;
+        q.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<std::result::Result<_, _>>()?
+    };
+    for (aid, project_id, card_id, state, num, raw) in att_rows {
+        let mut att: Value = serde_json::from_str(&raw)?;
+        let req = json!({
+            "id": aid,
+            "project_id": att["project_id"],
+            "card_id": att["card_id"],
+            "workflow_run_id": att.get("workflow_run_id").cloned().unwrap_or(Value::Null),
+            "workflow_step": att.get("workflow_step").cloned().unwrap_or(Value::Null),
+            "location": att.get("location").cloned().unwrap_or(Value::Null),
+            "resume_from": att.get("resume_from").cloned().unwrap_or(Value::Null),
+            "trigger": att.get("trigger").cloned().unwrap_or_else(|| json!("workflow")),
+            "stage": att.get("stage").cloned().unwrap_or_else(|| json!("")),
+            "profile": att.get("profile").cloned().unwrap_or_else(|| json!({})),
+            "instruction": att.get("instruction").cloned().unwrap_or_else(|| json!("")),
+            "on_completed": att.get("on_completed").cloned().unwrap_or(Value::Null),
+            "require_human_review": att.get("require_human_review").cloned().unwrap_or(json!(false)),
+            "state": state,
+            "attempt": num.max(0),
+            "created_at": att["created_at"],
+        });
+        tx.execute(
+            "INSERT INTO requests(id, project_id, card_id, state, number, data) VALUES(?1, ?2, ?3, ?4, 0, ?5)",
+            params![aid, project_id, card_id, state, serde_json::to_string(&req)?],
+        )?;
+        if num == 0 && att["terminal"].is_null() && att["cwd"].as_str() == Some("") {
+            tx.execute("DELETE FROM attempts WHERE id=?1", params![aid])?;
+        } else {
+            if let Some(obj) = att.as_object_mut() {
+                obj.insert("request_id".into(), json!(aid));
+            }
+            tx.execute(
+                "UPDATE attempts SET data=?2 WHERE id=?1",
+                params![aid, serde_json::to_string(&att)?],
+            )?;
+        }
+    }
+    let rewrite = |table: &str, f: &dyn Fn(&mut Value)| -> Result<()> {
+        let rows: Vec<(String, String)> = {
+            let mut q = tx.prepare(&format!("SELECT id, data FROM {table}"))?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (id, raw) in rows {
+            let mut v: Value = serde_json::from_str(&raw)?;
+            let before = v.clone();
+            f(&mut v);
+            if v != before {
+                tx.execute(
+                    &format!("UPDATE {table} SET data=?2 WHERE id=?1"),
+                    params![id, serde_json::to_string(&v)?],
+                )?;
+            }
+        }
+        Ok(())
+    };
+    rewrite("workflow_runs", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            let aid = obj.remove("attempt_id").unwrap_or(Value::Null);
+            obj.insert("request_id".into(), aid);
+        }
+    })?;
+    rewrite("cards", &|v| {
+        if let Some(gate) = v.get_mut("human_gate").and_then(Value::as_object_mut) {
+            let aid = gate.remove("attempt_id").unwrap_or(Value::Null);
+            gate.insert("request_id".into(), aid);
+        }
+    })?;
+    rewrite("conversations", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            let aid = obj.remove("last_attempt_id").unwrap_or(Value::Null);
+            obj.insert("last_request_id".into(), aid);
+        }
+    })?;
+    rewrite("questions", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            let aid = obj
+                .remove("attempt_id")
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            obj.insert("request_id".into(), json!(aid));
+            obj.insert("attempt".into(), json!(1));
+        }
+    })?;
+    rewrite("reports", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            let aid = obj
+                .remove("attempt_id")
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            obj.insert("request_id".into(), json!(aid));
+            obj.insert("attempt".into(), json!(1));
+        }
+    })?;
+    rewrite("events", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            let aid = obj
+                .get("data")
+                .and_then(|d| d.get("attempt_id"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            obj.insert("request_id".into(), aid);
+        }
+    })?;
+    rewrite("note_events", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("request_id".into(), Value::Null);
+            obj.insert("attempt".into(), Value::Null);
+        }
+    })?;
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -494,6 +874,15 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut store = crate::Store::open(home.path()).unwrap();
         assert_eq!(version(&store.conn).unwrap(), CURRENT);
+        let has_requests: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='requests')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!has_requests);
         apply(&mut store.conn, 12).unwrap();
         assert_eq!(version(&store.conn).unwrap(), 12);
         apply(&mut store.conn, 13).unwrap();
@@ -511,7 +900,143 @@ mod tests {
             .unwrap();
         apply(&mut store.conn, 12).unwrap();
         assert_eq!(version(&store.conn).unwrap(), 12);
+        apply(&mut store.conn, CURRENT).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), CURRENT);
+    }
+
+    #[test]
+    fn schema_14_merges_requests_into_attempts_and_roundtrips_with_schema_13() {
+        use serde_json::{Value, json};
+        let home = tempfile::tempdir().unwrap();
+        let mut store = crate::Store::open(home.path()).unwrap();
+        assert_eq!(CURRENT, 14);
+        assert_eq!(version(&store.conn).unwrap(), 14);
+
+        // Downgrade empty DB to schema 13 and populate representative Request + Attempt records.
         apply(&mut store.conn, 13).unwrap();
         assert_eq!(version(&store.conn).unwrap(), 13);
+        store.conn.execute(
+            "INSERT INTO projects(id,project_id,card_id,state,number,data) VALUES('p1',NULL,NULL,'',0,'{\"id\":\"p1\",\"name\":\"P\",\"directory\":\"/tmp/p\",\"workflow\":{\"stages\":[]},\"created_at\":1}')",
+            [],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO cards(id,project_id,card_id,state,number,data) VALUES('c1','p1',NULL,'develop',1,'{\"id\":\"c1\",\"project_id\":\"p1\",\"number\":1,\"title\":\"T\",\"body\":\"\",\"stage\":\"develop\",\"revision\":1,\"human_gate\":{\"reason\":\"Check\",\"request_id\":\"req-1\",\"next_stage\":null},\"created_at\":1}')",
+            [],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO requests(id,project_id,card_id,state,number,data) VALUES('req-1','p1','c1','running',0,'{\"id\":\"req-1\",\"project_id\":\"p1\",\"card_id\":\"c1\",\"workflow_run_id\":\"run-1\",\"workflow_step\":\"develop:1\",\"trigger\":\"workflow\",\"stage\":\"develop\",\"profile\":{\"id\":\"developer\",\"name\":\"Developer\"},\"instruction\":\"Build it\",\"state\":\"running\",\"attempt\":1,\"created_at\":10}')",
+            [],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO requests(id,project_id,card_id,state,number,data) VALUES('req-queued','p1','c1','queued',0,'{\"id\":\"req-queued\",\"project_id\":\"p1\",\"card_id\":\"c1\",\"trigger\":\"stage_entry\",\"stage\":\"develop\",\"profile\":{\"id\":\"reviewer\",\"name\":\"Reviewer\"},\"instruction\":\"Queued review\",\"state\":\"queued\",\"attempt\":0,\"created_at\":20}')",
+            [],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO attempts(id,project_id,card_id,state,number,data) VALUES('req-1:1','p1','c1','running',1,'{\"id\":\"req-1:1\",\"request_id\":\"req-1\",\"project_id\":\"p1\",\"card_id\":\"c1\",\"number\":1,\"state\":\"running\",\"cwd\":\"/tmp/wt\",\"input_path\":\"in.md\",\"created_at\":11}')",
+            [],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO workflow_runs(id,project_id,card_id,state,number,data) VALUES('run-1','p1','c1','waiting_agent',0,'{\"id\":\"run-1\",\"request_id\":\"req-1\"}')",
+            [],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO conversations(id,project_id,card_id,state,number,data) VALUES('c1:developer','p1','c1','',0,'{\"id\":\"c1:developer\",\"last_request_id\":\"req-1\"}')",
+            [],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO questions(id,project_id,card_id,state,number,data) VALUES('q1','p1','c1','replied',0,'{\"id\":\"q1\",\"request_id\":\"req-1\",\"attempt\":1}')",
+            [],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO reports(id,project_id,card_id,state,number,data) VALUES('rep1','p1','c1','completed',0,'{\"id\":\"rep1\",\"request_id\":\"req-1\",\"attempt\":1}')",
+            [],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO events(id,project_id,card_id,state,number,data) VALUES('ev1','p1','c1','execution.started',1,'{\"id\":\"ev1\",\"request_id\":\"req-1\",\"data\":{}}')",
+            [],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO note_events(id,project_id,card_id,state,number,data) VALUES('nev1','p1','c1','note.updated',1,'{\"id\":\"nev1\",\"request_id\":\"req-1\",\"attempt\":1}')",
+            [],
+        ).unwrap();
+
+        // Migrate 13 -> 14
+        apply(&mut store.conn, 14).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), 14);
+        let has_requests: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='requests')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!has_requests);
+
+        let att1_raw: String = store
+            .conn
+            .query_row("SELECT data FROM attempts WHERE id='req-1:1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let att1: Value = serde_json::from_str(&att1_raw).unwrap();
+        assert!(att1.get("request_id").is_none());
+        assert_eq!(att1["profile"]["id"], json!("developer"));
+        assert_eq!(att1["instruction"], json!("Build it"));
+        assert_eq!(att1["workflow_run_id"], json!("run-1"));
+
+        let queued_raw: String = store
+            .conn
+            .query_row("SELECT data FROM attempts WHERE id='req-queued'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let queued: Value = serde_json::from_str(&queued_raw).unwrap();
+        assert_eq!(queued["state"], json!("queued"));
+        assert_eq!(queued["profile"]["id"], json!("reviewer"));
+
+        let run_raw: String = store
+            .conn
+            .query_row("SELECT data FROM workflow_runs WHERE id='run-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let run: Value = serde_json::from_str(&run_raw).unwrap();
+        assert_eq!(run["attempt_id"], json!("req-1:1"));
+        assert!(run.get("request_id").is_none());
+
+        let card_raw: String = store
+            .conn
+            .query_row("SELECT data FROM cards WHERE id='c1'", [], |r| r.get(0))
+            .unwrap();
+        let card: Value = serde_json::from_str(&card_raw).unwrap();
+        assert_eq!(card["human_gate"]["attempt_id"], json!("req-1:1"));
+
+        let rep_raw: String = store
+            .conn
+            .query_row("SELECT data FROM reports WHERE id='rep1'", [], |r| r.get(0))
+            .unwrap();
+        let rep: Value = serde_json::from_str(&rep_raw).unwrap();
+        assert_eq!(rep["attempt_id"], json!("req-1:1"));
+        assert_eq!(rep["actor"], json!("agent:developer"));
+
+        let ev_raw: String = store
+            .conn
+            .query_row("SELECT data FROM events WHERE id='ev1'", [], |r| r.get(0))
+            .unwrap();
+        let ev: Value = serde_json::from_str(&ev_raw).unwrap();
+        assert!(ev.get("request_id").is_none());
+        assert_eq!(ev["data"]["attempt_id"], json!("req-1:1"));
+
+        // Roundtrip 14 -> 13 -> 14
+        apply(&mut store.conn, 13).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), 13);
+        let req_count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(req_count, 2);
+        apply(&mut store.conn, 14).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), 14);
     }
 }

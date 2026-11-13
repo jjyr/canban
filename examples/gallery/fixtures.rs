@@ -2,7 +2,7 @@ use canban_types::{Event, ReviewPreview};
 use serde_json::json;
 
 pub fn timeline() -> Event {
-    Event {id:"gallery-event".into(),project_id:"gallery-project".into(),card_id:"gallery-card".into(),sequence:1,kind:"comment.created".into(),actor:"user".into(),message:"A **shared component**, rendered from deterministic fixture data.\n\n中文输入、选择、复制与长文本。".into(),request_id:None,data:json!({}),created_at:canban_types::now()}
+    Event {id:"gallery-event".into(),project_id:"gallery-project".into(),card_id:"gallery-card".into(),sequence:1,kind:"comment.created".into(),actor:"user".into(),message:"A **shared component**, rendered from deterministic fixture data.\n\n中文输入、选择、复制与长文本。".into(),data:json!({}),created_at:canban_types::now()}
 }
 
 pub fn timeline_connected() -> [Event; 5] {
@@ -15,7 +15,6 @@ pub fn timeline_connected() -> [Event; 5] {
         kind: kind.into(),
         actor: actor.into(),
         message: msg.into(),
-        request_id: None,
         data: json!({}),
         created_at: base.saturating_sub(mins_ago * 60_000),
     };
@@ -107,7 +106,7 @@ pub fn archive() -> canban_types::Snapshot {
             profile_id: profile.into(),
             provider: provider.into(),
             provider_session_id: None,
-            last_request_id: None,
+            last_attempt_id: None,
             created_at: now(),
         });
     }
@@ -322,7 +321,7 @@ pub fn workspace() -> canban_types::Snapshot {
             3 => "\n\nTags: #ux",
             _ => "",
         };
-        s.cards.push(Card{source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),request_id:None,next_stage:None}),delivery,created_at:now()});
+        s.cards.push(Card{source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),attempt_id:None,next_stage:None}),delivery,created_at:now()});
     }
     s.notes.push(Note{id:"note-1".into(),project_id:"gallery-project".into(),title:"Search ideas.md".into(),body:"# Search experience\n\nFind a Card without remembering its number.\n\nSee [Architecture](note:note-2).".into(),revision:1,created_at:now(),updated_at:now(),links:vec!["note-2".into()],card_ids:vec!["card-1".into()]});
     s.notes.push(Note {
@@ -349,8 +348,6 @@ pub fn workspace() -> canban_types::Snapshot {
         actor: "@developer".into(),
         message: "Updated search constraints while handling Card #1".into(),
         card_id: Some("card-1".into()),
-        request_id: None,
-        attempt: None,
         revision: 1,
         data: json!({}),
         created_at: now(),
@@ -393,39 +390,26 @@ pub fn workspace_with_card_terminals() -> canban_types::Snapshot {
         .into_iter()
         .find(|p| p.id == "developer")
         .unwrap();
-    let mut req = canban_scheduler::request(
+    let mut run = canban_scheduler::attempt(
         "gallery-project",
         "card-2",
+        1,
         "develop",
         "stage_entry",
         dev_profile,
         "Implement credential validation.".into(),
         None,
     );
-    req.id = "card-2-req".into();
-    req.state = "running".into();
-    req.attempt = 1;
-    let mut run: Attempt = serde_json::from_value(json!({
-        "id": Attempt::key(&req.id, 1),
-        "request_id": req.id,
-        "project_id": "gallery-project",
-        "card_id": "card-2",
-        "number": 1,
-        "state": "running",
-        "core_id": "gallery",
-        "terminal": "card-2-dev-pty",
-        "cwd": "/preview/worktrees/card-2",
-        "input_path": "input.md",
-        "output_path": null,
-        "observed": {"state": "live", "status": {"state": "working"}},
-        "error": null,
-        "created_at": now(),
-        "provider_session_id": "session-card-2",
-        "connection_state": "connected"
-    }))
-    .unwrap();
+    run.id = "card-2-req:1".into();
+    run.state = "running".into();
+    run.core_id = Some("gallery".into());
+    run.terminal = Some("card-2-dev-pty".into());
+    run.cwd = "/preview/worktrees/card-2".into();
+    run.input_path = "input.md".into();
+    run.observed = Some(json!({"state": "live", "status": {"state": "working"}}));
+    run.provider_session_id = Some("session-card-2".into());
+    run.connection_state = "connected".into();
     run.lifecycle.observed_at = Some(u64::MAX);
-    s.requests.push(req);
     s.attempts.push(run);
     s.terminals.push(TerminalEntry {
         id: "card-2-shell-1".into(),
@@ -534,16 +518,17 @@ pub fn project_activity() -> canban_types::Snapshot {
         card.attention = None;
         if i < 4 {
             let state = ["completed", "blocked", "starting", "queued"][i];
-            let mut request = canban_scheduler::request(
+            let mut attempt = canban_scheduler::attempt(
                 &project.id,
                 &card.id,
+                1,
                 "develop",
                 "stage_entry",
                 Config::default().profiles[0].clone(),
                 "Fixture".into(),
                 None,
             );
-            request.state = state.into();
+            attempt.state = state.into();
             if i < 2 {
                 card.human_gate = Some(HumanGate {
                     reason: if i == 0 {
@@ -552,11 +537,11 @@ pub fn project_activity() -> canban_types::Snapshot {
                         "Answer the Agent"
                     }
                     .into(),
-                    request_id: Some(request.id.clone()),
+                    attempt_id: Some(attempt.id.clone()),
                     next_stage: None,
                 });
             }
-            s.requests.push(request);
+            s.attempts.push(attempt);
         }
         if i < 5 {
             let mut event = timeline();
@@ -625,32 +610,40 @@ pub fn overview() -> canban_types::Snapshot {
         }
         .into();
         card.human_gate = None;
-        let mut req=canban_scheduler::request(&card.project_id,&card.id,&card.stage,"stage_entry",Config::default().profiles[0].clone(),"Inspect the Card context and implement a small, reviewable change.\n\nKeep the user's existing work and explain any decision that needs attention.".into(),None);
-        req.id = format!("overview-request-{i}");
-        req.attempt = 1;
-        req.state = if *state == "queued" {
+        let mut run = canban_scheduler::attempt(
+            &card.project_id,
+            &card.id,
+            1,
+            &card.stage,
+            "stage_entry",
+            Config::default().profiles[0].clone(),
+            "Inspect the Card context and implement a small, reviewable change.\n\nKeep the user's existing work and explain any decision that needs attention.".into(),
+            None,
+        );
+        run.id = format!("overview-request-{i}");
+        run.state = if *state == "queued" {
             "queued"
         } else if *state == "review" {
             "completed"
+        } else if *state == "exited" {
+            "failed"
         } else {
             "running"
         }
         .into();
-        if *state == "exited" {
-            req.state = "failed".into();
-        }
         if *state == "review" {
             card.human_gate = Some(HumanGate {
                 reason: "Agent report ready; human review required".into(),
-                request_id: Some(req.id.clone()),
+                attempt_id: Some(run.id.clone()),
                 next_stage: None,
             });
             s.reports.push(Report {
                 id: format!("overview-report-{i}"),
-                request_id: req.id.clone(),
+                attempt_id: Some(run.id.clone()),
+                workflow_run_id: None,
+                actor: "agent:developer".into(),
                 project_id: card.project_id.clone(),
                 card_id: card.id.clone(),
-                attempt: 1,
                 state: "completed".into(),
                 message: "Completed changes and verified all workspace tests".into(),
                 path: None,
@@ -660,7 +653,27 @@ pub fn overview() -> canban_types::Snapshot {
             });
         }
         if *state != "queued" {
-            let mut run:Attempt=serde_json::from_value(json!({"id":Attempt::key(&req.id,1),"request_id":req.id,"project_id":card.project_id,"card_id":card.id,"number":1,"state":req.state,"core_id":"gallery-core","terminal":format!("t{}",i+1),"cwd":"/example/card-worktree","input_path":"input.md","output_path":null,"observed":{"state":if matches!(*state,"closed"|"exited") {"finished"} else {"live"},"status":{"state":if *state=="review" {"done"} else {state},"kind":"permission","title":"Allow repository command?","msg":"Agent requests permission to run git status in the Card worktree."}},"error":null,"created_at":now()-180_000,"provider_session_id":format!("session-{i}"),"connection_state":if *state=="unknown" {"unavailable"} else {"connected"}})).unwrap();
+            run.core_id = Some("gallery-core".into());
+            run.terminal = Some(format!("t{}", i + 1));
+            run.cwd = "/example/card-worktree".into();
+            run.input_path = "input.md".into();
+            run.created_at = now() - 180_000;
+            run.provider_session_id = Some(format!("session-{i}"));
+            run.connection_state = if *state == "unknown" {
+                "unavailable"
+            } else {
+                "connected"
+            }
+            .into();
+            run.observed = Some(json!({
+                "state": if matches!(*state, "closed" | "exited") { "finished" } else { "live" },
+                "status": {
+                    "state": if *state == "review" { "done" } else { state },
+                    "kind": "permission",
+                    "title": "Allow repository command?",
+                    "msg": "Agent requests permission to run git status in the Card worktree."
+                }
+            }));
             if *state == "exited" {
                 run.observed = Some(json!({"state":"finished","exit_code":1,"status":null}));
                 run.output_path = Some("saved-output.txt".into());
@@ -681,9 +694,8 @@ pub fn overview() -> canban_types::Snapshot {
             if *state == "idle" {
                 run.lifecycle.idle_since = Some(now() - 240_000);
             }
-            s.attempts.push(run);
         }
-        s.requests.push(req);
+        s.attempts.push(run);
         s.cards.push(card);
     }
     // Multi-reason and long-title row exercises compact layout and both direct actions.
@@ -691,32 +703,24 @@ pub fn overview() -> canban_types::Snapshot {
         "修复支付重试逻辑 · preserve the complete task identity when the window is narrow".into();
     s.cards[0].human_gate = Some(HumanGate {
         reason: "Decide whether to raise the retry limit".into(),
-        request_id: Some(s.requests[0].id.clone()),
+        attempt_id: Some(s.attempts[0].id.clone()),
         next_stage: None,
     });
-    if let Some(a) = s
-        .attempts
-        .iter_mut()
-        .find(|a| a.request_id == "overview-request-2")
-    {
+    if let Some(a) = s.attempts.iter_mut().find(|a| a.id == "overview-request-2") {
         a.observed = Some(
             json!({"state":"live","status":{"state":"working","msg":"Adding keyboard focus regression coverage"}}),
         );
     }
     // A second live profile makes Card-level navigation require an explicit choice.
-    let mut req = s.requests[2].clone();
-    req.id = "overview-reviewer".into();
-    req.profile.id = "reviewer".into();
     let mut attempt = s
         .attempts
         .iter()
-        .find(|a| a.request_id == "overview-request-2")
+        .find(|a| a.id == "overview-request-2")
         .unwrap()
         .clone();
     attempt.id = "overview-reviewer-attempt".into();
-    attempt.request_id = req.id.clone();
+    attempt.profile.id = "reviewer".into();
     attempt.terminal = Some("reviewer-pty".into());
-    s.requests.push(req);
     s.attempts.push(attempt);
     for (index, card_index) in [(1, 0), (2, 2)] {
         let mut event = timeline();
@@ -727,7 +731,7 @@ pub fn overview() -> canban_types::Snapshot {
         event.kind = "comment.replied".into();
         event.actor = "agent:codex".into();
         event.message = "Added regression coverage; please check the new boundary case.".into();
-        event.request_id = Some(s.requests[card_index].id.clone());
+        event.data = json!({"attempt_id": s.attempts[card_index].id});
         s.events.push(event);
     }
     s.cards[2].body=(0..20).map(|i|format!("### Context {i}\n\nLong task context tests direct navigation to an unread reply.\n\n")).collect();
@@ -749,7 +753,7 @@ pub fn overview() -> canban_types::Snapshot {
     merge_card.stage = "review".into();
     merge_card.human_gate = Some(HumanGate {
         reason: "Merge conflict with main; auto-merge paused".into(),
-        request_id: None,
+        attempt_id: None,
         next_stage: None,
     });
     s.cards.push(merge_card);
@@ -825,7 +829,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     let mut s = overview();
     s.projects[0].name = "Canban workspace with a long Project name".into();
     let mut reviewer = s
-        .requests
+        .attempts
         .iter()
         .find(|r| r.card_id == "overview-card-2")
         .unwrap()
@@ -835,8 +839,15 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     reviewer.profile.preset = Some("claude".into());
     reviewer.stage = "review".into();
     reviewer.state = "queued".into();
+    reviewer.core_id = None;
+    reviewer.terminal = None;
+    reviewer.cwd.clear();
+    reviewer.input_path.clear();
+    reviewer.observed = None;
+    reviewer.provider_session_id = None;
+    reviewer.connection_state.clear();
     reviewer.created_at += 1;
-    s.requests.push(reviewer);
+    s.attempts.push(reviewer);
     let mut card = s
         .cards
         .iter()
@@ -846,25 +857,15 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     card.id = "terminal-archived".into();
     card.title = "Archived investigation".into();
     card.archived_at = Some(canban_types::now());
-    let mut req = s
-        .requests
-        .iter()
-        .find(|r| r.card_id == "overview-card-5")
-        .unwrap()
-        .clone();
-    req.id = "terminal-archive-request".into();
-    req.card_id = card.id.clone();
     let mut run = s
         .attempts
         .iter()
-        .find(|a| a.request_id == "overview-request-5")
+        .find(|a| a.id == "overview-request-5")
         .unwrap()
         .clone();
     run.id = "terminal-archive-run".into();
-    run.request_id = req.id.clone();
     run.card_id = card.id.clone();
     s.cards.push(card);
-    s.requests.push(req);
     s.attempts.push(run);
     if let Some(card) = s.cards.iter_mut().find(|c| c.id == "overview-card-2") {
         card.title="修复跨项目调度中的上下文关联并验证长标题不会挤掉阶段与操作 / Preserve the full Agent context across recovery".into();
@@ -914,7 +915,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     for attempt in s
         .attempts
         .iter_mut()
-        .filter(|a| a.card_id == "overview-card-2")
+        .filter(|a| a.card_id == "overview-card-2" && a.terminal.is_some())
     {
         attempt.location = Some(canban_types::WorkLocation {
             machine: "gallery-remote".into(),
@@ -1006,7 +1007,7 @@ pub fn board_cards() -> canban_types::Snapshot {
     }
     s.cards[0].human_gate = Some(HumanGate {
         reason: "Review the report".into(),
-        request_id: None,
+        attempt_id: None,
         next_stage: None,
     });
     s.cards[1].attention = None;
@@ -1017,38 +1018,24 @@ pub fn board_cards() -> canban_types::Snapshot {
         .into_iter()
         .find(|p| p.id == "developer")
         .unwrap();
-    let mut running = canban_scheduler::request(
+    let mut running_attempt = canban_scheduler::attempt(
         "gallery-project",
         "card-2",
+        1,
         "develop",
         "stage_entry",
         profile.clone(),
         "Work on the Card".into(),
         None,
     );
-    running.state = "working".into();
-    running.attempt = 1;
-    let running_id = running.id.clone();
-    s.requests.push(running);
-    let mut running_attempt: Attempt = serde_json::from_value(json!({
-        "id": Attempt::key(&running_id, 1),
-        "request_id": running_id,
-        "project_id": "gallery-project",
-        "card_id": "card-2",
-        "number": 1,
-        "state": "running",
-        "core_id": "gallery",
-        "terminal": "gallery-card-2-pty",
-        "cwd": "/preview/worktrees/card-2",
-        "input_path": "input.md",
-        "output_path": null,
-        "observed": {"state": "live", "status": {"state": "working"}},
-        "error": null,
-        "created_at": now(),
-        "provider_session_id": "session-gallery-card-2",
-        "connection_state": "connected"
-    }))
-    .unwrap();
+    running_attempt.state = "running".into();
+    running_attempt.core_id = Some("gallery".into());
+    running_attempt.terminal = Some("gallery-card-2-pty".into());
+    running_attempt.cwd = "/preview/worktrees/card-2".into();
+    running_attempt.input_path = "input.md".into();
+    running_attempt.observed = Some(json!({"state": "live", "status": {"state": "working"}}));
+    running_attempt.provider_session_id = Some("session-gallery-card-2".into());
+    running_attempt.connection_state = "connected".into();
     running_attempt.lifecycle.observed_at = Some(u64::MAX);
     s.attempts.push(running_attempt);
     s.terminals.push(TerminalEntry {
@@ -1077,16 +1064,17 @@ pub fn board_cards() -> canban_types::Snapshot {
     queued.number = 5;
     queued.title = "Waiting for a free execution slot".into();
     queued.stage = "develop".into();
-    let request = canban_scheduler::request(
+    let attempt = canban_scheduler::attempt(
         "gallery-project",
         &queued.id,
+        1,
         "develop",
         "stage_entry",
         profile,
         "Wait".into(),
         None,
     );
-    s.requests.push(request);
+    s.attempts.push(attempt);
     s.cards.push(queued);
     let mut merging = s.cards[2].clone();
     merging.id = "merging-card".into();
@@ -1118,7 +1106,7 @@ pub fn board_cards() -> canban_types::Snapshot {
             "state": "waiting_delivery",
             "step": "deliver:review",
             "visit": 1,
-            "request_id": null,
+            "attempt_id": null,
             "trigger_event_id": null,
             "input_digest": "gallery",
             "inputs": {"sync_upstream": true, "queued_at": 100},
@@ -1142,20 +1130,21 @@ pub fn board_cards() -> canban_types::Snapshot {
         .into_iter()
         .find(|p| p.id == "merger")
         .unwrap();
-    let mut merger_req = canban_scheduler::request(
+    let mut merger_attempt = canban_scheduler::attempt(
         "gallery-project",
         &conflict.id,
+        1,
         "review",
         "workflow",
         merger_profile,
         "Merge conflict to resolve before delivery".into(),
         None,
     );
-    merger_req.state = "working".into();
-    merger_req.workflow_run_id = Some("gallery-conflict-run".into());
-    merger_req.workflow_step = Some("deliver:review:2".into());
-    let merger_req_id = merger_req.id.clone();
-    s.requests.push(merger_req);
+    merger_attempt.state = "working".into();
+    merger_attempt.workflow_run_id = Some("gallery-conflict-run".into());
+    merger_attempt.workflow_step = Some("deliver:review:2".into());
+    let merger_attempt_id = merger_attempt.id.clone();
+    s.attempts.push(merger_attempt);
     s.workflow_runs.push(
         serde_json::from_value(json!({
             "id": "gallery-conflict-run",
@@ -1186,7 +1175,7 @@ pub fn board_cards() -> canban_types::Snapshot {
             "state": "waiting_agent",
             "step": "deliver:review",
             "visit": 2,
-            "request_id": merger_req_id,
+            "attempt_id": merger_attempt_id,
             "trigger_event_id": null,
             "input_digest": "gallery",
             "inputs": {"sync_upstream": true, "conflict_attempts": 1, "queued_at": 200},
@@ -1229,7 +1218,7 @@ pub fn board_cards() -> canban_types::Snapshot {
             "state": "waiting_delivery",
             "step": "deliver:review",
             "visit": 1,
-            "request_id": null,
+            "attempt_id": null,
             "trigger_event_id": null,
             "input_digest": "gallery",
             "inputs": {"sync_upstream": true, "queued_at": 300},
@@ -1267,7 +1256,6 @@ pub fn conversation() -> canban_types::Snapshot {
             kind: kind.into(),
             actor: actor.into(),
             message: msg,
-            request_id: None,
             data: json!({}),
             created_at: base.saturating_sub(mins_ago * 60_000),
         });
@@ -1513,7 +1501,7 @@ pub fn workflow() -> canban_types::WorkflowRun {
             "approve":{"type":"approval","title":"Approve plan v1","next":"choose","rework":"plan"},
             "choose":{"type":"condition","pointer":"/inputs/implement","equals":true,"then":"develop","otherwise":"done"},
             "develop":{"type":"move","column":"develop","next":"done"},"done":{"type":"complete"}}},
-        "state":"waiting_approval","step":"approve","visit":2,"request_id":null,"trigger_event_id":null,
+        "state":"waiting_approval","step":"approve","visit":2,"attempt_id":null,"trigger_event_id":null,
         "input_digest":"fixture","inputs":{"implement":true},"outputs":{"plan":{"message":"Plan v1: preserve existing runtime and add a regression.","report_id":"plan-v1"}},
         "history":[],"error":null,"created_at":0,"updated_at":0
     })).unwrap()

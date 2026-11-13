@@ -5,7 +5,6 @@ pub fn event(
     kind: &str,
     actor: &str,
     message: &str,
-    request: Option<String>,
     data: serde_json::Value,
 ) -> Event {
     Event {
@@ -16,7 +15,6 @@ pub fn event(
         kind: kind.into(),
         actor: actor.into(),
         message: message.into(),
-        request_id: request,
         data,
         created_at: now(),
     }

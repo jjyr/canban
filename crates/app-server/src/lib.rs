@@ -114,16 +114,21 @@ fn log(
     kind: &str,
     actor: &str,
     message: &str,
-    request: Option<String>,
-    data: Value,
+    attempt_id: Option<String>,
+    mut data: Value,
 ) -> Result<()> {
+    if let Some(aid) = attempt_id
+        && let Some(obj) = data.as_object_mut()
+    {
+        obj.entry("attempt_id".to_owned())
+            .or_insert_with(|| json!(aid));
+    }
     db.append(canban_timeline::event(
         &c.project_id,
         &c.id,
         kind,
         actor,
         message,
-        request,
         data,
     ))?;
     Ok(())
@@ -133,7 +138,7 @@ fn attention(db: Db<'_>, card: &mut Card, message: &str) -> Result<()> {
     if card.human_gate.is_none() {
         card.human_gate = Some(HumanGate {
             reason: message.into(),
-            request_id: None,
+            attempt_id: None,
             next_stage: None,
         });
     }
@@ -143,6 +148,99 @@ fn attention(db: Db<'_>, card: &mut Card, message: &str) -> Result<()> {
         message,
     ))?;
     Ok(())
+}
+pub(crate) fn parse_card_number(v: &Value) -> Option<u64> {
+    if let Some(n) = v.as_u64() {
+        return (n > 0).then_some(n);
+    }
+    let s = v.as_str()?.trim();
+    let s = s.strip_prefix('#').unwrap_or(s).trim();
+    let n = s.parse::<u64>().ok()?;
+    (n > 0).then_some(n)
+}
+fn path_within(root: &str, target: &str) -> bool {
+    if root.is_empty() || target.is_empty() {
+        return false;
+    }
+    let r = std::fs::canonicalize(root).unwrap_or_else(|_| PathBuf::from(root));
+    let t = std::fs::canonicalize(target).unwrap_or_else(|_| PathBuf::from(target));
+    t.starts_with(&r)
+}
+pub(crate) fn resolve_card(db: Db<'_>, p: &Value) -> Result<Card> {
+    if let Some(raw_id) = p["card_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Ok(card) = db.get::<Card>(raw_id) {
+            return Ok(card);
+        }
+        if parse_card_number(&json!(raw_id)).is_none() {
+            bail!("Card not found: {raw_id}");
+        }
+    }
+    let number = parse_card_number(&p["card"])
+        .or_else(|| parse_card_number(&p["card_id"]))
+        .context("Supply --card <number> (or CANBAN_CARD) or card_id")?;
+    let cards = db.list::<Card>()?;
+    if let Some(pid) = p["project_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return cards
+            .into_iter()
+            .find(|c| c.project_id == pid && c.number == number && c.removed_at.is_none())
+            .with_context(|| format!("Card #{number} not found in Project {pid}"));
+    }
+    if let Some(cwd) = p["cwd"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(c) = cards.iter().find(|c| {
+            c.number == number
+                && c.removed_at.is_none()
+                && c.worktree.as_deref().is_some_and(|wt| path_within(wt, cwd))
+        }) {
+            return Ok(c.clone());
+        }
+        if let Some(wt) = db
+            .list::<ManagedWorktree>()?
+            .into_iter()
+            .find(|w| path_within(&w.path, cwd))
+            && let Some(c) = cards.iter().find(|c| {
+                c.project_id == wt.project_id && c.number == number && c.removed_at.is_none()
+            })
+        {
+            return Ok(c.clone());
+        }
+        let mut best_proj: Option<(usize, String)> = None;
+        for proj in db.list::<Project>()? {
+            let dir = proj.work_location().directory;
+            if path_within(&dir, cwd) {
+                let len = dir.len();
+                if best_proj.as_ref().is_none_or(|(b, _)| len > *b) {
+                    best_proj = Some((len, proj.id));
+                }
+            }
+        }
+        if let Some((_, pid)) = best_proj {
+            return cards
+                .into_iter()
+                .find(|c| c.project_id == pid && c.number == number && c.removed_at.is_none())
+                .with_context(|| {
+                    format!("Card #{number} not found in current repository Project")
+                });
+        }
+    }
+    let matches: Vec<Card> = cards
+        .into_iter()
+        .filter(|c| c.number == number && c.removed_at.is_none())
+        .collect();
+    match matches.len() {
+        1 => Ok(matches.into_iter().next().unwrap()),
+        0 => bail!("Card #{number} not found"),
+        _ => bail!(
+            "Card #{number} exists in multiple Projects; pass --project <project_id> or run inside the Project directory"
+        ),
+    }
 }
 #[allow(
     clippy::too_many_arguments,
@@ -154,10 +252,10 @@ fn enqueue(
     card: &mut Card,
     project: &Project,
     stage: &Stage,
-    trigger: RequestTrigger,
+    trigger: ExecutionTrigger,
     explicit: Option<&str>,
     instruction: Option<String>,
-) -> Result<Option<Request>> {
+) -> Result<Option<Attempt>> {
     ensure!(
         card.removed_at.is_none(),
         "Restore the removed Card before scheduling"
@@ -186,9 +284,11 @@ fn enqueue(
             return Ok(None);
         }
     };
-    let mut req = canban_scheduler::request(
+    let number = u32::try_from(db.counter(&format!("card-attempt:{}", card.id))?)?;
+    let mut att = canban_scheduler::attempt(
         &project.id,
         &card.id,
+        number,
         &stage.id,
         trigger.clone(),
         profile,
@@ -199,10 +299,11 @@ fn enqueue(
             stage.on_completed.clone()
         },
     );
-    req.require_human_review = explicit.is_none() && stage.require_human_review;
-    let mut context = crate::sessions::conversation(db, card, &req.profile)?;
+    att.require_human_review = explicit.is_none() && stage.require_human_review;
+    let mut context = crate::sessions::conversation(db, card, &att.profile)?;
+    att.conversation_id = Some(context.id.clone());
     if explicit.is_some() && context.provider_session_id.is_some() {
-        req.resume_from = db
+        att.resume_from = db
             .list::<Attempt>()?
             .into_iter()
             .rev()
@@ -212,10 +313,10 @@ fn enqueue(
             })
             .map(|a| a.id);
     }
-    db.save(&req)?;
+    db.save(&att)?;
     // Queued work does not replace the pointer to an invocation that is still live.
-    if context.last_request_id.is_none() {
-        context.last_request_id = Some(req.id.clone());
+    if context.last_attempt_id.is_none() {
+        context.last_attempt_id = Some(att.id.clone());
         db.save(&context)?;
     }
     log(
@@ -223,11 +324,11 @@ fn enqueue(
         card,
         "execution.queued",
         "system",
-        &format!("Queued @{}", req.profile.id),
-        Some(req.id.clone()),
-        json!({"trigger":trigger,"stage":stage.id}),
+        &format!("Queued @{}", att.profile.id),
+        Some(att.id.clone()),
+        json!({"trigger":trigger,"stage":stage.id,"attempt":att.number}),
     )?;
-    Ok(Some(req))
+    Ok(Some(att))
 }
 impl AppServer {
     pub fn open(home: PathBuf, cli: PathBuf) -> Result<Arc<Self>> {
@@ -259,7 +360,6 @@ impl AppServer {
         );
         // Existing attention is a real pause after upgrading, not merely a badge.
         store.write(|db| {
-            let requests = db.list::<Request>()?;
             for mut project in db.list::<Project>()? {
                 if project.location.is_none() {
                     project.location = Some(project.work_location());
@@ -282,7 +382,7 @@ impl AppServer {
                 }
             }
             for mut a in db.list::<Attempt>()? {
-                if a.location.is_none() {
+                if a.location.is_none() && a.state != "queued" {
                     let p: Project = db.get(&a.project_id)?;
                     let location = WorkLocation {
                         machine: "local".into(),
@@ -300,24 +400,25 @@ impl AppServer {
                     db.save(&a)?;
                 }
             }
+            let attempts = db.list::<Attempt>()?;
             for mut card in db.list::<Card>()? {
                 if let Some(reason) = card.attention.clone()
                     && card.human_gate.is_none()
                 {
-                    let request_id = requests
+                    let attempt_id = attempts
                         .iter()
                         .rev()
-                        .find(|r| {
-                            r.card_id == card.id
+                        .find(|a| {
+                            a.card_id == card.id
                                 && matches!(
-                                    r.state.as_str(),
+                                    a.state.as_str(),
                                     "blocked" | "failed" | "needs_report" | "unknown"
                                 )
                         })
-                        .map(|r| r.id.clone());
+                        .map(|a| a.id.clone());
                     card.human_gate = Some(HumanGate {
                         reason,
-                        request_id,
+                        attempt_id,
                         next_stage: None,
                     });
                     db.save(&card)?;
