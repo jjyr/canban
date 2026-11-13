@@ -239,6 +239,14 @@ pub const CATALOG: &[Command] = &[
         keywords: "preferences config identities",
     },
     Command {
+        id: "go-acknowledgements",
+        title: "Open Acknowledgements & Licenses",
+        key: "",
+        display: "Settings",
+        context: "Preferences",
+        keywords: "about credits open source licenses apache mit herdr sheprd herdr-gpui nsh ghostty",
+    },
+    Command {
         id: "go-machines",
         title: "Open Execution Machines",
         key: "",
@@ -525,6 +533,7 @@ pub fn execute(ui: Ui, id: &str) {
         "go-drafts" => ui.navigate("drafts"),
         "go-archive" => ui.navigate("archive"),
         "go-settings" => ui.navigate("settings"),
+        "go-acknowledgements" => ui.open_settings_section("acknowledgements"),
         "go-machines" => ui.navigate("machines"),
         "go-project-location" => {
             if ui.current_project().is_some() {

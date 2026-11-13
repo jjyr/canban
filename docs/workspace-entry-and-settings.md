@@ -57,17 +57,21 @@ Overview now renders compact Needs you, Updates, Running and Queued groups, with
 
 ## Settings composition
 
-One screen-owned vertical scroll contains every group, with a maximum content width of 880 points. Shared `settings_section`/`settings_field` components provide 16-point group headings, consistent surfaces, borders, spacing and field/helper alignment. Numeric fields are bounded to 160 points; descriptions wrap in narrow layouts. The scheduling section has no independent scroll or pinned region.
+Settings pairs a section jump column (208 points wide on desktop viewports, collapsing into a horizontal top jump strip when `narrow < 950` points without unmounting the content scroll) with one screen-owned vertical scroll (`max_w` 880 points). Clicking a jump entry scrolls directly to that section while pinning its active highlight across smooth-scroll animation and clamped bottom offsets until the user scrolls away; manual scrolling updates the active item via scroll-spy. Shared `settings_section`, `settings_field`, `settings_nav_heading` and `settings_nav_item` components provide consistent group headings, surfaces, borders, spacing and focus/hover states. Numeric fields are bounded to 160 points; descriptions wrap in narrow layouts.
 
-| Group | Existing capabilities exposed |
-| --- | --- |
-| Agent scheduling | Execution summary, global concurrency, idle timeout and Save scheduling settings; validation stays inside the group |
-| Agent profiles | Configuration path, profile/role list and Reload configuration |
-| Workflow | Default workflow JSON location and its scope for new Projects |
-| Herdr | Runtime executable/session and explicit Check connection |
-| Storage | Application-home location |
+| Nav group | Section | Capabilities exposed |
+| --- | --- | --- |
+| Interface | Theme and support | Notification sound toggle, theme picker, shortcuts palette, issue reporting and diagnostics copy |
+| Interface | Terminal | Installed monospaced font family picker, point size controls (9–32 pt) and reset |
+| Interface | Updates | Current build version, channel check and install/restart |
+| Execution | Agent scheduling | Execution summary, global concurrency, idle timeout and Save scheduling settings; validation stays inside the group |
+| Execution | Machines | Local host and SSH-configured remote execution machines |
+| Execution | Agents & Identities | Enabled Herdr CLI Agents, `@identities`, default interactive Agent, Setup wizard and configuration reload |
+| Execution | Herdr | Runtime executable/session and explicit Check connection |
+| System | Storage | Application-home location and path copy |
+| *(Bottom divider)* | Acknowledgements & Licenses | Canban Apache-2.0 attribution, core/runtime credits (`Herdr`, `sheprd` / formerly `herdr-gpui`, `NSH`, `Ghostty`), asset/upstream credits (`CodexBar`, `iTerm2-Color-Schemes`, `Lucide`, `Lobe Icons`, `Primer Octicons`) with license badges and repository links, plus a collapsible bundled-notices and full license viewer |
 
-This is a grouped presentation of current capabilities, not a new template/profile configuration GUI. Save scheduling settings persists both fields; concurrency must be positive, idle timeout nonnegative, and 0 disables idle reclamation.
+Save scheduling settings persists both fields; concurrency must be positive, idle timeout nonnegative, and 0 disables idle reclamation.
 
 ## Components and Gallery
 
@@ -75,7 +79,8 @@ This is a grouped presentation of current capabilities, not a new template/profi
 | --- | --- |
 | `ui-kit/entry_card.rs` | Generic icon, title, supporting text and press intent; one NSH Button |
 | `ui-kit/directory_field.rs` | Controlled directory string, native chooser/cancellation/error/pending behavior and path-selected intent |
-| `ui-kit/settings.rs` | Section/field visual composition; parent owns scrolling and persistence |
+| `ui-kit/settings.rs` | Section/field visual composition plus `settings_nav_heading` / `settings_nav_item` jump controls; parent owns scrolling and persistence |
+| `ui/settings.rs` | Settings middle jump rail, narrow horizontal jump strip, scroll-spy/pin model, and `Acknowledgements & Licenses` section |
 | `ui/board.rs`, `ui/screens.rs` | Project availability, form/autoname policy and application operations |
 | `ui/overview.rs` | Compact global rows and direct destinations; no filtering |
 | `ui/components/scheduling.rs`, `ui/profiles.rs` | Shared settings section and content-only profile projection |

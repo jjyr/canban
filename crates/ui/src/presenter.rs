@@ -98,6 +98,7 @@ pub struct Ui {
     pub card_view: Option<Signal<String>>,
     pub request: Signal<String>,
     pub page: Signal<String>,
+    pub settings_section: Signal<String>,
     pub status: Signal<String>,
     pub toast: Signal<String>,
     pub toast_epoch: Signal<u64>,
@@ -210,6 +211,10 @@ impl Ui {
         self.review_request
             .set(self.review_request.get_untracked() + 1);
         self.page.set(page.into());
+    }
+    pub fn open_settings_section(self, section: &str) {
+        self.settings_section.set(section.into());
+        self.navigate("settings");
     }
     pub fn has_blocking_overlay(self) -> bool {
         self.quick_open.get_untracked()
@@ -346,6 +351,7 @@ impl Ui {
             card_view: None,
             request: signal(String::new()),
             page: signal("board".into()),
+            settings_section: signal(String::new()),
             status: signal(String::new()),
             toast: signal(String::new()),
             toast_epoch: signal(0),

@@ -199,7 +199,7 @@ pub fn open(ui: Ui, url: &str) {
                 .profiles
                 .with_untracked(|profiles| profiles.iter().any(|p| p.id == id))
             {
-                ui.navigate("settings");
+                ui.open_settings_section("agents");
             }
         }
         Destination::Attachment(id) => {
