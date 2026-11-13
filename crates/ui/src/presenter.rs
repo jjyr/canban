@@ -145,6 +145,23 @@ fn ordered_enabled_profiles(all: &[Profile], default_agent: &str) -> Vec<Profile
     enabled
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceDismiss {
+    CloseNewCard,
+    CloseCard,
+}
+
+pub fn workspace_dismiss_action(page: &str, blocked: bool) -> Option<WorkspaceDismiss> {
+    if blocked {
+        return None;
+    }
+    match page {
+        "new-card" => Some(WorkspaceDismiss::CloseNewCard),
+        "card" => Some(WorkspaceDismiss::CloseCard),
+        _ => None,
+    }
+}
+
 impl Ui {
     pub fn apply_config(self, cfg: &Config) {
         self.default_agent.set(cfg.default_agent.clone());
@@ -190,6 +207,31 @@ impl Ui {
         self.review_request
             .set(self.review_request.get_untracked() + 1);
         self.page.set(page.into());
+    }
+    pub fn has_blocking_overlay(self) -> bool {
+        self.quick_open.get_untracked()
+            || !self.utility_popup.get_untracked().is_empty()
+            || self.native_modal.get_untracked()
+            || self.quick_merge.get_untracked().is_some()
+            || self.terminal_rename.get_untracked().is_some()
+            || self.worktree_modal.get_untracked().is_some()
+            || self.worktree_promote.get_untracked().is_some()
+            || self.worktree_remove_confirm.get_untracked().is_some()
+    }
+    pub fn close_card(self) {
+        self.card_terminal_open.set(false);
+        self.card_terminal_focused.set(false);
+        self.card.set(String::new());
+        self.card_standalone.set(false);
+        self.clear_output();
+        self.page.set("board".into());
+    }
+    pub fn dismiss_workspace_pane(self) {
+        match workspace_dismiss_action(&self.page.get_untracked(), self.has_blocking_overlay()) {
+            Some(WorkspaceDismiss::CloseNewCard) => self.navigate("board"),
+            Some(WorkspaceDismiss::CloseCard) => self.close_card(),
+            None => {}
+        }
     }
     pub fn new() -> Self {
         let snapshot = signal(Snapshot::default());
@@ -824,4 +866,25 @@ pub fn copy_text(ui: Ui, value: String) {
             Err(e) => ui.operation_error.set(e.to_string()),
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_dismiss_closes_only_card_and_new_card_when_unblocked() {
+        assert_eq!(
+            workspace_dismiss_action("card", false),
+            Some(WorkspaceDismiss::CloseCard)
+        );
+        assert_eq!(
+            workspace_dismiss_action("new-card", false),
+            Some(WorkspaceDismiss::CloseNewCard)
+        );
+        assert_eq!(workspace_dismiss_action("board", false), None);
+        assert_eq!(workspace_dismiss_action("review", false), None);
+        assert_eq!(workspace_dismiss_action("card", true), None);
+        assert_eq!(workspace_dismiss_action("new-card", true), None);
+    }
 }

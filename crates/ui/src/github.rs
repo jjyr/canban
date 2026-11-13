@@ -690,7 +690,24 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
     });
     let height = signal(280.);
     let active = computed(move || ui.page.get() == "new-card");
-    let (_local_editor, local_view) = crate::editor::body(
+    effect(move || {
+        if !active.get() {
+            return;
+        }
+        on_key_with(
+            "escape",
+            KeyOptions {
+                when: nsh_core::keymap::When::Always,
+                ..Default::default()
+            },
+            move |_| {
+                if ui.page.get_untracked() == "new-card" && !ui.has_blocking_overlay() {
+                    ui.navigate("board");
+                }
+            },
+        );
+    });
+    let (local_editor, local_view) = crate::editor::body(
         ui,
         local,
         computed(move || target.get()),
@@ -698,7 +715,7 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
         height,
         move || ui.card_submit.update(|n| *n += 1),
     );
-    let (_, instructions_view) = crate::editor::body(
+    let (instructions_editor, instructions_view) = crate::editor::body(
         ui,
         instructions,
         computed(move || target.get()),
@@ -706,6 +723,12 @@ pub fn new_card(ui: Ui) -> impl IntoElement {
         height,
         move || ui.card_submit.update(|n| *n += 1),
     );
+    effect(move || {
+        if !active.get() {
+            local_editor.blur();
+            instructions_editor.blur();
+        }
+    });
     view()
         .key(key.clone())
         .flex_1()

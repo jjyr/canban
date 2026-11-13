@@ -5,11 +5,18 @@ Status: implemented user-approved direction; native acceptance recorded 2026-11-
 New Cards and existing task descriptions share the native Markdown source editor.
 The default surface is the Board's right pane; Expand uses the main workspace,
 and Collapse restores the pane without replacing the editor, selection, undo
-history or scroll position. There is no separate centered editing dialog.
+history or scroll position. Clicking non-interactive Board space on the left
+collapses an open right-pane Card or New Card back to the Board, and Escape
+closes New Card when no completion menu or modal overlay is open. There is no
+separate centered editing dialog.
 
-Enter and Shift+Enter insert newlines, including while completion is open.
-Tab or a click accepts a candidate; arrows select and Escape dismisses the list.
+Enter, Tab or a click accepts an open completion candidate; arrows select,
+Shift+Enter inserts a newline without accepting, and Escape dismisses the list.
+When completion is closed, Enter and Shift+Enter insert newlines.
 Command+Enter dispatches the same guarded create/save intent as the button.
+Source editors use an explicit `Menlo, PingFang SC` font cascade so per-grapheme
+caret measurement matches CoreText line rendering across mixed Chinese and
+English text.
 
 Drafts are saved independently of published Card content. Closing or navigating
 away retains a draft; only explicit confirmation updates a Card. A searchable Drafts screen

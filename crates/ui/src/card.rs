@@ -114,10 +114,17 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     effect(move || {
         let _ = ui.reminders.get();
         let _ = crate::reminders::foreground();
-        let _ = ui.page.get();
+        let page = ui.page.get();
         let _ = ui.quick_open.get();
         let _ = ui.utility_popup.get();
         let _ = ui.native_modal.get();
+        if !matches!(page.as_str(), "card" | "review") {
+            reading.editor.with(|ed| {
+                if let Some(editor) = ed {
+                    editor.blur();
+                }
+            });
+        }
         reading.reader.check(ui);
     });
     let viewport_height = stored(0f32);

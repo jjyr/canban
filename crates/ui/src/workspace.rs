@@ -55,6 +55,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         ui.board_width,
         full,
         requested,
+        move || ui.dismiss_workspace_pane(),
     )
     .into_element()
 }

@@ -2,11 +2,7 @@ use super::*;
 use nsh_core::element::desktop::{MenuItem, popup_menu};
 use serde_json::json;
 fn close(ui: Ui) {
-    ui.card_terminal_open.set(false);
-    ui.card_terminal_focused.set(false);
-    ui.card.set(String::new());
-    ui.card_standalone.set(false);
-    ui.page.set("board".into());
+    ui.close_card();
 }
 fn review(ui: Ui) {
     if let Some(c) = ui.current_card() {

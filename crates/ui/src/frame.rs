@@ -81,10 +81,7 @@ fn route_chrome(ui: Ui) -> impl IntoElement {
                         .min_w(px(0.))
                         .window_drag(false)
                         .child(compact_action("← Board", Variant::Quiet, move |_| {
-                            ui.card_terminal_open.set(false);
-                            ui.card_standalone.set(false);
-                            ui.card.set(String::new());
-                            ui.page.set("board".into());
+                            ui.close_card();
                         }))
                         .child(
                             label(move || {
