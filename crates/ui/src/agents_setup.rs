@@ -515,6 +515,7 @@ fn builtin_role_summary(role_id: &str, role_instruction: &str) -> String {
         "planner" => "Read-only analysis & implementation planning".into(),
         "developer" => "Implementation & default interactive Agent".into(),
         "reviewer" => "Independent diff review & verification".into(),
+        "merger" => "Merge queue & conflict resolution".into(),
         _ if role_instruction.trim().is_empty() => "Custom identity".into(),
         _ => {
             let trimmed = role_instruction.lines().next().unwrap_or_default().trim();
@@ -734,7 +735,7 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                 map.insert(p.id.clone(), eng);
             }
         }
-        for role in ["planner", "developer", "reviewer"] {
+        for role in ["planner", "developer", "reviewer", "merger"] {
             map.entry(role.into())
                 .or_insert_with(|| current_dev_engine.clone());
         }
@@ -887,7 +888,7 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                     .child(
                         settings_section(
                             "Default Agent",
-                            "Powers @planner, @developer, and @reviewer unless customized below or overridden in a Project.",
+                            "Powers @planner, @developer, @reviewer, and @merger unless customized below or overridden in a Project.",
                         )
                         .child(dynamic(move || {
                             let enabled: Vec<String> = enabled_set.get().into_iter().collect();
@@ -909,9 +910,12 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                                                 let chosen = id.clone();
                                                 primary_engine.set(chosen.clone());
                                                 role_engines.update(|m| {
-                                                    for role in
-                                                        ["planner", "developer", "reviewer"]
-                                                    {
+                                                    for role in [
+                                                        "planner",
+                                                        "developer",
+                                                        "reviewer",
+                                                        "merger",
+                                                    ] {
                                                         m.insert(role.into(), chosen.clone());
                                                     }
                                                 });
@@ -944,6 +948,7 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                                                 ("developer", "Implementation & interactive"),
                                                 ("planner", "Read-only planning"),
                                                 ("reviewer", "Independent code review"),
+                                                ("merger", "Merge queue & conflict resolution"),
                                             ]
                                             .into_iter()
                                             .map(|(role_id, desc)| {
@@ -1272,8 +1277,10 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                     .children(identities.into_iter().map(|prof| {
                         let pid = prof.id.clone();
                         let (mark, prov_name) = crate::profiles::provider(&prof);
-                        let is_builtin_role =
-                            matches!(pid.as_str(), "planner" | "developer" | "reviewer");
+                        let is_builtin_role = matches!(
+                            pid.as_str(),
+                            "planner" | "developer" | "reviewer" | "merger"
+                        );
                         let is_editing = active_edit.as_deref() == Some(pid.as_str());
                         let is_editing_custom_model =
                             active_custom_model.as_deref() == Some(pid.as_str());

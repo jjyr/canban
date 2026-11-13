@@ -2200,6 +2200,17 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
     assert_eq!(dev.command()[0], "agy");
     let planner = cfg.profiles.iter().find(|p| p.id == "planner").unwrap();
     assert_eq!(planner.command()[0], "agy");
+    let merger = cfg.profiles.iter().find(|p| p.id == "merger").unwrap();
+    assert!(merger.is_identity() && merger.enabled);
+    assert_eq!(merger.command()[0], "agy");
+    assert!(
+        app.call(
+            "config.agents.save",
+            json!({ "op": "delete_profile", "id": "merger" })
+        )
+        .is_err(),
+        "built-in @merger cannot be deleted"
+    );
 
     // 3. Disabled `@claude` is ignored in prose mentions and rejected when explicitly mentioned!
     app.call(

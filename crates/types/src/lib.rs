@@ -163,7 +163,10 @@ impl Profile {
     pub fn is_identity(&self) -> bool {
         self.identity
             || !self.role_instruction.trim().is_empty()
-            || matches!(self.id.as_str(), "planner" | "developer" | "reviewer")
+            || matches!(
+                self.id.as_str(),
+                "planner" | "developer" | "reviewer" | "merger"
+            )
     }
     pub fn command(&self) -> &[String] {
         self.argv.as_deref().unwrap_or_default()
@@ -261,6 +264,12 @@ impl Default for Config {
                     "codex",
                     true,
                     "You are the Card's planning Agent. Inspect repository files in read-only mode without modifying source files.",
+                ),
+                profile(
+                    "merger",
+                    "codex",
+                    true,
+                    "You are the Card's merge queue Agent. Integrate the target branch cleanly, resolve merge conflicts while preserving both sides' intent, and verify builds and tests before finishing.",
                 ),
             ],
         }

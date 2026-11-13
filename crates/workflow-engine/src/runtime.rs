@@ -467,6 +467,31 @@ pub fn reported(
         return Ok(());
     }
     let key = run.step.clone().context("Missing Agent step")?;
+    if matches!(run.definition.steps.get(&key), Some(WorkflowStep::Deliver { .. })) {
+        run.outputs.insert(
+            key.clone(),
+            json!({"report_id":report.id,"path":report.path,"message":report.message,"request_id":request.id,"attempt":report.attempt,"state":"conflict_resolved"}),
+        );
+        run.history.push(
+            json!({"step":key,"visit":run.visit,"event":"conflict_resolved","report_id":report.id,"at":now()}),
+        );
+        let to = run.definition.steps[&key].next().map(str::to_owned);
+        if let Some(gate) = &mut card.human_gate {
+            if gate.request_id.is_none() {
+                gate.request_id = Some(request.id.clone());
+            }
+            gate.next_stage = request.on_completed.clone();
+            run.state = "blocked".into();
+            run.inputs["pending_next"] = json!(to);
+            db.save(&run)?;
+            return Ok(());
+        }
+        run.visit += 1;
+        run.request_id = Some(request.id.clone());
+        run.error = None;
+        run.state = "running".into();
+        return drive(db, config, card, &mut run, queue);
+    }
     run.outputs.insert(key.clone(),json!({"report_id":report.id,"path":report.path,"message":report.message,"request_id":request.id,"attempt":report.attempt}));
     run.history.push(
         json!({"step":key,"visit":run.visit,"event":"completed","report_id":report.id,"at":now()}),
@@ -663,9 +688,11 @@ pub fn admit(
     drive(db, config, card, run, queue)
 }
 
-/// Routes a delivery merge conflict to the Deliver step's rework target so an
-/// Agent resolves it in the Card worktree. Returns `false` (caller should hold
-/// for a human) when no rework path exists or the attempt budget is spent.
+/// Dispatches a delivery merge conflict directly to the Deliver step's conflict
+/// Agent (`profile`, defaulting to `@merger` when enabled) so it resolves the
+/// conflict in the Card worktree while keeping the run at the `Deliver` step.
+/// Returns `false` (caller should hold for a human) when the attempt budget is
+/// spent or the conflict Agent cannot be queued.
 #[allow(
     clippy::too_many_arguments,
     reason = "Transaction-scoped conflict context plus queue adapter"
@@ -685,7 +712,9 @@ pub fn rework_conflict(
     }
     let key = run.step.clone().context("Missing Deliver step")?;
     let Some(WorkflowStep::Deliver {
-        rework: Some(to),
+        profile,
+        next: continuation,
+        rework,
         max_conflict_attempts,
         ..
     }) = run.definition.steps.get(&key).cloned()
@@ -696,42 +725,92 @@ pub fn rework_conflict(
     if attempts >= max_conflict_attempts {
         return Ok(false);
     }
-    let note = format!(
-        "Queue merge found conflicts integrating `{target_branch}` ({target_head}) into this Card worktree.\n\
+    let conflict_profile = profile
+        .filter(|p| !p.trim().is_empty())
+        .or_else(|| {
+            config
+                .profiles
+                .iter()
+                .any(|p| p.id == "merger" && p.enabled)
+                .then(|| "merger".to_owned())
+        })
+        .or_else(|| {
+            rework
+                .as_ref()
+                .and_then(|to| match run.definition.steps.get(to) {
+                    Some(WorkflowStep::Agent {
+                        profile: Some(p), ..
+                    }) if config.profiles.iter().any(|x| x.id == *p && x.enabled) => {
+                        Some(p.clone())
+                    }
+                    _ => None,
+                })
+        });
+    let instruction = format!(
+        "Merge conflict to resolve before delivery:\n\
+         Queue merge found conflicts integrating `{target_branch}` ({target_head}) into this Card worktree.\n\
          Conflicted files: {}\n\
          The worktree may still be mid-merge. Resolve every conflict while preserving both this Card's intent and the target branch changes, \
-         run the relevant tests, and commit the merge (if no merge is in progress, run `git merge {target_branch}` first). \
-         Do not push; Queue merge will retry delivery automatically after you report completion.",
+         run the relevant builds and tests, and commit the merge (if no merge is in progress, run `git merge {target_branch}` first). \
+         Do not push; Queue merge will retry delivery automatically after you report `--state completed` (or report `--state blocked` if human judgment is required).",
         files.join(", ")
     );
+    let project: Project = db.get(&card.project_id)?;
+    let stage = Stage {
+        id: card.stage.clone(),
+        name: card.stage.clone(),
+        execute: true,
+        profile: conflict_profile,
+        instruction,
+        on_completed: None,
+        require_human_review: false,
+    };
+    let Some(mut req) = queue(db, config, card, &project, &stage, "workflow", None, None)? else {
+        return Ok(false);
+    };
+    run.visit += 1;
+    let step_ref = format!("{key}:{}", run.visit);
+    req.workflow_run_id = Some(run.id.clone());
+    req.workflow_step = Some(step_ref.clone());
+    db.save(&req)?;
+    db.conn.execute(
+        "UPDATE events SET data=json_set(data,'$.data.workflow_run_id',?2,'$.data.workflow_step',?3,'$.data.origin','workflow') WHERE json_extract(data,'$.request_id')=?1 AND json_extract(data,'$.kind')='execution.queued'",
+        [req.id.as_str(), run.id.as_str(), step_ref.as_str()],
+    )?;
+    let agent_id = req.profile.id.clone();
     run.inputs["conflict_attempts"] = json!(attempts + 1);
-    run.inputs["rework_feedback"] = json!(note);
-    run.inputs["rework_origin"] = json!("merge_conflict");
+    run.inputs["title"] = json!(card.title);
+    run.inputs["body"] = json!(card.body);
+    run.inputs["pending_next"] = json!(continuation);
     run.outputs.insert(
         key.clone(),
-        json!({"state":"conflict","target_branch":target_branch,"target_head":target_head,"files":files,"attempt":attempts + 1}),
+        json!({"state":"conflict","target_branch":target_branch,"target_head":target_head,"files":files,"attempt":attempts + 1,"profile_id":agent_id}),
     );
     run.history.push(
-        json!({"step":key,"visit":run.visit,"decision":"merge_conflict","files":files,"at":now()}),
+        json!({"step":key,"visit":run.visit,"decision":"merge_conflict","profile_id":agent_id,"files":files,"at":now()}),
     );
     card.human_gate = None;
     card.attention = None;
     card.revision += 1;
+    run.request_id = Some(req.id.clone());
+    run.state = "waiting_agent".into();
+    run.error = None;
     run.input_digest = digest(db, card);
+    run.updated_at = now();
     log(
         db,
         card,
         "review.merge_conflict",
         "system",
         &format!(
-            "Merge conflict with {target_branch}; Agent will resolve it (attempt {}/{max_conflict_attempts})",
+            "Merge conflict with {target_branch}; @{agent_id} will resolve it (attempt {}/{max_conflict_attempts})",
             attempts + 1
         ),
-        None,
-        json!({"workflow_run_id":run.id,"target_branch":target_branch,"target_head":target_head,"files":files,"attempt":attempts + 1}),
+        Some(req.id),
+        json!({"workflow_run_id":run.id,"target_branch":target_branch,"target_head":target_head,"files":files,"attempt":attempts + 1,"profile_id":agent_id}),
     )?;
-    next(run, Some(to));
-    drive(db, config, card, run, queue)?;
+    db.save(run)?;
+    db.save(card)?;
     Ok(true)
 }
 

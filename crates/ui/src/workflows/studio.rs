@@ -216,20 +216,32 @@ fn step_model(
                 .unwrap_or("Pause for human approval")
                 .to_owned(),
         ),
-        "deliver" => (
-            Icon::Branch,
-            Tint::Success,
-            if sync_upstream { "Merge · Sync" } else { "Merge · Local" }.into(),
-            format!(
-                "{}{} · conflicts → Agent ×{max_conflict}",
-                if target_branch.is_empty() {
-                    "Project branch".to_owned()
-                } else {
-                    target_branch.clone()
-                },
-                if sync_upstream { " + upstream" } else { " (local)" }
-            ),
-        ),
+        "deliver" => {
+            let conflict_agent = if profile.is_empty() {
+                "merger"
+            } else {
+                profile.as_str()
+            };
+            let conflict_summary = if max_conflict == 0 {
+                "conflicts → human".to_owned()
+            } else {
+                format!("conflicts → @{conflict_agent} ×{max_conflict}")
+            };
+            (
+                Icon::Branch,
+                Tint::Success,
+                if sync_upstream { "Merge · Sync" } else { "Merge · Local" }.into(),
+                format!(
+                    "{}{} · {conflict_summary}",
+                    if target_branch.is_empty() {
+                        "Project branch".to_owned()
+                    } else {
+                        target_branch.clone()
+                    },
+                    if sync_upstream { " + upstream" } else { " (local)" }
+                ),
+            )
+        }
         "condition" => (
             Icon::Trigger,
             Tint::Attention,
@@ -1312,7 +1324,7 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                 options.extend(targets.into_iter().map(|(tid, title)| (title, tid)));
                 let id = id.clone();
                 setting_row(
-                    "Rework / conflicts →",
+                    "Rework →",
                     choice(options, move || node.with(|n| n.rework.clone()), move |t: String| {
                         let id = id.clone();
                         ctx.edit(move |d| stages::set_rework(d, &id, Some(t).filter(|t| !t.is_empty())));
@@ -1437,7 +1449,7 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                 }));
         }
         "deliver" => {
-            let (sync_id, conflict_id) = (id.clone(), id.clone());
+            let (sync_id, conflict_id, pid) = (id.clone(), id.clone(), id.clone());
             form = form
                 .child(setting_row(
                     "Upstream",
@@ -1461,7 +1473,7 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                     ),
                 ))
                 .child(setting_row(
-                    "Conflicts → Agent",
+                    "Conflict retries",
                     choice(
                         vec![
                             ("Off".into(), 0u32),
@@ -1479,6 +1491,45 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                         },
                     ),
                 ))
+                .child(dynamic(move || {
+                    if node.with(|n| n.max_conflict == 0) {
+                        return view().into_element();
+                    }
+                    let profiles = ui.profiles.get();
+                    let mut seg = view().flex_row().flex_wrap().gap_1();
+                    for prof in profiles {
+                        let (sel, chosen) = (prof.id.clone(), prof.id.clone());
+                        let (mark, _, _) =
+                            crate::profiles::effective_provider(&prof, ui.current_project().as_ref());
+                        let pid = pid.clone();
+                        seg = seg.child(compact_segment(
+                            format!("@{}", prof.id),
+                            Some(mark),
+                            move || {
+                                node.with(|n| {
+                                    let active = if n.profile.is_empty() {
+                                        "merger"
+                                    } else {
+                                        n.profile.as_str()
+                                    };
+                                    active == sel
+                                })
+                            },
+                            move |_| {
+                                ctx.set_with(
+                                    &pid,
+                                    "profile",
+                                    (chosen != "merger").then(|| json!(chosen.clone())),
+                                )
+                            },
+                        ));
+                    }
+                    view()
+                        .gap_1()
+                        .child(muted("Conflict Agent").text_size(px(12.)))
+                        .child(seg)
+                        .into_element()
+                }))
                 .child(rework());
         }
         "approval" => {

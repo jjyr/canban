@@ -410,9 +410,17 @@ pub const DEFAULT_MERGE_PROMPT: &str = "Run pre-merge checks and tests in the wo
 
 pub fn default_step_prompt(step_id: &str, profile: Option<&str>) -> &'static str {
     let lower = step_id.to_ascii_lowercase();
-    if lower.contains("plan") || lower.contains("backlog") || lower.contains("design") {
+    if lower.contains("plan")
+        || lower.contains("backlog")
+        || lower.contains("design")
+        || profile == Some("planner")
+    {
         DEFAULT_PLAN_PROMPT
-    } else if lower.contains("merge") || lower.contains("deliver") || lower.contains("queue") {
+    } else if lower.contains("merge")
+        || lower.contains("deliver")
+        || lower.contains("queue")
+        || profile == Some("merger")
+    {
         DEFAULT_MERGE_PROMPT
     } else if lower.contains("review") || lower.contains("qa") || profile == Some("reviewer") {
         DEFAULT_REVIEW_PROMPT

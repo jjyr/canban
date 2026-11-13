@@ -854,6 +854,74 @@ pub fn board_cards() -> canban_types::Snapshot {
         .unwrap(),
     );
     s.cards.push(merging);
+    let mut conflict = s.cards[2].clone();
+    conflict.id = "conflict-card".into();
+    conflict.number = 8;
+    conflict.title = "Resolve merge conflict with main via @merger".into();
+    conflict.stage = "review".into();
+    conflict.branch = Some("canban/gallery/8".into());
+    let merger_profile = Config::default()
+        .profiles
+        .into_iter()
+        .find(|p| p.id == "merger")
+        .unwrap();
+    let mut merger_req = canban_scheduler::request(
+        "gallery-project",
+        &conflict.id,
+        "review",
+        "workflow",
+        merger_profile,
+        "Merge conflict to resolve before delivery".into(),
+        None,
+    );
+    merger_req.state = "working".into();
+    merger_req.workflow_run_id = Some("gallery-conflict-run".into());
+    merger_req.workflow_step = Some("deliver:review:2".into());
+    let merger_req_id = merger_req.id.clone();
+    s.requests.push(merger_req);
+    s.workflow_runs.push(
+        serde_json::from_value(json!({
+            "id": "gallery-conflict-run",
+            "project_id": "gallery-project",
+            "card_id": "conflict-card",
+            "workflow_id": "delivery",
+            "definition_revision": 1,
+            "definition": {
+                "id": "delivery",
+                "name": "Development",
+                "entries": {"review": "deliver:review"},
+                "steps": {
+                    "agent:develop": {
+                        "type": "agent",
+                        "profile": "developer",
+                        "instruction": "Implement",
+                        "next": "deliver:review"
+                    },
+                    "deliver:review": {
+                        "type": "deliver",
+                        "sync_upstream": true,
+                        "max_conflict_attempts": 3,
+                        "next": "__end"
+                    },
+                    "__end": {"type": "complete"}
+                }
+            },
+            "state": "waiting_agent",
+            "step": "deliver:review",
+            "visit": 2,
+            "request_id": merger_req_id,
+            "trigger_event_id": null,
+            "input_digest": "gallery",
+            "inputs": {"sync_upstream": true, "conflict_attempts": 1},
+            "outputs": {"agent:develop": {"state": "completed"}},
+            "history": [{"step": "agent:develop", "visit": 1, "event": "completed"}],
+            "error": null,
+            "created_at": 0,
+            "updated_at": 0
+        }))
+        .unwrap(),
+    );
+    s.cards.push(conflict);
     let mut long = s.cards[2].clone();
     long.id = "long-card".into();
     long.number = 7;
@@ -1135,6 +1203,9 @@ pub fn agent_config() -> canban_types::Config {
     }
     if let Some(rev) = cfg.profiles.iter_mut().find(|p| p.id == "reviewer") {
         rev.preset = Some("agy".into());
+    }
+    if let Some(merger) = cfg.profiles.iter_mut().find(|p| p.id == "merger") {
+        merger.preset = Some("agy".into());
     }
     cfg.profiles.push(Profile {
         id: "qa".into(),

@@ -126,8 +126,9 @@ try:
  params_file=base/'source-query.json';params_file.write_text(json.dumps({'project_id':project['id']}))
  collection=json.loads(subprocess.check_output([str(cli),'call','workflow.sources','@'+str(params_file)],env=env,text=True))
  assert len(collection['sources'])==2
+ current_schema=call('workflow.schema')['schema_version']
  custom=next(f for f in collection['sources'] if f['active']['workflow_id']=='plan-deliver')
- assert custom['source'].startswith('schema: 2')
+ assert custom['source'].startswith(f'schema: {current_schema}')
  assert call('workflow.get',{'workflow_id':custom['active']['workflow_id'],'revision':custom['active']['revision']})['source_yaml']==custom['source']
  assert not (home/'projects'/project['id']/'workflows').exists() and not (home/'config/workflows').exists()
  changed=[{'filename':f['filename'],'source':f['source']} for f in collection['sources']]

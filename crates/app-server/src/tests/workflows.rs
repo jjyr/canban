@@ -1452,8 +1452,9 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
     .unwrap();
     let snap = app.snapshot().unwrap();
     let dev = snap.requests[0].clone();
+    let updated_p = snap.projects.iter().find(|x| x.id == p.id).unwrap();
     let ops = canban_workspaces::Ops::local();
-    let wt = ops.prepare(&app.home, &p, &snap.cards[0]).unwrap();
+    let wt = ops.prepare(&app.home, updated_p, &snap.cards[0]).unwrap();
     let branch = ops.current_branch(wt.to_str().unwrap()).unwrap();
     app.store
         .lock()
@@ -1500,6 +1501,10 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
         .find(|r| r.card_id == c.id && r.id != dev.id)
         .expect("conflict rework request")
         .clone();
+    assert_eq!(
+        resolve.profile.id, "merger",
+        "Queue Merge conflicts must dispatch the dedicated @merger role"
+    );
     assert!(
         resolve
             .instruction
@@ -1511,7 +1516,12 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
             .workflow_step
             .as_deref()
             .unwrap()
-            .starts_with("agent:develop:")
+            .starts_with("deliver:review:")
+    );
+    assert_eq!(
+        run.step.as_deref(),
+        Some("deliver:review"),
+        "WorkflowRun stays on the Deliver step while @merger resolves conflicts"
     );
 
     // The Agent resolves the in-progress merge in the Card worktree.
@@ -1534,6 +1544,128 @@ fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
         std::fs::read_to_string(source.join("README.md")).unwrap(),
         "card + target version\n"
     );
+    let dev_conv = snap
+        .conversations
+        .iter()
+        .find(|conv| conv.card_id == c.id && conv.profile_id == "developer");
+    let merger_conv = snap
+        .conversations
+        .iter()
+        .find(|conv| conv.card_id == c.id && conv.profile_id == "merger");
+    assert!(
+        dev_conv.is_some() && merger_conv.is_some() && dev_conv.unwrap().id != merger_conv.unwrap().id,
+        "@developer and @merger must keep separate role conversations on the Card"
+    );
+}
+
+#[test]
+fn queue_merge_conflict_respects_custom_deliver_profile_and_rejects_unknown_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "init"]);
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Custom Deliver Profile", "directory": source}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Unknown profile on `deliver` must be rejected by `workflow.apply`.
+    let col = collection(&app, &p);
+    let raw = col["sources"][0]["source"].as_str().unwrap();
+    let mut bad_doc = canban_workflow_engine::source::parse(raw).unwrap();
+    bad_doc
+        .steps
+        .iter_mut()
+        .find(|s| s.uses == "deliver")
+        .unwrap()
+        .with
+        .insert("profile".into(), json!("nonexistent-merger"));
+    assert!(
+        app.call(
+            "workflow.apply",
+            json!({
+                "project_id": p.id,
+                "revision": col["revision"],
+                "sources": [{"filename": "development.yaml", "source": canban_workflow_engine::source::encode(&bad_doc).unwrap()}]
+            }),
+        )
+        .is_err()
+    );
+
+    // Custom `with.profile: reviewer` on `deliver` overrides `@merger` for conflict resolution.
+    let mut custom_doc = canban_workflow_engine::source::parse(raw).unwrap();
+    custom_doc.workspace.sync_base = false;
+    let deliver = custom_doc
+        .steps
+        .iter_mut()
+        .find(|s| s.uses == "deliver")
+        .unwrap();
+    deliver.with.insert("profile".into(), json!("reviewer"));
+    deliver.with.insert("sync_upstream".into(), json!(false));
+    deliver.on_changes_requested = None;
+    app.call(
+        "workflow.apply",
+        json!({
+            "project_id": p.id,
+            "revision": col["revision"],
+            "sources": [{"filename": "development.yaml", "source": canban_workflow_engine::source::encode(&custom_doc).unwrap()}]
+        }),
+    )
+    .unwrap();
+
+    let c: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Conflict with custom profile", "body": "Test"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let dev = snap.requests[0].clone();
+    let updated_p = snap.projects.iter().find(|x| x.id == p.id).unwrap();
+    let ops = canban_workspaces::Ops::local();
+    let wt = ops.prepare(&app.home, updated_p, &snap.cards[0]).unwrap();
+    let branch = ops.current_branch(wt.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c.id)?;
+            card.worktree = Some(wt.to_str().unwrap().into());
+            card.branch = Some(branch);
+            db.save(&card)
+        })
+        .unwrap();
+    git_identity(&wt);
+    std::fs::write(wt.join("README.md"), "card edit\n").unwrap();
+    std::fs::write(source.join("README.md"), "main edit\n").unwrap();
+    git_in(&source, &["commit", "-am", "main edit"]);
+
+    finish_closed(&app, &dev, "dev-done");
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let resolve = snap
+        .requests
+        .iter()
+        .find(|r| r.card_id == c.id && r.id != dev.id)
+        .expect("custom conflict profile request");
+    assert_eq!(resolve.profile.id, "reviewer");
 }
 
 #[test]
@@ -1593,8 +1725,9 @@ fn queue_merge_conflict_pauses_for_human_after_attempt_budget() {
     .unwrap();
     let snap = app.snapshot().unwrap();
     let dev = snap.requests[0].clone();
+    let updated_p = snap.projects.iter().find(|x| x.id == p.id).unwrap();
     let ops = canban_workspaces::Ops::local();
-    let wt = ops.prepare(&app.home, &p, &snap.cards[0]).unwrap();
+    let wt = ops.prepare(&app.home, updated_p, &snap.cards[0]).unwrap();
     app.store
         .lock()
         .unwrap()

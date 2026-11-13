@@ -359,6 +359,38 @@ pub fn migrate(value: &mut Value) -> Result<bool> {
         p.as_object_mut().unwrap().remove("template");
         changed = true;
     }
+
+    // Upgrade pre-@merger configs that already have the three built-in role identities
+    // (`developer`, `reviewer`, `planner`) so `@merger` appears automatically in Agent settings,
+    // Project Agent overrides, and Queue Merge conflict resolution without losing the user's
+    // configured engine.
+    let profiles = value["profiles"]
+        .as_array_mut()
+        .context("profiles must be an array")?;
+    let has_merger = profiles.iter().any(|p| p["id"].as_str() == Some("merger"));
+    let has_legacy_builtin_roles = ["developer", "reviewer", "planner"]
+        .iter()
+        .all(|id| profiles.iter().any(|p| p["id"].as_str() == Some(*id)));
+    if !has_merger && has_legacy_builtin_roles {
+        let dev = profiles.iter().find(|p| p["id"].as_str() == Some("developer"));
+        let preset = dev
+            .and_then(|p| p["preset"].as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("codex")
+            .to_owned();
+        let enabled = dev.and_then(|p| p["enabled"].as_bool()).unwrap_or(true);
+        let mut merger = json!({
+            "id": "merger",
+            "identity": true,
+            "preset": preset,
+            "role_instruction": "You are the Card's merge queue Agent. Integrate the target branch cleanly, resolve merge conflicts while preserving both sides' intent, and verify builds and tests before finishing.",
+        });
+        if !enabled {
+            merger["enabled"] = json!(false);
+        }
+        profiles.push(merger);
+        changed = true;
+    }
     Ok(changed)
 }
 
@@ -893,6 +925,36 @@ mod tests {
             Some("Custom security-focused reviewer prompt.")
         );
         assert!(!migrate(&mut legacy).unwrap());
+    }
+
+    #[test]
+    fn migrate_adds_builtin_merger_role_inheriting_developer_engine_for_existing_configs() {
+        let mut onboarded = json!({
+            "onboarded": true,
+            "default_agent": "developer",
+            "profiles": [
+                { "id": "agy", "preset": "agy", "enabled": true },
+                { "id": "developer", "preset": "agy", "identity": true, "role_instruction": "Dev" },
+                { "id": "reviewer", "preset": "agy", "identity": true, "role_instruction": "Rev" },
+                { "id": "planner", "preset": "agy", "identity": true, "role_instruction": "Plan" }
+            ]
+        });
+        assert!(migrate(&mut onboarded).unwrap());
+        let profiles = onboarded["profiles"].as_array().unwrap();
+        let merger = profiles
+            .iter()
+            .find(|p| p["id"].as_str() == Some("merger"))
+            .expect("@merger added by migration");
+        assert_eq!(merger["identity"], json!(true));
+        assert_eq!(merger["preset"], json!("agy"));
+        assert!(
+            merger["role_instruction"]
+                .as_str()
+                .unwrap()
+                .contains("merge queue Agent")
+        );
+        // Idempotent on second pass.
+        assert!(!migrate(&mut onboarded).unwrap());
     }
 }
 
