@@ -1383,3 +1383,368 @@ fn backlog_and_review_options_drive_card_lifecycle_and_preserve_custom_stages() 
             .is_some_and(|s| s.starts_with("agent:develop:"))
     );
 }
+
+fn git_in(cwd: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {:?}: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .trim_end_matches('\n')
+        .to_owned()
+}
+fn git_identity(cwd: &std::path::Path) {
+    git_in(cwd, &["config", "user.name", "Tester"]);
+    git_in(cwd, &["config", "user.email", "tester@example.invalid"]);
+    git_in(cwd, &["config", "commit.gpgsign", "false"]);
+}
+
+#[test]
+fn queue_merge_conflict_routes_to_agent_then_fast_forwards_after_resolution() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "init"]);
+    let remote = dir.path().join("remote.git");
+    std::fs::create_dir_all(&remote).unwrap();
+    git_in(&remote, &["init", "--bare", "-b", "main"]);
+    git_in(&source, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git_in(&source, &["push", "-u", "origin", "main"]);
+
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Conflict Queue", "directory": source}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let c: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Edit README", "body": "Conflicting edit"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let dev = snap.requests[0].clone();
+    let ops = canban_workspaces::Ops::local();
+    let wt = ops.prepare(&app.home, &p, &snap.cards[0]).unwrap();
+    let branch = ops.current_branch(wt.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c.id)?;
+            card.worktree = Some(wt.to_str().unwrap().into());
+            card.branch = Some(branch);
+            db.save(&card)
+        })
+        .unwrap();
+    git_identity(&wt);
+    std::fs::write(wt.join("README.md"), "card version\n").unwrap();
+    // The target branch moves with a conflicting edit while the Card is in flight.
+    std::fs::write(source.join("README.md"), "target version\n").unwrap();
+    git_in(&source, &["commit", "-am", "target edit"]);
+    git_in(&source, &["push", "origin", "main"]);
+    let target_before = git_in(&source, &["rev-parse", "HEAD"]);
+
+    finish_closed(&app, &dev, "dev-done");
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let run = snap.workflow_runs.iter().find(|r| r.card_id == c.id).unwrap();
+    assert_eq!(run.state, "waiting_agent", "conflict must route to the Agent");
+    assert_eq!(run.inputs["conflict_attempts"], 1);
+    let card = snap.cards.iter().find(|x| x.id == c.id).unwrap();
+    assert!(card.human_gate.is_none() && card.attention.is_none());
+    assert!(card.delivery.is_none());
+    assert_eq!(git_in(&source, &["rev-parse", "HEAD"]), target_before);
+    assert!(snap.events.iter().any(|e| e.card_id == c.id
+        && e.kind == "review.merge_conflict"
+        && e.data["files"] == json!(["README.md"])));
+    let resolve = snap
+        .requests
+        .iter()
+        .find(|r| r.card_id == c.id && r.id != dev.id)
+        .expect("conflict rework request")
+        .clone();
+    assert!(resolve.instruction.contains("Merge conflict to resolve before delivery"));
+    assert!(resolve.instruction.contains("README.md"));
+    assert!(resolve.workflow_step.as_deref().unwrap().starts_with("agent:develop:"));
+
+    // The Agent resolves the in-progress merge in the Card worktree.
+    std::fs::write(wt.join("README.md"), "card + target version\n").unwrap();
+    git_in(&wt, &["add", "README.md"]);
+    git_in(&wt, &["commit", "--no-edit"]);
+    let resolved = git_in(&wt, &["rev-parse", "HEAD"]);
+    finish_closed(&app, &resolve, "resolve-done");
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let run = snap.workflow_runs.iter().find(|r| r.card_id == c.id).unwrap();
+    assert_eq!(run.state, "completed");
+    assert_eq!(git_in(&source, &["rev-parse", "HEAD"]), resolved);
+    assert_eq!(
+        std::fs::read_to_string(source.join("README.md")).unwrap(),
+        "card + target version\n"
+    );
+}
+
+#[test]
+fn queue_merge_conflict_pauses_for_human_after_attempt_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "init"]);
+    let remote = dir.path().join("remote.git");
+    std::fs::create_dir_all(&remote).unwrap();
+    git_in(&remote, &["init", "--bare", "-b", "main"]);
+    git_in(&source, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git_in(&source, &["push", "-u", "origin", "main"]);
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call("project.create", json!({"name": "Budget", "directory": source}))
+            .unwrap(),
+    )
+    .unwrap();
+    // Disable automatic conflict rework.
+    let col = collection(&app, &p);
+    let raw = col["sources"][0]["source"].as_str().unwrap();
+    let mut doc = canban_workflow_engine::source::parse(raw).unwrap();
+    doc.steps
+        .iter_mut()
+        .find(|s| s.uses == "deliver")
+        .unwrap()
+        .with
+        .insert("max_conflict_attempts".into(), json!(0));
+    app.call(
+        "workflow.apply",
+        json!({"project_id": p.id, "revision": col["revision"], "sources": [{"filename": "development.yaml", "source": canban_workflow_engine::source::encode(&doc).unwrap()}]}),
+    )
+    .unwrap();
+    let c: Card = serde_json::from_value(
+        app.call("card.create", json!({"project_id": p.id, "title": "Edit", "body": "x"}))
+            .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let dev = snap.requests[0].clone();
+    let ops = canban_workspaces::Ops::local();
+    let wt = ops.prepare(&app.home, &p, &snap.cards[0]).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c.id)?;
+            card.worktree = Some(wt.to_str().unwrap().into());
+            db.save(&card)
+        })
+        .unwrap();
+    git_identity(&wt);
+    std::fs::write(wt.join("README.md"), "card\n").unwrap();
+    std::fs::write(source.join("README.md"), "target\n").unwrap();
+    git_in(&source, &["commit", "-am", "target edit"]);
+    git_in(&source, &["push", "origin", "main"]);
+    finish_closed(&app, &dev, "dev-done");
+    app.pump_deliveries().unwrap();
+    let snap = app.snapshot().unwrap();
+    let run = snap.workflow_runs.iter().find(|r| r.card_id == c.id).unwrap();
+    assert_eq!(run.state, "waiting_approval");
+    assert_eq!(snap.requests.iter().filter(|r| r.card_id == c.id).count(), 1);
+    assert!(snap.cards.iter().find(|x| x.id == c.id).unwrap().human_gate.is_some());
+}
+
+#[test]
+fn backlog_admission_plans_ahead_k_and_starts_in_board_order_when_agent_free() {
+    let (_dir, app, p, _) = setup();
+    let col = collection(&app, &p);
+    let raw = col["sources"][0]["source"].as_str().unwrap();
+    let mut doc = canban_workflow_engine::source::parse(raw).unwrap();
+    canban_workflow_engine::source::set_backlog_options(&mut doc, true, true);
+    canban_workflow_engine::source::set_backlog_admission(&mut doc, true, Some(1));
+    let opts = canban_workflow_engine::source::derive_options(&doc);
+    assert!(opts.backlog_analyze && opts.backlog_auto_develop && opts.backlog_wait_for_agent);
+    assert_eq!(opts.backlog_max_ready, Some(1));
+    app.call(
+        "workflow.apply",
+        json!({"project_id": p.id, "revision": col["revision"], "sources": [{"filename": "development.yaml", "source": canban_workflow_engine::source::encode(&doc).unwrap()}]}),
+    )
+    .unwrap();
+    app.call("scheduler.configure", json!({"max_agents": 1}))
+        .unwrap();
+
+    let create = |title: &str| -> Card {
+        serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"project_id": p.id, "title": title, "body": "task"}),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    };
+    let c1 = create("First");
+    let c2 = create("Second");
+    let c3 = create("Third");
+    // Kanban priority: drag Third above Second.
+    let c3_now = app
+        .snapshot()
+        .unwrap()
+        .cards
+        .into_iter()
+        .find(|c| c.id == c3.id)
+        .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c3.id, "revision": c3_now.revision, "stage": "backlog", "before_card_id": c2.id}),
+    )
+    .unwrap();
+
+    let run_of = |snap: &Snapshot, id: &str| {
+        snap.workflow_runs
+            .iter()
+            .find(|r| r.card_id == id && r.active())
+            .cloned()
+            .unwrap()
+    };
+    let snap = app.snapshot().unwrap();
+    // K = 1: only the first Card is planning; the rest wait before planning.
+    let plan1 = snap
+        .requests
+        .iter()
+        .find(|r| r.card_id == c1.id)
+        .expect("first Card plans")
+        .clone();
+    assert!(plan1.workflow_step.as_deref().unwrap().starts_with("agent:plan:"));
+    for c in [&c2, &c3] {
+        let r = run_of(&snap, &c.id);
+        assert_eq!(r.state, "waiting_capacity");
+        assert_eq!(r.step.as_deref(), Some("admit:plan"));
+        assert!(!snap.requests.iter().any(|q| q.card_id == c.id));
+    }
+
+    // Planning finishes; the Agent that planned is still occupying the only slot.
+    finish(&app, &plan1, "plan1-done");
+    app.pump_admissions().unwrap();
+    let snap = app.snapshot().unwrap();
+    let r1 = run_of(&snap, &c1.id);
+    assert_eq!(r1.state, "waiting_capacity");
+    assert_eq!(r1.step.as_deref(), Some("admit:develop"));
+    assert_eq!(snap.cards.iter().find(|c| c.id == c1.id).unwrap().stage, "backlog");
+    // The planned Card fills the plan-ahead window, so nobody else plans yet.
+    assert_eq!(run_of(&snap, &c3.id).step.as_deref(), Some("admit:plan"));
+
+    // A slot frees up: First starts Develop, then Third (Board order) begins planning.
+    app.call("scheduler.configure", json!({"max_agents": 2}))
+        .unwrap();
+    app.pump_admissions().unwrap();
+    app.pump_admissions().unwrap();
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.cards.iter().find(|c| c.id == c1.id).unwrap().stage, "develop");
+    assert!(snap.requests.iter().any(|r| r.card_id == c1.id
+        && r.workflow_step.as_deref().is_some_and(|s| s.starts_with("agent:develop:"))));
+    assert!(
+        snap.requests.iter().any(|r| r.card_id == c3.id
+            && r.workflow_step.as_deref().is_some_and(|s| s.starts_with("agent:plan:"))),
+        "Third was dragged above Second, so it plans first"
+    );
+    let r2 = run_of(&snap, &c2.id);
+    assert_eq!(r2.step.as_deref(), Some("admit:plan"));
+    assert_eq!(r2.state, "waiting_capacity");
+}
+
+fn edit_development(app: &AppServer, p: &Project, edit: impl FnOnce(&mut canban_workflow_engine::source::Document)) {
+    let col = collection(app, p);
+    let raw = col["sources"][0]["source"].as_str().unwrap();
+    let mut doc = canban_workflow_engine::source::parse(raw).unwrap();
+    canban_workflow_engine::stages::normalize(&mut doc, &[]);
+    edit(&mut doc);
+    app.call(
+        "workflow.apply",
+        json!({"project_id": p.id, "revision": col["revision"], "sources": [{"filename": "development.yaml", "source": canban_workflow_engine::source::encode(&doc).unwrap()}]}),
+    )
+    .unwrap();
+}
+
+#[test]
+fn removing_a_column_returns_its_cards_to_the_first_column() {
+    let (_dir, app, p, c) = setup();
+    // Disable Review automation first so the moved Card does not start delivery.
+    let moved: Card = serde_json::from_value(
+        app.call(
+            "card.move",
+            json!({"card_id": c.id, "revision": c.revision, "stage": "review"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(moved.stage, "review");
+    edit_development(&app, &p, |d| {
+        canban_workflow_engine::stages::remove_column(d, "review").unwrap();
+    });
+    let snap = app.snapshot().unwrap();
+    let card = snap.cards.iter().find(|x| x.id == c.id).unwrap();
+    assert_eq!(card.stage, "backlog");
+    assert!(snap.events.iter().any(|e| e.card_id == c.id
+        && e.kind == "card.stage_changed"
+        && e.data["reason"] == "column_removed"));
+    let project = snap.projects.iter().find(|x| x.id == p.id).unwrap();
+    assert!(!project.workflow.stages.iter().any(|s| s.id == "review"));
+}
+
+#[test]
+fn removing_the_running_step_finishes_it_then_stops_the_run() {
+    let (_dir, app, p, c) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let req = app.snapshot().unwrap().requests[0].clone();
+    edit_development(&app, &p, |d| {
+        canban_workflow_engine::stages::remove_step(d, "agent:develop").unwrap();
+    });
+    let snap = app.snapshot().unwrap();
+    let run = snap.workflow_runs.iter().find(|r| r.card_id == c.id).unwrap();
+    assert_eq!(run.state, "waiting_agent", "the current step keeps running");
+    assert_eq!(run.inputs["stop_after_step"], "agent:develop");
+    finish(&app, &req, "dev-done");
+    let snap = app.snapshot().unwrap();
+    let run = snap.workflow_runs.iter().find(|r| r.card_id == c.id).unwrap();
+    assert_eq!(run.state, "cancelled");
+    assert_eq!(
+        snap.cards.iter().find(|x| x.id == c.id).unwrap().stage,
+        "develop",
+        "the removed step's successors (move to Review) do not run"
+    );
+}

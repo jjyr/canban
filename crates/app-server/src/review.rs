@@ -470,6 +470,41 @@ impl AppServer {
                     }
                 }
                 Err(error) => {
+                    use canban_workspaces::review::DeliveryError;
+                    match error.downcast_ref::<DeliveryError>() {
+                        // The Project branch moved under us; leave the run queued for a retry.
+                        Some(DeliveryError::TargetAdvanced) => {
+                            log(
+                                db,
+                                &current_card,
+                                "review.merge_retry",
+                                "system",
+                                "Target branch advanced during delivery; retrying",
+                                None,
+                                json!({"target_branch":plan.target_branch,"request_key":key,"workflow_run_id":run.id}),
+                            )?;
+                            return Ok(());
+                        }
+                        Some(DeliveryError::Conflict {
+                            target_branch,
+                            target_head,
+                            files,
+                            ..
+                        }) if canban_workflow_engine::runtime::rework_conflict(
+                            db,
+                            &config,
+                            &mut current_card,
+                            &mut current_run,
+                            target_branch,
+                            target_head,
+                            files,
+                            enqueue,
+                        )? =>
+                        {
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
                     let reason = format!("Auto-merge failed: {error:#}");
                     log(
                         db,

@@ -339,6 +339,7 @@ impl AppServer {
         })?;
         self.deliver_questions(&client)?;
         self.close_idle(&client)?;
+        let _ = self.pump_admissions();
         let snapshot = self.snapshot()?;
         let mut available = snapshot.clone();
         if snapshot

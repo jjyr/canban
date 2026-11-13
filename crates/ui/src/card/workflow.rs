@@ -64,6 +64,13 @@ fn step_badge_label(id: &str, step: &WorkflowStep) -> String {
         }
         WorkflowStep::Condition { .. } => "Rule check".into(),
         WorkflowStep::Notify { .. } => "Notify".into(),
+        WorkflowStep::Admit { agent_slot, .. } => {
+            if *agent_slot {
+                "Wait for free Agent".into()
+            } else {
+                "Plan-ahead limit".into()
+            }
+        }
         WorkflowStep::Complete => "Done".into(),
     }
 }

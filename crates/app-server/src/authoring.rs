@@ -72,21 +72,7 @@ fn validate(
                 .map(|s| s.id.clone())
                 .collect()
         });
-    if let Some(cols) = &declared_columns {
-        let col_ids: BTreeSet<_> = cols.iter().map(|c| c.id.as_str()).collect();
-        for card in db.list::<Card>()? {
-            if card.project_id == project.id
-                && card.active()
-                && !col_ids.contains(card.stage.as_str())
-            {
-                bail!(
-                    "Column '{}' still has active Cards (e.g. #{}); move or archive them before removing the column",
-                    card.stage,
-                    card.number
-                );
-            }
-        }
-    }
+    // Removed columns are allowed: their active Cards return to the first column on publish.
     let mut out = Vec::new();
     for (name, raw, doc) in parsed_docs {
         let parsed = (|| -> Result<_> {
@@ -165,6 +151,28 @@ fn publish(
         db.save(&sub)?;
     }
     for (name, raw, doc, definition) in compiled {
+        // Runs currently at a step deleted from the source finish it, then stop.
+        let existing_ids: BTreeSet<&str> = doc.steps.iter().map(|s| s.id.as_str()).collect();
+        for mut run in db.list::<WorkflowRun>()?.into_iter().filter(|r| {
+            r.active()
+                && r.workflow_id == definition.id
+                && r.step.as_deref().is_some_and(|s| !existing_ids.contains(s))
+                && r.inputs["stop_after_step"].is_null()
+        }) {
+            run.inputs["stop_after_step"] = json!(run.step);
+            run.updated_at = now();
+            db.save(&run)?;
+            let card: Card = db.get(&run.card_id)?;
+            log(
+                db,
+                &card,
+                "workflow.stop_scheduled",
+                "system",
+                "Current step was removed; the run stops after it finishes",
+                run.request_id.clone(),
+                json!({"workflow_run_id":run.id,"step":run.step}),
+            )?;
+        }
         let hash = canban_context::digest(raw.as_bytes());
         let existing = old
             .iter()
@@ -296,6 +304,28 @@ fn publish(
         }
         if changed {
             db.save(&updated)?;
+        }
+        // Cards in removed columns return to the first column.
+        if let Some(first) = primary.columns.first() {
+            let ids: BTreeSet<_> = primary.columns.iter().map(|c| c.id.as_str()).collect();
+            for mut card in db.list::<Card>()?.into_iter().filter(|c| {
+                c.project_id == project.id && c.active() && !ids.contains(c.stage.as_str())
+            }) {
+                let from = std::mem::replace(&mut card.stage, first.id.clone());
+                card.board_order = None;
+                canban_kanban::order::place(db, &mut card, None)?;
+                card.revision += 1;
+                db.save(&card)?;
+                log(
+                    db,
+                    &card,
+                    "card.stage_changed",
+                    "system",
+                    &format!("{from} → {} (column removed)", card.stage),
+                    None,
+                    json!({"from":from,"to":card.stage,"reason":"column_removed"}),
+                )?;
+            }
         }
     }
     Ok(())

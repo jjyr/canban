@@ -6,6 +6,41 @@ use canban_types::{Card, Project, ReviewPreview};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+/// Delivery failures callers can route automatically (downcast from `anyhow::Error`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryError {
+    /// Integrating the target into the Card worktree produced textual conflicts.
+    /// The worktree is left mid-merge so a person or Agent can resolve it there.
+    Conflict {
+        target_branch: String,
+        target_head: String,
+        files: Vec<String>,
+        detail: String,
+    },
+    /// The Project target branch moved while delivery was being prepared; retrying is safe.
+    TargetAdvanced,
+}
+impl std::fmt::Display for DeliveryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Conflict {
+                target_branch,
+                files,
+                detail,
+                ..
+            } => write!(
+                f,
+                "Merge needs attention in the Card worktree; the Project branch was not updated. Conflicts with {target_branch} in: {}. {detail}",
+                files.join(", ")
+            ),
+            Self::TargetAdvanced => {
+                f.write_str("Target branch advanced; refresh the review. Card commit is retained.")
+            }
+        }
+    }
+}
+impl std::error::Error for DeliveryError {}
+
 impl Ops {
     fn r_checked(&self, dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
         let out = self.git(dir, args)?;
@@ -229,12 +264,29 @@ impl Ops {
         // Integrate the target into the Card checkout, leaving any conflict there
         // for the user/Agent. The Project's branch stays untouched on failure.
         let integrate = self.git(cwd, &["merge", "--no-edit", &plan.target_head])?;
-        ensure!(
-            integrate.status.success(),
-            "Merge needs attention in the Card worktree; the Project branch was not updated. {} {}",
-            String::from_utf8_lossy(&integrate.stdout).trim(),
-            String::from_utf8_lossy(&integrate.stderr).trim()
-        );
+        if !integrate.status.success() {
+            let detail = format!(
+                "{} {}",
+                String::from_utf8_lossy(&integrate.stdout).trim(),
+                String::from_utf8_lossy(&integrate.stderr).trim()
+            );
+            let files = self
+                .r_checked(cwd, &["diff", "--name-only", "--diff-filter=U", "-z"])
+                .and_then(|out| names(&out))
+                .unwrap_or_default();
+            if !files.is_empty() {
+                return Err(DeliveryError::Conflict {
+                    target_branch: plan.target_branch.clone(),
+                    target_head: plan.target_head.clone(),
+                    files,
+                    detail,
+                }
+                .into());
+            }
+            anyhow::bail!(
+                "Merge needs attention in the Card worktree; the Project branch was not updated. {detail}"
+            );
+        }
         ensure!(
             self.r_checked(
                 cwd,
@@ -248,10 +300,9 @@ impl Ops {
             self.current_branch(&project.directory).as_deref() == Some(&plan.target_branch),
             "Project branch changed while preparing the merge; Card commit is retained"
         );
-        ensure!(
-            self.r_text(source, &["rev-parse", "HEAD"])? == plan.target_head,
-            "Target branch advanced; refresh the review. Card commit is retained."
-        );
+        if self.r_text(source, &["rev-parse", "HEAD"])? != plan.target_head {
+            return Err(DeliveryError::TargetAdvanced.into());
+        }
         ensure!(
             self.r_checked(
                 source,
@@ -439,12 +490,21 @@ mod tests {
         fs::write(f.source().join("seed"), "target version\n").unwrap();
         f.source_commit();
         let before = text(f.source(), &["rev-parse", "HEAD"]).unwrap();
-        assert!(
-            f.accept()
-                .unwrap_err()
-                .to_string()
-                .contains("needs attention")
-        );
+        let err = f.accept().unwrap_err();
+        assert!(err.to_string().contains("needs attention"));
+        match err.downcast_ref::<DeliveryError>() {
+            Some(DeliveryError::Conflict {
+                files,
+                target_branch,
+                target_head,
+                ..
+            }) => {
+                assert_eq!(files, &vec!["seed".to_string()]);
+                assert_eq!(target_branch, "main");
+                assert_eq!(target_head, &before);
+            }
+            other => panic!("expected typed conflict, got {other:?}"),
+        }
         assert_eq!(text(f.source(), &["rev-parse", "HEAD"]).unwrap(), before);
         assert_eq!(
             fs::read_to_string(f.source().join("seed")).unwrap(),
