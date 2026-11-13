@@ -43,9 +43,13 @@ pub(super) fn pump(db: Db<'_>, config: &Config) -> Result<()> {
             let agent_backlog_workflow = matches!(sub.target, SubscriptionTarget::Workflow { .. })
                 && row.event.data["reason"] == "agent_returned_backlog"
                 && sub.selector.reason.as_deref() != Some("agent_returned_backlog");
+            let agent_adopted_workflow = matches!(sub.target, SubscriptionTarget::Workflow { .. })
+                && row.event.data["reason"] == "agent_adopted_stage"
+                && sub.selector.reason.as_deref() != Some("agent_adopted_stage");
             if !initial_workflow
                 && !restoration_workflow
                 && !agent_backlog_workflow
+                && !agent_adopted_workflow
                 && canban_workflow_engine::matches(&sub.selector, &row.event)
             {
                 let key = format!("{}:{}", sub.id, row.event.id);

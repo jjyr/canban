@@ -221,6 +221,7 @@ Studio UI: Stage lanes are generated from the graph (no column-specific panels).
 - **Single active delivery run per Card:** While a Card has a running or waiting `WorkflowRun`, competing event deliveries wait in `subscription.deliveries` (`pending`) with their captured `definition_revision` without consuming failure retries. Manual starts conflict visibly until the active run finishes or is stopped.
 - **Bound human decisions:** `workflow.decide` binds `run_id`, exact `visit`, and current `Card.revision`, requiring human provenance (Agent execution tokens are rejected). `rework` increments `visit`, records optional human `feedback`, and injects that feedback plus prior outputs into the target Agent step.
 - **External column moves & stop:** Manually dragging/moving a Card to another column cancels stale queued workflow work from the superseded stage while preserving completed reports and history, then triggers any matching `origin: "local"` rule on the destination column. `workflow.stop` halts future workflow progression without killing an interactive PTY.
+- **Interactive stage adoption (`canban card adopt` / `card.adopt`):** When a user discusses requirements with a live interactive Agent in `Backlog` and authorizes starting implementation in that same session, the Agent updates the Card only with user-confirmed design points (`canban card update` / `card.update`) and invokes `canban card adopt` (default `--stage develop`). `card.adopt` transitions the Card to the target column with `reason: "agent_adopted_stage"` (suppressing duplicate `card.column_entered` trigger dispatch) and binds the current live `Request` directly to the target column's `WorkflowRun` `agent` step (`start_adopted`) so subsequent `canban report --state completed` seamlessly advances the remaining workflow (`Move to Review -> Queue Merge`).
 
 ---
 
@@ -253,6 +254,7 @@ All clients share the same AppServer validation and publication boundary (`canba
 | `workflow.decide` | `run_id`, `visit`, `revision`, `decision: "approve" \| "rework"`, optional `feedback` |
 | `workflow.deliver` | `card_id`, `revision` -> manually trigger or retry Queue Merge (approving a paused `deliver` gate or starting a fresh run at the Project's active `deliver` step) |
 | `card.hold_auto_merge` | `card_id`, `revision`, optional `hold: bool` -> pause or resume Queue Merge on a Card |
+| `card.adopt` | `execution`, optional `stage` (default `"develop"`) -> transition the active Agent's own Card into `stage` and adopt its `WorkflowRun` without re-triggering scheduling |
 | `workflow.stop` | `run_id` -> cancel future run progression |
 | `event.list` / `subscription.*` | Durable journal pagination and `save` / `list` / `deliveries` / `ack` / `retry` |
 

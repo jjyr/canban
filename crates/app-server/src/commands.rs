@@ -322,44 +322,237 @@ impl AppServer {
                 }
                 Ok(serde_json::to_value(c)?)
             }),
-            "card.update" => self.mutate(method, &p, |db| {
-                ensure!(
-                    p.get("tags").is_none(),
-                    "Routing tags are no longer supported; use a workflow Profile or @profile"
-                );
-                let mut c: Card = db.get(strp(&p, "card_id")?)?;
-                revise(&c, &p)?;
-                ensure!(c.archived_at.is_none(), "Restore the Card before editing");
-                ensure!(
-                    c.removed_at.is_none(),
-                    "Restore the removed Card before editing"
-                );
-                let before = c.clone();
-                if let Some(t) = p["title"].as_str()
-                    && c.github_issue().is_none()
+            "card.update" => {
+                let mut emit_card = p["card_id"].as_str().map(str::to_owned);
+                let res = self.mutate(method, &p, |db| {
+                    ensure!(
+                        p.get("tags").is_none(),
+                        "Routing tags are no longer supported; use a workflow Profile or @profile"
+                    );
+                    let exec = p.get("execution").filter(|v| !v.is_null());
+                    let (mut c, actor, req_for_update) = if let Some(execution) = exec {
+                        let req: Request = db.get(strp(execution, "request_id")?)?;
+                        let number = u32::try_from(
+                            execution["attempt_number"]
+                                .as_u64()
+                                .context("execution.attempt_number is required")?,
+                        )?;
+                        ensure!(
+                            number > 0 && number == req.attempt,
+                            "Obsolete Agent invocation"
+                        );
+                        let run: Attempt = db.get(&Attempt::key(&req.id, number))?;
+                        ensure!(
+                            run.state != "continued",
+                            "This assignment was superseded; use the current request and attempt binding"
+                        );
+                        if let Some(explicit_card) = p["card_id"].as_str() {
+                            ensure!(
+                                explicit_card == req.card_id,
+                                "Agent execution can only update its own Card"
+                            );
+                        }
+                        let c: Card = db.get(&req.card_id)?;
+                        if p.get("revision").is_some_and(|v| !v.is_null()) {
+                            revise(&c, &p)?;
+                        }
+                        let actor = format!("agent:{}", req.profile.id);
+                        (c, actor, Some(req))
+                    } else {
+                        let c: Card = db.get(strp(&p, "card_id")?)?;
+                        revise(&c, &p)?;
+                        (c, "user".to_owned(), None)
+                    };
+                    emit_card = Some(c.id.clone());
+                    ensure!(c.archived_at.is_none(), "Restore the Card before editing");
+                    ensure!(
+                        c.removed_at.is_none(),
+                        "Restore the removed Card before editing"
+                    );
+                    let before = c.clone();
+                    if let Some(t) = p["title"].as_str()
+                        && c.github_issue().is_none()
+                    {
+                        ensure!(!t.trim().is_empty(), "Title is required");
+                        c.title = t.trim().into();
+                    }
+                    if let Some(b) = p["body"].as_str() {
+                        c.body = b.into();
+                    }
+                    if let Some(mode) = p.get("delivery_mode") {
+                        c.delivery_mode = serde_json::from_value(mode.clone())?;
+                    }
+                    c.revision += 1;
+                    log(
+                        db,
+                        &c,
+                        "card.updated",
+                        &actor,
+                        "Card updated",
+                        req_for_update.as_ref().map(|r| r.id.clone()),
+                        json!({"title":c.title,"body":c.body,"changed_fields": ([if c.title!=before.title {Some("title")}else{None},if c.body!=before.body {Some("body")}else{None}].into_iter().flatten().collect::<Vec<_>>()),"before_revision":before.revision,"after_revision":c.revision}),
+                    )?;
+                    db.save(&c)?;
+                    if let Some(req) = &req_for_update
+                        && let Some(run_id) = &req.workflow_run_id
+                        && let Ok(mut wf_run) = db.get::<WorkflowRun>(run_id)
+                        && wf_run.active()
+                        && wf_run.request_id.as_deref() == Some(&req.id)
+                    {
+                        wf_run.inputs["title"] = json!(c.title);
+                        wf_run.inputs["body"] = json!(c.body);
+                        wf_run.input_digest =
+                            canban_workflow_engine::runtime::card_digest(db, &c);
+                        wf_run.updated_at = now();
+                        db.save(&wf_run)?;
+                    }
+                    Ok(serde_json::to_value(c)?)
+                })?;
+                if p["card_id"].is_null()
+                    && let Some(id) = emit_card
                 {
-                    ensure!(!t.trim().is_empty(), "Title is required");
-                    c.title = t.trim().into();
+                    self.emit("application", Some(id));
                 }
-                if let Some(b) = p["body"].as_str() {
-                    c.body = b.into();
+                Ok(res)
+            }
+            "card.adopt" => {
+                let mut emit_card = None;
+                let res = self.mutate(method, &p, |db| {
+                    let execution = p
+                        .get("execution")
+                        .filter(|v| !v.is_null())
+                        .context("card.adopt requires an active Agent execution binding")?;
+                    let mut req: Request = db.get(strp(execution, "request_id")?)?;
+                    let number = u32::try_from(
+                        execution["attempt_number"]
+                            .as_u64()
+                            .context("execution.attempt_number is required")?,
+                    )?;
+                    ensure!(
+                        number > 0 && number == req.attempt,
+                        "Obsolete Agent invocation"
+                    );
+                    let run: Attempt = db.get(&Attempt::key(&req.id, number))?;
+                    ensure!(
+                        run.state != "continued" && !run.finished(),
+                        "Only a live Agent invocation can adopt a workflow stage"
+                    );
+                    ensure!(
+                        !matches!(req.state.as_str(), "completed" | "backlog" | "cancelled"),
+                        "Completed or cancelled requests cannot adopt a workflow stage"
+                    );
+                    if let Some(explicit_card) = p["card_id"].as_str() {
+                        ensure!(
+                            explicit_card == req.card_id,
+                            "Agent execution can only adopt a stage on its own Card"
+                        );
+                    }
+                    let mut c: Card = db.get(&req.card_id)?;
+                    if p.get("revision").is_some_and(|v| !v.is_null()) {
+                        revise(&c, &p)?;
+                    }
+                    ensure!(c.active(), "Restore the Card before adopting a stage");
+                    ensure!(!c.merged(), "Merged Cards cannot enter development");
+                    ensure!(
+                        c.human_gate.is_none(),
+                        "Human review must be approved by the user before moving this Card"
+                    );
+                    let target = p["stage"].as_str().unwrap_or("develop");
+                    let project: Project = db.get(&c.project_id)?;
+                    canban_workflow_engine::stage(&project.workflow, target)?;
+                    emit_card = Some(c.id.clone());
+
+                    if c.stage == target {
+                        if let Some(run_id) = &req.workflow_run_id
+                            && let Ok(existing) = db.get::<WorkflowRun>(run_id)
+                            && existing.active()
+                        {
+                            return Ok(json!({
+                                "card": c,
+                                "workflow_run": existing,
+                                "adopted": true,
+                            }));
+                        }
+                        if db
+                            .list::<WorkflowRun>()?
+                            .iter()
+                            .any(|r| r.card_id == c.id && r.active())
+                        {
+                            workflow::stop_card(db, &c.id, "superseded")?;
+                        }
+                        for mut pending in db.list::<Request>()?.into_iter().filter(|r| {
+                            r.card_id == c.id
+                                && r.id != req.id
+                                && r.state == "queued"
+                                && canban_scheduler::automatic(r)
+                        }) {
+                            pending.state = "cancelled".into();
+                            db.save(&pending)?;
+                        }
+                        let wf_run =
+                            workflow::adopt_stage(db, &config, &mut c, &mut req, target, None)?;
+                        db.save(&c)?;
+                        return Ok(json!({
+                            "card": c,
+                            "workflow_run": wf_run,
+                            "adopted": true,
+                        }));
+                    }
+
+                    let from = c.stage.clone();
+                    for mut pending in db.list::<Request>()?.into_iter().filter(|r| {
+                        r.card_id == c.id
+                            && r.id != req.id
+                            && r.state == "queued"
+                            && canban_scheduler::automatic(r)
+                    }) {
+                        pending.state = "cancelled".into();
+                        db.save(&pending)?;
+                    }
+                    workflow::stop_card(db, &c.id, "superseded")?;
+                    c.stage = target.into();
+                    c.board_order = None;
+                    canban_kanban::order::place(db, &mut c, None)?;
+                    c.revision += 1;
+                    c.attention = None;
+                    c.human_gate = None;
+                    db.save(&c)?;
+                    let event = db.append(canban_timeline::event(
+                        &c.project_id,
+                        &c.id,
+                        "card.stage_changed",
+                        &format!("agent:{}", req.profile.id),
+                        &format!("{from} → {target} (adopted by @{})", req.profile.id),
+                        Some(req.id.clone()),
+                        json!({
+                            "from": from,
+                            "to": target,
+                            "reason": "agent_adopted_stage",
+                            "request_id": req.id,
+                        }),
+                    ))?;
+                    let wf_run = workflow::adopt_stage(
+                        db,
+                        &config,
+                        &mut c,
+                        &mut req,
+                        target,
+                        Some(event.id),
+                    )?;
+                    db.save(&c)?;
+                    Ok(json!({
+                        "card": c,
+                        "workflow_run": wf_run,
+                        "adopted": true,
+                    }))
+                })?;
+                if p["card_id"].is_null()
+                    && let Some(id) = emit_card
+                {
+                    self.emit("application", Some(id));
                 }
-                if let Some(mode) = p.get("delivery_mode") {
-                    c.delivery_mode = serde_json::from_value(mode.clone())?;
-                }
-                c.revision += 1;
-                log(
-                    db,
-                    &c,
-                    "card.updated",
-                    "user",
-                    "Card updated",
-                    None,
-                    json!({"title":c.title,"body":c.body,"changed_fields": ([if c.title!=before.title {Some("title")}else{None},if c.body!=before.body {Some("body")}else{None}].into_iter().flatten().collect::<Vec<_>>()),"before_revision":before.revision,"after_revision":c.revision}),
-                )?;
-                db.save(&c)?;
-                Ok(serde_json::to_value(c)?)
-            }),
+                Ok(res)
+            }
             "card.move" => self.mutate(method, &p, |db| {
                 let mut c: Card = db.get(strp(&p, "card_id")?)?;
                 revise(&c, &p)?;
@@ -467,13 +660,7 @@ impl AppServer {
                         )
                     {
                         canban_workflow_engine::runtime::approve_with_feedback(
-                            db,
-                            &config,
-                            &mut c,
-                            &mut run,
-                            false,
-                            None,
-                            enqueue,
+                            db, &config, &mut c, &mut run, false, None, enqueue,
                         )?;
                     }
                     db.save(&c)?;

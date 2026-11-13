@@ -120,7 +120,17 @@ try:
  s=wait(lambda s:len(s['workflow_runs'])==2 and s['workflow_runs'][1]['state']=='waiting_approval','new revision planning')
  assert s['workflow_runs'][1]['definition_revision']==2
  assert 'SECOND_VERSION' in next(r for r in s['requests'] if r['card_id']==second['id'])['instruction']
- evidence={'base':str(base),'project_id':project['id'],'card_id':second['id'],'first_run':run['id'],'api_version':call('app.ping')['api_version'],'schema':json.loads(subprocess.check_output([str(cli),'build-info'],env=env,text=True))['schema'],'checks':['backlog planning','explicit approval','frozen run revision','immediate new revision','restart checkpoint','duplicate decision receipt','single workflow-owned movement','real isolated PTY reports','consumer acknowledgement']}
+ # Interactive Backlog session updates Card with confirmed design, adopts `develop` without re-triggering scheduling, and completes through Review!
+ adopt_yaml=plan_yaml('Plan').replace('id: plan-deliver','id: adopt-deliver')
+ adopt_project=call('project.create',{'name':'Adopt acceptance','directory':str(source),'workspace':{'create_worktree':False,'sync_base':False},'workflow_yaml':adopt_yaml})
+ adopt_card=call('card.create',{'project_id':adopt_project['id'],'title':'Discuss Backlog','body':'ADOPT_FROM_BACKLOG'})
+ call('agent.open',{'card_id':adopt_card['id'],'profile_id':'developer'})
+ s=wait(lambda s:any(c['id']==adopt_card['id'] and c['stage']=='review' for c in s['cards']) and any(r['card_id']==adopt_card['id'] and r['state']=='completed' for r in s['workflow_runs']),'interactive Backlog adopt and Review completion')
+ adopted_c=next(c for c in s['cards'] if c['id']==adopt_card['id'])
+ assert adopted_c['title']=='Adopted Interactive Spec' and 'Confirmed design key points' in adopted_c['body']
+ adopt_reqs=[r for r in s['requests'] if r['card_id']==adopt_card['id']]
+ assert len(adopt_reqs)==2 and adopt_reqs[0]['trigger']=='interactive' and adopt_reqs[1]['profile']['id']=='reviewer'
+ evidence={'base':str(base),'project_id':project['id'],'card_id':second['id'],'first_run':run['id'],'api_version':call('app.ping')['api_version'],'schema':json.loads(subprocess.check_output([str(cli),'build-info'],env=env,text=True))['schema'],'checks':['backlog planning','explicit approval','frozen run revision','immediate new revision','restart checkpoint','duplicate decision receipt','single workflow-owned movement','real isolated PTY reports','consumer acknowledgement','interactive card update and stage adopt']}
  # Project YAML authoring and a configuration Agent share real transport,
  # without creating a Card/assignment or sending the initial prompt twice.
  params_file=base/'source-query.json';params_file.write_text(json.dumps({'project_id':project['id']}))

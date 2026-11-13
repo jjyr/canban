@@ -25,7 +25,9 @@ pub(super) fn idle_candidate(
     let Some(req) = snapshot.requests.iter().find(|r| r.id == run.request_id) else {
         return false;
     };
-    if canban_scheduler::automatic(req) && !matches!(req.state.as_str(), "completed" | "backlog") {
+    if (canban_scheduler::automatic(req) || req.workflow_run_id.is_some())
+        && !matches!(req.state.as_str(), "completed" | "backlog")
+    {
         return false;
     }
     if !matches!(

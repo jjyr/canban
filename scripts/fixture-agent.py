@@ -37,6 +37,14 @@ if "concurrency-barrier" in assignment:
         time.sleep(.1)
 if "block-me" in assignment:
     subprocess.run([os.environ["CANBAN_CLI"], "report", "--state", "blocked", "--message", "Fixture needs a human answer"], check=True)
+elif context["request"]["trigger"] == "interactive" and "ADOPT_FROM_BACKLOG" in context["card"].get("body", ""):
+    spec = Path(os.environ["CANBAN_RUN_DIR"]) / "card.md"
+    spec.write_text("Confirmed design key points from interactive session\n")
+    subprocess.run([os.environ["CANBAN_CLI"], "card", "update", "--title", "Adopted Interactive Spec", "--file", str(spec)], check=True)
+    subprocess.run([os.environ["CANBAN_CLI"], "card", "adopt"], check=True)
+    report = Path(os.environ["CANBAN_RUN_DIR"]) / f"report-{request}.md"
+    report.write_text("# Interactive Develop report\n\nAdopted develop in current session.\n")
+    subprocess.run([os.environ["CANBAN_CLI"], "report", "--state", "completed", "--message", "Adopted develop complete", "--file", str(report)], check=True)
 else:
     if stage == "develop" and context["request"]["trigger"] == "stage_entry":
         Path("canban-acceptance.txt").write_text("Herdr executed the Canban Card task.\n")

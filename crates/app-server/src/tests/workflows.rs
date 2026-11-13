@@ -2973,3 +2973,263 @@ fn queue_merge_waits_for_connected_agent_turn_wrapup_and_falls_back_after_settle
         "Queue merge must proceed once settle grace expires"
     );
 }
+
+#[test]
+fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and_continues_pipeline()
+ {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    std::fs::write(source.join("README.md"), "base\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "init"]);
+    let remote = dir.path().join("remote.git");
+    std::fs::create_dir_all(&remote).unwrap();
+    git_in(&remote, &["init", "--bare", "-b", "main"]);
+    git_in(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git_in(&source, &["push", "-u", "origin", "main"]);
+
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Discuss Then Adopt", "directory": source}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({
+                "project_id": p.id,
+                "title": "Rough Backlog Idea",
+                "body": "Initial notes"
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let other_card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({
+                "project_id": p.id,
+                "title": "Unrelated Card",
+                "body": "Do not touch"
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // 1. Open interactive discussion in Backlog.
+    app.call(
+        "agent.open",
+        json!({"card_id": card.id, "profile_id": "developer"}),
+    )
+    .unwrap();
+    let req = app
+        .snapshot()
+        .unwrap()
+        .requests
+        .into_iter()
+        .find(|r| r.card_id == card.id)
+        .unwrap();
+    assert_eq!(req.trigger, RequestTrigger::Interactive);
+    assert!(req.workflow_run_id.is_none());
+
+    let ops = canban_workspaces::Ops::local();
+    let wt = ops.prepare(&app.home, &p, &card).unwrap();
+    let branch = ops.current_branch(wt.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut current: Card = db.get(&card.id)?;
+            current.worktree = Some(wt.to_str().unwrap().into());
+            current.branch = Some(branch);
+            db.save(&current)
+        })
+        .unwrap();
+    git_identity(&wt);
+    let attempt = admit(&app, &req);
+
+    // Prompt teaches both user-confirmed Card updates and permission-gated `card adopt`.
+    let prompt_rel = canban_context::capture(
+        &app.home,
+        &p,
+        &card,
+        &req,
+        attempt.number,
+        &app.snapshot().unwrap(),
+        "/tmp/test.sock",
+        Path::new("/bin/canban"),
+    )
+    .unwrap();
+    let prompt = std::fs::read_to_string(app.home.join(prompt_rel)).unwrap();
+    assert!(prompt.contains("card update"));
+    assert!(prompt.contains("card adopt"));
+    assert!(prompt.contains("Ask the user for permission before starting implementation"));
+
+    // Security check: execution cannot update or adopt another Card.
+    assert!(
+        app.call(
+            "card.update",
+            json!({
+                "card_id": other_card.id,
+                "body": "Hijacked",
+                "execution": {"request_id": req.id, "attempt_number": attempt.number}
+            }),
+        )
+        .is_err()
+    );
+    assert!(
+        app.call(
+            "card.adopt",
+            json!({
+                "card_id": other_card.id,
+                "stage": "develop",
+                "execution": {"request_id": req.id, "attempt_number": attempt.number}
+            }),
+        )
+        .is_err()
+    );
+    assert!(
+        app.call("card.adopt", json!({"stage": "develop"})).is_err(),
+        "card.adopt requires an active Agent execution binding"
+    );
+
+    // 2. Agent updates Card with user-confirmed design key points via execution binding (no card_id/revision required).
+    let updated_card: Card = serde_json::from_value(
+        app.call(
+            "card.update",
+            json!({
+                "title": "Confirmed Design Spec",
+                "body": "## Confirmed Design\n- Use `card adopt` without re-triggering scheduling",
+                "execution": {"request_id": req.id, "attempt_number": attempt.number}
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(updated_card.title, "Confirmed Design Spec");
+    assert!(updated_card.body.contains("Confirmed Design"));
+    assert_eq!(updated_card.stage, "backlog");
+    let update_event = app
+        .snapshot()
+        .unwrap()
+        .events
+        .into_iter()
+        .rev()
+        .find(|e| e.card_id == card.id && e.kind == "card.updated")
+        .unwrap();
+    assert_eq!(update_event.actor, "agent:developer");
+
+    // 3. User authorizes implementation: Agent adopts `develop` in the same session.
+    let adopt_res = app
+        .call(
+            "card.adopt",
+            json!({
+                "stage": "develop",
+                "request_key": "adopt-1",
+                "execution": {"request_id": req.id, "attempt_number": attempt.number}
+            }),
+        )
+        .unwrap();
+    assert_eq!(adopt_res["adopted"], json!(true));
+    assert_eq!(adopt_res["card"]["stage"], json!("develop"));
+    let run_id = adopt_res["workflow_run"]["id"].as_str().unwrap().to_owned();
+
+    // Calling `card.adopt` again in `develop` is idempotent and returns the same active WorkflowRun.
+    let adopt_again = app
+        .call(
+            "card.adopt",
+            json!({
+                "stage": "develop",
+                "request_key": "adopt-2",
+                "execution": {"request_id": req.id, "attempt_number": attempt.number}
+            }),
+        )
+        .unwrap();
+    assert_eq!(adopt_again["workflow_run"]["id"], json!(run_id));
+
+    let after_adopt = app.snapshot().unwrap();
+    // Crucial: NO second Request was queued by `on.develop` (`card.column_entered`)!
+    assert_eq!(
+        after_adopt
+            .requests
+            .iter()
+            .filter(|r| r.card_id == card.id)
+            .count(),
+        1,
+        "card.adopt must suppress duplicate column_entered scheduling"
+    );
+    let bound_req = after_adopt
+        .requests
+        .iter()
+        .find(|r| r.id == req.id)
+        .unwrap();
+    assert_eq!(bound_req.workflow_run_id.as_deref(), Some(run_id.as_str()));
+    assert_eq!(bound_req.stage, "develop");
+    let wf_run = after_adopt
+        .workflow_runs
+        .iter()
+        .find(|r| r.id == run_id)
+        .unwrap();
+    assert_eq!(wf_run.state, "waiting_agent");
+    assert_eq!(wf_run.request_id.as_deref(), Some(req.id.as_str()));
+    assert!(after_adopt.events.iter().any(|e| {
+        e.card_id == card.id
+            && e.kind == "card.stage_changed"
+            && e.data["from"] == "backlog"
+            && e.data["to"] == "develop"
+            && e.data["reason"] == "agent_adopted_stage"
+    }));
+
+    // Updating the Card again from the same bound Agent refreshes `input_digest` so completion does not go `stale`.
+    app.call(
+        "card.update",
+        json!({
+            "body": "## Confirmed Design\n- Use `card adopt`\n- Refresh workflow digest on bound update",
+            "execution": {"request_id": req.id, "attempt_number": attempt.number}
+        }),
+    )
+    .unwrap();
+
+    // 4. Agent implements in the worktree and reports `completed` in the same session -> pipeline moves to Review & merges!
+    std::fs::write(wt.join("feature.rs"), "pub fn adopted() -> bool { true }\n").unwrap();
+    git_in(&wt, &["add", "."]);
+    git_in(&wt, &["commit", "-m", "Implement adopted feature"]);
+
+    app.call(
+        "execution.report",
+        json!({
+            "execution": {"request_id": req.id, "attempt_number": attempt.number},
+            "request_key": "adopt-complete",
+            "state": "completed",
+            "message": "Implemented directly from interactive session"
+        }),
+    )
+    .unwrap();
+
+    let final_snap = app.snapshot().unwrap();
+    let final_card = final_snap.cards.iter().find(|c| c.id == card.id).unwrap();
+    assert_eq!(final_card.stage, "review");
+    assert!(
+        final_card.delivery.is_some(),
+        "completing the adopted session must advance Move to Review -> Queue Merge"
+    );
+    let final_run = final_snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.id == run_id)
+        .unwrap();
+    assert_eq!(final_run.state, "completed");
+}

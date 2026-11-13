@@ -19,6 +19,11 @@ def main():
     reply=sub.add_parser('reply');reply.add_argument('--to',required=True);reply.add_argument('--file',required=True)
     for p in [report,bind,reply]:
         p.add_argument('--request-id',default=os.environ.get('CANBAN_REQUEST_ID'));p.add_argument('--attempt',type=int,default=os.environ.get('CANBAN_ATTEMPT'))
+    card=sub.add_parser('card');cards=card.add_subparsers(dest='card_op',required=True)
+    cu=cards.add_parser('update');cu.add_argument('--title');cu.add_argument('--file');cu.add_argument('--request-key')
+    ca=cards.add_parser('adopt');ca.add_argument('--stage',default='develop');ca.add_argument('--request-key')
+    for p in [cu,ca]:
+        p.add_argument('--request-id',default=os.environ.get('CANBAN_REQUEST_ID'));p.add_argument('--attempt',type=int,default=os.environ.get('CANBAN_ATTEMPT'))
     note=sub.add_parser('note');notes=note.add_subparsers(dest='op',required=True)
     p=notes.add_parser('list');p.add_argument('--project-id')
     p=notes.add_parser('read');p.add_argument('note_id');p.add_argument('--json',action='store_true')
@@ -32,8 +37,17 @@ def main():
     elif a.cmd=='snapshot':m='app.snapshot'
     elif a.cmd=='status':m='herdr.status'
     elif a.cmd=='report':
-        m='execution.report';p={'state':a.state,'message':a.message,'execution':{'request_id':a.request_id,'attempt_number':a.attempt},'request_key':a.request_key or ('completed:%s:%s'%(a.request_id,a.attempt) if a.state=='completed' else uuid.uuid4().hex)}
+        m='execution.report';p={'state':a.state,'message':a.message,'execution':{'request_id':a.request_id,'attempt_number':a.attempt},'request_key':a.request_key or ('%s:%s:%s'%(a.state,a.request_id,a.attempt) if a.state in ['completed','backlog'] else uuid.uuid4().hex)}
         if a.file:p['body']=body(a.file)
+    elif a.cmd=='card':
+        if a.card_op=='update':
+            assert a.title is not None or a.file is not None, 'Supply --title and/or --file to update the Card'
+            m='card.update';p={'execution':{'request_id':a.request_id,'attempt_number':a.attempt}}
+            if a.request_key:p['request_key']=a.request_key
+            if a.title is not None:p['title']=a.title
+            if a.file is not None:p['body']=body(a.file)
+        else:
+            m='card.adopt';p={'stage':a.stage,'execution':{'request_id':a.request_id,'attempt_number':a.attempt},'request_key':a.request_key or ('adopt:%s:%s:%s'%(a.stage,a.request_id,a.attempt))}
     elif a.cmd=='bind-session':m='agent.bind';p={'session_id':a.session_id,'request_id':a.request_id,'attempt':a.attempt}
     elif a.cmd=='reply':m='agent.reply';p={'question_id':a.to,'request_id':a.request_id,'attempt':a.attempt,'body':body(a.file),'request_key':'reply:'+a.to}
     elif a.cmd=='note':
@@ -43,7 +57,7 @@ def main():
         raw=a.op=='read' and not a.json
     if m=='attachment.add' and 'source' in p:p['bytes']=list(pathlib.Path(p.pop('source')).read_bytes())
     p.setdefault('request_key',uuid.uuid4().hex)
-    if m in ['note.save','note.write','note.rename','card.continue','card.move','execution.retry','review.merge','card.archive'] and 'execution' not in p and os.environ.get('CANBAN_REQUEST_ID'):
+    if m in ['note.save','note.write','note.rename','card.continue','card.update','card.adopt','card.move','execution.retry','review.merge','card.archive'] and 'execution' not in p and os.environ.get('CANBAN_REQUEST_ID'):
         p['execution']={'request_id':os.environ['CANBAN_REQUEST_ID'],'attempt_number':int(os.environ['CANBAN_ATTEMPT'])}
     assert a.endpoint and a.endpoint.startswith('spool:'), 'Canban reporting endpoint unavailable'
     root=pathlib.Path(a.endpoint[6:]);root.mkdir(parents=True,exist_ok=True,mode=0o700)

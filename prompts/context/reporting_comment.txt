@@ -1,3 +1,9 @@
+## Card updates & starting development
+- Update the Card only with user-confirmed design key points, or when the user asks to update the Card:
+  CANBAN_ENDPOINT={{endpoint}} CANBAN_REQUEST_ID={{request_id}} CANBAN_ATTEMPT={{attempt}} {{cli}} card update [--title 'Title'] --file "$CANBAN_RUN_DIR/card.md"
+- Ask the user for permission before starting implementation. Once authorized (when the Card is not yet in `develop`), adopt `develop` first so this session takes over the workflow without re-triggering scheduling:
+  CANBAN_ENDPOINT={{endpoint}} CANBAN_REQUEST_ID={{request_id}} CANBAN_ATTEMPT={{attempt}} {{cli}} card adopt
+
 ## Reporting
 Publish your answer and complete this comment assignment in a single CLI call (never edit `canban.sqlite` or call `reply` separately):
 CANBAN_ENDPOINT={{endpoint}} CANBAN_REQUEST_ID={{request_id}} CANBAN_ATTEMPT={{attempt}} {{cli}} report --state <completed|blocked|backlog|failed> --message 'Short answer or summary' [--file "$CANBAN_RUN_DIR/reply.md"]

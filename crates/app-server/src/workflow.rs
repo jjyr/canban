@@ -55,6 +55,65 @@ fn start(
         db, config, card, flow, revision, entry, event, legacy, enqueue,
     )
 }
+pub(super) fn adopt_stage(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    request: &mut Request,
+    stage: &str,
+    event: Option<String>,
+) -> Result<Option<WorkflowRun>> {
+    let mut sources: Vec<_> = db
+        .list::<WorkflowSource>()?
+        .into_iter()
+        .filter(|s| s.project_id == card.project_id && s.enabled)
+        .collect();
+    sources.sort_by(|a, b| {
+        (a.filename != "development.yaml")
+            .cmp(&(b.filename != "development.yaml"))
+            .then_with(|| a.filename.cmp(&b.filename))
+    });
+    for source in sources {
+        let matched_entry = source
+            .rules
+            .iter()
+            .find(|(_, r)| {
+                r.enabled
+                    && r.event == "card.column_entered"
+                    && r.selector.column.as_deref() == Some(stage)
+                    && r.selector.origin.as_deref().is_none_or(|o| o == "local")
+            })
+            .map(|(k, _)| k.clone())
+            .or_else(|| {
+                source
+                    .rules
+                    .get(stage)
+                    .filter(|r| {
+                        r.enabled
+                            && r.event == "card.column_entered"
+                            && r.selector.column.as_deref().is_none_or(|c| c == stage)
+                    })
+                    .map(|_| stage.to_owned())
+            });
+        if let Some(entry) = matched_entry {
+            let w = published(db, &source.workflow_id)?;
+            let run = engine::start_adopted(
+                db,
+                config,
+                card,
+                w.definition,
+                w.revision,
+                &entry,
+                event,
+                w.workflow_id.starts_with("delivery:"),
+                request,
+                enqueue,
+            )?;
+            return Ok(Some(run));
+        }
+    }
+    Ok(None)
+}
 pub(super) fn published(db: Db<'_>, id: &str) -> Result<WorkflowRevision> {
     latest(db, id)
 }

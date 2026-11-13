@@ -59,6 +59,9 @@ pub fn latest(db: Db<'_>, id: &str) -> Result<WorkflowRevision> {
         .context("Workflow not found")
 }
 fn digest(db: Db<'_>, card: &Card) -> String {
+    card_digest(db, card)
+}
+pub fn card_digest(db: Db<'_>, card: &Card) -> String {
     let source = card.github_issue().and_then(|r| {
         let key = format!(
             "github.com:{}:{}:{}",
@@ -187,6 +190,166 @@ pub fn start(
     db.save(&run)?;
     record(db, &run, "workflow.started", entry)?;
     drive(db, config, card, &mut run, queue)?;
+    Ok(run)
+}
+
+/// Starts `entry` by binding an already-running `Request` directly to the first
+/// `Agent` step reached (evaluating leading `Condition` / `Notify` steps without
+/// enqueuing a duplicate Agent request). If the entry path pauses or finishes at a
+/// non-`Agent` step (`Approval`, `Deliver`, `Admit`, `Complete`), it drives normally.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Transaction-scoped adoption captures definition, live request and queue adapter"
+)]
+pub fn start_adopted(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    flow: WorkflowDefinition,
+    revision: u64,
+    entry: &str,
+    event: Option<String>,
+    legacy: bool,
+    adopted_request: &mut Request,
+    queue: Queue,
+) -> Result<WorkflowRun> {
+    ensure!(card.active(), "Restore the Card before starting a workflow");
+    ensure!(!card.merged(), "Merged Cards do not start new workflows");
+    ensure!(
+        card.human_gate.is_none(),
+        "Resolve the existing human decision first"
+    );
+    ensure!(
+        !db.list::<WorkflowRun>()?
+            .iter()
+            .any(|r| r.card_id == card.id && r.active()),
+        "Card already has an active workflow"
+    );
+    let step = if let Some(s) = flow.entries.get(entry) {
+        s.clone()
+    } else if flow.steps.contains_key(entry) {
+        entry.to_owned()
+    } else {
+        bail!("Unknown workflow entry")
+    };
+    let mut run = WorkflowRun {
+        id: id(),
+        project_id: card.project_id.clone(),
+        card_id: card.id.clone(),
+        workflow_id: flow.id.clone(),
+        definition_revision: revision,
+        definition: flow,
+        state: "running".into(),
+        step: Some(step),
+        visit: 1,
+        request_id: None,
+        trigger_event_id: event,
+        input_digest: digest(db, card),
+        inputs: json!({"title":card.title,"body":card.body,"content":card.content,"legacy":legacy,"adopted":true}),
+        outputs: BTreeMap::new(),
+        history: Vec::new(),
+        error: None,
+        created_at: now(),
+        updated_at: now(),
+    };
+    db.save(&run)?;
+    record(db, &run, "workflow.started", entry)?;
+    let mut claimed = false;
+    while run.state == "running" {
+        if run.visit > run.definition.max_steps {
+            break;
+        }
+        let Some(key) = run.step.clone() else {
+            break;
+        };
+        let Some(step) = run.definition.steps.get(&key).cloned() else {
+            break;
+        };
+        match step {
+            WorkflowStep::Condition {
+                pointer,
+                equals,
+                then,
+                otherwise,
+            } => {
+                run.history
+                    .push(json!({"step":key,"visit":run.visit,"at":now(),"event":"entered"}));
+                let mut card_val = serde_json::to_value(&*card)?;
+                if let Some(obj) = card_val.as_object_mut() {
+                    obj.insert("source_trust".into(), json!(card.trust_level()));
+                }
+                let context = json!({"inputs":run.inputs,"outputs":run.outputs,"card":card_val});
+                next(
+                    &mut run,
+                    Some(if context.pointer(&pointer) == Some(&equals) {
+                        then
+                    } else {
+                        otherwise
+                    }),
+                );
+            }
+            WorkflowStep::Notify { message, next: to } => {
+                run.history
+                    .push(json!({"step":key,"visit":run.visit,"at":now(),"event":"entered"}));
+                db.save(&canban_notifications::attention(
+                    &card.project_id,
+                    &card.id,
+                    &message,
+                ))?;
+                record(db, &run, "workflow.notified", &message)?;
+                next(&mut run, to);
+            }
+            WorkflowStep::Admit { next: to, .. } => {
+                // An already-live session holds its terminal; bypass capacity admission.
+                run.history
+                    .push(json!({"step":key,"visit":run.visit,"at":now(),"event":"entered"}));
+                next(&mut run, to);
+            }
+            WorkflowStep::Agent {
+                next: continuation, ..
+            } => {
+                run.history
+                    .push(json!({"step":key,"visit":run.visit,"at":now(),"event":"entered"}));
+                let step_ref = format!("{key}:{}", run.visit);
+                adopted_request.workflow_run_id = Some(run.id.clone());
+                adopted_request.workflow_step = Some(step_ref);
+                adopted_request.stage = card.stage.clone();
+                if legacy {
+                    let following = run.definition.steps[&key]
+                        .next()
+                        .and_then(|n| run.definition.steps.get(n));
+                    adopted_request.require_human_review =
+                        matches!(following, Some(WorkflowStep::Approval { .. }));
+                    let movement = match following {
+                        Some(WorkflowStep::Approval { next, .. }) => {
+                            next.as_ref().and_then(|n| run.definition.steps.get(n))
+                        }
+                        other => other,
+                    };
+                    adopted_request.on_completed = match movement {
+                        Some(WorkflowStep::Move { column, .. }) => Some(column.clone()),
+                        _ => None,
+                    };
+                }
+                db.save(adopted_request)?;
+                run.request_id = Some(adopted_request.id.clone());
+                run.state = "waiting_agent".into();
+                run.inputs["title"] = json!(card.title);
+                run.inputs["body"] = json!(card.body);
+                run.input_digest = digest(db, card);
+                run.inputs["pending_next"] = json!(continuation);
+                run.updated_at = now();
+                db.save(&run)?;
+                db.save(card)?;
+                claimed = true;
+                break;
+            }
+            _ => break,
+        }
+    }
+    if !claimed {
+        drive(db, config, card, &mut run, queue)?;
+    }
     Ok(run)
 }
 fn drive(

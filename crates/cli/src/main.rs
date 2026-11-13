@@ -41,6 +41,11 @@ enum Cmd {
     },
     Snapshot,
     Status,
+    /// Update or adopt a workflow stage on the current Card from an Agent session.
+    Card {
+        #[command(subcommand)]
+        command: CardCmd,
+    },
     /// Legacy Note compatibility for already captured executions.
     #[command(hide = true)]
     Note {
@@ -86,6 +91,33 @@ enum Cmd {
         message: String,
         #[arg(long)]
         file: Option<PathBuf>,
+        #[arg(long, env = "CANBAN_REQUEST_ID")]
+        request_id: String,
+        #[arg(long, env = "CANBAN_ATTEMPT")]
+        attempt: u32,
+        #[arg(long)]
+        request_key: Option<String>,
+    },
+}
+#[derive(Subcommand)]
+enum CardCmd {
+    /// Update the current Card's title and/or Markdown body.
+    Update {
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long, env = "CANBAN_REQUEST_ID")]
+        request_id: String,
+        #[arg(long, env = "CANBAN_ATTEMPT")]
+        attempt: u32,
+        #[arg(long)]
+        request_key: Option<String>,
+    },
+    /// Move the current Card to a stage and adopt its workflow in this session without re-triggering scheduling.
+    Adopt {
+        #[arg(long, default_value = "develop")]
+        stage: String,
         #[arg(long, env = "CANBAN_REQUEST_ID")]
         request_id: String,
         #[arg(long, env = "CANBAN_ATTEMPT")]
@@ -288,6 +320,50 @@ fn run() -> Result<()> {
     );
     let (method, mut p) = match args.command {
         Cmd::Workflow { .. } => unreachable!(),
+        Cmd::Card { command } => match command {
+            CardCmd::Update {
+                title,
+                file,
+                request_id,
+                attempt,
+                request_key,
+            } => {
+                anyhow::ensure!(
+                    title.is_some() || file.is_some(),
+                    "Supply --title and/or --file to update the Card"
+                );
+                let mut params = json!({
+                    "execution": {"request_id": request_id, "attempt_number": attempt},
+                });
+                if let Some(key) = request_key {
+                    params["request_key"] = json!(key);
+                }
+                if let Some(t) = title {
+                    params["title"] = json!(t);
+                }
+                if let Some(f) = file {
+                    params["body"] = json!(input_body(Some(f))?);
+                }
+                ("card.update".into(), params)
+            }
+            CardCmd::Adopt {
+                stage,
+                request_id,
+                attempt,
+                request_key,
+            } => {
+                let key =
+                    request_key.unwrap_or_else(|| format!("adopt:{stage}:{request_id}:{attempt}"));
+                (
+                    "card.adopt".into(),
+                    json!({
+                        "request_key": key,
+                        "stage": stage,
+                        "execution": {"request_id": request_id, "attempt_number": attempt},
+                    }),
+                )
+            }
+        },
         Cmd::Note { command } => match command {
             NoteCmd::List { project_id } => ("note.list".into(), json!({"project_id":project_id})),
             NoteCmd::Read { note_id, .. } => ("note.read".into(), json!({"note_id":note_id})),
@@ -409,6 +485,8 @@ fn run() -> Result<()> {
             | "note.write"
             | "note.rename"
             | "card.continue"
+            | "card.update"
+            | "card.adopt"
             | "card.move"
             | "execution.retry"
             | "review.merge"
