@@ -5,8 +5,10 @@ use nsh_core::prelude::*;
 pub fn sidebar(ui: Ui) -> impl IntoElement {
     let rail = view()
         .w(px(56.))
+        .h_full()
         .flex_shrink_0()
-        .py_3()
+        .pt_3()
+        .pb_2()
         .items_center()
         .gap_2()
         .bg(SURFACE)
