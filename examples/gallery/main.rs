@@ -7,6 +7,7 @@ use serde_json::json;
 
 fn controls() -> impl IntoElement {
     let ui = Ui::new();
+    ui.apply_config(&fixtures::agent_config());
     let input = signal("Card 现在编辑用中文时 mixed English @developer 与 `code` 对齐测试".into());
     let profile_fixture = signal(canban_types::Config::default().profiles);
     let count = signal(0_u32);
@@ -54,6 +55,61 @@ fn controls() -> impl IntoElement {
                                 icon_action(kind, format!("{kind:?}"), move || i == 1,
                                     move || if i == 2 { 3 } else { 0 }, |_| {}).into_element()
                             ).collect::<Vec<_>>())),
+                )
+                .child(
+                    panel()
+                        .child(label("Colored Agent comment avatars · brand & multi-color provider marks"))
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .gap_2()
+                                .children(
+                                    [
+                                        ("@codex", Icon::Codex),
+                                        ("@claude", Icon::Claude),
+                                        ("@agy", Icon::Agy),
+                                        ("@gemini", Icon::Gemini),
+                                        ("@copilot", Icon::Copilot),
+                                        ("@devin", Icon::Devin),
+                                        ("@cursor", Icon::Cursor),
+                                        ("@opencode", Icon::OpenCode),
+                                        ("@amp", Icon::Amp),
+                                        ("@kimi", Icon::Kimi),
+                                        ("@kiro", Icon::Kiro),
+                                        ("@qwen", Icon::Qwen),
+                                        ("@qoder", Icon::Qoder),
+                                        ("@muse", Icon::Muse),
+                                        ("@cline", Icon::Cline),
+                                        ("@grok", Icon::Grok),
+                                        ("@hermes", Icon::Hermes),
+                                        ("@kilo", Icon::Kilo),
+                                        ("@pi", Icon::Pi),
+                                        ("@omp", Icon::Omp),
+                                        ("@droid", Icon::Droid),
+                                        ("@letta", Icon::Letta),
+                                        ("@mastra", Icon::Mastra),
+                                        ("@maki", Icon::Maki),
+                                        ("@agent", Icon::Agent),
+                                    ]
+                                    .into_iter()
+                                    .map(|(handle, mark)| {
+                                        view()
+                                            .w(px(28.))
+                                            .h(px(28.))
+                                            .rounded(px(14.))
+                                            .bg(INSET)
+                                            .border_1()
+                                            .border_color(BORDER)
+                                            .items_center()
+                                            .justify_center()
+                                            .tooltip(hint_tooltip(handle))
+                                            .child(icon_colored(mark, 16.))
+                                            .into_element()
+                                    })
+                                    .collect::<Vec<_>>(),
+                                ),
+                        ),
                 )
                 .child(
                     panel()
@@ -192,7 +248,7 @@ fn controls() -> impl IntoElement {
                             use canban_ui::components::timeline_item::{
                                 MilestoneFold, Spine, render_connected,
                             };
-                            let [e1, e2, e3, e4] = fixtures::timeline_connected();
+                            let [e1, e2, e3, e4, e5] = fixtures::timeline_connected();
                             let open = tl_expanded.get();
                             let fold = MilestoneFold {
                                 hidden_count: 1,
@@ -239,6 +295,17 @@ fn controls() -> impl IntoElement {
                                 .child(render_connected(
                                     ui,
                                     e4,
+                                    true,
+                                    Spine {
+                                        first: false,
+                                        last: false,
+                                    },
+                                    None,
+                                    None,
+                                ))
+                                .child(render_connected(
+                                    ui,
+                                    e5,
                                     true,
                                     Spine {
                                         first: false,

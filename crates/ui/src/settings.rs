@@ -254,7 +254,7 @@ pub const ASSET_CREDITS: &[CreditEntry] = &[
         name: "Lobe Icons & Primer Octicons",
         subtitle: "",
         license: "MIT",
-        description: "Monochrome provider and GitHub vector marks.",
+        description: "Provider brand (monochrome & multi-color) and GitHub vector marks.",
         links: &[
             ("Lobe Icons", "https://github.com/lobehub/lobe-icons"),
             ("Octicons", "https://github.com/primer/octicons"),

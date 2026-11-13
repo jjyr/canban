@@ -5,7 +5,7 @@ pub fn timeline() -> Event {
     Event {id:"gallery-event".into(),project_id:"gallery-project".into(),card_id:"gallery-card".into(),sequence:1,kind:"comment.created".into(),actor:"user".into(),message:"A **shared component**, rendered from deterministic fixture data.\n\n中文输入、选择、复制与长文本。".into(),request_id:None,data:json!({}),created_at:canban_types::now()}
 }
 
-pub fn timeline_connected() -> [Event; 4] {
+pub fn timeline_connected() -> [Event; 5] {
     let base = canban_types::now();
     let mk = |seq: u64, kind: &str, actor: &str, msg: &str, mins_ago: u64| Event {
         id: format!("gallery-tl-{seq}"),
@@ -35,6 +35,13 @@ pub fn timeline_connected() -> [Event; 4] {
             "agent:developer",
             "Shipped with collapsible intermediate status updates · 中文与长文本对齐正常。",
             5,
+        ),
+        mk(
+            5,
+            "comment.replied",
+            "agent:reviewer",
+            "Verified colored provider avatars across Codex, Antigravity, Claude, and Gemini.",
+            2,
         ),
     ]
 }
@@ -1241,20 +1248,22 @@ pub fn conversation() -> canban_types::Snapshot {
     );
 
     for i in 1..=20 {
+        let agent_actor = match (i / 2) % 4 {
+            1 => "agent:developer",
+            2 => "agent:reviewer",
+            3 => "agent:claude",
+            _ => "agent:gemini",
+        };
         push(
-            if i % 4 == 0 {
+            if i == 7 || i == 15 {
                 "execution.started"
             } else if i % 2 == 0 {
                 "comment.replied"
             } else {
                 "comment.created"
             },
-            if i % 2 == 0 {
-                "agent:developer"
-            } else {
-                "user"
-            },
-            if i % 4 == 0 {
+            if i % 2 == 0 { agent_actor } else { "user" },
+            if i == 7 || i == 15 {
                 "Agent execution started".into()
             } else {
                 format!(

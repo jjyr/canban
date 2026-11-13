@@ -19,7 +19,7 @@ pub use split::split;
 pub use status::{Tone, attention_count, live_dot, live_status, notice, reminder_count, status};
 
 pub mod icons;
-pub use icons::{Icon, icon, icon_action, icon_tinted};
+pub use icons::{Icon, icon, icon_action, icon_colored, icon_tinted};
 pub mod search_dialog;
 pub use search_dialog::{SearchChoice, search_dialog};
 
