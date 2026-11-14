@@ -4,9 +4,9 @@ Static product site for [https://canban.dev/](https://canban.dev/), deployed via
 
 ## Structure
 
-- `index.html` — Zen product showcase (default English HTML, pre-paint browser locale matching, interactive parallel Kanban + Herdr Workbench preview, copyable install command, and GitHub Star prompt).
-- `styles.css` — Responsive warm-paper / dark-ink design system and subtle motion choreography (`prefers-reduced-motion` aware).
-- `app.js` — Client-side i18n dictionary (`en` / `zh`, extensible), interactive Card context switching, ambient stage preview, and clipboard actions.
+- `index.html` — 4-channel retro CRT monitor deck (`CH.01` Workbench, `CH.02` Human Context, `CH.03` Parallel Pipeline, `CH.04` Install).
+- `styles.css` — Native Monokai dark CRT design system aligned with Canban's built-in Monokai palette (`crates/themes/src/lib.rs`), phosphor scanlines/noise, and pixel-aligned wireframe flow.
+- `app.js` — Concise `en` / `zh` localization, discrete channel paging with CRT H-sync glitch transitions, 3-primitive scene sequencer (`Kanban`, `Workflow`, `Herdr`), and clipboard helpers.
 - `install.sh` — Shell installer served at `https://canban.dev/install.sh`.
 - `CNAME` — Custom domain binding (`canban.dev`).
 - `favicon.svg` — Vector Canban mark derived from `crates/ui/assets/app-icon.svg`.

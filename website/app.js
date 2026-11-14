@@ -11,601 +11,607 @@
   };
 
   /* ------------------------------------------------------------------------ */
-  /* Localization Dictionary (Default English + Simplified Chinese)           */
-  /* Easy to extend: add another locale key (e.g., `ja`) with matching keys.  */
+  /* Bilingual Copy                                                           */
   /* ------------------------------------------------------------------------ */
   const I18N = {
     en: {
-      meta_title: "Canban — Kanban + Herdr Workbench for Human Context",
+      meta_title: "Canban = Kanban + Workflow + Herdr",
       meta_desc:
-        "Run agents in parallel without switching human context. Canban unites an intent-preserving Kanban board, declarative Workflows, and persistent Herdr Terminals.",
-      nav_context: "Human Context",
-      nav_workbench: "Workbench",
-      nav_stack: "Under the Hood",
-      nav_install: "Install",
-      star_prompt: "Star on GitHub",
+        "Maintain Human Context with Kanban, schedule with custom Workflows, and power native Agent CLIs with Herdr.",
 
-      hero_eyebrow: "KANBAN + HERDR WORKBENCH",
-      hero_title: "Run agents in parallel.<br>Never switch <em>human context</em>.",
+      ch_1: "WORKBENCH",
+      ch_2: "CONTEXT",
+      ch_3: "TOPOLOGY",
+      ch_4: "INSTALL",
+      star_prompt: "STAR",
+
       hero_subtitle:
-        "Canban unites an intent-preserving <strong>Kanban</strong> board with persistent <strong>Herdr Terminals</strong>, orchestrated by declarative <strong>Workflows</strong>. Every Card locks in its own discussion, branch, and live session—unburdening your mind.",
+        "Maintain Human Context with Kanban, schedule with custom Workflows, and power native Agent CLIs with Herdr.",
 
-      copy_label: "Copy",
-      copied_label: "Copied",
+      tab_1_desc: "Maintain Human Context",
+      tab_2_desc: "Custom Workflow Scheduling",
+      tab_3_desc: "Native Agent CLI Support",
 
-      install_platform: "Available for macOS today · Linux & Windows on the roadmap",
-      install_license: "Apache-2.0",
-      install_source_link: "Or build from source",
+      term_chrome_crumb: "canban / Card #65 · CRT & Monokai polish",
+      c68_title: "Wayland fractional scale host",
+      c67_title: "Remote machine SSH multiplexer",
+      c65_title: "CRT deck & Monokai polish",
+      c63_title: "GitHub App token rotation",
+      c63_wait: "Needs answer",
+      c64_title: "Workflow schema v7 migration",
+      c61_title: "Durable event journal cursor",
+      c60_title: "Unified ⌘O Command Palette",
 
-      wb_hint_left: "Live Workbench · 4 agents running in parallel across isolated worktrees",
-      wb_hint_right: "Click any active Card to switch full context instantly →",
-      wb_running_pill: "4 Running",
-      wb_attention_pill: "1 Needs Input",
+      tl_msg_1: "Build a bold retro CRT Monokai deck, one screen per channel.",
+      tl_mile: "⎇ Worktree <code>canban-0afd/65</code> · @developer started",
+      tl_msg_2: "Redrew full width Workflow Studio and live Agent CLI view.",
 
-      col_backlog: "Backlog",
-      col_develop: "Develop",
-      col_parallel_badge: "4 · Parallel",
-      col_review: "Review",
+      wf_intake: "Intake",
+      wn_0_title: "Plan task",
+      wn_0_sub: "Inspect repository & draft implementation steps",
+      wn_1_title: "Wait for free Agent",
+      wn_1_sub: "Admit in Board order when global slot is free",
+      wn_2_title: "Implement",
+      wn_2_sub: "Isolated Git worktree · awaits explicit CLI report",
+      wn_3_title: "External PR check",
+      wn_4_title: "Queue merge",
+      wn_4_sub: "FIFO batch integration & upstream branch sync",
 
-      card_68_title: "Linux Wayland window host",
-      card_68_sub: "Spec draft · multi-platform",
-      card_69_title: "Device OAuth token refresh",
-      card_69_sub: "Queued after #63",
-      card_70_title: "Warm paper terminal theme",
-      card_70_sub: "Palette tokens",
+      hs_desc_label: "Description",
+      hs_desc_text:
+        "Present Canban inside a retro Monokai CRT deck. Keep Workflow pure visual Studio and show real Agent CLI TUI beside the Card.",
+      hs_comment_1: "@developer Add CRT scanlines, channel glitch, and ASCII topology on CH.03.",
+      hs_comment_2: "Applying Monokai phosphor tokens and verifying layout.",
+      tsc_placeholder: "Write a comment…",
+      tui_prompt_hint: "Steer @developer directly in TTY, or close window safely…",
 
-      card_65_title: "Website zen layout & i18n",
-      card_65_step: "Layout & motion",
-      card_64_title: "Workflow YAML migration v6",
-      card_64_step: "cargo test --workspace",
-      card_63_title: "GitHub App token rotation",
-      card_63_step: "Needs human answer",
-      card_62_title: "Worktree archive GC sweep",
-      card_62_step: "Verifying clean refs",
+      ctx_title: "Track all task context and progress with Kanban cards.",
+      old_tag: "Scattered Terminal Tabs",
+      new_tag: "1 Card = Complete Context",
+      ccm_title: "GitHub App device OAuth token refresh",
+      ccm_msg_user:
+        "Refresh installation tokens 5m before expiry without storing client secrets. @developer",
+      ccm_msg_agent:
+        "Implemented secretless Device Flow rotation and passed 14 auth integration tests. Ready to merge.",
+      ccm_mile: "✓ Queued for automatic rebase & upstream sync",
 
-      card_61_title: "Durable event bus cursor",
-      card_61_sub: "+182 −24 · Queue merge ready",
-      card_60_title: "Command palette parity",
-      card_60_sub: "+64 −11 · Diff verified",
+      ascii_title: "Parallel Agents. Isolated Worktrees. Zero Conflict Delivery.",
+      rf_card_title: "Token Refresh & Sync",
+      rf_plan_title: "Plan & Admit",
+      al_1: "Zero branch collisions: every Card gets its own clean checkout",
+      al_2: "Bring any native Agent CLI inside persistent Herdr TTYs",
+      al_3: "Automatic FIFO rebase merge, upstream push & worktree cleanup",
 
-      status_running: "Running",
-      status_needs_input: "Needs Input",
-      status_ready: "Ready",
-
-      detail_context_heading: "Human Context & Timeline",
-      detail_context_sub: "Zero mental reload",
-
-      ctx_kicker: "HUMAN CONTEXT",
-      ctx_title: "Stop acting as the context router between agents.",
-      ctx_desc:
-        "Parallel agents multiply output, but scattered terminal tabs multiply cognitive load. Canban keeps your mind quiet by anchoring every stream of work to a single Card.",
-
-      contrast_old_title: "Parallelism without Human Context",
-      contrast_old_1: "8 scattered terminal tabs—constantly guessing which session belongs to which branch.",
-      contrast_old_2: "Re-reading scrollback and re-explaining intent every time you switch tasks.",
-      contrast_old_3: "Your brain acts as the state machine, draining focus on routing instead of decisions.",
-
-      contrast_new_title: "Parallel calm in Canban",
-      contrast_new_1: "One Card binds intent, timeline discussion, isolated Git worktree, and persistent PTY.",
-      contrast_new_2: "Click a Card to recall its complete story and live terminal in under 200ms.",
-      contrast_new_3: "Agents advance quietly in the background and surface gentle notices only when your judgment is needed.",
-
-      pillars_kicker: "KANBAN + WORKFLOW + HERDR",
-      pillars_title: "Three primitives, one calm workbench.",
-      pillars_desc:
-        "Built from the ground up as a unified desktop workbench rather than bolted-on scripts.",
-
-      p1_index: "01 · KANBAN",
-      p1_title: "Lock in Human Context",
-      p1_body:
-        "Every Card holds the task brief, @agent discussions, pasted screenshots, and review disposition in one unified Timeline. Switching Cards switches your entire working context cleanly.",
-
-      p2_index: "02 · WORKFLOW",
-      p2_title: "Declarative stage flow",
-      p2_body:
-        "Dragging a Card into Develop or @mentioning a profile dispatches the right agent automatically. Explicit CLI outcome reports advance runs into Review and Queue Merge safely.",
-
-      p3_index: "03 · HERDR TERMINAL",
-      p3_title: "Persistent sessions & PTYs",
-      p3_body:
-        "Powered by Herdr and native libghostty rendering. Closing the window never kills active runs; attach to any live PTY, answer prompts inline, or resume conversations by exact ID.",
-
-      loop_1: "Intent captured",
-      loop_2: "Stage & schedule",
-      loop_3: "Isolated PTY & worktree",
-      loop_4: "Review & Queue Merge",
-
-      stack_kicker: "UNDER THE HOOD",
-      stack_title: "Grounded in native systems engineering.",
-      stack_desc:
-        "Designed for cross-platform longevity—shipping on macOS today, with Linux and Windows on the roadmap.",
-
-      stack_rust_tag: "Core & Engine",
-      stack_rust_desc:
-        "End-to-end Rust workspace across Kanban, Workflow Engine, Scheduler, and SQLite WAL storage—instant startup and minimal memory footprint.",
-      stack_herdr_tag: "Session Daemon",
-      stack_herdr_desc:
-        "Persistent PTY supervision, live status observation, exact conversation resume, and local or remote machine routing.",
-      stack_nsh_tag: "Native UI",
-      stack_nsh_desc:
-        "Built with NSH UI rather than a heavy web wrapper—delivering crisp 60/120fps responsiveness, keyboard-first Quick Open, and cross-platform evolution.",
-      stack_ghostty_tag: "VT & Rendering",
-      stack_ghostty_desc:
-        "Embeds checksum-pinned libghostty-vt for faithful terminal emulation, low-latency input, and clean ANSI palettes right beside each Card.",
-
-      closing_title: "Unburden your context. Start building.",
-      closing_sub: "Install Canban in one command, or build directly from source.",
+      closing_title: "Unburden your mind. Keep your Human Context.",
       tab_script: "Install Script",
       tab_source: "Build from Source",
+      copy_label: "Copy",
+      copied_label: "Copied",
       cta_star: "Star jjyr/canban on GitHub",
-      cta_docs: "Read Architecture Docs",
-      footer_copy: "Apache-2.0 License · © 2026 JJy",
+      cta_docs: "Architecture Docs →",
+
+      s_rust: "Canban Core Engine",
+      s_herdr: "TTY Agent Support",
+      s_nsh: "Native UI",
+      s_ghostty: "Terminal Rendering Engine",
+
+      footer_meta: "Apache-2.0 · © 2026 JJy",
     },
 
     zh: {
-      meta_title: "Canban — 面向 Human Context 的 Kanban + Herdr 并行工作台",
+      meta_title: "Canban = Kanban + Workflow + Herdr",
       meta_desc:
-        "多 Agent 并行推进，无需在会话间频繁切换大脑上下文。Canban 将承载意图的 Kanban 看板、声明式 Workflow 与持久运行的 Herdr Terminal 合二为一。",
-      nav_context: "Human Context",
-      nav_workbench: "工作台架构",
-      nav_stack: "底层技术",
-      nav_install: "安装",
-      star_prompt: "GitHub 点亮 Star",
+        "用 Kanban 维护 Human Context，自定义 Workflow 调度，Herdr 提供原生的 Agent CLI 支持。",
 
-      hero_eyebrow: "KANBAN + HERDR WORKBENCH",
-      hero_title: "多 Agent 并行推进，<br>无需频繁切换<em>你的大脑上下文</em>。",
+      ch_1: "工作台",
+      ch_2: "上下文",
+      ch_3: "并行拓扑",
+      ch_4: "安装",
+      star_prompt: "STAR",
+
       hero_subtitle:
-        "Canban 将管理意图的 <strong>Kanban</strong> 与持久运行的 <strong>Herdr Terminal</strong> 合二为一，由声明式 <strong>Workflow</strong> 自动编排推进。每张卡片锁住独立讨论、分支与实时终端，让大脑卸下记忆重担。",
+        "用 Kanban 维护 Human Context，自定义 Workflow 调度，Herdr 提供原生的 Agent CLI 支持。",
 
+      tab_1_desc: "维护 Human Context",
+      tab_2_desc: "自定义 Workflow 调度",
+      tab_3_desc: "原生的 Agent CLI 支持",
+
+      term_chrome_crumb: "canban / Card #65 · CRT 复古终端与 Monokai 质感",
+      c68_title: "Wayland 分数缩放窗口适配",
+      c67_title: "远程机器 SSH 多路复用连接",
+      c65_title: "CRT 复古终端与 Monokai 质感",
+      c63_title: "GitHub App 令牌轮换机制",
+      c63_wait: "待人工回复",
+      c64_title: "Workflow schema v7 迁移",
+      c61_title: "持久化事件日志游标恢复",
+      c60_title: "统一 ⌘O 全局命令面板",
+
+      tl_msg_1: "采用老式 CRT 终端切屏风格，搭配 Monokai 荧光质感。",
+      tl_mile: "⎇ Worktree <code>canban-0afd/65</code> · @developer 已启动",
+      tl_msg_2: "已重绘全宽 Workflow Studio 与右侧真实 Agent CLI 界面。",
+
+      wf_intake: "准入",
+      wn_0_title: "任务规划",
+      wn_0_sub: "读取仓库结构并生成实施步骤",
+      wn_1_title: "等待空闲 Agent 槽位",
+      wn_1_sub: "按看板优先级排队，有空闲并发槽位自动准入",
+      wn_2_title: "编码实现",
+      wn_2_sub: "独立 Git Worktree 隔离开发 · 等待 CLI 显式汇报",
+      wn_3_title: "外部 PR 安全检查",
+      wn_4_title: "Queue Merge 队列合并",
+      wn_4_sub: "FIFO 批量变基集成并自动推送远端分支",
+
+      hs_desc_label: "任务描述",
+      hs_desc_text:
+        "采用复古 CRT 显像管分屏展示 Canban。Workflow 保持纯图形化 Studio，Herdr 分屏展示真实 Agent CLI 交互输出。",
+      hs_comment_1: "@developer 加上 CRT 扫描线噪点、切台 Glitch 和第 3 屏 ASCII 拓扑图。",
+      hs_comment_2: "正在写入 Monokai 荧光色板并校验各频道布局。",
+      tsc_placeholder: "输入评论或 @agent…",
+      tui_prompt_hint: "直接在 TTY 中引导 @developer，或随时安全关闭窗口…",
+
+      ctx_title: "使用 Kanban 卡片追踪任务相关的所有上下文以及进度",
+      old_tag: "散落的终端标签",
+      new_tag: "1 张 Card = 完整现场",
+      ccm_title: "GitHub App 设备流 OAuth 令牌无感续期",
+      ccm_msg_user:
+        "在过期前 5 分钟自动刷新安装令牌，本地不落盘任何 Client Secret。@developer",
+      ccm_msg_agent:
+        "已完成免密钥 Device Flow 轮换逻辑，14 项鉴权集成测试全部通过，可随时合入。",
+      ccm_mile: "✓ 已进入 Queue Merge 自动变基合并队列",
+
+      ascii_title: "多 Agent 并行 · 独立 Worktree 隔离 · 零冲突自动合入",
+      rf_card_title: "令牌无感刷新与同步",
+      rf_plan_title: "规划与准入",
+      al_1: "零分支污染：每张 Card 独占干净的 Git Worktree",
+      al_2: "不绑架工具：在 Herdr 持久 TTY 中运行任意原生 Agent CLI",
+      al_3: "自动交付闭环：FIFO 批量变基合并、远端同步并自动清理归档",
+
+      closing_title: "卸下思维负担，保持 Human Context。",
+      tab_script: "一键脚本安装",
+      tab_source: "从源码构建",
       copy_label: "复制",
       copied_label: "已复制",
+      cta_star: "在 GitHub 点亮 Star",
+      cta_docs: "阅读架构文档 →",
 
-      install_platform: "当前首发支持 macOS · Linux 与 Windows 正在规划中",
-      install_license: "Apache-2.0 开源协议",
-      install_source_link: "或从源码构建",
+      s_rust: "Canban 核心引擎",
+      s_herdr: "提供 TTY Agent 支持",
+      s_nsh: "Native UI",
+      s_ghostty: "终端渲染引擎",
 
-      wb_hint_left: "实时工作台预览 · 4 个 Agent 正于独立 worktree 中并行开发",
-      wb_hint_right: "点击任意卡片，体验零负担秒切完整上下文 →",
-      wb_running_pill: "4 并行运行中",
-      wb_attention_pill: "1 待人工确认",
-
-      col_backlog: "Backlog",
-      col_develop: "Develop",
-      col_parallel_badge: "4 · 并行中",
-      col_review: "Review",
-
-      card_68_title: "Linux Wayland 原生窗口适配",
-      card_68_sub: "方案草案 · 跨平台演进",
-      card_69_title: "CLI 设备授权流自动续期",
-      card_69_sub: "等待 #63 完成后准入",
-      card_70_title: "和纸暖白终端主题色板",
-      card_70_sub: "设计 Token 整理",
-
-      card_65_title: "官网 Zen 视觉与多语言设计",
-      card_65_step: "正在编写布局与动效",
-      card_64_title: "Workflow YAML 迁移契约 v6",
-      card_64_step: "正在运行 cargo test",
-      card_63_title: "GitHub App 令牌轮换策略",
-      card_63_step: "等待人工确认方案",
-      card_62_title: "归档 Worktree 自动清理",
-      card_62_step: "校验分支引用完整性",
-
-      card_61_title: "持久化事件总线游标恢复",
-      card_61_sub: "+182 −24 · 队列合并就绪",
-      card_60_title: "全局命令面板快捷键对齐",
-      card_60_sub: "+64 −11 · Diff 已核验",
-
-      status_running: "运行中",
-      status_needs_input: "待回复",
-      status_ready: "就绪",
-
-      detail_context_heading: "Human Context 与时间线",
-      detail_context_sub: "切卡即切完整语境",
-
-      ctx_kicker: "HUMAN CONTEXT · 心智留白",
-      ctx_title: "告别在十几个 Agent 窗口间充当人肉路由器。",
-      ctx_desc:
-        "并行 Agent 成倍放大了产出，但散落的终端会话也成倍放大了记忆负担。Canban 把每一条并行工作流锚定在一张卡片上，还大脑一片静谧。",
-
-      contrast_old_title: "缺乏 Human Context 的并行",
-      contrast_old_1: "开满 8 个终端 Tab，来回翻找哪个窗口对应哪个分支与任务。",
-      contrast_old_2: "每次切换窗口都要重新滚屏回忆前因后果，反复粘贴背景上下文。",
-      contrast_old_3: "人脑被迫充当状态机与调度器，精力消耗在找窗口而非关键决策。",
-
-      contrast_new_title: "Canban 的并行秩序",
-      contrast_new_1: "一张卡片完整锁定任务意图、讨论时间线、独立 Git worktree 与持久 PTY。",
-      contrast_new_2: "点击任意卡片，200ms 内召回全部上下文与实时终端，心智零残留。",
-      contrast_new_3: "多个 Agent 在后台静默推进，仅在需要人工拍板或审阅时温和提醒。",
-
-      pillars_kicker: "KANBAN + WORKFLOW + HERDR",
-      pillars_title: "三大核心原语，合一静谧工作台。",
-      pillars_desc:
-        "从第一行代码起即为多 Agent 并行协作原生设计，而非零散脚本拼接。",
-
-      p1_index: "01 · KANBAN",
-      p1_title: "锁定 Human Context",
-      p1_body:
-        "每张卡片收纳任务初衷、@agent 讨论记录、截图资源与审阅结论于统一 Timeline。切换卡片即切换完整工作现场，大脑无需记忆中间状态。",
-
-      p2_index: "02 · WORKFLOW",
-      p2_title: "声明式自动流转",
-      p2_body:
-        "拖入阶段或 @mention 自动唤醒对应角色 Agent；通过显式 CLI 结果汇报驱动阶段流转，安全衔接 Review 审阅与 Queue Merge 队列合并。",
-
-      p3_index: "03 · HERDR TERMINAL",
-      p3_title: "持久会话与原生终端",
-      p3_body:
-        "深度融合 Herdr 守护进程与原生 libghostty 渲染。关闭窗口绝不中断后台任务；随时附着实时 PTY、就地回答追问，或按精确 ID 无损恢复会话。",
-
-      loop_1: "沉淀意图",
-      loop_2: "阶段编排与调度",
-      loop_3: "独立 Worktree 与持久终端",
-      loop_4: "审阅与队列合并",
-
-      stack_kicker: "UNDER THE HOOD · 底层技术",
-      stack_title: "纯粹、扎实的原生系统工程底座。",
-      stack_desc:
-        "面向跨平台长期演进架构设计 —— 当前首发支持 macOS，Linux 与 Windows 支持稳步推进中。",
-
-      stack_rust_tag: "核心与引擎",
-      stack_rust_desc:
-        "Kanban、Workflow 引擎、调度器与 SQLite WAL 存储全栈采用 Rust 编写，瞬时启动、极低内存占用。",
-      stack_herdr_tag: "持久终端底座",
-      stack_herdr_desc:
-        "负责 PTY 守护、运行态实时观测、会话精确 ID 恢复，以及本地与远程开发机无缝路由。",
-      stack_nsh_tag: "原生桌面 UI",
-      stack_nsh_desc:
-        "基于 NSH UI 构建原生界面，告别笨重浏览器套壳，提供细腻的键盘流 Quick Open 与多平台演进能力。",
-      stack_ghostty_tag: "终端解析与渲染",
-      stack_ghostty_desc:
-        "内嵌校验锁定的 libghostty-vt，在卡片旁提供高帧率、低延迟、色彩温润的原生终端体验。",
-
-      closing_title: "卸下上下文重担，从容开始构建。",
-      closing_sub: "一行命令即可安装 Canban，或直接从源码编译体验。",
-      tab_script: "一键安装脚本",
-      tab_source: "从源码构建",
-      cta_star: "在 GitHub 点亮 jjyr/canban",
-      cta_docs: "阅读架构文档",
-      footer_copy: "Apache-2.0 开源协议 · © 2026 JJy",
+      footer_meta: "Apache-2.0 · © 2026 JJy",
     },
   };
 
-  /* Interactive Card Context Data for the Live Workbench Stage */
-  const CARD_SCENES = {
-    "65": {
-      branch: "canban-0afd/65",
-      stageClass: "",
-      session: "hc attach #65:agy",
-      en: {
-        stage: "Develop · @agy",
-        title: "#65 Website zen layout & i18n",
-        timeline: [
-          { who: "user", text: "Emphasize Human Context, Kanban + Herdr workbench, and browser auto-i18n.", cls: "" },
-          { who: "@agy", text: "Adopted v2 wireframe: 4 parallel Develop cards + interactive context pane.", cls: "is-highlight" },
-          { who: "workflow", text: "Stage develop active · isolated worktree clean", cls: "" },
-        ],
-        term: [
-          { cls: "term-cmd", text: "$ canban card show 65 --context" },
-          { cls: "term-dim", text: "worktree: ~/.canban/worktrees/canban-0afd/65" },
-          { cls: "term-ok", text: "✓ wrote website/index.html, styles.css, app.js" },
-          { cls: "", text: "> verifying responsive stage & i18n dictionary", cursor: true },
-        ],
-      },
-      zh: {
-        stage: "Develop · @agy",
-        title: "#65 官网 Zen 视觉与多语言设计",
-        timeline: [
-          { who: "user", text: "强调 Human Context 免切上下文，突出 Kanban + Herdr 工作台与浏览器多语言。", cls: "" },
-          { who: "@agy", text: "已对齐 v2 线框：Develop 四卡并行预览 + 即点即切上下文面板。", cls: "is-highlight" },
-          { who: "workflow", text: "develop 阶段运行中 · 独立 worktree 已挂载", cls: "" },
-        ],
-        term: [
-          { cls: "term-cmd", text: "$ canban card show 65 --context" },
-          { cls: "term-dim", text: "worktree: ~/.canban/worktrees/canban-0afd/65" },
-          { cls: "term-ok", text: "✓ 已生成 website/index.html, styles.css, app.js" },
-          { cls: "", text: "> 正在校验响应式布局与双语无闪烁切换", cursor: true },
-        ],
-      },
-    },
-    "64": {
-      branch: "canban-0afd/64",
-      stageClass: "",
-      session: "hc attach #64:codex",
-      en: {
-        stage: "Develop · @codex",
-        title: "#64 Workflow YAML migration v6",
-        timeline: [
-          { who: "user", text: "Add sequential migration for admit.max_ready defaults in migrations.rs.", cls: "" },
-          { who: "@codex", text: "Implemented v5 → v6 step; running round-trip & snapshot tests.", cls: "is-highlight" },
-          { who: "workflow", text: "Auto-advance to Review armed on completed report", cls: "" },
-        ],
-        term: [
-          { cls: "term-cmd", text: "$ cargo test -p canban-workflow-engine" },
-          { cls: "term-ok", text: "test migrations::v5_to_v6_roundtrip ... ok" },
-          { cls: "term-ok", text: "test stages::preserves_custom_edges ... ok" },
-          { cls: "", text: "running 42 tests across workspace", cursor: true },
-        ],
-      },
-      zh: {
-        stage: "Develop · @codex",
-        title: "#64 Workflow YAML 迁移契约 v6",
-        timeline: [
-          { who: "user", text: "在 migrations.rs 中为 admit.max_ready 默认值补充顺序迁移步骤。", cls: "" },
-          { who: "@codex", text: "已完成 v5 → v6 迁移实现，正在执行往返兼容与快照回归测试。", cls: "is-highlight" },
-          { who: "workflow", text: "收到 completed 汇报后将自动流转至 Review", cls: "" },
-        ],
-        term: [
-          { cls: "term-cmd", text: "$ cargo test -p canban-workflow-engine" },
-          { cls: "term-ok", text: "test migrations::v5_to_v6_roundtrip ... ok" },
-          { cls: "term-ok", text: "test stages::preserves_custom_edges ... ok" },
-          { cls: "", text: "正在并行执行其余 42 项工作区测试", cursor: true },
-        ],
-      },
-    },
-    "63": {
-      branch: "canban-0afd/63",
-      stageClass: "amber",
-      session: "hc attach #63:claude",
-      en: {
-        stage: "Needs Input · @claude",
-        title: "#63 GitHub App token rotation",
-        timeline: [
-          { who: "user", text: "Refresh installation tokens secret-free before 5-minute expiry window.", cls: "" },
-          {
-            who: "@claude ▲",
-            text: "Question: Should expired offline tokens pause Queue Merge with `waiting_approval` or retry silently on wake?",
-            cls: "is-attention",
-          },
-          { who: "canban", text: "Card #63 surfaced to Activity pill — reply inline to resume", cls: "" },
-        ],
-        term: [
-          { cls: "term-cmd", text: "$ canban report --state blocked --message 'Awaiting policy choice'" },
-          { cls: "term-warn", text: "▲ Agent paused cleanly at decision gate (PTY preserved)" },
-          { cls: "term-dim", text: "session id: claude-8f21a · ready for instant @claude reply" },
-          { cls: "", text: "? awaiting human answer on Card #63", cursor: true },
-        ],
-      },
-      zh: {
-        stage: "待人工确认 · @claude",
-        title: "#63 GitHub App 令牌轮换策略",
-        timeline: [
-          { who: "user", text: "在到期前 5 分钟无密钥刷新 GitHub App 安装令牌。", cls: "" },
-          {
-            who: "@claude ▲",
-            text: "待确认：离线唤醒后若令牌已过期，Queue Merge 应进入 `waiting_approval` 挂起还是静默重试？",
-            cls: "is-attention",
-          },
-          { who: "canban", text: "已置顶温和提醒 —— 在卡片直接回复即可唤醒继续执行", cls: "" },
-        ],
-        term: [
-          { cls: "term-cmd", text: "$ canban report --state blocked --message '等待策略拍板'" },
-          { cls: "term-warn", text: "▲ Agent 已在决策节点安全挂起（Herdr PTY 完整保留）" },
-          { cls: "term-dim", text: "session id: claude-8f21a · 回复后按精确 ID 无损恢复" },
-          { cls: "", text: "? 等待人工回复 Card #63", cursor: true },
-        ],
-      },
-    },
-    "62": {
-      branch: "canban-0afd/62",
-      stageClass: "",
-      session: "hc attach #62:codex",
-      en: {
-        stage: "Develop · @codex",
-        title: "#62 Worktree archive GC sweep",
-        timeline: [
-          { who: "user", text: "Preserve commit under refs/canban/cards/<id> before pruning clean worktrees.", cls: "" },
-          { who: "@codex", text: "Verified dirty worktrees stay untouched with explicit notice.", cls: "is-highlight" },
-        ],
-        term: [
-          { cls: "term-cmd", text: "$ git for-each-ref refs/canban/cards/" },
-          { cls: "term-dim", text: "9c41e0b commit refs/canban/cards/61" },
-          { cls: "term-ok", text: "✓ archive retention invariant verified" },
-          { cls: "", text: "> preparing completion report", cursor: true },
-        ],
-      },
-      zh: {
-        stage: "Develop · @codex",
-        title: "#62 归档 Worktree 自动清理",
-        timeline: [
-          { who: "user", text: "清理干净 worktree 前将提交快照保留至 refs/canban/cards/<id>。", cls: "" },
-          { who: "@codex", text: "已验证含未提交改动的工作树会自动保留并给出提示。", cls: "is-highlight" },
-        ],
-        term: [
-          { cls: "term-cmd", text: "$ git for-each-ref refs/canban/cards/" },
-          { cls: "term-dim", text: "9c41e0b commit refs/canban/cards/61" },
-          { cls: "term-ok", text: "✓ 归档安全不变量测试通过" },
-          { cls: "", text: "> 正在生成任务完成汇报", cursor: true },
-        ],
-      },
-    },
-    "61": {
-      branch: "canban-0afd/61",
-      stageClass: "",
-      session: "hc attach #61:merger",
-      en: {
-        stage: "Review · Queue Merge",
-        title: "#61 Durable event bus cursor",
-        timeline: [
-          { who: "@codex", text: "Completed (+182 −24): durable journal cursor survives daemon restarts.", cls: "is-highlight" },
-          { who: "workflow", text: "deliver:review · rebased cleanly onto main, ready to fast-forward.", cls: "" },
-        ],
-        term: [
-          { cls: "term-cmd", text: "$ canban report --state completed --message 'Journal cursor ready'" },
-          { cls: "term-ok", text: "✓ Settled turn · rebase onto origin/main clean" },
-          { cls: "term-ok", text: "✓ Ready to merge & auto-archive Card #61" },
-          { cls: "", text: "idle · session preserved", cursor: true },
-        ],
-      },
-      zh: {
-        stage: "Review · 队列合并就绪",
-        title: "#61 持久化事件总线游标恢复",
-        timeline: [
-          { who: "@codex", text: "已完成 (+182 −24)：事件订阅游标跨重启无损恢复。", cls: "is-highlight" },
-          { who: "workflow", text: "deliver:review · 已干净变基至 main，准备快进合并与自动归档。", cls: "" },
-        ],
-        term: [
-          { cls: "term-cmd", text: "$ canban report --state completed --message '游标恢复验证通过'" },
-          { cls: "term-ok", text: "✓ 会话回合已收尾 · rebase origin/main 无冲突" },
-          { cls: "term-ok", text: "✓ 准备合并并自动归档 Card #61" },
-          { cls: "", text: "idle · 终端会话持久保留", cursor: true },
-        ],
-      },
-    },
-  };
+  /* ------------------------------------------------------------------------ */
+  /* Channel Paging Deck (One Screen at a Time + CRT Glitch Transition)       */
+  /* ------------------------------------------------------------------------ */
+  const TOTAL_CHANNELS = 4;
+  const CHANNEL_OSD_NAMES = [
+    "CH 01 // WORKBENCH",
+    "CH 02 // HUMAN CONTEXT",
+    "CH 03 // PIPELINE",
+    "CH 04 // INSTALL",
+  ];
 
-  let currentLang = document.documentElement.getAttribute("data-lang") || "en";
-  if (!I18N[currentLang]) currentLang = "en";
+  let currentChannel = 0;
+  let wheelLockUntil = 0;
+  let wheelAccum = 0;
+  let osdTimer = null;
+  let touchStartY = null;
 
-  let activeCardId = "65";
-  let activeInstallTab = "script";
-  let autoCycleTimer = null;
-  let userInteractedWithStage = false;
+  function switchChannel(nextIndex) {
+    const clamped = Math.max(0, Math.min(TOTAL_CHANNELS - 1, nextIndex));
+    if (clamped === currentChannel) return;
 
-  function applyLanguage(lang, persist) {
-    const resolved = I18N[lang] ? lang : "en";
-    currentLang = resolved;
-    document.documentElement.setAttribute("lang", resolved === "zh" ? "zh-CN" : "en");
-    document.documentElement.setAttribute("data-lang", resolved);
+    currentChannel = clamped;
 
-    if (persist) {
-      try {
-        localStorage.setItem("canban_lang", resolved);
-      } catch (_) {
-        /* ignore private mode storage restrictions */
-      }
+    const glass = document.getElementById("crt-glass");
+    const osd = document.getElementById("crt-osd");
+    const readout = document.getElementById("ch-readout");
+
+    /* Trigger CRT H-Sync Glitch Burst */
+    if (glass && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      glass.classList.remove("is-glitching");
+      void glass.offsetWidth;
+      glass.classList.add("is-glitching");
+      window.setTimeout(() => glass.classList.remove("is-glitching"), 240);
     }
 
-    const dict = I18N[resolved];
+    /* Update active screen */
+    document.querySelectorAll(".crt-screen").forEach((sec) => {
+      const idx = Number(sec.getAttribute("data-ch"));
+      sec.classList.toggle("is-active", idx === currentChannel);
+    });
+
+    /* Update top channel buttons */
+    document.querySelectorAll("[data-goto-ch]").forEach((btn) => {
+      if (btn.classList.contains("ch-btn")) {
+        const idx = Number(btn.getAttribute("data-goto-ch"));
+        btn.classList.toggle("is-active", idx === currentChannel);
+      }
+    });
+
+    /* Update bottom readout */
+    if (readout) {
+      readout.textContent = `CH 0${currentChannel + 1} / 0${TOTAL_CHANNELS}`;
+    }
+
+    /* Flash retro green OSD label */
+    if (osd) {
+      osd.textContent = CHANNEL_OSD_NAMES[currentChannel];
+      osd.classList.add("is-shown");
+      window.clearTimeout(osdTimer);
+      osdTimer = window.setTimeout(() => osd.classList.remove("is-shown"), 1150);
+    }
+  }
+
+  function setupChannelNavigation() {
+    document.querySelectorAll("[data-goto-ch]").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.preventDefault();
+        const target = Number(el.getAttribute("data-goto-ch"));
+        switchChannel(target);
+      });
+    });
+
+    const prevBtn = document.getElementById("prev-ch-btn");
+    const nextBtn = document.getElementById("next-ch-btn");
+    if (prevBtn) prevBtn.addEventListener("click", () => switchChannel(currentChannel - 1));
+    if (nextBtn) nextBtn.addEventListener("click", () => switchChannel(currentChannel + 1));
+
+    /* Wheel paging (one discrete channel jump per gesture) */
+    window.addEventListener(
+      "wheel",
+      (e) => {
+        const now = performance.now();
+        if (now < wheelLockUntil) return;
+
+        /* Allow internal scroll if screen content overflows on tiny viewports */
+        const activeScreen = document.querySelector(".crt-screen.is-active");
+        if (activeScreen && activeScreen.scrollHeight > activeScreen.clientHeight + 8) {
+          const atTop = activeScreen.scrollTop <= 2;
+          const atBottom =
+            activeScreen.scrollTop + activeScreen.clientHeight >= activeScreen.scrollHeight - 2;
+          if ((e.deltaY > 0 && !atBottom) || (e.deltaY < 0 && !atTop)) {
+            return;
+          }
+        }
+
+        wheelAccum += e.deltaY;
+        if (Math.abs(wheelAccum) >= 42) {
+          const dir = wheelAccum > 0 ? 1 : -1;
+          wheelAccum = 0;
+          wheelLockUntil = now + 560;
+          switchChannel(currentChannel + dir);
+        }
+      },
+      { passive: true }
+    );
+
+    /* Touch swipe paging */
+    window.addEventListener(
+      "touchstart",
+      (e) => {
+        if (e.touches.length === 1) touchStartY = e.touches[0].clientY;
+      },
+      { passive: true }
+    );
+    window.addEventListener(
+      "touchend",
+      (e) => {
+        if (touchStartY === null || !e.changedTouches.length) return;
+        const dy = touchStartY - e.changedTouches[0].clientY;
+        touchStartY = null;
+        if (Math.abs(dy) > 48) {
+          switchChannel(currentChannel + (dy > 0 ? 1 : -1));
+        }
+      },
+      { passive: true }
+    );
+
+    /* Keyboard ArrowUp/Down, PageUp/PageDown, 1-4 */
+    window.addEventListener("keydown", (e) => {
+      if (e.target && ["INPUT", "TEXTAREA"].includes(e.target.tagName)) return;
+      if (e.key === "ArrowDown" || e.key === "PageDown" || e.key === " ") {
+        e.preventDefault();
+        switchChannel(currentChannel + 1);
+      } else if (e.key === "ArrowUp" || e.key === "PageUp") {
+        e.preventDefault();
+        switchChannel(currentChannel - 1);
+      } else if (["1", "2", "3", "4"].includes(e.key) && !e.metaKey && !e.ctrlKey) {
+        switchChannel(Number(e.key) - 1);
+      }
+    });
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* CH 01 Scene Sequencer: Kanban | Workflow | Herdr                         */
+  /* ------------------------------------------------------------------------ */
+  const SCENES = ["kanban", "workflow", "terminal"];
+  const SCENE_DURATION_MS = 8600;
+
+  let currentLang = document.documentElement.getAttribute("data-lang") === "zh" ? "zh" : "en";
+  let activeInstallTab = "script";
+  let activeScene = "kanban";
+  let sceneStartTime = performance.now();
+  let rafId = null;
+  let sceneTimers = [];
+
+  function clearSceneTimers() {
+    while (sceneTimers.length) {
+      window.clearTimeout(sceneTimers.pop());
+    }
+  }
+
+  function scheduleInScene(fn, delayMs) {
+    const id = window.setTimeout(fn, delayMs);
+    sceneTimers.push(id);
+    return id;
+  }
+
+  /* Scene 01: Kanban Card Click -> Slide Open Pure Card Reader (No Bottom Terminal) */
+  function playKanbanScene(reduced) {
+    const ws = document.getElementById("kanban-workspace");
+    const card = document.getElementById("target-card-65");
+    const cursor = document.getElementById("kanban-cursor");
+    const replyNode = document.getElementById("kanban-live-reply");
+    if (!ws || !card || !cursor) return;
+
+    if (reduced) {
+      cursor.className = "sim-cursor";
+      card.classList.add("is-card-selected");
+      ws.classList.add("is-drawer-open");
+      if (replyNode) replyNode.classList.add("is-visible");
+      return;
+    }
+
+    ws.classList.remove("is-drawer-open");
+    card.classList.remove("is-card-selected");
+    if (replyNode) replyNode.classList.remove("is-visible");
+    cursor.className = "sim-cursor";
+
+    scheduleInScene(() => cursor.classList.add("is-visible", "is-aimed"), 260);
+    scheduleInScene(() => {
+      cursor.classList.add("is-clicking");
+      card.classList.add("is-card-selected");
+      ws.classList.add("is-drawer-open");
+    }, 1020);
+    scheduleInScene(() => cursor.classList.remove("is-visible", "is-clicking"), 1500);
+    scheduleInScene(() => {
+      if (replyNode) replyNode.classList.add("is-visible");
+    }, 2400);
+  }
+
+  /* Scene 02: Full-Width Visual Workflow Studio Traversal */
+  const WF_TRAVERSAL = [
+    { node: 0, en: "1/5 · Backlog · @planner drafting steps", zh: "1/5 · Backlog · @planner 生成实施步骤" },
+    { node: 1, vwire: 0, en: "2/5 · Backlog · Free Agent slot granted (4/6)", zh: "2/5 · Backlog · 获得空闲并发槽位 (4/6)" },
+    { node: 2, wire: 0, en: "3/5 · Develop · @developer running in worktree", zh: "3/5 · Develop · @developer 在独立分支编码" },
+    { node: 3, wire: 1, en: "4/5 · Review · Trusted branch verified", zh: "4/5 · Review · 本地受信任分支校验通过" },
+    { node: 4, vwire: 1, en: "5/5 · Review · Queue Merge Rebase ×5 & Sync ✓", zh: "5/5 · Review · Queue Merge 批量变基同步 ✓" },
+  ];
+
+  function playWorkflowScene(reduced) {
+    const nodes = document.querySelectorAll("[data-wf-node]");
+    const wires = document.querySelectorAll("[data-wf-wire]");
+    const arrows = document.querySelectorAll("[data-wf-arrow]");
+    const vwires = document.querySelectorAll("[data-wf-vwire]");
+    const banner = document.getElementById("wf-step-banner");
+
+    nodes.forEach((n) => n.classList.remove("is-lit", "is-done"));
+    wires.forEach((w) => w.classList.remove("is-lit"));
+    arrows.forEach((a) => a.classList.remove("is-lit"));
+    vwires.forEach((v) => v.classList.remove("is-lit"));
+
+    const stepTo = (idx) => {
+      const s = WF_TRAVERSAL[idx];
+      if (!s) return;
+      nodes.forEach((n) => {
+        const k = Number(n.getAttribute("data-wf-node"));
+        n.classList.toggle("is-lit", k === s.node);
+        n.classList.toggle("is-done", k < s.node);
+      });
+      if (typeof s.wire === "number") {
+        const w = document.querySelector(`[data-wf-wire="${s.wire}"]`);
+        const a = document.querySelector(`[data-wf-arrow="${s.wire}"]`);
+        if (w) w.classList.add("is-lit");
+        if (a) a.classList.add("is-lit");
+      }
+      if (typeof s.vwire === "number") {
+        const vw = document.querySelector(`[data-wf-vwire="${s.vwire}"]`);
+        if (vw) vw.classList.add("is-lit");
+      }
+      if (banner) banner.textContent = currentLang === "zh" ? s.zh : s.en;
+    };
+
+    if (reduced) {
+      WF_TRAVERSAL.forEach((_, i) => stepTo(i));
+      return;
+    }
+
+    [200, 1650, 3250, 4850, 6350].forEach((ms, i) => {
+      scheduleInScene(() => stepTo(i), ms);
+    });
+  }
+
+  /* Scene 03: Herdr — Authentic Agent CLI TUI Stream (Thoughts + Tool Calls + Diff) */
+  function playTerminalScene(reduced) {
+    const container = document.getElementById("agent-tui-stream");
+    if (!container) return;
+    container.innerHTML = "";
+
+    const blocks = [
+      {
+        delay: 180,
+        html: `<div class="tui-tool-head"><span class="tui-bullet is-ok">●</span><span class="tui-tool-name">Read</span><span class="tui-tool-arg">(crates/themes/src/lib.rs#L94-L103)</span></div>
+               <div class="tui-thought vt-dim">⎿ Loaded Monokai 16-color ANSI palette &amp; chrome tokens</div>`,
+      },
+      {
+        delay: 1550,
+        html: `<div class="tui-tool-head"><span class="tui-bullet is-ok">●</span><span class="tui-tool-name">Edit</span><span class="tui-tool-arg">(website/styles.css)</span></div>
+               <div class="tui-diff">
+                 <div class="diff-del">- --bg: #FAF9F6; /* warm paper */</div>
+                 <div class="diff-add">+ --tube-bg: #151612; /* Monokai CRT phosphor */</div>
+                 <div class="diff-add">+ --green: #a6e22e; --pink: #f92672; --cyan: #66d9ef;</div>
+               </div>`,
+      },
+      {
+        delay: 3400,
+        html: `<div class="tui-tool-head"><span class="tui-bullet">✦</span><span class="vt-purple">Agent reasoning</span></div>
+               <div class="tui-thought">${
+                 currentLang === "zh"
+                   ? "已移除左侧冗余 YAML 栏，将右侧切换为原生 Agent TUI 实时视图。"
+                   : "Removed redundant YAML sidebar and wired live Agent TUI stream."
+               }</div>`,
+      },
+      {
+        delay: 5300,
+        html: `<div class="tui-tool-head"><span class="tui-bullet is-ok">●</span><span class="tui-tool-name">Bash</span><span class="tui-tool-arg">(canban report --state completed)</span></div>
+               <div class="tui-thought vt-green">⎿ ✓ Reported completed to AppServer → advancing Card #65 to Review</div>`,
+      },
+    ];
+
+    const appendBlock = (b) => {
+      const div = document.createElement("div");
+      div.className = "tui-block";
+      div.innerHTML = b.html;
+      container.appendChild(div);
+    };
+
+    if (reduced) {
+      blocks.forEach(appendBlock);
+      return;
+    }
+
+    blocks.forEach((b) => {
+      scheduleInScene(() => appendBlock(b), b.delay);
+    });
+  }
+
+  function activateScene(sceneName) {
+    if (!SCENES.includes(sceneName)) return;
+    clearSceneTimers();
+    activeScene = sceneName;
+    sceneStartTime = performance.now();
+
+    const win = document.getElementById("app-window");
+    if (win) win.setAttribute("data-active-scene", sceneName);
+
+    document.querySelectorAll(".feature-tab").forEach((tab) => {
+      const match = tab.getAttribute("data-scene") === sceneName;
+      tab.classList.toggle("is-active", match);
+      tab.setAttribute("aria-selected", match ? "true" : "false");
+    });
+
+    SCENES.forEach((s) => {
+      const bar = document.getElementById("prog-" + s);
+      if (bar) bar.style.width = "0%";
+      const el = document.getElementById("scene-" + s);
+      if (el) el.classList.toggle("is-active", s === sceneName);
+    });
+
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (sceneName === "kanban") playKanbanScene(reduced);
+    else if (sceneName === "workflow") playWorkflowScene(reduced);
+    else if (sceneName === "terminal") playTerminalScene(reduced);
+  }
+
+  function startLoops() {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+    /* Continuous progress bar & auto-advance on CH 01 */
+    const tick = (now) => {
+      if (document.hidden || currentChannel !== 0) {
+        sceneStartTime = now;
+        rafId = window.requestAnimationFrame(tick);
+        return;
+      }
+      const elapsed = now - sceneStartTime;
+      const pct = Math.min(100, (elapsed / SCENE_DURATION_MS) * 100);
+      const bar = document.getElementById("prog-" + activeScene);
+      if (bar) bar.style.width = pct.toFixed(1) + "%";
+
+      if (elapsed >= SCENE_DURATION_MS) {
+        const nextIdx = (SCENES.indexOf(activeScene) + 1) % SCENES.length;
+        activateScene(SCENES[nextIdx]);
+      }
+      rafId = window.requestAnimationFrame(tick);
+    };
+    rafId = window.requestAnimationFrame(tick);
+
+    /* Subtle periodic micro-glitch on Hero Formula + Retro Flow stage pulse on CH 03 */
+    let pulseStep = 0;
+    window.setInterval(() => {
+      if (document.hidden) return;
+      pulseStep = (pulseStep + 1) % 4;
+      document.querySelectorAll("[data-rf-step]").forEach((el) => {
+        el.classList.toggle("is-hot", Number(el.getAttribute("data-rf-step")) === pulseStep);
+      });
+      document.querySelectorAll("[data-rf-wire]").forEach((el) => {
+        el.classList.toggle("is-hot", Number(el.getAttribute("data-rf-wire")) === pulseStep - 1);
+      });
+
+      if (Math.random() < 0.35) {
+        const formula = document.querySelector(".hero-formula");
+        if (formula) {
+          formula.classList.add("is-micro-glitch");
+          window.setTimeout(() => formula.classList.remove("is-micro-glitch"), 110);
+        }
+      }
+    }, 950);
+  }
+
+  /* ------------------------------------------------------------------------ */
+  /* Localization & Copy Helpers                                              */
+  /* ------------------------------------------------------------------------ */
+  function applyLanguage(lang, persist) {
+    const normalized = lang === "zh" ? "zh" : "en";
+    currentLang = normalized;
+    const dict = I18N[normalized];
+
+    document.documentElement.setAttribute("data-lang", normalized);
+    document.documentElement.setAttribute("lang", normalized === "zh" ? "zh-CN" : "en");
     document.title = dict.meta_title;
+
     const metaDesc = document.querySelector('meta[name="description"]');
     if (metaDesc) metaDesc.setAttribute("content", dict.meta_desc);
 
     document.querySelectorAll("[data-i18n]").forEach((el) => {
       const key = el.getAttribute("data-i18n");
       if (dict[key] !== undefined) {
-        el.textContent = dict[key];
+        if (key === "tl_mile") {
+          el.innerHTML = dict[key];
+        } else {
+          el.textContent = dict[key];
+        }
       }
     });
 
-    document.querySelectorAll("[data-i18n-html]").forEach((el) => {
-      const key = el.getAttribute("data-i18n-html");
-      if (dict[key] !== undefined) {
-        el.innerHTML = dict[key];
-      }
+    document.querySelectorAll("[data-set-lang]").forEach((btn) => {
+      btn.setAttribute("aria-pressed", btn.getAttribute("data-set-lang") === normalized ? "true" : "false");
     });
 
-    document.querySelectorAll(".lang-btn").forEach((btn) => {
-      const isMatch = btn.getAttribute("data-set-lang") === resolved;
-      btn.setAttribute("aria-pressed", isMatch ? "true" : "false");
-    });
-
-    renderCardDetail(activeCardId, false);
-  }
-
-  function renderCardDetail(cardId, animate) {
-    const scene = CARD_SCENES[cardId] || CARD_SCENES["65"];
-    const localeData = scene[currentLang] || scene.en;
-    const detailPane = document.getElementById("wb-detail");
-    if (!detailPane) return;
-
-    document.querySelectorAll("[data-card-id]").forEach((cardBtn) => {
-      const selected = cardBtn.getAttribute("data-card-id") === cardId;
-      cardBtn.classList.toggle("is-selected", selected);
-      cardBtn.setAttribute("aria-selected", selected ? "true" : "false");
-    });
-
-    const updateDOM = () => {
-      const branchEl = document.getElementById("detail-branch");
-      const stageEl = document.getElementById("detail-stage");
-      const titleEl = document.getElementById("detail-title");
-      const timelineEl = document.getElementById("detail-timeline");
-      const sessionEl = document.getElementById("detail-session");
-      const termBodyEl = document.getElementById("detail-term-body");
-
-      if (branchEl) branchEl.textContent = scene.branch;
-      if (stageEl) {
-        stageEl.textContent = localeData.stage;
-        stageEl.className = "wb-stage-pill" + (scene.stageClass ? " " + scene.stageClass : "");
-      }
-      if (titleEl) titleEl.textContent = localeData.title;
-      if (sessionEl) sessionEl.textContent = scene.session;
-
-      if (timelineEl) {
-        timelineEl.innerHTML = "";
-        localeData.timeline.forEach((item) => {
-          const row = document.createElement("div");
-          row.className = "wb-tl-item" + (item.cls ? " " + item.cls : "");
-          const who = document.createElement("span");
-          who.className = "wb-tl-who";
-          who.textContent = item.who;
-          const txt = document.createElement("span");
-          txt.className = "wb-tl-text";
-          txt.textContent = item.text;
-          row.appendChild(who);
-          row.appendChild(txt);
-          timelineEl.appendChild(row);
-        });
-      }
-
-      if (termBodyEl) {
-        termBodyEl.innerHTML = "";
-        localeData.term.forEach((line) => {
-          const div = document.createElement("div");
-          div.className = "term-line" + (line.cls ? " " + line.cls : "");
-          div.appendChild(document.createTextNode(line.text));
-          if (line.cursor) {
-            const cur = document.createElement("span");
-            cur.className = "term-cursor";
-            cur.setAttribute("aria-hidden", "true");
-            div.appendChild(cur);
-          }
-          termBodyEl.appendChild(div);
-        });
-      }
-    };
-
-    if (animate && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      detailPane.classList.add("is-switching");
-      window.setTimeout(() => {
-        updateDOM();
-        detailPane.classList.remove("is-switching");
-      }, 110);
-    } else {
-      updateDOM();
+    if (persist) {
+      try {
+        localStorage.setItem("canban_lang", normalized);
+      } catch (_) {}
     }
-  }
-
-  function startAmbientStageCycle() {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const order = ["65", "64", "63", "62", "61"];
-    autoCycleTimer = window.setInterval(() => {
-      if (userInteractedWithStage || document.hidden) return;
-      const idx = order.indexOf(activeCardId);
-      activeCardId = order[(idx + 1) % order.length];
-      renderCardDetail(activeCardId, true);
-    }, 5200);
   }
 
   function copyText(text, buttonEl) {
     const dict = I18N[currentLang] || I18N.en;
     const labelEl = buttonEl.querySelector(".copy-text");
-    const iconCopy = buttonEl.querySelector(".icon-copy");
-    const iconCheck = buttonEl.querySelector(".icon-check");
 
     const showSuccess = () => {
       buttonEl.classList.add("is-copied");
       if (labelEl) labelEl.textContent = dict.copied_label;
-      if (iconCopy) iconCopy.style.display = "none";
-      if (iconCheck) iconCheck.style.display = "inline-block";
-
       window.clearTimeout(buttonEl._copyTimer);
       buttonEl._copyTimer = window.setTimeout(() => {
         buttonEl.classList.remove("is-copied");
-        const latestDict = I18N[currentLang] || I18N.en;
-        if (labelEl) labelEl.textContent = latestDict.copy_label;
-        if (iconCopy) iconCopy.style.display = "";
-        if (iconCheck) iconCheck.style.display = "none";
-      }, 2000);
+        const latest = I18N[currentLang] || I18N.en;
+        if (labelEl) labelEl.textContent = latest.copy_label;
+      }, 1800);
     };
 
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -626,16 +632,14 @@
     try {
       document.execCommand("copy");
       onDone();
-    } catch (_) {
-      /* ignore */
-    }
+    } catch (_) {}
     document.body.removeChild(ta);
   }
 
   function setupInstallTabs() {
     const tabs = document.querySelectorAll("[data-install-tab]");
-    const footerCmdEl = document.getElementById("closing-install-cmd");
-    const footerCopyBtn = document.getElementById("closing-copy-btn");
+    const cmdEl = document.getElementById("closing-install-cmd");
+    const copyBtn = document.getElementById("closing-copy-btn");
 
     tabs.forEach((tab) => {
       tab.addEventListener("click", () => {
@@ -645,38 +649,10 @@
         tabs.forEach((t) =>
           t.setAttribute("aria-selected", t.getAttribute("data-install-tab") === mode ? "true" : "false")
         );
-        if (footerCmdEl) footerCmdEl.textContent = INSTALL_COMMANDS[mode];
-        if (footerCopyBtn) footerCopyBtn.setAttribute("data-copy-value", INSTALL_COMMANDS[mode]);
+        if (cmdEl) cmdEl.textContent = INSTALL_COMMANDS[mode];
+        if (copyBtn) copyBtn.setAttribute("data-copy-value", INSTALL_COMMANDS[mode]);
       });
     });
-
-    const jumpSourceLink = document.getElementById("jump-build-source");
-    if (jumpSourceLink) {
-      jumpSourceLink.addEventListener("click", () => {
-        const sourceTab = document.querySelector('[data-install-tab="source"]');
-        if (sourceTab) sourceTab.click();
-      });
-    }
-  }
-
-  function setupRevealObserver() {
-    const items = document.querySelectorAll(".reveal");
-    if (!("IntersectionObserver" in window)) {
-      items.forEach((el) => el.classList.add("is-visible"));
-      return;
-    }
-    const io = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting) {
-            entry.target.classList.add("is-visible");
-            io.unobserve(entry.target);
-          }
-        });
-      },
-      { threshold: 0.1, rootMargin: "0px 0px -40px 0px" }
-    );
-    items.forEach((el) => io.observe(el));
   }
 
   function fetchGitHubStars() {
@@ -696,32 +672,26 @@
           el.textContent = formatted;
         });
       })
-      .catch(() => {
-        /* Graceful silent fallback when repo is private or offline */
-      });
+      .catch(() => {});
   }
 
   document.addEventListener("DOMContentLoaded", () => {
-    /* Language switchers */
+    setupChannelNavigation();
+
     document.querySelectorAll("[data-set-lang]").forEach((btn) => {
       btn.addEventListener("click", () => {
         applyLanguage(btn.getAttribute("data-set-lang"), true);
+        activateScene(activeScene);
       });
     });
 
-    /* Interactive Kanban cards in Product Stage */
-    document.querySelectorAll("[data-card-id]").forEach((cardBtn) => {
-      cardBtn.addEventListener("click", () => {
-        userInteractedWithStage = true;
-        if (autoCycleTimer) window.clearInterval(autoCycleTimer);
-        const nextId = cardBtn.getAttribute("data-card-id");
-        if (nextId === activeCardId) return;
-        activeCardId = nextId;
-        renderCardDetail(activeCardId, true);
+    /* Clicking any primitive tab restarts that scene at 0% and keeps auto-cycling */
+    document.querySelectorAll(".feature-tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        activateScene(tab.getAttribute("data-scene"));
       });
     });
 
-    /* Copy command buttons */
     document.querySelectorAll("[data-copy-btn]").forEach((btn) => {
       btn.addEventListener("click", () => {
         const val = btn.getAttribute("data-copy-value") || INSTALL_COMMANDS[activeInstallTab];
@@ -731,8 +701,8 @@
 
     setupInstallTabs();
     applyLanguage(currentLang, false);
-    setupRevealObserver();
-    startAmbientStageCycle();
+    activateScene("kanban");
+    startLoops();
     fetchGitHubStars();
   });
 })();
