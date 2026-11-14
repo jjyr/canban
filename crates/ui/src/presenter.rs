@@ -455,6 +455,12 @@ impl Ui {
                 recent.insert(card.id.clone(), conversation.clone());
             });
         }
+        let scope_key = self
+            .snapshot
+            .with_untracked(|s| crate::terminals::worktrees::entry_scope(s, &entry).recent_key());
+        self.terminal_recent.with(|recent| {
+            recent.insert(scope_key, conversation.clone());
+        });
         self.card_standalone.set(false);
         self.clear_output();
         self.review_request

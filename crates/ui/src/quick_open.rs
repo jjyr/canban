@@ -123,6 +123,13 @@ fn contextual_commands(ui: Ui, raw_query: &str) -> Vec<(usize, SearchChoice)> {
             icon: Icon::Compare,
             keywords: format!("worktree diff review compare {}", wt.branch),
         });
+        dynamic_cmds.push(DynamicCommand {
+            id: format!("cmd:worktree-delete:{}", wt.id),
+            title: format!("Delete Worktree {}…", wt.branch),
+            detail: format!("{project_name} · Worktrees"),
+            icon: Icon::Branch,
+            keywords: format!("worktree delete remove {}", wt.branch),
+        });
     }
 
     dynamic_cmds
@@ -379,23 +386,10 @@ pub fn activate(ui: Ui, row: Candidate) {
         }
         Target::Agent(id) | Target::Terminal(id) => ui.open_terminal(id),
         Target::Worktree(wt_id) => {
-            let s = ui.snapshot.get_untracked();
-            if let Some(wt) = s.worktrees.iter().find(|w| w.id == wt_id) {
-                if let Some(live) = crate::terminals::entries(&s)
-                    .into_iter()
-                    .find(|e| e.listed() && crate::terminals::worktrees::entry_in_worktree(e, wt))
-                {
-                    ui.open_terminal(live.saved.id);
-                } else {
-                    ui.project.set(wt.project_id.clone());
-                    ui.terminal_folds.update(|folds| {
-                        folds.remove(&format!("project:{}", wt.project_id));
-                        folds.remove(&format!("wt:{}", wt.id));
-                    });
-                    ui.terminal_sidebar.set(true);
-                    ui.navigate("terminals");
-                }
-            }
+            crate::terminals::worktrees::activate_scope(
+                ui,
+                &crate::terminals::worktrees::WorktreeScope::ManagedWorktree(wt_id),
+            );
         }
     }
 }

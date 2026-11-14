@@ -59,7 +59,14 @@ pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
         MenuItem::new(e.cwd().unwrap_or_else(|| "Directory unavailable".into())).disabled(true),
     );
     if let Some(branch) = e.location.as_ref().and_then(|c| c.branch.clone()) {
-        items.push(MenuItem::new(format!("Branch: {branch}")).disabled(true));
+        let mut line = format!("Branch: {branch}");
+        if let Some(loc) = &e.location {
+            let ind = super::worktrees::format_git_indicators(loc.dirty, loc.ahead, loc.behind);
+            if !ind.is_empty() {
+                line.push_str(&format!(" ({})", ind.join(" · ")));
+            }
+        }
+        items.push(MenuItem::new(line).disabled(true));
     }
     if let Some(agent) = &e.agent {
         if agent
@@ -199,26 +206,243 @@ fn tab(ui: Ui, e: Entry, capacity: Memo<f32>) -> impl IntoElement {
             ))
     })
 }
+async fn switcher_menu(ui: Ui, at: Option<Point<Points>>) {
+    use super::worktrees::{WorktreeScope, activate_scope, entry_scope, scope_git_summary};
+    let s = ui.snapshot.get_untracked();
+    let live_rows: Vec<Entry> = ui.closing_terminals.with_untracked(|closing| {
+        ui.terminal_entries.with_untracked(|rows| {
+            rows.iter()
+                .filter(|e| e.listed() && !closing.contains(&e.saved.id))
+                .cloned()
+                .collect()
+        })
+    });
+    let current_scope = untracked(|| current(ui)).map(|e| entry_scope(&s, &e));
+    let mut items: Vec<MenuItem> = Vec::new();
+    let mut idle_managed: Vec<(String, canban_types::ManagedWorktree)> = Vec::new();
+
+    for proj in &s.projects {
+        if !items.is_empty() {
+            items.push(MenuItem::separator());
+        }
+        items.push(MenuItem::new(format!("📁 {}", proj.name)).disabled(true));
+
+        let root_scope = WorktreeScope::ProjectRoot(proj.id.clone());
+        let root_children: Vec<Entry> = live_rows
+            .iter()
+            .filter(|e| entry_scope(&s, e) == root_scope)
+            .cloned()
+            .collect();
+        let root_git = scope_git_summary(&s, &root_scope, &root_children);
+        let root_name = root_scope.display_name(&s, &root_children, Some(ui));
+        let mut root_label = format!(
+            "{}📁 {root_name} (Project root)",
+            if current_scope.as_ref() == Some(&root_scope) {
+                "✓ "
+            } else {
+                "   "
+            }
+        );
+        let root_ind = root_git.indicators();
+        if !root_ind.is_empty() {
+            root_label.push_str(&format!(" · {}", root_ind.join(" ")));
+        }
+        if !root_children.is_empty() {
+            root_label.push_str(&format!(" · {} live", root_children.len()));
+        }
+        let scope_sel = root_scope.clone();
+        items.push(MenuItem::new(root_label).on_select(move || activate_scope(ui, &scope_sel)));
+
+        let mut proj_cards: Vec<&canban_types::Card> = s
+            .cards
+            .iter()
+            .filter(|c| {
+                c.project_id == proj.id
+                    && c.archived_at.is_none()
+                    && (c.worktree.as_ref().is_some_and(|w| !w.is_empty())
+                        || live_rows.iter().any(|e| {
+                            entry_scope(&s, e) == WorktreeScope::CardWorktree(c.id.clone())
+                        }))
+            })
+            .collect();
+        proj_cards.sort_by_key(|c| (c.number, c.id.clone()));
+        for card in proj_cards {
+            let c_scope = WorktreeScope::CardWorktree(card.id.clone());
+            let c_children: Vec<Entry> = live_rows
+                .iter()
+                .filter(|e| entry_scope(&s, e) == c_scope)
+                .cloned()
+                .collect();
+            let c_git = scope_git_summary(&s, &c_scope, &c_children);
+            let c_branch = c_scope.display_name(&s, &c_children, Some(ui));
+            let mut c_label = format!(
+                "{}⎇ {} · #{} {}",
+                if current_scope.as_ref() == Some(&c_scope) {
+                    "✓ "
+                } else {
+                    "   "
+                },
+                c_branch,
+                card.number,
+                compact(&card.title, 28)
+            );
+            let c_ind = c_git.indicators();
+            if !c_ind.is_empty() {
+                c_label.push_str(&format!(" · {}", c_ind.join(" ")));
+            }
+            if !c_children.is_empty() {
+                c_label.push_str(&format!(" · {} live", c_children.len()));
+            }
+            let scope_sel = c_scope.clone();
+            items.push(MenuItem::new(c_label).on_select(move || activate_scope(ui, &scope_sel)));
+        }
+
+        for wt in s.worktrees.iter().filter(|w| w.project_id == proj.id) {
+            let wt_scope = WorktreeScope::ManagedWorktree(wt.id.clone());
+            let wt_children: Vec<Entry> = live_rows
+                .iter()
+                .filter(|e| entry_scope(&s, e) == wt_scope)
+                .cloned()
+                .collect();
+            let wt_git = scope_git_summary(&s, &wt_scope, &wt_children);
+            let mut wt_label = format!(
+                "{}⎇ {}",
+                if current_scope.as_ref() == Some(&wt_scope) {
+                    "✓ "
+                } else {
+                    "   "
+                },
+                wt.branch
+            );
+            let wt_ind = wt_git.indicators();
+            if !wt_ind.is_empty() {
+                wt_label.push_str(&format!(" · {}", wt_ind.join(" ")));
+            }
+            if wt_children.is_empty() {
+                wt_label.push_str(" · idle");
+                idle_managed.push((proj.name.clone(), wt.clone()));
+            } else {
+                wt_label.push_str(&format!(" · {} live", wt_children.len()));
+            }
+            let scope_sel = wt_scope.clone();
+            items.push(MenuItem::new(wt_label).on_select(move || activate_scope(ui, &scope_sel)));
+        }
+    }
+
+    let other_scopes = super::worktrees::project_scopes_in_tree_order(&s, &live_rows, None);
+    if !other_scopes.is_empty() {
+        if !items.is_empty() {
+            items.push(MenuItem::separator());
+        }
+        items.push(MenuItem::new("Other").disabled(true));
+        for (u_scope, u_children) in other_scopes {
+            let name = u_scope.display_name(&s, &u_children, Some(ui));
+            let label_str = format!(
+                "{}{} · {} live",
+                if current_scope.as_ref() == Some(&u_scope) {
+                    "✓ "
+                } else {
+                    "   "
+                },
+                name,
+                u_children.len()
+            );
+            let scope_sel = u_scope.clone();
+            items.push(MenuItem::new(label_str).on_select(move || activate_scope(ui, &scope_sel)));
+        }
+    }
+
+    if !idle_managed.is_empty() {
+        items.push(MenuItem::separator());
+        items.push(MenuItem::new("Idle Managed Worktrees").disabled(true));
+        for (proj_name, wt) in idle_managed {
+            let wt_diff = wt.clone();
+            let wt_promote = wt.id.clone();
+            let wt_del = wt.id.clone();
+            items.push(
+                MenuItem::new(format!("Compare ⎇ {} ({proj_name})", wt.branch))
+                    .on_select(move || super::worktrees::open_diff(ui, &wt_diff)),
+            );
+            items.push(
+                MenuItem::new(format!("Promote ⎇ {} to Board Card…", wt.branch))
+                    .on_select(move || ui.worktree_promote.set(Some(wt_promote.clone()))),
+            );
+            items.push(
+                MenuItem::new(format!("Delete ⎇ {}…", wt.branch))
+                    .on_select(move || super::worktrees::request_remove(ui, wt_del.clone(), false)),
+            );
+        }
+    }
+
+    if !s.projects.is_empty() {
+        items.push(MenuItem::separator());
+        let active_pid = {
+            let pid = ui.project.get_untracked();
+            if !pid.is_empty() {
+                pid
+            } else {
+                s.projects[0].id.clone()
+            }
+        };
+        items.push(
+            MenuItem::new("New Managed Branch Worktree…")
+                .on_select(move || ui.worktree_modal.set(Some(active_pid.clone()))),
+        );
+    } else {
+        items.push(
+            MenuItem::new("Create New Project…").on_select(move || ui.navigate("new-project")),
+        );
+    }
+
+    if let Some(pos) = at {
+        popup_menu_at(items, pos).await;
+    } else {
+        popup_menu(items).await;
+    }
+    ui.terminal_focus.update(|v| *v += 1);
+}
+
 pub fn header(ui: Ui) -> impl IntoElement {
     let inventory = computed(move || {
+        let s = ui.snapshot.get();
         ui.closing_terminals.with(|closing| {
             ui.terminal_entries.with(|rows| {
                 rows.iter()
-                    .filter(|e| !closing.contains(&e.saved.id))
-                    .map(|e| (e.saved.id.clone(), e.title(), e.hint()))
+                    .filter(|e| e.listed() && !closing.contains(&e.saved.id))
+                    .map(|e| {
+                        (
+                            e.saved.id.clone(),
+                            super::worktrees::entry_scope(&s, e),
+                            e.title(),
+                            e.hint(),
+                        )
+                    })
                     .collect::<Vec<_>>()
             })
         })
     });
     let context = computed(move || {
-        current(ui).map(|e| {
-            (
-                e.saved.id.clone(),
-                e.card.clone(),
-                e.project_id.clone(),
-                e.location.clone(),
-            )
-        })
+        (
+            ui.project.get(),
+            ui.snapshot.with(|s| {
+                (
+                    s.projects.len(),
+                    s.worktrees.len(),
+                    s.projects
+                        .iter()
+                        .map(|p| (p.id.clone(), p.name.clone(), p.target_branch.clone()))
+                        .collect::<Vec<_>>(),
+                )
+            }),
+            current(ui).map(|e| {
+                (
+                    e.saved.id.clone(),
+                    e.card.clone(),
+                    e.project_id.clone(),
+                    e.location.clone(),
+                )
+            }),
+        )
     });
     let width = signal(1000f32);
     let capacity = computed(move || {
@@ -234,21 +458,16 @@ pub fn header(ui: Ui) -> impl IntoElement {
     let active = computed(move || ui.terminal_selection.get());
     effect(move || {
         let selected = active.get();
-        let tabs = ui.terminal_tabs.get();
+        let tabs = super::scope_tabs(ui);
         let cap = capacity.get();
         let _ = inventory.get();
-        let offset = ui.terminal_entries.with_untracked(|entries| {
-            let mut offset = 0.;
-            for id in tabs {
-                if id == selected {
-                    break;
-                }
-                if let Some(e) = entries.iter().find(|e| e.saved.id == id) {
-                    offset += super::labels::tab_width(e).min(cap);
-                }
+        let mut offset = 0.;
+        for e in &tabs {
+            if e.saved.id == selected {
+                break;
             }
-            offset
-        });
+            offset += super::labels::tab_width(e).min(cap);
+        }
         strip.scroll_to(
             Point {
                 x: px(offset),
@@ -286,43 +505,34 @@ pub fn header(ui: Ui) -> impl IntoElement {
                 .scrollbar(false)
                 .element_ref(&strip)
                 .w(move || {
-                    px(ui.terminal_entries.with(|rows| {
-                        let cap = capacity.get();
-                        let total = ui
-                            .terminal_tabs
-                            .get()
-                            .iter()
-                            .filter_map(|id| rows.iter().find(|e| &e.saved.id == id))
-                            .map(|e| super::labels::tab_width(e).min(cap))
-                            .sum::<f32>();
-                        total.min(cap).max(0.)
-                    }))
+                    let cap = capacity.get();
+                    let total = super::scope_tabs(ui)
+                        .iter()
+                        .map(|e| super::labels::tab_width(e).min(cap))
+                        .sum::<f32>();
+                    px(total.min(cap).max(0.))
                 })
                 .min_w(px(0.))
                 .h_full()
                 .child(dynamic(move || {
                     let _ = inventory.get();
-                    let tabs = ui.terminal_tabs.get();
-                    ui.terminal_entries.with_untracked(|rows| {
-                        let mut strip = view().h_full().flex_row().items_center().window_drag(true);
-                        for id in tabs {
-                            if let Some(e) = rows.iter().find(|e| e.saved.id == id) {
-                                strip = strip.child(tab(ui, e.clone(), capacity));
-                            }
-                        }
-                        strip
-                    })
+                    let tabs = untracked(|| super::scope_tabs(ui));
+                    let mut strip = view().h_full().flex_row().items_center().window_drag(true);
+                    for e in tabs {
+                        strip = strip.child(tab(ui, e, capacity));
+                    }
+                    strip
                 })),
         )
         .child(chrome_button_disabled(
             Icon::Plus,
-            "New terminal · ⌘T",
+            "New terminal in current worktree · ⌘T",
             move || ui.pending.get(),
             move |_| new_tab(ui),
         ))
         .child(
             action("▾", Variant::Quiet, move |_| machine_menu(ui))
-                .accessibility_label(|| Some("Choose terminal machine".into())),
+                .accessibility_label(|| Some("Choose terminal worktree or machine".into())),
         )
         .child(chrome_button_disabled(
             Icon::Agent,
@@ -333,154 +543,241 @@ pub fn header(ui: Ui) -> impl IntoElement {
         .child(view().flex_1().min_w(px(24.)).h_full().window_drag(true))
         .child(dynamic(move || {
             let _ = context.get();
-            let Some(e) = untracked(|| current(ui)) else {
-                return view();
-            };
-            let id = e.saved.id.clone();
-            let anchor = element_ref();
-            let mut context = view()
+            let s = ui.snapshot.get_untracked();
+            let cur = untracked(|| current(ui));
+            let scope_tabs_now = untracked(|| super::scope_tabs(ui));
+            let switcher_anchor = element_ref();
+            let more_anchor = element_ref();
+
+            let mut context_bar = view()
                 .window_drag(false)
                 .flex_row()
                 .items_center()
                 .justify_end()
-                .gap_2()
+                .gap_1p5()
                 .min_w(px(0.))
                 .w(move || px((width.get() * 0.35).min(340.)))
                 .flex_shrink_0();
-            if let Some(card) = e.card.clone() {
-                context = context.child(
-                    view()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .overflow_hidden()
-                        .tooltip(
-                            hint_tooltip(format!(
-                                "#{} {}\n{}",
-                                card.number,
-                                card.title,
-                                if e.inferred_card {
-                                    "Card inferred from directory or branch"
+
+            if let Some(ref e) = cur {
+                if let Some(card) = e.card.clone() {
+                    context_bar = context_bar.child(
+                        view()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .tooltip(
+                                hint_tooltip(format!(
+                                    "#{} {}\n{}",
+                                    card.number,
+                                    card.title,
+                                    if e.inferred_card {
+                                        "Card inferred from directory or branch"
+                                    } else {
+                                        "Open task Card"
+                                    }
+                                ))
+                                .placement(Placement::Bottom),
+                            )
+                            .child(
+                                canban_ui_kit::press_target()
+                                    .w_full()
+                                    .min_w(px(0.))
+                                    .h(px(30.))
+                                    .justify_center()
+                                    .px_2()
+                                    .rounded(px(5.))
+                                    .bg(CLEAR)
+                                    .hover(|st| st.bg(SURFACE))
+                                    .focus(|st| st.border_1().border_color(ACCENT))
+                                    .child(
+                                        label(format!("#{} {}", card.number, card.title))
+                                            .text_color(if e.inferred_card { MUTED } else { TEXT })
+                                            .w_full()
+                                            .truncate(),
+                                    )
+                                    .accessibility_label(move || Some("Open current Card".into()))
+                                    .on_press(move |_: &()| ui.terminal_card(card.id.clone())),
+                            ),
+                    );
+                } else if let Some(project) = e.project_id.clone() {
+                    context_bar = context_bar.child(
+                        canban_ui_kit::press_target()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .h(px(30.))
+                            .px_2()
+                            .rounded(px(5.))
+                            .bg(CLEAR)
+                            .hover(|st| st.bg(SURFACE))
+                            .focus(|st| st.border_1().border_color(ACCENT))
+                            .child(label(e.project_name.clone()).w_full().truncate())
+                            .accessibility_label(move || Some("Open current Project".into()))
+                            .on_press(move |_: &()| ui.select_project(project.clone())),
+                    );
+                } else if let Some(cwd) = e.cwd() {
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let title = if !home.is_empty() {
+                        std::path::Path::new(&cwd)
+                            .strip_prefix(&home)
+                            .ok()
+                            .map(|p| {
+                                if p.as_os_str().is_empty() {
+                                    "~".into()
                                 } else {
-                                    "Open task Card"
+                                    format!("~/{}", p.display())
                                 }
-                            ))
-                            .placement(Placement::Bottom),
-                        )
-                        .child(
-                            canban_ui_kit::press_target()
-                                .w_full()
-                                .min_w(px(0.))
-                                .h(px(30.))
-                                .justify_center()
-                                .px_2()
-                                .rounded(px(5.))
-                                .bg(CLEAR)
-                                .hover(|s| s.bg(INSET))
-                                .focus(|s| s.border_1().border_color(ACCENT))
-                                .child(
-                                    label(format!("#{} {}", card.number, card.title))
-                                        .text_color(if e.inferred_card { MUTED } else { TEXT })
-                                        .w_full()
-                                        .truncate(),
-                                )
-                                .accessibility_label(move || Some("Open current Card".into()))
-                                .on_press(move |_: &()| ui.terminal_card(card.id.clone())),
-                        ),
-                );
-            } else if let Some(project) = e.project_id.clone() {
-                context = context.child(
-                    canban_ui_kit::press_target()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .h(px(30.))
-                        .px_2()
-                        .rounded(px(5.))
-                        .bg(CLEAR)
-                        .hover(|s| s.bg(INSET))
-                        .focus(|s| s.border_1().border_color(ACCENT))
-                        .child(label(e.project_name.clone()).w_full().truncate())
-                        .accessibility_label(move || Some("Open current Project".into()))
-                        .on_press(move |_: &()| ui.select_project(project.clone())),
-                );
-            } else if let Some(cwd) = e.cwd() {
-                let home = std::env::var("HOME").unwrap_or_default();
-                let title = if !home.is_empty() {
-                    std::path::Path::new(&cwd)
-                        .strip_prefix(&home)
-                        .ok()
-                        .map(|p| {
-                            if p.as_os_str().is_empty() {
-                                "~".into()
-                            } else {
-                                format!("~/{}", p.display())
-                            }
-                        })
-                        .unwrap_or(cwd)
+                            })
+                            .unwrap_or(cwd)
+                    } else {
+                        cwd
+                    };
+                    context_bar = context_bar.child(
+                        view()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .overflow_hidden()
+                            .tooltip(
+                                hint_tooltip(e.cwd().unwrap_or_default())
+                                    .placement(Placement::Bottom),
+                            )
+                            .child(
+                                muted(compact(&title, if ui.narrow.get() { 14 } else { 32 }))
+                                    .w_full()
+                                    .truncate(),
+                            ),
+                    );
+                }
+            }
+
+            // Worktree Switcher pill (always available when projects/worktrees or a live terminal exist)
+            let has_switcher_targets =
+                cur.is_some() || !s.projects.is_empty() || !s.worktrees.is_empty();
+            if has_switcher_targets {
+                let (pill_icon, pill_branch, pill_git, pill_tooltip) = if let Some(ref e) = cur {
+                    let scope = super::worktrees::entry_scope(&s, e);
+                    let git = super::worktrees::scope_git_summary(&s, &scope, &scope_tabs_now);
+                    let name = scope.display_name(&s, &scope_tabs_now, Some(ui));
+                    let mut tip = format!(
+                        "Switch Project / Worktree\nCurrent: {name}\nDirectory: {}",
+                        e.cwd().unwrap_or_else(|| "Unavailable".into())
+                    );
+                    let ind = git.indicators();
+                    if !ind.is_empty() {
+                        tip.push_str(&format!("\nGit: {}", ind.join(" · ")));
+                    }
+                    let ic = match scope {
+                        super::worktrees::WorktreeScope::ProjectRoot(_) => Icon::Projects,
+                        super::worktrees::WorktreeScope::Unassigned(_) => Icon::Terminal,
+                        _ => Icon::Branch,
+                    };
+                    (ic, name, git, tip)
                 } else {
-                    cwd
+                    let pid = ui.project.get_untracked();
+                    let proj = s
+                        .projects
+                        .iter()
+                        .find(|p| p.id == pid)
+                        .or_else(|| s.projects.first());
+                    let name = proj
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "Worktrees".into());
+                    (
+                        Icon::Branch,
+                        name.clone(),
+                        super::worktrees::ScopeGitSummary::default(),
+                        format!("Switch Project / Worktree ({name})"),
+                    )
                 };
-                context = context.child(
-                    view()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .overflow_hidden()
-                        .tooltip(
-                            hint_tooltip(e.cwd().unwrap_or_default()).placement(Placement::Bottom),
-                        )
-                        .child(
-                            muted(compact(&title, if ui.narrow.get() { 14 } else { 32 }))
-                                .w_full()
-                                .truncate(),
-                        ),
+
+                let limit = if ui.narrow.get() { 10 } else { 18 };
+                let short = compact(
+                    &pill_branch,
+                    if pill_branch.is_ascii() {
+                        limit
+                    } else {
+                        limit / 2
+                    },
                 );
-            }
-            let branch = e.location.as_ref().and_then(|c| c.branch.clone());
-            if let Some(branch) = branch.filter(|s| !s.is_empty()) {
-                let detail = id.clone();
-                let full = format!(
-                    "Branch: {branch}\nDirectory: {}",
-                    e.cwd().unwrap_or_else(|| "Unavailable".into())
-                );
-                let limit = if ui.narrow.get() { 8 } else { 16 };
-                let short = compact(&branch, if branch.is_ascii() { limit } else { limit / 2 });
-                context = context.child(
+                let mut pill_row = canban_ui_kit::press_target()
+                    .h(px(30.))
+                    .max_w(move || {
+                        px((if ui.narrow.get() { 130f32 } else { 210f32 })
+                            .min((width.get() * 0.4).min(420.) - 44.)
+                            .max(56.))
+                    })
+                    .min_w(px(0.))
+                    .px_2()
+                    .rounded(px(5.))
+                    .flex_row()
+                    .gap_1()
+                    .items_center()
+                    .bg(CLEAR)
+                    .hover(|st| st.bg(SURFACE))
+                    .focus(|st| st.border_1().border_color(ACCENT))
+                    .accessibility_label({
+                        let b = pill_branch.clone();
+                        move || Some(format!("Switch worktree ({b})").into())
+                    })
+                    .child(icon(pill_icon).w(px(13.)).h(px(13.)).flex_shrink_0())
+                    .child(muted(short).min_w(px(0.)).truncate());
+
+                if pill_git.dirty {
+                    pill_row = pill_row.child(
+                        label("changed")
+                            .text_size(px(11.))
+                            .text_color(ATTENTION)
+                            .flex_shrink_0(),
+                    );
+                }
+                if pill_git.ahead > 0 || pill_git.behind > 0 {
+                    let mut ab = Vec::new();
+                    if pill_git.ahead > 0 {
+                        ab.push(format!("↑{}", pill_git.ahead));
+                    }
+                    if pill_git.behind > 0 {
+                        ab.push(format!("↓{}", pill_git.behind));
+                    }
+                    pill_row =
+                        pill_row.child(muted(ab.join(" ")).text_size(px(11.)).flex_shrink_0());
+                }
+                pill_row = pill_row
+                    .child(
+                        icon(Icon::ChevronDown)
+                            .w(px(12.))
+                            .h(px(12.))
+                            .flex_shrink_0(),
+                    )
+                    .on_press(move |_: &()| {
+                        ui.spawn(async move {
+                            let pos = switcher_anchor
+                                .measure()
+                                .await
+                                .map(|b| point(b.page.x, b.page.y + b.frame.size.height));
+                            switcher_menu(ui, pos).await;
+                        });
+                    });
+
+                context_bar = context_bar.child(
                     view()
-                        .w(move || {
-                            px((if ui.narrow.get() { 84f32 } else { 140f32 })
-                                .min((width.get() * 0.4).min(420.) - 44.)
-                                .max(36.))
-                        })
                         .flex_shrink_0()
-                        .tooltip(hint_tooltip(full).placement(Placement::Bottom))
-                        .child(
-                            canban_ui_kit::press_target()
-                                .h(px(30.))
-                                .w_full()
-                                .min_w(px(0.))
-                                .px_2()
-                                .rounded(px(5.))
-                                .flex_row()
-                                .gap_1()
-                                .items_center()
-                                .bg(CLEAR)
-                                .hover(|s| s.bg(INSET))
-                                .focus(|s| s.border_1().border_color(ACCENT))
-                                .accessibility_label({
-                                    let b = branch.clone();
-                                    move || Some(format!("Branch {b}").into())
-                                })
-                                .child(icon(Icon::Branch).w(px(14.)).h(px(14.)).flex_shrink_0())
-                                .child(muted(short).flex_1().min_w(px(0.)).truncate())
-                                .on_press(move |_: &()| anchored(ui, detail.clone(), anchor)),
-                        ),
+                        .min_w(px(0.))
+                        .element_ref(&switcher_anchor)
+                        .tooltip(hint_tooltip(pill_tooltip).placement(Placement::Bottom))
+                        .child(pill_row),
                 );
             }
-            context.child(
-                chrome_button(Icon::More, "Terminal actions", move |_| {
-                    anchored(ui, id.clone(), anchor)
-                })
-                .element_ref(&anchor),
-            )
+
+            if let Some(e) = cur {
+                let id = e.saved.id.clone();
+                context_bar = context_bar.child(
+                    chrome_button(Icon::More, "Terminal actions", move |_| {
+                        anchored(ui, id.clone(), more_anchor)
+                    })
+                    .element_ref(&more_anchor),
+                );
+            }
+            context_bar
         }))
         .child(crate::overview::trigger_pill(ui))
 }

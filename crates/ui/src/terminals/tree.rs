@@ -1,12 +1,253 @@
-//! Complete Project/Card inventory. Closing a tab never removes this entry.
+//! Unified Project -> Worktree -> Terminal hierarchy.
+//! Only worktree scopes with >= 1 live Terminal are displayed; all active rows stay expanded.
+use super::worktrees::{
+    WorktreeScope, activate_scope, create_in_scope, entry_scope, project_scopes_in_tree_order,
+    scope_git_summary,
+};
 use super::*;
 use crate::drafts::{capture_scroll, scroll_position};
-fn toggle(ui: Ui, key: String) {
-    ui.terminal_folds.update(|s| {
-        if !s.remove(&key) {
-            s.insert(key);
+
+fn git_status_chips(git: &super::worktrees::ScopeGitSummary) -> View {
+    let mut row = view().flex_row().items_center().gap_1().flex_shrink_0();
+    if git.dirty {
+        row = row.child(label("changed").text_size(px(11.)).text_color(ATTENTION));
+    }
+    if git.ahead > 0 || git.behind > 0 {
+        let mut ab = Vec::new();
+        if git.ahead > 0 {
+            ab.push(format!("↑{}", git.ahead));
         }
+        if git.behind > 0 {
+            ab.push(format!("↓{}", git.behind));
+        }
+        row = row.child(muted(ab.join(" ")).text_size(px(11.)));
+    }
+    row
+}
+
+fn scope_header(
+    ui: Ui,
+    s: &canban_types::Snapshot,
+    scope: WorktreeScope,
+    children: &[Entry],
+) -> impl IntoElement {
+    let git = scope_git_summary(s, &scope, children);
+    let display = scope.display_name(s, children, Some(ui));
+    let scope_for_active = scope.clone();
+    let is_active_scope = computed(move || {
+        let sel = ui.terminal_selection.get();
+        if sel.is_empty() || ui.closing_terminals.with(|c| c.contains(&sel)) {
+            return false;
+        }
+        ui.snapshot.with(|snap| {
+            ui.terminal_entries.with(|rows| {
+                rows.iter()
+                    .find(|e| e.saved.id == sel)
+                    .is_some_and(|e| entry_scope(snap, e) == scope_for_active)
+            })
+        })
     });
+
+    let (lead_icon, card_badge, tooltip_text) = match &scope {
+        WorktreeScope::ProjectRoot(pid) => {
+            let dir = s
+                .projects
+                .iter()
+                .find(|p| &p.id == pid)
+                .map(|p| p.directory.clone())
+                .unwrap_or_default();
+            let mut tip = format!("Project root · {display}");
+            let ind = git.indicators();
+            if !ind.is_empty() {
+                tip.push_str(&format!(" ({})", ind.join(" · ")));
+            }
+            if !dir.is_empty() {
+                tip.push_str(&format!("\n{dir}"));
+            }
+            (Icon::Projects, None, tip)
+        }
+        WorktreeScope::CardWorktree(cid) => {
+            let card = s.cards.iter().find(|c| &c.id == cid);
+            let badge = card.map(|c| format!("#{}", c.number));
+            let mut tip = match card {
+                Some(c) => format!("#{} {}\nBranch: {display}", c.number, c.title),
+                None => format!("Card worktree · {display}"),
+            };
+            let ind = git.indicators();
+            if !ind.is_empty() {
+                tip.push_str(&format!(" ({})", ind.join(" · ")));
+            }
+            if let Some(wt) = card.and_then(|c| c.worktree.as_deref()) {
+                tip.push_str(&format!("\n{wt}"));
+            }
+            (Icon::Branch, badge, tip)
+        }
+        WorktreeScope::ManagedWorktree(wid) => {
+            let wt = s.worktrees.iter().find(|w| &w.id == wid);
+            let mut tip = match wt {
+                Some(w) => format!(
+                    "Managed worktree `{}`\nBase: {}",
+                    w.branch,
+                    if w.base_branch.is_empty() {
+                        "default"
+                    } else {
+                        w.base_branch.as_str()
+                    }
+                ),
+                None => format!("Managed worktree `{display}`"),
+            };
+            let ind = git.indicators();
+            if !ind.is_empty() {
+                tip.push_str(&format!(" ({})", ind.join(" · ")));
+            }
+            if let Some(w) = wt {
+                tip.push_str(&format!("\n{}", w.path));
+            }
+            (Icon::Branch, None, tip)
+        }
+        WorktreeScope::Unassigned(machine) => {
+            let tip = format!("External directory ({machine})");
+            (Icon::Terminal, None, tip)
+        }
+    };
+
+    let managed_wt = match &scope {
+        WorktreeScope::ManagedWorktree(wid) => s.worktrees.iter().find(|w| &w.id == wid).cloned(),
+        _ => None,
+    };
+    let scope_card = match &scope {
+        WorktreeScope::CardWorktree(cid) => s.cards.iter().find(|c| &c.id == cid).cloned(),
+        _ => None,
+    };
+
+    dynamic(move || {
+        let active = is_active_scope.get();
+        let scope_press = scope.clone();
+        let scope_plus = scope.clone();
+        let display_label = display.clone();
+        let badge = card_badge.clone();
+        let tip = tooltip_text.clone();
+        let git_now = git.clone();
+        let wt_ctx = managed_wt.clone();
+        let wt_more = managed_wt.clone();
+        let card_ctx = scope_card.clone();
+        let card_more = scope_card.clone();
+        let more_anchor = element_ref();
+
+        let mut btn_row = canban_ui_kit::press_target()
+            .w_full()
+            .min_w(px(0.))
+            .min_h(px(30.))
+            .px_2()
+            .rounded(px(5.))
+            .bg(if active { INSET } else { CLEAR })
+            .hover(|st| st.bg(INSET))
+            .focus(|st| st.border_1().border_color(ACCENT))
+            .flex_row()
+            .items_center()
+            .gap_1p5()
+            .child(
+                icon_tinted(lead_icon, if active { ACCENT } else { MUTED })
+                    .w(px(13.))
+                    .h(px(13.))
+                    .flex_shrink_0(),
+            )
+            .child(
+                label(display_label.clone())
+                    .flex_1()
+                    .min_w(px(0.))
+                    .text_size(px(12.5))
+                    .font_weight(if active {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    })
+                    .truncate(),
+            );
+
+        if let Some(b) = badge {
+            btn_row = btn_row.child(muted(b).text_size(px(11.)).flex_shrink_0());
+        }
+        if git_now.dirty || git_now.ahead > 0 || git_now.behind > 0 {
+            btn_row = btn_row.child(git_status_chips(&git_now));
+        }
+        btn_row = btn_row
+            .accessibility_label({
+                let lbl = display_label.clone();
+                move || Some(format!("Worktree {lbl}").into())
+            })
+            .on_press(move |_: &()| activate_scope(ui, &scope_press));
+
+        let mut outer = view()
+            .ml_2()
+            .flex_row()
+            .items_center()
+            .min_w(px(0.))
+            .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
+                if let Some(wt) = wt_ctx.clone() {
+                    ui.spawn(super::worktrees::menu(ui, wt, Some(ev.page_position)));
+                } else if let Some(card) = card_ctx.clone() {
+                    ui.spawn(super::worktrees::card_scope_menu(
+                        ui,
+                        card,
+                        Some(ev.page_position),
+                    ));
+                }
+            })
+            .child(
+                view()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .tooltip(hint_tooltip(tip).placement(Placement::Right))
+                    .child(btn_row),
+            )
+            .child(chrome_button_disabled(
+                Icon::Plus,
+                format!("New terminal in {display_label}"),
+                move || ui.pending.get(),
+                move |_| create_in_scope(ui, &scope_plus),
+            ));
+
+        if let Some(wt) = wt_more {
+            outer = outer.child(
+                chrome_button(
+                    Icon::More,
+                    format!("Worktree actions for {}", wt.branch),
+                    move |_| {
+                        let item = wt.clone();
+                        ui.spawn(async move {
+                            let pos = more_anchor
+                                .measure()
+                                .await
+                                .map(|b| point(b.page.x, b.page.y + b.frame.size.height));
+                            super::worktrees::menu(ui, item, pos).await;
+                        });
+                    },
+                )
+                .element_ref(&more_anchor),
+            );
+        } else if let Some(card) = card_more {
+            outer = outer.child(
+                chrome_button(
+                    Icon::More,
+                    format!("Card worktree actions for #{}", card.number),
+                    move |_| {
+                        let item = card.clone();
+                        ui.spawn(async move {
+                            let pos = more_anchor
+                                .measure()
+                                .await
+                                .map(|b| point(b.page.x, b.page.y + b.frame.size.height));
+                            super::worktrees::card_scope_menu(ui, item, pos).await;
+                        });
+                    },
+                )
+                .element_ref(&more_anchor),
+            );
+        }
+
+        outer
+    })
 }
 fn row(ui: Ui, e: Entry) -> impl IntoElement {
     let id = e.saved.id.clone();
@@ -128,9 +369,14 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                 rows.iter()
                     .filter(|e| e.listed() && !closing.contains(&e.saved.id))
                     .map(|e| {
+                        let loc = e.location.as_ref();
                         (
                             e.saved.id.clone(),
-                            e.project_id.clone(),
+                            entry_scope(&s, e),
+                            loc.and_then(|l| l.branch.clone()),
+                            loc.is_some_and(|l| l.dirty),
+                            loc.map_or(0, |l| l.ahead),
+                            loc.map_or(0, |l| l.behind),
                             super::labels::sidebar_hint(
                                 e,
                                 &if e.machine() == "local" {
@@ -150,11 +396,19 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         (
             s.projects
                 .iter()
-                .map(|p| (p.id.clone(), p.name.clone()))
+                .map(|p| (p.id.clone(), p.name.clone(), p.target_branch.clone()))
                 .collect::<Vec<_>>(),
             s.cards
                 .iter()
-                .map(|c| (c.id.clone(), c.number, c.title.clone(), c.archived_at))
+                .map(|c| {
+                    (
+                        c.id.clone(),
+                        c.number,
+                        c.title.clone(),
+                        c.branch.clone(),
+                        c.archived_at,
+                    )
+                })
                 .collect::<Vec<_>>(),
             s.worktrees
                 .iter()
@@ -203,34 +457,29 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                 .collect()
                         })
                     });
-                    let folds = ui.terminal_folds.get();
                     let mut body = view().gap_2();
                     let mut groups: Vec<_> = snapshot
                         .projects
                         .iter()
                         .map(|p| (Some(p.id.clone()), p.name.clone()))
                         .collect();
-                    if rows.iter().any(|e| e.project_id.is_none()) {
+                    if !project_scopes_in_tree_order(&snapshot, &rows, None).is_empty() {
                         groups.push((None, "Other".into()));
                     }
                     for (project, name) in groups {
-                        let key = format!("project:{}", project.clone().unwrap_or_default());
-                        let collapsed = folds.contains(&key);
+                        let active_scopes =
+                            project_scopes_in_tree_order(&snapshot, &rows, project.as_deref());
                         let mut group = view().gap_1().pt_2();
                         let mut heading = view().flex_row().items_center().min_w(px(0.)).child(
-                            canban_ui_kit::press_target()
+                            view()
                                 .flex_1()
                                 .min_w(px(0.))
                                 .min_h(px(32.))
                                 .px_2()
-                                .items_start()
-                                .bg(CLEAR)
-                                .hover(|s| s.bg(INSET))
                                 .flex_row()
                                 .items_center()
                                 .gap_2()
-                                .child(muted(if collapsed { "▸" } else { "▾" }))
-                                .child(icon(Icon::Folder).w(px(14.)).h(px(14.)))
+                                .child(icon(Icon::Folder).w(px(14.)).h(px(14.)).flex_shrink_0())
                                 .child(
                                     label(name.clone())
                                         .flex_1()
@@ -238,8 +487,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                         .text_color(MUTED)
                                         .font_weight(FontWeight::SEMIBOLD)
                                         .truncate(),
-                                )
-                                .on_press(move |_: &()| toggle(ui, key.clone())),
+                                ),
                         );
                         if let Some(pid) = project.clone() {
                             let pid_wt = pid.clone();
@@ -258,189 +506,29 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                 ));
                         }
                         group = group.child(heading);
-                        if !collapsed {
-                            let project_worktrees: Vec<_> = snapshot
-                                .worktrees
-                                .iter()
-                                .filter(|w| Some(w.project_id.as_str()) == project.as_deref())
-                                .cloned()
-                                .collect();
-                            let project_rows: Vec<_> = rows
-                                .iter()
-                                .filter(|e| e.project_id == project)
-                                .cloned()
-                                .collect();
-
-                            for wt in &project_worktrees {
-                                let wt_children: Vec<_> = project_rows
-                                    .iter()
-                                    .filter(|e| super::worktrees::entry_in_worktree(e, wt))
-                                    .cloned()
-                                    .collect();
-                                let wt_key = format!("worktree:{}", wt.id);
-                                let wt_collapsed = folds.contains(&wt_key);
-                                let wt_menu_item = wt.clone();
-                                let wt_more_item = wt.clone();
-                                let wt_open_item = wt.clone();
-                                let wt_anchor = element_ref();
-                                let has_live = !wt_children.is_empty();
-
-                                let wt_row = view()
-                                    .ml_2()
-                                    .flex_row()
-                                    .items_center()
-                                    .min_w(px(0.))
-                                    .on_context_menu(move |ev: &nsh_core::ContextMenuEvent| {
-                                        ui.spawn(super::worktrees::menu(
-                                            ui,
-                                            wt_menu_item.clone(),
-                                            Some(ev.page_position),
-                                        ));
-                                    })
-                                    .child(
-                                        view()
-                                            .flex_1()
-                                            .min_w(px(0.))
-                                            .tooltip(
-                                                hint_tooltip(format!(
-                                                    "Managed worktree `{}`\nBase: {}\n{}",
-                                                    wt.branch,
-                                                    if wt.base_branch.is_empty() {
-                                                        "default"
-                                                    } else {
-                                                        wt.base_branch.as_str()
-                                                    },
-                                                    wt.path
-                                                ))
-                                                .placement(Placement::Right),
-                                            )
-                                            .child(
-                                                canban_ui_kit::press_target()
-                                                    .w_full()
-                                                    .min_w(px(0.))
-                                                    .min_h(px(32.))
-                                                    .px_2()
-                                                    .rounded(px(5.))
-                                                    .bg(CLEAR)
-                                                    .hover(|s| s.bg(INSET))
-                                                    .flex_row()
-                                                    .items_center()
-                                                    .gap_1p5()
-                                                    .child(muted(if wt_collapsed {
-                                                        "▸"
-                                                    } else {
-                                                        "▾"
-                                                    }))
-                                                    .child(
-                                                        icon_tinted(
-                                                            Icon::Branch,
-                                                            if has_live { SUCCESS } else { ACCENT },
-                                                        )
-                                                        .w(px(13.))
-                                                        .h(px(13.)),
-                                                    )
-                                                    .child(
-                                                        label(wt.branch.clone())
-                                                            .flex_1()
-                                                            .min_w(px(0.))
-                                                            .text_size(px(12.5))
-                                                            .font_weight(FontWeight::MEDIUM)
-                                                            .truncate(),
-                                                    )
-                                                    .child(
-                                                        muted(if has_live {
-                                                            format!("{} live", wt_children.len())
-                                                        } else {
-                                                            "ready".into()
-                                                        })
-                                                        .text_size(px(11.)),
-                                                    )
-                                                    .on_press(move |_: &()| {
-                                                        if has_live {
-                                                            toggle(ui, wt_key.clone());
-                                                        } else {
-                                                            super::worktrees::open_shell(
-                                                                ui,
-                                                                &wt_open_item,
-                                                            );
-                                                        }
-                                                    }),
-                                            ),
-                                    )
-                                    .child(when(move || !has_live, {
-                                        let wt_shell_btn = wt.clone();
-                                        move || {
-                                            let wt_for_press = wt_shell_btn.clone();
-                                            chrome_button_disabled(
-                                                Icon::Terminal,
-                                                format!(
-                                                    "Open Shell in worktree {}",
-                                                    wt_shell_btn.branch
-                                                ),
-                                                move || ui.pending.get(),
-                                                move |_| {
-                                                    super::worktrees::open_shell(ui, &wt_for_press)
-                                                },
-                                            )
-                                        }
-                                    }))
-                                    .child(
-                                        chrome_button(
-                                            Icon::More,
-                                            format!("Worktree actions for {}", wt.branch),
-                                            move |_| {
-                                                let item = wt_more_item.clone();
-                                                ui.spawn(async move {
-                                                    let pos = wt_anchor.measure().await.map(|b| {
-                                                        point(
-                                                            b.page.x,
-                                                            b.page.y + b.frame.size.height,
-                                                        )
-                                                    });
-                                                    super::worktrees::menu(ui, item, pos).await;
-                                                });
-                                            },
-                                        )
-                                        .element_ref(&wt_anchor),
-                                    );
-
-                                let mut wt_block = view().gap_0p5().child(wt_row);
-                                if !wt_collapsed {
-                                    for child in wt_children {
-                                        wt_block = wt_block.child(
-                                            view()
-                                                .ml_5()
-                                                .pl_2()
-                                                .border_l_1()
-                                                .border_color(BORDER)
-                                                .child(row(ui, child)),
-                                        );
-                                    }
-                                }
-                                group = group.child(wt_block);
-                            }
-
-                            for e in project_rows.into_iter().filter(|e| {
-                                !project_worktrees
-                                    .iter()
-                                    .any(|wt| super::worktrees::entry_in_worktree(e, wt))
-                            }) {
+                        for (scope, children) in active_scopes {
+                            let mut scope_block = view()
+                                .gap_0p5()
+                                .child(scope_header(ui, &snapshot, scope, &children));
+                            for child in children {
                                 if snapshot
                                     .configuration_sessions
                                     .iter()
-                                    .any(|c| c.id == e.saved.id)
+                                    .any(|c| c.id == child.saved.id)
                                 {
-                                    group = group.child(muted("Configuration").ml_3());
+                                    scope_block =
+                                        scope_block.child(muted("Configuration").ml_5().pl_2());
                                 }
-                                group = group.child(
+                                scope_block = scope_block.child(
                                     view()
-                                        .ml_3()
+                                        .ml_5()
                                         .pl_2()
                                         .border_l_1()
                                         .border_color(BORDER)
-                                        .child(row(ui, e)),
+                                        .child(row(ui, child)),
                                 );
                             }
+                            group = group.child(scope_block);
                         }
                         body = body.child(group);
                     }

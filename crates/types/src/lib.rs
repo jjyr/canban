@@ -1121,7 +1121,7 @@ pub struct TerminalRuntime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_turn: Option<u64>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct TerminalContext {
     #[serde(default = "local_machine")]
     pub machine: String,
@@ -1131,7 +1131,15 @@ pub struct TerminalContext {
     pub cwd: Option<String>,
     pub project_id: Option<String>,
     pub card_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_id: Option<String>,
     pub branch: Option<String>,
+    #[serde(default)]
+    pub dirty: bool,
+    #[serde(default)]
+    pub ahead: u32,
+    #[serde(default)]
+    pub behind: u32,
 }
 #[derive(Clone, Debug)]
 pub enum AppEvent {

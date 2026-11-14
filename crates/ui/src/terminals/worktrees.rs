@@ -1,10 +1,126 @@
-//! Standalone Canban-managed Git branch worktree creation, tree actions,
-//! Card promotion, and guarded deletion.
+//! Unified Worktree scopes, standalone Canban-managed Git branch worktrees,
+//! Git status summaries, Card promotion, and guarded deletion.
 use super::*;
-use canban_types::ManagedWorktree;
+use canban_types::{ManagedWorktree, Snapshot};
 use nsh_core::element::desktop::{MenuItem, popup_menu, popup_menu_at};
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WorktreeScope {
+    ProjectRoot(String),
+    CardWorktree(String),
+    ManagedWorktree(String),
+    Unassigned(String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScopeGitSummary {
+    pub branch: Option<String>,
+    pub dirty: bool,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+impl ScopeGitSummary {
+    pub fn indicators(&self) -> Vec<String> {
+        format_git_indicators(self.dirty, self.ahead, self.behind)
+    }
+}
+
+pub fn format_git_indicators(dirty: bool, ahead: u32, behind: u32) -> Vec<String> {
+    let mut parts = Vec::new();
+    if dirty {
+        parts.push("changed".into());
+    }
+    if ahead > 0 {
+        parts.push(format!("↑{ahead}"));
+    }
+    if behind > 0 {
+        parts.push(format!("↓{behind}"));
+    }
+    parts
+}
+
+impl WorktreeScope {
+    pub fn recent_key(&self) -> String {
+        match self {
+            Self::ProjectRoot(pid) => format!("scope:project:{pid}"),
+            Self::CardWorktree(cid) => format!("scope:card:{cid}"),
+            Self::ManagedWorktree(wid) => format!("scope:worktree:{wid}"),
+            Self::Unassigned(machine) => format!("scope:unassigned:{machine}"),
+        }
+    }
+
+    pub fn project_id(&self, s: &Snapshot) -> Option<String> {
+        match self {
+            Self::ProjectRoot(pid) => Some(pid.clone()),
+            Self::CardWorktree(cid) => s
+                .cards
+                .iter()
+                .find(|c| &c.id == cid)
+                .map(|c| c.project_id.clone()),
+            Self::ManagedWorktree(wid) => s
+                .worktrees
+                .iter()
+                .find(|w| &w.id == wid)
+                .map(|w| w.project_id.clone()),
+            Self::Unassigned(_) => None,
+        }
+    }
+
+    pub fn display_name(&self, s: &Snapshot, children: &[Entry], ui: Option<Ui>) -> String {
+        let git = scope_git_summary(s, self, children);
+        match self {
+            Self::ProjectRoot(pid) => git
+                .branch
+                .or_else(|| {
+                    s.projects
+                        .iter()
+                        .find(|p| &p.id == pid)
+                        .and_then(|p| p.target_branch.clone())
+                        .filter(|b| !b.is_empty())
+                })
+                .unwrap_or_else(|| "main".into()),
+            Self::CardWorktree(cid) => {
+                let card = s.cards.iter().find(|c| &c.id == cid);
+                git.branch
+                    .or_else(|| {
+                        card.and_then(|c| c.branch.clone())
+                            .filter(|b| !b.is_empty())
+                    })
+                    .unwrap_or_else(|| {
+                        card.map(|c| format!("#{} {}", c.number, c.title))
+                            .unwrap_or_else(|| "Card worktree".into())
+                    })
+            }
+            Self::ManagedWorktree(wid) => git
+                .branch
+                .or_else(|| {
+                    s.worktrees
+                        .iter()
+                        .find(|w| &w.id == wid)
+                        .map(|w| w.branch.clone())
+                })
+                .unwrap_or_else(|| "worktree".into()),
+            Self::Unassigned(machine) => {
+                if machine == "local" {
+                    "Local".into()
+                } else if let Some(ui) = ui {
+                    crate::machines::name(ui, machine)
+                } else {
+                    machine.clone()
+                }
+            }
+        }
+    }
+}
+
 pub fn entry_in_worktree(e: &Entry, wt: &ManagedWorktree) -> bool {
+    if e.agent.is_some() {
+        return false;
+    }
+    if let Some(wid) = e.location.as_ref().and_then(|l| l.worktree_id.as_deref()) {
+        return wid == wt.id;
+    }
     if e.card.is_some() {
         return false;
     }
@@ -15,6 +131,270 @@ pub fn entry_in_worktree(e: &Entry, wt: &ManagedWorktree) -> bool {
         return false;
     }
     cwd == wt.path || cwd.starts_with(&format!("{}/", wt.path.trim_end_matches('/')))
+}
+
+pub fn entry_scope(s: &Snapshot, e: &Entry) -> WorktreeScope {
+    if let Some(agent) = &e.agent {
+        return WorktreeScope::CardWorktree(agent.card.id.clone());
+    }
+    if let Some(cfg) = s.configuration_sessions.iter().find(|c| c.id == e.saved.id) {
+        return WorktreeScope::ProjectRoot(cfg.project_id.clone());
+    }
+    if let Some(wid) = e
+        .location
+        .as_ref()
+        .and_then(|l| l.worktree_id.as_ref())
+        .filter(|wid| s.worktrees.iter().any(|w| &w.id == *wid))
+    {
+        return WorktreeScope::ManagedWorktree(wid.clone());
+    }
+    if let Some(wt) = s.worktrees.iter().find(|wt| entry_in_worktree(e, wt)) {
+        return WorktreeScope::ManagedWorktree(wt.id.clone());
+    }
+    if let Some(card) = &e.card {
+        return WorktreeScope::CardWorktree(card.id.clone());
+    }
+    if let Some(pid) = &e.project_id {
+        return WorktreeScope::ProjectRoot(pid.clone());
+    }
+    WorktreeScope::Unassigned(e.machine().to_owned())
+}
+
+pub fn scope_git_summary(
+    s: &Snapshot,
+    scope: &WorktreeScope,
+    children: &[Entry],
+) -> ScopeGitSummary {
+    for child in children {
+        if let Some(loc) = &child.location
+            && (loc.branch.is_some() || loc.dirty || loc.ahead > 0 || loc.behind > 0)
+        {
+            return ScopeGitSummary {
+                branch: loc.branch.clone(),
+                dirty: loc.dirty,
+                ahead: loc.ahead,
+                behind: loc.behind,
+            };
+        }
+    }
+    match scope {
+        WorktreeScope::ProjectRoot(pid) => ScopeGitSummary {
+            branch: s
+                .projects
+                .iter()
+                .find(|p| &p.id == pid)
+                .and_then(|p| p.target_branch.clone())
+                .filter(|b| !b.is_empty()),
+            ..Default::default()
+        },
+        WorktreeScope::CardWorktree(cid) => ScopeGitSummary {
+            branch: s
+                .cards
+                .iter()
+                .find(|c| &c.id == cid)
+                .and_then(|c| c.branch.clone())
+                .filter(|b| !b.is_empty()),
+            ..Default::default()
+        },
+        WorktreeScope::ManagedWorktree(wid) => ScopeGitSummary {
+            branch: s
+                .worktrees
+                .iter()
+                .find(|w| &w.id == wid)
+                .map(|w| w.branch.clone()),
+            ..Default::default()
+        },
+        WorktreeScope::Unassigned(_) => ScopeGitSummary::default(),
+    }
+}
+
+/// Active worktree scopes with >= 1 live terminal for a given Project (`Some(pid)`) or `Other` (`None`),
+/// ordered deterministically: `ProjectRoot`, then `CardWorktree` (by card number), then `ManagedWorktree`.
+pub fn project_scopes_in_tree_order(
+    s: &Snapshot,
+    live_rows: &[Entry],
+    project: Option<&str>,
+) -> Vec<(WorktreeScope, Vec<Entry>)> {
+    let mut out = Vec::new();
+    match project {
+        Some(pid) => {
+            let root = WorktreeScope::ProjectRoot(pid.to_owned());
+            let root_children: Vec<Entry> = live_rows
+                .iter()
+                .filter(|e| entry_scope(s, e) == root)
+                .cloned()
+                .collect();
+            if !root_children.is_empty() {
+                out.push((root, root_children));
+            }
+
+            let mut card_ids: Vec<(u64, String)> = Vec::new();
+            for e in live_rows {
+                if let WorktreeScope::CardWorktree(cid) = entry_scope(s, e)
+                    && let Some(card) = s
+                        .cards
+                        .iter()
+                        .find(|c| c.id == cid && c.project_id == pid)
+                        .or_else(|| {
+                            e.card
+                                .as_ref()
+                                .filter(|c| c.id == cid && c.project_id == pid)
+                        })
+                    && !card_ids.iter().any(|(_, existing)| existing == &cid)
+                {
+                    card_ids.push((card.number, cid));
+                }
+            }
+            card_ids.sort();
+            for (_, cid) in card_ids {
+                let scope = WorktreeScope::CardWorktree(cid);
+                let children: Vec<Entry> = live_rows
+                    .iter()
+                    .filter(|e| entry_scope(s, e) == scope)
+                    .cloned()
+                    .collect();
+                if !children.is_empty() {
+                    out.push((scope, children));
+                }
+            }
+
+            for wt in s.worktrees.iter().filter(|w| w.project_id == pid) {
+                let scope = WorktreeScope::ManagedWorktree(wt.id.clone());
+                let children: Vec<Entry> = live_rows
+                    .iter()
+                    .filter(|e| entry_scope(s, e) == scope)
+                    .cloned()
+                    .collect();
+                if !children.is_empty() {
+                    out.push((scope, children));
+                }
+            }
+        }
+        None => {
+            let mut machines: Vec<String> = Vec::new();
+            for e in live_rows {
+                if let WorktreeScope::Unassigned(m) = entry_scope(s, e)
+                    && !machines.contains(&m)
+                {
+                    machines.push(m);
+                }
+            }
+            machines.sort_by_key(|m| (m != "local", m.clone()));
+            for m in machines {
+                let scope = WorktreeScope::Unassigned(m);
+                let children: Vec<Entry> = live_rows
+                    .iter()
+                    .filter(|e| entry_scope(s, e) == scope)
+                    .cloned()
+                    .collect();
+                if !children.is_empty() {
+                    out.push((scope, children));
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn create_in_scope(ui: Ui, scope: &WorktreeScope) {
+    match scope {
+        WorktreeScope::ProjectRoot(pid) => super::create(ui, pid.clone(), None),
+        WorktreeScope::CardWorktree(cid) => {
+            if let Some(card) = ui
+                .snapshot
+                .with_untracked(|s| s.cards.iter().find(|c| &c.id == cid).cloned())
+            {
+                super::create(ui, card.project_id, Some(card.id));
+            }
+        }
+        WorktreeScope::ManagedWorktree(wid) => {
+            if let Some(wt) = ui
+                .snapshot
+                .with_untracked(|s| s.worktrees.iter().find(|w| &w.id == wid).cloned())
+            {
+                open_shell(ui, &wt);
+            }
+        }
+        WorktreeScope::Unassigned(machine) => {
+            super::launch_custom(ui, json!({ "machine": machine }));
+        }
+    }
+}
+
+/// Switch to the remembered live terminal in `scope`, or spawn a shell in `scope` when empty.
+pub fn activate_scope(ui: Ui, scope: &WorktreeScope) {
+    let target = ui.closing_terminals.with_untracked(|closing| {
+        ui.snapshot.with_untracked(|s| {
+            ui.terminal_entries.with_untracked(|rows| {
+                let live: Vec<&Entry> = rows
+                    .iter()
+                    .filter(|e| {
+                        e.listed() && !closing.contains(&e.saved.id) && &entry_scope(s, e) == scope
+                    })
+                    .collect();
+                let key = scope.recent_key();
+                let recent = ui.terminal_recent.with(|m| m.get(&key).cloned());
+                recent
+                    .filter(|rid| live.iter().any(|e| e.saved.id.as_str() == *rid))
+                    .or_else(|| live.first().map(|e| e.saved.id.clone()))
+            })
+        })
+    });
+    if let Some(pid) = ui.snapshot.with_untracked(|s| scope.project_id(s)) {
+        ui.project.set(pid);
+    }
+    if let Some(id) = target {
+        ui.open_terminal(id);
+    } else {
+        ui.navigate("terminals");
+        create_in_scope(ui, scope);
+    }
+}
+
+pub async fn card_scope_menu(ui: Ui, card: canban_types::Card, at: Option<Point<Points>>) {
+    let cid_open = card.id.clone();
+    let cid_diff = card.id.clone();
+    let pid_shell = card.project_id.clone();
+    let cid_shell = card.id.clone();
+    let pid_agent = card.project_id.clone();
+    let cid_agent = card.id.clone();
+    let wt_copy = card.worktree.clone();
+
+    let mut items = vec![MenuItem::new(format!("#{} {}", card.number, card.title)).disabled(true)];
+    if let Some(br) = &card.branch {
+        items.push(MenuItem::new(format!("⎇ {br}")).disabled(true));
+    }
+    if let Some(wt) = &card.worktree {
+        items.push(MenuItem::new(wt.clone()).disabled(true));
+    }
+    items.push(MenuItem::separator());
+    items.push(
+        MenuItem::new("New Terminal in Card Worktree")
+            .on_select(move || super::create(ui, pid_shell.clone(), Some(cid_shell.clone()))),
+    );
+    items.push(
+        MenuItem::new("Open Agent in Card Worktree").on_select(move || {
+            super::create_in_card(ui, pid_agent.clone(), cid_agent.clone(), true)
+        }),
+    );
+    items.push(MenuItem::separator());
+    items.push(MenuItem::new("Open Card").on_select(move || ui.terminal_card(cid_open.clone())));
+    items.push(
+        MenuItem::new("Open in Diff & Review")
+            .on_select(move || crate::review::open_card(ui, &cid_diff)),
+    );
+    if let Some(path) = wt_copy {
+        items.push(
+            MenuItem::new("Copy Worktree Path").on_select(move || copy_text(ui, path.clone())),
+        );
+    }
+
+    if let Some(pos) = at {
+        popup_menu_at(items, pos).await;
+    } else {
+        popup_menu(items).await;
+    }
+    ui.terminal_focus.update(|v| *v += 1);
 }
 
 pub fn open_shell(ui: Ui, wt: &ManagedWorktree) {
@@ -62,6 +442,8 @@ pub fn open_shell(ui: Ui, wt: &ManagedWorktree) {
             branch: Some(wt.branch.clone()),
             project_id: Some(wt.project_id.clone()),
             card_id: None,
+            worktree_id: Some(wt.id.clone()),
+            ..Default::default()
         };
         ui.snapshot.update(|s| {
             s.terminals.push(saved);

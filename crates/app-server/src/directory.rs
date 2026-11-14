@@ -30,6 +30,7 @@ pub(super) struct ContextQueue {
     mappings: BTreeMap<String, (String, Arc<Snapshot>)>,
     watcher: Option<RecommendedWatcher>,
     watched: BTreeSet<PathBuf>,
+    last_status_invalidation: Option<Instant>,
 }
 impl ContextQueue {
     pub fn retain_targets(&mut self, wanted: &BTreeSet<String>) {
@@ -189,7 +190,11 @@ impl AppServer {
                 cwd: Some(cwd.into()),
                 project_id: None,
                 card_id: None,
+                worktree_id: None,
                 branch: None,
+                dirty: false,
+                ahead: 0,
+                behind: 0,
             },
         };
         let cached = q
@@ -236,24 +241,38 @@ impl AppServer {
     pub(super) fn start_context_workers(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
         let watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-            let (relevant, structural) = match result {
-                Ok(e) => (
-                    !e.kind.is_access()
-                        && e.paths.iter().any(|p| {
-                            p.file_name()
-                                .is_some_and(|n| n == "HEAD" || n == "HEAD.lock" || n == ".git")
+            let (head_or_git, structural, status_meta) = match result {
+                Ok(e) if !e.kind.is_access() => {
+                    let has_name = |pred: fn(&std::ffi::OsStr) -> bool| {
+                        e.paths.iter().any(|p| p.file_name().is_some_and(pred))
+                    };
+                    (
+                        has_name(|n| n == "HEAD" || n == "HEAD.lock" || n == ".git"),
+                        has_name(|n| n == ".git"),
+                        has_name(|n| {
+                            n == "index"
+                                || n == "FETCH_HEAD"
+                                || n == "ORIG_HEAD"
+                                || n == "packed-refs"
                         }),
-                    e.paths
-                        .iter()
-                        .any(|p| p.file_name().is_some_and(|n| n == ".git")),
-                ),
-                Err(_) => (true, true),
+                    )
+                }
+                Ok(_) => (false, false, false),
+                Err(_) => (true, true, false),
             };
-            if !relevant {
+            if !head_or_git && !status_meta {
                 return;
             }
             if let Some(server) = weak.upgrade() {
                 let mut q = server.contexts.lock().unwrap();
+                if !head_or_git {
+                    if q.last_status_invalidation
+                        .is_some_and(|t| t.elapsed() < Duration::from_secs(5))
+                    {
+                        return;
+                    }
+                    q.last_status_invalidation = Some(Instant::now());
+                }
                 if structural {
                     q.caches.remove("local");
                 } else if let Some(cache) = q.caches.get("local") {
@@ -301,7 +320,7 @@ impl AppServer {
                         continue;
                     };
                     let permit = server.check(&key.0);
-                    let result = server.ops(&key.0).directory_context_cached(
+                    let result = server.ops(&key.0).directory_context_full_cached(
                         &job.snapshot,
                         &key.1,
                         &mut cache.lock().unwrap(),
@@ -311,12 +330,16 @@ impl AppServer {
                     q.running.remove(&key.0);
                     let mut changed = false;
                     if job.generation == q.generation
-                        && let Ok((project_id, card_id, branch)) = result
+                        && let Ok(resolved) = result
                     {
                         let mut context = job.context.clone();
-                        context.project_id = project_id;
-                        context.card_id = card_id;
-                        context.branch = branch;
+                        context.project_id = resolved.project_id;
+                        context.card_id = resolved.card_id;
+                        context.worktree_id = resolved.worktree_id;
+                        context.branch = resolved.branch;
+                        context.dirty = resolved.dirty;
+                        context.ahead = resolved.ahead;
+                        context.behind = resolved.behind;
                         changed = true;
                         if q.pending.get(&key).is_some_and(|p| {
                             p.generation == job.generation && p.signature == job.signature
@@ -400,10 +423,15 @@ impl AppServer {
         let cwd = canban_herdr::cwd(value).context("Current directory unavailable")?;
         let machine = terminal.split_once('/').map(|(m, _)| m).unwrap_or("local");
         let key = (machine.into(), cwd.into());
+        let ttl = if machine == "local" {
+            Duration::from_secs(15)
+        } else {
+            Duration::from_secs(30)
+        };
         let mut q = self.contexts.lock().unwrap();
         if let Some(r) = q.results.get(&key)
             && r.signature == signature(s, machine)
-            && (machine == "local" || r.at.elapsed() < Duration::from_secs(30))
+            && r.at.elapsed() < ttl
         {
             let mut context = r.context.clone();
             context.terminal_id = id.into();
@@ -411,11 +439,9 @@ impl AppServer {
             context.terminal = terminal.into();
             return Ok(context);
         }
-        if machine != "local" {
-            q.results.remove(&key);
-            if let Some(cache) = q.caches.get(machine) {
-                cache.lock().unwrap().invalidate_branches();
-            }
+        q.results.remove(&key);
+        if let Some(cache) = q.caches.get(machine) {
+            cache.lock().unwrap().invalidate_branches();
         }
         drop(q);
         self.queue_context(s, id, core, terminal, value);

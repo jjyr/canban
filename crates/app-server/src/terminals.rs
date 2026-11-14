@@ -714,9 +714,9 @@ impl AppServer {
     ) -> TerminalContext {
         let machine = terminal.split_once('/').map(|(m, _)| m).unwrap_or("local");
         let cwd = canban_herdr::cwd(value).map(str::to_owned);
-        let (project_id, card_id, branch) = cwd
+        let resolved = cwd
             .as_ref()
-            .map(|d| self.ops(machine).directory_context(s, d))
+            .map(|d| self.ops(machine).directory_context_full(s, d))
             .unwrap_or_default();
         TerminalContext {
             machine: machine.into(),
@@ -724,9 +724,13 @@ impl AppServer {
             core_id: core.into(),
             terminal: terminal.into(),
             cwd,
-            project_id,
-            card_id,
-            branch,
+            project_id: resolved.project_id,
+            card_id: resolved.card_id,
+            worktree_id: resolved.worktree_id,
+            branch: resolved.branch,
+            dirty: resolved.dirty,
+            ahead: resolved.ahead,
+            behind: resolved.behind,
         }
     }
     pub(super) fn terminal_context(&self, p: Value) -> Result<Value> {

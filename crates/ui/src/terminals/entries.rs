@@ -359,27 +359,53 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
             .as_ref()
             .and_then(|id| s.cards.iter().find(|c| &c.id == id))
             .cloned();
+        let in_managed_worktree = location.as_ref().is_some_and(|loc| {
+            loc.worktree_id
+                .as_ref()
+                .is_some_and(|wid| s.worktrees.iter().any(|w| &w.id == wid))
+                || loc.cwd.as_deref().is_some_and(|cwd| {
+                    s.worktrees.iter().any(|w| {
+                        w.location.machine == loc.machine
+                            && (cwd == w.path
+                                || cwd.starts_with(&format!("{}/", w.path.trim_end_matches('/'))))
+                    })
+                })
+        });
         let card = if configuration.is_some() {
             None
         } else {
-            agent
-                .as_ref()
-                .map(|r| r.card.clone())
-                .or_else(|| {
-                    location
-                        .as_ref()
-                        .and_then(|c| c.card_id.as_ref())
-                        .and_then(|id| s.cards.iter().find(|c| &c.id == id))
-                        .cloned()
-                })
-                .or_else(|| {
-                    let origin = origin_card.as_ref()?;
-                    let same_project = location.as_ref().is_none_or(|loc| {
-                        (loc.project_id.is_none() && loc.cwd.is_none())
-                            || loc.project_id.as_deref() == Some(origin.project_id.as_str())
-                    });
-                    same_project.then(|| origin.clone())
-                })
+            agent.as_ref().map(|r| r.card.clone()).or_else(|| {
+                if in_managed_worktree {
+                    return None;
+                }
+                location
+                    .as_ref()
+                    .and_then(|c| c.card_id.as_ref())
+                    .and_then(|id| s.cards.iter().find(|c| &c.id == id))
+                    .cloned()
+                    .or_else(|| {
+                        let origin = origin_card.as_ref()?;
+                        let project_dir = s
+                            .projects
+                            .iter()
+                            .find(|p| p.id == origin.project_id)
+                            .map(|p| p.directory.as_str());
+                        let has_dedicated_worktree = origin
+                            .worktree
+                            .as_deref()
+                            .filter(|w| !w.is_empty() && Some(*w) != project_dir)
+                            .is_some();
+                        let keep_origin = match location.as_ref() {
+                            None => true,
+                            Some(loc) if loc.cwd.is_none() && loc.project_id.is_none() => true,
+                            Some(loc) => {
+                                !has_dedicated_worktree
+                                    && loc.project_id.as_deref() == Some(origin.project_id.as_str())
+                            }
+                        };
+                        keep_origin.then(|| origin.clone())
+                    })
+            })
         };
         let project_id = configuration.map(|c| c.project_id.clone()).or_else(|| {
             agent

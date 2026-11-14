@@ -239,6 +239,7 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
             project_id: Some("p2".into()),
             card_id: Some("c2".into()),
             branch: Some("feature".into()),
+            ..Default::default()
         });
     }
     let rows = crate::terminals::entries(&s);
@@ -553,6 +554,7 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
         project_id: Some("p2".into()),
         card_id: None,
         branch: None,
+        ..Default::default()
     });
     let live_after_move = crate::terminals::card_live_entries(&s, "c1");
     assert!(
@@ -1107,6 +1109,7 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
     let _entered = runtime.enter();
     let (_owner, ()) = nsh_core::element::create_root(|| {
         let mut s = fixture();
+        s.terminals[0].agent.as_mut().unwrap().observed = Some(json!({"state":"finished"}));
         s.terminals.extend([
             TerminalEntry {
                 id: "term-1".into(),
@@ -1219,5 +1222,400 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
                 .unwrap()
                 .ended()
         }));
+    });
+}
+
+#[test]
+fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd() {
+    use crate::terminals::worktrees::{
+        WorktreeScope, entry_scope, format_git_indicators, project_scopes_in_tree_order,
+    };
+
+    let runtime = nsh_core::element::Runtime::default();
+    let _entered = runtime.enter();
+    let (_owner, ()) = nsh_core::element::create_root(|| {
+        let mut s = fixture();
+        s.projects[0].directory = "/repo/p1".into();
+        s.projects[0].target_branch = Some("main".into());
+        s.cards[0].worktree = Some("/repo/p1-worktrees/c1".into());
+        s.cards[0].branch = Some("canban/1".into());
+        s.projects.push(
+            serde_json::from_value(json!({
+                "id": "p-empty",
+                "name": "Empty Project",
+                "directory": "/repo/empty",
+                "workflow": Workflow::default(),
+                "created_at": 2
+            }))
+            .unwrap(),
+        );
+        s.worktrees.push(ManagedWorktree {
+            id: "wt-active".into(),
+            project_id: "p1".into(),
+            branch: "feat/active".into(),
+            base_branch: "main".into(),
+            base_commit: None,
+            path: "/repo/p1-worktrees/feat-active".into(),
+            location: WorkLocation {
+                machine: "local".into(),
+                directory: "/repo/p1-worktrees/feat-active".into(),
+            },
+            created_at: 3,
+        });
+        s.worktrees.push(ManagedWorktree {
+            id: "wt-idle".into(),
+            project_id: "p1".into(),
+            branch: "chore/idle".into(),
+            base_branch: "main".into(),
+            base_commit: None,
+            path: "/repo/p1-worktrees/chore-idle".into(),
+            location: WorkLocation {
+                machine: "local".into(),
+                directory: "/repo/p1-worktrees/chore-idle".into(),
+            },
+            created_at: 4,
+        });
+
+        let mk_shell = |id: &str, num: u64, origin: Option<&str>| TerminalEntry {
+            id: id.into(),
+            conversation_id: None,
+            number: num,
+            name: None,
+            manual_number: Some(num),
+            origin_card_id: origin.map(str::to_owned),
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some(format!("pty-{id}")),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+            }),
+            agent: None,
+            created_at: num,
+        };
+
+        s.terminals.extend([
+            mk_shell("root-1", 10, None),
+            mk_shell("root-2", 11, None),
+            mk_shell("card-shell", 12, Some("c1")),
+            mk_shell("wt-shell", 13, None),
+        ]);
+        s.terminal_contexts.extend([
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "root-1".into(),
+                core_id: "core".into(),
+                terminal: "pty-root-1".into(),
+                cwd: Some("/repo/p1".into()),
+                project_id: Some("p1".into()),
+                branch: Some("main".into()),
+                dirty: true,
+                ahead: 2,
+                behind: 1,
+                ..Default::default()
+            },
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "root-2".into(),
+                core_id: "core".into(),
+                terminal: "pty-root-2".into(),
+                cwd: Some("/repo/p1/crates".into()),
+                project_id: Some("p1".into()),
+                branch: Some("main".into()),
+                ..Default::default()
+            },
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "card-shell".into(),
+                core_id: "core".into(),
+                terminal: "pty-card-shell".into(),
+                cwd: Some("/repo/p1-worktrees/c1".into()),
+                project_id: Some("p1".into()),
+                card_id: Some("c1".into()),
+                branch: Some("canban/1".into()),
+                ..Default::default()
+            },
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "wt-shell".into(),
+                core_id: "core".into(),
+                terminal: "pty-wt-shell".into(),
+                cwd: Some("/repo/p1-worktrees/feat-active".into()),
+                project_id: Some("p1".into()),
+                worktree_id: Some("wt-active".into()),
+                branch: Some("feat/active".into()),
+                ..Default::default()
+            },
+        ]);
+
+        assert_eq!(
+            format_git_indicators(true, 2, 1),
+            vec!["changed", "↑2", "↓1"]
+        );
+        assert!(format_git_indicators(false, 0, 0).is_empty());
+
+        let ui = crate::presenter::Ui::new();
+        ui.snapshot.set(s);
+        ui.snapshot_ready.set(true);
+        ui.project.set("p1".into());
+        ui.page.set("terminals".into());
+
+        // 1. Left tree hides `wt-idle` and `p-empty` children completely.
+        let snap = ui.snapshot.get_untracked();
+        let live: Vec<_> = crate::terminals::entries(&snap)
+            .into_iter()
+            .filter(|e| e.listed())
+            .collect();
+        let p1_scopes = project_scopes_in_tree_order(&snap, &live, Some("p1"));
+        let p1_scope_keys: Vec<_> = p1_scopes.iter().map(|(sc, _)| sc.clone()).collect();
+        assert_eq!(
+            p1_scope_keys,
+            vec![
+                WorktreeScope::ProjectRoot("p1".into()),
+                WorktreeScope::CardWorktree("c1".into()),
+                WorktreeScope::ManagedWorktree("wt-active".into()),
+            ]
+        );
+        assert!(project_scopes_in_tree_order(&snap, &live, Some("p-empty")).is_empty());
+        assert!(project_scopes_in_tree_order(&snap, &live, None).is_empty());
+
+        // 2. Selecting `root-1` shows ONLY `root-1` & `root-2` in `scope_tabs` and `cycle`.
+        ui.open_terminal("root-1".into());
+        let tab_ids: Vec<_> = crate::terminals::scope_tabs(ui)
+            .into_iter()
+            .map(|e| e.saved.id)
+            .collect();
+        assert_eq!(tab_ids, vec!["root-1", "root-2"]);
+        crate::terminals::cycle(ui, true);
+        assert_eq!(ui.terminal_selection.get_untracked(), "root-2");
+        crate::terminals::cycle(ui, true);
+        assert_eq!(ui.terminal_selection.get_untracked(), "root-1");
+
+        // 3. When `card-shell` (opened with `origin_card_id = Some("c1")`) `cd`s into ProjectRoot `/repo/p1`,
+        //    it dynamically regroups from `CardWorktree("c1")` into `ProjectRoot("p1")`!
+        ui.open_terminal("card-shell".into());
+        let conv_c1 = Conversation::key("c1", &Config::default().profiles[0].id);
+        let card_tabs: Vec<_> = crate::terminals::scope_tabs(ui)
+            .into_iter()
+            .map(|e| e.saved.id)
+            .collect();
+        assert_eq!(card_tabs, vec![conv_c1.clone(), "card-shell".into()]);
+
+        ui.snapshot.update(|s| {
+            let ctx = s
+                .terminal_contexts
+                .iter_mut()
+                .find(|c| c.terminal_id == "card-shell")
+                .unwrap();
+            ctx.cwd = Some("/repo/p1".into());
+            ctx.card_id = None;
+            ctx.branch = Some("main".into());
+        });
+        let snap_after = ui.snapshot.get_untracked();
+        let moved = crate::terminals::entries(&snap_after)
+            .into_iter()
+            .find(|e| e.saved.id == "card-shell")
+            .unwrap();
+        assert_eq!(
+            entry_scope(&snap_after, &moved),
+            WorktreeScope::ProjectRoot("p1".into())
+        );
+        let root_tabs_after: Vec<_> = crate::terminals::scope_tabs(ui)
+            .into_iter()
+            .map(|e| e.saved.id)
+            .collect();
+        assert_eq!(root_tabs_after, vec!["root-1", "root-2", "card-shell"]);
+    });
+}
+
+#[test]
+fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_then_empty_state() {
+    let runtime = nsh_core::element::Runtime::default();
+    let _entered = runtime.enter();
+    let (_owner, ()) = nsh_core::element::create_root(|| {
+        let mut s = fixture();
+        s.projects[0].directory = "/repo/p1".into();
+        s.cards[0].worktree = Some("/repo/p1-wt/c1".into());
+        // Finish the default workflow agent on c1 so we control exact shells in p1; keep p2's agent alive!
+        s.terminals[0].agent.as_mut().unwrap().observed = Some(json!({"state": "finished"}));
+
+        let mk = |id: &str, num: u64| TerminalEntry {
+            id: id.into(),
+            conversation_id: None,
+            number: num,
+            name: None,
+            manual_number: Some(num),
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some(format!("pty-{id}")),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+            }),
+            agent: None,
+            created_at: num,
+        };
+        s.terminals.extend([
+            mk("r1", 10),
+            mk("c1-a", 11),
+            mk("c1-b", 12),
+            mk("c1-c", 13),
+            mk("wt1", 14),
+        ]);
+        s.worktrees.push(ManagedWorktree {
+            id: "wt-1".into(),
+            project_id: "p1".into(),
+            branch: "feat/x".into(),
+            base_branch: "main".into(),
+            base_commit: None,
+            path: "/repo/p1-wt/feat-x".into(),
+            location: WorkLocation {
+                machine: "local".into(),
+                directory: "/repo/p1-wt/feat-x".into(),
+            },
+            created_at: 1,
+        });
+        s.terminal_contexts.extend([
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "r1".into(),
+                core_id: "core".into(),
+                terminal: "pty-r1".into(),
+                cwd: Some("/repo/p1".into()),
+                project_id: Some("p1".into()),
+                ..Default::default()
+            },
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "c1-a".into(),
+                core_id: "core".into(),
+                terminal: "pty-c1-a".into(),
+                cwd: Some("/repo/p1-wt/c1".into()),
+                project_id: Some("p1".into()),
+                card_id: Some("c1".into()),
+                ..Default::default()
+            },
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "c1-b".into(),
+                core_id: "core".into(),
+                terminal: "pty-c1-b".into(),
+                cwd: Some("/repo/p1-wt/c1".into()),
+                project_id: Some("p1".into()),
+                card_id: Some("c1".into()),
+                ..Default::default()
+            },
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "c1-c".into(),
+                core_id: "core".into(),
+                terminal: "pty-c1-c".into(),
+                cwd: Some("/repo/p1-wt/c1".into()),
+                project_id: Some("p1".into()),
+                card_id: Some("c1".into()),
+                ..Default::default()
+            },
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "wt1".into(),
+                core_id: "core".into(),
+                terminal: "pty-wt1".into(),
+                cwd: Some("/repo/p1-wt/feat-x".into()),
+                project_id: Some("p1".into()),
+                worktree_id: Some("wt-1".into()),
+                ..Default::default()
+            },
+        ]);
+
+        let ui = crate::presenter::Ui::new();
+        ui.snapshot.set(s);
+        ui.snapshot_ready.set(true);
+        ui.page.set("terminals".into());
+
+        // 1. Closing middle terminal `c1-b` -> jumps to PREVIOUS in same worktree (`c1-a`).
+        ui.open_terminal("c1-b".into());
+        crate::terminals::close_tab(ui, "c1-b");
+        assert_eq!(ui.terminal_selection.get_untracked(), "c1-a");
+
+        // 2. Closing first terminal `c1-a` -> no previous in worktree, jumps to NEXT in same worktree (`c1-c`).
+        crate::terminals::close_tab(ui, "c1-a");
+        assert_eq!(ui.terminal_selection.get_untracked(), "c1-c");
+
+        // 3. Closing last terminal in `CardWorktree("c1")` (`c1-c`) -> jumps to PREVIOUS in same Project (`r1`, before `c1` in tree order, rather than `wt1` after it).
+        crate::terminals::close_tab(ui, "c1-c");
+        assert_eq!(ui.terminal_selection.get_untracked(), "r1");
+
+        // 4. Closing first terminal in Project (`r1`) -> no previous in Project, jumps to NEXT in same Project (`wt1`).
+        crate::terminals::close_tab(ui, "r1");
+        assert_eq!(ui.terminal_selection.get_untracked(), "wt1");
+
+        // 5. Closing the final terminal in `p1` (`wt1`) -> clears selection (`""` Empty State), NEVER jumping to `p2`!
+        crate::terminals::close_tab(ui, "wt1");
+        assert_eq!(ui.terminal_selection.get_untracked(), "");
+    });
+}
+
+#[test]
+fn global_new_terminal_opens_in_project_root_while_in_page_new_tab_inherits_current_worktree() {
+    use crate::terminals::worktrees::{WorktreeScope, entry_scope};
+
+    let runtime = nsh_core::element::Runtime::default();
+    let _entered = runtime.enter();
+    let (_owner, ()) = nsh_core::element::create_root(|| {
+        let mut s = fixture();
+        s.projects[0].directory = "/repo/p1".into();
+        s.projects[0].target_branch = Some("main".into());
+        s.cards[0].worktree = Some("/repo/p1-wt/c1".into());
+        s.cards[0].branch = Some("canban/1".into());
+
+        let ui = crate::presenter::Ui::new();
+        ui.snapshot.set(s);
+        ui.snapshot_ready.set(true);
+        ui.project.set("p1".into());
+
+        // Select Card c1's agent terminal first on Terminals page, then run in-page `new_tab`:
+        let conv_c1 = Conversation::key("c1", &Config::default().profiles[0].id);
+        ui.open_terminal(conv_c1);
+        crate::commands::execute(ui, "new-terminal");
+        let in_page_id = ui.terminal_selection.get_untracked();
+        let snap1 = ui.snapshot.get_untracked();
+        let in_page_entry = crate::terminals::entries(&snap1)
+            .into_iter()
+            .find(|e| e.saved.id == in_page_id)
+            .unwrap();
+        assert_eq!(
+            entry_scope(&snap1, &in_page_entry),
+            WorktreeScope::CardWorktree("c1".into()),
+            "in-page + / ⌘T on Terminals must inherit current CardWorktree"
+        );
+
+        // Now navigate to Board while `in_page_id` (a CardWorktree shell) is still remembered in `terminal_selection`.
+        // Pressing global `⌘T` (`new-terminal` from Board) must create in `ProjectRoot("p1")`, NOT `CardWorktree("c1")`!
+        ui.navigate("board");
+        crate::commands::execute(ui, "new-terminal");
+        assert_eq!(ui.page.get_untracked(), "terminals");
+        let global_id = ui.terminal_selection.get_untracked();
+        assert_ne!(global_id, in_page_id);
+        let snap2 = ui.snapshot.get_untracked();
+        let global_entry = crate::terminals::entries(&snap2)
+            .into_iter()
+            .find(|e| e.saved.id == global_id)
+            .unwrap();
+        assert_eq!(
+            entry_scope(&snap2, &global_entry),
+            WorktreeScope::ProjectRoot("p1".into()),
+            "global ⌘T from outside Terminals must land in active ProjectRoot"
+        );
     });
 }

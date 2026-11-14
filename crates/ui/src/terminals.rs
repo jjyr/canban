@@ -46,11 +46,13 @@ pub fn watch(ui: Ui) {
             })
         })
     });
+    let prev_entries = signal(Vec::<Entry>::new());
     effect(move || {
         if crate::APP.get().is_some() && !ui.snapshot_ready.get() {
             return;
         }
         let ids = listed.get();
+        let current_rows = ui.terminal_entries.get();
         let active_card_tab = ui.card_tab.get();
         if let Some(confirm_id) = ui.terminal_close_confirm.get_untracked()
             && !ids.contains(&confirm_id)
@@ -74,19 +76,44 @@ pub fn watch(ui: Ui) {
         }
         let tabs = ui.terminal_tabs.get();
         let kept: Vec<_> = tabs.iter().filter(|id| ids.contains(id)).cloned().collect();
-        if tabs != kept {
+        let selected = ui.terminal_selection.get_untracked();
+        let selected_gone = !selected.is_empty() && !ids.contains(&selected);
+        if tabs != kept || selected_gone {
+            let fallback = if selected_gone {
+                let s = ui.snapshot.get_untracked();
+                let closing = ui.closing_terminals.get_untracked();
+                let mut combined = prev_entries.get_untracked();
+                for r in &current_rows {
+                    if let Some(existing) = combined.iter_mut().find(|e| e.saved.id == r.saved.id) {
+                        *existing = r.clone();
+                    } else {
+                        combined.push(r.clone());
+                    }
+                }
+                fallback_after_close(&s, &combined, &closing, &selected)
+                    .filter(|nid| ids.contains(nid))
+                    .unwrap_or_default()
+            } else {
+                selected.clone()
+            };
             batch(move || {
-                let selected = ui.terminal_selection.get_untracked();
-                ui.terminal_tabs.set(kept.clone());
-                if !selected.is_empty() && !ids.contains(&selected) {
-                    ui.terminal_selection
-                        .set(kept.last().cloned().unwrap_or_default());
+                ui.terminal_tabs.set(kept);
+                if selected_gone {
+                    ui.terminal_selection.set(fallback.clone());
+                    if !fallback.is_empty() {
+                        ui.terminal_tabs.update(|ts| {
+                            if !ts.contains(&fallback) {
+                                ts.push(fallback.clone());
+                            }
+                        });
+                    }
                     ui.terminal_card_context.set(String::new());
                     ui.terminal_details.set(false);
                     crate::navigation::replace(ui);
                 }
             });
         }
+        prev_entries.set(current_rows);
     });
 }
 pub fn selected(ui: Ui) -> Option<OverviewRow> {
@@ -102,6 +129,79 @@ pub fn current(ui: Ui) -> Option<Entry> {
     }
     ui.terminal_entries
         .with(|rows| rows.iter().find(|r| r.saved.id == sel).cloned())
+}
+
+/// Live Terminals belonging to the same `WorktreeScope` as `current(ui)`, in creation order.
+pub fn scope_tabs(ui: Ui) -> Vec<Entry> {
+    let Some(cur) = current(ui) else {
+        return Vec::new();
+    };
+    let s = ui.snapshot.get();
+    let target_scope = worktrees::entry_scope(&s, &cur);
+    ui.closing_terminals.with(|closing| {
+        ui.terminal_entries.with(|rows| {
+            rows.iter()
+                .filter(|e| {
+                    e.listed()
+                        && !closing.contains(&e.saved.id)
+                        && worktrees::entry_scope(&s, e) == target_scope
+                })
+                .cloned()
+                .collect()
+        })
+    })
+}
+
+/// Pure fallback resolution when closing a live Terminal:
+/// 1. Previous live Terminal in the same `WorktreeScope` (or next if none precedes it);
+/// 2. Previous live Terminal in the same Project in tree order (or next if none precedes it);
+/// 3. `None` (Empty State — never jumps across different Projects).
+pub fn fallback_after_close(
+    s: &canban_types::Snapshot,
+    rows: &[Entry],
+    closing: &std::collections::BTreeSet<String>,
+    closed_id: &str,
+) -> Option<String> {
+    let closed_entry = rows.iter().find(|e| e.saved.id == closed_id)?;
+    let target_scope = worktrees::entry_scope(s, closed_entry);
+    let is_live_or_target =
+        |e: &Entry| e.saved.id == closed_id || (e.listed() && !closing.contains(&e.saved.id));
+
+    let same_scope: Vec<&Entry> = rows
+        .iter()
+        .filter(|e| is_live_or_target(e) && worktrees::entry_scope(s, e) == target_scope)
+        .collect();
+    if let Some(pos) = same_scope.iter().position(|e| e.saved.id == closed_id) {
+        if pos > 0 {
+            return Some(same_scope[pos - 1].saved.id.clone());
+        }
+        if pos + 1 < same_scope.len() {
+            return Some(same_scope[pos + 1].saved.id.clone());
+        }
+    }
+
+    let project_id = target_scope.project_id(s);
+    let candidate_rows: Vec<Entry> = rows
+        .iter()
+        .filter(|e| is_live_or_target(e))
+        .cloned()
+        .collect();
+    let ordered_scopes =
+        worktrees::project_scopes_in_tree_order(s, &candidate_rows, project_id.as_deref());
+    let same_project: Vec<Entry> = ordered_scopes
+        .into_iter()
+        .flat_map(|(_, children)| children)
+        .collect();
+    if let Some(pos) = same_project.iter().position(|e| e.saved.id == closed_id) {
+        if pos > 0 {
+            return Some(same_project[pos - 1].saved.id.clone());
+        }
+        if pos + 1 < same_project.len() {
+            return Some(same_project[pos + 1].saved.id.clone());
+        }
+    }
+
+    None
 }
 pub fn restore_selection(ui: Ui) {
     if !ui.terminal_selection.get_untracked().is_empty() {
@@ -220,6 +320,7 @@ fn gallery_create_entry(
     project_id: Option<String>,
     card_id: Option<String>,
     agent: bool,
+    inherit: bool,
 ) -> String {
     let prefix = if agent {
         "gallery-agent"
@@ -254,6 +355,13 @@ fn gallery_create_entry(
             })
             .unwrap_or_else(|| "codex".into())
     });
+    let inherited = inherit.then(|| untracked(|| current(ui))).flatten();
+    let origin_card = card_id.clone().or_else(|| {
+        inherited
+            .as_ref()
+            .filter(|e| e.agent.is_none())
+            .and_then(|e| e.saved.origin_card_id.clone())
+    });
     let saved = canban_types::TerminalEntry {
         id: id.clone(),
         conversation_id: None,
@@ -271,12 +379,15 @@ fn gallery_create_entry(
                     .unwrap_or(0)
             }) + 1,
         ),
-        origin_card_id: card_id.clone(),
+        origin_card_id: origin_card,
         agent_engine,
         agent: None,
         created_at: 0,
         runtime: Some(canban_types::TerminalRuntime {
-            machine: "local".into(),
+            machine: inherited
+                .as_ref()
+                .map(|e| e.machine().to_owned())
+                .unwrap_or_else(|| "local".into()),
             owner_core_id: None,
             core_id: Some("gallery".into()),
             terminal: Some(id.clone()),
@@ -287,7 +398,7 @@ fn gallery_create_entry(
             agent_turn: None,
         }),
     };
-    let inherited_location = current(ui).and_then(|e| e.location);
+    let inherited_location = inherited.and_then(|e| e.location);
     ui.snapshot.update(|s| {
         s.terminals.push(saved);
         if let Some(mut loc) = inherited_location {
@@ -302,15 +413,34 @@ fn gallery_create_entry(
             }
             s.terminal_contexts.push(loc);
         } else if project_id.is_some() || card_id.is_some() {
+            let resolved_card = card_id
+                .as_deref()
+                .and_then(|cid| s.cards.iter().find(|c| c.id == cid));
+            let resolved_project = project_id
+                .as_deref()
+                .or_else(|| resolved_card.map(|c| c.project_id.as_str()))
+                .and_then(|pid| s.projects.iter().find(|p| p.id == pid));
+            let cwd = resolved_card
+                .and_then(|c| c.worktree.clone())
+                .filter(|w| !w.is_empty())
+                .or_else(|| resolved_project.map(|p| p.directory.clone()))
+                .unwrap_or_else(|| "/workspace/project".into());
+            let branch = resolved_card
+                .and_then(|c| c.branch.clone())
+                .or_else(|| resolved_project.and_then(|p| p.target_branch.clone()));
+            let machine = resolved_project
+                .and_then(|p| p.location.as_ref().map(|l| l.machine.clone()))
+                .unwrap_or_else(|| "local".into());
             s.terminal_contexts.push(canban_types::TerminalContext {
-                machine: "local".into(),
+                machine,
                 terminal_id: id.clone(),
                 core_id: "gallery".into(),
                 terminal: id.clone(),
-                cwd: Some("/workspace/project".into()),
-                project_id,
+                cwd: Some(cwd),
+                project_id: project_id.or_else(|| resolved_project.map(|p| p.id.clone())),
                 card_id,
-                branch: None,
+                branch,
+                ..Default::default()
             });
         }
     });
@@ -367,7 +497,7 @@ pub fn create_in_card(ui: Ui, project_id: String, card_id: String, agent: bool) 
         ui.card_terminal_focused.set(true);
     }
     if crate::APP.get().is_none() {
-        let id = gallery_create_entry(ui, Some(project_id), Some(card_id.clone()), agent);
+        let id = gallery_create_entry(ui, Some(project_id), Some(card_id.clone()), agent, false);
         if ui.page.get_untracked() == "card" && ui.card.get_untracked() == card_id {
             select_card_tab(ui, &card_id, id);
             ui.card_terminal_open.set(true);
@@ -455,7 +585,8 @@ fn launch(ui: Ui, params: serde_json::Value) {
         let project_id = params["project_id"].as_str().map(str::to_owned);
         let card_id = params["card_id"].as_str().map(str::to_owned);
         let agent = params["agent"] == true;
-        let id = gallery_create_entry(ui, project_id, card_id, agent);
+        let inherit = params["inherit_terminal_id"].as_str().is_some();
+        let id = gallery_create_entry(ui, project_id, card_id, agent, inherit);
         ui.open_terminal(id);
         return;
     }
@@ -471,39 +602,140 @@ fn launch(ui: Ui, params: serde_json::Value) {
         }
     });
 }
+
+/// In-page `+` and `⌘T` while already on `Terminals`: inherits the current `WorktreeScope`,
+/// or falls back to the active project's root directory when no Terminal is selected.
 pub fn new_tab(ui: Ui) {
-    let selected = ui.terminal_selection.get_untracked();
-    let params = if selected.is_empty() {
-        json!({})
+    if let Some(cur) = untracked(|| current(ui)) {
+        if cur.agent.is_some()
+            && let Some(card) = cur.card.filter(|c| c.archived_at.is_none())
+        {
+            launch(
+                ui,
+                json!({
+                    "project_id": card.project_id,
+                    "card_id": card.id,
+                }),
+            );
+            return;
+        }
+        launch(ui, json!({ "inherit_terminal_id": cur.saved.id }));
+        return;
+    }
+    let pid = ui.project.get_untracked();
+    if !pid.is_empty() {
+        launch(ui, json!({ "project_id": pid }));
     } else {
-        json!({"inherit_terminal_id":selected})
-    };
-    launch(ui, params);
+        launch(ui, json!({}));
+    }
 }
+
+/// Global New Terminal (`⌘T` / `new-terminal` outside `Terminals`): opens a fresh shell in the
+/// active project's root (`ProjectRoot`) without inheriting any previous sub-worktree session.
+pub fn open_global(ui: Ui) {
+    let return_to = ui.location();
+    let pid = ui.project.get_untracked();
+    let target_project = if !pid.is_empty() {
+        Some(pid)
+    } else {
+        ui.snapshot
+            .with_untracked(|s| s.projects.first().map(|p| p.id.clone()))
+    };
+    if crate::APP.get().is_none() {
+        if let Some(ref p) = target_project {
+            ui.project.set(p.clone());
+        }
+        let id = gallery_create_entry(ui, target_project, None, false, false);
+        ui.open_terminal(id);
+        ui.terminal_focus.update(|v| *v += 1);
+        return;
+    }
+    if let Some(ref p) = target_project {
+        ui.project.set(p.clone());
+    }
+    ui.navigate("terminals");
+    let selection = ui.terminal_selection.get_untracked();
+    let intermediate = ui.location();
+    let params = match target_project {
+        Some(p) => json!({ "project_id": p }),
+        None => json!({}),
+    };
+    dispatch_then(ui, "terminal.create", params, move |v| {
+        if ui.location() == intermediate
+            && let Some(id) = v["id"].as_str()
+            && ui.terminal_selection.get_untracked() == selection
+        {
+            ui.history.update(|history| {
+                history.visit(intermediate.clone());
+                history.entries[history.index] = return_to.clone();
+                if history.index > 0 && history.entries[history.index - 1] == return_to {
+                    history.entries.remove(history.index);
+                    history.index -= 1;
+                }
+            });
+            ui.open_terminal(id.into());
+        }
+    });
+}
+
 pub fn machine_menu(ui: Ui) {
     use nsh_core::element::desktop::{MenuItem, popup_menu};
     ui.spawn(async move {
         let mut items = vec![
-            MenuItem::new("New Terminal (Local)")
-                .on_select(move || launch(ui, json!({"machine":"local"}))),
+            MenuItem::new("New Terminal in Current Worktree · ⌘T").on_select(move || new_tab(ui)),
         ];
-        if !ui.project.get_untracked().is_empty()
-            || ui.snapshot.with_untracked(|s| !s.projects.is_empty())
-        {
+        let active_pid = {
+            let pid = ui.project.get_untracked();
+            if !pid.is_empty() {
+                Some(pid)
+            } else {
+                ui.snapshot
+                    .with_untracked(|s| s.projects.first().map(|p| p.id.clone()))
+            }
+        };
+        if let Some(pid) = active_pid.clone() {
+            let proj_name = ui
+                .snapshot
+                .with_untracked(|s| {
+                    s.projects
+                        .iter()
+                        .find(|p| p.id == pid)
+                        .map(|p| p.name.clone())
+                })
+                .unwrap_or_else(|| "Project".into());
+            let pid_root = pid.clone();
             items.push(
-                MenuItem::new("New Managed Branch Worktree…").on_select(move || {
-                    let pid = ui.project.get_untracked();
-                    let target = if pid.is_empty() {
-                        ui.snapshot
-                            .with_untracked(|s| s.projects.first().map(|p| p.id.clone()))
-                            .unwrap_or_default()
-                    } else {
-                        pid
-                    };
-                    ui.worktree_modal.set(Some(target));
-                }),
+                MenuItem::new(format!("New Terminal in {proj_name} Root"))
+                    .on_select(move || create(ui, pid_root.clone(), None)),
             );
+            let pid_wt = pid.clone();
+            items.push(
+                MenuItem::new("New Managed Branch Worktree…")
+                    .on_select(move || ui.worktree_modal.set(Some(pid_wt.clone()))),
+            );
+            let worktrees: Vec<_> = ui.snapshot.with_untracked(|s| {
+                s.worktrees
+                    .iter()
+                    .filter(|w| w.project_id == pid)
+                    .cloned()
+                    .collect()
+            });
+            if !worktrees.is_empty() {
+                items.push(MenuItem::separator());
+                for wt in worktrees {
+                    let wt_open = wt.clone();
+                    items.push(
+                        MenuItem::new(format!("Open Shell in ⎇ {}", wt.branch))
+                            .on_select(move || worktrees::open_shell(ui, &wt_open)),
+                    );
+                }
+            }
         }
+        items.push(MenuItem::separator());
+        items.push(
+            MenuItem::new("New Terminal ($HOME · Local)")
+                .on_select(move || launch(ui, json!({ "machine": "local" }))),
+        );
         for m in ui
             .machines
             .with_untracked(|v| v["machines"].as_array().cloned().unwrap_or_default())
@@ -584,6 +816,7 @@ pub(crate) struct OptimisticCloseContext {
     pub id: String,
     pub prev_tab_index: Option<usize>,
     pub was_selected_tab: bool,
+    pub fallback_tab: Option<String>,
     pub was_card_tab_for: Option<String>,
 }
 
@@ -612,11 +845,20 @@ pub(crate) fn begin_optimistic_close(ui: Ui, id: &str) -> Option<OptimisticClose
         .then(|| ui.card.get_untracked())
         .filter(|cid| !cid.is_empty());
 
+    let fallback = was_selected_tab
+        .then(|| {
+            let s = ui.snapshot.get_untracked();
+            let closing = ui.closing_terminals.get_untracked();
+            ui.terminal_entries
+                .with_untracked(|rows| fallback_after_close(&s, rows, &closing, id))
+        })
+        .flatten();
+
     batch(|| {
         ui.closing_terminals.update(|c| {
             c.insert(id.to_owned());
         });
-        remove_tab(ui, id);
+        apply_tab_removal(ui, id, fallback.clone());
         if let Some(ref cid) = was_card_tab_for {
             let recent = ui.terminal_recent.with(|m| m.get(cid).cloned());
             let next = untracked(|| default_card_terminal_for_ui(ui, cid, recent.as_deref()))
@@ -637,6 +879,7 @@ pub(crate) fn begin_optimistic_close(ui: Ui, id: &str) -> Option<OptimisticClose
         id: id.to_owned(),
         prev_tab_index,
         was_selected_tab,
+        fallback_tab: fallback,
         was_card_tab_for,
     })
 }
@@ -684,7 +927,10 @@ fn rollback_optimistic_close(ui: Ui, ctx: &OptimisticCloseContext, message: Stri
                     tabs.insert(insert_at, ctx.id.clone());
                 }
             });
-            if ctx.was_selected_tab && ui.terminal_selection.get_untracked().is_empty() {
+        }
+        if ctx.was_selected_tab {
+            let cur_sel = ui.terminal_selection.get_untracked();
+            if cur_sel.is_empty() || ctx.fallback_tab.as_deref() == Some(cur_sel.as_str()) {
                 ui.terminal_selection.set(ctx.id.clone());
             }
         }
@@ -708,10 +954,19 @@ pub fn close_entry_confirmed(ui: Ui, id: &str) {
     let Some(app) = crate::APP.get().cloned() else {
         // A static Gallery has no runtime; simulate the same closed outcome.
         ui.terminal_close_confirm.set(None);
+        let was_selected = ui.terminal_selection.get_untracked() == id;
+        let fallback = was_selected
+            .then(|| {
+                let s = ui.snapshot.get_untracked();
+                let closing = ui.closing_terminals.get_untracked();
+                ui.terminal_entries
+                    .with_untracked(|rows| fallback_after_close(&s, rows, &closing, id))
+            })
+            .flatten();
         ui.snapshot.update(|s| {
             mark_entry_finished_in_snapshot(s, id);
         });
-        remove_tab(ui, id);
+        apply_tab_removal(ui, id, fallback);
         return;
     };
     let Some(ctx) = begin_optimistic_close(ui, id) else {
@@ -750,32 +1005,63 @@ pub fn close_entry_confirmed(ui: Ui, id: &str) {
 }
 
 pub fn close_tab(ui: Ui, id: &str) {
-    if id.is_empty()
-        || !ui
-            .terminal_tabs
-            .with_untracked(|tabs| tabs.iter().any(|t| t == id))
-    {
+    if id.is_empty() {
+        return;
+    }
+    let can_close = ui
+        .terminal_tabs
+        .with_untracked(|tabs| tabs.iter().any(|t| t == id))
+        || ui
+            .terminal_entries
+            .with_untracked(|rows| rows.iter().any(|e| e.saved.id == id && e.listed()));
+    if !can_close {
         return;
     }
     close_entry(ui, id);
 }
 
-fn remove_tab(ui: Ui, id: &str) {
+fn apply_tab_removal(ui: Ui, id: &str, fallback: Option<String>) {
     ui.terminal_focus.update(|v| *v += 1);
     let mut tabs = ui.terminal_tabs.get_untracked();
-    let next = tabs.iter().position(|t| t == id).and_then(|i| {
+    if let Some(i) = tabs.iter().position(|t| t == id) {
         tabs.remove(i);
-        tabs.get(i.min(tabs.len().saturating_sub(1))).cloned()
-    });
-    ui.terminal_tabs.set(tabs);
+    }
     if ui.terminal_selection.get_untracked() == id {
-        ui.terminal_selection.set(next.unwrap_or_default());
+        let next = fallback.unwrap_or_default();
+        if !next.is_empty() && !tabs.contains(&next) {
+            tabs.push(next.clone());
+        }
+        ui.terminal_tabs.set(tabs);
+        if !next.is_empty() {
+            let scope_opt = ui.snapshot.with_untracked(|s| {
+                ui.terminal_entries.with_untracked(|rows| {
+                    rows.iter().find(|e| e.saved.id == next).map(|e| {
+                        (
+                            e.card.as_ref().map(|c| c.id.clone()),
+                            worktrees::entry_scope(s, e).recent_key(),
+                        )
+                    })
+                })
+            });
+            if let Some((card_id, scope_key)) = scope_opt {
+                ui.terminal_recent.with(|recent| {
+                    if let Some(cid) = card_id {
+                        recent.insert(cid, next.clone());
+                    }
+                    recent.insert(scope_key, next.clone());
+                });
+            }
+        }
+        ui.terminal_selection.set(next);
         ui.terminal_details.set(false);
         if ui.narrow.get_untracked() && ui.terminal_selection.get_untracked().is_empty() {
             ui.terminal_sidebar.set(true);
         }
+    } else {
+        ui.terminal_tabs.set(tabs);
     }
 }
+
 pub fn cycle(ui: Ui, forward: bool) {
     if ui.page.get_untracked() == "card"
         && ui.card_terminal_open.get_untracked()
@@ -798,7 +1084,10 @@ pub fn cycle(ui: Ui, forward: bool) {
         select_card_tab(ui, &c.id, slots[next].clone());
         return;
     }
-    let tabs = ui.terminal_tabs.get_untracked();
+    let tabs: Vec<String> = untracked(|| scope_tabs(ui))
+        .into_iter()
+        .map(|e| e.saved.id)
+        .collect();
     if tabs.is_empty() {
         return;
     }

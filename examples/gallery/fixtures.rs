@@ -956,19 +956,61 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         attempt.terminal = Some("gallery-remote/t3".into());
     }
     let card = s.cards.iter().find(|c| c.archived_at.is_none()).unwrap();
+    let card_project_id = card.project_id.clone();
+    let card_id = card.id.clone();
     s.terminal_contexts.push(canban_types::TerminalContext {
         machine: "local".into(),
         terminal_id: "gallery-linked-shell".into(),
         core_id: "gallery".into(),
         terminal: "linked-shell".into(),
         cwd: Some("/tmp/gallery/worktree".into()),
-        project_id: Some(card.project_id.clone()),
-        card_id: Some(card.id.clone()),
+        project_id: Some(card_project_id),
+        card_id: Some(card_id),
+        worktree_id: None,
         branch: Some(
             "canban/very-long-worktree-and-branch-name/context-navigation-acceptance-42".into(),
         ),
+        dirty: true,
+        ahead: 2,
+        behind: 0,
     });
     let proj_id = s.projects[0].id.clone();
+    s.terminals.push(canban_types::TerminalEntry {
+        id: "gallery-project-root-shell".into(),
+        conversation_id: None,
+        number: number + 3,
+        name: None,
+        manual_number: Some(5),
+        origin_card_id: None,
+        agent_engine: None,
+        runtime: Some(canban_types::TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("gallery".into()),
+            terminal: Some("root-shell".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+        }),
+        agent: None,
+        created_at: 0,
+    });
+    s.terminal_contexts.push(canban_types::TerminalContext {
+        machine: "local".into(),
+        terminal_id: "gallery-project-root-shell".into(),
+        core_id: "gallery".into(),
+        terminal: "root-shell".into(),
+        cwd: Some(s.projects[0].directory.clone()),
+        project_id: Some(proj_id.clone()),
+        card_id: None,
+        worktree_id: None,
+        branch: Some("main".into()),
+        dirty: false,
+        ahead: 0,
+        behind: 1,
+    });
     s.worktrees.push(canban_types::ManagedWorktree {
         id: "gallery-wt-spike".into(),
         project_id: proj_id.clone(),
@@ -1025,7 +1067,24 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         cwd: Some("/tmp/gallery/worktrees/standalone-spike".into()),
         project_id: Some(proj_id),
         card_id: None,
+        worktree_id: Some("gallery-wt-spike".into()),
         branch: Some("feat/standalone-spike".into()),
+        dirty: true,
+        ahead: 3,
+        behind: 1,
+    });
+    s.projects.push(canban_types::Project {
+        id: "gallery-empty-project".into(),
+        name: "Docs & Website".into(),
+        directory: "/tmp/gallery/docs-site".into(),
+        location: None,
+        github: None,
+        delivery_mode: Default::default(),
+        agent_overrides: Default::default(),
+        tags: Default::default(),
+        workflow: canban_types::Workflow::default(),
+        target_branch: Some("main".into()),
+        created_at: 0,
     });
     s
 }

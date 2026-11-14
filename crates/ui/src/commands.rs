@@ -530,6 +530,15 @@ pub fn execute(ui: Ui, id: &str) {
         }
         return;
     }
+    if let Some(wt_id) = id.strip_prefix("worktree-delete:") {
+        if ui
+            .snapshot
+            .with_untracked(|s| s.worktrees.iter().any(|w| w.id == wt_id))
+        {
+            crate::terminals::worktrees::request_remove(ui, wt_id.to_owned(), false);
+        }
+        return;
+    }
 
     match id {
         "back" => crate::navigation::go(ui, false),
@@ -879,11 +888,13 @@ pub fn execute(ui: Ui, id: &str) {
                 && let Some(c) = ui.current_card()
             {
                 crate::terminals::create_in_card(ui, c.project_id, c.id, false);
-            } else {
-                ui.navigate("terminals");
+                ui.terminal_focus.update(|v| *v += 1);
+            } else if ui.page.get_untracked() == "terminals" {
                 crate::terminals::new_tab(ui);
+                ui.terminal_focus.update(|v| *v += 1);
+            } else {
+                crate::terminals::open_global(ui);
             }
-            ui.terminal_focus.update(|v| *v += 1);
         }
         "new-worktree" => {
             let pid = ui.project.get_untracked();
