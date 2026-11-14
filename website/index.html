@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="en" data-lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Canban — Kanban + Herdr Workbench for Human Context</title>
+  <meta name="description" content="Run agents in parallel without switching human context. Canban unites an intent-preserving Kanban board, declarative Workflows, and persistent Herdr Terminals.">
+  <meta property="og:title" content="Canban — Kanban + Herdr Workbench">
+  <meta property="og:description" content="Run agents in parallel. Never switch human context. Kanban + Workflow + Herdr Terminal in one native workbench.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://canban.dev/">
+  <link rel="canonical" href="https://canban.dev/">
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+
+  <!-- Zero-flicker browser language detection (Default: English; saved preference -> navigator.languages) -->
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem("canban_lang");
+        var chosen = "en";
+        if (saved === "en" || saved === "zh") {
+          chosen = saved;
+        } else {
+          var langs = navigator.languages && navigator.languages.length
+            ? navigator.languages
+            : [navigator.language || "en"];
+          for (var i = 0; i < langs.length; i++) {
+            var code = String(langs[i] || "").toLowerCase();
+            if (code.indexOf("zh") === 0) {
+              chosen = "zh";
+              break;
+            }
+            if (code.indexOf("en") === 0) {
+              chosen = "en";
+              break;
+            }
+          }
+        }
+        document.documentElement.setAttribute("data-lang", chosen);
+        document.documentElement.setAttribute("lang", chosen === "zh" ? "zh-CN" : "en");
+      } catch (_) {}
+    })();
+  </script>
+
+  <!-- Subtle typography enhancement (gracefully falls back to system fonts offline) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Newsreader:ital,opsz,wght@0,6..72,400;1,6..72,400&display=swap" rel="stylesheet">
+
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <!-- ==================================================================== -->
+  <!-- Sticky Zen Header                                                    -->
+  <!-- ==================================================================== -->
+  <header class="site-header">
+    <div class="container nav-inner">
+      <a href="#" class="brand" aria-label="Canban Home">
+        <img src="./favicon.svg" alt="" class="brand-mark" width="28" height="28">
+        <span>canban</span>
+      </a>
+
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#human-context" data-i18n="nav_context">Human Context</a>
+        <a href="#workbench" data-i18n="nav_workbench">Workbench</a>
+        <a href="#stack" data-i18n="nav_stack">Under the Hood</a>
+        <a href="#install" data-i18n="nav_install">Install</a>
+      </nav>
+
+      <div class="nav-actions">
+        <div class="lang-switch" role="group" aria-label="Language Switcher">
+          <button type="button" class="lang-btn" data-set-lang="en" aria-pressed="true">EN</button>
+          <button type="button" class="lang-btn" data-set-lang="zh" aria-pressed="false">中文</button>
+        </div>
+
+        <a
+          href="https://github.com/jjyr/canban"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="star-pill"
+          aria-label="Star jjyr/canban on GitHub"
+        >
+          <!-- Primer Octicons GitHub Mark (MIT) -->
+          <svg class="gh-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"></path>
+          </svg>
+          <svg class="star-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 2.4l2.93 5.94 6.56.95-4.75 4.63 1.12 6.53L12 17.37l-5.86 3.08 1.12-6.53L2.51 9.29l6.56-.95L12 2.4z"></path>
+          </svg>
+          <span class="star-label-long" data-i18n="star_prompt">Star on GitHub</span>
+          <span class="star-count"></span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- ================================================================== -->
+    <!-- Hero                                                               -->
+    <!-- ================================================================== -->
+    <section class="hero">
+      <div class="container">
+        <div class="eyebrow reveal is-visible">
+          <span class="eyebrow-dot" aria-hidden="true"></span>
+          <span data-i18n="hero_eyebrow">KANBAN + HERDR WORKBENCH</span>
+        </div>
+
+        <h1 class="hero-title reveal delay-1 is-visible" data-i18n-html="hero_title">
+          Run agents in parallel.<br>Never switch <em>human context</em>.
+        </h1>
+
+        <p class="hero-subtitle reveal delay-2 is-visible" data-i18n-html="hero_subtitle">
+          Canban unites an intent-preserving <strong>Kanban</strong> board with persistent <strong>Herdr Terminals</strong>, orchestrated by declarative <strong>Workflows</strong>. Every Card locks in its own discussion, branch, and live session—unburdening your mind.
+        </p>
+
+        <div class="reveal delay-3 is-visible">
+          <div class="install-shell">
+            <div class="install-code-wrap">
+              <span class="install-prompt">$</span>
+              <code class="install-cmd">curl -fsSL https://canban.dev/install.sh | sh</code>
+            </div>
+            <button
+              type="button"
+              class="copy-btn"
+              data-copy-btn
+              data-copy-value="curl -fsSL https://canban.dev/install.sh | sh"
+              aria-label="Copy install command"
+            >
+              <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              <svg class="icon-check" style="display:none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="20 6 9 17 4 12"></polyline>
+              </svg>
+              <span class="copy-text" data-i18n="copy_label">Copy</span>
+            </button>
+          </div>
+
+          <div class="install-meta">
+            <span data-i18n="install_platform">Available for macOS today · Linux &amp; Windows on the roadmap</span>
+            <span class="sep" aria-hidden="true">·</span>
+            <span data-i18n="install_license">Apache-2.0</span>
+            <span class="sep" aria-hidden="true">·</span>
+            <a href="#install" id="jump-build-source" data-i18n="install_source_link">Or build from source</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- Live Parallel Product Stage                                        -->
+    <!-- ================================================================== -->
+    <section class="stage-section">
+      <div class="container reveal delay-4 is-visible">
+        <div class="workbench-hint">
+          <span class="workbench-hint-left">
+            <span class="pulse-dot" aria-hidden="true"></span>
+            <span data-i18n="wb_hint_left">Live Workbench · 4 agents running in parallel across isolated worktrees</span>
+          </span>
+          <span class="workbench-hint-right" data-i18n="wb_hint_right">
+            Click any active Card to switch full context instantly →
+          </span>
+        </div>
+
+        <div class="workbench-window" role="region" aria-label="Canban Workbench Interactive Preview">
+          <!-- Window Top Chrome -->
+          <div class="wb-chrome">
+            <div class="wb-chrome-left">
+              <div class="wb-traffic" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </div>
+              <div class="wb-project-switcher">
+                <span class="wb-proj-active">canban ▾</span>
+                <span class="wb-proj-chip">herdr-core <span class="chip-badge">1</span></span>
+                <span class="wb-proj-chip">nsh-ui</span>
+              </div>
+            </div>
+
+            <div class="wb-chrome-right">
+              <span class="wb-chrome-tag">⌘O Quick Open</span>
+              <div class="wb-activity-pill">
+                <span class="run-count">● <span data-i18n="wb_running_pill">4 Running</span></span>
+                <span class="attn-count">▲ <span data-i18n="wb_attention_pill">1 Needs Input</span></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Workbench Split: Rail + 3 Columns + Context & Herdr PTY -->
+          <div class="wb-body">
+            <!-- 56pt Native Icon Rail -->
+            <div class="wb-rail" aria-hidden="true">
+              <div class="wb-rail-group">
+                <div class="wb-rail-icon" title="Quick Open">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                </div>
+                <div class="wb-rail-icon is-active" title="Board">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M8 7v7"/><path d="M12 7v4"/><path d="M16 7v9"/></svg>
+                </div>
+                <div class="wb-rail-icon" title="Terminals">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+                </div>
+                <div class="wb-rail-icon" title="Workflows">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/></svg>
+                </div>
+              </div>
+              <div class="wb-rail-group">
+                <div class="wb-rail-icon" title="Settings">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.85 1 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                </div>
+              </div>
+            </div>
+
+            <!-- 3 Board Columns -->
+            <div class="wb-board" role="tablist" aria-label="Kanban Cards">
+              <!-- Column 1: Backlog -->
+              <div class="wb-col">
+                <div class="wb-col-header">
+                  <span class="wb-col-title" data-i18n="col_backlog">Backlog</span>
+                  <span class="wb-col-count">3</span>
+                </div>
+
+                <div class="k-card k-card-passive">
+                  <div class="k-card-top">
+                    <span class="k-id">#68</span>
+                    <div class="k-tags"><span class="k-tag">#platform</span></div>
+                  </div>
+                  <div class="k-title" data-i18n="card_68_title">Linux Wayland window host</div>
+                  <div class="k-meta"><span class="k-step" data-i18n="card_68_sub">Spec draft · multi-platform</span></div>
+                </div>
+
+                <div class="k-card k-card-passive">
+                  <div class="k-card-top">
+                    <span class="k-id">#69</span>
+                    <div class="k-tags"><span class="k-tag">#github</span></div>
+                  </div>
+                  <div class="k-title" data-i18n="card_69_title">Device OAuth token refresh</div>
+                  <div class="k-meta"><span class="k-step" data-i18n="card_69_sub">Queued after #63</span></div>
+                </div>
+
+                <div class="k-card k-card-passive">
+                  <div class="k-card-top">
+                    <span class="k-id">#70</span>
+                    <div class="k-tags"><span class="k-tag">#ui-kit</span></div>
+                  </div>
+                  <div class="k-title" data-i18n="card_70_title">Warm paper terminal theme</div>
+                  <div class="k-meta"><span class="k-step" data-i18n="card_70_sub">Palette tokens</span></div>
+                </div>
+              </div>
+
+              <!-- Column 2: Develop (4 Parallel Agents!) -->
+              <div class="wb-col">
+                <div class="wb-col-header">
+                  <span class="wb-col-title" data-i18n="col_develop">Develop</span>
+                  <span class="wb-col-parallel-badge" data-i18n="col_parallel_badge">4 · Parallel</span>
+                </div>
+
+                <button type="button" role="tab" aria-selected="true" class="k-card is-selected" data-card-id="65">
+                  <div class="k-card-top">
+                    <span class="k-id">#65</span>
+                    <span class="k-status running" data-i18n="status_running">Running</span>
+                  </div>
+                  <div class="k-title" data-i18n="card_65_title">Website zen layout &amp; i18n</div>
+                  <div class="k-meta">
+                    <span class="k-agent"><span class="k-agent-dot"></span>@agy</span>
+                    <span class="k-step" data-i18n="card_65_step">Layout &amp; motion</span>
+                  </div>
+                </button>
+
+                <button type="button" role="tab" aria-selected="false" class="k-card" data-card-id="64">
+                  <div class="k-card-top">
+                    <span class="k-id">#64</span>
+                    <span class="k-status running" data-i18n="status_running">Running</span>
+                  </div>
+                  <div class="k-title" data-i18n="card_64_title">Workflow YAML migration v6</div>
+                  <div class="k-meta">
+                    <span class="k-agent"><span class="k-agent-dot"></span>@codex</span>
+                    <span class="k-step" data-i18n="card_64_step">cargo test --workspace</span>
+                  </div>
+                </button>
+
+                <button type="button" role="tab" aria-selected="false" class="k-card needs-attention" data-card-id="63">
+                  <div class="k-card-top">
+                    <span class="k-id">#63</span>
+                    <span class="k-status attention">▲ <span data-i18n="status_needs_input">Needs Input</span></span>
+                  </div>
+                  <div class="k-title" data-i18n="card_63_title">GitHub App token rotation</div>
+                  <div class="k-meta">
+                    <span class="k-agent"><span class="k-agent-dot amber"></span>@claude</span>
+                    <span class="k-step" data-i18n="card_63_step">Needs human answer</span>
+                  </div>
+                </button>
+
+                <button type="button" role="tab" aria-selected="false" class="k-card" data-card-id="62">
+                  <div class="k-card-top">
+                    <span class="k-id">#62</span>
+                    <span class="k-status running" data-i18n="status_running">Running</span>
+                  </div>
+                  <div class="k-title" data-i18n="card_62_title">Worktree archive GC sweep</div>
+                  <div class="k-meta">
+                    <span class="k-agent"><span class="k-agent-dot"></span>@codex</span>
+                    <span class="k-step" data-i18n="card_62_step">Verifying clean refs</span>
+                  </div>
+                </button>
+              </div>
+
+              <!-- Column 3: Review -->
+              <div class="wb-col">
+                <div class="wb-col-header">
+                  <span class="wb-col-title" data-i18n="col_review">Review</span>
+                  <span class="wb-col-count">2</span>
+                </div>
+
+                <button type="button" role="tab" aria-selected="false" class="k-card" data-card-id="61">
+                  <div class="k-card-top">
+                    <span class="k-id">#61</span>
+                    <span class="k-status ready">✓ <span data-i18n="status_ready">Ready</span></span>
+                  </div>
+                  <div class="k-title" data-i18n="card_61_title">Durable event bus cursor</div>
+                  <div class="k-meta">
+                    <span class="k-agent">@codex</span>
+                    <span class="k-step" data-i18n="card_61_sub">+182 −24 · Queue merge ready</span>
+                  </div>
+                </button>
+
+                <div class="k-card k-card-passive">
+                  <div class="k-card-top">
+                    <span class="k-id">#60</span>
+                    <span class="k-status ready">✓ <span data-i18n="status_ready">Ready</span></span>
+                  </div>
+                  <div class="k-title" data-i18n="card_60_title">Command palette parity</div>
+                  <div class="k-meta">
+                    <span class="k-agent">@agy</span>
+                    <span class="k-step" data-i18n="card_60_sub">+64 −11 · Diff verified</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Right Pane: Attached Card Human Context + Embedded Herdr Terminal -->
+            <aside class="wb-detail" id="wb-detail" aria-live="polite">
+              <div class="wb-detail-header">
+                <div class="wb-detail-top">
+                  <span class="wb-branch-pill">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+                    <span id="detail-branch">canban-0afd/65</span>
+                  </span>
+                  <span class="wb-stage-pill" id="detail-stage">Develop · @agy</span>
+                </div>
+                <h2 class="wb-detail-title" id="detail-title">#65 Website zen layout &amp; i18n</h2>
+              </div>
+
+              <div class="wb-context-pane">
+                <div class="wb-pane-label">
+                  <span data-i18n="detail_context_heading">Human Context &amp; Timeline</span>
+                  <span data-i18n="detail_context_sub">Zero mental reload</span>
+                </div>
+                <div class="wb-timeline" id="detail-timeline">
+                  <div class="wb-tl-item">
+                    <span class="wb-tl-who">user</span>
+                    <span class="wb-tl-text">Emphasize Human Context, Kanban + Herdr workbench, and browser auto-i18n.</span>
+                  </div>
+                  <div class="wb-tl-item is-highlight">
+                    <span class="wb-tl-who">@agy</span>
+                    <span class="wb-tl-text">Adopted v2 wireframe: 4 parallel Develop cards + interactive context pane.</span>
+                  </div>
+                  <div class="wb-tl-item">
+                    <span class="wb-tl-who">workflow</span>
+                    <span class="wb-tl-text">Stage develop active · isolated worktree clean</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="wb-terminal">
+                <div class="wb-term-bar">
+                  <span class="wb-term-session" id="detail-session">hc attach #65:agy</span>
+                  <span class="wb-term-engine">herdr · libghostty</span>
+                </div>
+                <div class="wb-term-body" id="detail-term-body">
+                  <div class="term-line term-cmd">$ canban card show 65 --context</div>
+                  <div class="term-line term-dim">worktree: ~/.canban/worktrees/canban-0afd/65</div>
+                  <div class="term-line term-ok">✓ wrote website/index.html, styles.css, app.js</div>
+                  <div class="term-line">&gt; verifying responsive stage &amp; i18n dictionary<span class="term-cursor" aria-hidden="true"></span></div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- Human Context Contrast                                             -->
+    <!-- ================================================================== -->
+    <section class="zen-section" id="human-context">
+      <div class="container">
+        <div class="section-header reveal">
+          <span class="section-kicker" data-i18n="ctx_kicker">HUMAN CONTEXT</span>
+          <h2 class="section-title" data-i18n="ctx_title">Stop acting as the context router between agents.</h2>
+          <p class="section-desc" data-i18n="ctx_desc">
+            Parallel agents multiply output, but scattered terminal tabs multiply cognitive load. Canban keeps your mind quiet by anchoring every stream of work to a single Card.
+          </p>
+        </div>
+
+        <div class="contrast-grid">
+          <div class="contrast-card reveal">
+            <div class="contrast-head">
+              <span class="contrast-symbol" aria-hidden="true">✕</span>
+              <span data-i18n="contrast_old_title">Parallelism without Human Context</span>
+            </div>
+            <ul class="contrast-list">
+              <li>
+                <span class="contrast-bullet">—</span>
+                <span data-i18n="contrast_old_1">8 scattered terminal tabs—constantly guessing which session belongs to which branch.</span>
+              </li>
+              <li>
+                <span class="contrast-bullet">—</span>
+                <span data-i18n="contrast_old_2">Re-reading scrollback and re-explaining intent every time you switch tasks.</span>
+              </li>
+              <li>
+                <span class="contrast-bullet">—</span>
+                <span data-i18n="contrast_old_3">Your brain acts as the state machine, draining focus on routing instead of decisions.</span>
+              </li>
+            </ul>
+          </div>
+
+          <div class="contrast-card is-canban reveal delay-1">
+            <div class="contrast-head">
+              <span class="contrast-symbol" aria-hidden="true">◯</span>
+              <span data-i18n="contrast_new_title">Parallel calm in Canban</span>
+            </div>
+            <ul class="contrast-list">
+              <li>
+                <span class="contrast-bullet">✓</span>
+                <span data-i18n="contrast_new_1">One Card binds intent, timeline discussion, isolated Git worktree, and persistent PTY.</span>
+              </li>
+              <li>
+                <span class="contrast-bullet">✓</span>
+                <span data-i18n="contrast_new_2">Click a Card to recall its complete story and live terminal in under 200ms.</span>
+              </li>
+              <li>
+                <span class="contrast-bullet">✓</span>
+                <span data-i18n="contrast_new_3">Agents advance quietly in the background and surface gentle notices only when your judgment is needed.</span>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- Three Pillars: Kanban + Workflow + Herdr                           -->
+    <!-- ================================================================== -->
+    <section class="zen-section" id="workbench">
+      <div class="container">
+        <div class="section-header reveal">
+          <span class="section-kicker" data-i18n="pillars_kicker">KANBAN + WORKFLOW + HERDR</span>
+          <h2 class="section-title" data-i18n="pillars_title">Three primitives, one calm workbench.</h2>
+          <p class="section-desc" data-i18n="pillars_desc">
+            Built from the ground up as a unified desktop workbench rather than bolted-on scripts.
+          </p>
+        </div>
+
+        <div class="pillars-grid">
+          <article class="pillar-card reveal">
+            <div>
+              <span class="pillar-index" data-i18n="p1_index">01 · KANBAN</span>
+              <h3 class="pillar-title" data-i18n="p1_title">Lock in Human Context</h3>
+              <p class="pillar-body" data-i18n="p1_body">
+                Every Card holds the task brief, @agent discussions, pasted screenshots, and review disposition in one unified Timeline. Switching Cards switches your entire working context cleanly.
+              </p>
+            </div>
+            <div class="pillar-snippet">
+              <div><span class="hl">Card #65</span> · canban-0afd/65</div>
+              <div>├─ Intent &amp; Resources</div>
+              <div>├─ @agy / @claude Timeline</div>
+              <div>└─ Review Diff &amp; Disposition</div>
+            </div>
+          </article>
+
+          <article class="pillar-card reveal delay-1">
+            <div>
+              <span class="pillar-index" data-i18n="p2_index">02 · WORKFLOW</span>
+              <h3 class="pillar-title" data-i18n="p2_title">Declarative stage flow</h3>
+              <p class="pillar-body" data-i18n="p2_body">
+                Dragging a Card into Develop or @mentioning a profile dispatches the right agent automatically. Explicit CLI outcome reports advance runs into Review and Queue Merge safely.
+              </p>
+            </div>
+            <div class="pillar-snippet">
+              <div>on: <span class="hl">stage.develop</span></div>
+              <div>steps:</div>
+              <div>  - uses: <span class="hl">agent</span> (@developer)</div>
+              <div>  - uses: <span class="hl">deliver</span> (queue_merge)</div>
+            </div>
+          </article>
+
+          <article class="pillar-card reveal delay-2">
+            <div>
+              <span class="pillar-index" data-i18n="p3_index">03 · HERDR TERMINAL</span>
+              <h3 class="pillar-title" data-i18n="p3_title">Persistent sessions &amp; PTYs</h3>
+              <p class="pillar-body" data-i18n="p3_body">
+                Powered by Herdr and native libghostty rendering. Closing the window never kills active runs; attach to any live PTY, answer prompts inline, or resume conversations by exact ID.
+              </p>
+            </div>
+            <div class="pillar-snippet">
+              <div>$ <span class="hl">hc</span> attach card-65:developer</div>
+              <div>pty: alive · exact-ID resume</div>
+              <div>renderer: native libghostty-vt</div>
+              <div>host: local &amp; remote machines</div>
+            </div>
+          </article>
+        </div>
+
+        <div class="flow-loop reveal">
+          <span class="flow-step"><code>Kanban</code> <span data-i18n="loop_1">Intent captured</span></span>
+          <span class="flow-arrow" aria-hidden="true">──►</span>
+          <span class="flow-step"><code>Workflow</code> <span data-i18n="loop_2">Stage &amp; schedule</span></span>
+          <span class="flow-arrow" aria-hidden="true">──►</span>
+          <span class="flow-step"><code>Herdr</code> <span data-i18n="loop_3">Isolated PTY &amp; worktree</span></span>
+          <span class="flow-arrow" aria-hidden="true">──►</span>
+          <span class="flow-step"><code>Deliver</code> <span data-i18n="loop_4">Review &amp; Queue Merge</span></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- Under the Hood: Core Technical Stack                               -->
+    <!-- ================================================================== -->
+    <section class="zen-section" id="stack">
+      <div class="container">
+        <div class="section-header reveal">
+          <span class="section-kicker" data-i18n="stack_kicker">UNDER THE HOOD</span>
+          <h2 class="section-title" data-i18n="stack_title">Grounded in native systems engineering.</h2>
+          <p class="section-desc" data-i18n="stack_desc">
+            Designed for cross-platform longevity—shipping on macOS today, with Linux and Windows on the roadmap.
+          </p>
+        </div>
+
+        <div class="stack-grid">
+          <div class="stack-card reveal">
+            <div class="stack-top">
+              <h3 class="stack-name">Rust</h3>
+              <span class="stack-tag" data-i18n="stack_rust_tag">Core &amp; Engine</span>
+            </div>
+            <p class="stack-desc" data-i18n="stack_rust_desc">
+              End-to-end Rust workspace across Kanban, Workflow Engine, Scheduler, and SQLite WAL storage—instant startup and minimal memory footprint.
+            </p>
+          </div>
+
+          <div class="stack-card reveal delay-1">
+            <div class="stack-top">
+              <h3 class="stack-name">Herdr</h3>
+              <span class="stack-tag" data-i18n="stack_herdr_tag">Session Daemon</span>
+            </div>
+            <p class="stack-desc" data-i18n="stack_herdr_desc">
+              Persistent PTY supervision, live status observation, exact conversation resume, and local or remote machine routing.
+            </p>
+          </div>
+
+          <div class="stack-card reveal delay-2">
+            <div class="stack-top">
+              <h3 class="stack-name">NSH UI</h3>
+              <span class="stack-tag" data-i18n="stack_nsh_tag">Native UI</span>
+            </div>
+            <p class="stack-desc" data-i18n="stack_nsh_desc">
+              Built with NSH UI rather than a heavy web wrapper—delivering crisp 60/120fps responsiveness, keyboard-first Quick Open, and cross-platform evolution.
+            </p>
+          </div>
+
+          <div class="stack-card reveal delay-3">
+            <div class="stack-top">
+              <h3 class="stack-name">libghostty</h3>
+              <span class="stack-tag" data-i18n="stack_ghostty_tag">VT &amp; Rendering</span>
+            </div>
+            <p class="stack-desc" data-i18n="stack_ghostty_desc">
+              Embeds checksum-pinned libghostty-vt for faithful terminal emulation, low-latency input, and clean ANSI palettes right beside each Card.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================================================================== -->
+    <!-- Closing Install Section                                            -->
+    <!-- ================================================================== -->
+    <section class="closing-section" id="install">
+      <div class="container reveal">
+        <h2 class="closing-title" data-i18n="closing_title">Unburden your context. Start building.</h2>
+        <p class="closing-sub" data-i18n="closing_sub">
+          Install Canban in one command, or build directly from source.
+        </p>
+
+        <div class="install-tabs" role="tablist" aria-label="Installation method">
+          <button type="button" role="tab" class="install-tab" data-install-tab="script" aria-selected="true" data-i18n="tab_script">
+            Install Script
+          </button>
+          <button type="button" role="tab" class="install-tab" data-install-tab="source" aria-selected="false" data-i18n="tab_source">
+            Build from Source
+          </button>
+        </div>
+
+        <div class="install-shell">
+          <div class="install-code-wrap">
+            <span class="install-prompt">$</span>
+            <code class="install-cmd" id="closing-install-cmd">curl -fsSL https://canban.dev/install.sh | sh</code>
+          </div>
+          <button
+            type="button"
+            class="copy-btn"
+            id="closing-copy-btn"
+            data-copy-btn
+            data-copy-value="curl -fsSL https://canban.dev/install.sh | sh"
+            aria-label="Copy install command"
+          >
+            <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <svg class="icon-check" style="display:none" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+            <span class="copy-text" data-i18n="copy_label">Copy</span>
+          </button>
+        </div>
+
+        <div class="closing-actions">
+          <a
+            href="https://github.com/jjyr/canban"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="star-pill"
+          >
+            <svg class="star-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M12 2.4l2.93 5.94 6.56.95-4.75 4.63 1.12 6.53L12 17.37l-5.86 3.08 1.12-6.53L2.51 9.29l6.56-.95L12 2.4z"></path>
+            </svg>
+            <span data-i18n="cta_star">Star jjyr/canban on GitHub</span>
+            <span class="star-count"></span>
+          </a>
+
+          <a
+            href="https://github.com/jjyr/canban/tree/main/docs"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="secondary-link"
+            data-i18n="cta_docs"
+          >
+            Read Architecture Docs
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="brand">
+        <img src="./favicon.svg" alt="" class="brand-mark" width="22" height="22">
+        <span>canban.dev</span>
+      </div>
+
+      <div class="footer-links">
+        <a href="https://github.com/jjyr/canban" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a href="https://github.com/jjyr/canban/blob/main/LICENSE" target="_blank" rel="noopener noreferrer" data-i18n="footer_copy">Apache-2.0 License · © 2026 JJy</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>

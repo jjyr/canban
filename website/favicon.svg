@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="100 100 824 824" width="64" height="64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#081320"/>
+      <stop offset="1" stop-color="#020408"/>
+    </linearGradient>
+    <radialGradient id="aura" cx="0.47" cy="0.52" r="0.42">
+      <stop offset="0" stop-color="#00C8F0" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#00C8F0" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="auraO" cx="0.743" cy="0.62" r="0.16">
+      <stop offset="0" stop-color="#FF5A0A" stop-opacity="0.11"/>
+      <stop offset="1" stop-color="#FF5A0A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cyan" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#8CF6FF"/>
+      <stop offset="0.45" stop-color="#2BE4FF"/>
+      <stop offset="1" stop-color="#00B4E6"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFB45E"/>
+      <stop offset="1" stop-color="#FF560A"/>
+    </linearGradient>
+    <clipPath id="squircle"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <g clip-path="url(#squircle)">
+    <rect x="100" y="100" width="824" height="824" fill="url(#aura)"/>
+    <rect x="100" y="100" width="824" height="824" fill="url(#auraO)"/>
+    <polygon points="230,352 326,352 486,512 326,672 230,672 390,512" fill="url(#cyan)"/>
+    <rect x="530" y="604" width="72" height="68" fill="url(#cyan)"/>
+    <rect x="626" y="604" width="72" height="68" fill="url(#cyan)"/>
+    <rect x="722" y="604" width="72" height="68" fill="url(#orange)"/>
+  </g>
+  <rect x="102" y="102" width="820" height="820" rx="183" fill="none" stroke="#3FE6FF" stroke-opacity="0.22" stroke-width="6"/>
+</svg>
