@@ -381,6 +381,8 @@ fn install(j: &mut Journal) -> Result<()> {
     j.save()?;
     std::fs::rename(&j.target, &j.previous)?;
     std::fs::rename(&j.staged, &j.target)?;
+    #[cfg(target_os = "macos")]
+    refresh_bundle_registration(&j.target);
     File::open(j.target.parent().context("App parent missing")?)?.sync_all()?;
     j.phase = "starting".into();
     j.save()?;
@@ -471,6 +473,8 @@ fn rollback(j: &mut Journal) -> Result<()> {
             std::fs::rename(&j.target, failed)?;
         }
         std::fs::rename(&j.previous, &j.target)?;
+        #[cfg(target_os = "macos")]
+        refresh_bundle_registration(&j.target);
         File::open(j.target.parent().context("App parent missing")?)?.sync_all()?;
     }
     j.phase = "restoring".into();
@@ -494,6 +498,19 @@ fn rollback(j: &mut Journal) -> Result<()> {
         eprintln!("Queued Agent reports await retry: {e:#}");
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn refresh_bundle_registration(bundle: &Path) {
+    if let Ok(file) = File::open(bundle) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+    let lsregister = Path::new(
+        "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
+    );
+    if lsregister.is_file() {
+        let _ = Command::new(lsregister).arg("-f").arg(bundle).output();
+    }
 }
 
 fn stop_children(j: &Journal) {

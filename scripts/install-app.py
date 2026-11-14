@@ -75,6 +75,16 @@ try:
         os.rename(dest, backup)
     try:
         os.rename(staged, dest)
+        os.utime(dest, None)
+        lsregister = Path(
+            "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+        )
+        if lsregister.is_file():
+            subprocess.run(
+                [str(lsregister), "-f", str(dest)],
+                check=False,
+                capture_output=True,
+            )
     except Exception:
         if backup is not None and backup.exists() and not dest.exists():
             os.rename(backup, dest)

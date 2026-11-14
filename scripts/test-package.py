@@ -115,6 +115,11 @@ class Packaging(unittest.TestCase):
         )
         marker = dest / "Contents/Resources/old-marker.txt"
         marker.write_text("old\n")
+        stale = 1_700_000_000
+        os.utime(self.root / ".local/Canban.app", (stale, stale))
+        os.utime(dest, (stale, stale))
+        self.package("--release")
+        self.assertGreater((self.root / ".local/Canban.app").stat().st_mtime, stale)
         subprocess.run(
             [sys.executable, str(self.root / "scripts/install-app.py"), "--dest", str(dest)],
             check=True,
@@ -122,6 +127,7 @@ class Packaging(unittest.TestCase):
             text=True,
         )
         self.assertFalse(marker.exists())
+        self.assertGreater(dest.stat().st_mtime, stale)
         subprocess.run(
             ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(dest)],
             check=True,

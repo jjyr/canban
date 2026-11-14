@@ -81,4 +81,5 @@ if instance:
 # Sign only after all binaries, plist and resources have reached their final paths.
 subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", str(app)], check=True)
 subprocess.run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)], check=True)
+os.utime(app, None)
 print(app)
