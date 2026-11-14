@@ -65,22 +65,39 @@ fn card_counts_items_and_project_counts_cards_without_progress_or_own_comments()
 fn counts_count(s: &Snapshot) -> ReminderCount {
     counts(&reminders(s))["c"]
 }
+fn agent_terminal(id: &str, agent: serde_json::Value) -> TerminalEntry {
+    TerminalEntry {
+        id: id.into(),
+        conversation_id: Some(id.into()),
+        number: 1,
+        name: None,
+        manual_number: None,
+        origin_card_id: None,
+        agent_engine: None,
+        runtime: None,
+        agent: Some(serde_json::from_value(agent).unwrap()),
+        created_at: 1,
+    }
+}
 #[test]
 fn report_reply_and_human_gate_share_one_item_even_without_a_resource_file() {
     let mut s = fixture();
-    let a: Attempt = serde_json::from_value(json!({"id":"r","project_id":"p","card_id":"c","number":1,"stage":"review","trigger":"stage_entry","profile":Config::default().profiles[0],"instruction":"Review","state":"completed","created_at":1})).unwrap();
-    s.attempts.push(a);
+    s.terminals.push(agent_terminal(
+        "c:codex",
+        json!({"project_id":"p","card_id":"c","number":1,"stage":"review","trigger":"stage_entry","profile":Config::default().profiles[0],"instruction":"Review","state":"completed","updated_at":1}),
+    ));
     s.cards[0].human_gate = Some(HumanGate {
         reason: "Review needed".into(),
-        attempt_id: Some("r".into()),
+        terminal_id: Some("c:codex".into()),
         next_stage: None,
     });
     reply(&mut s, "report-event", 1);
     s.events[0].kind = "execution.reported".into();
     s.events[0].data =
-        json!({"attempt_id":"r","report_id":"report","state":"completed","path":null});
+        json!({"terminal_id":"c:codex","report_id":"report","state":"completed","path":null});
     reply(&mut s, "echo", 2);
-    s.events[1].data = json!({"attempt_id":"r","report_id":"report","question_id":"q","path":null});
+    s.events[1].data =
+        json!({"terminal_id":"c:codex","report_id":"report","question_id":"q","path":null});
     assert_eq!(
         counts_count(&s),
         ReminderCount {
@@ -128,11 +145,11 @@ fn push_event(
     sequence: u64,
     kind: &str,
     actor: &str,
-    attempt_id: Option<&str>,
+    terminal_id: Option<&str>,
     mut data: serde_json::Value,
 ) {
-    if let Some(aid) = attempt_id {
-        data["attempt_id"] = json!(aid);
+    if let Some(tid) = terminal_id {
+        data["terminal_id"] = json!(tid);
     }
     s.events.push(Event {
         id: id.into(),
@@ -212,19 +229,20 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
     assert!(delivery.observe(&sound_items(&s)).is_empty());
 
     // 1a. Runtime permission/input wait (`wait:*`)
-    let attempt: Attempt = serde_json::from_value(json!({
-        "id":"r1:1","project_id":"p","card_id":"c","number":1,"stage":"develop","trigger":"stage_entry",
-        "profile":Config::default().profiles[0],"instruction":"Dev","state":"running",
-        "terminal":"t1","cwd":"/tmp","input_path":"in","connection_state":"connected",
-        "observed":{"state":"live","status":{"state":"blocked","kind":"permission","title":"Run cmd","msg":"ls"}},
-        "lifecycle":{"observed_at":canban_types::now(),"waiting":{"id":"w1","kind":"permission","title":"Run cmd","message":"ls","since":1}},
-        "created_at":1
-    }))
-    .unwrap();
-    s.attempts.push(attempt);
+    s.terminals.push(agent_terminal(
+        "c:codex",
+        json!({
+            "project_id":"p","card_id":"c","number":1,"stage":"develop","trigger":"stage_entry",
+            "profile":Config::default().profiles[0],"instruction":"Dev","state":"running",
+            "terminal":"t1","cwd":"/tmp","input_path":"in","connection_state":"connected",
+            "observed":{"state":"live","status":{"state":"blocked","kind":"permission","title":"Run cmd","msg":"ls"}},
+            "lifecycle":{"observed_at":canban_types::now(),"waiting":{"id":"w1","kind":"permission","title":"Run cmd","message":"ls","since":1}},
+            "updated_at":1
+        }),
+    ));
     assert_eq!(delivery.observe(&sound_items(&s)), vec!["wait:w1"]);
     // Resolving the wait clears it from active sound_items.
-    s.attempts.clear();
+    s.terminals.clear();
     assert!(sound_items(&s).is_empty());
 
     // 1b. Agent returned to Backlog (`report --state backlog`)
@@ -247,24 +265,25 @@ fn sound_items_cover_permissions_gates_backlog_replies_failures_and_merges() {
     assert_eq!(delivery.observe(&sound_items(&s)), vec!["reply:q-direct"]);
 
     // 1d. Explicit workflow approval / human gate on completed step
-    let att_rev: Attempt = serde_json::from_value(json!({
-        "id":"r2","project_id":"p","card_id":"c","number":1,"stage":"review","trigger":"stage_entry",
-        "profile":Config::default().profiles[0],"instruction":"Rev","state":"completed","created_at":2
-    }))
-    .unwrap();
-    s.attempts.push(att_rev);
+    s.terminals.push(agent_terminal(
+        "c:reviewer",
+        json!({
+            "project_id":"p","card_id":"c","number":1,"stage":"review","trigger":"stage_entry",
+            "profile":Config::default().profiles[0],"instruction":"Rev","state":"completed","updated_at":2
+        }),
+    ));
     push_event(
         &mut s,
         "ev-rev-done",
         3,
         "execution.reported",
         "agent:developer",
-        Some("r2"),
+        Some("c:reviewer"),
         json!({"report_id":"rep-rev","state":"completed"}),
     );
     s.cards[0].human_gate = Some(HumanGate {
         reason: "Approve deployment".into(),
-        attempt_id: Some("r2".into()),
+        terminal_id: Some("c:reviewer".into()),
         next_stage: None,
     });
     assert_eq!(delivery.observe(&sound_items(&s)), vec!["report:rep-rev"]);
@@ -369,36 +388,39 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
     assert!(delivery.observe(&sound_items(&s)).is_empty());
 
     // Interactive Card Agent finishes Turn 1 without closing -> creates pending visual
-    // reminder (`idle:r-int:1:1`), but MUST NOT play a notification sound.
-    let attempt: Attempt = serde_json::from_value(json!({
-        "id":"r-int:1","project_id":"p","card_id":"c","number":1,"stage":"develop","trigger":"interactive",
-        "profile":Config::default().profiles[0],"instruction":"Chat","state":"running",
-        "terminal":"t-int","cwd":"/tmp","input_path":"in","connection_state":"connected",
-        "observed":{"state":"live","turn":1,"status":{"state":"idle"}},
-        "lifecycle":{"observed_at":canban_types::now(),"idle_since":10},
-        "created_at":1
-    }))
-    .unwrap();
-    s.attempts.push(attempt);
+    // reminder (`idle:c:codex:1`), but MUST NOT play a notification sound.
+    s.terminals.push(agent_terminal(
+        "c:codex",
+        json!({
+            "project_id":"p","card_id":"c","number":1,"stage":"develop","trigger":"interactive",
+            "profile":Config::default().profiles[0],"instruction":"Chat","state":"running",
+            "terminal":"t-int","cwd":"/tmp","input_path":"in","connection_state":"connected",
+            "observed":{"state":"live","turn":1,"status":{"state":"idle"}},
+            "lifecycle":{"observed_at":canban_types::now(),"idle_since":10},
+            "updated_at":1
+        }),
+    ));
     assert_eq!(counts_count(&s).pending, 1);
-    assert_eq!(reminders(&s)[0].id, "idle:r-int:1:1");
+    assert_eq!(reminders(&s)[0].id, "idle:c:codex:1");
     assert!(sound_items(&s).is_empty());
 
     // Automatic stage Agent transiently entering `idle` before reporting also stays silent.
-    s.attempts[0].trigger = ExecutionTrigger::parse("stage_entry");
+    s.terminals[0].agent.as_mut().unwrap().trigger = ExecutionTrigger::parse("stage_entry");
     assert_eq!(counts_count(&s).pending, 1);
     assert!(sound_items(&s).is_empty());
-    s.attempts[0].trigger = ExecutionTrigger::parse("interactive");
+    s.terminals[0].agent.as_mut().unwrap().trigger = ExecutionTrigger::parse("interactive");
 
     // User replies -> Agent resumes working -> pending clears.
-    s.attempts[0].observed = Some(json!({"state":"live","turn":2,"status":{"state":"working"}}));
+    s.terminals[0].agent.as_mut().unwrap().observed =
+        Some(json!({"state":"live","turn":2,"status":{"state":"working"}}));
     assert!(reminders(&s).is_empty());
     assert!(sound_items(&s).is_empty());
 
     // Turn 2 finishes (`done`) -> visual pending reminder updates, still silent!
-    s.attempts[0].observed = Some(json!({"state":"live","turn":2,"status":{"state":"done"}}));
+    s.terminals[0].agent.as_mut().unwrap().observed =
+        Some(json!({"state":"live","turn":2,"status":{"state":"done"}}));
     assert_eq!(counts_count(&s).pending, 1);
-    assert_eq!(reminders(&s)[0].id, "idle:r-int:1:2");
+    assert_eq!(reminders(&s)[0].id, "idle:c:codex:2");
     assert!(sound_items(&s).is_empty());
 
     // If the same idle Card also has an unread `@agent` reply, the reply still chimes!
@@ -416,7 +438,7 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
     assert!(sound_items(&s).is_empty());
 
     // Once reported `completed`, the live idle terminal becomes quiet (no pending reminder or sound).
-    s.attempts[0].state = "completed".into();
+    s.terminals[0].agent.as_mut().unwrap().state = "completed".into();
     assert!(reminders(&s).is_empty());
     assert!(sound_items(&s).is_empty());
 
@@ -441,23 +463,24 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
             agent_status: Some("idle".into()),
             agent_turn: Some(0),
         }),
+        agent: None,
         created_at: 2,
     });
     assert!(sound_items(&s).is_empty());
 
-    s.terminals[0].runtime.as_mut().unwrap().agent_turn = Some(1);
+    s.terminals[1].runtime.as_mut().unwrap().agent_turn = Some(1);
     assert!(sound_items(&s).is_empty());
 
-    s.terminals[0].runtime.as_mut().unwrap().agent_status = Some("done".into());
+    s.terminals[1].runtime.as_mut().unwrap().agent_status = Some("done".into());
     assert!(sound_items(&s).is_empty());
 
-    s.terminals[0].runtime.as_mut().unwrap().agent_status = Some("blocked".into());
+    s.terminals[1].runtime.as_mut().unwrap().agent_status = Some("blocked".into());
     assert_eq!(
         delivery.observe(&sound_items(&s)),
         vec!["terminal-attn:ephemeral-agy:blocked"]
     );
 
-    s.terminals[0].runtime.as_mut().unwrap().agent_status = Some("error".into());
+    s.terminals[1].runtime.as_mut().unwrap().agent_status = Some("error".into());
     assert_eq!(
         delivery.observe(&sound_items(&s)),
         vec!["terminal-attn:ephemeral-agy:error"]

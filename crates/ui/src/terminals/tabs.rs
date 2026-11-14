@@ -63,17 +63,14 @@ pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
     }
     if let Some(agent) = &e.agent {
         if agent
-            .attempt
-            .as_ref()
+            .agent()
             .is_some_and(|a| !a.finished() && a.terminal.is_some())
             && e.card.as_ref().is_some_and(|c| c.archived_at.is_none())
         {
-            let attempt = agent.attempt.as_ref().unwrap().id.clone();
-            items.push(
-                MenuItem::new("Interrupt").on_select(move || {
-                    dispatch(ui, "agent.interrupt", json!({"attempt_id":attempt}))
-                }),
-            );
+            let terminal_id = e.saved.id.clone();
+            items.push(MenuItem::new("Interrupt").on_select(move || {
+                dispatch(ui, "agent.interrupt", json!({"terminal_id":terminal_id}))
+            }));
         }
         items.push(
             MenuItem::new("Context and execution history").on_select(move || {

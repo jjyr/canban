@@ -74,34 +74,30 @@ pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<
         .into_iter()
         .filter(|row| row.card.active() && !row.card.merged())
     {
-        let Some(att) = &row.attempt else {
+        let Some((profile_id, command_name)) = row
+            .agent()
+            .map(|att| (att.profile.id.clone(), att.profile.command_name()))
+        else {
             continue;
         };
-        let title = format!(
-            "@{} · #{} {}",
-            att.profile.id, row.card.number, row.card.title
+        let title = format!("@{} · #{} {}", profile_id, row.card.number, row.card.title);
+        let detail = format!(
+            "Agent · {} · {} · {}",
+            row.project_name,
+            row.card.stage,
+            format_args!(
+                "{} · {}",
+                row.group,
+                crate::terminals::navigation::label(&row)
+            )
         );
         rows.push(Candidate {
             id: format!("agent:{}", row.id),
             title: title.clone(),
-            detail: format!(
-                "Agent · {} · {} · {}",
-                row.project_name,
-                row.card.stage,
-                format_args!(
-                    "{} · {}",
-                    row.group,
-                    crate::terminals::navigation::label(&row)
-                )
-            ),
+            detail,
             kind: "Agent",
             target: Target::Agent(row.id),
-            fields: vec![
-                title,
-                row.project_name,
-                att.profile.command_name(),
-                row.group,
-            ],
+            fields: vec![title, row.project_name, command_name, row.group],
             tags: Vec::new(),
         });
     }

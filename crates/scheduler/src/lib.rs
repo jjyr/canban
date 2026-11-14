@@ -1,5 +1,7 @@
 use anyhow::Result;
-use canban_types::{Attempt, Config, ExecutionTrigger, Lifecycle, Profile, Project, id, now};
+use canban_types::{
+    AgentRun, Config, ExecutionTrigger, Lifecycle, Profile, Project, TerminalEntry, now,
+};
 /// Resolve an explicit profile ID, otherwise the global default.
 pub fn select(config: &Config, explicit: Option<&str>) -> Result<Profile> {
     select_in_project(config, None, explicit)
@@ -40,7 +42,7 @@ pub fn select_for_stage_in_project(
     select_in_project(config, project, explicit.or(stage_profile))
 }
 #[allow(clippy::too_many_arguments)]
-pub fn attempt(
+pub fn agent_run(
     project: &str,
     card: &str,
     number: u32,
@@ -49,11 +51,11 @@ pub fn attempt(
     profile: Profile,
     instruction: String,
     on_completed: Option<String>,
-) -> Attempt {
-    Attempt {
+) -> AgentRun {
+    AgentRun {
         workflow_run_id: None,
         workflow_step: None,
-        resume_from: None,
+        resume_session: false,
         trigger: trigger.into(),
         stage: stage.into(),
         profile,
@@ -65,7 +67,6 @@ pub fn attempt(
         location: None,
         owner_core_id: None,
         lifecycle: Lifecycle::default(),
-        id: id(),
         project_id: project.into(),
         card_id: card.into(),
         number,
@@ -77,8 +78,7 @@ pub fn attempt(
         output_path: None,
         observed: None,
         error: None,
-        created_at: now(),
-        conversation_id: None,
+        updated_at: now(),
         provider_session_id: None,
         close_state: String::new(),
         turn_ended_at: None,
@@ -87,6 +87,7 @@ pub fn attempt(
         completion_turn: None,
         close_requested_at: None,
         connection_state: String::new(),
+        pending: None,
     }
 }
 
@@ -94,8 +95,9 @@ pub fn attempt(
 /// Verified waits and idle states release slots; unknown launches reserve them.
 pub fn active_count(snapshot: &canban_types::Snapshot) -> usize {
     let bound = snapshot
-        .attempts
+        .terminals
         .iter()
+        .filter_map(|t| t.agent.as_ref())
         .filter(|a| {
             (a.terminal.is_some()
                 && !a.finished()
@@ -119,92 +121,113 @@ pub fn active_count(snapshot: &canban_types::Snapshot) -> usize {
             })
             .count()
 }
-pub fn automatic(attempt: &Attempt) -> bool {
-    attempt.trigger.is_automatic()
+pub fn automatic(agent: &AgentRun) -> bool {
+    agent.trigger.is_automatic()
 }
-/// A completed, idle invocation may take another assignment in the same environment.
-pub fn retained<'a>(
-    snapshot: &'a canban_types::Snapshot,
-    attempt: &Attempt,
-) -> Option<&'a canban_types::Attempt> {
-    let location = attempt.location.clone().or_else(|| {
+/// True when `entry` holds a live, completed, idle PTY that can accept a queued `pending`
+/// assignment in-place without spawning a new PTY.
+pub fn can_continue_in_place(snapshot: &canban_types::Snapshot, entry: &TerminalEntry) -> bool {
+    let Some(agent) = entry.agent.as_ref() else {
+        return false;
+    };
+    let Some(pending) = agent.pending.as_ref() else {
+        return false;
+    };
+    let expected_location = agent.location.clone().or_else(|| {
         snapshot
             .projects
             .iter()
-            .find(|p| p.id == attempt.project_id)
+            .find(|p| p.id == agent.project_id)
             .map(|p| p.work_location())
     });
-    snapshot.attempts.iter().rev().find(|a| {
-        a.id != attempt.id
-            && a.card_id == attempt.card_id
-            && a.terminal.is_some()
-            && a.close_state.is_empty()
-            && !a.finished()
-            && a.location == location
-            && a.connection_state == "connected"
-            && matches!(a.runtime_status(), "idle" | "done")
-            && matches!(a.state.as_str(), "completed" | "backlog")
-            && a.profile.id == attempt.profile.id
-            && a.profile.command_name() == attempt.profile.command_name()
-            && !snapshot
-                .questions
-                .iter()
-                .any(|q| q.attempt_id.as_deref() == Some(&a.id) && q.state != "replied")
-    })
+    agent.terminal.is_some()
+        && agent.close_state.is_empty()
+        && !agent.finished()
+        && agent.location == expected_location
+        && agent.connection_state == "connected"
+        && matches!(agent.runtime_status(), "idle" | "done")
+        && matches!(agent.state.as_str(), "completed" | "backlog")
+        && agent.profile.id == pending.profile.id
+        && agent.profile.command_name() == pending.profile.command_name()
+        && !snapshot
+            .questions
+            .iter()
+            .any(|q| q.terminal_id.as_deref() == Some(entry.id.as_str()) && q.state != "replied")
 }
-pub fn eligible(snapshot: &canban_types::Snapshot, attempt: &Attempt) -> bool {
-    if attempt.state != "queued" {
-        return false;
+fn queued_meta(agent: &AgentRun) -> Option<(&str, &ExecutionTrigger, Option<&str>, u64)> {
+    if let Some(p) = &agent.pending {
+        Some((
+            &p.stage,
+            &p.trigger,
+            p.workflow_run_id.as_deref(),
+            p.queued_at,
+        ))
+    } else if agent.state == "queued" {
+        Some((
+            &agent.stage,
+            &agent.trigger,
+            agent.workflow_run_id.as_deref(),
+            agent.updated_at,
+        ))
+    } else {
+        None
     }
-    let Some(card) = snapshot.cards.iter().find(|c| c.id == attempt.card_id) else {
+}
+pub fn eligible(snapshot: &canban_types::Snapshot, entry: &TerminalEntry) -> bool {
+    let Some(agent) = entry.agent.as_ref() else {
+        return false;
+    };
+    let Some((stage, trigger, workflow_run_id, _)) = queued_meta(agent) else {
+        return false;
+    };
+    let Some(card) = snapshot.cards.iter().find(|c| c.id == agent.card_id) else {
         return false;
     };
     if card.removed_at.is_some()
         || card.archived_at.is_some()
-        || (automatic(attempt)
+        || (trigger.is_automatic()
             && (card.merged()
                 || card.human_gate.is_some()
                 || card.attention.is_some()
-                || card.stage != attempt.stage))
+                || card.stage != stage))
     {
         return false;
     }
-    if automatic(attempt)
-        && let Some(id) = &attempt.workflow_run_id
+    if trigger.is_automatic()
+        && let Some(id) = workflow_run_id
         && !snapshot.workflow_runs.iter().any(|r| {
-            r.id == *id
+            r.id == id
                 && r.active()
-                && r.attempt_id.as_deref() == Some(&attempt.id)
+                && r.terminal_id.as_deref() == Some(entry.id.as_str())
                 && r.state == "waiting_agent"
         })
     {
         return false;
     }
-    let retained = retained(snapshot, attempt).map(|a| a.id.as_str());
-    !snapshot.attempts.iter().any(|a| {
-        a.id != attempt.id
-            && a.card_id == attempt.card_id
-            && a.profile.id == attempt.profile.id
-            && retained != Some(a.id.as_str())
-            && ((!a.finished() && a.terminal.is_some()) || a.state == "unknown")
-    })
+    if agent.pending.is_some() {
+        can_continue_in_place(snapshot, entry) || agent.finished() || agent.terminal.is_none()
+    } else {
+        (agent.finished() || agent.terminal.is_none()) && agent.state != "unknown"
+    }
 }
-pub fn next(snapshot: &canban_types::Snapshot, max_agents: usize) -> Option<Attempt> {
+pub fn next(snapshot: &canban_types::Snapshot, max_agents: usize) -> Option<TerminalEntry> {
     if active_count(snapshot) >= max_agents {
         return None;
     }
     snapshot
-        .attempts
+        .terminals
         .iter()
-        .filter(|a| eligible(snapshot, a))
-        .min_by_key(|a| {
+        .filter(|t| eligible(snapshot, t))
+        .min_by_key(|t| {
+            let a = t.agent.as_ref().unwrap();
+            let (stage, _, _, queued_at) = queued_meta(a).unwrap();
             let depth = snapshot
                 .projects
                 .iter()
                 .find(|p| p.id == a.project_id)
-                .and_then(|p| p.workflow.stages.iter().position(|s| s.id == a.stage))
+                .and_then(|p| p.workflow.stages.iter().position(|s| s.id == stage))
                 .unwrap_or(0);
-            (std::cmp::Reverse(depth), a.created_at)
+            (std::cmp::Reverse(depth), queued_at)
         })
         .cloned()
 }
@@ -214,9 +237,9 @@ pub fn admissions(snapshot: &canban_types::Snapshot, max_agents: usize) -> Vec<S
     use canban_types::WorkflowStep;
     let card = |id: &str| snapshot.cards.iter().find(|c| c.id == id);
     let queued = snapshot
-        .attempts
+        .terminals
         .iter()
-        .filter(|a| eligible(snapshot, a))
+        .filter(|t| eligible(snapshot, t))
         .count();
     let mut free = max_agents.saturating_sub(active_count(snapshot) + queued);
     // (project, workflow, gate step, column) -> admitted Cards still in that column.

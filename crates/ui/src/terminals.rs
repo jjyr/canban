@@ -231,6 +231,7 @@ fn gallery_create_entry(
         ),
         origin_card_id: card_id.clone(),
         agent_engine,
+        agent: None,
         created_at: 0,
         runtime: Some(canban_types::TerminalRuntime {
             machine: "local".into(),
@@ -566,19 +567,14 @@ pub fn close_entry_confirmed(ui: Ui, id: &str) {
     ui.terminal_close_confirm.set(None);
     if crate::APP.get().is_none() {
         // A static Gallery has no runtime; simulate the same closed outcome.
-        let entry = entries(&ui.snapshot.get_untracked())
-            .into_iter()
-            .find(|e| e.saved.id == id);
         ui.snapshot.update(|s| {
-            if let Some(t) = s.terminals.iter_mut().find(|t| t.id == id)
-                && let Some(runtime) = &mut t.runtime
-            {
-                runtime.state = "finished".into();
-            }
-            if let Some(attempt) = entry.and_then(|e| e.agent).and_then(|r| r.attempt)
-                && let Some(run) = s.attempts.iter_mut().find(|a| a.id == attempt.id)
-            {
-                run.observed = Some(json!({"state":"finished"}));
+            if let Some(t) = s.terminals.iter_mut().find(|t| t.id == id) {
+                if let Some(runtime) = &mut t.runtime {
+                    runtime.state = "finished".into();
+                }
+                if let Some(run) = &mut t.agent {
+                    run.observed = Some(json!({"state":"finished"}));
+                }
             }
         });
         remove_tab(ui, id);

@@ -1,21 +1,22 @@
 use super::*;
 fn fixture() -> Snapshot {
     let mut s = Snapshot::default();
-    for (project, card) in [("p1", "c1"), ("p2", "c2")] {
+    for (idx, (project, card)) in [("p1", "c1"), ("p2", "c2")].into_iter().enumerate() {
         s.projects.push(serde_json::from_value(json!({"id":project,"name":project,"directory":"/tmp/project","workflow":Workflow::default(),"created_at":1})).unwrap());
         s.cards.push(serde_json::from_value(json!({"id":card,"project_id":project,"number":1,"title":"Same title","body":"","stage":"develop","revision":1,"created_at":1})).unwrap());
-        let mut a = canban_scheduler::attempt(
+        let profile = Config::default().profiles[0].clone();
+        let tid = Conversation::key(card, &profile.id);
+        let mut a = canban_scheduler::agent_run(
             project,
             card,
             1,
             "develop",
             "interactive",
-            Config::default().profiles[0].clone(),
+            profile,
             "task".into(),
             None,
         );
-        a.id = format!("run-{card}");
-        a.created_at = 1;
+        a.updated_at = 1;
         a.state = "running".into();
         a.core_id = Some("core".into());
         a.terminal = Some(format!("t-{card}"));
@@ -23,20 +24,42 @@ fn fixture() -> Snapshot {
         a.input_path = "input".into();
         a.observed = Some(json!({"state":"live","status":{"state":"working"}}));
         a.provider_session_id = Some(format!("provider-{card}"));
-        s.attempts.push(a);
+        s.terminals.push(TerminalEntry {
+            id: tid.clone(),
+            conversation_id: Some(tid),
+            number: idx as u64 + 1,
+            name: None,
+            manual_number: None,
+            origin_card_id: Some(card.into()),
+            agent_engine: None,
+            runtime: None,
+            agent: Some(a),
+            created_at: 1,
+        });
     }
     s
 }
 #[test]
 fn tree_keeps_projects_and_profiles_distinct_and_excludes_unassigned_recovery() {
     let mut s = fixture();
-    let mut att = s.attempts[0].clone();
-    att.id = "reviewer".into();
+    let mut att = s.terminals[0].agent.clone().unwrap();
     att.profile.id = "reviewer".into();
     att.state = "queued".into();
     att.terminal = None;
     att.observed = None;
-    s.attempts.push(att);
+    let rev_id = Conversation::key("c1", "reviewer");
+    s.terminals.push(TerminalEntry {
+        id: rev_id.clone(),
+        conversation_id: Some(rev_id),
+        number: 3,
+        name: None,
+        manual_number: None,
+        origin_card_id: Some("c1".into()),
+        agent_engine: None,
+        runtime: None,
+        agent: Some(att),
+        created_at: 1,
+    });
     let mut recovery = s.cards[0].clone();
     recovery.id = "unassigned".into();
     recovery.attention = Some("No profile".into());
@@ -51,34 +74,43 @@ fn tree_keeps_projects_and_profiles_distinct_and_excludes_unassigned_recovery() 
 #[test]
 fn live_invocation_precedes_queued_followup_and_resume_keeps_identity() {
     let mut s = fixture();
-    let key = Conversation::key("c1", "codex");
-    let mut next = s.attempts[0].clone();
-    next.id = "followup".into();
-    next.number = 2;
-    next.created_at = 2;
-    next.state = "queued".into();
-    next.terminal = None;
-    next.observed = None;
-    s.attempts.push(next);
+    let key = Conversation::key("c1", &Config::default().profiles[0].id);
+    s.terminals[0].agent.as_mut().unwrap().pending = Some(QueuedAssignment {
+        stage: "develop".into(),
+        trigger: "comment".into(),
+        profile: s.terminals[0].agent.as_ref().unwrap().profile.clone(),
+        instruction: "followup".into(),
+        on_completed: None,
+        require_human_review: false,
+        workflow_run_id: None,
+        workflow_step: None,
+        queued_at: 2,
+    });
     let row = conversations(&s).into_iter().find(|r| r.id == key).unwrap();
-    assert_eq!(row.attempt.unwrap().id, "run-c1");
-    s.attempts[0].observed = Some(json!({"state":"finished"}));
+    assert_eq!(row.agent().unwrap().number, 1);
+    assert_eq!(binding(&row).unwrap()["terminal"], "t-c1");
+    let run = s.terminals[0].agent.as_mut().unwrap();
+    run.observed = Some(json!({"state":"finished"}));
+    run.promote_pending();
+    run.number = 2;
     let row = conversations(&s).into_iter().find(|r| r.id == key).unwrap();
-    assert_eq!(row.attempt.as_ref().unwrap().id, "followup");
+    assert_eq!(row.agent().unwrap().number, 2);
     assert!(!closed(&row));
     assert!(binding(&row).is_none());
-    let f = s.attempts.iter_mut().find(|a| a.id == "followup").unwrap();
+    let f = s.terminals[0].agent.as_mut().unwrap();
     f.state = "running".into();
+    f.core_id = Some("core".into());
+    f.connection_state = "connected".into();
     f.terminal = Some("new-terminal".into());
     f.observed = Some(json!({"state":"live"}));
     let row = conversations(&s).into_iter().find(|r| r.id == key).unwrap();
     assert_eq!(binding(&row).unwrap()["terminal"], "new-terminal");
-    assert_eq!(row.history.len(), 2);
+    assert_eq!(row.id, key);
 }
 #[test]
 fn closed_archived_and_missing_bindings_never_create_viewers_or_implicit_resume() {
     let mut s = fixture();
-    s.attempts[0].observed = Some(json!({"state":"finished"}));
+    s.terminals[0].agent.as_mut().unwrap().observed = Some(json!({"state":"finished"}));
     let mut profiles = Config::default().profiles;
     profiles[0].resume_argv = Some(vec!["resume".into()]);
     let row = conversations(&s)
@@ -96,22 +128,18 @@ fn closed_archived_and_missing_bindings_never_create_viewers_or_implicit_resume(
         .unwrap();
     assert!(!can_resume(&row, &profiles));
     assert!(binding(&row).is_none());
-    s.attempts[1].core_id = None;
+    s.terminals[1].agent.as_mut().unwrap().core_id = None;
     let row = conversations(&s)
         .into_iter()
         .find(|r| r.card.id == "c2")
         .unwrap();
     assert!(binding(&row).is_none());
-    assert_eq!(s.attempts.len(), 2);
+    assert_eq!(s.terminals.len(), 2);
 }
 #[test]
 fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() {
     let mut s = fixture();
-    s.terminals = crate::terminals::entries(&s)
-        .into_iter()
-        .map(|e| e.saved)
-        .collect();
-    let key = Conversation::key("c1", "codex");
+    let key = Conversation::key("c1", &Config::default().profiles[0].id);
     let label = s.terminals.iter().find(|t| t.id == key).unwrap().number;
     s.terminals.push(TerminalEntry {
         id: "manual".into(),
@@ -132,6 +160,7 @@ fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() 
             agent_status: None,
             agent_turn: None,
         }),
+        agent: None,
         created_at: 0,
     });
     let rows = crate::terminals::entries(&s);
@@ -140,7 +169,7 @@ fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() 
     assert!(shell.card.is_none());
     assert!(shell.agent.is_none());
     assert_eq!(shell.binding().unwrap()["terminal"], "shell-pty");
-    s.attempts[0].terminal = Some("resumed-pty".into());
+    s.terminals[0].agent.as_mut().unwrap().terminal = Some("resumed-pty".into());
     let row = crate::terminals::entries(&s)
         .into_iter()
         .find(|e| e.saved.id == key)
@@ -156,7 +185,7 @@ fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() 
         .unwrap();
     assert!(ended.ended());
     assert!(ended.binding().is_none());
-    assert_eq!(s.attempts.len(), 2);
+    assert_eq!(s.terminals.len(), 3);
 }
 #[test]
 fn workspace_shortcuts_are_valid_nsh_keystrokes() {
@@ -168,10 +197,6 @@ fn workspace_shortcuts_are_valid_nsh_keystrokes() {
 #[test]
 fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agent_assignment() {
     let mut s = fixture();
-    s.terminals = crate::terminals::entries(&s)
-        .into_iter()
-        .map(|e| e.saved)
-        .collect();
     let agent = s.terminals[0].id.clone();
     let shell = TerminalEntry {
         id: "shell".into(),
@@ -192,6 +217,7 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
             agent_status: None,
             agent_turn: None,
         }),
+        agent: None,
         created_at: 0,
     };
     s.terminals.push(shell.clone());
@@ -242,8 +268,10 @@ fn automatic_labels_follow_execution_stage_and_profile_without_changing_binding(
     let mut s = fixture();
     s.cards[0].stage = "review".into();
     s.cards[0].title = "非常长的任务标题 / a long task title with important details".repeat(8);
-    s.attempts[0].profile.id = "developer".into();
     let key = Conversation::key("c1", "developer");
+    s.terminals[0].id = key.clone();
+    s.terminals[0].conversation_id = Some(key.clone());
+    s.terminals[0].agent.as_mut().unwrap().profile.id = "developer".into();
     let entry = crate::terminals::entries(&s)
         .into_iter()
         .find(|e| e.saved.id == key)
@@ -254,7 +282,6 @@ fn automatic_labels_follow_execution_stage_and_profile_without_changing_binding(
     assert_eq!(entry.profile(), Some("developer"));
     assert_eq!(entry.provider().unwrap().0, Icon::Codex);
     assert!(entry.hint().contains(&s.cards[0].title));
-    s.terminals.push(entry.saved.clone());
     s.terminals[0].name = Some("My review desk".into());
     let named = crate::terminals::entries(&s)
         .into_iter()
@@ -263,14 +290,15 @@ fn automatic_labels_follow_execution_stage_and_profile_without_changing_binding(
     assert_eq!(named.title(), "My review desk");
     assert_eq!(named.binding(), binding);
     s.terminals[0].name = None;
-    s.attempts[0].profile.argv = Some(vec!["/opt/bin/claude".into()]);
+    s.terminals[0].agent.as_mut().unwrap().profile.argv = Some(vec!["/opt/bin/claude".into()]);
     let entry = crate::terminals::entries(&s)
         .into_iter()
         .find(|e| e.saved.id == key)
         .unwrap();
     assert_eq!(entry.provider().unwrap().0, Icon::Claude);
-    s.attempts[0].profile.preset = None;
-    s.attempts[0].profile.argv = Some(vec!["my-agent".into()]);
+    let prof = &mut s.terminals[0].agent.as_mut().unwrap().profile;
+    prof.preset = None;
+    prof.argv = Some(vec!["my-agent".into()]);
     let entry = crate::terminals::entries(&s)
         .into_iter()
         .find(|e| e.saved.id == key)
@@ -281,7 +309,7 @@ fn automatic_labels_follow_execution_stage_and_profile_without_changing_binding(
 #[test]
 fn input_gating_has_a_specific_lifecycle_label_and_keeps_binding_identity() {
     let mut s = fixture();
-    let key = Conversation::key("c1", "codex");
+    let key = Conversation::key("c1", &Config::default().profiles[0].id);
     for (connection, close, label) in [
         ("connecting", "", "Connecting"),
         ("unavailable", "", "Disconnected"),
@@ -289,23 +317,36 @@ fn input_gating_has_a_specific_lifecycle_label_and_keeps_binding_identity() {
         ("connected", "pending", "Closing"),
         ("connected", "", ""),
     ] {
-        s.attempts[0].connection_state = connection.into();
-        s.attempts[0].close_state = close.into();
+        let a = s.terminals[0].agent.as_mut().unwrap();
+        a.connection_state = connection.into();
+        a.close_state = close.into();
         let row = conversations(&s).into_iter().find(|r| r.id == key).unwrap();
         let b = binding(&row).unwrap();
         assert_eq!(b["input_status"].as_str().unwrap(), label);
         assert_eq!(b["read_only"], !label.is_empty());
-        assert_eq!(b["terminal"], s.attempts[0].terminal.as_deref().unwrap());
+        assert_eq!(
+            b["terminal"],
+            s.terminals[0]
+                .agent
+                .as_ref()
+                .unwrap()
+                .terminal
+                .as_deref()
+                .unwrap()
+        );
     }
 }
 
 #[test]
 fn inactive_is_a_live_unattended_conversation_and_closed_entries_leave_inventory() {
     let mut s = fixture();
-    s.attempts[0].state = "completed".into();
-    s.attempts[0].observed = Some(json!({"state":"live","status":{"state":"done"}}));
-    s.attempts[0].connection_state = "connected".into();
-    s.attempts[0].lifecycle.observed_at = Some(now());
+    {
+        let a = s.terminals[0].agent.as_mut().unwrap();
+        a.state = "completed".into();
+        a.observed = Some(json!({"state":"live","status":{"state":"done"}}));
+        a.connection_state = "connected".into();
+        a.lifecycle.observed_at = Some(now());
+    }
     let entry = |s: &Snapshot| {
         super::super::entries(s)
             .into_iter()
@@ -315,16 +356,21 @@ fn inactive_is_a_live_unattended_conversation_and_closed_entries_leave_inventory
     assert!(entry(&s).listed());
     assert!(entry(&s).inactive());
     // Immediate state update: recent interaction does not pin a finished idle Agent as active.
-    s.attempts[0].lifecycle.last_interaction_at = Some(now());
+    s.terminals[0]
+        .agent
+        .as_mut()
+        .unwrap()
+        .lifecycle
+        .last_interaction_at = Some(now());
     assert!(entry(&s).inactive());
     assert!(!entry(&s).needs_attention());
     // Unfinished assignment sitting idle requires user inspection instead of silent inactive state.
-    s.attempts[0].state = "running".into();
+    s.terminals[0].agent.as_mut().unwrap().state = "running".into();
     assert!(entry(&s).needs_attention());
     assert!(!entry(&s).inactive());
-    s.attempts[0].observed = Some(json!({"state":"finished"}));
+    s.terminals[0].agent.as_mut().unwrap().observed = Some(json!({"state":"finished"}));
     assert!(!entry(&s).listed());
-    s.attempts[0].observed = Some(json!({"state":"live"}));
+    s.terminals[0].agent.as_mut().unwrap().observed = Some(json!({"state":"live"}));
     s.cards[0].archived_at = Some(now());
     assert!(!entry(&s).listed());
 }
@@ -333,11 +379,22 @@ fn inactive_is_a_live_unattended_conversation_and_closed_entries_leave_inventory
 fn card_destination_requires_choice_and_remembers_only_live_selection() {
     use crate::terminals::{entries, navigation::direct};
     let mut s = fixture();
-    let mut a = s.attempts[0].clone();
-    a.id = "second-attempt".into();
+    let mut a = s.terminals[0].agent.clone().unwrap();
     a.profile.id = "reviewer".into();
     a.terminal = Some("second-pty".into());
-    s.attempts.push(a);
+    let preferred = Conversation::key("c1", "reviewer");
+    s.terminals.push(TerminalEntry {
+        id: preferred.clone(),
+        conversation_id: Some(preferred.clone()),
+        number: 3,
+        name: None,
+        manual_number: None,
+        origin_card_id: Some("c1".into()),
+        agent_engine: None,
+        runtime: None,
+        agent: Some(a),
+        created_at: 2,
+    });
     let card_entries = |s: &Snapshot| {
         entries(s)
             .into_iter()
@@ -346,53 +403,61 @@ fn card_destination_requires_choice_and_remembers_only_live_selection() {
     };
     let rows = card_entries(&s);
     assert_eq!(direct(&rows, None), None);
-    let preferred = Conversation::key("c1", "reviewer");
     assert_eq!(direct(&rows, Some(&preferred)), Some(preferred.clone()));
     // Disconnection retains the original target; exit invalidates the preference.
-    s.attempts.last_mut().unwrap().connection_state = "unavailable".into();
+    s.terminals
+        .last_mut()
+        .unwrap()
+        .agent
+        .as_mut()
+        .unwrap()
+        .connection_state = "unavailable".into();
     assert_eq!(
         direct(&card_entries(&s), Some(&preferred)),
         Some(preferred.clone())
     );
-    s.attempts.last_mut().unwrap().observed = Some(json!({"state":"finished"}));
+    s.terminals
+        .last_mut()
+        .unwrap()
+        .agent
+        .as_mut()
+        .unwrap()
+        .observed = Some(json!({"state":"finished"}));
     assert_eq!(
         direct(&card_entries(&s), Some(&preferred)),
-        Some(Conversation::key("c1", "codex"))
+        Some(Conversation::key("c1", &Config::default().profiles[0].id))
     );
-    s.attempts[0].terminal = None;
+    s.terminals[0].agent.as_mut().unwrap().terminal = None;
     assert_eq!(direct(&card_entries(&s), Some(&preferred)), None);
 }
 
 #[test]
-fn historical_request_never_attaches_to_a_newer_profile_invocation() {
+fn closed_terminal_never_attaches_until_reopened_in_place() {
     use crate::terminals::navigation::live_request;
     let mut s = fixture();
-    let original = s.attempts[0].id.clone();
+    let original = s.terminals[0].id.clone();
     assert!(live_request(&s, &original).is_some());
-    s.attempts[0].observed = Some(json!({"state":"finished"}));
-    let mut attempt = s.attempts[0].clone();
-    attempt.id = "new-attempt".into();
-    attempt.number = 2;
-    attempt.created_at = 2;
-    attempt.observed = Some(json!({"state":"live","status":{"state":"working"}}));
-    s.attempts.push(attempt);
+    s.terminals[0].agent.as_mut().unwrap().observed = Some(json!({"state":"finished"}));
     assert_eq!(live_request(&s, &original), None);
-    assert!(live_request(&s, "new-attempt").is_some());
-    assert_eq!(live_request(&s, "removed-attempt"), None);
+    {
+        let a = s.terminals[0].agent.as_mut().unwrap();
+        a.number = 2;
+        a.updated_at = 2;
+        a.observed = Some(json!({"state":"live","status":{"state":"working"}}));
+    }
+    assert!(live_request(&s, &original).is_some());
+    assert_eq!(live_request(&s, "removed-terminal"), None);
 }
 
 #[test]
 fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells() {
     use canban_ui_kit::Icon;
     let mut s = fixture();
-    s.terminals = crate::terminals::entries(&s)
-        .into_iter()
-        .map(|e| e.saved)
-        .collect();
+    let prof_id = Config::default().profiles[0].id.clone();
     s.terminals.push(TerminalEntry {
         id: "agent-ephemeral".into(),
         conversation_id: None,
-        number: 2,
+        number: 3,
         name: None,
         manual_number: Some(1),
         origin_card_id: Some("c1".into()),
@@ -408,12 +473,13 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             agent_status: None,
             agent_turn: None,
         }),
+        agent: None,
         created_at: 2,
     });
     s.terminals.push(TerminalEntry {
         id: "shell-backlog".into(),
         conversation_id: None,
-        number: 3,
+        number: 4,
         name: None,
         manual_number: Some(2),
         origin_card_id: Some("c1".into()),
@@ -429,12 +495,13 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             agent_status: None,
             agent_turn: None,
         }),
+        agent: None,
         created_at: 3,
     });
     s.terminals.push(TerminalEntry {
         id: "shell-ended".into(),
         conversation_id: None,
-        number: 4,
+        number: 5,
         name: None,
         manual_number: Some(3),
         origin_card_id: Some("c1".into()),
@@ -450,6 +517,7 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             agent_status: None,
             agent_turn: None,
         }),
+        agent: None,
         created_at: 4,
     });
 
@@ -458,7 +526,7 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
     assert_eq!(
         ids,
         vec![
-            Conversation::key("c1", "codex").as_str(),
+            Conversation::key("c1", &prof_id).as_str(),
             "agent-ephemeral",
             "shell-backlog",
         ]
@@ -497,14 +565,11 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
 #[test]
 fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
     let mut s = fixture();
-    s.terminals = crate::terminals::entries(&s)
-        .into_iter()
-        .map(|e| e.saved)
-        .collect();
+    let prof_id = Config::default().profiles[0].id.clone();
     s.terminals.push(TerminalEntry {
         id: "agent-second".into(),
         conversation_id: None,
-        number: 2,
+        number: 3,
         name: None,
         manual_number: Some(1),
         origin_card_id: Some("c1".into()),
@@ -520,12 +585,13 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
             agent_status: None,
             agent_turn: None,
         }),
+        agent: None,
         created_at: 2,
     });
     s.terminals.push(TerminalEntry {
         id: "shell-ended".into(),
         conversation_id: None,
-        number: 3,
+        number: 4,
         name: None,
         manual_number: Some(2),
         origin_card_id: Some("c1".into()),
@@ -541,10 +607,11 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
             agent_status: None,
             agent_turn: None,
         }),
+        agent: None,
         created_at: 3,
     });
 
-    let first_id = Conversation::key("c1", "codex");
+    let first_id = Conversation::key("c1", &prof_id);
     // Without a recent override, auto-expansion selects the FIRST active entry, not the last.
     assert_eq!(
         crate::terminals::default_card_terminal(&s, "c1", None),
@@ -561,7 +628,7 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
         Some("agent-second".into())
     );
     // A Card with no active terminals does not auto-expand.
-    s.attempts[1].observed = Some(json!({"state":"finished"}));
+    s.terminals[1].agent.as_mut().unwrap().observed = Some(json!({"state":"finished"}));
     assert_eq!(
         crate::terminals::default_card_terminal(&s, "c2", None),
         None
@@ -571,14 +638,10 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
 #[test]
 fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surface_attention() {
     let mut s = fixture();
-    s.terminals = crate::terminals::entries(&s)
-        .into_iter()
-        .map(|e| e.saved)
-        .collect();
     s.terminals.push(TerminalEntry {
         id: "manual-shell".into(),
         conversation_id: None,
-        number: 2,
+        number: 3,
         name: None,
         manual_number: Some(1),
         origin_card_id: Some("c1".into()),
@@ -594,12 +657,13 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
             agent_status: Some("idle".into()),
             agent_turn: Some(3),
         }),
+        agent: None,
         created_at: 2,
     });
     s.terminals.push(TerminalEntry {
         id: "ephemeral-cli".into(),
         conversation_id: None,
-        number: 3,
+        number: 4,
         name: None,
         manual_number: Some(2),
         origin_card_id: Some("c1".into()),
@@ -615,6 +679,7 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
             agent_status: Some("idle".into()),
             agent_turn: Some(0),
         }),
+        agent: None,
         created_at: 3,
     });
 
@@ -669,10 +734,14 @@ fn card_agent_actions_open_card_with_expanded_agent_terminal_instead_of_terminal
     let (_owner, ()) = nsh_core::element::create_root(|| {
         let ui = crate::presenter::Ui::new();
         let mut s = fixture();
+        let prof_id = Config::default().profiles[0].id.clone();
+        // Place the manual shell ahead of the Agent in terminal creation order so
+        // first-live fallback (`c1-shell`) is distinguishable from explicit Agent selection (`c1:developer`).
+        s.terminals[0].number = 2;
         s.terminals.push(TerminalEntry {
             id: "c1-shell".into(),
             conversation_id: None,
-            number: 2,
+            number: 1,
             name: None,
             manual_number: Some(1),
             origin_card_id: Some("c1".into()),
@@ -688,10 +757,11 @@ fn card_agent_actions_open_card_with_expanded_agent_terminal_instead_of_terminal
                 agent_status: None,
                 agent_turn: None,
             }),
+            agent: None,
             created_at: 2,
         });
-        let att_id = s.attempts[0].id.clone();
-        let conv_id = Conversation::key("c1", "codex");
+        let att_id = s.terminals[0].id.clone();
+        let conv_id = Conversation::key("c1", &prof_id);
         ui.snapshot.set(s);
         ui.page.set("board".into());
 
@@ -746,12 +816,9 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
     let (_owner, ()) = nsh_core::element::create_root(|| {
         let ui = crate::presenter::Ui::new();
         let mut s = fixture();
-        s.terminals = crate::terminals::entries(&s)
-            .into_iter()
-            .map(|e| e.saved)
-            .collect();
-        let conv_c1 = Conversation::key("c1", "codex");
-        let conv_c2 = Conversation::key("c2", "codex");
+        let prof_id = Config::default().profiles[0].id.clone();
+        let conv_c1 = Conversation::key("c1", &prof_id);
+        let conv_c2 = Conversation::key("c2", &prof_id);
 
         // Add a plain shell, an ephemeral CLI Agent, and a Workflow Configuration Agent.
         s.terminals.push(TerminalEntry {
@@ -773,6 +840,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 agent_status: None,
                 agent_turn: None,
             }),
+            agent: None,
             created_at: 10,
         });
         s.terminals.push(TerminalEntry {
@@ -794,6 +862,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 agent_status: None,
                 agent_turn: None,
             }),
+            agent: None,
             created_at: 11,
         });
         s.configuration_sessions.push(ConfigurationSession {
@@ -825,6 +894,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 agent_status: Some("working".into()),
                 agent_turn: Some(1),
             }),
+            agent: None,
             created_at: 12,
         });
 
@@ -851,8 +921,9 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
         // 2. Managed Card Agent in `"working"`, `"blocked"`, or `"error"` prompts for confirmation.
         for non_done in ["working", "blocked", "error"] {
             ui.snapshot.update(|s| {
-                s.attempts[0].connection_state = "connected".into();
-                s.attempts[0].observed = Some(json!({"state":"live","status":{"state":non_done}}));
+                let a = s.terminals[0].agent.as_mut().unwrap();
+                a.connection_state = "connected".into();
+                a.observed = Some(json!({"state":"live","status":{"state":non_done}}));
             });
             crate::terminals::close_tab(ui, &conv_c1);
             assert_eq!(
@@ -888,10 +959,10 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
         // 3. Managed Card Agent in `"done"` or `"idle"` (even with older `observed_at`) closes immediately!
         for finished_turn in ["done", "idle"] {
             ui.snapshot.update(|s| {
-                s.attempts[1].connection_state = "connected".into();
-                s.attempts[1].lifecycle.observed_at = Some(0);
-                s.attempts[1].observed =
-                    Some(json!({"state":"live","status":{"state":finished_turn}}));
+                let a = s.terminals[1].agent.as_mut().unwrap();
+                a.connection_state = "connected".into();
+                a.lifecycle.observed_at = Some(0);
+                a.observed = Some(json!({"state":"live","status":{"state":finished_turn}}));
             });
             let entry = crate::terminals::entries(&ui.snapshot.get_untracked())
                 .into_iter()
@@ -960,6 +1031,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                     agent_status: Some("working".into()),
                     agent_turn: Some(2),
                 }),
+                agent: None,
                 created_at: 13,
             });
         });

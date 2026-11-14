@@ -326,17 +326,17 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                                 return view().into_element();
                             };
                             if let Some(agent) = &e.agent
-                                && let Some(att) = &agent.attempt
+                                && let Some(att) = agent.agent()
                                 && !att.finished()
                                 && att.terminal.is_some()
                                 && e.card.as_ref().is_some_and(|c| c.archived_at.is_none())
                             {
-                                let attempt_id = att.id.clone();
+                                let terminal_id = e.saved.id.clone();
                                 return compact_action("Interrupt", Variant::Quiet, move |_| {
                                     dispatch(
                                         ui,
                                         "agent.interrupt",
-                                        json!({"attempt_id": attempt_id}),
+                                        json!({"terminal_id": terminal_id}),
                                     )
                                 })
                                 .into_element();

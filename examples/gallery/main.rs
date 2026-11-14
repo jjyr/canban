@@ -448,7 +448,7 @@ pub fn Gallery() -> impl IntoElement {
     canban_ui::terminals::bindings(ui);
     set_interval(std::time::Duration::from_secs(5), move || {
         ui.snapshot.update(|s| {
-            for a in &mut s.attempts {
+            for a in s.terminals.iter_mut().filter_map(|t| t.agent.as_mut()) {
                 if a.connection_state == "connected" && !a.finished() {
                     a.lifecycle.observed_at = Some(canban_types::now());
                 }
@@ -597,19 +597,31 @@ pub fn Gallery() -> impl IntoElement {
             };
             snapshot.github_issues.push(canban_types::GitHubIssueSnapshot { id:"source".into(),project_id:snapshot.cards[0].project_id.clone(),source,title:snapshot.cards[0].title.clone(),body:"## GitHub description\n\nThis is the remote source. Local context remains separate.".into(),state:if pr {"draft".into()} else {"open".into()},author_id:1,author_login:"octocat".into(),labels:vec![],assignees:vec![],updated_at:String::new(),synced_at:canban_types::now() });
         }
-        let mut attempt = canban_scheduler::attempt(
+        let prof = canban_types::Config::default().profiles[0].clone();
+        let fixture_tid = canban_types::Conversation::key("card-1", &prof.id);
+        let mut attempt = canban_scheduler::agent_run(
             &snapshot.cards[0].project_id,
             "card-1",
             1,
             "develop",
             "stage_entry",
-            canban_types::Config::default().profiles[0].clone(),
+            prof,
             "Card conversation fixture".into(),
             None,
         );
-        attempt.id = "card-fixture-request".into();
         attempt.state = "completed".into();
-        snapshot.attempts.push(attempt);
+        snapshot.terminals.push(canban_types::TerminalEntry {
+            id: fixture_tid.clone(),
+            conversation_id: Some(fixture_tid.clone()),
+            number: 1,
+            name: None,
+            manual_number: None,
+            origin_card_id: Some("card-1".into()),
+            agent_engine: None,
+            runtime: None,
+            agent: Some(attempt),
+            created_at: 1,
+        });
         snapshot.events.retain(|e| e.card_id != "card-1");
         for (index, kind) in [
             "comment.created",
@@ -634,7 +646,7 @@ pub fn Gallery() -> impl IntoElement {
                 "agent:developer".into()
             };
             if index != 0 && index != 5 {
-                event.data = json!({"attempt_id": "card-fixture-request"});
+                event.data = json!({"terminal_id": fixture_tid});
             }
             event.message = match index { 0 => "Please preserve the review decision and local discussion scope.".into(), 3 => "## Implementation report\n\n".to_owned() + &"A readable paragraph with **Markdown** and a stable reference [Issue #42](https://github.com/acme/app/issues/42).\n\n".repeat(18), 4 => "Execution failed: check the terminal before continuing.".into(), _ => kind.replace('.', " ") };
             snapshot.events.push(event);
@@ -813,23 +825,25 @@ pub fn Gallery() -> impl IntoElement {
                     }))
                     .child(action("Silent idle #1", Variant::Quiet, move |_| {
                         ui.snapshot.update(|s| {
+                            let prof = canban_types::Config::default().profiles[0].clone();
+                            let idle_tid = canban_types::Conversation::key("card-1", &prof.id);
                             let turn = s
-                                .attempts
+                                .terminals
                                 .iter()
-                                .find(|a| a.id == "idle-attempt-1")
+                                .find(|t| t.id == idle_tid)
+                                .and_then(|t| t.agent.as_ref())
                                 .and_then(|a| a.observed.as_ref())
                                 .and_then(|v| v["turn"].as_u64())
                                 .unwrap_or(0)
                                 + 1;
-                            s.attempts.retain(|a| a.id != "idle-attempt-1");
-                            let attempt: canban_types::Attempt = serde_json::from_value(json!({
-                                "id": "idle-attempt-1",
+                            s.terminals.retain(|t| t.id != idle_tid);
+                            let attempt: canban_types::AgentRun = serde_json::from_value(json!({
                                 "project_id": "gallery-project",
                                 "card_id": "card-1",
                                 "number": 1,
                                 "stage": "develop",
                                 "trigger": "interactive",
-                                "profile": canban_types::Config::default().profiles[0],
+                                "profile": prof,
                                 "instruction": "Interactive check",
                                 "state": "running",
                                 "terminal": "pty-idle-1",
@@ -838,10 +852,22 @@ pub fn Gallery() -> impl IntoElement {
                                 "connection_state": "connected",
                                 "observed": {"state": "live", "turn": turn, "status": {"state": "idle"}},
                                 "lifecycle": {"observed_at": canban_types::now(), "idle_since": canban_types::now()},
-                                "created_at": 1
+                                "updated_at": 1
                             }))
                             .unwrap();
-                            s.attempts.push(attempt);
+                            let num = s.terminals.iter().map(|t| t.number).max().unwrap_or(0) + 1;
+                            s.terminals.push(canban_types::TerminalEntry {
+                                id: idle_tid.clone(),
+                                conversation_id: Some(idle_tid),
+                                number: num,
+                                name: None,
+                                manual_number: None,
+                                origin_card_id: Some("card-1".into()),
+                                agent_engine: None,
+                                runtime: None,
+                                agent: Some(attempt),
+                                created_at: 1,
+                            });
                         });
                     }))
                     .child(action("Return #1 to Backlog", Variant::Quiet, move |_| {
@@ -1043,7 +1069,7 @@ pub fn Gallery() -> impl IntoElement {
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminal-close-confirm") {
         canban_ui::frame::configure_window_chrome();
         let mut s = fixtures::terminal_workspace();
-        for a in &mut s.attempts {
+        for a in s.terminals.iter_mut().filter_map(|t| t.agent.as_mut()) {
             if a.card_id == "overview-card-2" {
                 a.observed = Some(json!({"state":"live","status":{"state":"working"}}));
                 a.connection_state = "connected".into();
@@ -1051,7 +1077,10 @@ pub fn Gallery() -> impl IntoElement {
             }
         }
         ui.snapshot.set(s);
-        let id = canban_types::Conversation::key("overview-card-2", "codex");
+        let id = canban_types::Conversation::key(
+            "overview-card-2",
+            &canban_types::Config::default().profiles[0].id,
+        );
         ui.open_terminal(id.clone());
         canban_ui::terminals::close_tab(ui, &id);
         return canban_ui::frame::screen(ui).into_element();
@@ -1270,12 +1299,15 @@ pub fn Gallery() -> impl IntoElement {
                     ui.profiles.set(profiles);
                     ui.navigate("terminals");
                     ui.terminal_sidebar.set(true);
-                    ui.open_terminal(canban_types::Conversation::key("overview-card-2","codex"));
+                    ui.open_terminal(canban_types::Conversation::key(
+                        "overview-card-2",
+                        &canban_types::Config::default().profiles[0].id,
+                    ));
                 }))
                 .child(action("Close Running Agent?", Variant::Quiet, move |_| {
                     scene.set("workspace".into());
                     let mut s = fixtures::terminal_workspace();
-                    for a in &mut s.attempts {
+                    for a in s.terminals.iter_mut().filter_map(|t| t.agent.as_mut()) {
                         if a.card_id == "overview-card-2" {
                             a.observed = Some(json!({"state":"live","status":{"state":"working"}}));
                             a.connection_state = "connected".into();
@@ -1285,14 +1317,17 @@ pub fn Gallery() -> impl IntoElement {
                     ui.snapshot.set(s);
                     ui.navigate("terminals");
                     ui.terminal_sidebar.set(true);
-                    let id = canban_types::Conversation::key("overview-card-2", "codex");
+                    let id = canban_types::Conversation::key(
+                        "overview-card-2",
+                        &canban_types::Config::default().profiles[0].id,
+                    );
                     ui.open_terminal(id.clone());
                     canban_ui::terminals::close_tab(ui, &id);
                 }))
                 .child(action("Idle & Attention Terminals",Variant::Secondary,move |_|{
                     let mut snapshot=fixtures::terminal_workspace();
                     for card in &mut snapshot.cards {card.human_gate=None;card.attention=None;}
-                    for (idx, a) in snapshot.attempts.iter_mut().enumerate() {
+                    for (idx, a) in snapshot.terminals.iter_mut().filter_map(|t| t.agent.as_mut()).enumerate() {
                         if a.terminal.is_some() && !a.finished() {
                             a.state = if idx == 0 { "running".into() } else { "completed".into() };
                             let status = if idx == 0 { "idle" } else { "done" };

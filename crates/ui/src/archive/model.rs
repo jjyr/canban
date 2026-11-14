@@ -66,7 +66,12 @@ pub fn groups_with_tags(
             agents.insert(format!("@{}", c.profile_id));
             providers.insert(c.provider.clone());
         }
-        for a in snapshot.attempts.iter().filter(|a| a.card_id == card.id) {
+        for a in snapshot
+            .terminals
+            .iter()
+            .filter_map(|t| t.agent.as_ref())
+            .filter(|a| a.card_id == card.id)
+        {
             agents.insert(format!("@{}", a.profile.id));
             providers.insert(a.profile.command_name());
         }
@@ -196,7 +201,7 @@ mod tests {
     fn fuzzy_terms_numbers_unicode_and_agent_metadata_filter_only_matching_children() {
         let mut s = fixture();
         let profile = Config::default().profiles[0].clone();
-        let mut a = canban_scheduler::attempt(
+        let a = canban_scheduler::agent_run(
             "b",
             "three",
             1,
@@ -206,8 +211,18 @@ mod tests {
             "Review".into(),
             None,
         );
-        a.id = "attempt-1".into();
-        s.attempts.push(a);
+        s.terminals.push(canban_types::TerminalEntry {
+            id: "three:developer".into(),
+            conversation_id: Some("three:developer".into()),
+            number: 1,
+            name: None,
+            manual_number: None,
+            origin_card_id: Some("three".into()),
+            agent_engine: None,
+            runtime: None,
+            agent: Some(a),
+            created_at: 1,
+        });
         assert_eq!(groups(&s, "cnBn impr srch")[0].entries[0].card.id, "one");
         assert_eq!(groups(&s, "原终恢复 #42")[0].entries[0].card.id, "two");
         assert_eq!(groups(&s, "codex resume")[0].entries[0].card.id, "three");

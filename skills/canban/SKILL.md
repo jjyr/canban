@@ -109,9 +109,9 @@ Call any public AppServer JSON-RPC method via `"$CANBAN_CLI" call <METHOD> '<JSO
 # Create a follow-up Card in Backlog
 "$CANBAN_CLI" call card.create '{"project_id":"<PROJECT_ID>","title":"Follow-up task","body":"Details..."}'
 
-# Inspect the latest execution attempt or captured terminal output
+# Inspect the Card's Agent terminals or captured terminal output
 "$CANBAN_CLI" call execution.get '{"card":<CARD_NUMBER>,"project_id":"<PROJECT_ID>"}'
-"$CANBAN_CLI" call execution.output '{"attempt_id":"<ATTEMPT_ID>"}'
+"$CANBAN_CLI" call execution.output '{"terminal_id":"<TERMINAL_ID>"}'
 ```
 
 ## Authoring Workflows (CLI)

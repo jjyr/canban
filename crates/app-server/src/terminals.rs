@@ -11,26 +11,31 @@ impl AppServer {
         );
         let terminal_id = strp(&p, "terminal_id")?;
         let mut target = None;
-        let mut invocation = None;
+        let mut closing_agent = false;
         let saved = self.mutate("terminal.close", &p, |db| {
             let mut item: TerminalEntry = db.get(terminal_id)?;
             if let Ok(mut configuration)=db.get::<ConfigurationSession>(terminal_id) && configuration.state=="queued" {
                 configuration.state="cancelled".into();db.save(&configuration)?;
                 item.runtime=Some(TerminalRuntime{machine:"local".into(),owner_core_id:None,core_id:None,terminal:None,state:"finished".into(),connection:"connected".into(),error:None,agent_status:None,agent_turn:None});db.save(&item)?;
             }
-            if let Some(conversation) = &item.conversation_id {
-                let row = canban_notifications::overview(&db.snapshot()?).into_iter().find(|r| &r.id == conversation);
-                if let Some(mut run) = row.and_then(|r| r.attempt)
-                    && !run.finished() {
-                        let core = run.core_id.clone().context("Original Core binding unavailable")?;
-                        let terminal = run.terminal.clone().context("Terminal is still starting; wait before closing")?;
-                        target = Some((core, terminal));
-                        run.close_state = "closing".into();
-                        run.close_requested_at = Some(now());
-                        db.save(&run)?;
-                        let card: Card = db.get(&run.card_id)?;
-                        log(db, &card, "execution.close_requested", "user", "Terminal closed by user", Some(run.id.clone()), json!({"attempt":run.number}))?;
-                        invocation = Some(run.id);
+            if let Some(run) = &mut item.agent {
+                if !run.finished() && run.terminal.is_some() {
+                    let core = run.core_id.clone().context("Original Core binding unavailable")?;
+                    let terminal = run.terminal.clone().context("Terminal is still starting; wait before closing")?;
+                    target = Some((core, terminal));
+                    run.close_state = "closing".into();
+                    run.close_requested_at = Some(now());
+                    let card_id = run.card_id.clone();
+                    let run_num = run.number;
+                    db.save(&item)?;
+                    let card: Card = db.get(&card_id)?;
+                    log(db, &card, "execution.close_requested", "user", "Terminal closed by user", Some(item.id.clone()), json!({"run_number":run_num}))?;
+                    closing_agent = true;
+                } else {
+                    ensure!(
+                        run.state != "starting",
+                        "Terminal is still starting; wait before closing"
+                    );
                 }
             } else if let Some(runtime) = &mut item.runtime
                 && runtime.state != "finished" {
@@ -66,12 +71,14 @@ impl AppServer {
                     params![key, serde_json::to_string(&value)?],
                 )?;
             }
-            if let Some(id) = invocation {
-                let mut run: Attempt = db.get(&id)?;
+            if closing_agent {
                 if let Err(e) = &result {
-                    run.close_state = "error".into();
-                    run.error = Some(format!("Terminal close failed: {e:#}"));
-                    db.save(&run)?;
+                    let mut item: TerminalEntry = db.get(terminal_id)?;
+                    if let Some(run) = &mut item.agent {
+                        run.close_state = "error".into();
+                        run.error = Some(format!("Terminal close failed: {e:#}"));
+                        db.save(&item)?;
+                    }
                 }
             } else if result.is_err() {
                 let mut item: TerminalEntry = db.get(terminal_id)?;
@@ -87,14 +94,13 @@ impl AppServer {
         self.emit("terminals", None);
         Ok(value)
     }
-    /// Resolve exactly one owning binding; Agent Attempts remain authoritative.
-    pub(super) fn terminal_binding(s: &Snapshot, item: &TerminalEntry) -> Option<(String, String)> {
-        if let Some(conversation) = &item.conversation_id {
-            let row = canban_notifications::overview(s)
-                .into_iter()
-                .find(|r| &r.id == conversation)?;
-            let a = row.attempt?;
-            return Some((a.core_id?, a.terminal?));
+    /// Resolve the owning Core + PTY binding for either a Card-role Agent or an independent terminal.
+    pub(super) fn terminal_binding(
+        _s: &Snapshot,
+        item: &TerminalEntry,
+    ) -> Option<(String, String)> {
+        if let Some(a) = &item.agent {
+            return Some((a.core_id.clone()?, a.terminal.clone()?));
         }
         let r = item.runtime.as_ref()?;
         Some((r.core_id.clone()?, r.terminal.clone()?))
@@ -102,7 +108,7 @@ impl AppServer {
     pub(super) fn ensure_card_worktree(
         &self,
         card_id: &str,
-        attempt_id: Option<String>,
+        terminal_id: Option<String>,
     ) -> Result<(Card, Project)> {
         let (card, mut project) = {
             let store = self.store.lock().unwrap();
@@ -181,7 +187,7 @@ impl AppServer {
                         "workspace.prepared",
                         "system",
                         "Card workspace prepared",
-                        attempt_id,
+                        terminal_id,
                         json!({"workspace":workspace}),
                     )?;
                     db.save(&current)?;
@@ -395,6 +401,7 @@ impl AppServer {
                     agent_status: None,
                     agent_turn: None,
                 }),
+                agent: None,
             };
             db.save(&item)?;
             let project_dir = project
@@ -631,13 +638,17 @@ impl AppServer {
         })
     }
     pub(super) fn control_terminal(&self, p: Value, end: bool) -> Result<Value> {
-        let _gate = self.terminal_gate.lock().unwrap();
-        let item: TerminalEntry = self
+        let item_check: TerminalEntry = self
             .store
             .lock()
             .unwrap()
             .db()
             .get(strp(&p, "terminal_id")?)?;
+        if item_check.agent.is_some() {
+            return self.control_agent(p, end);
+        }
+        let _gate = self.terminal_gate.lock().unwrap();
+        let item = item_check;
         let runtime = item
             .runtime
             .as_ref()
@@ -940,6 +951,7 @@ mod tests {
                 agent_status: None,
                 agent_turn: None,
             }),
+            agent: None,
         };
         app.store
             .lock()

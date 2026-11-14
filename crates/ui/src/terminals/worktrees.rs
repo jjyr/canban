@@ -39,6 +39,7 @@ pub fn open_shell(ui: Ui, wt: &ManagedWorktree) {
             ),
             origin_card_id: None,
             agent_engine: None,
+            agent: None,
             created_at: canban_types::now(),
             runtime: Some(canban_types::TerminalRuntime {
                 machine: wt.location.machine.clone(),

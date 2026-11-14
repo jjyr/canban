@@ -3,7 +3,7 @@ use super::*;
 
 pub(super) fn idle_candidate(
     snapshot: &Snapshot,
-    run: &Attempt,
+    run: &AgentRun,
     minutes: u64,
     at: u64,
     _viewed: bool,
@@ -51,7 +51,10 @@ pub(super) fn idle_candidate(
 }
 
 impl AppServer {
-    pub(super) fn observe_lifecycle(&self, run: &Attempt, observed: &Value) -> Result<()> {
+    pub(super) fn observe_lifecycle(&self, entry: &TerminalEntry, observed: &Value) -> Result<()> {
+        let Some(run) = &entry.agent else {
+            return Ok(());
+        };
         let activity = canban_herdr::activity::get(
             run.core_id.as_deref().unwrap_or(""),
             run.terminal.as_deref().unwrap_or(""),
@@ -71,8 +74,12 @@ impl AppServer {
         {
             return Ok(());
         }
+        let card_id = run.card_id.clone();
         self.store.lock().unwrap().write(|db| {
-            let mut a: Attempt = db.get(&run.id)?;
+            let mut current_entry: TerminalEntry = db.get(&entry.id)?;
+            let Some(a) = &mut current_entry.agent else {
+                return Ok(());
+            };
             a.lifecycle.observed_at = Some(now());
             if activity.last_at > a.lifecycle.last_interaction_at.unwrap_or(0) {
                 a.lifecycle.last_interaction_at = Some(activity.last_at);
@@ -123,8 +130,8 @@ impl AppServer {
                         "execution.input_required",
                         "herdr",
                         &notice.message,
-                        Some(a.id.clone()),
-                        json!({"wait":w,"attempt":a.number}),
+                        Some(entry.id.clone()),
+                        json!({"wait":w,"run_number":a.number}),
                     )?;
                     a.lifecycle.waiting = Some(w);
                 }
@@ -139,22 +146,25 @@ impl AppServer {
                     "execution.input_resolved",
                     "herdr",
                     "Runtime input wait ended; workflow approval is unchanged",
-                    Some(a.id.clone()),
-                    json!({"wait_id":w.id,"attempt":a.number}),
+                    Some(entry.id.clone()),
+                    json!({"wait_id":w.id,"run_number":a.number}),
                 )?;
             }
-            db.save(&a)
+            db.save(&current_entry)
         })?;
         if matches!(status, "idle" | "done") {
-            let _ = self.try_auto_archive_merged(&run.card_id);
+            let _ = self.try_auto_archive_merged(&card_id);
         }
-        self.emit("runtime", Some(run.card_id.clone()));
+        self.emit("runtime", Some(card_id));
         Ok(())
     }
 
     pub(super) fn close_idle(&self, client: &canban_herdr::Client) -> Result<()> {
         let snapshot = self.snapshot()?;
-        for run in &snapshot.attempts {
+        for entry in &snapshot.terminals {
+            let Some(run) = &entry.agent else {
+                continue;
+            };
             let activity = canban_herdr::activity::get(
                 run.core_id.as_deref().unwrap_or(""),
                 run.terminal.as_deref().unwrap_or(""),
@@ -193,7 +203,10 @@ impl AppServer {
             };
             let execute = self.store.lock().unwrap().write(|db| {
                 let current = db.snapshot()?;
-                let mut a: Attempt = db.get(&run.id)?;
+                let mut current_entry: TerminalEntry = db.get(&entry.id)?;
+                let Some(a) = &mut current_entry.agent else {
+                    return Ok(false);
+                };
                 let activity =
                     canban_herdr::activity::get(run.core_id.as_deref().unwrap_or(""), terminal);
                 a.lifecycle.last_interaction_at = Some(
@@ -203,7 +216,7 @@ impl AppServer {
                 );
                 if !idle_candidate(
                     &current,
-                    &a,
+                    a,
                     self.config().scheduler.idle_minutes,
                     now(),
                     activity.viewers > 0,
@@ -213,26 +226,24 @@ impl AppServer {
                 a.lifecycle.close_reason = "idle".into();
                 a.close_state = "closing".into();
                 a.close_requested_at = Some(now());
-                db.save(&a)?;
+                let card_id = a.card_id.clone();
+                let run_num = a.number;
+                db.save(&current_entry)?;
                 log(
                     db,
-                    &db.get::<Card>(&a.card_id)?,
+                    &db.get::<Card>(&card_id)?,
                     "execution.idle_close_requested",
                     "system",
                     close_note,
-                    Some(a.id.clone()),
-                    json!({"attempt":a.number}),
+                    Some(entry.id.clone()),
+                    json!({"run_number":run_num}),
                 )?;
                 Ok(true)
             })?;
             if !execute {
                 continue;
             }
-            let _ = self.capture_output(run);
-            // Herdr guards `idle` at delivery and refuses blocked dialogs without force.
-            // Profiles with an explicit exit command try graceful input first; profiles using
-            // `ExitAction::Manual` (or `None`, e.g. `agy`, `gemini`, `opencode`) terminate
-            // the verified-idle PTY cleanly via `terminal.kill`.
+            let _ = self.capture_output(entry);
             let result = (|| -> Result<Value> {
                 let actual = client.get(terminal)?;
                 let state = actual["status"]["state"].as_str().unwrap_or("");
@@ -252,13 +263,19 @@ impl AppServer {
             })();
             if let Err(e) = result {
                 self.store.lock().unwrap().write(|db| {
-                    let mut a: Attempt = db.get(&run.id)?;
-                    a.close_state = "error".into();
-                    a.error = Some(format!("Idle exit was not confirmed: {e:#}. Inspect before retrying; no forced kill was sent."));
-                    let card:Card=db.get(&a.card_id)?;
-                    db.save(&canban_notifications::attention(&a.project_id,&a.card_id,a.error.as_deref().unwrap()))?;
-                    log(db,&card,"execution.idle_close_failed","system",a.error.as_deref().unwrap(),Some(a.id.clone()),json!({"attempt":a.number}))?;
-                    db.save(&a)
+                    let mut current_entry: TerminalEntry = db.get(&entry.id)?;
+                    if let Some(a) = &mut current_entry.agent {
+                        a.close_state = "error".into();
+                        a.error = Some(format!("Idle exit was not confirmed: {e:#}. Inspect before retrying; no forced kill was sent."));
+                        let err_msg = a.error.clone().unwrap();
+                        let card_id = a.card_id.clone();
+                        let proj_id = a.project_id.clone();
+                        let run_num = a.number;
+                        let card: Card = db.get(&card_id)?;
+                        db.save(&canban_notifications::attention(&proj_id, &card_id, &err_msg))?;
+                        log(db, &card, "execution.idle_close_failed", "system", &err_msg, Some(entry.id.clone()), json!({"run_number":run_num}))?;
+                    }
+                    db.save(&current_entry)
                 })?;
             }
             self.emit("runtime", Some(run.card_id.clone()));

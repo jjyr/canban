@@ -27,7 +27,7 @@ fn board_reorder_is_durable_idempotent_and_preserves_human_gates() {
     let mut c = peer(&app, &p, "C");
     c.human_gate = Some(HumanGate {
         reason: "Review first".into(),
-        attempt_id: None,
+        terminal_id: None,
         next_stage: None,
     });
     app.store.lock().unwrap().write(|db| db.save(&c)).unwrap();
@@ -38,7 +38,13 @@ fn board_reorder_is_durable_idempotent_and_preserves_human_gates() {
         vec![a.id.clone(), c.id.clone(), b.id.clone()]
     );
     assert_eq!(app.call("card.move", args).unwrap(), moved);
-    assert!(app.snapshot().unwrap().attempts.is_empty());
+    assert!(
+        app.snapshot()
+            .unwrap()
+            .terminals
+            .iter()
+            .all(|t| t.agent.is_none())
+    );
     assert_eq!(
         app.snapshot()
             .unwrap()
@@ -93,8 +99,9 @@ fn cross_column_drop_persists_slot_and_dispatches_exactly_once() {
     assert_eq!(
         app.snapshot()
             .unwrap()
-            .attempts
+            .terminals
             .iter()
+            .filter_map(|t| t.agent.as_ref())
             .filter(|r| r.card_id == a.id)
             .count(),
         1

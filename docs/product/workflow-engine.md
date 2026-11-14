@@ -1,6 +1,6 @@
 # Unified workflow engine, Studio and implementation
 
-Status: implemented and active (reconciled 2026-11-12; SQLite schema 12, desktop API 10). This is the canonical product and engineering contract for Canban Workflows, consolidating the unified engine rules, Project/Board workflow ownership, Visual Studio UX, YAML schema, RPC/CLI operations, workspace lifecycle, and acceptance evidence. [Events and subscriptions](events-and-notifications.md) owns the durable journal envelope and trigger delivery.
+Status: implemented and active (reconciled 2026-11-14; SQLite schema 15, desktop API 34). This is the canonical product and engineering contract for Canban Workflows, consolidating the unified engine rules, Project/Board workflow ownership, Visual Studio UX, YAML schema, RPC/CLI operations, workspace lifecycle, and acceptance evidence. [Events and subscriptions](events-and-notifications.md) owns the durable journal envelope and trigger delivery.
 
 ## Core design principles
 
@@ -16,7 +16,7 @@ Status: implemented and active (reconciled 2026-11-12; SQLite schema 12, desktop
    - **Merge-queue algorithm:** Deliveries run one at a time (global review gate). When a connected Card Agent invoked `canban report --state completed` mid-turn (while Herdr still observes `status.state == "working"`), Queue Merge stays queued in `waiting_delivery` until the Agent finishes its turn (`idle` / `done` / `blocked` / `error` or terminal exit, bounded by a 3-minute settle grace window) so post-report turn cleanup completes before Git integration. Each attempt syncs the target from upstream, commits the reviewed Card worktree, merges the target into the Card worktree, then fast-forwards the Project target branch and pushes. A clean (fast-forward or conflict-free three-way) merge delivers immediately. A textual **merge conflict** leaves the Card worktree mid-merge and dispatches `@merger` (or `deliver.with.profile`) directly on the `deliver` step (`review.merge_conflict`) with the conflicted files and target head, up to `max_conflict_attempts` (default 3, `0` disables) per run; `@merger` resolves/commits in its own role conversation and the run re-enters Queue Merge while keeping `on_changes_requested` for human rework. Beyond the budget, it pauses for a human. If the target branch advances during delivery (`review.merge_retry`), the run simply stays queued and retries.
 5. **Board stage decoupled from workflow progress:** Columns represent business stage position; `WorkflowRun` steps represent execution progress. Planning and approvals can run while a Card stays in `Backlog`. Workflow-owned `card.move` transitions carry causal ancestry (`origin: "workflow"`, `workflow_run_id`) and continue the active `WorkflowRun` without re-triggering duplicate column-entry Agents.
 6. **Deterministic boundaries (Engine vs. Scheduler, explicit completion, frozen revisions):**
-   - **Engine vs. Scheduler:** Workflow Engine determines *what* happens next and enqueues `Request`s; Scheduler owns *when* terminals launch under the global concurrency budget and conversation reuse rules.
+   - **Engine vs. Scheduler:** Workflow Engine determines *what* happens next and enqueues assignments onto the Card/profile `TerminalEntry` (`AgentRun`); Scheduler owns *when* terminals launch under the global concurrency budget and conversation reuse rules.
    - **Explicit completion only:** Only an Agent's bound CLI `completed` report advances its owning step. Terminal idle, root `done`, process exit, or `@profile` mention replies never advance workflow steps.
    - **Frozen run revisions:** Each `WorkflowRun` and queued `EventDelivery` captures the published definition revision at creation. Publishing new YAML takes effect immediately for future events without mutating in-flight runs or pending human gates.
 7. **Agent-native authoring:** Users do not need a complex drag-and-drop node-wire canvas. Everyday adjustments use graph-derived Studio switches and inline Step Inspectors, while multi-column or custom branching designs use **Edit with agent** in a Project-owned configuration conversation in Terminal.
@@ -36,7 +36,7 @@ Project
   +-- Cards
        +-- Board stage (column ID)
        +-- WorkflowRun (captured revision, step visits, outputs, decisions)
-       +-- Agent step -> Request -> Attempt -> Card/profile Conversation -> Herdr PTY
+       +-- Agent step -> TerminalEntry (`{card_id}:{profile_id}`) + Conversation -> Herdr PTY
 ```
 
 ### Worktrees and base synchronization

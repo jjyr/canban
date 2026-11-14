@@ -763,13 +763,12 @@ pub fn execute(ui: Ui, id: &str) {
                     crate::terminals::current(ui)
                 };
             if let Some(e) = entry {
-                if let Some(attempt) = e
-                    .agent
+                if e.agent
                     .as_ref()
-                    .and_then(|a| a.attempt.as_ref())
-                    .filter(|a| !a.finished() && a.terminal.is_some())
+                    .and_then(|a| a.agent())
+                    .is_some_and(|a| !a.finished() && a.terminal.is_some())
                 {
-                    dispatch(ui, "agent.interrupt", json!({"attempt_id": attempt.id}));
+                    dispatch(ui, "agent.interrupt", json!({"terminal_id": e.saved.id}));
                 } else if !e.ended() && e.binding().is_some() {
                     dispatch(ui, "terminal.interrupt", json!({"terminal_id": e.saved.id}));
                 }

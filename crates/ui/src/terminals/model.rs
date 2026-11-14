@@ -20,25 +20,25 @@ pub struct CardGroup {
 pub fn conversations(snapshot: &Snapshot) -> Vec<OverviewRow> {
     canban_notifications::overview(snapshot)
         .into_iter()
-        .filter(|r| r.attempt.is_some())
+        .filter(|r| r.agent().is_some())
         .collect()
 }
 pub fn closed(row: &OverviewRow) -> bool {
-    row.attempt.as_ref().is_none_or(|a| a.finished())
+    row.agent().is_none_or(|a| a.finished())
 }
 pub fn can_resume(row: &OverviewRow, profiles: &[Profile]) -> bool {
     row.card.archived_at.is_none()
         && closed(row)
-        && row.attempt.as_ref().is_some_and(|a| {
+        && row.agent().is_some_and(|a| {
             a.provider_session_id.is_some()
                 && profiles
                     .iter()
                     .any(|p| p.id == a.profile.id && !p.resume_command().is_empty())
         })
 }
-/// Only the selected live attempt can have a viewer. History never attaches.
+/// Only the selected live Agent terminal can have a viewer. History never attaches.
 pub fn binding(row: &OverviewRow) -> Option<Value> {
-    let a = row.attempt.as_ref()?;
+    let a = row.agent()?;
     if a.finished() || row.card.archived_at.is_some() {
         return None;
     }
@@ -86,8 +86,8 @@ pub fn groups(snapshot: &Snapshot, history: bool) -> Vec<ProjectGroup> {
             .sort_by(|a, b| (a.number, &a.id).cmp(&(b.number, &b.id)));
         for c in &mut p.cards {
             c.rows.sort_by(|a, b| {
-                (&a.attempt.as_ref().unwrap().profile.id, &a.id)
-                    .cmp(&(&b.attempt.as_ref().unwrap().profile.id, &b.id))
+                (&a.agent().unwrap().profile.id, &a.id)
+                    .cmp(&(&b.agent().unwrap().profile.id, &b.id))
             });
         }
     }

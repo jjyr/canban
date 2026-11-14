@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 14;
+pub const CURRENT: u32 = 15;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -41,6 +41,11 @@ const STEPS: &[Migration] = &[
         version: 14,
         up: remove_requests_up,
         down: remove_requests_down,
+    },
+    Migration {
+        version: 15,
+        up: remove_attempts_up,
+        down: remove_attempts_down,
     },
 ];
 fn workflows_up(tx: &Transaction<'_>) -> Result<()> {
@@ -530,8 +535,11 @@ fn remove_requests_up(tx: &Transaction<'_>) -> Result<()> {
             let rid = obj.remove("request_id");
             let att = obj.remove("attempt").and_then(|n| n.as_u64());
             let aid = rid.as_ref().and_then(Value::as_str).map(|s| {
-                if let Some(n) = att.filter(|n| *n > 0) {
-                    format!("{s}:{n}")
+                let candidate = att.filter(|n| *n > 0).map(|n| format!("{s}:{n}"));
+                if let Some(c) = candidate
+                    && req_to_attempt.values().any(|(mapped, _)| mapped == &c)
+                {
+                    c
                 } else {
                     map_req(s)
                 }
@@ -554,8 +562,11 @@ fn remove_requests_up(tx: &Transaction<'_>) -> Result<()> {
                 .map(|p| format!("agent:{p}"))
                 .unwrap_or_else(|| "agent".into());
             let aid = rid.as_ref().and_then(Value::as_str).map(|s| {
-                if let Some(n) = att.filter(|n| *n > 0) {
-                    format!("{s}:{n}")
+                let candidate = att.filter(|n| *n > 0).map(|n| format!("{s}:{n}"));
+                if let Some(c) = candidate
+                    && req_to_attempt.values().any(|(mapped, _)| mapped == &c)
+                {
+                    c
                 } else {
                     map_req(s)
                 }
@@ -716,6 +727,448 @@ fn remove_requests_down(tx: &Transaction<'_>) -> Result<()> {
         if let Some(obj) = v.as_object_mut() {
             obj.insert("request_id".into(), Value::Null);
             obj.insert("attempt".into(), Value::Null);
+        }
+    })?;
+    Ok(())
+}
+fn remove_attempts_up(tx: &Transaction<'_>) -> Result<()> {
+    use rusqlite::params;
+    use serde_json::{Value, json};
+    let has_attempts: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='attempts')",
+        [],
+        |r| r.get(0),
+    )?;
+    let mut attempt_to_terminal = std::collections::HashMap::<String, String>::new();
+    if has_attempts {
+        let att_rows: Vec<(String, Option<String>, Option<String>, String)> = {
+            let mut q =
+                tx.prepare("SELECT id, project_id, card_id, data FROM attempts ORDER BY rowid")?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        let rank = |att: &Value| -> u8 {
+            let state = att["state"].as_str().unwrap_or("");
+            let conn = att["connection_state"].as_str().unwrap_or("");
+            let has_terminal = !att.get("terminal").is_none_or(Value::is_null);
+            let finished = matches!(state, "continued" | "cancelled" | "superseded")
+                || conn == "missing"
+                || (!has_terminal && matches!(state, "failed" | "completed" | "backlog"))
+                || att
+                    .get("observed")
+                    .is_some_and(|v| v["state"] == "finished");
+            if has_terminal && !finished {
+                3
+            } else if matches!(state, "queued" | "starting" | "unknown") {
+                2
+            } else {
+                1
+            }
+        };
+        let mut grouped = std::collections::BTreeMap::<
+            String,
+            Vec<(String, Option<String>, Option<String>, Value)>,
+        >::new();
+        for (aid, proj, card_col, raw) in att_rows {
+            let att: Value = serde_json::from_str(&raw)?;
+            let card_id = att["card_id"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| card_col.clone())
+                .unwrap_or_default();
+            let profile_id = att["profile"]["id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .or_else(|| {
+                    att["conversation_id"]
+                        .as_str()
+                        .and_then(|c| c.split_once(':').map(|(_, p)| p.to_owned()))
+                })
+                .unwrap_or_else(|| "developer".into());
+            let conv_id = att["conversation_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{card_id}:{profile_id}"));
+            attempt_to_terminal.insert(aid.clone(), conv_id.clone());
+            grouped
+                .entry(conv_id)
+                .or_default()
+                .push((aid, proj, card_col, att));
+        }
+        let next_counter = |key: &str| -> Result<i64> {
+            tx.execute(
+                "INSERT INTO counters(id,value) VALUES(?1,1) ON CONFLICT(id) DO UPDATE SET value=value+1",
+                [key],
+            )?;
+            Ok(
+                tx.query_row("SELECT value FROM counters WHERE id=?1", [key], |r| {
+                    r.get(0)
+                })?,
+            )
+        };
+        for (conv_id, items) in grouped {
+            let mut chosen_idx = 0usize;
+            let mut best_rank = 0u8;
+            for (idx, (_, _, _, att)) in items.iter().enumerate() {
+                let r = rank(att);
+                if r >= best_rank {
+                    best_rank = r;
+                    chosen_idx = idx;
+                }
+            }
+            let (_, proj_col, card_col, mut chosen) = items[chosen_idx].clone();
+            let project_id = chosen["project_id"]
+                .as_str()
+                .map(str::to_owned)
+                .or(proj_col);
+            let card_id = chosen["card_id"].as_str().map(str::to_owned).or(card_col);
+            let profile_id = chosen["profile"]["id"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .or_else(|| conv_id.split_once(':').map(|(_, p)| p.to_owned()))
+                .unwrap_or_else(|| "developer".into());
+            let provider = chosen["profile"]["preset"]
+                .as_str()
+                .unwrap_or("codex")
+                .to_owned();
+            let created_at = chosen["created_at"].as_u64().unwrap_or(0);
+            let resume_session = chosen
+                .get("resume_from")
+                .is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()));
+            if let Some(obj) = chosen.as_object_mut() {
+                obj.remove("id");
+                obj.remove("conversation_id");
+                obj.remove("resume_from");
+                let created = obj
+                    .remove("created_at")
+                    .unwrap_or_else(|| json!(created_at));
+                obj.entry("updated_at".to_owned()).or_insert(created);
+                obj.insert("resume_session".into(), json!(resume_session));
+                if obj.get("state").and_then(Value::as_str) == Some("continued") {
+                    obj.insert("state".into(), json!("completed"));
+                }
+            }
+            let state = chosen["state"].as_str().unwrap_or("").to_owned();
+            let has_conv: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM conversations WHERE id=?1)",
+                [&conv_id],
+                |r| r.get(0),
+            )?;
+            if !has_conv && let (Some(pid), Some(cid)) = (project_id.as_deref(), card_id.as_deref())
+            {
+                let conv = json!({
+                    "id": conv_id,
+                    "project_id": pid,
+                    "card_id": cid,
+                    "profile_id": profile_id,
+                    "provider": provider,
+                    "provider_session_id": chosen.get("provider_session_id").cloned().unwrap_or(Value::Null),
+                    "created_at": created_at,
+                });
+                tx.execute(
+                    "INSERT INTO conversations(id, project_id, card_id, state, number, data) VALUES(?1, ?2, ?3, '', 0, ?4)",
+                    params![conv_id, pid, cid, serde_json::to_string(&conv)?],
+                )?;
+            }
+            let existing_term: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT number, data FROM terminals WHERE id=?1",
+                    [&conv_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .ok();
+            if let Some((num, raw_term)) = existing_term {
+                let mut term: Value = serde_json::from_str(&raw_term)?;
+                if let Some(obj) = term.as_object_mut() {
+                    obj.insert("conversation_id".into(), json!(conv_id));
+                    obj.insert("agent".into(), chosen);
+                }
+                tx.execute(
+                    "UPDATE terminals SET project_id=?2, card_id=?3, state=?4, number=?5, data=?6 WHERE id=?1",
+                    params![
+                        conv_id,
+                        project_id,
+                        card_id,
+                        state,
+                        num,
+                        serde_json::to_string(&term)?
+                    ],
+                )?;
+            } else {
+                let num = next_counter("terminal-number")?;
+                let term = json!({
+                    "id": conv_id,
+                    "conversation_id": conv_id,
+                    "number": num,
+                    "name": Value::Null,
+                    "manual_number": Value::Null,
+                    "runtime": Value::Null,
+                    "agent": chosen,
+                    "created_at": created_at,
+                });
+                tx.execute(
+                    "INSERT INTO terminals(id, project_id, card_id, state, number, data) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        conv_id,
+                        project_id,
+                        card_id,
+                        state,
+                        num,
+                        serde_json::to_string(&term)?
+                    ],
+                )?;
+            }
+        }
+    }
+    let map_att = |aid: &str| -> String {
+        attempt_to_terminal
+            .get(aid)
+            .cloned()
+            .unwrap_or_else(|| aid.to_owned())
+    };
+    let rewrite = |table: &str, f: &dyn Fn(&mut Value)| -> Result<()> {
+        let rows: Vec<(String, String)> = {
+            let mut q = tx.prepare(&format!("SELECT id, data FROM {table}"))?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (id, raw) in rows {
+            let mut v: Value = serde_json::from_str(&raw)?;
+            let before = v.clone();
+            f(&mut v);
+            if v != before {
+                tx.execute(
+                    &format!("UPDATE {table} SET data=?2 WHERE id=?1"),
+                    params![id, serde_json::to_string(&v)?],
+                )?;
+            }
+        }
+        Ok(())
+    };
+    rewrite("workflow_runs", &|v| {
+        if let Some(obj) = v.as_object_mut()
+            && let Some(aid) = obj.remove("attempt_id")
+        {
+            obj.insert(
+                "terminal_id".into(),
+                aid.as_str()
+                    .map(|s| json!(map_att(s)))
+                    .unwrap_or(Value::Null),
+            );
+        }
+    })?;
+    rewrite("cards", &|v| {
+        if let Some(gate) = v.get_mut("human_gate").and_then(Value::as_object_mut)
+            && let Some(aid) = gate.remove("attempt_id")
+        {
+            gate.insert(
+                "terminal_id".into(),
+                aid.as_str()
+                    .map(|s| json!(map_att(s)))
+                    .unwrap_or(Value::Null),
+            );
+        }
+    })?;
+    rewrite("conversations", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("last_attempt_id");
+        }
+    })?;
+    rewrite("questions", &|v| {
+        if let Some(obj) = v.as_object_mut()
+            && let Some(aid) = obj.remove("attempt_id")
+        {
+            obj.insert(
+                "terminal_id".into(),
+                aid.as_str()
+                    .map(|s| json!(map_att(s)))
+                    .unwrap_or(Value::Null),
+            );
+        }
+    })?;
+    rewrite("reports", &|v| {
+        if let Some(obj) = v.as_object_mut()
+            && let Some(aid) = obj.remove("attempt_id")
+        {
+            obj.insert(
+                "terminal_id".into(),
+                aid.as_str()
+                    .map(|s| json!(map_att(s)))
+                    .unwrap_or(Value::Null),
+            );
+        }
+    })?;
+    rewrite("events", &|v| {
+        if let Some(data) = v.get_mut("data").and_then(Value::as_object_mut)
+            && let Some(aid) = data.remove("attempt_id")
+        {
+            data.insert(
+                "terminal_id".into(),
+                aid.as_str()
+                    .map(|s| json!(map_att(s)))
+                    .unwrap_or(Value::Null),
+            );
+        }
+    })?;
+    rewrite("note_events", &|v| {
+        if let Some(data) = v.get_mut("data").and_then(Value::as_object_mut)
+            && let Some(aid) = data.remove("attempt_id")
+        {
+            data.insert(
+                "terminal_id".into(),
+                aid.as_str()
+                    .map(|s| json!(map_att(s)))
+                    .unwrap_or(Value::Null),
+            );
+        }
+    })?;
+    tx.execute_batch("DROP INDEX IF EXISTS attempts_scope; DROP TABLE IF EXISTS attempts;")?;
+    Ok(())
+}
+fn remove_attempts_down(tx: &Transaction<'_>) -> Result<()> {
+    use rusqlite::params;
+    use serde_json::{Value, json};
+    tx.execute_batch(
+        "CREATE TABLE attempts (id TEXT PRIMARY KEY, project_id TEXT, card_id TEXT, state TEXT NOT NULL, number INTEGER NOT NULL, data TEXT NOT NULL, FOREIGN KEY(project_id) REFERENCES projects(id), FOREIGN KEY(card_id) REFERENCES cards(id)); CREATE INDEX attempts_scope ON attempts(project_id,card_id,state);",
+    )?;
+    let term_rows: Vec<TableRow> = {
+        let mut q = tx.prepare(
+            "SELECT id, project_id, card_id, state, number, data FROM terminals ORDER BY rowid",
+        )?;
+        q.query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<std::result::Result<_, _>>()?
+    };
+    let mut conv_with_attempt = std::collections::HashSet::<String>::new();
+    for (tid, proj_col, card_col, _, term_num, raw) in term_rows {
+        let mut term: Value = serde_json::from_str(&raw)?;
+        let Some(mut agent) = term
+            .as_object_mut()
+            .and_then(|o| o.remove("agent"))
+            .filter(|v| v.is_object())
+        else {
+            continue;
+        };
+        let project_id = agent["project_id"].as_str().map(str::to_owned).or(proj_col);
+        let card_id = agent["card_id"].as_str().map(str::to_owned).or(card_col);
+        let state = agent["state"].as_str().unwrap_or("").to_owned();
+        let num = agent["number"].as_i64().unwrap_or(1);
+        let created_at = agent["updated_at"]
+            .as_u64()
+            .or_else(|| term["created_at"].as_u64())
+            .unwrap_or(0);
+        if let Some(obj) = agent.as_object_mut() {
+            obj.remove("updated_at");
+            obj.remove("pending");
+            let resume_session = obj
+                .remove("resume_session")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            obj.insert("id".into(), json!(tid));
+            obj.insert("conversation_id".into(), json!(tid));
+            obj.insert("created_at".into(), json!(created_at));
+            obj.insert(
+                "resume_from".into(),
+                if resume_session {
+                    json!(tid)
+                } else {
+                    Value::Null
+                },
+            );
+        }
+        tx.execute(
+            "INSERT INTO attempts(id, project_id, card_id, state, number, data) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+            params![tid, project_id, card_id, state, num, serde_json::to_string(&agent)?],
+        )?;
+        conv_with_attempt.insert(tid.clone());
+        tx.execute(
+            "UPDATE terminals SET project_id=NULL, card_id=NULL, state='', number=?2, data=?3 WHERE id=?1",
+            params![tid, term_num, serde_json::to_string(&term)?],
+        )?;
+    }
+    let rewrite = |table: &str, f: &dyn Fn(&mut Value)| -> Result<()> {
+        let rows: Vec<(String, String)> = {
+            let mut q = tx.prepare(&format!("SELECT id, data FROM {table}"))?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (id, raw) in rows {
+            let mut v: Value = serde_json::from_str(&raw)?;
+            let before = v.clone();
+            f(&mut v);
+            if v != before {
+                tx.execute(
+                    &format!("UPDATE {table} SET data=?2 WHERE id=?1"),
+                    params![id, serde_json::to_string(&v)?],
+                )?;
+            }
+        }
+        Ok(())
+    };
+    rewrite("workflow_runs", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            let tid = obj.remove("terminal_id").unwrap_or(Value::Null);
+            obj.insert("attempt_id".into(), tid);
+        }
+    })?;
+    rewrite("cards", &|v| {
+        if let Some(gate) = v.get_mut("human_gate").and_then(Value::as_object_mut) {
+            let tid = gate.remove("terminal_id").unwrap_or(Value::Null);
+            gate.insert("attempt_id".into(), tid);
+        }
+    })?;
+    rewrite("conversations", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            let id = obj
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_default();
+            obj.insert(
+                "last_attempt_id".into(),
+                if conv_with_attempt.contains(&id) {
+                    json!(id)
+                } else {
+                    Value::Null
+                },
+            );
+        }
+    })?;
+    rewrite("questions", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            let tid = obj.remove("terminal_id").unwrap_or(Value::Null);
+            obj.insert("attempt_id".into(), tid);
+        }
+    })?;
+    rewrite("reports", &|v| {
+        if let Some(obj) = v.as_object_mut() {
+            let tid = obj.remove("terminal_id").unwrap_or(Value::Null);
+            obj.insert("attempt_id".into(), tid);
+        }
+    })?;
+    rewrite("events", &|v| {
+        if let Some(data) = v.get_mut("data").and_then(Value::as_object_mut)
+            && let Some(tid) = data.remove("terminal_id")
+        {
+            data.insert("attempt_id".into(), tid);
+        }
+    })?;
+    rewrite("note_events", &|v| {
+        if let Some(data) = v.get_mut("data").and_then(Value::as_object_mut)
+            && let Some(tid) = data.remove("terminal_id")
+        {
+            data.insert("attempt_id".into(), tid);
         }
     })?;
     Ok(())
@@ -909,8 +1362,8 @@ mod tests {
         use serde_json::{Value, json};
         let home = tempfile::tempdir().unwrap();
         let mut store = crate::Store::open(home.path()).unwrap();
-        assert_eq!(CURRENT, 14);
-        assert_eq!(version(&store.conn).unwrap(), 14);
+        assert_eq!(CURRENT, 15);
+        assert_eq!(version(&store.conn).unwrap(), 15);
 
         // Downgrade empty DB to schema 13 and populate representative Request + Attempt records.
         apply(&mut store.conn, 13).unwrap();
@@ -1028,7 +1481,7 @@ mod tests {
         assert!(ev.get("request_id").is_none());
         assert_eq!(ev["data"]["attempt_id"], json!("req-1:1"));
 
-        // Roundtrip 14 -> 13 -> 14
+        // Roundtrip 14 -> 13 -> 15 -> 14 -> 15
         apply(&mut store.conn, 13).unwrap();
         assert_eq!(version(&store.conn).unwrap(), 13);
         let req_count: i64 = store
@@ -1036,7 +1489,82 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM requests", [], |r| r.get(0))
             .unwrap();
         assert_eq!(req_count, 2);
+        apply(&mut store.conn, 15).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), 15);
+        let has_attempts: bool = store
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='attempts')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!has_attempts);
+
+        let term_dev_raw: String = store
+            .conn
+            .query_row(
+                "SELECT data FROM terminals WHERE id='c1:developer'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let term_dev: Value = serde_json::from_str(&term_dev_raw).unwrap();
+        assert_eq!(term_dev["agent"]["profile"]["id"], json!("developer"));
+        assert_eq!(term_dev["agent"]["instruction"], json!("Build it"));
+        assert_eq!(term_dev["agent"]["workflow_run_id"], json!("run-1"));
+
+        let term_rev_raw: String = store
+            .conn
+            .query_row(
+                "SELECT data FROM terminals WHERE id='c1:reviewer'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let term_rev: Value = serde_json::from_str(&term_rev_raw).unwrap();
+        assert_eq!(term_rev["agent"]["state"], json!("queued"));
+
+        let run_raw: String = store
+            .conn
+            .query_row("SELECT data FROM workflow_runs WHERE id='run-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        let run: Value = serde_json::from_str(&run_raw).unwrap();
+        assert_eq!(run["terminal_id"], json!("c1:developer"));
+        assert!(run.get("attempt_id").is_none());
+
+        let card_raw: String = store
+            .conn
+            .query_row("SELECT data FROM cards WHERE id='c1'", [], |r| r.get(0))
+            .unwrap();
+        let card: Value = serde_json::from_str(&card_raw).unwrap();
+        assert_eq!(card["human_gate"]["terminal_id"], json!("c1:developer"));
+
+        let rep_raw: String = store
+            .conn
+            .query_row("SELECT data FROM reports WHERE id='rep1'", [], |r| r.get(0))
+            .unwrap();
+        let rep: Value = serde_json::from_str(&rep_raw).unwrap();
+        assert_eq!(rep["terminal_id"], json!("c1:developer"));
+
+        let ev_raw: String = store
+            .conn
+            .query_row("SELECT data FROM events WHERE id='ev1'", [], |r| r.get(0))
+            .unwrap();
+        let ev: Value = serde_json::from_str(&ev_raw).unwrap();
+        assert_eq!(ev["data"]["terminal_id"], json!("c1:developer"));
+        assert!(ev["data"].get("attempt_id").is_none());
+
         apply(&mut store.conn, 14).unwrap();
         assert_eq!(version(&store.conn).unwrap(), 14);
+        let att_count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM attempts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(att_count, 2);
+        apply(&mut store.conn, 15).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), 15);
     }
 }

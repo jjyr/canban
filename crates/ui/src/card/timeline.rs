@@ -32,8 +32,8 @@ pub fn entries(events: &[Event]) -> Vec<(Event, bool)> {
                 && (event.data["comment_replied"] == true
                     || events.iter().any(|other| {
                         other.kind == "comment.replied"
-                            && other.data["attempt_id"] == event.data["attempt_id"]
-                            && event.data["attempt_id"].as_str().is_some()
+                            && other.data["terminal_id"] == event.data["terminal_id"]
+                            && event.data["terminal_id"].as_str().is_some()
                             && ((event.data["report_id"].as_str().is_some()
                                 && other.data["report_id"] == event.data["report_id"])
                                 || (event.data["path"].as_str().is_some()
@@ -99,13 +99,13 @@ fn noise(kind: &str) -> bool {
 /// Transient runtime input waits (e.g. folder trust or sign-in prompts) are
 /// actionable while active, but become historical noise once resolved.
 fn resolved_input_wait(event: &Event, events: &[Event]) -> bool {
-    let Some(attempt_id) = event.data["attempt_id"].as_str() else {
+    let Some(terminal_id) = event.data["terminal_id"].as_str() else {
         return false;
     };
     event.kind == "execution.input_required"
         && events.iter().any(|other| {
             other.sequence > event.sequence
-                && other.data["attempt_id"].as_str() == Some(attempt_id)
+                && other.data["terminal_id"].as_str() == Some(terminal_id)
                 && matches!(
                     other.kind.as_str(),
                     "execution.input_resolved"
@@ -227,37 +227,39 @@ pub(crate) fn project_rows(
     rows
 }
 
-fn execution(ui: Ui, reading: Reading, attempt_id: String) -> impl IntoElement {
+fn execution(ui: Ui, reading: Reading, terminal_id: String) -> impl IntoElement {
     dynamic(move || {
         let selected = ui.request.get();
-        if selected != attempt_id {
+        if selected != terminal_id {
             return view().into_element();
         }
         let run = ui.snapshot.with(|s| {
-            s.attempts
+            s.terminals
                 .iter()
-                .find(|a| a.id == selected && a.card_id == ui.card_id())
+                .find(|t| {
+                    t.id == selected && t.agent.as_ref().is_some_and(|a| a.card_id == ui.card_id())
+                })
                 .cloned()
         });
         if let Some(run) = run {
-            let attempt_id = run.id.clone();
+            let terminal_id = run.id.clone();
             let target = element_ref();
             let pending = stored(false);
             view()
                 .element_ref(&target)
                 .on_layout(move |_: &Bounds<Points>| {
-                    if reading.revealed_request.get() == attempt_id || pending.replace(true) {
+                    if reading.revealed_request.get() == terminal_id || pending.replace(true) {
                         return;
                     }
-                    let attempt_id = attempt_id.clone();
+                    let terminal_id = terminal_id.clone();
                     ui.spawn(async move {
                         next_frame().await;
                         next_frame().await;
                         if let Some(bounds) = reading.bounds(target).await
-                            && ui.request.get_untracked() == attempt_id
+                            && ui.request.get_untracked() == terminal_id
                             && ui.card_id() == ui.card.get_untracked()
                         {
-                            reading.revealed_request.replace(attempt_id);
+                            reading.revealed_request.replace(terminal_id);
                             reading.follow.set(false);
                             reading.scroll.scroll_to(
                                 Point::new(px(0.), px((bounds.origin.y.0 - 12.).max(0.))),
@@ -330,23 +332,23 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
                             }),
                         }
                     });
-                    // One detail owner per attempt, placed inside the right column of its
+                    // One detail owner per Agent terminal, placed inside the right column of its
                     // earliest rendered row so the vertical spine stays unbroken.
-                    let trailing_detail = row.event.data["attempt_id"]
+                    let trailing_detail = row.event.data["terminal_id"]
                         .as_str()
                         .map(str::to_owned)
-                        .and_then(|attempt_id| {
+                        .and_then(|terminal_id| {
                             let first = rows.with(|all| {
                                 all.iter()
                                     .filter(|r| {
-                                        r.event.data["attempt_id"].as_str()
-                                            == Some(attempt_id.as_str())
+                                        r.event.data["terminal_id"].as_str()
+                                            == Some(terminal_id.as_str())
                                     })
                                     .map(|r| r.event.sequence)
                                     .min()
                             });
                             (first == Some(sequence))
-                                .then(|| execution(ui, reading, attempt_id).into_element())
+                                .then(|| execution(ui, reading, terminal_id).into_element())
                         });
                     view()
                         .element_ref(&target)
@@ -385,14 +387,14 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
             },
         )))
         .child(dynamic(move || {
-            let attempt_id = ui.request.get();
-            if !attempt_id.is_empty()
+            let terminal_id = ui.request.get();
+            if !terminal_id.is_empty()
                 && !rows.with(|all| {
                     all.iter()
-                        .any(|r| r.event.data["attempt_id"].as_str() == Some(&attempt_id))
+                        .any(|r| r.event.data["terminal_id"].as_str() == Some(&terminal_id))
                 })
             {
-                execution(ui, reading, attempt_id).into_element()
+                execution(ui, reading, terminal_id).into_element()
             } else {
                 view().into_element()
             }
@@ -403,7 +405,7 @@ pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
 mod tests {
     use super::*;
 
-    fn make_event(seq: u64, kind: &str, attempt: &str, message: &str) -> Event {
+    fn make_event(seq: u64, kind: &str, terminal: &str, message: &str) -> Event {
         Event {
             id: format!("e{seq}"),
             sequence: seq,
@@ -412,10 +414,10 @@ mod tests {
             kind: kind.into(),
             actor: "agent:developer".into(),
             message: message.into(),
-            data: if attempt.is_empty() {
+            data: if terminal.is_empty() {
                 serde_json::json!({})
             } else {
-                serde_json::json!({"attempt_id": attempt})
+                serde_json::json!({"terminal_id": terminal})
             },
             created_at: 1,
         }
@@ -601,7 +603,7 @@ mod tests {
             kind: "execution.reported".into(),
             actor: "agent:developer".into(),
             message: "completed: Answer".into(),
-            data: serde_json::json!({"report_id":"result","attempt_id":"r"}),
+            data: serde_json::json!({"report_id":"result","terminal_id":"r"}),
             created_at: 1,
         };
         let reply = Event {
@@ -626,7 +628,7 @@ mod tests {
             kind: "execution.reported".into(),
             actor: "agent:developer".into(),
             message: "completed: Answer".into(),
-            data: serde_json::json!({"report_id":"result","path":null,"attempt_id":"r"}),
+            data: serde_json::json!({"report_id":"result","path":null,"terminal_id":"r"}),
             created_at: 1,
         };
         let reply = Event {
@@ -651,7 +653,7 @@ mod tests {
             kind: "comment.replied".into(),
             actor: "agent:agy".into(),
             message: "Detailed answer".into(),
-            data: serde_json::json!({"question_id":"q:agy","path":"replies/q.md","attempt_id":"r"}),
+            data: serde_json::json!({"question_id":"q:agy","path":"replies/q.md","terminal_id":"r"}),
             created_at: 1,
         };
         let report = Event {
@@ -659,7 +661,7 @@ mod tests {
             sequence: 2,
             kind: "execution.reported".into(),
             message: "completed: Summary".into(),
-            data: serde_json::json!({"report_id":"rep1","path":null,"state":"completed","comment_replied":true,"attempt_id":"r"}),
+            data: serde_json::json!({"report_id":"rep1","path":null,"state":"completed","comment_replied":true,"terminal_id":"r"}),
             ..reply.clone()
         };
         let rows = visible(&[reply, report], None);
@@ -678,7 +680,7 @@ mod tests {
             actor: "agent:developer".into(),
             message: "Blocked".into(),
             created_at: 1,
-            data: serde_json::json!({"attempt_id":"r"}),
+            data: serde_json::json!({"terminal_id":"r"}),
         };
         let reply = Event {
             id: "reply".into(),
@@ -704,7 +706,7 @@ mod tests {
             actor: "user".into(),
             message: kind.into(),
             created_at: 1,
-            data: serde_json::json!({"path":"report.md","attempt_id":"r"}),
+            data: serde_json::json!({"path":"report.md","terminal_id":"r"}),
         };
         let mut events = vec![
             make("comment.created", 1),

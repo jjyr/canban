@@ -325,12 +325,16 @@ fn terminal_button(ui: Ui, card: String, number: u64) -> View {
 }
 
 /// A running workflow/profile Agent: pulsing mark + provider icon + profile. Opens Card + Agent terminal.
-fn agent_pill(ui: Ui, attempt: Attempt) -> impl IntoElement {
-    let (mark, provider) = crate::profiles::provider(&attempt.profile);
-    let profile = attempt.profile.id.clone();
+fn agent_pill(ui: Ui, entry: TerminalEntry) -> impl IntoElement {
+    let agent = entry
+        .agent
+        .as_ref()
+        .expect("agent_pill requires an Agent terminal");
+    let (mark, provider) = crate::profiles::provider(&agent.profile);
+    let profile = agent.profile.id.clone();
     let hint = format!("{provider} · @{profile} is working — open in Card");
     let a11y = hint.clone();
-    let id = attempt.id.clone();
+    let id = entry.id.clone();
     view().flex_shrink_0().tooltip(hint_tooltip(hint)).child(
         press_target()
             .h(px(22.))
