@@ -123,6 +123,16 @@ pub fn active_count(snapshot: &canban_types::Snapshot) -> usize {
                 )
             })
             .count()
+        + snapshot
+            .merge_batches
+            .iter()
+            .filter(|b| {
+                matches!(
+                    b.state.as_str(),
+                    "starting" | "unknown" | "running" | "working"
+                )
+            })
+            .count()
 }
 pub fn automatic(agent: &AgentRun) -> bool {
     agent.trigger.is_automatic()
@@ -256,7 +266,12 @@ pub fn admissions(snapshot: &canban_types::Snapshot, max_agents: usize) -> Vec<S
         .terminals
         .iter()
         .filter(|t| eligible(snapshot, t))
-        .count();
+        .count()
+        + snapshot
+            .merge_batches
+            .iter()
+            .filter(|b| b.state == "queued")
+            .count();
     let mut free = max_agents.saturating_sub(active_count(snapshot) + queued);
     // (project, workflow, gate step, column) -> admitted Cards still in that column.
     let mut ready = std::collections::BTreeMap::<(String, String, String, String), u32>::new();
@@ -398,5 +413,155 @@ mod tests {
         proj.agent_overrides.clear();
         let fallback = select_in_project(&resolved, Some(&proj), Some("developer")).unwrap();
         assert_eq!(fallback.command()[0], "codex");
+    }
+
+    #[test]
+    fn merge_batches_count_against_active_budget_and_reserve_queued_slots() {
+        let mut a1 = agent_run(
+            "p1",
+            "c1",
+            1,
+            "develop",
+            "auto",
+            Profile::default(),
+            "go".into(),
+            None,
+        );
+        a1.state = "queued".into();
+        let t1 = TerminalEntry {
+            id: "t1".into(),
+            conversation_id: Some("conv1".into()),
+            number: 1,
+            name: None,
+            manual_number: None,
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: None,
+            agent: Some(a1),
+            created_at: 1,
+        };
+
+        let batch = canban_types::MergeBatch {
+            id: "merge-queue:p1:abcd1234".into(),
+            project_id: "p1".into(),
+            profile_id: "merger".into(),
+            provider_session_id: None,
+            target_branch: "main".into(),
+            target_head: "abc".into(),
+            strategy: canban_types::MergeStrategy::Rebase,
+            sync_upstream: true,
+            test_command: None,
+            worktree: "/tmp/mq".into(),
+            state: "running".into(),
+            failure_kind: None,
+            conflict_card_number: None,
+            conflict_files: vec![],
+            test_output: None,
+            items: vec![canban_types::MergeBatchItem {
+                card_id: "c3".into(),
+                card_number: 3,
+                workflow_run_id: "r3".into(),
+                branch: "canban/card-3".into(),
+                worktree: "/tmp/c3".into(),
+                base_head: "def".into(),
+                integrated_commit: None,
+                evicted: false,
+            }],
+            prompt: "resolve".into(),
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+
+        let make_card = |id: &str, number: u64| canban_types::Card {
+            source_trust: None,
+            hold_auto_merge: false,
+            github_links: vec![],
+            created_by: String::new(),
+            content: Default::default(),
+            removed_at: None,
+            pull_request: None,
+            pull_request_history: vec![],
+            delivery_mode: None,
+            workspace: None,
+            workspace_history: vec![],
+            id: id.into(),
+            project_id: "p1".into(),
+            number,
+            title: format!("Card {number}"),
+            body: String::new(),
+            board_order: None,
+            context_notes: None,
+            stage: "develop".into(),
+            revision: 1,
+            attention: None,
+            archived_at: None,
+            archive: None,
+            archive_error: None,
+            worktree: None,
+            branch: None,
+            base_commit: None,
+            human_gate: None,
+            delivery: None,
+            created_at: 1,
+        };
+
+        let mut def = canban_types::WorkflowDefinition {
+            id: "dev".into(),
+            name: "Dev".into(),
+            columns: vec![],
+            entries: Default::default(),
+            steps: Default::default(),
+            env: Default::default(),
+            workspace: Default::default(),
+            max_steps: 100,
+        };
+        def.steps.insert(
+            "admit".into(),
+            canban_types::WorkflowStep::Admit {
+                agent_slot: true,
+                max_ready: None,
+                next: None,
+            },
+        );
+        let wf2 = canban_types::WorkflowRun {
+            id: "wf2".into(),
+            project_id: "p1".into(),
+            card_id: "c2".into(),
+            workflow_id: "dev".into(),
+            definition_revision: 1,
+            definition: def,
+            state: "waiting_capacity".into(),
+            step: Some("admit".into()),
+            visit: 1,
+            terminal_id: None,
+            trigger_event_id: None,
+            input_digest: String::new(),
+            inputs: Default::default(),
+            outputs: Default::default(),
+            history: vec![],
+            error: None,
+            created_at: 2,
+            updated_at: 2,
+        };
+
+        let mut snap = canban_types::Snapshot {
+            cards: vec![make_card("c1", 1), make_card("c2", 2)],
+            terminals: vec![t1.clone()],
+            workflow_runs: vec![wf2],
+            merge_batches: vec![batch],
+            ..Default::default()
+        };
+        assert_eq!(active_count(&snap), 1);
+        assert!(next(&snap, 1).is_none());
+        assert_eq!(next(&snap, 2).map(|t| t.id), Some("t1".into()));
+        assert!(admissions(&snap, 2).is_empty());
+        assert_eq!(admissions(&snap, 3), vec!["wf2".to_string()]);
+
+        // A queued merge batch reserves capacity ahead of ready-gate admissions.
+        snap.merge_batches[0].state = "queued".into();
+        assert_eq!(active_count(&snap), 0);
+        assert!(admissions(&snap, 2).is_empty());
+        assert_eq!(admissions(&snap, 3), vec!["wf2".to_string()]);
     }
 }

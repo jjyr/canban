@@ -104,6 +104,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
             had_previous_run,
             att_profiles,
             queue_info,
+            active_batch,
         ) = ui.snapshot.with(|s| {
             let att_profiles: std::collections::BTreeMap<String, (String, Option<u64>, bool)> = s
                 .terminals
@@ -183,9 +184,15 @@ pub fn render(ui: Ui) -> impl IntoElement {
                     .find(|c| c.id == head.card_id)
                     .map(|c| c.number);
                 let head_pause = head.queue_pause_reason().map(str::to_owned);
-                let head_resolving = matches!(head.state.as_str(), "waiting_agent" | "running");
+                let head_resolving = matches!(
+                    head.state.as_str(),
+                    "waiting_agent" | "running" | "waiting_batch"
+                );
                 (pos, total, head_card_num, head_pause, head_resolving)
             });
+            let active_batch = s
+                .active_merge_batch_for_card(&card_id)
+                .map(|(b, idx, total)| (b.clone(), idx, total));
             (
                 active_visible,
                 any_active,
@@ -193,6 +200,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                 had_prev,
                 att_profiles,
                 queue_info,
+                active_batch,
             )
         });
 
@@ -589,6 +597,16 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                 .disabled(pending_action),
                             );
                         }
+                        if let Some((ref batch, _, _)) = active_batch
+                            && matches!(batch.state.as_str(), "queued" | "running")
+                        {
+                            let batch_id = batch.id.clone();
+                            actions = actions.child(compact_action(
+                                format!("Open @{} terminal", batch.profile_id),
+                                Variant::Secondary,
+                                move |_| ui.open_terminal(batch_id.clone()),
+                            ));
+                        }
                     }
                     for (step_key, output) in &run.outputs {
                         if let Some(path) = output["path"].as_str() {
@@ -623,10 +641,35 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         }
                     }
 
+                    let batch_state_label = |batch: &canban_types::MergeBatch,
+                                             idx: usize,
+                                             total: usize,
+                                             fallback: String| match batch.state.as_str() {
+                        "integrating" => format!("Integrating batch ({idx} of {total})…"),
+                        "testing" => format!("Testing batch ({idx} of {total})…"),
+                        "queued" => format!(
+                            "Batch queued for @{} ({idx} of {total})…",
+                            batch.profile_id
+                        ),
+                        "running" => format!(
+                            "Resolving batch (@{} · {idx} of {total})…",
+                            batch.profile_id
+                        ),
+                        _ => fallback,
+                    };
                     let state_label = match run.state.as_str() {
                         "stale" => "Changes required".to_owned(),
+                        "waiting_batch" => {
+                            if let Some((ref batch, idx, total)) = active_batch {
+                                batch_state_label(batch, idx, total, format!("Batch {idx} of {total}…"))
+                            } else {
+                                "In merge batch…".to_owned()
+                            }
+                        }
                         "waiting_delivery" => {
-                            if let Some((pos, total, head_num, _, head_resolving)) = &queue_info {
+                            if let Some((ref batch, idx, total)) = active_batch {
+                                batch_state_label(batch, idx, total, "Merging…".to_owned())
+                            } else if let Some((pos, total, head_num, _, head_resolving)) = &queue_info {
                                 if *pos > 1 {
                                     if *head_resolving {
                                         if let Some(num) = head_num {
@@ -733,6 +776,50 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                 .child(actions),
                         )
                         .child(stepper);
+
+                    if let Some((ref batch, idx, total)) = active_batch {
+                        let nums = batch
+                            .items
+                            .iter()
+                            .filter(|i| !i.evicted)
+                            .map(|i| format!("#{}", i.card_number))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let mut msg = match batch.state.as_str() {
+                            "integrating" => {
+                                format!("Integrating batch ({idx} of {total}: {nums})")
+                            }
+                            "testing" => {
+                                let cmd = batch.test_command.as_deref().unwrap_or("batch tests");
+                                format!("Running `{cmd}` for batch ({idx} of {total}: {nums})")
+                            }
+                            "queued" => format!(
+                                "Batch queued for @{} ({idx} of {total}: {nums})",
+                                batch.profile_id
+                            ),
+                            "running" => format!(
+                                "@{} resolving batch ({idx} of {total}: {nums})",
+                                batch.profile_id
+                            ),
+                            _ => format!("Merge batch ({idx} of {total}: {nums})"),
+                        };
+                        if batch.failure_kind.as_deref() == Some("conflict")
+                            && let Some(num) = batch.conflict_card_number
+                        {
+                            msg.push_str(&format!(" · Card #{num} conflict"));
+                            if !batch.conflict_files.is_empty() {
+                                msg.push_str(&format!(": {}", batch.conflict_files.join(", ")));
+                            }
+                        } else if batch.failure_kind.as_deref() == Some("test_failure") {
+                            msg.push_str(" · Test command failed");
+                        }
+                        let tone = if batch.failure_kind.is_some() {
+                            Tone::Attention
+                        } else {
+                            Tone::Info
+                        };
+                        body = body.child(notice(msg, tone));
+                    }
 
                     if run.state == "waiting_delivery" {
                         if let Some(pause_reason) = run.queue_pause_reason() {

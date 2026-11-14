@@ -263,13 +263,13 @@ impl Ops {
         };
         Ok(Some((target_branch, target_head, files)))
     }
-    fn r_text(&self, dir: &Path, args: &[&str]) -> Result<String> {
+    pub(crate) fn r_text(&self, dir: &Path, args: &[&str]) -> Result<String> {
         Ok(String::from_utf8(self.r_checked(dir, args)?)
             .context("Git returned a non-UTF-8 path/ref")?
             .trim_end_matches('\n')
             .into())
     }
-    fn r_common(&self, dir: &Path) -> Result<PathBuf> {
+    pub(crate) fn r_common(&self, dir: &Path) -> Result<PathBuf> {
         let path = PathBuf::from(self.r_text(dir, &["rev-parse", "--git-common-dir"])?);
         self.host.canonical(&if path.is_absolute() {
             path

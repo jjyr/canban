@@ -58,6 +58,8 @@ struct StepModel {
     sync_upstream: bool,
     target_branch: String,
     max_conflict: u32,
+    batch_size: u32,
+    test_command: String,
     rework: String,
     gate_title: String,
     agent_slot: bool,
@@ -214,6 +216,14 @@ fn step_model(
         .get("max_conflict_attempts")
         .and_then(|v| v.as_u64())
         .map_or(canban_types::DEFAULT_MAX_CONFLICT_ATTEMPTS, |v| v as u32);
+    let batch_size = step
+        .with
+        .get("batch_size")
+        .and_then(|v| v.as_u64())
+        .map_or(canban_types::DEFAULT_MERGE_BATCH_SIZE, |v| {
+            (v as u32).clamp(1, 50)
+        });
+    let test_command = with_str(step, "test_command").unwrap_or("").to_owned();
     let agent_slot = step
         .with
         .get("agent_slot")
@@ -326,6 +336,11 @@ fn step_model(
                 MergeStrategy::Squash => "Squash",
                 MergeStrategy::Merge => "Merge",
             };
+            let batch_summary = if test_command.trim().is_empty() {
+                format!("batch ×{batch_size}")
+            } else {
+                format!("batch ×{batch_size} · tested")
+            };
             (
                 Icon::Branch,
                 Tint::Success,
@@ -334,7 +349,7 @@ fn step_model(
                     if sync_upstream { "Sync" } else { "Local" }
                 ),
                 format!(
-                    "{}{} · {conflict_summary}",
+                    "{}{} · {batch_summary} · {conflict_summary}",
                     if target_branch.is_empty() {
                         "Project branch".to_owned()
                     } else {
@@ -449,6 +464,8 @@ fn step_model(
         sync_upstream,
         target_branch,
         max_conflict,
+        batch_size,
+        test_command,
         rework: step.on_changes_requested.clone().unwrap_or_default(),
         gate_title: with_str(step, "title").unwrap_or("").to_owned(),
         agent_slot,
@@ -1852,8 +1869,8 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                 }));
         }
         "deliver" => {
-            let (strategy_id, sync_id, conflict_id, pid) =
-                (id.clone(), id.clone(), id.clone(), id.clone());
+            let (strategy_id, sync_id, batch_id, conflict_id, pid) =
+                (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
             form = form
                 .child(setting_row(
                     "Strategy",
@@ -1891,6 +1908,38 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                         |ctx, id, v| {
                             let v = v.trim().to_owned();
                             ctx.set_with(id, "target_branch", (!v.is_empty()).then(|| json!(v)));
+                        },
+                    ),
+                ))
+                .child(setting_row(
+                    "Batch size",
+                    choice(
+                        vec![
+                            ("×1".into(), 1u32),
+                            ("×3".into(), 3),
+                            ("×5".into(), 5),
+                            ("×10".into(), 10),
+                        ],
+                        move || node.with(|n| n.batch_size),
+                        move |k| {
+                            ctx.set_with(
+                                &batch_id,
+                                "batch_size",
+                                (k != canban_types::DEFAULT_MERGE_BATCH_SIZE).then(|| json!(k)),
+                            )
+                        },
+                    ),
+                ))
+                .child(setting_row(
+                    "Test command",
+                    text_setting(
+                        ctx,
+                        id.clone(),
+                        model.test_command.clone(),
+                        "Optional (skip tests when empty)",
+                        |ctx, id, v| {
+                            let v = v.trim().to_owned();
+                            ctx.set_with(id, "test_command", (!v.is_empty()).then(|| json!(v)));
                         },
                     ),
                 ))

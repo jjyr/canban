@@ -471,7 +471,8 @@ impl AppServer {
                         t.agent
                             .as_ref()
                             .is_some_and(|a| a.state == "queued" || a.pending.is_some())
-                    }) {
+                    }) || s.merge_batches.iter().any(|b| b.state == "queued")
+                    {
                         server.wake_runtime();
                     }
                     let mut due = |at: u64| {
@@ -665,10 +666,12 @@ impl AppServer {
                     }
                 }
                 // Only queued work awaiting an unavailable machine needs retry admission.
-                let retry_needed =
-                    canban_scheduler::next(&s, server.config().scheduler.max_agents).is_some();
+                let retry_needed = canban_scheduler::next(&s, server.config().scheduler.max_agents)
+                    .is_some()
+                    || (canban_scheduler::active_count(&s) < server.config().scheduler.max_agents
+                        && s.merge_batches.iter().any(|b| b.state == "queued"));
                 if retry_needed {
-                    let current = s
+                    let mut current = s
                         .terminals
                         .iter()
                         .filter(|t| {
@@ -678,6 +681,12 @@ impl AppServer {
                         })
                         .map(|t| t.id.clone())
                         .collect::<Vec<_>>();
+                    current.extend(
+                        s.merge_batches
+                            .iter()
+                            .filter(|b| b.state == "queued")
+                            .map(|b| b.id.clone()),
+                    );
                     if current != queued {
                         queued = current;
                         backoff = 1;

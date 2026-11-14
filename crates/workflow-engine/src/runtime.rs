@@ -598,6 +598,8 @@ fn drive(
                 target_branch,
                 strategy,
                 sync_upstream,
+                batch_size,
+                test_command,
                 next: to,
                 ..
             } => {
@@ -629,6 +631,8 @@ fn drive(
                     run.inputs["target_branch"] = json!(target_branch);
                     run.inputs["strategy"] = json!(strategy);
                     run.inputs["sync_upstream"] = json!(sync_upstream);
+                    run.inputs["batch_size"] = json!(batch_size);
+                    run.inputs["test_command"] = json!(test_command);
                     run.state = "waiting_delivery".into();
                 }
             }
@@ -1442,6 +1446,8 @@ pub fn requeue_delivery(db: Db<'_>, card: &mut Card, run: &mut WorkflowRun) -> R
         target_branch,
         strategy,
         sync_upstream,
+        batch_size,
+        test_command,
         max_conflict_attempts,
         next: to,
         ..
@@ -1455,10 +1461,25 @@ pub fn requeue_delivery(db: Db<'_>, card: &mut Card, run: &mut WorkflowRun) -> R
         bail!("Current step is not Deliver");
     };
     ensure!(
-        matches!(run.state.as_str(), "failed" | "blocked" | "waiting_agent"),
+        matches!(
+            run.state.as_str(),
+            "failed" | "blocked" | "waiting_agent" | "waiting_batch"
+        ),
         "Delivery is not retryable from state {}",
         run.state
     );
+    if run.state == "waiting_batch" {
+        let active_batch = db.list::<MergeBatch>()?.into_iter().any(|b| {
+            b.active()
+                && b.items
+                    .iter()
+                    .any(|item| !item.evicted && item.workflow_run_id == run.id)
+        });
+        ensure!(
+            !active_batch,
+            "Card is currently owned by an active merge batch"
+        );
+    }
     let mut handled_terminal = false;
     let mut refund_attempt = true;
     if let Some(tid) = &run.terminal_id
@@ -1527,6 +1548,8 @@ pub fn requeue_delivery(db: Db<'_>, card: &mut Card, run: &mut WorkflowRun) -> R
     run.inputs["target_branch"] = json!(target_branch);
     run.inputs["strategy"] = json!(strategy);
     run.inputs["sync_upstream"] = json!(sync_upstream);
+    run.inputs["batch_size"] = json!(batch_size);
+    run.inputs["test_command"] = json!(test_command);
     run.terminal_id = None;
     run.error = None;
     run.state = "waiting_delivery".into();

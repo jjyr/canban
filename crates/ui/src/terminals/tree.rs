@@ -518,6 +518,13 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                 {
                                     scope_block =
                                         scope_block.child(muted("Configuration").ml_5().pl_2());
+                                } else if snapshot
+                                    .merge_batches
+                                    .iter()
+                                    .any(|b| b.id == child.saved.id)
+                                {
+                                    scope_block =
+                                        scope_block.child(muted("Merge queue").ml_5().pl_2());
                                 }
                                 scope_block = scope_block.child(
                                     view()

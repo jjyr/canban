@@ -170,12 +170,26 @@ pub fn validate_definition(
                 }
             }
             WorkflowStep::Deliver {
-                profile, rework, ..
+                profile,
+                batch_size,
+                test_command,
+                rework,
+                ..
             } => {
                 if let Some(profile) = profile {
                     ensure!(
                         profiles.contains(profile),
                         "Unknown agent @{profile} at {id}"
+                    );
+                }
+                ensure!(
+                    (1..=50).contains(batch_size),
+                    "batch_size must be between 1 and 50 at {id}"
+                );
+                if let Some(cmd) = test_command {
+                    ensure!(
+                        !cmd.trim().is_empty(),
+                        "test_command must be non-empty when set at {id}"
                     );
                 }
                 if let Some(to) = rework {

@@ -88,6 +88,18 @@ impl Drop for MergingCard<'_> {
             .remove(&self.card_id);
     }
 }
+pub(crate) struct MergingCards<'a> {
+    server: &'a AppServer,
+    card_ids: Vec<String>,
+}
+impl Drop for MergingCards<'_> {
+    fn drop(&mut self) {
+        let mut guard = self.server.merging_cards.lock().unwrap();
+        for id in &self.card_ids {
+            guard.remove(id);
+        }
+    }
+}
 fn strp<'a>(p: &'a Value, key: &str) -> Result<&'a str> {
     p.get(key)
         .and_then(Value::as_str)
@@ -245,7 +257,9 @@ pub(crate) fn resolve_card(db: Db<'_>, p: &Value) -> Result<Card> {
             let prefix_matches: Vec<_> = db
                 .list::<Card>()?
                 .into_iter()
-                .filter(|c| c.removed_at.is_none() && c.id.to_ascii_lowercase().starts_with(&needle))
+                .filter(|c| {
+                    c.removed_at.is_none() && c.id.to_ascii_lowercase().starts_with(&needle)
+                })
                 .collect();
             if prefix_matches.len() == 1 {
                 return Ok(prefix_matches.into_iter().next().unwrap());
@@ -746,6 +760,24 @@ impl AppServer {
             card_id: id,
         }
     }
+    pub(crate) fn track_merging_many<'a>(&'a self, card_ids: &[String]) -> MergingCards<'a> {
+        let mut added = false;
+        {
+            let mut guard = self.merging_cards.lock().unwrap();
+            for id in card_ids {
+                if guard.insert(id.clone()) {
+                    added = true;
+                }
+            }
+        }
+        if added {
+            self.emit("review", None);
+        }
+        MergingCards {
+            server: self,
+            card_ids: card_ids.to_vec(),
+        }
+    }
     pub fn snapshot(&self) -> Result<Snapshot> {
         let mut snapshot = self.store.lock().unwrap().snapshot()?;
         snapshot.github = serde_json::from_value(serde_json::to_value(self.github.status())?)?;
@@ -850,6 +882,7 @@ mod configuration;
 mod events;
 mod herdr_setup;
 mod machines;
+mod merge_batch;
 mod remote;
 mod workflow;
 

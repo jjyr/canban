@@ -154,6 +154,7 @@ impl AppServer {
             worktrees: Vec::new(),
             workflow_sources: Vec::new(),
             configuration_sessions: Vec::new(),
+            merge_batches: Vec::new(),
             event_subscriptions: Vec::new(),
             workflow_runs: snapshot
                 .workflow_runs

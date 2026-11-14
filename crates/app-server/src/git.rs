@@ -37,19 +37,18 @@ impl AppServer {
         let (project, card_from_param, cards, managed) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
-            let (proj, card_opt) =
-                if p["card_id"].as_str().is_some_and(|s| !s.trim().is_empty())
-                    || super::parse_card_number(&p["card"]).is_some()
-                {
-                    let c = super::resolve_card(db, p)?;
-                    let base_proj: Project = db.get(&c.project_id)?;
-                    let bound = self.bound_project(&base_proj, &c);
-                    (bound, Some(c))
-                } else {
-                    let pid = super::resolve_project_id(db, strp(p, "project_id")?)?;
-                    let proj: Project = db.get(&pid)?;
-                    (proj, None)
-                };
+            let (proj, card_opt) = if p["card_id"].as_str().is_some_and(|s| !s.trim().is_empty())
+                || super::parse_card_number(&p["card"]).is_some()
+            {
+                let c = super::resolve_card(db, p)?;
+                let base_proj: Project = db.get(&c.project_id)?;
+                let bound = self.bound_project(&base_proj, &c);
+                (bound, Some(c))
+            } else {
+                let pid = super::resolve_project_id(db, strp(p, "project_id")?)?;
+                let proj: Project = db.get(&pid)?;
+                (proj, None)
+            };
             let proj_id = proj.id.clone();
             let cards: Vec<Card> = db
                 .list::<Card>()?

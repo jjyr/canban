@@ -69,6 +69,13 @@ pub(super) fn retry_agent(db: Db<'_>, card: &Card, entry: &mut TerminalEntry) ->
 
 impl AppServer {
     pub(super) fn bind_session(&self, p: Value) -> Result<Value> {
+        if p["batch_id"].as_str().is_some_and(|s| !s.trim().is_empty())
+            || p["terminal_id"]
+                .as_str()
+                .is_some_and(|s| s.trim().starts_with("merge-queue:"))
+        {
+            return self.batch_bind(p);
+        }
         let config = self.config();
         self.mutate("agent.bind", &p, |db| {
             let session = strp(&p, "session_id")?;

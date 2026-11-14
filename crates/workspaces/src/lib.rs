@@ -693,6 +693,7 @@ mod tests {
     }
 }
 
+pub mod batch;
 pub mod compare;
 pub mod context;
 pub mod git_client;

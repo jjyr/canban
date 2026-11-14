@@ -98,6 +98,7 @@ pub fn mark_all_read(ui: Ui, project_scope: Option<String>) {
 fn is_special_agent_terminal(s: &canban_types::Snapshot, e: &crate::terminals::Entry) -> bool {
     e.agent.is_none()
         && (s.configuration_sessions.iter().any(|c| c.id == e.saved.id)
+            || s.merge_batches.iter().any(|b| b.id == e.saved.id)
             || e.saved.agent_engine.is_some())
 }
 
@@ -1254,7 +1255,10 @@ fn activity_body(
                                 && is_special_agent_terminal(&s, e)
                         } else {
                             !(e.needs_attention() || e.status() == "blocked")
-                                && s.configuration_sessions.iter().any(|c| c.id == e.saved.id)
+                                && (s.configuration_sessions.iter().any(|c| c.id == e.saved.id)
+                                    || s.merge_batches
+                                        .iter()
+                                        .any(|b| b.id == e.saved.id && b.active()))
                         }
                 })
                 .collect()
@@ -1353,9 +1357,12 @@ fn config_session_row(
 ) -> impl IntoElement {
     let id = entry.saved.id.clone();
     let id_btn = id.clone();
-    let is_config = ui
-        .snapshot
-        .with_untracked(|s| s.configuration_sessions.iter().any(|c| c.id == id));
+    let (is_config, merge_batch) = ui.snapshot.with_untracked(|s| {
+        (
+            s.configuration_sessions.iter().any(|c| c.id == id),
+            s.merge_batches.iter().find(|b| b.id == id).cloned(),
+        )
+    });
     let status_word = entry.status();
     let needs_attn = entry.needs_attention() || status_word == "blocked";
     let status_text = entry
@@ -1386,6 +1393,14 @@ fn config_session_row(
             "Configuring workflows".to_owned(),
             Some(status_text.clone()),
         )
+    } else if let Some(ref batch) = merge_batch {
+        (
+            Icon::Branch,
+            Tone::Info,
+            batch.active(),
+            format!("Merging batch (@{})", batch.profile_id),
+            Some(status_text.clone()),
+        )
     } else {
         (
             entry.provider().map(|(ic, _)| ic).unwrap_or(Icon::Agent),
@@ -1397,6 +1412,12 @@ fn config_session_row(
     };
     let context_title = if is_config {
         "Edit Project Workflows".into()
+    } else if let Some(ref batch) = merge_batch {
+        let live_cards = batch.items.iter().filter(|i| !i.evicted).count();
+        format!(
+            "Merge queue · {live_cards} Card(s) → {}",
+            batch.target_branch
+        )
     } else {
         entry.title()
     };

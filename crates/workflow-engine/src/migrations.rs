@@ -7,7 +7,7 @@ use crate::source::Document;
 use anyhow::{Result, ensure};
 
 pub const BASELINE: u32 = 1;
-pub const CURRENT: u32 = 6;
+pub const CURRENT: u32 = 7;
 
 pub struct Migration {
     pub version: u32,
@@ -34,6 +34,10 @@ const STEPS: &[Migration] = &[
     Migration {
         version: 6,
         up: v6_script_and_env,
+    },
+    Migration {
+        version: 7,
+        up: v7_deliver_batch_and_test,
     },
 ];
 
@@ -203,6 +207,32 @@ fn v6_script_and_env(doc: &mut Document) -> Result<()> {
     Ok(())
 }
 
+/// Schema 7: `deliver` steps gain `with.batch_size` (default `5`) and optional `with.test_command`.
+/// Strips redundant default `batch_size: 5` and blank `test_command` strings so YAML stays concise.
+fn v7_deliver_batch_and_test(doc: &mut Document) -> Result<()> {
+    for step in &mut doc.steps {
+        if step.uses == "deliver" {
+            if step
+                .with
+                .get("batch_size")
+                .and_then(|v| v.as_u64())
+                .is_some_and(|n| n == u64::from(canban_types::DEFAULT_MERGE_BATCH_SIZE))
+            {
+                step.with.remove("batch_size");
+            }
+            if step
+                .with
+                .get("test_command")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.trim().is_empty())
+            {
+                step.with.remove("test_command");
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +352,46 @@ steps:
         assert_eq!(doc.steps[0].run.as_deref(), Some("cargo test"));
         assert!(!doc.steps[0].with.contains_key("run"));
         assert!(doc.steps[0].continue_on_error.is_none());
+        assert!(upgrade_yaml(&upgraded).unwrap().is_none());
+    }
+
+    #[test]
+    fn v7_strips_redundant_deliver_batch_defaults_and_preserves_custom() {
+        let v6 = r#"schema: 6
+id: delivery:demo
+name: Development
+on:
+  review:
+    event: card.column_entered
+    start_at: deliver:review
+    match:
+      column: review
+steps:
+  - id: deliver:review
+    uses: deliver
+    with:
+      batch_size: 5
+      test_command: "   "
+    next: deliver:custom
+  - id: deliver:custom
+    uses: deliver
+    with:
+      batch_size: 10
+      test_command: cargo test
+    next: __end
+  - id: __end
+    uses: complete
+"#;
+        let upgraded = upgrade_yaml(v6).unwrap().expect("v6 should upgrade to v7");
+        let doc = crate::source::parse(&upgraded).unwrap();
+        assert_eq!(doc.schema, CURRENT);
+        assert!(!doc.steps[0].with.contains_key("batch_size"));
+        assert!(!doc.steps[0].with.contains_key("test_command"));
+        assert_eq!(doc.steps[1].with["batch_size"], serde_json::json!(10));
+        assert_eq!(
+            doc.steps[1].with["test_command"].as_str(),
+            Some("cargo test")
+        );
         assert!(upgrade_yaml(&upgraded).unwrap().is_none());
     }
 }

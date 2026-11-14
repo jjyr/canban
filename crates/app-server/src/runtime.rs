@@ -259,7 +259,9 @@ impl AppServer {
         self.request_scripts();
         let _ = self.pump_merged_archives();
         self.observe_terminals()?;
+        self.reconcile_merge_batches()?;
         self.pump_configuration()?;
+        self.pump_merge_batches()?;
         let client = canban_herdr::Client {
             config: self.config(),
         };

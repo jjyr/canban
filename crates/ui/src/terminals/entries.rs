@@ -182,6 +182,21 @@ impl Entry {
                 cfg.profile_id
             ));
         }
+        if let Some(batch) = s
+            .merge_batches
+            .iter()
+            .find(|b| b.id == self.saved.id && b.active())
+        {
+            let rt = self.saved.runtime.as_ref()?;
+            if rt.state == "finished" || rt.state == "closing" || rt.terminal.is_none() {
+                return None;
+            }
+            return Some(format!(
+                "Merge batch Agent @{} is resolving {} Card(s). Closing this terminal cancels the batch and pauses those Cards for human review.",
+                batch.profile_id,
+                batch.items.iter().filter(|i| !i.evicted).count()
+            ));
+        }
         let r = self.saved.runtime.as_ref()?;
         if r.state == "finished" || r.state == "closing" || r.terminal.is_none() {
             return None;
@@ -354,6 +369,7 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
             .find(|c| c.terminal_id == t.id)
             .cloned();
         let configuration = s.configuration_sessions.iter().find(|c| c.id == t.id);
+        let merge_batch = s.merge_batches.iter().find(|b| b.id == t.id);
         let origin_card = t
             .origin_card_id
             .as_ref()
@@ -371,7 +387,7 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                     })
                 })
         });
-        let card = if configuration.is_some() {
+        let card = if configuration.is_some() || merge_batch.is_some() {
             None
         } else {
             agent.as_ref().map(|r| r.card.clone()).or_else(|| {
@@ -407,13 +423,16 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                     })
             })
         };
-        let project_id = configuration.map(|c| c.project_id.clone()).or_else(|| {
-            agent
-                .as_ref()
-                .map(|r| r.card.project_id.clone())
-                .or_else(|| location.as_ref().and_then(|c| c.project_id.clone()))
-                .or_else(|| card.as_ref().map(|c| c.project_id.clone()))
-        });
+        let project_id = configuration
+            .map(|c| c.project_id.clone())
+            .or_else(|| merge_batch.map(|b| b.project_id.clone()))
+            .or_else(|| {
+                agent
+                    .as_ref()
+                    .map(|r| r.card.project_id.clone())
+                    .or_else(|| location.as_ref().and_then(|c| c.project_id.clone()))
+                    .or_else(|| card.as_ref().map(|c| c.project_id.clone()))
+            });
         let inferred_card = agent.is_none() && t.origin_card_id.is_none() && card.is_some();
         let stage = agent.as_ref().and_then(|a| a.agent()).map(|att| {
             s.projects

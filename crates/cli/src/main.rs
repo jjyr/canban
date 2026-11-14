@@ -99,6 +99,33 @@ enum Cmd {
         #[arg(long)]
         request_key: Option<String>,
     },
+    /// Batch merge queue reporting for a project `_merge_queue` Agent session.
+    Batch {
+        #[command(subcommand)]
+        command: BatchCmd,
+    },
+}
+#[derive(Subcommand)]
+enum BatchCmd {
+    /// Report batch resolution outcome (and optionally evict unresolvable Cards).
+    Report {
+        /// Outcome state: completed | blocked | failed | working
+        #[arg(long)]
+        state: String,
+        #[arg(long, default_value = "")]
+        message: String,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Card number or ID to evict back to human review (repeatable).
+        #[arg(long)]
+        evict: Vec<String>,
+        #[arg(long, env = "CANBAN_BATCH_ID")]
+        batch: Option<String>,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project: Option<String>,
+        #[arg(long)]
+        request_key: Option<String>,
+    },
 }
 #[derive(Subcommand)]
 enum CardCmd {
@@ -448,6 +475,13 @@ fn run() -> Result<()> {
                     "configuration.bind".into(),
                     json!({"configuration_id":configuration,"generation":std::env::var("CANBAN_CONFIGURATION_GENERATION")?.parse::<u64>()?,"session_id":session_id}),
                 )
+            } else if let Ok(batch_id) = std::env::var("CANBAN_BATCH_ID")
+                && !batch_id.trim().is_empty()
+            {
+                let mut params = card_scope(card, project);
+                params["batch_id"] = json!(batch_id);
+                params["session_id"] = json!(session_id);
+                ("batch.bind".into(), params)
             } else {
                 let mut params = card_scope(card, project);
                 params["session_id"] = json!(session_id);
@@ -488,6 +522,30 @@ fn run() -> Result<()> {
             params["body"] = json!(file.map(std::fs::read_to_string).transpose()?);
             ("execution.report".into(), params)
         }
+        Cmd::Batch { command } => match command {
+            BatchCmd::Report {
+                state,
+                message,
+                file,
+                evict,
+                batch,
+                project,
+                request_key,
+            } => {
+                let mut params = card_scope(None, project);
+                if let Some(bid) = batch.filter(|s| !s.trim().is_empty()) {
+                    params["batch_id"] = json!(bid);
+                }
+                if !evict.is_empty() {
+                    params["evict"] = json!(evict);
+                }
+                params["request_key"] = json!(request_key.unwrap_or_else(canban_types::id));
+                params["state"] = json!(state);
+                params["message"] = json!(message);
+                params["body"] = json!(file.map(std::fs::read_to_string).transpose()?);
+                ("batch.report".into(), params)
+            }
+        },
         Cmd::Serve | Cmd::BuildInfo | Cmd::Skill | Cmd::Database { .. } => unreachable!(),
     };
     anyhow::ensure!(p.is_object(), "Parameters must be an object");
@@ -546,8 +604,10 @@ fn run() -> Result<()> {
         }
         p["execution"] = ex;
     }
-    let retryable = matches!(method.as_str(), "execution.report" | "agent.reply")
-        && endpoint == home.join("app.sock");
+    let retryable = matches!(
+        method.as_str(),
+        "execution.report" | "batch.report" | "agent.reply"
+    ) && endpoint == home.join("app.sock");
     let queued = if retryable {
         Some(canban_updater::handoff::enqueue(&home, &method, &p)?)
     } else {
@@ -595,5 +655,39 @@ mod tests {
 
         let by_cmd = Args::try_parse_from(["canban", "skill"]).unwrap();
         assert!(matches!(by_cmd.command, Some(Cmd::Skill)));
+    }
+
+    #[test]
+    fn parses_batch_report_with_repeatable_evict() {
+        let parsed = Args::try_parse_from([
+            "canban",
+            "batch",
+            "report",
+            "--state",
+            "completed",
+            "--evict",
+            "2",
+            "--evict",
+            "5",
+            "--message",
+            "ok",
+        ])
+        .unwrap();
+        match parsed.command {
+            Some(Cmd::Batch {
+                command:
+                    BatchCmd::Report {
+                        state,
+                        message,
+                        evict,
+                        ..
+                    },
+            }) => {
+                assert_eq!(state, "completed");
+                assert_eq!(message, "ok");
+                assert_eq!(evict, vec!["2", "5"]);
+            }
+            _ => panic!("expected batch report"),
+        }
     }
 }

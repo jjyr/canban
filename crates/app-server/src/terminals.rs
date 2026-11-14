@@ -14,6 +14,11 @@ impl AppServer {
         let mut closing_agent = false;
         let saved = self.mutate("terminal.close", &p, |db| {
             let mut item: TerminalEntry = db.get(terminal_id)?;
+            if let Ok(mut batch) = db.get::<canban_types::MergeBatch>(terminal_id)
+                && batch.active()
+            {
+                self.cancel_batch_from_terminal_close(db, &mut batch, &mut item)?;
+            }
             if let Ok(mut configuration)=db.get::<ConfigurationSession>(terminal_id) && configuration.state=="queued" {
                 configuration.state="cancelled".into();db.save(&configuration)?;
                 item.runtime=Some(TerminalRuntime{machine:"local".into(),owner_core_id:None,core_id:None,terminal:None,state:"finished".into(),connection:"connected".into(),error:None,agent_status:None,agent_turn:None});db.save(&item)?;
@@ -893,7 +898,11 @@ impl AppServer {
         let s = self.snapshot()?;
         Ok(s.terminals
             .iter()
-            .filter(|t| t.conversation_id.is_none())
+            .filter(|t| {
+                t.conversation_id.is_none()
+                    && !t.id.starts_with("merge-queue:")
+                    && !t.id.starts_with("configuration:")
+            })
             .any(|t| {
                 let live = t.runtime.as_ref().is_some_and(|r| r.state != "finished");
                 let machine = t

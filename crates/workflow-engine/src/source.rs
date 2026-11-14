@@ -2124,6 +2124,8 @@ fn walk_stage_summary(
                 target_branch,
                 strategy,
                 sync_upstream,
+                batch_size,
+                test_command,
                 max_conflict_attempts,
                 ..
             } => {
@@ -2142,9 +2144,17 @@ fn walk_stage_summary(
                 } else {
                     " (local only)"
                 };
+                let batch_desc = if *batch_size != canban_types::DEFAULT_MERGE_BATCH_SIZE {
+                    format!(" · batch {batch_size}")
+                } else {
+                    String::new()
+                };
                 details.push(format!(
-                    "• Queue merge{strategy_desc} into {branch}{sync_desc}"
+                    "• Queue merge{strategy_desc} into {branch}{sync_desc}{batch_desc}"
                 ));
+                if let Some(cmd) = test_command.as_deref().filter(|c| !c.trim().is_empty()) {
+                    details.push(format!("• Batch test: `{cmd}`"));
+                }
                 if *max_conflict_attempts > 0 {
                     let merger = profile
                         .as_deref()

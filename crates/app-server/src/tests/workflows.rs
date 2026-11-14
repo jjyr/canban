@@ -3387,6 +3387,13 @@ fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_fo
     .unwrap();
     edit_development(&app, &p, |d| {
         canban_workflow_engine::source::set_review_manual(d, false);
+        canban_workflow_engine::stages::set_step_with(
+            d,
+            "deliver:review",
+            "batch_size",
+            Some(json!(1)),
+        )
+        .unwrap();
     });
     let ops = canban_workspaces::Ops::local();
 
@@ -4502,9 +4509,12 @@ fn workflow_schema_6_migration_dual_syntax_env_outputs_and_agent_injection() {
     std::fs::create_dir_all(source.join("sub")).unwrap();
     let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
 
-    // 1. Discoverable `workflow.schema` reports schema 6 and `script` / `env`.
+    // 1. Discoverable `workflow.schema` reports current schema version and `script` / `env`.
     let schema = app.call("workflow.schema", json!({})).unwrap();
-    assert_eq!(schema["schema_version"], 6);
+    assert_eq!(
+        schema["schema_version"],
+        canban_workflow_engine::migrations::CURRENT
+    );
     assert!(schema["step_types"]["script"].is_object());
     assert!(schema["yaml"]["env"].is_string());
 
@@ -4551,7 +4561,10 @@ workspace:
     .unwrap();
     let wf = collection(&app, &p);
     let stored = wf["sources"][0]["source"].as_str().unwrap();
-    assert!(stored.contains("schema: 6"));
+    assert!(stored.contains(&format!(
+        "schema: {}",
+        canban_workflow_engine::migrations::CURRENT
+    )));
 
     // 3. Apply a schema 6 workflow covering 4-layer env precedence, dual syntax,
     // `$CANBAN_ENV`, `$CANBAN_OUTPUT`, `condition` routing, and Agent PTY invalidation.
@@ -5125,6 +5138,13 @@ fn failed_merger_retry_joins_tail_of_merge_queue_behind_active_card() {
     edit_development(&app, &p, |doc| {
         canban_workflow_engine::source::set_review_manual(doc, false);
         canban_workflow_engine::source::set_sync_upstream(doc, false);
+        canban_workflow_engine::stages::set_step_with(
+            doc,
+            "deliver:review",
+            "batch_size",
+            Some(json!(1)),
+        )
+        .unwrap();
     });
     let ops = canban_workspaces::Ops::local();
 
@@ -5419,5 +5439,528 @@ fn failed_merger_retry_joins_tail_of_merge_queue_behind_active_card() {
     assert_eq!(
         std::fs::read_to_string(source.join("a.txt")).unwrap(),
         "resolved a\n"
+    );
+}
+
+struct BatchQueueTestHarness {
+    dir: tempfile::TempDir,
+    source: PathBuf,
+    remote: PathBuf,
+    pushes_log: PathBuf,
+    app: std::sync::Arc<AppServer>,
+    project: Project,
+    ops: canban_workspaces::Ops,
+}
+
+impl BatchQueueTestHarness {
+    fn new(test_command: Option<&str>, agy_merger: bool) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let remote = dir.path().join("remote.git");
+        let pushes_log = dir.path().join("pushes.log");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&remote).unwrap();
+
+        git_in(&source, &["init", "-b", "main"]);
+        git_identity(&source);
+        std::fs::write(source.join("shared.txt"), "base\n").unwrap();
+        git_in(&source, &["add", "shared.txt"]);
+        git_in(&source, &["commit", "-m", "initial commit"]);
+
+        git_in(&remote, &["init", "--bare", "-b", "main"]);
+        let hook_path = remote.join("hooks").join("post-receive");
+        std::fs::write(
+            &hook_path,
+            format!("#!/bin/sh\ncat >> '{}'\n", pushes_log.to_string_lossy()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        git_in(
+            &source,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git_in(&source, &["push", "-u", "origin", "main"]);
+        let _ = std::fs::remove_file(&pushes_log);
+        // Pause auto-merge on the main checkout while test Cards finish and enter the queue,
+        // preventing the background delivery worker from draining Card 1 before Card 2..N arrive.
+        std::fs::write(
+            source.join("wip.local"),
+            "hold queue until batch is populated\n",
+        )
+        .unwrap();
+
+        let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+        if agy_merger {
+            let mut cfg = app.config();
+            if let Some(m) = cfg.profiles.iter_mut().find(|p| p.id == "merger") {
+                m.preset = Some("agy".into());
+                m.argv = None;
+                m.resume_argv = None;
+            } else {
+                cfg.profiles.push(Profile {
+                    id: "merger".into(),
+                    preset: Some("agy".into()),
+                    ..Default::default()
+                });
+            }
+            let resolved = canban_profiles::resolve(cfg, &app.home).unwrap();
+            *app.config.write().unwrap() = resolved;
+        }
+        let project: Project = serde_json::from_value(
+            app.call(
+                "project.create",
+                json!({
+                    "name": "Batch Merge Queue",
+                    "directory": source,
+                    "workspace": {"create_worktree": true, "sync_base": false}
+                }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        edit_development(&app, &project, |doc| {
+            canban_workflow_engine::source::set_review_manual(doc, false);
+            canban_workflow_engine::source::set_sync_upstream(doc, true);
+            if let Some(cmd) = test_command {
+                canban_workflow_engine::stages::set_step_with(
+                    doc,
+                    "deliver:review",
+                    "test_command",
+                    Some(json!(cmd)),
+                )
+                .unwrap();
+            }
+        });
+        Self {
+            dir,
+            source,
+            remote,
+            pushes_log,
+            app,
+            project,
+            ops: canban_workspaces::Ops::local(),
+        }
+    }
+
+    fn finish_card_in_develop(&self, title: &str, file: &str, content: &str) -> (Card, PathBuf) {
+        let card: Card = serde_json::from_value(
+            self.app
+                .call(
+                    "card.create",
+                    json!({"project_id": self.project.id, "title": title, "body": title}),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        self.app
+            .call(
+                "card.move",
+                json!({"card_id": card.id, "revision": card.revision, "stage": "develop"}),
+            )
+            .unwrap();
+        let dev = admit(&self.app, &snap_latest_card_terminal(&self.app, &card.id));
+        let wt = self
+            .ops
+            .prepare(&self.app.home, &self.project, &card)
+            .unwrap();
+        let br = self.ops.current_branch(wt.to_str().unwrap()).unwrap();
+        self.app
+            .store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut stored: Card = db.get(&card.id)?;
+                stored.worktree = Some(wt.to_str().unwrap().into());
+                stored.branch = Some(br);
+                db.save(&stored)
+            })
+            .unwrap();
+        git_identity(&wt);
+        std::fs::write(wt.join(file), content).unwrap();
+        git_in(&wt, &["add", file]);
+        git_in(&wt, &["commit", "-m", title]);
+        finish_closed(&self.app, &dev, &format!("dev-{}", card.number));
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let updated_card = self
+            .app
+            .snapshot()
+            .unwrap()
+            .cards
+            .into_iter()
+            .find(|c| c.id == card.id)
+            .unwrap();
+        (updated_card, wt)
+    }
+
+    fn push_count(&self) -> usize {
+        std::fs::read_to_string(&self.pushes_log)
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0)
+    }
+
+    fn release_and_pump(&self, expected_queued: usize) {
+        let queue_len = self
+            .app
+            .snapshot()
+            .unwrap()
+            .merge_queue(&self.project.id)
+            .len();
+        assert_eq!(
+            queue_len, expected_queued,
+            "All {expected_queued} batch Cards must be queued together before pumping"
+        );
+        let _ = std::fs::remove_file(self.source.join("wip.local"));
+        // Serialize behind any in-flight background worker pass before pumping synchronously.
+        for _ in 0..40 {
+            self.app.pump_deliveries().unwrap();
+            let snap = self.app.snapshot().unwrap();
+            let still_waiting_unbatched = snap
+                .merge_queue(&self.project.id)
+                .into_iter()
+                .any(|r| r.state == "waiting_delivery")
+                && snap
+                    .active_merge_batch_for_project(&self.project.id)
+                    .is_none();
+            if !still_waiting_unbatched {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+}
+
+#[test]
+fn batch_merge_queue_integrates_five_clean_cards_without_tests_in_single_push() {
+    let env = BatchQueueTestHarness::new(None, false);
+    let mut cards = Vec::new();
+    for i in 1..=5 {
+        let (c, _) = env.finish_card_in_develop(
+            &format!("Clean batch card {i}"),
+            &format!("feature_{i}.txt"),
+            &format!("feature {i}\n"),
+        );
+        cards.push(c);
+    }
+
+    env.release_and_pump(5);
+
+    let snap = env.app.snapshot().unwrap();
+    for (idx, c) in cards.iter().enumerate() {
+        let live = snap.cards.iter().find(|x| x.id == c.id).unwrap();
+        assert!(
+            live.delivery.is_some(),
+            "Card #{} must be delivered cleanly in the batch",
+            c.number
+        );
+        assert_eq!(
+            std::fs::read_to_string(env.source.join(format!("feature_{}.txt", idx + 1))).unwrap(),
+            format!("feature {}\n", idx + 1)
+        );
+    }
+    assert_eq!(
+        env.push_count(),
+        1,
+        "5 clean Cards in one batch must push upstream exactly once"
+    );
+    assert!(
+        snap.merge_batches.is_empty(),
+        "Clean batch with no test failure or conflict must not leave persistent MergeBatch records"
+    );
+    assert!(
+        !snap
+            .terminals
+            .iter()
+            .any(|t| t.id.starts_with("merge-queue:")
+                || t.agent.as_ref().is_some_and(|a| a.profile.id == "merger")),
+        "Clean batch without test failures must never launch @merger"
+    );
+    let remote_head = git_in(&env.remote, &["rev-parse", "refs/heads/main"]);
+    let local_head = git_in(&env.source, &["rev-parse", "HEAD"]);
+    assert_eq!(remote_head, local_head);
+}
+
+#[test]
+fn batch_merge_queue_runs_test_command_once_for_clean_batch() {
+    let dir_tmp = tempfile::tempdir().unwrap();
+    let test_log = dir_tmp.path().join("batch_test_runs.log");
+    let test_cmd = format!("echo tested >> '{}'", test_log.to_string_lossy());
+    let env = BatchQueueTestHarness::new(Some(&test_cmd), false);
+    let mut cards = Vec::new();
+    for i in 1..=3 {
+        let (c, _) = env.finish_card_in_develop(
+            &format!("Tested card {i}"),
+            &format!("tested_{i}.txt"),
+            &format!("tested {i}\n"),
+        );
+        cards.push(c);
+    }
+
+    env.release_and_pump(3);
+
+    let snap = env.app.snapshot().unwrap();
+    for c in &cards {
+        assert!(
+            snap.cards
+                .iter()
+                .find(|x| x.id == c.id)
+                .unwrap()
+                .delivery
+                .is_some()
+        );
+    }
+    let test_runs = std::fs::read_to_string(&test_log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| *l == "tested")
+        .count();
+    assert_eq!(
+        test_runs, 1,
+        "Configured test_command must run exactly once for the whole clean batch"
+    );
+    assert_eq!(
+        env.push_count(),
+        1,
+        "Tested clean batch must push upstream once after tests pass"
+    );
+    assert!(snap.merge_batches.is_empty());
+}
+
+#[test]
+fn batch_merge_queue_conflict_dispatches_single_merger_with_agy_trusted_paths_and_completes_on_batch_report()
+ {
+    let env = BatchQueueTestHarness::new(None, true);
+    let (c1, wt1) = env.finish_card_in_develop("Batch card 1", "shared.txt", "from card 1\n");
+    let (c2, wt2) =
+        env.finish_card_in_develop("Batch card 2 conflicts", "shared.txt", "from card 2\n");
+    let (c3, wt3) = env.finish_card_in_develop("Batch card 3", "card3.txt", "from card 3\n");
+
+    super::terminal_cases::core(&env.app, env.dir.path());
+    env.release_and_pump(3);
+    env.app.tick().unwrap();
+
+    let snap = env.app.snapshot().unwrap();
+    assert_eq!(
+        snap.merge_batches.len(),
+        1,
+        "Batch conflict must create exactly one MergeBatch record"
+    );
+    let batch = &snap.merge_batches[0];
+    assert!(
+        batch
+            .id
+            .starts_with(&format!("merge-queue:{}:", env.project.id))
+    );
+    assert_eq!(batch.state, "running");
+    assert_eq!(batch.failure_kind.as_deref(), Some("conflict"));
+    assert_eq!(batch.conflict_card_number, Some(c2.number));
+    assert_eq!(batch.items.len(), 3);
+    for c in [&c1, &c2, &c3] {
+        let run = snap
+            .workflow_runs
+            .iter()
+            .find(|r| r.card_id == c.id && r.active())
+            .unwrap();
+        assert_eq!(run.state, "waiting_batch");
+    }
+
+    let entry = snap.terminals.iter().find(|t| t.id == batch.id).unwrap();
+    assert_eq!(entry.agent_engine.as_deref(), Some("agy"));
+    let launches = std::fs::read_to_string(env.dir.path().join("launches")).unwrap();
+    let launch: Value = serde_json::from_str(launches.lines().last().unwrap()).unwrap();
+    let merge_wt = PathBuf::from(&batch.worktree);
+    assert_eq!(launch["cwd"], batch.worktree);
+    assert_eq!(launch["env"]["CANBAN_BATCH_ID"], batch.id);
+    let argv: Vec<String> = serde_json::from_value(launch["argv"].clone()).unwrap();
+    let settings_idx = argv.iter().position(|a| a == "--settings").unwrap();
+    let settings: Value = serde_json::from_str(&argv[settings_idx + 1]).unwrap();
+    let trusted: Vec<&str> = settings["trustedWorkspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let batch_run_dir = env.app.home.join("terminals").join(&batch.id);
+    let project_dir = PathBuf::from(&env.project.directory);
+    for expected_dir in [&merge_wt, &project_dir, &batch_run_dir, &wt1, &wt2, &wt3] {
+        let canon = std::fs::canonicalize(expected_dir)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            trusted.contains(&canon.as_str()),
+            "agy trustedWorkspaces missing {canon}; got {trusted:?}"
+        );
+    }
+    let add_dirs: Vec<&str> = argv
+        .windows(2)
+        .filter_map(|w| (w[0] == "--add-dir").then_some(w[1].as_str()))
+        .collect();
+    for expected_dir in [&merge_wt, &project_dir, &batch_run_dir, &wt1, &wt2, &wt3] {
+        let dir_str = expected_dir.to_str().unwrap();
+        assert!(
+            add_dirs.contains(&dir_str),
+            "agy --add-dir missing {dir_str}; got {add_dirs:?}"
+        );
+    }
+
+    // Simulate `@merger` resolving Card 2's conflict (in cherry-pick state) and integrating Card 3 in `_merge_queue`.
+    git_identity(&merge_wt);
+    std::fs::write(merge_wt.join("shared.txt"), "from card 1 + from card 2\n").unwrap();
+    git_in(&merge_wt, &["add", "shared.txt"]);
+    git_in(&merge_wt, &["commit", "--no-edit"]);
+    let card3_ref = format!("refs/canban/batch/{}/card-{}", batch.short_id(), c3.number);
+    git_in(&merge_wt, &["cherry-pick", &card3_ref]);
+
+    let report_res = env
+        .app
+        .call(
+            "batch.report",
+            json!({
+                "batch_id": batch.id,
+                "state": "completed",
+                "message": "Resolved conflict and integrated Card #3",
+                "request_key": "batch-conflict-resolved"
+            }),
+        )
+        .unwrap();
+    assert_eq!(report_res["delivered"], 3);
+
+    let snap_after = env.app.snapshot().unwrap();
+    for c in [&c1, &c2, &c3] {
+        assert!(
+            snap_after
+                .cards
+                .iter()
+                .find(|x| x.id == c.id)
+                .unwrap()
+                .delivery
+                .is_some(),
+            "Card #{} must be delivered after batch completion",
+            c.number
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(env.source.join("shared.txt")).unwrap(),
+        "from card 1 + from card 2\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.source.join("card3.txt")).unwrap(),
+        "from card 3\n"
+    );
+    assert_eq!(
+        env.push_count(),
+        1,
+        "Resolved batch must push upstream once"
+    );
+    assert_eq!(
+        snap_after
+            .merge_batches
+            .iter()
+            .find(|b| b.id == batch.id)
+            .unwrap()
+            .state,
+        "completed"
+    );
+}
+
+#[test]
+fn batch_merge_queue_test_failure_supports_evicting_bad_card_and_delivering_remaining_batch() {
+    let env = BatchQueueTestHarness::new(Some("test ! -f bad.flag"), false);
+    let (c1, _) = env.finish_card_in_develop("Batch ok 1", "ok1.txt", "ok 1\n");
+    let (c2, _) = env.finish_card_in_develop("Batch bad 2", "bad.flag", "broken\n");
+    let (c3, _) = env.finish_card_in_develop("Batch ok 3", "ok3.txt", "ok 3\n");
+
+    super::terminal_cases::core(&env.app, env.dir.path());
+    env.release_and_pump(3);
+    env.app.tick().unwrap();
+
+    let snap = env.app.snapshot().unwrap();
+    assert_eq!(snap.merge_batches.len(), 1);
+    let batch = &snap.merge_batches[0];
+    assert_eq!(batch.state, "running");
+    assert_eq!(batch.failure_kind.as_deref(), Some("test_failure"));
+    assert_eq!(
+        env.push_count(),
+        0,
+        "Failing batch test must block delivery and push"
+    );
+
+    // Simulate `@merger` resetting `_merge_queue` to target, cherry-picking Cards 1 & 3, and evicting Card 2.
+    let merge_wt = PathBuf::from(&batch.worktree);
+    let short_id = batch.short_id();
+    let target_ref = format!("refs/canban/batch/{short_id}/target");
+    let c1_ref = format!("refs/canban/batch/{short_id}/card-{}", c1.number);
+    let c3_ref = format!("refs/canban/batch/{short_id}/card-{}", c3.number);
+    git_identity(&merge_wt);
+    git_in(&merge_wt, &["reset", "--hard", &target_ref]);
+    git_in(&merge_wt, &["cherry-pick", &c1_ref]);
+    git_in(&merge_wt, &["cherry-pick", &c3_ref]);
+
+    let res = env
+        .app
+        .call(
+            "batch.report",
+            json!({
+                "batch_id": batch.id,
+                "state": "completed",
+                "evict": [c2.number],
+                "message": "Evicted Card #2 due to test failure",
+                "request_key": "batch-evict-c2"
+            }),
+        )
+        .unwrap();
+    assert_eq!(res["delivered"], 2);
+    assert_eq!(res["evicted"], 1);
+
+    let snap_after = env.app.snapshot().unwrap();
+    for good in [&c1, &c3] {
+        assert!(
+            snap_after
+                .cards
+                .iter()
+                .find(|x| x.id == good.id)
+                .unwrap()
+                .delivery
+                .is_some()
+        );
+    }
+    let bad_card = snap_after.cards.iter().find(|x| x.id == c2.id).unwrap();
+    assert!(bad_card.delivery.is_none());
+    assert!(bad_card.human_gate.is_some());
+    assert!(bad_card.attention.is_some());
+    let bad_run = snap_after
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == c2.id && r.active())
+        .unwrap();
+    assert_eq!(bad_run.state, "waiting_approval");
+    assert!(
+        snap_after
+            .events
+            .iter()
+            .any(|e| e.card_id == c2.id && e.kind == "review.batch_evicted"),
+        "Evicted Card must record review.batch_evicted event"
+    );
+    assert!(env.source.join("ok1.txt").exists());
+    assert!(env.source.join("ok3.txt").exists());
+    assert!(!env.source.join("bad.flag").exists());
+    assert_eq!(env.push_count(), 1);
+    let finished_batch = snap_after
+        .merge_batches
+        .iter()
+        .find(|b| b.id == batch.id)
+        .unwrap();
+    assert_eq!(finished_batch.state, "completed");
+    assert!(
+        finished_batch
+            .items
+            .iter()
+            .find(|i| i.card_id == c2.id)
+            .unwrap()
+            .evicted
     );
 }

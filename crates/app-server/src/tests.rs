@@ -3489,11 +3489,25 @@ fn short_ids_card_number_paths_and_legacy_alias_resolution() {
     assert!(c.id.bytes().all(|b| b.is_ascii_hexdigit()));
 
     // Move to develop, admit, add a comment to create a Question, then report & reply.
-    app.call("card.move", json!({"card_id":c.id,"revision":c.revision,"stage":"develop"})).unwrap();
-    let entry = app.snapshot().unwrap().terminals.into_iter().next().unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id":c.id,"revision":c.revision,"stage":"develop"}),
+    )
+    .unwrap();
+    let entry = app
+        .snapshot()
+        .unwrap()
+        .terminals
+        .into_iter()
+        .next()
+        .unwrap();
     assert_eq!(entry.agent.as_ref().unwrap().card_number, c.number);
     let _running = admit(&app, &entry);
-    app.call("comment.add", json!({"card_id":c.id,"body":"@developer quick question"})).unwrap();
+    app.call(
+        "comment.add",
+        json!({"card_id":c.id,"body":"@developer quick question"}),
+    )
+    .unwrap();
     app.call(
         "execution.report",
         json!({"project_id":&p.id[..4],"card":c.number,"state":"completed","message":"done","body":"Full report","request_key":"rep-short"}),
@@ -3504,7 +3518,13 @@ fn short_ids_card_number_paths_and_legacy_alias_resolution() {
     assert_eq!(rep.id.len(), 8);
     assert_eq!(
         rep.path.as_deref(),
-        Some(format!("projects/{}/cards/{}/agents/developer/reports/{}.md", p.id, c.number, rep.id).as_str())
+        Some(
+            format!(
+                "projects/{}/cards/{}/agents/developer/reports/{}.md",
+                p.id, c.number, rep.id
+            )
+            .as_str()
+        )
     );
 
     // Prefix + name + legacy id_migrations lookup.
@@ -3523,9 +3543,13 @@ fn short_ids_card_number_paths_and_legacy_alias_resolution() {
     }).unwrap();
 
     // Legacy 32-char project_id + prefix + project name resolve on card.get / card.list.
-    let by_legacy = app.call("card.get", json!({"project_id":old_pid,"card":c.number})).unwrap();
+    let by_legacy = app
+        .call("card.get", json!({"project_id":old_pid,"card":c.number}))
+        .unwrap();
     assert_eq!(by_legacy["id"], c.id);
-    let by_name = app.call("card.get", json!({"project_id":"Example","card":c.number})).unwrap();
+    let by_name = app
+        .call("card.get", json!({"project_id":"Example","card":c.number}))
+        .unwrap();
     assert_eq!(by_name["id"], c.id);
     let by_old_card = app.call("card.get", json!({"card_id":old_cid})).unwrap();
     assert_eq!(by_old_card["id"], c.id);

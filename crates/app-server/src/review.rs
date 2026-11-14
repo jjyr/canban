@@ -360,10 +360,12 @@ impl AppServer {
                 // Head-of-line serialization: while any Deliver run in this Project is actively
                 // resolving a conflict via @merger (`waiting_agent` / `running`), no queued Card
                 // may merge or spawn a concurrent resolver.
-                if queue
-                    .iter()
-                    .any(|r| matches!(r.state.as_str(), "waiting_agent" | "running"))
-                {
+                if queue.iter().any(|r| {
+                    matches!(
+                        r.state.as_str(),
+                        "waiting_agent" | "running" | "waiting_batch"
+                    )
+                }) {
                     None
                 } else {
                     queue.into_iter().next().cloned()
@@ -375,14 +377,25 @@ impl AppServer {
             if head.state != "waiting_delivery" {
                 break;
             }
-            if !self.execute_workflow_delivery(&head.id)? {
-                break;
+            match self.collect_compatible_batch(project_id)? {
+                crate::merge_batch::BatchSelection::Empty
+                | crate::merge_batch::BatchSelection::HoldQueue => break,
+                crate::merge_batch::BatchSelection::Single(run_id) => {
+                    if !self.execute_workflow_delivery(&run_id)? {
+                        break;
+                    }
+                }
+                crate::merge_batch::BatchSelection::Batch { run_ids } => {
+                    if !self.execute_batch_delivery(project_id, &run_ids)? {
+                        break;
+                    }
+                }
             }
         }
         Ok(())
     }
 
-    fn set_queue_pause_reason(
+    pub(super) fn set_queue_pause_reason(
         &self,
         card_id: &str,
         run_id: &str,

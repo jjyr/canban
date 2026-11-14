@@ -39,6 +39,8 @@ def main():
     for p in [cs,cu,ca]:
         p.add_argument('--card',type=int,default=os.environ.get('CANBAN_CARD'),required=not bool(os.environ.get('CANBAN_CARD')))
         p.add_argument('--project',default=os.environ.get('CANBAN_PROJECT'))
+    batch=sub.add_parser('batch');batches=batch.add_subparsers(dest='batch_op',required=True)
+    br=batches.add_parser('report');br.add_argument('--state',required=True);br.add_argument('--message',default='');br.add_argument('--file');br.add_argument('--evict',action='append',default=[]);br.add_argument('--batch',default=os.environ.get('CANBAN_BATCH_ID'));br.add_argument('--project',default=os.environ.get('CANBAN_PROJECT'));br.add_argument('--request-key')
     note=sub.add_parser('note');notes=note.add_subparsers(dest='op',required=True)
     p=notes.add_parser('list');p.add_argument('--project-id')
     p=notes.add_parser('read');p.add_argument('note_id');p.add_argument('--json',action='store_true')
@@ -54,6 +56,11 @@ def main():
     elif a.cmd=='report':
         m='execution.report';p=card_scope(a);p.update({'state':a.state,'message':a.message,'request_key':a.request_key or uuid.uuid4().hex})
         if a.file:p['body']=body(a.file)
+    elif a.cmd=='batch':
+        m='batch.report';p=card_scope(a);p.update({'state':a.state,'message':a.message,'request_key':a.request_key or uuid.uuid4().hex})
+        if a.batch:p['batch_id']=a.batch
+        if a.evict:p['evict']=a.evict
+        if a.file:p['body']=body(a.file)
     elif a.cmd=='card':
         if a.card_op=='show':
             m='card.show';p=card_scope(a)
@@ -65,7 +72,12 @@ def main():
             if a.file is not None:p['body']=body(a.file)
         else:
             m='card.adopt';p=card_scope(a);p.update({'stage':a.stage,'request_key':a.request_key or uuid.uuid4().hex})
-    elif a.cmd=='bind-session':m='agent.bind';p=card_scope(a);p['session_id']=a.session_id
+    elif a.cmd=='bind-session':
+        p=card_scope(a);p['session_id']=a.session_id
+        if os.environ.get('CANBAN_BATCH_ID'):
+            m='batch.bind';p['batch_id']=os.environ['CANBAN_BATCH_ID']
+        else:
+            m='agent.bind'
     elif a.cmd=='reply':m='agent.reply';p=card_scope(a);p.update({'question_id':a.to,'body':body(a.file),'request_key':'reply:'+a.to})
     elif a.cmd=='note':
         m='note.'+{'create':'save','read':'read'}.get(a.op,a.op)

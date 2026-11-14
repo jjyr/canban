@@ -2,6 +2,27 @@ use super::*;
 
 impl AppServer {
     pub(super) fn report(&self, p: Value) -> Result<Value> {
+        if p["batch_id"].as_str().is_some_and(|s| !s.trim().is_empty())
+            || p["batch"].as_str().is_some_and(|s| !s.trim().is_empty())
+            || p["terminal_id"]
+                .as_str()
+                .is_some_and(|s| s.trim().starts_with("merge-queue:"))
+            || (p["card"].is_null()
+                && p["card_id"].is_null()
+                && p["cwd"].as_str().is_some_and(|cwd| {
+                    self.store
+                        .lock()
+                        .unwrap()
+                        .db()
+                        .list::<canban_types::MergeBatch>()
+                        .is_ok_and(|list| {
+                            list.into_iter()
+                                .any(|b| b.active() && path_within(&b.worktree, cwd))
+                        })
+                }))
+        {
+            return self.batch_report(p);
+        }
         let state = strp(&p, "state")?;
         ensure!(
             ["working", "completed", "backlog", "blocked", "failed"].contains(&state),

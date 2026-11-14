@@ -1245,9 +1245,14 @@ impl AppServer {
             "agent.reply" => self.reply(p),
             "agent.interrupt" => self.control_agent(p, false),
             "agent.end" => self.control_agent(p, true),
+            "batch.bind" => self.batch_bind(p),
+            "batch.report" => self.batch_report(p),
             "execution.report" => self.report(p),
             "execution.retry" => self.mutate(method, &p, |db| {
                 let mut entry: TerminalEntry = db.get(strp(&p, "terminal_id")?)?;
+                if entry.id.starts_with("merge-queue:") {
+                    return self.retry_merge_batch_runs(db, &p, &entry);
+                }
                 let prev = entry
                     .agent
                     .as_ref()

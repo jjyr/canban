@@ -52,6 +52,21 @@ Canban injects `CANBAN_CLI` and task environment variables when launching an Age
 > - In an **interactive Card session**, reply directly in the terminal for initial discussion; only run `report` once the user asks you to complete a concrete task.
 > - In a **dedicated `@mention` comment assignment**, publish your answer and finish in a single `report --state completed` call (do not call `reply` separately).
 
+### Report batch merge queue outcome (`batch report`)
+
+When running in a project `_merge_queue` batch `@merger` session (`CANBAN_BATCH_ID` is injected):
+
+```sh
+"$CANBAN_CLI" batch report \
+  --state <completed|blocked|failed|working> \
+  --message 'Concise summary of batch resolution' \
+  [--evict <CARD_NUMBER> ...] \
+  [--file "$CANBAN_RUN_DIR/report.md"]
+```
+
+- Do not `git push` or modify the main checkout directly; Canban fast-forwards and pushes once on `completed`.
+- Use repeatable `--evict <CARD_NUMBER>` only if you rebuilt `_merge_queue` cleanly from `refs/canban/batch/<short_id>/target` without those broken Card(s) and verified tests on the remaining Cards.
+
 ### Answer a live follow-up question (`reply`)
 
 When a human posts a follow-up question with a Question ID against an already running non-comment task, answer that question without ending your main task:

@@ -1,0 +1,25 @@
+You are resolving a Canban batch merge queue failure for Project `{{project_name}}`.
+
+- Batch ID: `{{batch_id}}`
+- Target branch: `{{target_branch}}`
+- Merge strategy: `{{strategy}}`
+- Batch worktree: `{{worktree}}`
+- Clean base ref (target branch HEAD at batch start): `refs/canban/batch/{{short_id}}/target`
+
+## Failure Summary
+{{failure_summary}}
+
+## Participating Cards (strict queue order)
+{{cards_manifest}}
+{{test_command_section}}
+## Instructions
+1. Work strictly inside the batch worktree (`{{worktree}}`). Do NOT run `git push` or mutate the main Project checkout directly—Canban validates, fast-forwards, and pushes once after you report `completed`.
+2. Inspect the current state (`git status`, `git diff`). Card branches are also pinned under `refs/canban/batch/{{short_id}}/card-<CARD_NUMBER>` so you can compare commits or restart cleanly from `refs/canban/batch/{{short_id}}/target` if needed.
+3. Preserve the intended behavior of every participating Card while resolving any conflicts or fixing test failures across the combined changes. Commit the resolved state cleanly on detached `HEAD` (finish any in-progress cherry-pick, rebase, or merge—e.g. `GIT_EDITOR=true git cherry-pick --continue`).
+4. Run all verification tests before finishing and ensure the batch worktree has no unmerged files or uncommitted tracked changes.
+5. Report completion through the injected CLI:
+   ```sh
+   "$CANBAN_CLI" batch report --state completed --message 'Concise summary of resolution' [--file "$CANBAN_RUN_DIR/report.md"]
+   ```
+   - Only if a specific Card is fundamentally broken and cannot safely ship with the batch, rebuild `_merge_queue` cleanly from `refs/canban/batch/{{short_id}}/target` with the remaining Cards in order, verify tests pass, and pass `--evict <CARD_NUMBER>` (repeatable) so Canban returns only the evicted Card(s) to human review while shipping the rest of the batch.
+   - If human judgment or missing credentials block resolution, report `--state blocked --message '...'` instead.

@@ -62,6 +62,7 @@ macro_rules! record {
 record!(Project, "projects");
 record!(WorkflowSource, "workflow_sources", project);
 record!(ConfigurationSession, "configuration_sessions", project);
+record!(MergeBatch, "merge_batches", project);
 record!(WorkflowRevision, "workflow_revisions", project);
 record!(WorkflowRun, "workflow_runs", card);
 record!(EventSubscription, "event_subscriptions");
@@ -83,7 +84,16 @@ impl Record for TerminalEntry {
         &self.id
     }
     fn project(&self) -> Option<&str> {
-        self.agent.as_ref().map(|a| a.project_id.as_str())
+        self.agent
+            .as_ref()
+            .map(|a| a.project_id.as_str())
+            .or_else(|| {
+                self.id
+                    .strip_prefix("merge-queue:")
+                    .or_else(|| self.id.strip_prefix("configuration:"))
+                    .and_then(|rest| rest.split(':').next())
+                    .filter(|id| !id.is_empty())
+            })
     }
     fn card(&self) -> Option<&str> {
         self.agent.as_ref().map(|a| a.card_id.as_str())
@@ -444,6 +454,7 @@ impl Db<'_> {
             workflow_sources: sources,
             event_subscriptions: self.list()?,
             configuration_sessions: self.list()?,
+            merge_batches: self.list()?,
             card_reads: self.list()?,
             github: Default::default(),
             github_issues: self.list()?,

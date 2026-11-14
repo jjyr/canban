@@ -182,6 +182,8 @@ pub fn activity_header(actor: String, kind: &str, time: u64) -> impl IntoElement
         "review.merge_started" | "github.pr_merge_started" => "Merge started",
         "review.merged" | "github.pr_merged" | "github.pr_delivered" => "Merged",
         "review.merge_failed" | "github.pr_merge_attention" => "Merge failed",
+        "review.batch_test_failed" => "Batch test failed",
+        "review.batch_evicted" => "Evicted from batch",
         "card.archived" => "Card archived",
         "card.restored" => "Card restored",
         "execution.queued" => "Queued",
@@ -227,7 +229,9 @@ pub fn is_merging(snapshot: &canban_types::Snapshot, card: &canban_types::Card) 
     if !card.active() || card.merged() {
         return false;
     }
-    if snapshot.merging_cards.iter().any(|id| id == &card.id) {
+    if snapshot.merging_cards.iter().any(|id| id == &card.id)
+        || snapshot.active_merge_batch_for_card(&card.id).is_some()
+    {
         return true;
     }
     if card.hold_auto_merge {
@@ -251,6 +255,17 @@ pub fn card_status_specs(
     let merging = is_merging(snapshot, card) || card.active() && !card.merged() && ui_merging;
     if card.merged() {
         specs.push(("Merged".into(), Tone::Success, false));
+    } else if card.active()
+        && let Some((batch, _, _)) = snapshot.active_merge_batch_for_card(&card.id)
+    {
+        let label_text = match batch.state.as_str() {
+            "integrating" => "Merging".to_owned(),
+            "testing" => "Testing batch".to_owned(),
+            "queued" => "Batch queued".to_owned(),
+            "running" => format!("Merging (@{})", batch.profile_id),
+            _ => "Merging".to_owned(),
+        };
+        specs.push((label_text, Tone::Info, true));
     } else if merging {
         specs.push(("Merging".into(), Tone::Info, true));
     } else if card.active()
@@ -692,6 +707,118 @@ mod tests {
         assert_eq!(
             workflow_step_elapsed(&run, "deliver:review", now_ms, Some(t0 + 71 * 60_000)),
             Some(3 * 60_000)
+        );
+    }
+
+    #[test]
+    fn batch_merge_queue_status_specs_reflect_phases_and_queue_position() {
+        let t0 = 1_760_000_000_000_u64;
+        let mut snapshot = canban_types::Snapshot::default();
+        let batch_card: canban_types::Card = serde_json::from_value(serde_json::json!({
+            "id": "c-batch",
+            "project_id": "p",
+            "number": 9,
+            "title": "Batch item",
+            "body": "",
+            "stage": "review",
+            "revision": 1,
+            "created_at": t0
+        }))
+        .unwrap();
+        let behind_card: canban_types::Card = serde_json::from_value(serde_json::json!({
+            "id": "c-behind",
+            "project_id": "p",
+            "number": 10,
+            "title": "Queued behind batch",
+            "body": "",
+            "stage": "review",
+            "revision": 1,
+            "created_at": t0
+        }))
+        .unwrap();
+        let run_template: canban_types::WorkflowRun = serde_json::from_value(serde_json::json!({
+            "id": "run-batch",
+            "project_id": "p",
+            "card_id": "c-batch",
+            "workflow_id": "delivery",
+            "definition_revision": 1,
+            "definition": {
+                "id": "delivery",
+                "name": "Development",
+                "entries": {"review": "deliver:review"},
+                "steps": {
+                    "deliver:review": {"type": "deliver", "next": "done"},
+                    "done": {"type": "complete"}
+                }
+            },
+            "state": "waiting_batch",
+            "step": "deliver:review",
+            "visit": 1,
+            "input_digest": "d",
+            "inputs": {"queued_at": t0},
+            "outputs": {},
+            "history": [],
+            "created_at": t0,
+            "updated_at": t0
+        }))
+        .unwrap();
+        let b_run = run_template.clone();
+        let mut q_run = run_template;
+        q_run.id = "run-behind".into();
+        q_run.card_id = behind_card.id.clone();
+        q_run.state = "waiting_delivery".into();
+        q_run.inputs = serde_json::json!({"queued_at": t0 + 100});
+        let b_run_id = b_run.id.clone();
+        let make_batch = |state: &str| canban_types::MergeBatch {
+            id: "merge-queue:p:12345678".into(),
+            project_id: "p".into(),
+            profile_id: "merger".into(),
+            provider_session_id: None,
+            target_branch: "main".into(),
+            target_head: "deadbeef".into(),
+            strategy: canban_types::MergeStrategy::Rebase,
+            sync_upstream: true,
+            test_command: Some("cargo test".into()),
+            worktree: "/tmp/_merge_queue".into(),
+            state: state.into(),
+            failure_kind: None,
+            conflict_card_number: None,
+            conflict_files: Vec::new(),
+            test_output: None,
+            items: vec![canban_types::MergeBatchItem {
+                card_id: batch_card.id.clone(),
+                card_number: batch_card.number,
+                workflow_run_id: b_run_id.clone(),
+                branch: "feat/9".into(),
+                worktree: "/tmp/wt-9".into(),
+                base_head: "cafe".into(),
+                integrated_commit: None,
+                evicted: false,
+            }],
+            prompt: "Resolve".into(),
+            error: None,
+            created_at: t0,
+            updated_at: t0,
+        };
+        snapshot.cards.push(batch_card.clone());
+        snapshot.cards.push(behind_card.clone());
+        snapshot.workflow_runs = vec![b_run, q_run];
+        for (state, expected) in [
+            ("integrating", "Merging"),
+            ("testing", "Testing batch"),
+            ("queued", "Batch queued"),
+            ("running", "Merging (@merger)"),
+        ] {
+            snapshot.merge_batches = vec![make_batch(state)];
+            assert!(is_merging(&snapshot, &batch_card));
+            assert_eq!(
+                card_status_specs(&snapshot, &batch_card, false),
+                vec![(expected.into(), Tone::Info, true)]
+            );
+        }
+        assert_eq!(
+            card_status_specs(&snapshot, &behind_card, false),
+            vec![("Queue #2".into(), Tone::Info, false)]
         );
     }
 }

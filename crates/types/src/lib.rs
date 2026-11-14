@@ -997,6 +997,8 @@ pub struct Snapshot {
     #[serde(default)]
     pub configuration_sessions: Vec<ConfigurationSession>,
     #[serde(default)]
+    pub merge_batches: Vec<MergeBatch>,
+    #[serde(default)]
     pub workflow_revisions: Vec<WorkflowRevision>,
     #[serde(default)]
     pub card_reads: Vec<CardRead>,
@@ -1443,14 +1445,25 @@ mod tests {
     fn id_generators_produce_expected_formats() {
         let short = id();
         assert_eq!(short.len(), 8);
-        assert!(short.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        assert!(
+            short
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        );
 
         let token = token_id();
         assert_eq!(token.len(), 32);
-        assert!(token.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        assert!(
+            token
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        );
 
         let v4 = uuid_v4();
         assert_eq!(v4.len(), 36);
-        assert_eq!(v4.split('-').map(str::len).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12]);
+        assert_eq!(
+            v4.split('-').map(str::len).collect::<Vec<_>>(),
+            vec![8, 4, 4, 4, 12]
+        );
     }
 }

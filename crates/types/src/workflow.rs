@@ -118,6 +118,13 @@ pub enum WorkflowStep {
         strategy: MergeStrategy,
         #[serde(default = "default_sync_upstream", skip_serializing_if = "is_true")]
         sync_upstream: bool,
+        #[serde(
+            default = "default_merge_batch_size",
+            skip_serializing_if = "is_default_merge_batch_size"
+        )]
+        batch_size: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        test_command: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,7 +302,7 @@ impl WorkflowRun {
             && self.step_is_deliver()
             && matches!(
                 self.state.as_str(),
-                "waiting_delivery" | "waiting_agent" | "running"
+                "waiting_delivery" | "waiting_batch" | "waiting_agent" | "running"
             )
     }
 }
@@ -335,6 +342,29 @@ impl Snapshot {
         let head = *queue.first()?;
         let pos = queue.iter().position(|r| r.card_id == card_id)?;
         Some((pos + 1, queue.len(), head))
+    }
+
+    /// Returns the currently active [`MergeBatch`] for `project_id`, if any.
+    pub fn active_merge_batch_for_project(&self, project_id: &str) -> Option<&MergeBatch> {
+        self.merge_batches
+            .iter()
+            .find(|b| b.project_id == project_id && b.active())
+    }
+
+    /// Returns `(batch, 1_based_non_evicted_index, total_non_evicted)` when `card_id` is actively
+    /// participating in an active [`MergeBatch`].
+    pub fn active_merge_batch_for_card(
+        &self,
+        card_id: &str,
+    ) -> Option<(&MergeBatch, usize, usize)> {
+        for batch in self.merge_batches.iter().filter(|b| b.active()) {
+            let live_items: Vec<&MergeBatchItem> =
+                batch.items.iter().filter(|item| !item.evicted).collect();
+            if let Some(pos) = live_items.iter().position(|item| item.card_id == card_id) {
+                return Some((batch, pos + 1, live_items.len()));
+            }
+        }
+        None
     }
 }
 
@@ -454,8 +484,81 @@ pub struct ConfigurationSession {
     pub error: Option<String>,
 }
 
+/// One Card participating in an in-flight or historical merge batch.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MergeBatchItem {
+    pub card_id: String,
+    pub card_number: u64,
+    pub workflow_run_id: String,
+    pub branch: String,
+    pub worktree: String,
+    pub base_head: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrated_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub evicted: bool,
+}
+
+/// Persistent record for a batch merge-queue execution (including any `@merger` resolution session).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct MergeBatch {
+    pub id: String,
+    pub project_id: String,
+    pub profile_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    pub target_branch: String,
+    pub target_head: String,
+    #[serde(default)]
+    pub strategy: MergeStrategy,
+    #[serde(default = "default_sync_upstream")]
+    pub sync_upstream: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_command: Option<String>,
+    pub worktree: String,
+    /// One of: "integrating", "testing", "queued", "running", "completed", "blocked", "failed", "cancelled".
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict_card_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflict_files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_output: Option<String>,
+    #[serde(default)]
+    pub items: Vec<MergeBatchItem>,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+impl MergeBatch {
+    pub fn active(&self) -> bool {
+        matches!(
+            self.state.as_str(),
+            "integrating" | "testing" | "queued" | "running"
+        )
+    }
+
+    pub fn short_id(&self) -> &str {
+        self.id.rsplit(':').next().unwrap_or(&self.id)
+    }
+}
+
 fn default_sync_upstream() -> bool {
     true
+}
+
+/// Default maximum Cards combined into one batch on a `deliver` step.
+pub const DEFAULT_MERGE_BATCH_SIZE: u32 = 5;
+fn default_merge_batch_size() -> u32 {
+    DEFAULT_MERGE_BATCH_SIZE
+}
+fn is_default_merge_batch_size(v: &u32) -> bool {
+    *v == DEFAULT_MERGE_BATCH_SIZE
 }
 
 /// Default automatic merge-conflict rework attempts for a `deliver` step.

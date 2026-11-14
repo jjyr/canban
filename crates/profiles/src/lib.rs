@@ -582,11 +582,22 @@ pub fn command(
     let home_val = lookup("home").unwrap_or("");
     let cwd_val = lookup("cwd").or(lookup("project_dir")).unwrap_or(home_val);
     let project_dir_val = lookup("project_dir").unwrap_or(cwd_val);
+    let extra_dirs: Vec<&str> = lookup("extra_dirs")
+        .map(|raw| {
+            raw.split(['\0', '\n'])
+                .map(str::trim)
+                .filter(|dir| !dir.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
 
     let mut trusted_dirs = Vec::new();
     push_trusted_dir(&mut trusted_dirs, cwd_val);
     push_trusted_dir(&mut trusted_dirs, project_dir_val);
     push_trusted_dir(&mut trusted_dirs, home_val);
+    for dir in &extra_dirs {
+        push_trusted_dir(&mut trusted_dirs, dir);
+    }
     let agy_trusted_settings = serde_json::to_string(&json!({
         "trustedWorkspaces": trusted_dirs,
     }))?;
@@ -660,8 +671,9 @@ pub fn command(
         .iter()
         .map(|arg| expand_template(arg, &replacements))
         .collect();
-    let mut final_args = Vec::with_capacity(expanded.len());
+    let mut final_args = Vec::with_capacity(expanded.len() + extra_dirs.len() * 2);
     let mut seen_add_dirs: Vec<String> = Vec::new();
+    let mut last_add_dir_end: Option<usize> = None;
     let mut i = 0;
     while i < expanded.len() {
         if expanded[i] == "--add-dir" && i + 1 < expanded.len() {
@@ -670,12 +682,22 @@ pub fn command(
                 seen_add_dirs.push(dir.to_owned());
                 final_args.push("--add-dir".into());
                 final_args.push(expanded[i + 1].clone());
+                last_add_dir_end = Some(final_args.len());
             }
             i += 2;
             continue;
         }
         final_args.push(expanded[i].clone());
         i += 1;
+    }
+    if let Some(mut insert_at) = last_add_dir_end {
+        for dir in extra_dirs {
+            if !seen_add_dirs.iter().any(|d| d == dir) {
+                seen_add_dirs.push(dir.to_owned());
+                final_args.splice(insert_at..insert_at, ["--add-dir".into(), dir.to_owned()]);
+                insert_at += 2;
+            }
+        }
     }
     Ok(final_args)
 }
@@ -1275,6 +1297,86 @@ mod tests {
         );
         // Idempotent on second pass.
         assert!(!migrate(&mut onboarded).unwrap());
+    }
+
+    #[test]
+    fn agy_extra_dirs_adds_trusted_workspaces_and_deduplicated_add_dir_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("project");
+        let merge_queue = dir.path().join("worktrees/_merge_queue");
+        let card1_wt = dir.path().join("worktrees/c1");
+        let card2_wt = dir.path().join("worktrees/c2");
+        for path in [&home, &project, &merge_queue, &card1_wt, &card2_wt] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let mut cfg = Config::default();
+        cfg.profiles.push(Profile {
+            id: "agy".into(),
+            preset: Some("agy".into()),
+            ..Default::default()
+        });
+        let c = resolve(cfg, &home).unwrap();
+        let agy = c.profiles.iter().find(|p| p.id == "agy").unwrap();
+        let extra = format!(
+            "{}\0{}\0{}",
+            card1_wt.display(),
+            card2_wt.display(),
+            merge_queue.display()
+        );
+        let argv = command(
+            agy,
+            None,
+            true,
+            &[
+                ("home", home.to_str().unwrap()),
+                ("cwd", merge_queue.to_str().unwrap()),
+                ("project_dir", project.to_str().unwrap()),
+                ("extra_dirs", &extra),
+                ("prompt", "Resolve batch conflict"),
+            ],
+        )
+        .unwrap();
+
+        let settings_idx = argv.iter().position(|a| a == "--settings").unwrap();
+        let settings: Value = serde_json::from_str(&argv[settings_idx + 1]).unwrap();
+        let trusted: Vec<&str> = settings["trustedWorkspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        for expected in [&home, &project, &merge_queue, &card1_wt, &card2_wt] {
+            let raw = expected.to_str().unwrap();
+            let canon = std::fs::canonicalize(expected)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            assert!(trusted.contains(&raw), "missing raw trusted dir {raw}");
+            assert!(
+                trusted.contains(&canon.as_str()),
+                "missing canonical trusted dir {canon}"
+            );
+        }
+
+        let add_dirs: Vec<&str> = argv
+            .windows(2)
+            .filter_map(|w| (w[0] == "--add-dir").then_some(w[1].as_str()))
+            .collect();
+        assert!(add_dirs.contains(&card1_wt.to_str().unwrap()));
+        assert!(add_dirs.contains(&card2_wt.to_str().unwrap()));
+        // `_merge_queue` was already passed as `cwd`, so `--add-dir` must not duplicate it.
+        assert_eq!(
+            add_dirs
+                .iter()
+                .filter(|d| **d == merge_queue.to_str().unwrap())
+                .count(),
+            1
+        );
+        assert_eq!(
+            argv.last().map(String::as_str),
+            Some("Resolve batch conflict")
+        );
     }
 }
 

@@ -205,6 +205,11 @@ impl Ops {
             roots.push((wt.location.directory.clone(), wt.project_id.clone()));
             managed_checkouts.push((wt.path.clone(), wt.id.clone()));
         }
+        if machine == "local" {
+            for batch in s.merge_batches.iter().filter(|b| b.active()) {
+                roots.push((batch.worktree.clone(), batch.project_id.clone()));
+            }
+        }
         let mut paths = roots
             .iter()
             .map(|(p, _)| p.clone())

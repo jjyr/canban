@@ -312,7 +312,9 @@ pub fn capture_for(
     let cli_quoted = shell_quote(&cli.to_string_lossy());
     if let Some(source) = github_source {
         let number = source.number.to_string();
-        let params = shell_quote(&serde_json::json!({"project_id": project.id, "card": card.number}).to_string());
+        let params = shell_quote(
+            &serde_json::json!({"project_id": project.id, "card": card.number}).to_string(),
+        );
         prompt.push('\n');
         prompt.push_str(&render_template(
             GITHUB_SOURCE_TEMPLATE,

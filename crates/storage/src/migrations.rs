@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 16;
+pub const CURRENT: u32 = 17;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -54,7 +54,38 @@ const STEPS: &[Migration] = &[
         up: short_ids_up,
         down: short_ids_down,
     },
+    Migration {
+        version: 17,
+        up: merge_batches_up,
+        down: merge_batches_down,
+    },
 ];
+
+fn merge_batches_up(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS merge_batches(\
+            id TEXT PRIMARY KEY,\
+            project_id TEXT,\
+            card_id TEXT,\
+            state TEXT NOT NULL,\
+            number INTEGER NOT NULL,\
+            data TEXT NOT NULL\
+        );\
+        CREATE INDEX IF NOT EXISTS merge_batches_scope ON merge_batches(project_id, state);",
+    )?;
+    Ok(())
+}
+
+fn merge_batches_down(tx: &Transaction<'_>) -> Result<()> {
+    let active: u64 = tx.query_row(
+        "SELECT count(*) FROM merge_batches WHERE json_extract(data,'$.state') NOT IN ('completed','blocked','failed','cancelled')",
+        [],
+        |r| r.get(0),
+    )?;
+    ensure!(active == 0, "End active merge batches before downgrading");
+    tx.execute_batch("DROP TABLE IF EXISTS merge_batches;")?;
+    Ok(())
+}
 fn workflows_up(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch("CREATE TABLE IF NOT EXISTS event_journal(offset INTEGER PRIMARY KEY AUTOINCREMENT,event_id TEXT NOT NULL UNIQUE REFERENCES events(id)); INSERT OR IGNORE INTO event_journal(event_id) SELECT id FROM events ORDER BY rowid; CREATE TABLE IF NOT EXISTS source_observations(id TEXT PRIMARY KEY,data TEXT NOT NULL);")?;
     for table in [
@@ -1252,11 +1283,7 @@ fn remap_composite_id(s: &str, map: &HashMap<String, String>) -> String {
             }
         })
         .collect();
-    if changed {
-        out.join(":")
-    } else {
-        s.to_owned()
-    }
+    if changed { out.join(":") } else { s.to_owned() }
 }
 
 fn rewrite_rel_path(
@@ -1340,7 +1367,8 @@ fn rewrite_rel_path(
     }
     let rewritten = new_parts.join("/");
     if let Some(map) = path_map {
-        map.entry(raw.to_owned()).or_insert_with(|| rewritten.clone());
+        map.entry(raw.to_owned())
+            .or_insert_with(|| rewritten.clone());
     }
     rewritten
 }
@@ -1533,6 +1561,25 @@ const CHILD_SCOPED_TABLES: &[(&str, &str)] = &[
     ("managed_worktrees", "managed_worktree"),
 ];
 
+type ShortIdTableRow = (String, Option<String>, Option<String>, String, i64, String);
+
+fn load_short_id_rows(tx: &Transaction<'_>, table: &str) -> Result<Vec<ShortIdTableRow>> {
+    let mut q = tx.prepare(&format!(
+        "SELECT id, project_id, card_id, state, number, data FROM {table}"
+    ))?;
+    Ok(q.query_map([], |r| {
+        Ok((
+            r.get(0)?,
+            r.get(1)?,
+            r.get(2)?,
+            r.get(3)?,
+            r.get(4)?,
+            r.get(5)?,
+        ))
+    })?
+    .collect::<std::result::Result<_, _>>()?)
+}
+
 fn short_ids_up(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS id_migrations(kind TEXT NOT NULL, old_id TEXT NOT NULL, new_id TEXT NOT NULL, PRIMARY KEY(kind, old_id));
@@ -1560,7 +1607,11 @@ fn short_ids_up(tx: &Transaction<'_>) -> Result<()> {
     for (table, _) in ENTITY_TABLES
         .iter()
         .chain(CHILD_SCOPED_TABLES.iter())
-        .chain([&("source_observations", "source_observation")].iter().copied())
+        .chain(
+            [&("source_observations", "source_observation")]
+                .iter()
+                .copied(),
+        )
     {
         if !table_exists(tx, table)? {
             continue;
@@ -1655,16 +1706,22 @@ fn short_ids_up(tx: &Transaction<'_>) -> Result<()> {
     )?;
 
     // 1. Insert new project rows (or update in-place if ID stayed unchanged).
-    let project_rows: Vec<(String, Option<String>, Option<String>, String, i64, String)> = {
-        let mut q = tx.prepare("SELECT id, project_id, card_id, state, number, data FROM projects")?;
-        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
-            .collect::<std::result::Result<_, _>>()?
-    };
+    let project_rows = load_short_id_rows(tx, "projects")?;
     let mut old_project_ids = Vec::new();
     for (old_id, proj_col, card_col, state, number, raw) in project_rows {
-        let new_id = id_map.get(&old_id).cloned().unwrap_or_else(|| old_id.clone());
+        let new_id = id_map
+            .get(&old_id)
+            .cloned()
+            .unwrap_or_else(|| old_id.clone());
         let mut v: Value = serde_json::from_str(&raw)?;
-        rewrite_json_fields(&mut v, None, None, &id_map, &card_numbers, Some(&mut path_map));
+        rewrite_json_fields(
+            &mut v,
+            None,
+            None,
+            &id_map,
+            &card_numbers,
+            Some(&mut path_map),
+        );
         let new_data = serde_json::to_string(&v)?;
         if new_id != old_id {
             tx.execute(
@@ -1681,14 +1738,13 @@ fn short_ids_up(tx: &Transaction<'_>) -> Result<()> {
     }
 
     // 2. Insert new card rows (referencing new projects) or update in place.
-    let card_rows: Vec<(String, Option<String>, Option<String>, String, i64, String)> = {
-        let mut q = tx.prepare("SELECT id, project_id, card_id, state, number, data FROM cards")?;
-        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
-            .collect::<std::result::Result<_, _>>()?
-    };
+    let card_rows = load_short_id_rows(tx, "cards")?;
     let mut old_card_ids = Vec::new();
     for (old_id, proj_col, card_col, state, number, raw) in card_rows {
-        let new_id = id_map.get(&old_id).cloned().unwrap_or_else(|| old_id.clone());
+        let new_id = id_map
+            .get(&old_id)
+            .cloned()
+            .unwrap_or_else(|| old_id.clone());
         let new_proj = proj_col
             .as_ref()
             .map(|p| id_map.get(p).cloned().unwrap_or_else(|| p.clone()));
@@ -1717,13 +1773,12 @@ fn short_ids_up(tx: &Transaction<'_>) -> Result<()> {
     }
 
     // 3. Migrate events + event_journal.
-    let event_rows: Vec<(String, Option<String>, Option<String>, String, i64, String)> = {
-        let mut q = tx.prepare("SELECT id, project_id, card_id, state, number, data FROM events")?;
-        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
-            .collect::<std::result::Result<_, _>>()?
-    };
+    let event_rows = load_short_id_rows(tx, "events")?;
     for (old_id, proj_col, card_col, state, number, raw) in event_rows {
-        let new_id = id_map.get(&old_id).cloned().unwrap_or_else(|| old_id.clone());
+        let new_id = id_map
+            .get(&old_id)
+            .cloned()
+            .unwrap_or_else(|| old_id.clone());
         let new_proj = proj_col
             .as_ref()
             .map(|p| id_map.get(p).cloned().unwrap_or_else(|| p.clone()));
@@ -1764,7 +1819,9 @@ fn short_ids_up(tx: &Transaction<'_>) -> Result<()> {
             continue;
         }
         let rows: Vec<(String, Option<String>, Option<String>, String)> = {
-            let mut q = tx.prepare(&format!("SELECT id, project_id, card_id, data FROM {table}"))?;
+            let mut q = tx.prepare(&format!(
+                "SELECT id, project_id, card_id, data FROM {table}"
+            ))?;
             q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
                 .collect::<std::result::Result<_, _>>()?
         };
@@ -1798,7 +1855,9 @@ fn short_ids_up(tx: &Transaction<'_>) -> Result<()> {
             let new_data = serde_json::to_string(&v)?;
             if new_id != old_id || new_proj != proj_col || new_card != card_col || new_data != raw {
                 tx.execute(
-                    &format!("UPDATE {table} SET id=?2, project_id=?3, card_id=?4, data=?5 WHERE id=?1"),
+                    &format!(
+                        "UPDATE {table} SET id=?2, project_id=?3, card_id=?4, data=?5 WHERE id=?1"
+                    ),
                     params![old_id, new_id, new_proj, new_card, new_data],
                 )?;
             }
@@ -1818,7 +1877,14 @@ fn short_ids_up(tx: &Transaction<'_>) -> Result<()> {
                 .cloned()
                 .unwrap_or_else(|| remap_composite_id(&old_id, &id_map));
             let mut v: Value = serde_json::from_str(&raw)?;
-            rewrite_json_fields(&mut v, None, None, &id_map, &card_numbers, Some(&mut path_map));
+            rewrite_json_fields(
+                &mut v,
+                None,
+                None,
+                &id_map,
+                &card_numbers,
+                Some(&mut path_map),
+            );
             let new_data = serde_json::to_string(&v)?;
             if new_id != old_id || new_data != raw {
                 tx.execute(
@@ -1840,7 +1906,14 @@ fn short_ids_up(tx: &Transaction<'_>) -> Result<()> {
                 new_mappings.push(("editor_draft".into(), old_id.clone(), new_id.clone()));
             }
             let mut v: Value = serde_json::from_str(&raw)?;
-            rewrite_json_fields(&mut v, None, None, &id_map, &card_numbers, Some(&mut path_map));
+            rewrite_json_fields(
+                &mut v,
+                None,
+                None,
+                &id_map,
+                &card_numbers,
+                Some(&mut path_map),
+            );
             let new_data = serde_json::to_string(&v)?;
             if new_id != old_id || new_data != raw {
                 tx.execute(
@@ -1875,7 +1948,14 @@ fn short_ids_up(tx: &Transaction<'_>) -> Result<()> {
         };
         for (id, raw) in rows {
             if let Ok(mut v) = serde_json::from_str::<Value>(&raw) {
-                rewrite_json_fields(&mut v, None, None, &id_map, &card_numbers, Some(&mut path_map));
+                rewrite_json_fields(
+                    &mut v,
+                    None,
+                    None,
+                    &id_map,
+                    &card_numbers,
+                    Some(&mut path_map),
+                );
                 let new_res = serde_json::to_string(&v)?;
                 if new_res != raw {
                     tx.execute(
@@ -1953,11 +2033,7 @@ fn short_ids_down(tx: &Transaction<'_>) -> Result<()> {
     )?;
 
     // 1. Restore old project rows.
-    let project_rows: Vec<(String, Option<String>, Option<String>, String, i64, String)> = {
-        let mut q = tx.prepare("SELECT id, project_id, card_id, state, number, data FROM projects")?;
-        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
-            .collect::<std::result::Result<_, _>>()?
-    };
+    let project_rows = load_short_id_rows(tx, "projects")?;
     let mut drop_project_ids = Vec::new();
     for (new_id, proj_col, card_col, state, number, raw) in project_rows {
         let old_id = rev_by_kind
@@ -1982,11 +2058,7 @@ fn short_ids_down(tx: &Transaction<'_>) -> Result<()> {
     }
 
     // 2. Restore old card rows.
-    let card_rows: Vec<(String, Option<String>, Option<String>, String, i64, String)> = {
-        let mut q = tx.prepare("SELECT id, project_id, card_id, state, number, data FROM cards")?;
-        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
-            .collect::<std::result::Result<_, _>>()?
-    };
+    let card_rows = load_short_id_rows(tx, "cards")?;
     let mut drop_card_ids = Vec::new();
     for (new_id, proj_col, card_col, state, number, raw) in card_rows {
         let old_id = rev_by_kind
@@ -2014,11 +2086,7 @@ fn short_ids_down(tx: &Transaction<'_>) -> Result<()> {
     }
 
     // 3. Restore events + event_journal.
-    let event_rows: Vec<(String, Option<String>, Option<String>, String, i64, String)> = {
-        let mut q = tx.prepare("SELECT id, project_id, card_id, state, number, data FROM events")?;
-        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
-            .collect::<std::result::Result<_, _>>()?
-    };
+    let event_rows = load_short_id_rows(tx, "events")?;
     for (new_id, proj_col, card_col, state, number, raw) in event_rows {
         let old_id = rev_by_kind
             .get(&("event".into(), new_id.clone()))
@@ -2057,7 +2125,9 @@ fn short_ids_down(tx: &Transaction<'_>) -> Result<()> {
             continue;
         }
         let rows: Vec<(String, Option<String>, Option<String>, String)> = {
-            let mut q = tx.prepare(&format!("SELECT id, project_id, card_id, data FROM {table}"))?;
+            let mut q = tx.prepare(&format!(
+                "SELECT id, project_id, card_id, data FROM {table}"
+            ))?;
             q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
                 .collect::<std::result::Result<_, _>>()?
         };
@@ -2082,7 +2152,9 @@ fn short_ids_down(tx: &Transaction<'_>) -> Result<()> {
             let old_data = serde_json::to_string(&v)?;
             if old_id != new_id || old_proj != proj_col || old_card != card_col || old_data != raw {
                 tx.execute(
-                    &format!("UPDATE {table} SET id=?2, project_id=?3, card_id=?4, data=?5 WHERE id=?1"),
+                    &format!(
+                        "UPDATE {table} SET id=?2, project_id=?3, card_id=?4, data=?5 WHERE id=?1"
+                    ),
                     params![new_id, old_id, old_proj, old_card, old_data],
                 )?;
             }
@@ -2221,10 +2293,7 @@ fn move_tree(src: &Path, dst: &Path, report_map: &HashMap<String, String>) -> Re
     Ok(())
 }
 
-fn sync_git_card_refs(
-    conn: &Connection,
-    mappings: &[(String, String)],
-) -> Result<()> {
+fn sync_git_card_refs(conn: &Connection, mappings: &[(String, String)]) -> Result<()> {
     if mappings.is_empty() || !table_exists(conn, "projects")? {
         return Ok(());
     }
@@ -2373,14 +2442,20 @@ pub fn sync_paths(home: &Path, conn: &Connection) -> Result<()> {
         for entry in std::fs::read_dir(&projects_root)? {
             let entry = entry?;
             let p_name = entry.file_name().to_string_lossy().into_owned();
-            let dst_pid = proj_map.get(&p_name).cloned().unwrap_or_else(|| p_name.clone());
+            let dst_pid = proj_map
+                .get(&p_name)
+                .cloned()
+                .unwrap_or_else(|| p_name.clone());
             if let Some(mapped_pid) = proj_map.get(&p_name) {
                 let p_path = entry.path();
                 if p_path.join("cards").is_dir() {
                     for card_entry in std::fs::read_dir(p_path.join("cards"))? {
                         let card_entry = card_entry?;
                         let c_name = card_entry.file_name().to_string_lossy().into_owned();
-                        let cid = card_old_to_new.get(&c_name).map(String::as_str).unwrap_or(&c_name);
+                        let cid = card_old_to_new
+                            .get(&c_name)
+                            .map(String::as_str)
+                            .unwrap_or(&c_name);
                         let leaf = card_info
                             .get(cid)
                             .map(|(_, num)| num.to_string())
@@ -2395,12 +2470,18 @@ pub fn sync_paths(home: &Path, conn: &Connection) -> Result<()> {
                 for card_entry in std::fs::read_dir(entry.path().join("cards"))? {
                     let card_entry = card_entry?;
                     let c_name = card_entry.file_name().to_string_lossy().into_owned();
-                    let cid = card_old_to_new.get(&c_name).map(String::as_str).unwrap_or(&c_name);
+                    let cid = card_old_to_new
+                        .get(&c_name)
+                        .map(String::as_str)
+                        .unwrap_or(&c_name);
                     if let Some((expected_pid, num)) = card_info.get(cid)
                         && *expected_pid == dst_pid
                         && c_name != num.to_string()
                     {
-                        let dst = projects_root.join(&dst_pid).join("cards").join(num.to_string());
+                        let dst = projects_root
+                            .join(&dst_pid)
+                            .join("cards")
+                            .join(num.to_string());
                         move_tree(&card_entry.path(), &dst, &file_id_map)?;
                     }
                 }
@@ -2413,12 +2494,18 @@ pub fn sync_paths(home: &Path, conn: &Connection) -> Result<()> {
         for entry in std::fs::read_dir(&archives_root)? {
             let entry = entry?;
             let p_name = entry.file_name().to_string_lossy().into_owned();
-            let dst_pid = proj_map.get(&p_name).cloned().unwrap_or_else(|| p_name.clone());
+            let dst_pid = proj_map
+                .get(&p_name)
+                .cloned()
+                .unwrap_or_else(|| p_name.clone());
             if entry.path().is_dir() {
                 for card_entry in std::fs::read_dir(entry.path())? {
                     let card_entry = card_entry?;
                     let c_name = card_entry.file_name().to_string_lossy().into_owned();
-                    let cid = card_old_to_new.get(&c_name).map(String::as_str).unwrap_or(&c_name);
+                    let cid = card_old_to_new
+                        .get(&c_name)
+                        .map(String::as_str)
+                        .unwrap_or(&c_name);
                     if let Some((expected_pid, num)) = card_info.get(cid)
                         && *expected_pid == dst_pid
                     {
@@ -2498,11 +2585,25 @@ fn sync_paths_down(home: &Path, conn: &Connection) -> Result<()> {
             ))
         })? {
             let (new_cid, new_pid, num) = row?;
-            let old_pid = rev_proj.get(&new_pid).cloned().unwrap_or_else(|| new_pid.clone());
-            let old_cid = rev_card.get(&new_cid).cloned().unwrap_or_else(|| new_cid.clone());
+            let old_pid = rev_proj
+                .get(&new_pid)
+                .cloned()
+                .unwrap_or_else(|| new_pid.clone());
+            let old_cid = rev_card
+                .get(&new_cid)
+                .cloned()
+                .unwrap_or_else(|| new_cid.clone());
             let num_str = num.to_string();
-            let cur_card_dir = home.join("projects").join(&new_pid).join("cards").join(&num_str);
-            let old_card_dir = home.join("projects").join(&old_pid).join("cards").join(&old_cid);
+            let cur_card_dir = home
+                .join("projects")
+                .join(&new_pid)
+                .join("cards")
+                .join(&num_str);
+            let old_card_dir = home
+                .join("projects")
+                .join(&old_pid)
+                .join("cards")
+                .join(&old_cid);
             if cur_card_dir != old_card_dir && cur_card_dir.exists() {
                 move_tree(&cur_card_dir, &old_card_dir, &rev_files)?;
             }
@@ -2717,8 +2818,7 @@ mod tests {
         use serde_json::{Value, json};
         let home = tempfile::tempdir().unwrap();
         let mut store = crate::Store::open(home.path()).unwrap();
-        assert_eq!(CURRENT, 16);
-        assert_eq!(version(&store.conn).unwrap(), 16);
+        assert_eq!(version(&store.conn).unwrap(), CURRENT);
 
         // Downgrade empty DB to schema 13 and populate representative Request + Attempt records.
         apply(&mut store.conn, 13).unwrap();
@@ -2928,7 +3028,7 @@ mod tests {
         use serde_json::{Value, json};
         let home = tempfile::tempdir().unwrap();
         let mut store = crate::Store::open(home.path()).unwrap();
-        assert_eq!(version(&store.conn).unwrap(), 16);
+        assert_eq!(version(&store.conn).unwrap(), CURRENT);
 
         // Downgrade empty DB to schema 15 and insert 32-char UUID records & disk files.
         apply(&mut store.conn, 15).unwrap();
@@ -2944,7 +3044,8 @@ mod tests {
         let old_run = "deadbeefcafebabe1234567890abcdef";
         let old_tid = format!("{old_cid}:agy");
         let old_qid = format!("{old_eid}:agy");
-        let old_report_rel = format!("projects/{old_pid}/cards/{old_cid}/agents/agy/reports/{old_rep}.md");
+        let old_report_rel =
+            format!("projects/{old_pid}/cards/{old_cid}/agents/agy/reports/{old_rep}.md");
         let old_prompt_rel = format!("projects/{old_pid}/cards/{old_cid}/agents/agy/prompt.md");
         let old_art_rel = format!("projects/{old_pid}/cards/{old_cid}/resources/{old_art}.txt");
         let old_arch_rel = format!("archives/{old_pid}/{old_cid}/pack.tar.zst");
@@ -2961,10 +3062,10 @@ mod tests {
             "INSERT INTO events(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,'comment.added',1,?4)",
             params![old_eid, old_pid, old_cid, json!({"id":old_eid,"project_id":old_pid,"card_id":old_cid,"sequence":1,"kind":"comment.added","actor":"user","message":"hi","data":{"terminal_id":old_tid,"workflow_run_id":old_run,"report_id":old_rep},"created_at":2}).to_string()],
         ).unwrap();
-        store.conn.execute(
-            "INSERT INTO event_journal(event_id) VALUES(?1)",
-            [old_eid],
-        ).unwrap();
+        store
+            .conn
+            .execute("INSERT INTO event_journal(event_id) VALUES(?1)", [old_eid])
+            .unwrap();
         store.conn.execute(
             "INSERT INTO conversations(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,'',0,?4)",
             params![old_tid, old_pid, old_cid, json!({"id":old_tid,"project_id":old_pid,"card_id":old_cid,"profile_id":"agy","provider":"agy","provider_session_id":"11111111-2222-4333-8444-555555555555"}).to_string()],
@@ -3009,18 +3110,30 @@ mod tests {
             "INSERT INTO workflow_runs(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,'waiting_agent',0,?4)",
             params![old_run, old_pid, old_cid, json!({"id":old_run,"project_id":old_pid,"card_id":old_cid,"workflow_id":"canban-default","definition_revision":1,"definition":{"id":"canban-default","name":"Default","steps":{}},"state":"waiting_agent","visit":1,"terminal_id":old_tid,"trigger_event_id":old_eid}).to_string()],
         ).unwrap();
-        store.conn.execute(
-            "INSERT INTO editor_drafts(id,revision,updated_at,data) VALUES(?1,1,1,?2)",
-            params![format!("card:{old_cid}"), json!({"project_id":old_pid,"card_id":old_cid,"body":"draft"}).to_string()],
-        ).unwrap();
-        store.conn.execute(
-            "INSERT INTO counters(id,value) VALUES(?1,69)",
-            [format!("card-number:{old_pid}")],
-        ).unwrap();
-        store.conn.execute(
-            "INSERT INTO operations(id,fingerprint,result) VALUES('op1','fp',?1)",
-            [json!({"id":old_rep,"card_id":old_cid,"path":old_report_rel}).to_string()],
-        ).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO editor_drafts(id,revision,updated_at,data) VALUES(?1,1,1,?2)",
+                params![
+                    format!("card:{old_cid}"),
+                    json!({"project_id":old_pid,"card_id":old_cid,"body":"draft"}).to_string()
+                ],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO counters(id,value) VALUES(?1,69)",
+                [format!("card-number:{old_pid}")],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO operations(id,fingerprint,result) VALUES('op1','fp',?1)",
+                [json!({"id":old_rep,"card_id":old_cid,"path":old_report_rel}).to_string()],
+            )
+            .unwrap();
 
         // Populate matching on-disk files, including unindexed context.json & scratch.
         for (rel, content) in [
@@ -3056,29 +3169,58 @@ mod tests {
         assert!(home.path().join(&new_prompt_rel).exists());
         assert!(home.path().join(&new_art_rel).exists());
         assert!(home.path().join(&new_arch_rel).exists());
-        assert!(home.path().join(format!("projects/{new_pid}/cards/69/context.json")).exists());
+        assert!(
+            home.path()
+                .join(format!("projects/{new_pid}/cards/69/context.json"))
+                .exists()
+        );
         assert!(!home.path().join(&old_report_rel).exists());
 
-        let proj_count: i64 = store.conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap();
+        let proj_count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(proj_count, 1);
-        let mapped_pid: String = store.conn.query_row("SELECT id FROM projects", [], |r| r.get(0)).unwrap();
+        let mapped_pid: String = store
+            .conn
+            .query_row("SELECT id FROM projects", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(mapped_pid, new_pid);
-        let mapped_cid: String = store.conn.query_row("SELECT id FROM cards", [], |r| r.get(0)).unwrap();
+        let mapped_cid: String = store
+            .conn
+            .query_row("SELECT id FROM cards", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(mapped_cid, new_cid);
 
-        let wf_id: String = store.conn.query_row("SELECT json_extract(data,'$.workflow_id') FROM workflow_revisions", [], |r| r.get(0)).unwrap();
+        let wf_id: String = store
+            .conn
+            .query_row(
+                "SELECT json_extract(data,'$.workflow_id') FROM workflow_revisions",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(wf_id, "canban-default");
 
-        let term_raw: String = store.conn.query_row("SELECT data FROM terminals", [], |r| r.get(0)).unwrap();
+        let term_raw: String = store
+            .conn
+            .query_row("SELECT data FROM terminals", [], |r| r.get(0))
+            .unwrap();
         let term: Value = serde_json::from_str(&term_raw).unwrap();
         assert_eq!(term["id"], json!(format!("{new_cid}:agy")));
         assert_eq!(term["agent"]["card_number"], json!(69));
         assert_eq!(term["agent"]["input_path"], json!(new_prompt_rel));
         assert_eq!(term["agent"]["workflow_run_id"], json!("deadbeef"));
 
-        let cnt_id: String = store.conn.query_row("SELECT id FROM counters WHERE value=69", [], |r| r.get(0)).unwrap();
+        let cnt_id: String = store
+            .conn
+            .query_row("SELECT id FROM counters WHERE value=69", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(cnt_id, format!("card-number:{new_pid}"));
-        let draft_id: String = store.conn.query_row("SELECT id FROM editor_drafts", [], |r| r.get(0)).unwrap();
+        let draft_id: String = store
+            .conn
+            .query_row("SELECT id FROM editor_drafts", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(draft_id, format!("card:{new_cid}"));
         drop(store);
 
@@ -3088,23 +3230,95 @@ mod tests {
         assert!(home.path().join(&old_prompt_rel).exists());
         assert!(home.path().join(&old_art_rel).exists());
         assert!(home.path().join(&old_arch_rel).exists());
-        assert!(home.path().join(format!("projects/{old_pid}/cards/{old_cid}/context.json")).exists());
+        assert!(
+            home.path()
+                .join(format!("projects/{old_pid}/cards/{old_cid}/context.json"))
+                .exists()
+        );
         assert!(!home.path().join(&new_report_rel).exists());
 
         let conn = Connection::open(home.path().join("canban.sqlite")).unwrap();
-        let restored_pid: String = conn.query_row("SELECT id FROM projects", [], |r| r.get(0)).unwrap();
+        let restored_pid: String = conn
+            .query_row("SELECT id FROM projects", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(restored_pid, old_pid);
-        let restored_cid: String = conn.query_row("SELECT id FROM cards", [], |r| r.get(0)).unwrap();
+        let restored_cid: String = conn
+            .query_row("SELECT id FROM cards", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(restored_cid, old_cid);
-        let restored_term: String = conn.query_row("SELECT data FROM terminals", [], |r| r.get(0)).unwrap();
+        let restored_term: String = conn
+            .query_row("SELECT data FROM terminals", [], |r| r.get(0))
+            .unwrap();
         let restored_term_v: Value = serde_json::from_str(&restored_term).unwrap();
         assert!(restored_term_v["agent"].get("card_number").is_none());
-        assert_eq!(restored_term_v["agent"]["input_path"], json!(old_prompt_rel));
+        assert_eq!(
+            restored_term_v["agent"]["input_path"],
+            json!(old_prompt_rel)
+        );
         drop(conn);
 
         // Upgrade 15 -> 16 again (roundtrip idempotence).
         assert_eq!(migrate(home.path(), 16).unwrap(), 16);
         assert!(home.path().join(&new_report_rel).exists());
-        assert!(home.path().join(format!("projects/{new_pid}/cards/69/context.json")).exists());
+        assert!(
+            home.path()
+                .join(format!("projects/{new_pid}/cards/69/context.json"))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn schema_17_merge_batches_roundtrip_and_downgrade_guard() {
+        let home = tempfile::tempdir().unwrap();
+        let mut store = crate::Store::open(home.path()).unwrap();
+        let batch = canban_types::MergeBatch {
+            id: "merge-queue:abcd1234:11223344".into(),
+            project_id: "abcd1234".into(),
+            profile_id: "merger".into(),
+            provider_session_id: None,
+            target_branch: "main".into(),
+            target_head: "deadbeef".into(),
+            strategy: canban_types::MergeStrategy::Rebase,
+            sync_upstream: true,
+            test_command: Some("cargo test".into()),
+            worktree: "/tmp/wt".into(),
+            state: "running".into(),
+            failure_kind: Some("conflict".into()),
+            conflict_card_number: Some(12),
+            conflict_files: vec!["README.md".into()],
+            test_output: None,
+            items: vec![canban_types::MergeBatchItem {
+                card_id: "c1234567".into(),
+                card_number: 12,
+                workflow_run_id: "r1234567".into(),
+                branch: "card/12".into(),
+                worktree: "/tmp/wt12".into(),
+                base_head: "base".into(),
+                integrated_commit: None,
+                evicted: false,
+            }],
+            prompt: "Resolve".into(),
+            error: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.write(|db| db.save(&batch)).unwrap();
+        assert_eq!(store.snapshot().unwrap().merge_batches.len(), 1);
+        drop(store);
+
+        // Downgrade must fail while batch is active.
+        assert!(migrate(home.path(), 16).is_err());
+
+        // Complete batch and downgrade cleanly to 16, then back up to 17.
+        let mut store = crate::Store::open(home.path()).unwrap();
+        let mut completed = batch.clone();
+        completed.state = "completed".into();
+        store.write(|db| db.save(&completed)).unwrap();
+        drop(store);
+
+        assert_eq!(migrate(home.path(), 16).unwrap(), 16);
+        assert_eq!(migrate(home.path(), 17).unwrap(), 17);
+        let store = crate::Store::open(home.path()).unwrap();
+        assert!(store.snapshot().unwrap().merge_batches.is_empty());
     }
 }
