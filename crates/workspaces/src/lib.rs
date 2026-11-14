@@ -11,7 +11,14 @@ impl Ops {
         }
     }
     fn git(&self, dir: &Path, args: &[&str]) -> Result<std::process::Output> {
-        let mut argv = vec!["git", "-C", dir.to_str().context("Invalid path")?];
+        let mut argv = vec![
+            "env",
+            "GIT_EDITOR=true",
+            "GIT_SEQUENCE_EDITOR=true",
+            "git",
+            "-C",
+            dir.to_str().context("Invalid path")?,
+        ];
         argv.extend(args);
         self.host.run(Path::new("/"), &argv, None)
     }
@@ -372,6 +379,7 @@ impl Ops {
                 if !self
                     .checked(cwd, &["diff", "--name-only", "--diff-filter=U"])?
                     .is_empty()
+                    || self.in_merge_or_rebase(cwd)?
                 {
                     value.state = "conflict".into();
                 }

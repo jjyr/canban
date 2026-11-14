@@ -43,7 +43,10 @@ Human accepts -> persist unknown delivery intent / request key
                            |
                     commit Card changes (if dirty)
                            |
-                  merge target HEAD INTO Card
+       integrate into target via selected strategy:
+         - rebase (default): rebase Card commits onto target HEAD (linear fast-forward)
+         - squash: single squashed commit on target HEAD
+         - merge: forward two-parent merge commit on target HEAD
                            |
              +-------------+------------------+
              |                                |
@@ -51,12 +54,20 @@ Human accepts -> persist unknown delivery intent / request key
              |                                |
       retain in Card worktree        recheck clean/unchanged target
       target branch unchanged                 |
-      attention + failure receipt       fast-forward target checkout
-                                              |
+      route to @merger (Queue Merge)   fast-forward target checkout
+      or attention + failure receipt          |
                                      Delivery + Timeline receipt
                                               |
                                          Archive separately
 ```
+
+Delivery supports three local integration strategies (`MergeStrategy`, configured on the Workflow `deliver` step via `with.strategy` or selected per-merge in the Diff & Review workbench):
+
+- `rebase` (**default**): Rebases the Card's commits linearly onto `target_branch` and fast-forwards the target checkout, preserving developer commit granularity and semantic commit messages without raw reverse merge commits (`Merge commit '<sha>' into ...`). If a custom commit message is explicitly typed for a single-commit Card, that commit's message is amended.
+- `squash`: Integrates the net tree diff against `target_branch` as a single commit directly on `target_branch` (reusing a single commit's message, formatting a multi-commit summary under `Canban #<number>: <title>`, or using the reviewer's custom commit message).
+- `merge`: Creates a forward two-parent semantic merge commit (`Merge card #<number>: <title>` or custom commit message) with `target_branch` as `--first-parent` and the Card commit history (excluding any reverse conflict-sync helper commit) as the second parent.
+
+Across **all three strategies**, conflict handling is uniform: if Git integration fails due to textual conflicts, the target branch remains untouched, conflict state is materialized in the Card worktree (`rebase-merge` for `rebase`, `MERGE_HEAD` for `squash`/`merge`), and Queue Merge automatically dispatches `@merger` (up to `max_conflict_attempts`) before retrying delivery. Manual `review.merge` leaves the conflict in the Card worktree and surfaces attention.
 
 Git readiness (`merge_allowed` and `reason`) governs whether a diff can be accepted. Active Card Agent work or queued/uncertain requests never disable `Merge` or `Publish PR`: `review.preview` exposes an informational `warning` only when Herdr reports the Agent is still running/disconnected or when a Request is `queued`/`starting`/`unknown`. When a retained interactive Agent terminal is connected and Herdr reports `status.state` as `idle` or `done` (or the PTY has `finished`), no warning is shown at all. Git hooks remain active; a hook changing the committed tree or leaving checkout edits stops delivery for inspection. Divergent non-conflicting target changes are integrated in the Card worktree first. Conflicts stay there; the Project source checkout is not left in a half-merged state. Resolve/abort them in the Card terminal, rerun validation and refresh the diff before another acceptance.
 
@@ -68,12 +79,12 @@ Card and target changes are checked again, but Canban does not lock arbitrary ex
 
 ```sh
 canban call review.preview '{"card_id":"CARD_ID","target_branch":"main"}'
-canban call review.merge '{"card_id":"CARD_ID","revision":7,"target_branch":"main","token":"PREVIEW_TOKEN","message":"Implement the reviewed task","request_key":"unique-acceptance-id"}'
+canban call review.merge '{"card_id":"CARD_ID","revision":7,"target_branch":"main","strategy":"rebase","token":"PREVIEW_TOKEN","message":"Implement the reviewed task","request_key":"unique-acceptance-id"}'
 ```
 
-`review.preview` is read-only. It returns revision, heads, target/source branch, worktree, file paths, patch, truncation/dirty/conflict flags, token, merge_allowed, reason and optional non-blocking warning. The token fingerprints full content/status/heads even if the displayed patch is truncated. A stale token or revision rejects acceptance before staging/committing.
+`review.preview` is read-only. It returns revision, heads, target/source branch, worktree, file paths, patch, truncation/dirty/conflict flags, token, merge_allowed, reason and optional non-blocking warning. The token fingerprints full content/status/heads (including paused merge or rebase states) even if the displayed patch is truncated. A stale token or revision rejects acceptance before staging/committing.
 
-`review.merge` requires the request key, revision and preview token. It returns `state: merged`, `failed` or `unknown`. Reusing a key with the identical payload returns its stored receipt before any Git action; changing its payload is a conflict. The intent is saved before Git effects. A crash/lost result can leave unknown; inspect the target and Card Git heads and Timeline before a new acceptance. There is no blind replay of an uncertain physical operation. The native UI clears the preview after a returned result, requiring a fresh inspection.
+`review.merge` requires the request key, revision and preview token, and accepts optional `strategy` (`"rebase"` | `"squash"` | `"merge"`, defaulting to the Project's active `deliver` step strategy or `"rebase"`) and `message_customized` (boolean). It returns `state: merged`, `failed` or `unknown`. Reusing a key with the identical payload returns its stored receipt before any Git action; changing its payload is a conflict. The intent is saved before Git effects. A crash/lost result can leave unknown; inspect the target and Card Git heads and Timeline before a new acceptance. There is no blind replay of an uncertain physical operation. The native UI clears the preview after a returned result, requiring a fresh inspection.
 
 Success saves `Card.delivery` with target branch, commit, request key and merged timestamp. Timeline events are review.merge_started, review.merged or review.merge_failed. Failed operations request attention. Delivery metadata does not change the workflow stage or imply Archive. Subsequent rework retains the earlier delivery as history until a newer successful acceptance replaces the Card's latest-delivery summary.
 

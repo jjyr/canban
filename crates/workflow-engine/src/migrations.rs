@@ -7,7 +7,7 @@ use crate::source::Document;
 use anyhow::{Result, ensure};
 
 pub const BASELINE: u32 = 1;
-pub const CURRENT: u32 = 4;
+pub const CURRENT: u32 = 5;
 
 pub struct Migration {
     pub version: u32,
@@ -26,6 +26,10 @@ const STEPS: &[Migration] = &[
     Migration {
         version: 4,
         up: v4_deliver_merger_role,
+    },
+    Migration {
+        version: 5,
+        up: v5_deliver_merge_strategy,
     },
 ];
 
@@ -143,6 +147,24 @@ fn v4_deliver_merger_role(doc: &mut Document) -> Result<()> {
     Ok(())
 }
 
+/// Schema 5: `deliver` steps gain configurable `with.strategy` (`rebase` default, `squash`,
+/// or `merge`). Strips explicit `strategy: rebase` (or blank strings) so the built-in default
+/// remains clean in YAML.
+fn v5_deliver_merge_strategy(doc: &mut Document) -> Result<()> {
+    for step in &mut doc.steps {
+        if step.uses == "deliver"
+            && step
+                .with
+                .get("strategy")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.trim().is_empty() || s.trim() == "rebase")
+        {
+            step.with.remove("strategy");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +213,46 @@ steps:
         assert!(
             upgrade_yaml(&upgraded).unwrap().is_none(),
             "already-current YAML is untouched"
+        );
+    }
+
+    #[test]
+    fn v5_strips_redundant_default_rebase_strategy_and_keeps_squash_or_merge() {
+        let v4 = r#"schema: 4
+id: delivery:demo
+name: Development
+on:
+  review:
+    event: card.column_entered
+    start_at: deliver:review
+    match:
+      column: review
+steps:
+  - id: deliver:review
+    uses: deliver
+    with:
+      strategy: rebase
+      sync_upstream: true
+    next: deliver:squash
+  - id: deliver:squash
+    uses: deliver
+    with:
+      strategy: squash
+    next: __end
+  - id: __end
+    uses: complete
+"#;
+        let upgraded = upgrade_yaml(v4).unwrap().expect("v4 should upgrade to v5");
+        let doc = crate::source::parse(&upgraded).unwrap();
+        assert_eq!(doc.schema, CURRENT);
+        assert!(
+            !doc.steps[0].with.contains_key("strategy"),
+            "default rebase strategy is stripped"
+        );
+        assert_eq!(
+            doc.steps[1].with.get("strategy").and_then(|v| v.as_str()),
+            Some("squash"),
+            "non-default strategy is preserved"
         );
     }
 }

@@ -1,5 +1,5 @@
 use super::*;
-use canban_types::{WorkflowDefinition, WorkflowStep};
+use canban_types::{MergeStrategy, WorkflowDefinition, WorkflowStep};
 use serde_json::json;
 
 fn ordered_steps(definition: &WorkflowDefinition, root: Option<&str>) -> Vec<String> {
@@ -55,11 +55,20 @@ fn step_badge_label(id: &str, step: &WorkflowStep) -> String {
         }
         WorkflowStep::Move { column, .. } => format!("→ {column}"),
         WorkflowStep::Approval { .. } => "Approval".into(),
-        WorkflowStep::Deliver { sync_upstream, .. } => {
+        WorkflowStep::Deliver {
+            strategy,
+            sync_upstream,
+            ..
+        } => {
+            let strat = match strategy {
+                MergeStrategy::Rebase => "Queue merge",
+                MergeStrategy::Squash => "Queue squash",
+                MergeStrategy::Merge => "Queue merge commit",
+            };
             if *sync_upstream {
-                "Queue merge · Sync".into()
+                format!("{strat} · Sync")
             } else {
-                "Queue merge · Local".into()
+                format!("{strat} · Local")
             }
         }
         WorkflowStep::Condition { .. } => "Rule check".into(),

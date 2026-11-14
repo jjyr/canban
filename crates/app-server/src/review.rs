@@ -5,6 +5,37 @@ pub(super) fn activity_warning(db: Db<'_>, card: &Card) -> Result<Option<String>
         &db.list::<TerminalEntry>()?,
     ))
 }
+
+fn default_project_merge_strategy(db: Db<'_>, card: &Card) -> Result<MergeStrategy> {
+    for run in db.list::<WorkflowRun>()? {
+        if run.card_id == card.id
+            && run.active()
+            && let Some(step_id) = &run.step
+            && let Some(WorkflowStep::Deliver { strategy, .. }) = run.definition.steps.get(step_id)
+        {
+            return Ok(*strategy);
+        }
+    }
+    let sources = db.list::<WorkflowSource>()?;
+    let revisions = db.list::<WorkflowRevision>()?;
+    for source in sources
+        .iter()
+        .filter(|s| s.project_id == card.project_id && s.enabled)
+    {
+        if let Some(rev) = revisions
+            .iter()
+            .find(|r| r.workflow_id == source.workflow_id && r.revision == source.revision)
+            && let Some((_, WorkflowStep::Deliver { strategy, .. })) = rev
+                .definition
+                .steps
+                .iter()
+                .find(|(_, st)| matches!(st, WorkflowStep::Deliver { .. }))
+        {
+            return Ok(*strategy);
+        }
+    }
+    Ok(MergeStrategy::Rebase)
+}
 impl AppServer {
     pub(super) fn review_preview(&self, p: Value) -> Result<Value> {
         let (card, project, warning) = {
@@ -33,6 +64,13 @@ impl AppServer {
             anyhow::anyhow!("Another code delivery is in progress; retry after it completes")
         })?;
         let key = strp(&p, "request_key")?.to_owned();
+        let requested_strategy = match p["strategy"].as_str() {
+            Some(raw) if !raw.trim().is_empty() => Some(
+                MergeStrategy::parse(raw)
+                    .with_context(|| format!("Unknown merge strategy `{}`", raw.trim()))?,
+            ),
+            _ => None,
+        };
         // A stored intent must win before any Git effects. Duplicate/unknown
         // delivery requests are never blindly replayed after a lost reply.
         let mut execute = false;
@@ -42,30 +80,39 @@ impl AppServer {
             ensure!(card.active(),"Restore the Card before accepting");
             ensure!(card.pull_request.as_ref().is_none_or(|pr|pr.merged),"Resolve the existing PR delivery before local merge");
             let project:Project=db.get(&card.project_id)?;let project=self.bound_project(&project,&card);
+            let strategy=match requested_strategy{Some(s)=>s,None=>default_project_merge_strategy(db,&card)?};
             let plan=self.ops(&project.work_location().machine).review_preview(&project,&card,p["target_branch"].as_str())?;
             ensure!(plan.token==strp(&p,"token")?,"Review is stale; refresh the diff before accepting");
             ensure!(plan.merge_allowed,"{}",plan.reason.as_deref().unwrap_or("Merge unavailable"));
-            log(db,&card,"review.merge_started","user","Accepted reviewed changes for commit/merge",None,json!({"request_key":key,"target_branch":plan.target_branch,"target_head":plan.target_head,"card_head":plan.card_head,"token":plan.token}))?;
-            execute=true;context=Some((card,project,plan));
+            log(db,&card,"review.merge_started","user","Accepted reviewed changes for commit/merge",None,json!({"request_key":key,"target_branch":plan.target_branch,"target_head":plan.target_head,"card_head":plan.card_head,"strategy":strategy,"token":plan.token}))?;
+            execute=true;context=Some((card,project,plan,strategy));
             Ok(json!({"state":"unknown","request_key":key,"message":"Merge intent saved; inspect Git heads before repeating an uncertain delivery"}))
         })?;
         if !execute {
             return Ok(saved);
         }
-        let (card, project, plan) = context.unwrap();
+        let (card, project, plan, strategy) = context.unwrap();
         let _merging = self.track_merging(&card.id);
+        let default_msg = format!("Canban #{}: {}", card.number, card.title);
         let message = p["message"]
             .as_str()
             .filter(|s| !s.trim().is_empty())
             .map(str::to_owned)
-            .unwrap_or_else(|| format!("Canban #{}: {}", card.number, card.title));
-        let result = self.ops(&project.work_location().machine).review_merge(
-            &project,
-            &card,
-            Some(&plan.target_branch),
-            &plan.token,
-            &message,
-        );
+            .unwrap_or_else(|| default_msg.clone());
+        let message_customized = p["message_customized"]
+            .as_bool()
+            .unwrap_or_else(|| p["message"].as_str().is_some() && message.trim() != default_msg);
+        let result = self
+            .ops(&project.work_location().machine)
+            .review_merge_with_strategy(
+                &project,
+                &card,
+                Some(&plan.target_branch),
+                &plan.token,
+                &message,
+                strategy,
+                message_customized,
+            );
         let value=self.store.lock().unwrap().write(|db|{
             let mut current:Card=db.get(&card.id)?;
             let value=match result {
@@ -459,6 +506,18 @@ impl AppServer {
         }
         let _merging = self.track_merging(&card.id);
         let target_branch = run.inputs["target_branch"].as_str();
+        let strategy = run.inputs["strategy"]
+            .as_str()
+            .and_then(MergeStrategy::parse)
+            .or_else(|| {
+                run.step
+                    .as_ref()
+                    .and_then(|k| match run.definition.steps.get(k) {
+                        Some(WorkflowStep::Deliver { strategy, .. }) => Some(*strategy),
+                        _ => None,
+                    })
+            })
+            .unwrap_or_default();
         let sync_upstream = run.inputs["sync_upstream"].as_bool().unwrap_or(true);
         let mut workspace_project = project.clone();
         workspace_project.workflow.workspace = run.definition.workspace.clone();
@@ -569,12 +628,14 @@ impl AppServer {
         let _ = self.set_queue_pause_reason(&card.id, &run.id, None);
         let key = format!("workflow-deliver:{}:{}", run.id, run.visit);
         let message = format!("Canban #{}: {}", card.number, card.title);
-        let result = ops.review_merge(
+        let result = ops.review_merge_with_strategy(
             &workspace_project,
             &card,
             Some(&plan.target_branch),
             &plan.token,
             &message,
+            strategy,
+            false,
         );
         let push_result = if result.is_ok() && sync_upstream {
             Some(ops.push_target_branch(&workspace_project, &plan.target_branch))

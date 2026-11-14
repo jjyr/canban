@@ -70,18 +70,24 @@ pub fn run_view(run: WorkflowRun) -> impl IntoElement {
             WorkflowStep::Approval { title, .. } => title.clone(),
             WorkflowStep::Deliver {
                 target_branch,
+                strategy,
                 sync_upstream,
                 ..
             } => {
+                let strat_note = match strategy {
+                    MergeStrategy::Rebase => "",
+                    MergeStrategy::Squash => " (squash)",
+                    MergeStrategy::Merge => " (merge commit)",
+                };
                 let sync_note = if *sync_upstream {
                     " + sync upstream"
                 } else {
                     " (local only)"
                 };
                 if let Some(branch) = target_branch {
-                    format!("Queue merge into {branch}{sync_note}")
+                    format!("Queue merge{strat_note} into {branch}{sync_note}")
                 } else {
-                    format!("Queue merge{sync_note}")
+                    format!("Queue merge{strat_note}{sync_note}")
                 }
             }
             WorkflowStep::Condition {

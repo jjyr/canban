@@ -3962,3 +3962,255 @@ fn manual_card_terminal_updates_adopts_and_reports_via_short_card_number_with_ze
         "implemented from manual terminal\n"
     );
 }
+
+#[test]
+fn queue_merge_supports_rebase_squash_and_merge_strategies_and_routes_conflicts_to_merger() {
+    for strategy in ["rebase", "squash", "merge"] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        git_in(&source, &["init", "-b", "main"]);
+        git_identity(&source);
+        std::fs::write(source.join("shared.txt"), "base\n").unwrap();
+        git_in(&source, &["add", "."]);
+        git_in(&source, &["commit", "-m", "initial"]);
+
+        let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+        let p: Project = serde_json::from_value(
+            app.call(
+                "project.create",
+                json!({
+                    "name": format!("Strategy {strategy}"),
+                    "directory": source,
+                    "workspace": {"create_worktree": true, "sync_base": false}
+                }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let wf = collection(&app, &p);
+        let fname = wf["sources"][0]["filename"].as_str().unwrap();
+        let mut doc =
+            canban_workflow_engine::source::parse(wf["sources"][0]["source"].as_str().unwrap())
+                .unwrap();
+        canban_workflow_engine::source::set_sync_upstream(&mut doc, false);
+        canban_workflow_engine::source::set_merge_strategy(
+            &mut doc,
+            canban_types::MergeStrategy::parse(strategy).unwrap(),
+        );
+        let raw = canban_workflow_engine::source::encode(&doc).unwrap();
+        app.call(
+            "workflow.apply",
+            json!({
+                "project_id": p.id,
+                "revision": wf["revision"],
+                "sources": [{"filename": fname, "source": raw}]
+            }),
+        )
+        .unwrap();
+
+        // 1. Clean divergent target delivery: zero raw SHA merge commits!
+        let c1: Card = serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"project_id": p.id, "title": "Clean feature"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        app.call(
+            "card.move",
+            json!({"card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
+        )
+        .unwrap();
+        let dev1 = snap_latest_card_terminal(&app, &c1.id);
+        let dev1 = admit(&app, &dev1);
+        let ops = canban_workspaces::Ops::local();
+        let wt1 = ops.prepare(&app.home, &p, &c1).unwrap();
+        let br1 = ops.current_branch(wt1.to_str().unwrap()).unwrap();
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut card: Card = db.get(&c1.id)?;
+                card.worktree = Some(wt1.to_str().unwrap().into());
+                card.branch = Some(br1);
+                db.save(&card)
+            })
+            .unwrap();
+        git_identity(&wt1);
+        std::fs::write(wt1.join("c1.txt"), "c1 step 1\n").unwrap();
+        git_in(&wt1, &["add", "."]);
+        git_in(&wt1, &["commit", "-m", "feat: add c1 step 1"]);
+        std::fs::write(wt1.join("c1.txt"), "c1 step 2\n").unwrap();
+        git_in(&wt1, &["add", "."]);
+        git_in(&wt1, &["commit", "-m", "feat: add c1 step 2"]);
+
+        // Advance `main` on an unrelated file while c1 is in flight.
+        std::fs::write(source.join("main_extra.txt"), "main moved\n").unwrap();
+        git_in(&source, &["add", "."]);
+        git_in(&source, &["commit", "-m", "docs: advance main"]);
+        let main_before_c1 = git_in(&source, &["rev-parse", "HEAD"]);
+
+        finish_closed(&app, &dev1, &format!("c1-done-{strategy}"));
+        app.pump_deliveries().unwrap();
+
+        let snap = app.snapshot().unwrap();
+        assert!(
+            snap.cards
+                .iter()
+                .find(|c| c.id == c1.id)
+                .unwrap()
+                .delivery
+                .is_some(),
+            "{strategy}: clean divergent delivery should succeed without @merger"
+        );
+        let head_subject = git_in(&source, &["log", "-n", "1", "--format=%s"]);
+        assert!(
+            !head_subject.starts_with("Merge commit '"),
+            "{strategy}: must never produce raw SHA merge commit, got `{head_subject}`"
+        );
+        match strategy {
+            "rebase" => {
+                assert_eq!(head_subject, "feat: add c1 step 2");
+                assert!(git_in(&source, &["rev-list", "--merges", "HEAD"]).is_empty());
+            }
+            "squash" => {
+                assert_eq!(
+                    git_in(&source, &["rev-parse", "HEAD^"]),
+                    main_before_c1,
+                    "squash must create a single commit on top of main"
+                );
+                assert!(git_in(&source, &["rev-list", "--merges", "HEAD"]).is_empty());
+            }
+            "merge" => {
+                assert_eq!(
+                    git_in(&source, &["rev-parse", "HEAD^1"]),
+                    main_before_c1,
+                    "merge strategy must keep main as first parent"
+                );
+                assert_eq!(head_subject, "Merge card #1: Clean feature");
+            }
+            _ => unreachable!(),
+        }
+
+        // 2. Conflicting delivery: ALL 3 strategies must route through `@merger` and then land cleanly!
+        let c2: Card = serde_json::from_value(
+            app.call(
+                "card.create",
+                json!({"project_id": p.id, "title": "Conflicting feature"}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        app.call(
+            "card.move",
+            json!({"card_id": c2.id, "revision": c2.revision, "stage": "develop"}),
+        )
+        .unwrap();
+        let dev2 = snap_latest_card_terminal(&app, &c2.id);
+        let dev2 = admit(&app, &dev2);
+        let wt2 = ops.prepare(&app.home, &p, &c2).unwrap();
+        let br2 = ops.current_branch(wt2.to_str().unwrap()).unwrap();
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut card: Card = db.get(&c2.id)?;
+                card.worktree = Some(wt2.to_str().unwrap().into());
+                card.branch = Some(br2);
+                db.save(&card)
+            })
+            .unwrap();
+        git_identity(&wt2);
+        std::fs::write(wt2.join("shared.txt"), "card2 conflict edit\n").unwrap();
+        git_in(&wt2, &["add", "."]);
+        git_in(&wt2, &["commit", "-m", "feat: update shared from card2"]);
+
+        std::fs::write(source.join("shared.txt"), "main conflict edit\n").unwrap();
+        git_in(&source, &["add", "."]);
+        git_in(&source, &["commit", "-m", "fix: update shared on main"]);
+        let main_before_c2 = git_in(&source, &["rev-parse", "HEAD"]);
+
+        finish_closed(&app, &dev2, &format!("c2-done-{strategy}"));
+        app.pump_deliveries().unwrap();
+
+        let snap = app.snapshot().unwrap();
+        let run2 = snap
+            .workflow_runs
+            .iter()
+            .find(|r| r.card_id == c2.id && r.active())
+            .expect("active run waiting on @merger");
+        assert_eq!(
+            run2.state, "waiting_agent",
+            "{strategy}: conflict must route to @merger"
+        );
+        let merger = snap
+            .terminals
+            .iter()
+            .rfind(|t| {
+                t.agent
+                    .as_ref()
+                    .is_some_and(|a| a.card_id == c2.id && a.profile.id == "merger")
+            })
+            .expect("@merger terminal queued")
+            .clone();
+        let merger = admit(&app, &merger);
+
+        // Simulate `@merger` resolving conflict according to strategy instructions.
+        std::fs::write(wt2.join("shared.txt"), "main + card2 resolved\n").unwrap();
+        git_in(&wt2, &["add", "shared.txt"]);
+        if strategy == "rebase" {
+            git_in(&wt2, &["commit", "--no-edit"]);
+            git_in(&wt2, &["rebase", "--skip"]);
+        } else {
+            git_in(
+                &wt2,
+                &["commit", "-m", "chore(merge): integrate main into card #2"],
+            );
+        }
+        finish_closed(&app, &merger, &format!("c2-merged-{strategy}"));
+        app.pump_deliveries().unwrap();
+
+        let snap = app.snapshot().unwrap();
+        let card2 = snap.cards.iter().find(|c| c.id == c2.id).unwrap();
+        assert!(
+            card2.delivery.is_some(),
+            "{strategy}: c2 must deliver after @merger resolution"
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("shared.txt")).unwrap(),
+            "main + card2 resolved\n"
+        );
+        let final_subject = git_in(&source, &["log", "-n", "1", "--format=%s"]);
+        assert!(
+            !final_subject.starts_with("Merge commit '"),
+            "{strategy}: resolved delivery must not leave raw SHA merge commit, got `{final_subject}`"
+        );
+        match strategy {
+            "rebase" => {
+                assert_eq!(final_subject, "feat: update shared from card2");
+                assert_eq!(git_in(&source, &["rev-parse", "HEAD^"]), main_before_c2);
+            }
+            "squash" => {
+                assert_eq!(final_subject, "feat: update shared from card2");
+                assert_eq!(git_in(&source, &["rev-parse", "HEAD^"]), main_before_c2);
+            }
+            "merge" => {
+                assert_eq!(final_subject, "Merge card #2: Conflicting feature");
+                assert_eq!(git_in(&source, &["rev-parse", "HEAD^1"]), main_before_c2);
+            }
+            _ => unreachable!(),
+        }
+    }
+}
+
+fn snap_latest_card_terminal(app: &AppServer, card_id: &str) -> TerminalEntry {
+    app.snapshot()
+        .unwrap()
+        .terminals
+        .into_iter()
+        .rfind(|t| t.agent.as_ref().is_some_and(|a| a.card_id == card_id))
+        .unwrap()
+}

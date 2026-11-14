@@ -1241,6 +1241,7 @@ pub fn board_cards() -> canban_types::Snapshot {
                 "steps": {
                     "deliver:review": {
                         "type": "deliver",
+                        "strategy": "squash",
                         "sync_upstream": true,
                         "max_conflict_attempts": 3,
                         "next": "__end"
@@ -1254,7 +1255,7 @@ pub fn board_cards() -> canban_types::Snapshot {
             "terminal_id": null,
             "trigger_event_id": null,
             "input_digest": "gallery",
-            "inputs": {"sync_upstream": true, "queued_at": 300},
+            "inputs": {"strategy": "squash", "sync_upstream": true, "queued_at": 300},
             "outputs": {},
             "history": [],
             "error": null,

@@ -896,12 +896,13 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
             .into_element();
     }
 
+    let default_commit_msg = format!("Canban #{}: {}", c.number, c.title);
     let message_key = format!("review-msg:{}", c.id);
     let msg_draft = crate::drafts::document(
         ui,
         message_key,
         crate::drafts::Draft {
-            body: format!("Canban #{}: {}", c.number, c.title),
+            body: default_commit_msg.clone(),
             ..Default::default()
         },
     );
@@ -976,6 +977,7 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                             },
                         ))
                         .child(if has_worktree && st.mode.get() == "card_local" {
+                            let default_msg_check = default_commit_msg.clone();
                             view()
                                 .flex_row()
                                 .items_center()
@@ -984,6 +986,20 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                                     ui,
                                     st.delivery_mode,
                                     vec![("local", "Local merge"), ("github_pr", "GitHub PR")],
+                                ))
+                                .child(when(
+                                    move || st.delivery_mode.get() == "local",
+                                    move || {
+                                        crate::github::choice(
+                                            ui,
+                                            st.delivery_strategy,
+                                            vec![
+                                                ("rebase", "Rebase"),
+                                                ("squash", "Squash"),
+                                                ("merge", "Merge commit"),
+                                            ],
+                                        )
+                                    },
                                 ))
                                 .child(compact_action(
                                     move || {
@@ -1009,6 +1025,9 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                                         move |_| {
                                             if let Some(p) = ui.review.get_untracked() {
                                                 let source = ui.location();
+                                                let msg = commit_msg.get_untracked();
+                                                let customized = st.delivery_customize.get_untracked()
+                                                    && msg.trim() != default_msg_check;
                                                 dispatch_then(
                                                     ui,
                                                     if st.delivery_mode.get_untracked()
@@ -1023,7 +1042,9 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                                                         "revision": p.revision,
                                                         "token": p.token,
                                                         "target_branch": p.target_branch,
-                                                        "message": commit_msg.get_untracked(),
+                                                        "strategy": st.delivery_strategy.get_untracked(),
+                                                        "message": msg,
+                                                        "message_customized": customized,
                                                     }),
                                                     move |_| {
                                                         if ui.location() == source {
@@ -1060,7 +1081,11 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .child(muted("Merge commit message:"))
+                    .child(muted(move || match st.delivery_strategy.get().as_str() {
+                        "squash" => "Squash commit message:",
+                        "merge" => "Merge commit message:",
+                        _ => "Commit message (if dirty / single-commit):",
+                    }))
                     .child(field(commit_msg, "Commit message").flex_1())
             },
         ))

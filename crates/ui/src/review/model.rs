@@ -53,6 +53,7 @@ pub struct State {
     pub submit_new_card_title: Signal<String>,
     pub delivery_customize: Signal<bool>,
     pub delivery_mode: Signal<String>,
+    pub delivery_strategy: Signal<String>,
 }
 
 impl Default for State {
@@ -94,6 +95,7 @@ impl State {
             submit_new_card_title: signal(String::new()),
             delivery_customize: signal(false),
             delivery_mode: signal("local".into()),
+            delivery_strategy: signal("rebase".into()),
         }
     }
 }

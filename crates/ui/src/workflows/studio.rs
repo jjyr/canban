@@ -7,7 +7,7 @@
 //! in a dialog. Structure edits go through the same draft/publish path as YAML.
 use super::update_doc;
 use crate::presenter::*;
-use canban_types::WorkflowColumn;
+use canban_types::{MergeStrategy, WorkflowColumn};
 use canban_ui_kit::{tokens::*, *};
 use canban_workflow_engine::{
     source::{self, Document, NEXT_COLUMN, default_step_prompt, is_default_step_prompt},
@@ -54,6 +54,7 @@ struct StepModel {
     profile: String,
     instruction: String,
     default_prompt: bool,
+    strategy: MergeStrategy,
     sync_upstream: bool,
     target_branch: String,
     max_conflict: u32,
@@ -150,6 +151,9 @@ fn step_model(
     } else {
         raw_instruction.to_owned()
     };
+    let strategy = with_str(step, "strategy")
+        .and_then(MergeStrategy::parse)
+        .unwrap_or_default();
     let sync_upstream = step
         .with
         .get("sync_upstream")
@@ -237,15 +241,18 @@ fn step_model(
             } else {
                 format!("conflicts → @{conflict_agent} ×{max_conflict}")
             };
+            let strategy_tag = match strategy {
+                MergeStrategy::Rebase => "Rebase",
+                MergeStrategy::Squash => "Squash",
+                MergeStrategy::Merge => "Merge",
+            };
             (
                 Icon::Branch,
                 Tint::Success,
-                if sync_upstream {
-                    "Merge · Sync"
-                } else {
-                    "Merge · Local"
-                }
-                .into(),
+                format!(
+                    "{strategy_tag} · {}",
+                    if sync_upstream { "Sync" } else { "Local" }
+                ),
                 format!(
                     "{}{} · {conflict_summary}",
                     if target_branch.is_empty() {
@@ -325,6 +332,7 @@ fn step_model(
         default_prompt: is_default,
         profile,
         instruction,
+        strategy,
         sync_upstream,
         target_branch,
         max_conflict,
@@ -1522,8 +1530,27 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                 }));
         }
         "deliver" => {
-            let (sync_id, conflict_id, pid) = (id.clone(), id.clone(), id.clone());
+            let (strategy_id, sync_id, conflict_id, pid) =
+                (id.clone(), id.clone(), id.clone(), id.clone());
             form = form
+                .child(setting_row(
+                    "Strategy",
+                    choice(
+                        vec![
+                            ("Rebase".into(), MergeStrategy::Rebase),
+                            ("Squash".into(), MergeStrategy::Squash),
+                            ("Merge".into(), MergeStrategy::Merge),
+                        ],
+                        move || node.with(|n| n.strategy),
+                        move |s| {
+                            ctx.set_with(
+                                &strategy_id,
+                                "strategy",
+                                (s != MergeStrategy::Rebase).then(|| json!(s)),
+                            )
+                        },
+                    ),
+                ))
                 .child(setting_row(
                     "Upstream",
                     choice(

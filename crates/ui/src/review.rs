@@ -10,7 +10,7 @@ pub mod submit;
 pub use model::{LineTarget, PendingInlineComment, State};
 
 use crate::presenter::*;
-use canban_types::{Card, DeliveryMode, ReviewPreview};
+use canban_types::{Card, DeliveryMode, MergeStrategy, ReviewPreview, WorkflowStep};
 use canban_ui_kit::tokens::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
@@ -292,6 +292,37 @@ pub fn open_card(ui: Ui, card_id: &str) {
     } else {
         "local"
     };
+    let strategy_default = ui.snapshot.with_untracked(|s| {
+        for run in &s.workflow_runs {
+            if run.card_id == card.id
+                && run.active()
+                && let Some(step_id) = &run.step
+                && let Some(WorkflowStep::Deliver { strategy, .. }) =
+                    run.definition.steps.get(step_id)
+            {
+                return strategy.as_str();
+            }
+        }
+        for src in s
+            .workflow_sources
+            .iter()
+            .filter(|src| src.project_id == card.project_id && src.enabled)
+        {
+            if let Some(rev) = s
+                .workflow_revisions
+                .iter()
+                .find(|r| r.workflow_id == src.workflow_id && r.revision == src.revision)
+                && let Some((_, WorkflowStep::Deliver { strategy, .. })) = rev
+                    .definition
+                    .steps
+                    .iter()
+                    .find(|(_, st)| matches!(st, WorkflowStep::Deliver { .. }))
+            {
+                return strategy.as_str();
+            }
+        }
+        MergeStrategy::Rebase.as_str()
+    });
 
     let pr = card_pr_info(&card);
     let has_local = card.worktree.is_some() || card.branch.is_some();
@@ -304,6 +335,7 @@ pub fn open_card(ui: Ui, card_id: &str) {
         st.active_line.set(None);
         st.error.set(String::new());
         st.delivery_mode.set(delivery_default.into());
+        st.delivery_strategy.set(strategy_default.into());
         st.base_ref.set(target_branch.clone());
         if let Some((repo, num, url)) = pr {
             st.pr_target.set(Some(json!({

@@ -545,6 +545,7 @@ fn drive(
             }
             WorkflowStep::Deliver {
                 target_branch,
+                strategy,
                 sync_upstream,
                 next: to,
                 ..
@@ -574,6 +575,7 @@ fn drive(
                     }
                     run.inputs["pending_next"] = json!(to);
                     run.inputs["target_branch"] = json!(target_branch);
+                    run.inputs["strategy"] = json!(strategy);
                     run.inputs["sync_upstream"] = json!(sync_upstream);
                     run.state = "waiting_delivery".into();
                 }
@@ -840,6 +842,7 @@ pub fn approve_with_feedback(
         );
         if let WorkflowStep::Deliver {
             target_branch,
+            strategy,
             sync_upstream,
             next: to,
             ..
@@ -857,6 +860,7 @@ pub fn approve_with_feedback(
             run.inputs["queued_at"] = json!(now());
             run.inputs["pending_next"] = json!(to);
             run.inputs["target_branch"] = json!(target_branch);
+            run.inputs["strategy"] = json!(strategy);
             run.inputs["sync_upstream"] = json!(sync_upstream);
             run.state = "waiting_delivery".into();
             run.updated_at = now();
@@ -970,6 +974,7 @@ pub fn rework_conflict(
     let key = run.step.clone().context("Missing Deliver step")?;
     let Some(WorkflowStep::Deliver {
         profile,
+        strategy,
         next: continuation,
         rework,
         max_conflict_attempts,
@@ -1003,14 +1008,35 @@ pub fn rework_conflict(
                     _ => None,
                 })
         });
-    let instruction = format!(
-        "Merge conflict to resolve before delivery:\n\
-         Queue merge found conflicts integrating `{target_branch}` ({target_head}) into this Card worktree.\n\
-         Conflicted files: {}\n\
-         The worktree may still be mid-merge. Resolve every conflict while preserving both this Card's intent and the target branch changes, \
-         run the relevant builds and tests, and commit the merge (if no merge is in progress, run `git merge {target_branch}` first). \
-         Do not push; Queue merge will retry delivery automatically after you report `--state completed` (or report `--state blocked` if human judgment is required).",
+    let files_summary = if files.is_empty() {
+        "(inspect `git status` in the Card worktree)".to_owned()
+    } else {
         files.join(", ")
+    };
+    let resolution_steps = match strategy {
+        MergeStrategy::Rebase => format!(
+            "The worktree may already be mid-rebase onto `{target_branch}` ({target_head}). \
+             Resolve every conflict while preserving both this Card's intent and the target branch changes, \
+             stage resolved files, and run `GIT_EDITOR=true git rebase --continue` until the rebase completes \
+             (if no rebase is in progress, run `GIT_EDITOR=true git rebase {target_branch}`). \
+             Keep clean, semantic commit messages rather than raw SHA merge commits, and run the relevant builds and tests."
+        ),
+        MergeStrategy::Squash | MergeStrategy::Merge => format!(
+            "The worktree may have an in-progress merge of `{target_branch}` ({target_head}). \
+             Resolve every conflict while preserving both this Card's intent and the target branch changes, \
+             run the relevant builds and tests, and commit the resolved worktree with a semantic message \
+             such as `git commit -m \"chore(merge): integrate {target_branch} into card #{}\"` \
+             (if no merge is in progress, run `git merge --no-commit --no-ff {target_branch}` first).",
+            card.number
+        ),
+    };
+    let instruction = format!(
+        "Merge conflict to resolve before delivery ({strategy_name} strategy):\n\
+         Queue merge found conflicts integrating `{target_branch}` ({target_head}) into this Card worktree.\n\
+         Conflicted files: {files_summary}\n\
+         {resolution_steps} \
+         Do not push; Queue merge will retry delivery automatically after you report `--state completed` (or report `--state blocked` if human judgment is required).",
+        strategy_name = strategy.as_str(),
     );
     let project: Project = db.get(&card.project_id)?;
     let stage = Stage {

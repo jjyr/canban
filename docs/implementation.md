@@ -8,7 +8,7 @@ Workflow/event contract (reconciled 2026-11-12): [Unified workflow engine, Studi
 
 [Unified Card reminders](reminders.md) (2026-11-10) defines the current unread /
 pending counts, persistent visible-read positions, Overview updates and local
-notification sounds. Current builds use SQLite schema 15 and desktop API version 35 (earlier Workflow/GitHub milestones used schema 12/API 10 and schema 10/API 8). Upgrade
+notification sounds. Current builds use SQLite schema 15 and desktop API version 36 (earlier Workflow/GitHub milestones used schema 12/API 10 and schema 10/API 8). Upgrade
 the installed AppServer together with its UI. `mise run dev` (also `mise run run`)
 now manages a separate checkout/branch instance; it does not upgrade installed
 `~/.canban`. Existing history is baselined quietly during migration.

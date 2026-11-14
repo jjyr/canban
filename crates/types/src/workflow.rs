@@ -29,6 +29,46 @@ fn default_limit() -> u32 {
     100
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeStrategy {
+    #[default]
+    Rebase,
+    Squash,
+    Merge,
+}
+
+impl MergeStrategy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rebase => "rebase",
+            Self::Squash => "squash",
+            Self::Merge => "merge",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rebase => "Rebase",
+            Self::Squash => "Squash",
+            Self::Merge => "Merge commit",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "rebase" => Some(Self::Rebase),
+            "squash" => Some(Self::Squash),
+            "merge" => Some(Self::Merge),
+            _ => None,
+        }
+    }
+}
+
+pub fn is_default_merge_strategy(v: &MergeStrategy) -> bool {
+    *v == MergeStrategy::Rebase
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WorkflowStep {
@@ -51,6 +91,8 @@ pub enum WorkflowStep {
         profile: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_branch: Option<String>,
+        #[serde(default, skip_serializing_if = "is_default_merge_strategy")]
+        strategy: MergeStrategy,
         #[serde(default = "default_sync_upstream", skip_serializing_if = "is_true")]
         sync_upstream: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]

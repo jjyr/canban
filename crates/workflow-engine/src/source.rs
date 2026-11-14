@@ -586,6 +586,8 @@ pub struct WorkflowOptions {
     pub backlog_auto_develop: bool,
     /// Review requires manual human approval instead of Queue Merge (`deliver`).
     pub review_manual: bool,
+    /// Queue Merge integration strategy (`rebase` default, `squash`, or forward `merge`).
+    pub merge_strategy: MergeStrategy,
     /// Queue Merge syncs the merged target branch to the upstream Git remote (`sync_upstream: true` by default;
     /// `false` = merge locally only without syncing upstream).
     pub sync_upstream: bool,
@@ -608,6 +610,7 @@ impl Default for WorkflowOptions {
             backlog_analyze: false,
             backlog_auto_develop: false,
             review_manual: false,
+            merge_strategy: MergeStrategy::Rebase,
             sync_upstream: true,
             external_pr: "require_review".into(),
             backlog_wait_for_agent: false,
@@ -858,6 +861,15 @@ pub fn derive_options(doc: &Document) -> WorkflowOptions {
         internal_has_deliver = doc.steps.iter().any(|s| s.uses == "deliver");
     }
 
+    let merge_strategy = doc
+        .steps
+        .iter()
+        .find(|s| s.uses == "deliver")
+        .and_then(|s| s.with.get("strategy"))
+        .and_then(|v| v.as_str())
+        .and_then(MergeStrategy::parse)
+        .unwrap_or_default();
+
     let sync_upstream = doc
         .steps
         .iter()
@@ -886,6 +898,7 @@ pub fn derive_options(doc: &Document) -> WorkflowOptions {
         backlog_analyze,
         backlog_auto_develop,
         review_manual: !internal_has_deliver,
+        merge_strategy,
         sync_upstream,
         external_pr,
         backlog_wait_for_agent: backlog_wait_for_agent && backlog_auto_develop,
@@ -1572,6 +1585,34 @@ pub fn set_sync_upstream(doc: &mut Document, sync_upstream: bool) {
     }
 }
 
+/// Surgically updates `strategy` on all `deliver` steps in the workflow, omitting the key when
+/// equal to the default [`MergeStrategy::Rebase`].
+pub fn set_merge_strategy(doc: &mut Document, strategy: MergeStrategy) {
+    let mut updated_any = false;
+    for step in &mut doc.steps {
+        if step.uses == "deliver" {
+            if strategy == MergeStrategy::Rebase {
+                step.with.remove("strategy");
+            } else {
+                step.with.insert("strategy".into(), json!(strategy));
+            }
+            updated_any = true;
+        }
+    }
+    if !updated_any {
+        set_review_manual(doc, false);
+        for step in &mut doc.steps {
+            if step.uses == "deliver" {
+                if strategy == MergeStrategy::Rebase {
+                    step.with.remove("strategy");
+                } else {
+                    step.with.insert("strategy".into(), json!(strategy));
+                }
+            }
+        }
+    }
+}
+
 /// Surgically updates the External PR handling rule (`"require_review"` | `"same"` | `"manual_only"`).
 pub fn set_external_pr_rule(doc: &mut Document, mode: &str) {
     pin_explicit_nexts(doc);
@@ -1835,6 +1876,7 @@ fn walk_stage_summary(
             WorkflowStep::Deliver {
                 profile,
                 target_branch,
+                strategy,
                 sync_upstream,
                 max_conflict_attempts,
                 ..
@@ -1844,12 +1886,19 @@ fn walk_stage_summary(
                     .as_deref()
                     .filter(|b| !b.is_empty())
                     .unwrap_or("target branch");
+                let strategy_desc = match strategy {
+                    MergeStrategy::Rebase => "",
+                    MergeStrategy::Squash => " (squash)",
+                    MergeStrategy::Merge => " (merge commit)",
+                };
                 let sync_desc = if *sync_upstream {
                     " + syncs upstream"
                 } else {
                     " (local only)"
                 };
-                details.push(format!("• Queue merge into {branch}{sync_desc}"));
+                details.push(format!(
+                    "• Queue merge{strategy_desc} into {branch}{sync_desc}"
+                ));
                 if *max_conflict_attempts > 0 {
                     let merger = profile
                         .as_deref()
@@ -2073,6 +2122,7 @@ mod tests {
                 backlog_analyze: false,
                 backlog_auto_develop: false,
                 review_manual: false,
+                merge_strategy: MergeStrategy::Rebase,
                 sync_upstream: true,
                 external_pr: "require_review".into(),
                 backlog_wait_for_agent: false,
