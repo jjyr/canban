@@ -79,6 +79,14 @@ impl std::fmt::Display for BackendOlder {
 impl std::error::Error for BackendOlder {}
 impl AppClient {
     pub fn connect_or_start(home: PathBuf, cli: &Path) -> Result<Arc<Self>> {
+        Self::connect_or_start_inner(home, cli, None)
+    }
+
+    pub fn connect_or_start_ui(home: PathBuf, cli: &Path, ui_pid: u32) -> Result<Arc<Self>> {
+        Self::connect_or_start_inner(home, cli, Some(ui_pid))
+    }
+
+    fn connect_or_start_inner(home: PathBuf, cli: &Path, ui_pid: Option<u32>) -> Result<Arc<Self>> {
         let explicit = std::env::var_os("CANBAN_ENDPOINT");
         let endpoint = explicit
             .clone()
@@ -88,7 +96,12 @@ impl AppClient {
             && !canban_updater::handoff::authorized(&home)
             && canban_updater::handoff::active(&home)
         {
-            canban_updater::handoff::resume(&home)?;
+            let updater = cli.with_file_name("canban-updater");
+            let replaces_ui = canban_updater::handoff::resume_with(
+                &home,
+                updater.is_file().then_some(updater.as_path()),
+                ui_pid,
+            )?;
             let until = std::time::Instant::now() + Duration::from_secs(100);
             while canban_updater::handoff::active(&home) {
                 ensure!(
@@ -100,6 +113,9 @@ impl AppClient {
                     "Upgrade/recovery is still in progress"
                 );
                 std::thread::sleep(Duration::from_millis(100));
+            }
+            if replaces_ui && ui_pid.is_some() {
+                std::thread::sleep(Duration::from_secs(5));
             }
         }
         if rpc(&endpoint, "app.ping", json!({})).is_err() && explicit.is_none() {
@@ -205,7 +221,11 @@ impl AppClient {
                     .is_some_and(|io| {
                         matches!(
                             io.kind(),
-                            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                            std::io::ErrorKind::ConnectionRefused
+                                | std::io::ErrorKind::NotFound
+                                | std::io::ErrorKind::UnexpectedEof
+                                | std::io::ErrorKind::BrokenPipe
+                                | std::io::ErrorKind::ConnectionReset
                         )
                     });
                 if !connect_failed

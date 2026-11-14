@@ -350,9 +350,10 @@ pub fn Bootstrap() -> impl IntoElement {
                             Ok(exe) => exe.with_file_name("canban"),
                             Err(e) => return BootOutcome::AppServerError(format!("{e:#}")),
                         };
-                        let app = match canban_app_server::AppClient::connect_or_start(
+                        let app = match canban_app_server::AppClient::connect_or_start_ui(
                             hp.clone(),
                             &cli,
+                            std::process::id(),
                         ) {
                             Ok(app) => app,
                             Err(err) => {
@@ -542,20 +543,25 @@ pub fn Bootstrap() -> impl IntoElement {
         .flex_1()
         .min_h(px(0.))
         .bg(BACKGROUND)
-        .child(dynamic(move || match stage.get() {
-        Stage::Workspace => crate::workspace_root().into_element(),
-        Stage::Checking {
-            home,
-            step_app,
-            app_detail,
-            step_herdr,
-            herdr_detail,
-        } => {
-            if !show_checking_panel.get() {
-                return startup_frame(view()).into_element();
-            }
-            checking_screen(home, step_app, app_detail, step_herdr, herdr_detail).into_element()
-        }
+        .child(dynamic(move || {
+            let current = stage.get();
+            let show_checking =
+                matches!(current, Stage::Checking { .. }) && show_checking_panel.get();
+            untracked(|| match current {
+                Stage::Workspace => crate::workspace_root().into_element(),
+                Stage::Checking {
+                    home,
+                    step_app,
+                    app_detail,
+                    step_herdr,
+                    herdr_detail,
+                } => {
+                    if !show_checking {
+                        return startup_frame(view()).into_element();
+                    }
+                    checking_screen(home, step_app, app_detail, step_herdr, herdr_detail)
+                        .into_element()
+                }
         Stage::BackendOlder { home, detail, old } => {
             let auto_start = std::env::var_os("CANBAN_UPGRADE_TOKEN").is_none();
             backend_update_screen_auto(home, detail, auto_start, move || {
@@ -722,7 +728,8 @@ pub fn Bootstrap() -> impl IntoElement {
             )
             .into_element()
         }
-    }))
+            })
+        }))
 }
 
 fn copy_to_clipboard(content: &str) -> Result<()> {
@@ -1242,4 +1249,77 @@ pub fn error_screen_with_retry(
             .child(muted(format!("Home: {home}")))
             .child(actions),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventPayload, MountItem, ROOT_ID, element::Root,
+        geometry::size,
+    };
+    use std::cell::Cell;
+
+    #[test]
+    fn untracked_workspace_stage_does_not_remount_on_inner_signal_or_theme_change() {
+        thread_local! {
+            static WORKSPACE_MOUNTS: Cell<usize> = const { Cell::new(0) };
+        }
+        WORKSPACE_MOUNTS.with(|m| m.set(0));
+
+        #[component]
+        fn ProbeBootstrap() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let stage = signal(0_u8);
+            let show_checking_panel = signal(false);
+            let inner = signal("initial".to_owned());
+
+            view()
+                .on_press(move |_: &()| {
+                    if stage.get_untracked() == 0 {
+                        stage.set(1);
+                    } else {
+                        inner.set("updated".into());
+                        canban_ui_kit::tokens::set_theme("monokai");
+                    }
+                })
+                .child(dynamic(move || {
+                    let current = stage.get();
+                    let show_checking = current == 0 && show_checking_panel.get();
+                    untracked(|| match current {
+                        0 => {
+                            let _ = show_checking;
+                            view().into_element()
+                        }
+                        _ => {
+                            WORKSPACE_MOUNTS.with(|m| m.set(m.get() + 1));
+                            let _ = inner.get();
+                            view().bg(BACKGROUND).into_element()
+                        }
+                    })
+                }))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(800.0), px(600.0)));
+        core.mount_root(&Root::of::<ProbeBootstrap>());
+        let batch = core.commit().expect("initial mount batch");
+        assert_eq!(WORKSPACE_MOUNTS.with(|m| m.get()), 0);
+
+        let host = batch
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::Insert { parent, child, .. } if *parent == ROOT_ID => Some(*child),
+                _ => None,
+            })
+            .expect("root host node");
+
+        assert!(core.component_event(host, EventKind::Press, &EventPayload::None));
+        let _ = core.commit();
+        assert_eq!(WORKSPACE_MOUNTS.with(|m| m.get()), 1);
+
+        assert!(core.component_event(host, EventKind::Press, &EventPayload::None));
+        let _ = core.commit();
+        assert_eq!(WORKSPACE_MOUNTS.with(|m| m.get()), 1);
+    }
 }

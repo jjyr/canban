@@ -43,6 +43,7 @@ static APP: std::sync::OnceLock<Arc<canban_app_server::AppClient>> = std::sync::
 fn native(_: &mut Registry) {}
 #[component]
 pub fn Canban() -> impl IntoElement {
+    canban_ui_kit::tokens::install_theme();
     workspace_root()
 }
 
@@ -60,7 +61,6 @@ pub(crate) fn workspace_root() -> impl IntoElement {
     set_interval(std::time::Duration::from_millis(250), move || {
         ui.draft_status.update(|n| *n += 1)
     });
-    canban_ui_kit::tokens::install_theme();
     commands::bindings(ui);
     utilities::init(ui);
     updates::init(ui);

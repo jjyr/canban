@@ -140,60 +140,24 @@ mod tests {
     }
 }
 
-/// A normal launch can resume an interrupted installer. The worker's exclusive
-/// lock elects one recovery process; a manual-recovery journal is never retried.
-pub fn resume(home: &Path) -> Result<()> {
-    if authorized(home) || !active(home) {
-        return Ok(());
-    }
-    let j = journal(home)?;
-    ensure!(
-        j.phase != "manual_recovery",
-        "Upgrade requires manual recovery; inspect updates/updater.log"
-    );
-    let Ok(guard) = lock(home, "upgrade.lock") else {
-        return Ok(());
-    };
-    let helper = home
-        .join("updates/jobs")
-        .join(&j.token)
-        .join("canban-updater");
-    ensure!(
-        helper.is_file(),
-        "Interrupted upgrade helper is missing; inspect updates/install.json"
-    );
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(home.join("updates/updater.log"))?;
-    drop(guard);
-    use std::os::unix::process::CommandExt;
-    std::process::Command::new(helper)
-        .arg("--home")
-        .arg(home)
-        .arg("--recover")
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .process_group(0)
-        .spawn()?;
-    Ok(())
-}
-
-/// Explicitly trigger `--recover` from the native Recovery window.
-/// Copies the latest `canban-updater` into the job directory so bundle renames stay safe,
-/// and registers `ui_pid` as `recovery_ui` so the worker closes the Recovery window cleanly.
-pub fn recover(home: &Path, bundled_updater: Option<&Path>, ui_pid: Option<u32>) -> Result<()> {
-    let guard = lock(home, "upgrade.lock")?;
-    let mut j = journal(home)?;
-    if let Some(pid) = ui_pid {
+fn spawn_recover(
+    home: &Path,
+    guard: File,
+    mut j: worker::Journal,
+    bundled_updater: Option<&Path>,
+    ui_pid: Option<u32>,
+    use_bundled: bool,
+    record_ui: bool,
+) -> Result<()> {
+    if let Some(pid) = ui_pid.filter(|_| record_ui) {
         j.recovery_ui = worker::process(pid).ok();
         j.save()?;
     }
     let job_dir = home.join("updates/jobs").join(&j.token);
     std::fs::create_dir_all(&job_dir)?;
-    let helper = if let Some(src) = bundled_updater.filter(|p| p.is_file()) {
+    let helper = if let Some(src) = bundled_updater.filter(|p| use_bundled && p.is_file()) {
         let dest = job_dir.join("canban-updater-recover");
+        let _ = std::fs::remove_file(&dest);
         std::fs::copy(src, &dest)?;
         dest
     } else {
@@ -223,6 +187,54 @@ pub fn recover(home: &Path, bundled_updater: Option<&Path>, ui_pid: Option<u32>)
     Ok(())
 }
 
+/// A normal launch can resume an interrupted installer. The worker's exclusive
+/// lock elects one recovery process; a manual-recovery journal is never retried.
+/// Returns `Ok(true)` when recovery replaces the launching UI via a candidate window.
+pub fn resume_with(
+    home: &Path,
+    bundled_updater: Option<&Path>,
+    ui_pid: Option<u32>,
+) -> Result<bool> {
+    if authorized(home) || !active(home) {
+        return Ok(false);
+    }
+    let j = journal(home)?;
+    ensure!(
+        j.phase != "manual_recovery",
+        "Upgrade requires manual recovery; inspect updates/updater.log"
+    );
+    let Ok(guard) = lock(home, "upgrade.lock") else {
+        return Ok(false);
+    };
+    let replaces_ui = j.local.is_some() || !matches!(j.phase.as_str(), "prepared" | "stopping");
+    let use_bundled = j.local.is_some();
+    spawn_recover(
+        home,
+        guard,
+        j,
+        bundled_updater,
+        ui_pid,
+        use_bundled,
+        replaces_ui,
+    )?;
+    Ok(replaces_ui)
+}
+
+/// A normal launch can resume an interrupted installer. The worker's exclusive
+/// lock elects one recovery process; a manual-recovery journal is never retried.
+pub fn resume(home: &Path) -> Result<()> {
+    resume_with(home, None, None).map(|_| ())
+}
+
+/// Explicitly trigger `--recover` from the native Recovery window.
+/// Copies the latest `canban-updater` into the job directory so bundle renames stay safe,
+/// and registers `ui_pid` as `recovery_ui` so the worker closes the Recovery window cleanly.
+pub fn recover(home: &Path, bundled_updater: Option<&Path>, ui_pid: Option<u32>) -> Result<()> {
+    let guard = lock(home, "upgrade.lock")?;
+    let j = journal(home)?;
+    spawn_recover(home, guard, j, bundled_updater, ui_pid, true, true)
+}
+
 #[cfg(test)]
 mod guard_tests {
     use super::*;
@@ -242,6 +254,34 @@ mod guard_tests {
 #[cfg(test)]
 mod journal_tests {
     use super::*;
+
+    fn sample_local_journal(home: &Path, token: &str, phase: &str) -> worker::Journal {
+        worker::Journal {
+            local: Some(worker::local::Handoff {
+                peer: worker::Process {
+                    pid: 1,
+                    identity: "old".into(),
+                },
+                backup: home.join("updates/backup.sqlite"),
+            }),
+            token: token.into(),
+            phase: phase.into(),
+            home: home.to_path_buf(),
+            target: home.join("Canban.app"),
+            staged: home.join("updates/staged"),
+            previous: home.join("updates/previous"),
+            build: Build::current(),
+            schema_before: Build::current().schema,
+            before: None,
+            ui: None,
+            app_id: "com.canban.test".into(),
+            error: None,
+            server: None,
+            candidate_ui: None,
+            recovery_ui: None,
+        }
+    }
+
     #[test]
     fn corrupt_upgrade_state_fails_closed_before_database_open() {
         let dir = tempfile::tempdir().unwrap();
@@ -249,5 +289,64 @@ mod journal_tests {
         assert!(active(dir.path()));
         assert!(startup_guard(dir.path()).is_err());
         assert!(!dir.path().join("canban.sqlite").exists());
+    }
+
+    #[test]
+    fn resume_with_returns_false_when_upgrade_lock_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("updates")).unwrap();
+        sample_local_journal(dir.path(), "tok-locked", "starting")
+            .save()
+            .unwrap();
+        let _guard = lock(dir.path(), "upgrade.lock").unwrap();
+        assert!(!resume_with(dir.path(), None, None).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resume_with_copies_bundled_updater_and_records_recovery_ui_for_local_handoff() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::create_dir_all(home.join("updates")).unwrap();
+        sample_local_journal(home, "tok-local", "starting")
+            .save()
+            .unwrap();
+
+        let marker = home.join("updates/ran.args");
+        let bundled = home.join("bundled-canban-updater");
+        std::fs::write(
+            &bundled,
+            format!("#!/bin/sh\necho \"$@\" > \"{}\"\n", marker.display()),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&bundled).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bundled, perms).unwrap();
+
+        let replaces_ui = resume_with(home, Some(&bundled), Some(std::process::id())).unwrap();
+        assert!(replaces_ui);
+
+        let copied = home.join("updates/jobs/tok-local/canban-updater-recover");
+        assert!(copied.is_file());
+        let saved = journal(home).unwrap();
+        assert_eq!(saved.recovery_ui.map(|p| p.pid), Some(std::process::id()));
+
+        let mut args = String::new();
+        for _ in 0..40 {
+            if let Ok(content) = std::fs::read_to_string(&marker)
+                && !content.is_empty()
+            {
+                args = content;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(args.contains("--home"), "unexpected marker args: {args:?}");
+        assert!(
+            args.contains("--recover"),
+            "unexpected marker args: {args:?}"
+        );
     }
 }

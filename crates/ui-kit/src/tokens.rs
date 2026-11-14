@@ -8,7 +8,7 @@ thread_local! { static THEME: RefCell<Option<Signal<String>>> = const { RefCell:
 pub fn install_theme() {
     set_color_scheme(Appearance::Dark);
     THEME.with(|p| *p.borrow_mut() = Some(signal(canban_themes::DEFAULT.into())));
-    sync_nsh_tokens();
+    untracked(sync_nsh_tokens);
     super::scrollbar::install();
 }
 pub fn set_theme(name: &str) {
@@ -18,7 +18,7 @@ pub fn set_theme(name: &str) {
             && s.get_untracked() != name
         {
             s.set(name.into());
-            sync_nsh_tokens();
+            untracked(sync_nsh_tokens);
         }
     });
 }
@@ -125,5 +125,58 @@ mod tests {
                 nsh_core::FamilyName::Named("PingFang SC"),
             ]
         );
+    }
+
+    #[test]
+    fn theme_install_and_switch_do_not_track_enclosing_dynamic_region() {
+        use nsh_core::prelude::*;
+        use nsh_core::{
+            ApproxTextEngine, Core, EventKind, EventPayload, MountItem, ROOT_ID, element::Root,
+            geometry::size,
+        };
+        use std::cell::{Cell, RefCell};
+
+        thread_local! {
+            static MOUNTS: Cell<usize> = const { Cell::new(0) };
+            static ACTIVE_THEME: RefCell<String> = const { RefCell::new(String::new()) };
+        }
+        MOUNTS.with(|m| m.set(0));
+        ACTIVE_THEME.with(|t| t.borrow_mut().clear());
+
+        #[component]
+        fn ProbeRoot() -> impl IntoElement {
+            view()
+                .on_press(move |_: &()| {
+                    set_theme("monokai");
+                    ACTIVE_THEME.with(|t| {
+                        *t.borrow_mut() = THEME
+                            .with(|p| p.borrow().map(|s| s.get_untracked()))
+                            .unwrap_or_default();
+                    });
+                })
+                .child(dynamic(|| {
+                    MOUNTS.with(|m| m.set(m.get() + 1));
+                    install_theme();
+                    view().bg(BACKGROUND)
+                }))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(400.0), px(300.0)));
+        core.mount_root(&Root::of::<ProbeRoot>());
+        let batch = core.commit().expect("initial mount batch");
+        assert_eq!(MOUNTS.with(|m| m.get()), 1);
+
+        let host = batch
+            .items
+            .iter()
+            .find_map(|item| match item {
+                MountItem::Insert { parent, child, .. } if *parent == ROOT_ID => Some(*child),
+                _ => None,
+            })
+            .expect("root host node");
+        assert!(core.component_event(host, EventKind::Press, &EventPayload::None));
+        let _ = core.commit();
+        assert_eq!(MOUNTS.with(|m| m.get()), 1);
+        assert_eq!(ACTIVE_THEME.with(|t| t.borrow().clone()), "monokai");
     }
 }

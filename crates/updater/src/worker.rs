@@ -227,6 +227,11 @@ fn spawn_server(j: &Journal) -> Result<Child> {
         .stdout(log.try_clone()?)
         .stderr(log);
     environment(&mut cmd, j);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     Ok(cmd.spawn()?)
 }
 fn spawn_ui(j: &Journal) -> Result<Child> {
@@ -239,6 +244,11 @@ fn spawn_ui(j: &Journal) -> Result<Child> {
         .stdout(log.try_clone()?)
         .stderr(log);
     environment(&mut cmd, j);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     Ok(cmd.spawn()?)
 }
 fn health(j: &Journal, server: &mut Child, expected: &Build) -> Result<()> {
