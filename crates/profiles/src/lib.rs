@@ -1045,6 +1045,8 @@ mod tests {
 
         let mut proj = Project {
             github: None,
+            detected_github: None,
+            github_disconnected: false,
             delivery_mode: Default::default(),
             agent_overrides: BTreeMap::from([
                 (
@@ -1355,6 +1357,8 @@ mod tests {
         });
         let mut proj = Project {
             github: None,
+            detected_github: None,
+            github_disconnected: false,
             delivery_mode: Default::default(),
             agent_overrides: BTreeMap::from([(
                 "developer".into(),

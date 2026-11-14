@@ -162,6 +162,55 @@ impl Ops {
         self.git(source, &["remote", "get-url", "--push", remote])
             .is_ok_and(|out| out.status.success())
     }
+    /// Lists Git remote `(name, url)` pairs configured on `directory`, placing
+    /// `preferred_remote` (default `"origin"`) first when present. Returns empty
+    /// when `directory` does not exist or is not inside a Git repository.
+    pub fn remote_urls(&self, directory: &str, preferred_remote: &str) -> Vec<(String, String)> {
+        let dir = Path::new(directory.trim());
+        if directory.trim().is_empty() || !dir.is_absolute() || !self.host.is_dir(dir) {
+            return Vec::new();
+        }
+        if !self
+            .git(dir, &["rev-parse", "--git-dir"])
+            .is_ok_and(|out| out.status.success())
+        {
+            return Vec::new();
+        }
+        let preferred = if preferred_remote.trim().is_empty() || preferred_remote.starts_with('-') {
+            "origin"
+        } else {
+            preferred_remote.trim()
+        };
+        let mut names = vec![preferred.to_owned()];
+        if let Ok(list) = self.checked(dir, &["remote"]) {
+            for line in list
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !s.starts_with('-'))
+            {
+                if !names.iter().any(|existing| existing == line) {
+                    names.push(line.to_owned());
+                }
+            }
+        }
+        let mut pairs = Vec::new();
+        for remote in names {
+            for args in [
+                vec!["remote", "get-url", remote.as_str()],
+                vec!["remote", "get-url", "--push", remote.as_str()],
+            ] {
+                if let Ok(url) = self.checked(dir, &args) {
+                    let trimmed = url.trim();
+                    if !trimmed.is_empty()
+                        && !pairs.iter().any(|(r, u)| r == &remote && u == trimmed)
+                    {
+                        pairs.push((remote.clone(), trimmed.to_owned()));
+                    }
+                }
+            }
+        }
+        pairs
+    }
     /// Pushes the merged local `target_branch` to the configured upstream Git remote (`origin/<target_branch>`).
     /// Returns `Ok(Some(remote_name))` when pushed, or `Ok(None)` when no Git remote is configured.
     pub fn push_target_branch(
@@ -606,6 +655,8 @@ mod tests {
         workflow.workspace.sync_base = false;
         let project = Project {
             github: None,
+            detected_github: None,
+            github_disconnected: false,
             delivery_mode: Default::default(),
             agent_overrides: Default::default(),
             tags: Default::default(),
@@ -691,6 +742,48 @@ mod tests {
         );
         assert!(source.join("seed.txt").exists());
     }
+    #[test]
+    fn remote_urls_prioritizes_preferred_remote_and_handles_non_git_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = Ops::local();
+        assert!(
+            ops.remote_urls(dir.path().to_str().unwrap(), "origin")
+                .is_empty()
+        );
+        assert!(
+            ops.remote_urls("/nonexistent/path/for/canban", "origin")
+                .is_empty()
+        );
+
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        checked(&repo, &["init", "-b", "main"]).unwrap();
+        checked(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/org/upstream.git",
+            ],
+        )
+        .unwrap();
+        checked(
+            &repo,
+            &["remote", "add", "origin", "git@github.com:jjyr/canban.git"],
+        )
+        .unwrap();
+
+        let urls = ops.remote_urls(repo.to_str().unwrap(), "origin");
+        assert_eq!(
+            urls.first().map(|(r, u)| (r.as_str(), u.as_str())),
+            Some(("origin", "git@github.com:jjyr/canban.git"))
+        );
+        assert!(
+            urls.iter()
+                .any(|(r, u)| r == "upstream" && u == "https://github.com/org/upstream.git")
+        );
+    }
 }
 
 pub mod batch;
@@ -757,6 +850,8 @@ mod sync_tests {
             }
             let project = Project {
                 github: None,
+                detected_github: None,
+                github_disconnected: false,
                 delivery_mode: Default::default(),
                 agent_overrides: Default::default(),
                 tags: Default::default(),

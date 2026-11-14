@@ -86,7 +86,27 @@ impl AppServer {
     }
     pub(super) fn update_location(&self, p: Value) -> Result<Value> {
         let location = self.work_location(&p)?;
-        self.mutate("project.location", &p, |db| {
+        let existing = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+            db.get::<Project>(&pid)?
+        };
+        let detected_github = self.detect_project_github(
+            &location.machine,
+            &location.directory,
+            &existing.workflow.workspace.remote,
+        );
+        let auto_source = if existing.github.is_none() && !existing.github_disconnected {
+            detected_github
+                .as_ref()
+                .and_then(|d| self.try_auto_link_github(&d.repository))
+        } else {
+            None
+        };
+        let account_generation = self.github.generation();
+        let linked = auto_source.is_some();
+        let result = self.mutate("project.location", &p, |db| {
             let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
             let mut project: Project = db.get(&pid)?;
             if let Some(expected) = p.get("expected_location") {
@@ -98,6 +118,14 @@ impl AppServer {
             let previous = project.work_location();
             project.directory = location.directory.clone();
             project.location = Some(location.clone());
+            project.detected_github = detected_github;
+            if let Some(source) = auto_source
+                && project.github.is_none()
+                && !project.github_disconnected
+                && self.github.generation() == account_generation
+            {
+                project.github = Some(source);
+            }
             if let Some(branch) = p["target_branch"].as_str() {
                 project.target_branch = Some(branch.into())
             }
@@ -118,7 +146,11 @@ impl AppServer {
                 )?;
             }
             Ok(serde_json::to_value(project)?)
-        })
+        })?;
+        if linked {
+            self.github_sync_due.store(true, Ordering::SeqCst);
+        }
+        Ok(result)
     }
     pub(super) fn browse_directory(&self, p: Value) -> Result<Value> {
         let machine = self.resolve_machine(p["machine"].as_str().unwrap_or("local"), true)?;

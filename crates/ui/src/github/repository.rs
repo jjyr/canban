@@ -15,7 +15,7 @@ struct Rules {
 impl Default for Rules {
     fn default() -> Self {
         Self {
-            intake: "all".into(),
+            intake: "off".into(),
             pr_intake: "off".into(),
             authors: String::new(),
             labels: String::new(),
@@ -50,6 +50,14 @@ fn enum_name<T: Serialize>(v: &T) -> String {
         .into()
 }
 
+fn split_csv(s: String) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
     let source = id.clone();
     let saved = computed(move || {
@@ -70,6 +78,8 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                         r.drafts = g.include_drafts;
                         r.paused = g.paused;
                         g.repository.clone()
+                    } else if let Some(det) = &p.detected_github {
+                        det.repository.clone()
                     } else {
                         String::new()
                     };
@@ -162,6 +172,8 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
     let sync = id.clone();
     let disconnect = id.clone();
     let status_id = id.clone();
+    let banner_id = id.clone();
+    let hint_id = id.clone();
 
     view()
         .max_w(px(780.))
@@ -197,6 +209,62 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                 .child(
                     view()
                         .gap_2()
+                        .child(dynamic(move || {
+                            let (connected, detected) = ui.snapshot.with(|s| {
+                                s.projects
+                                    .iter()
+                                    .find(|p| p.id == banner_id)
+                                    .map(|p| (p.github.is_some(), p.detected_github.clone()))
+                                    .unwrap_or((false, None))
+                            });
+                            let Some(det) = detected.filter(|_| !connected) else {
+                                return view().into_element();
+                            };
+                            let link_pid = banner_id.clone();
+                            let link_repo = det.repository.clone();
+                            view()
+                                .p_3()
+                                .rounded(px(canban_ui_kit::tokens::RADIUS))
+                                .bg(canban_ui_kit::tokens::INSET)
+                                .border_1()
+                                .border_color(canban_ui_kit::tokens::BORDER)
+                                .flex_row()
+                                .flex_wrap()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(muted(format!(
+                                    "Detected `{}` from git remote `{}`.",
+                                    det.repository, det.remote
+                                )))
+                                .child(
+                                    compact_action(
+                                        format!("Link {}", det.remote),
+                                        Variant::Secondary,
+                                        move |_| {
+                                            let r = rules_untracked(d);
+                                            d.update(|draft| draft.title = link_repo.clone());
+                                            dispatch(
+                                                ui,
+                                                "project.github",
+                                                json!({
+                                                    "project_id": link_pid,
+                                                    "repository": link_repo,
+                                                    "intake": r.intake,
+                                                    "pr_intake": r.pr_intake,
+                                                    "authors": split_csv(r.authors),
+                                                    "labels": split_csv(r.labels),
+                                                    "include_drafts": r.drafts,
+                                                    "paused": r.paused,
+                                                    "delivery_mode": r.delivery,
+                                                }),
+                                            );
+                                        },
+                                    )
+                                    .disabled(move || ui.is_method_pending("project.github")),
+                                )
+                                .into_element()
+                        }))
                         .child(
                             bound_field(
                                 move || d.get().title,
@@ -205,6 +273,42 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                             )
                             .key("github-repository"),
                         )
+                        .child(dynamic(move || {
+                            let (connected, detected) = ui.snapshot.with(|s| {
+                                s.projects
+                                    .iter()
+                                    .find(|p| p.id == hint_id)
+                                    .map(|p| (p.github.is_some(), p.detected_github.clone()))
+                                    .unwrap_or((false, None))
+                            });
+                            let Some(det) = detected.filter(|_| connected) else {
+                                return view().into_element();
+                            };
+                            let differs = !d
+                                .get()
+                                .title
+                                .trim()
+                                .eq_ignore_ascii_case(&det.repository);
+                            let mut row = view()
+                                .flex_row()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(muted(format!("Detected from git remote `{}`", det.remote)));
+                            if differs {
+                                let restore_repo = det.repository.clone();
+                                row = row
+                                    .child(muted("·"))
+                                    .child(compact_action(
+                                        format!("Use {}", det.remote),
+                                        Variant::Quiet,
+                                        move |_| {
+                                            d.update(|draft| draft.title = restore_repo.clone());
+                                        },
+                                    ));
+                            }
+                            row.into_element()
+                        }))
                         .child(checkbox(
                             "Pause synchronization".into(),
                             paused_flag,
@@ -303,13 +407,6 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                 .child(
                     action("Save repository settings", Variant::Primary, move |_| {
                         let r = rules_untracked(d);
-                        let split = |s: String| {
-                            s.split(',')
-                                .map(str::trim)
-                                .filter(|s| !s.is_empty())
-                                .map(str::to_owned)
-                                .collect::<Vec<_>>()
-                        };
                         dispatch(
                             ui,
                             "project.github",
@@ -318,8 +415,8 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                                 "repository": d.get_untracked().title.trim(),
                                 "intake": r.intake,
                                 "pr_intake": r.pr_intake,
-                                "authors": split(r.authors),
-                                "labels": split(r.labels),
+                                "authors": split_csv(r.authors),
+                                "labels": split_csv(r.labels),
                                 "include_drafts": r.drafts,
                                 "paused": r.paused,
                                 "delivery_mode": r.delivery,
@@ -377,4 +474,134 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 muted("Select or create a Project first.").into_element()
             }
         })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canban_types::{
+        DetectedGitHub, GitHubIntake, GitHubPrIntake, GitHubSource, Project, Snapshot, Workflow,
+    };
+    use nsh_core::{ApproxTextEngine, Core, MountItem, geometry::size};
+
+    fn collect_texts(root: nsh_core::element::Root) -> Vec<String> {
+        let mut core = Core::new(ApproxTextEngine, size(px(900.), px(700.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&root);
+        let batch = core.commit().expect("initial mount batch");
+        batch
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn repository_binding_defaults_to_intake_off_and_renders_detected_git_remote_states() {
+        assert_eq!(Rules::default().intake, "off");
+        assert_eq!(Rules::default().pr_intake, "off");
+
+        #[component]
+        fn DisconnectedDetectedProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut snapshot = Snapshot::default();
+            snapshot.projects.push(Project {
+                id: "proj-1".into(),
+                name: "Canban".into(),
+                directory: "/tmp/canban".into(),
+                location: None,
+                github: None,
+                detected_github: Some(DetectedGitHub {
+                    repository: "jjyr/canban".into(),
+                    remote: "origin".into(),
+                }),
+                github_disconnected: true,
+                delivery_mode: Default::default(),
+                agent_overrides: Default::default(),
+                tags: Vec::new(),
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: 1,
+            });
+            ui.snapshot.set(snapshot);
+            ui.project.set("proj-1".into());
+            screen(ui)
+        }
+
+        let disconnected_texts =
+            collect_texts(nsh_core::element::Root::of::<DisconnectedDetectedProbe>());
+        assert!(
+            disconnected_texts
+                .iter()
+                .any(|t| t == "Detected `jjyr/canban` from git remote `origin`."),
+            "expected detected remote banner when unlinked, got {disconnected_texts:?}"
+        );
+        assert!(
+            disconnected_texts.iter().any(|t| t == "Link origin"),
+            "expected `Link origin` button when unlinked, got {disconnected_texts:?}"
+        );
+        assert!(
+            disconnected_texts.iter().any(|t| t == "Not linked"),
+            "expected `Not linked` status badge, got {disconnected_texts:?}"
+        );
+
+        #[component]
+        fn ConnectedDetectedProbe() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut snapshot = Snapshot::default();
+            snapshot.projects.push(Project {
+                id: "proj-1".into(),
+                name: "Canban".into(),
+                directory: "/tmp/canban".into(),
+                location: None,
+                github: Some(GitHubSource {
+                    pr_intake: GitHubPrIntake::Off,
+                    authors: Vec::new(),
+                    labels: Vec::new(),
+                    include_drafts: false,
+                    paused: false,
+                    repository: "jjyr/canban".into(),
+                    repository_id: 1,
+                    generation: "gen-1".into(),
+                    intake: GitHubIntake::Off,
+                    synced_at: None,
+                    error: None,
+                }),
+                detected_github: Some(DetectedGitHub {
+                    repository: "jjyr/canban".into(),
+                    remote: "origin".into(),
+                }),
+                github_disconnected: false,
+                delivery_mode: Default::default(),
+                agent_overrides: Default::default(),
+                tags: Vec::new(),
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: 1,
+            });
+            ui.snapshot.set(snapshot);
+            ui.project.set("proj-1".into());
+            screen(ui)
+        }
+
+        let connected_texts =
+            collect_texts(nsh_core::element::Root::of::<ConnectedDetectedProbe>());
+        assert!(
+            connected_texts
+                .iter()
+                .any(|t| t == "Connected · jjyr/canban"),
+            "expected connected badge, got {connected_texts:?}"
+        );
+        assert!(
+            connected_texts
+                .iter()
+                .any(|t| t == "Detected from git remote `origin`"),
+            "expected detected remote caption when connected, got {connected_texts:?}"
+        );
+    }
 }

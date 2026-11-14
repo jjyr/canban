@@ -18,6 +18,7 @@ impl AppServer {
                     | "agent.catalog"
                     | "draft.list"
                     | "herdr.check"
+                    | "project.detect_github"
             )
         {
             bail!("Canban is upgrading; retry after the service handoff");
@@ -41,7 +42,9 @@ impl AppServer {
         if method.starts_with("event.") || method.starts_with("subscription.") {
             return self.event_call(method, p);
         }
-        if method.starts_with("github.") || method == "project.github" {
+        if method.starts_with("github.")
+            || matches!(method, "project.github" | "project.detect_github")
+        {
             return self.github_call(method, p);
         }
         if method.starts_with("utilities.") || method.starts_with("usage.") {
@@ -301,8 +304,24 @@ impl AppServer {
                     self.parse_agent_overrides(&config, p.get("agent_overrides"))?;
                 let name = strp(&p, "name")?.trim();
                 ensure!(!name.is_empty(), "Project name is required");
+                let auto_link = p["github_auto_link"].as_bool().unwrap_or(true);
+                let detected_github = self.detect_project_github(
+                    &location.machine,
+                    &location.directory,
+                    &workflow.workspace.remote,
+                );
+                let github = if auto_link {
+                    detected_github
+                        .as_ref()
+                        .and_then(|d| self.try_auto_link_github(&d.repository))
+                } else {
+                    None
+                };
+                let linked_github = github.is_some();
                 let project = Project {
-                    github: None,
+                    github,
+                    detected_github,
+                    github_disconnected: !auto_link,
                     delivery_mode: Default::default(),
                     agent_overrides,
                     tags: Default::default(),
@@ -317,7 +336,7 @@ impl AppServer {
                     }),
                     created_at: now(),
                 };
-                self.mutate(method, &p, |db| {
+                let result = self.mutate(method, &p, |db| {
                     db.save(&project)?;
                     authoring::initialize_new(
                         &self.home,
@@ -328,7 +347,11 @@ impl AppServer {
                     )?;
                     let saved: Project = db.get(&project.id)?;
                     Ok(serde_json::to_value(saved)?)
-                })
+                })?;
+                if linked_github {
+                    self.github_sync_due.store(true, Ordering::SeqCst);
+                }
+                Ok(result)
             }
             "tag.create" => self.mutate(method, &p, |db| {
                 let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;

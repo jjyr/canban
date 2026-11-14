@@ -651,6 +651,8 @@ mod tests {
                 directory: source.to_string_lossy().into_owned(),
                 workflow,
                 github: None,
+                detected_github: None,
+                github_disconnected: false,
                 delivery_mode: Default::default(),
                 agent_overrides: Default::default(),
                 tags: Default::default(),

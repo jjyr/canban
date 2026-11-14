@@ -1814,8 +1814,44 @@ pub fn Gallery() -> impl IntoElement {
                 }))
                 .child(action("No signed-in providers", Variant::Quiet, move |_| {ui.usage.set(json!({"readings":[]}));}))
                 .child(action("New Project", Variant::Quiet, move |_| {
+                    scene.set("new-project-detected".into());
+                }))
+                .child(action("GitHub Repo · Auto-linked", Variant::Quiet, move |_| {
+                    let mut snapshot = fixtures::workspace();
+                    snapshot.projects[0].github = Some(canban_types::GitHubSource {
+                        pr_intake: canban_types::GitHubPrIntake::Off,
+                        authors: vec![],
+                        labels: vec![],
+                        include_drafts: false,
+                        paused: false,
+                        repository: "jjyr/canban".into(),
+                        repository_id: 1,
+                        generation: "gallery".into(),
+                        intake: canban_types::GitHubIntake::Off,
+                        synced_at: Some(canban_types::now()),
+                        error: None,
+                    });
+                    snapshot.projects[0].detected_github = Some(canban_types::DetectedGitHub {
+                        repository: "jjyr/canban".into(),
+                        remote: "origin".into(),
+                    });
                     scene.set("workspace".into());
-                    ui.navigate("new-project");
+                    ui.snapshot.set(snapshot);
+                    ui.select_project("gallery-project".into());
+                    ui.navigate("github-repository");
+                }))
+                .child(action("GitHub Repo · Disconnected", Variant::Quiet, move |_| {
+                    let mut snapshot = fixtures::workspace();
+                    snapshot.projects[0].github = None;
+                    snapshot.projects[0].github_disconnected = true;
+                    snapshot.projects[0].detected_github = Some(canban_types::DetectedGitHub {
+                        repository: "jjyr/canban".into(),
+                        remote: "origin".into(),
+                    });
+                    scene.set("workspace".into());
+                    ui.snapshot.set(snapshot);
+                    ui.select_project("gallery-project".into());
+                    ui.navigate("github-repository");
                 }))
                 .child(action("New Card", Variant::Quiet, move |_| {
                     let mut snapshot=fixtures::workspace();
@@ -1966,6 +2002,17 @@ pub fn Gallery() -> impl IntoElement {
             }
             if scene.get() == "herdr-missing" {
                 return gallery_herdr_setup_fixture(ui, "herdr-missing").into_element();
+            }
+            if scene.get() == "new-project-detected" {
+                return canban_ui::projects::new_project_form(
+                    ui,
+                    "/Users/jjy/Workspace/canban".into(),
+                    Some(canban_types::DetectedGitHub {
+                        repository: "jjyr/canban".into(),
+                        remote: "origin".into(),
+                    }),
+                )
+                .into_element();
             }
             let narrow_preview = constrained.get();
             view()

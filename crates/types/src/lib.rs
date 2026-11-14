@@ -389,10 +389,19 @@ impl<'de> Deserialize<'de> for ProjectAgentOverride {
         }
     }
 }
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DetectedGitHub {
+    pub repository: String,
+    pub remote: String,
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Project {
     #[serde(default)]
     pub github: Option<GitHubSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_github: Option<DetectedGitHub>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub github_disconnected: bool,
     #[serde(default)]
     pub delivery_mode: DeliveryMode,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

@@ -37,6 +37,8 @@ pub fn project(name: &str, directory: &str, workflow: Workflow) -> Result<Projec
     std::fs::create_dir_all(path)?;
     Ok(Project {
         github: None,
+        detected_github: None,
+        github_disconnected: false,
         delivery_mode: Default::default(),
         agent_overrides: Default::default(),
         tags: Default::default(),

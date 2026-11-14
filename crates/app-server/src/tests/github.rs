@@ -167,3 +167,161 @@ fn migration_sanitizes_source_titles_in_events_and_receipts_but_retains_local_in
             .contains("LEGACY_REMOTE_TITLE")
     );
 }
+
+#[test]
+fn project_auto_detects_github_remote_links_with_intake_off_and_respects_manual_disconnect() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(home.join("credentials")).unwrap();
+    std::fs::write(
+        home.join("credentials/github.json"),
+        serde_json::to_vec(&json!({
+            "client_id": canban_github::auth::CLIENT_ID,
+            "login": "fixture",
+            "access_token": "fixture-not-a-real-token",
+            "refresh_token": null,
+            "expires_at": null
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let source = dir.path().join("repo-source");
+    std::fs::create_dir_all(&source).unwrap();
+    for args in [
+        &["init", "-b", "main"][..],
+        &["remote", "add", "origin", "git@github.com:jjyr/canban.git"][..],
+    ] {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&source)
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    let app = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+    app.github.cached_client().unwrap().seed(
+        "/repos/jjyr/canban",
+        json!({
+            "id": 777,
+            "full_name": "jjyr/canban",
+            "default_branch": "main",
+            "html_url": "https://github.com/jjyr/canban"
+        }),
+    );
+
+    let probe = app
+        .call(
+            "project.detect_github",
+            json!({ "machine": "local", "directory": source }),
+        )
+        .unwrap();
+    assert_eq!(probe["detected"]["repository"], "jjyr/canban");
+    assert_eq!(probe["detected"]["remote"], "origin");
+
+    // 1. Default creation auto-links with Intake Off + PR Intake Off.
+    let created: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({ "name": "Canban", "directory": source }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        created.detected_github,
+        Some(DetectedGitHub {
+            repository: "jjyr/canban".into(),
+            remote: "origin".into(),
+        })
+    );
+    assert!(!created.github_disconnected);
+    let gh = created.github.as_ref().expect("auto-linked GitHubSource");
+    assert_eq!(gh.repository, "jjyr/canban");
+    assert_eq!(gh.repository_id, 777);
+    assert_eq!(gh.intake, GitHubIntake::Off);
+    assert_eq!(gh.pr_intake, GitHubPrIntake::Off);
+
+    // 2. Manual disconnect sets `github_disconnected = true` and prevents background auto-relink.
+    let disconnected: Project = serde_json::from_value(
+        app.call(
+            "github.source.disconnect",
+            json!({ "project_id": created.id }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(disconnected.github.is_none());
+    assert!(disconnected.github_disconnected);
+    assert_eq!(
+        disconnected
+            .detected_github
+            .as_ref()
+            .map(|d| d.repository.as_str()),
+        Some("jjyr/canban")
+    );
+    app.reconcile_project_github_bindings();
+    let after_reconcile: Project = app.store.lock().unwrap().db().get(&created.id).unwrap();
+    assert!(after_reconcile.github.is_none());
+    assert!(after_reconcile.github_disconnected);
+
+    // 3. Existing legacy unlinked project (`github: None, github_disconnected: false`) auto-links on reconcile.
+    let legacy_source = dir.path().join("legacy-source");
+    std::fs::create_dir_all(&legacy_source).unwrap();
+    for args in [
+        &["init", "-b", "main"][..],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/jjyr/canban.git",
+        ][..],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&legacy_source)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let opted_out: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "Opted Out",
+                "directory": legacy_source,
+                "github_auto_link": false
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(opted_out.github.is_none());
+    assert!(opted_out.github_disconnected);
+    // Simulate a pre-upgrade row where `github_disconnected` and `detected_github` were absent.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut p: Project = db.get(&opted_out.id)?;
+            p.github_disconnected = false;
+            p.detected_github = None;
+            db.save(&p)
+        })
+        .unwrap();
+    app.reconcile_project_github_bindings();
+    let upgraded: Project = app.store.lock().unwrap().db().get(&opted_out.id).unwrap();
+    let upgraded_gh = upgraded
+        .github
+        .as_ref()
+        .expect("legacy project auto-linked on reconcile");
+    assert_eq!(upgraded_gh.repository, "jjyr/canban");
+    assert_eq!(upgraded_gh.intake, GitHubIntake::Off);
+    assert_eq!(upgraded_gh.pr_intake, GitHubPrIntake::Off);
+}

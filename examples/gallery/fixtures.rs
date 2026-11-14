@@ -435,6 +435,11 @@ pub fn workspace() -> canban_types::Snapshot {
     let mut s = Snapshot::default();
     s.projects.push(Project {
         github: None,
+        detected_github: Some(DetectedGitHub {
+            repository: "jjyr/canban".into(),
+            remote: "origin".into(),
+        }),
+        github_disconnected: false,
         delivery_mode: Default::default(),
         agent_overrides: std::collections::BTreeMap::from([(
             "developer".into(),
@@ -1344,6 +1349,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         directory: "/tmp/gallery/docs-site".into(),
         location: None,
         github: None,
+        detected_github: None,
+        github_disconnected: false,
         delivery_mode: Default::default(),
         agent_overrides: Default::default(),
         tags: Default::default(),

@@ -387,6 +387,8 @@ mod tests {
         let resolved = canban_profiles::resolve(config, dir.path()).unwrap();
         let mut proj = Project {
             github: None,
+            detected_github: None,
+            github_disconnected: false,
             delivery_mode: Default::default(),
             agent_overrides: std::collections::BTreeMap::from([(
                 "developer".into(),

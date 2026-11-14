@@ -489,6 +489,8 @@ mod tests {
         .unwrap();
         let project = Project {
             github: None,
+            detected_github: None,
+            github_disconnected: false,
             delivery_mode: Default::default(),
             agent_overrides: Default::default(),
             tags: Default::default(),
@@ -573,6 +575,8 @@ mod cache_tests {
         assert_eq!(cache.probes, probes);
         s.projects.push(Project {
             github: None,
+            detected_github: None,
+            github_disconnected: false,
             delivery_mode: Default::default(),
             agent_overrides: Default::default(),
             tags: Default::default(),
@@ -665,6 +669,8 @@ mod cache_tests {
         let s = Snapshot {
             projects: vec![Project {
                 github: None,
+                detected_github: None,
+                github_disconnected: false,
                 delivery_mode: Default::default(),
                 agent_overrides: Default::default(),
                 tags: Default::default(),

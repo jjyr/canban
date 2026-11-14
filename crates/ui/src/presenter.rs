@@ -801,6 +801,15 @@ pub fn dispatch_complete(
                         "project.agents" => ui.notify("Project Agent overrides saved"),
                         "scheduler.configure" => ui.notify("Scheduling settings saved"),
                         "project.location" => ui.notify("Work location updated"),
+                        "project.github" => {
+                            if let Some(repo) = value["github"]["repository"].as_str() {
+                                ui.notify(format!("Linked to {repo}"));
+                            } else {
+                                ui.notify("Repository settings saved");
+                            }
+                        }
+                        "github.sync" => ui.notify("GitHub repository synced"),
+                        "github.source.disconnect" => ui.notify("GitHub repository disconnected"),
                         "workflow.save" => ui.notify("Workflow saved"),
                         "review.merge" if value["state"] == "merged" => ui.notify(format!(
                             "Merged into {}",

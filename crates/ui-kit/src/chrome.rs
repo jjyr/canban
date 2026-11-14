@@ -40,6 +40,53 @@ pub fn chrome_action(
         .on_press(press)
 }
 
+/// Compact window-chrome icon action with an optional corner indicator dot (e.g. connected repository).
+pub fn chrome_indicator_button(
+    kind: Icon,
+    title: impl Fn() -> String + Copy + 'static,
+    active: impl Fn() -> bool + Copy + 'static,
+    press: impl Fn(&()) + 'static,
+) -> View {
+    let active = computed(active);
+    view()
+        .flex_shrink_0()
+        .window_drag(false)
+        .tooltip(hint_tooltip(move || SharedString::from(title())).placement(Placement::Bottom))
+        .child(
+            crate::press_target()
+                .relative()
+                .w(px(30.))
+                .h(px(30.))
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .bg(CLEAR)
+                .hover(|s| s.bg(INSET))
+                .focus(|s| s.border_1().border_color(ACCENT))
+                .accessibility_label(move || Some(title().into()))
+                .child(
+                    super::icon_tinted(kind, move || if active.get() { TEXT } else { MUTED })
+                        .w(px(16.))
+                        .h(px(16.)),
+                )
+                .child(when(
+                    move || active.get(),
+                    move || {
+                        view()
+                            .absolute()
+                            .right(px(5.))
+                            .bottom(px(5.))
+                            .w(px(6.))
+                            .h(px(6.))
+                            .rounded_full()
+                            .bg(SUCCESS)
+                            .pointer_events(PointerEvents::None)
+                    },
+                ))
+                .on_press(press),
+        )
+}
+
 /// Selected utility action, shared by the compact global tools.
 pub fn utility_button(
     kind: Icon,

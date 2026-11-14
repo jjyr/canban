@@ -5,6 +5,8 @@ fn fixture() -> Snapshot {
     for (id, name) in [("p1", "Canban"), ("p2", "Tools")] {
         s.projects.push(Project {
             github: None,
+            detected_github: None,
+            github_disconnected: false,
             delivery_mode: Default::default(),
             agent_overrides: Default::default(),
             tags: Default::default(),

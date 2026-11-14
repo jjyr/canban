@@ -287,6 +287,30 @@ pub const CATALOG: &[Command] = &[
         keywords: "sync repo owner",
     },
     Command {
+        id: "link-detected-github-repo",
+        title: "Link Detected GitHub Repository",
+        key: "",
+        display: "GitHub",
+        context: "Project",
+        keywords: "origin remote auto-detect connect repository binding",
+    },
+    Command {
+        id: "sync-github-repo",
+        title: "Sync Project GitHub Repository",
+        key: "",
+        display: "GitHub",
+        context: "Project",
+        keywords: "refresh issues pull requests intake",
+    },
+    Command {
+        id: "disconnect-github-repo",
+        title: "Disconnect Project GitHub Repository",
+        key: "",
+        display: "GitHub",
+        context: "Project",
+        keywords: "unlink remove repository binding",
+    },
+    Command {
         id: "go-github-account",
         title: "GitHub Account & Access",
         key: "",
@@ -662,6 +686,57 @@ pub fn execute(ui: Ui, id: &str) {
                 ui.navigate("github-repository");
             } else {
                 ui.navigate("github");
+            }
+        }
+        "link-detected-github-repo" => {
+            if let Some(p) = ui.current_project() {
+                if let Some(det) = p.detected_github {
+                    let delivery = serde_json::to_value(&p.delivery_mode)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "local".into());
+                    dispatch(
+                        ui,
+                        "project.github",
+                        json!({
+                            "project_id": p.id,
+                            "repository": det.repository,
+                            "intake": "off",
+                            "pr_intake": "off",
+                            "authors": [],
+                            "labels": [],
+                            "include_drafts": false,
+                            "paused": false,
+                            "delivery_mode": delivery,
+                        }),
+                    );
+                } else {
+                    ui.navigate("github-repository");
+                }
+            } else {
+                ui.notify("Select or create a Project first");
+            }
+        }
+        "sync-github-repo" => {
+            if let Some(p) = ui.current_project() {
+                if p.github.is_some() {
+                    dispatch(ui, "github.sync", json!({"project_id": p.id}));
+                } else {
+                    ui.navigate("github-repository");
+                }
+            } else {
+                ui.notify("Select or create a Project first");
+            }
+        }
+        "disconnect-github-repo" => {
+            if let Some(p) = ui.current_project() {
+                if p.github.is_some() {
+                    dispatch(ui, "github.source.disconnect", json!({"project_id": p.id}));
+                } else {
+                    ui.notify("Current Project has no linked GitHub repository");
+                }
+            } else {
+                ui.notify("Select or create a Project first");
             }
         }
         "go-github-account" => ui.navigate("github-account"),

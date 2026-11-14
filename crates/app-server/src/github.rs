@@ -19,6 +19,139 @@ impl AppServer {
             canban_github::Client::from_cli(self.github_cli.clone(), false)
         }
     }
+    pub(super) fn detect_project_github(
+        &self,
+        machine: &str,
+        directory: &str,
+        preferred_remote: &str,
+    ) -> Option<DetectedGitHub> {
+        let dir = directory.trim();
+        if dir.is_empty() || !Path::new(dir).is_absolute() {
+            return None;
+        }
+        let machine = self.resolve_machine(machine, true).ok()?;
+        let preferred = if preferred_remote.trim().is_empty() || preferred_remote.starts_with('-') {
+            "origin"
+        } else {
+            preferred_remote.trim()
+        };
+        let urls = self.ops(&machine).remote_urls(dir, preferred);
+        if let Some((remote, repo)) =
+            urls.iter()
+                .filter(|(r, _)| r == preferred)
+                .find_map(|(r, u)| {
+                    canban_github::remote_repository(u)
+                        .ok()
+                        .map(|repo| (r.clone(), repo))
+                })
+        {
+            return Some(DetectedGitHub {
+                repository: repo,
+                remote,
+            });
+        }
+        let mut fallback: Option<DetectedGitHub> = None;
+        for (remote, url) in urls {
+            let Ok(repo) = canban_github::remote_repository(&url) else {
+                continue;
+            };
+            match &fallback {
+                None => {
+                    fallback = Some(DetectedGitHub {
+                        repository: repo,
+                        remote,
+                    });
+                }
+                Some(first) if !first.repository.eq_ignore_ascii_case(&repo) => {
+                    return None;
+                }
+                Some(_) => {}
+            }
+        }
+        fallback
+    }
+    pub(super) fn try_auto_link_github(&self, repository: &str) -> Option<GitHubSource> {
+        let repo = canban_github::repository(repository).ok()?;
+        let client = self.github_client().ok()?;
+        let info = client.repo(&repo).ok()?;
+        Some(GitHubSource {
+            pr_intake: GitHubPrIntake::Off,
+            authors: Vec::new(),
+            labels: Vec::new(),
+            include_drafts: false,
+            paused: false,
+            repository: info.full_name,
+            repository_id: info.id,
+            generation: id(),
+            intake: GitHubIntake::Off,
+            synced_at: None,
+            error: None,
+        })
+    }
+    /// Backfills `detected_github` and automatic repository bindings (`intake: Off`,
+    /// `pr_intake: Off`) for unlinked Projects that have not been manually disconnected.
+    pub(super) fn reconcile_project_github_bindings(&self) {
+        let projects = self
+            .store
+            .lock()
+            .unwrap()
+            .db()
+            .list::<Project>()
+            .unwrap_or_default();
+        let mut changed = false;
+        for project in projects {
+            if self.stopped() {
+                break;
+            }
+            let loc = project.work_location();
+            let detected = self.detect_project_github(
+                &loc.machine,
+                &loc.directory,
+                &project.workflow.workspace.remote,
+            );
+            let next_detected = detected.or_else(|| project.detected_github.clone());
+            let auto_source = if project.github.is_none() && !project.github_disconnected {
+                next_detected
+                    .as_ref()
+                    .and_then(|d| self.try_auto_link_github(&d.repository))
+            } else {
+                None
+            };
+            if next_detected == project.detected_github && auto_source.is_none() {
+                continue;
+            }
+            let account_generation = self.github.generation();
+            let saved = self.store.lock().unwrap().write(|db| {
+                let mut current: Project = db.get(&project.id)?;
+                if current.work_location() != loc {
+                    return Ok(false);
+                }
+                let mut dirty = false;
+                if current.detected_github != next_detected {
+                    current.detected_github = next_detected.clone();
+                    dirty = true;
+                }
+                if let Some(source) = auto_source
+                    && current.github.is_none()
+                    && !current.github_disconnected
+                    && self.github.generation() == account_generation
+                {
+                    current.github = Some(source);
+                    dirty = true;
+                }
+                if dirty {
+                    db.save(&current)?;
+                }
+                Ok(dirty)
+            });
+            if matches!(saved, Ok(true)) {
+                changed = true;
+            }
+        }
+        if changed {
+            self.emit("github", None);
+        }
+    }
 
     fn github_receipt(&self, method: &str, p: &Value) -> Result<Option<Value>> {
         let Some(key) = p["request_key"].as_str() else {
@@ -91,6 +224,14 @@ impl AppServer {
                 Ok(json!({"disconnected":true}))
             }
             "github.installations" => self.github_client()?.get("/user/installations"),
+            "project.detect_github" => {
+                let raw = p.get("location").filter(|v| v.is_object()).unwrap_or(&p);
+                let machine = raw["machine"].as_str().unwrap_or("local");
+                let directory = raw["directory"].as_str().unwrap_or("");
+                let remote = p["remote"].as_str().unwrap_or("origin");
+                let detected = self.detect_project_github(machine, directory, remote);
+                Ok(json!({ "detected": detected }))
+            }
             "project.github" => {
                 let project_id = strp(&p, "project_id")?;
                 let repo = canban_github::repository(strp(&p, "repository")?)?;
@@ -107,7 +248,9 @@ impl AppServer {
                         self.github.generation() == account_generation,
                         "GitHub account changed; connect the source again"
                     );
-                    let mut project: Project = db.get(project_id)?;
+                    let pid = super::resolve_project_id(db, project_id)?;
+                    let mut project: Project = db.get(&pid)?;
+                    project.github_disconnected = false;
                     project.github = Some(GitHubSource {
                         pr_intake: serde_json::from_value(
                             p.get("pr_intake").cloned().unwrap_or(json!("off")),
@@ -132,13 +275,31 @@ impl AppServer {
                 self.github_sync_due.store(true, Ordering::SeqCst);
                 Ok(result)
             }
-            "github.source.disconnect" => self.mutate(method, &p, |db| {
-                let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
-                let mut project: Project = db.get(&pid)?;
-                project.github = None;
-                db.save(&project)?;
-                Ok(serde_json::to_value(project)?)
-            }),
+            "github.source.disconnect" => {
+                let existing = {
+                    let store = self.store.lock().unwrap();
+                    let db = store.db();
+                    let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+                    db.get::<Project>(&pid)?
+                };
+                let loc = existing.work_location();
+                let detected = self
+                    .detect_project_github(
+                        &loc.machine,
+                        &loc.directory,
+                        &existing.workflow.workspace.remote,
+                    )
+                    .or_else(|| existing.detected_github.clone());
+                self.mutate(method, &p, |db| {
+                    let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+                    let mut project: Project = db.get(&pid)?;
+                    project.github = None;
+                    project.github_disconnected = true;
+                    project.detected_github = detected;
+                    db.save(&project)?;
+                    Ok(serde_json::to_value(project)?)
+                })
+            }
             "github.reference.search" => {
                 let project: Project = {
                     let store = self.store.lock().unwrap();

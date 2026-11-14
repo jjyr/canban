@@ -453,6 +453,8 @@ mod tests {
         let mut s = Snapshot::default();
         s.projects.push(Project {
             github: None,
+            detected_github: None,
+            github_disconnected: false,
             delivery_mode: Default::default(),
             agent_overrides: Default::default(),
             tags: vec!["bug".into(), "ui-kit".into(), "前端".into()],

@@ -999,6 +999,8 @@ mod tests {
             );
             let mut project = Project {
                 github: None,
+                detected_github: None,
+                github_disconnected: false,
                 delivery_mode: DeliveryMode::default(),
                 agent_overrides: Default::default(),
                 tags: Vec::new(),

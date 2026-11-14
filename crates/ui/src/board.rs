@@ -41,9 +41,31 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                 .child(when(
                     move || project.get().is_some(),
                     move || {
-                        chrome_button(
+                        chrome_indicator_button(
                             Icon::GitHub,
-                            "GitHub repository & synchronization",
+                            move || {
+                                if let Some(p) = project.get() {
+                                    if let Some(g) = &p.github {
+                                        if g.paused {
+                                            format!("GitHub · {} (paused)", g.repository)
+                                        } else {
+                                            format!("GitHub · Connected to {}", g.repository)
+                                        }
+                                    } else if let Some(d) = &p.detected_github {
+                                        format!("GitHub · Detected {} (not linked)", d.repository)
+                                    } else {
+                                        "GitHub repository & synchronization".into()
+                                    }
+                                } else {
+                                    "GitHub repository & synchronization".into()
+                                }
+                            },
+                            move || {
+                                project
+                                    .get()
+                                    .and_then(|p| p.github)
+                                    .is_some_and(|g| !g.paused)
+                            },
                             move |_| ui.navigate("github-repository"),
                         )
                     },
@@ -430,6 +452,8 @@ mod tests {
                 directory: "/tmp/canban".into(),
                 location: None,
                 github: None,
+                detected_github: None,
+                github_disconnected: false,
                 delivery_mode: Default::default(),
                 agent_overrides: BTreeMap::from([
                     (
@@ -501,6 +525,8 @@ mod tests {
                 directory: "/tmp/canban".into(),
                 location: None,
                 github: None,
+                detected_github: None,
+                github_disconnected: false,
                 delivery_mode: Default::default(),
                 agent_overrides: BTreeMap::new(),
                 tags: vec!["bug".into(), "ui".into()],

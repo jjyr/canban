@@ -42,8 +42,29 @@ pub fn remote_repository(url: &str) -> Result<String> {
     let value = url.trim().trim_end_matches('/').trim_end_matches(".git");
     let path = value
         .strip_prefix("git@github.com:")
-        .or_else(|| value.strip_prefix("ssh://git@github.com/"))
-        .or_else(|| value.strip_prefix("https://github.com/"))
+        .or_else(|| {
+            let rest = value
+                .strip_prefix("ssh://")
+                .or_else(|| value.strip_prefix("https://"))
+                .or_else(|| value.strip_prefix("http://"))
+                .or_else(|| value.strip_prefix("git://"))?;
+            let host_and_path = match rest.find('/') {
+                Some(idx) => {
+                    let authority = &rest[..idx];
+                    let host = authority.rsplit('@').next().unwrap_or(authority);
+                    let host = host.split(':').next().unwrap_or(host);
+                    host.eq_ignore_ascii_case("github.com")
+                        .then_some(&rest[idx + 1..])?
+                }
+                None => return None,
+            };
+            Some(host_and_path)
+        })
+        .or_else(|| {
+            let (left, right) = value.split_once(':')?;
+            let host = left.rsplit('@').next().unwrap_or(left);
+            (!left.contains('/') && host.eq_ignore_ascii_case("github.com")).then_some(right)
+        })
         .context("Push remote must be a github.com SSH or HTTPS repository")?;
     repository(path)
 }
@@ -892,5 +913,30 @@ mod cache_tests {
                 .starts_with("DELETE /repos/fixture/repo/issues/comments/42 ")
         );
         worker.join().unwrap();
+    }
+    #[test]
+    fn remote_repository_parses_ssh_https_and_rejects_non_github_urls() {
+        for url in [
+            "git@github.com:jjyr/canban.git",
+            "git@github.com:jjyr/canban",
+            "ssh://git@github.com/jjyr/canban.git",
+            "ssh://git@github.com:22/jjyr/canban.git/",
+            "https://github.com/jjyr/canban.git",
+            "https://github.com/jjyr/canban/",
+            "https://x-access-token:secret@github.com/jjyr/canban.git",
+            "git://github.com/jjyr/canban.git",
+        ] {
+            assert_eq!(remote_repository(url).unwrap(), "jjyr/canban", "{url}");
+        }
+        for bad in [
+            "/tmp/local/origin.git",
+            "https://gitlab.com/jjyr/canban.git",
+            "git@gitlab.com:jjyr/canban.git",
+            "https://github.com/jjyr",
+            "https://github.com/jjyr/canban/extra",
+            "",
+        ] {
+            assert!(remote_repository(bad).is_err(), "{bad}");
+        }
     }
 }

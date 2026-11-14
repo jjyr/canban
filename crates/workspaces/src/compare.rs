@@ -934,6 +934,8 @@ mod tests {
 
         let project = Project {
             github: None,
+            detected_github: None,
+            github_disconnected: false,
             delivery_mode: Default::default(),
             agent_overrides: Default::default(),
             tags: Default::default(),

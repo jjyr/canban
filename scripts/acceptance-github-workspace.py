@@ -36,7 +36,13 @@ def remote(**changes):
 try:
  ready();assert call('github.cli.status')['login']=='fixture'
  source=base/'source';source.mkdir()
+ subprocess.run(['git','-C',str(source),'init','-b','main'],check=True,capture_output=True)
+ subprocess.run(['git','-C',str(source),'remote','add','origin','git@github.com:fixture/repo.git'],check=True,capture_output=True)
+ detected=call('project.detect_github',{'machine':'local','directory':str(source)})
+ assert detected['detected']=={'repository':'fixture/repo','remote':'origin'}
  p=call('project.create',{'name':'GitHub workspace acceptance','directory':str(source)})
+ assert p['github']['repository']=='fixture/repo' and p['github']['intake']=='off' and p['github']['pr_intake']=='off'
+ call('github.sync',{'project_id':p['id']});assert call('app.snapshot')['cards']==[]
  call('project.github',{'project_id':p['id'],'repository':'fixture/repo','intake':'all','pr_intake':'all'})
  call('github.sync',{'project_id':p['id']})
  s=wait(lambda s:len(s['cards'])==2);assert all(c['stage']=='backlog' for c in s['cards']);assert not [t for t in s['terminals'] if t.get('agent')]

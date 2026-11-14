@@ -153,6 +153,7 @@ impl AppServer {
         let weak = Arc::downgrade(self);
         std::thread::spawn(move || {
             let mut next_sync = std::time::Instant::now();
+            let mut prev_auth_state = String::new();
             while let Some(server) = weak.upgrade() {
                 if server.stopped() {
                     break;
@@ -165,10 +166,19 @@ impl AppServer {
                 if let Err(e) = server.github.poll() {
                     eprintln!("Canban GitHub sign-in: {e}");
                 }
+                let auth_state = server.github.status().state;
+                if auth_state != prev_auth_state {
+                    if auth_state == "connected" && !prev_auth_state.is_empty() {
+                        server.github_sync_due.store(true, Ordering::SeqCst);
+                        server.emit("github", None);
+                    }
+                    prev_auth_state = auth_state;
+                }
                 if std::time::Instant::now() >= next_sync
                     || server.github_sync_due.swap(false, Ordering::SeqCst)
                 {
                     next_sync = std::time::Instant::now() + Duration::from_secs(120);
+                    server.reconcile_project_github_bindings();
                     let projects = server
                         .store
                         .lock()

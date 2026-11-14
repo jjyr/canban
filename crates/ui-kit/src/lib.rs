@@ -37,7 +37,9 @@ pub use settings::{settings_field, settings_nav_heading, settings_nav_item, sett
 pub mod section_group;
 pub use section_group::{SectionGroup, collapsible_section_group, section_group};
 pub mod chrome;
-pub use chrome::{chrome_action, chrome_button, chrome_button_disabled, utility_button};
+pub use chrome::{
+    chrome_action, chrome_button, chrome_button_disabled, chrome_indicator_button, utility_button,
+};
 
 pub mod segmented;
 pub use segmented::{compact_segment, segment, segmented};

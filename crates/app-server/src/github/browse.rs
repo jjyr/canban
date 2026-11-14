@@ -72,22 +72,39 @@ impl AppServer {
                 self.github_notification_action(method, p)
             }
             "github.reference.add" | "github.reference.remove" => self.github_reference(method, p),
-            "github.cli.status" => match self.github_cli.identify() {
-                Ok(u) => Ok(json!({
-                    "state": "connected",
-                    "installed": true,
-                    "login": u.login,
-                    "account_matches": self.github.status().login.is_none_or(|login| login.eq_ignore_ascii_case(&u.login))
-                })),
-                Err(e) => {
-                    let installed = canban_github::cli::Service::installed();
-                    Ok(json!({
-                        "state": if installed { "signed_out" } else { "missing" },
-                        "installed": installed,
-                        "message": format!("{e:#}"),
-                    }))
+            "github.cli.status" => {
+                let had_identity = self.github_cli.identity().is_some();
+                match self.github_cli.identify() {
+                    Ok(u) => {
+                        let has_unlinked = self
+                            .store
+                            .lock()
+                            .unwrap()
+                            .db()
+                            .list::<Project>()
+                            .unwrap_or_default()
+                            .iter()
+                            .any(|p| p.github.is_none() && !p.github_disconnected);
+                        if !had_identity && has_unlinked {
+                            self.reconcile_project_github_bindings();
+                        }
+                        Ok(json!({
+                            "state": "connected",
+                            "installed": true,
+                            "login": u.login,
+                            "account_matches": self.github.status().login.is_none_or(|login| login.eq_ignore_ascii_case(&u.login))
+                        }))
+                    }
+                    Err(e) => {
+                        let installed = canban_github::cli::Service::installed();
+                        Ok(json!({
+                            "state": if installed { "signed_out" } else { "missing" },
+                            "installed": installed,
+                            "message": format!("{e:#}"),
+                        }))
+                    }
                 }
-            },
+            }
             "github.cli.login" => (|| {
                 ensure!(
                     canban_github::cli::Service::installed(),
