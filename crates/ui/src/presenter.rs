@@ -94,6 +94,7 @@ pub struct Ui {
     pub terminal_recent: Stored<BTreeMap<String, String>>,
     pub terminal_pending_open: Signal<Option<crate::terminals::navigation::PendingOpen>>,
     pub card_event: Signal<Option<u64>>,
+    pub editing_comment: Signal<Option<String>>,
     pub project: Signal<String>,
     pub archive_query: Signal<String>,
     pub archive_folds: Signal<BTreeSet<String>>,
@@ -232,6 +233,7 @@ impl Ui {
             || self.worktree_remove_confirm.get_untracked().is_some()
     }
     pub fn close_card(self) {
+        self.editing_comment.set(None);
         self.card_tab.set(String::new());
         self.card_terminal_open.set(false);
         self.card_terminal_focused.set(false);
@@ -327,6 +329,7 @@ impl Ui {
             terminal_recent: stored(BTreeMap::new()),
             terminal_pending_open: signal(None),
             card_event: signal(None),
+            editing_comment: signal(None),
             max_agents: signal(
                 crate::APP
                     .get()
@@ -518,6 +521,9 @@ impl Ui {
         })
     }
     pub fn open_card(self, id: String) {
+        if self.card.get_untracked() != id {
+            self.editing_comment.set(None);
+        }
         self.request.set(String::new());
         self.card_event.set(None);
         self.card_terminal_focused.set(false);
@@ -793,6 +799,7 @@ pub fn dispatch_complete(
                         | "notifications.read"
                         | "notifications.read_all"
                         | "comment.add"
+                        | "comment.update"
                         | "card.move"
                         | "project.create"
                         | "tag.create" => ui.status.set("Saved".into()),

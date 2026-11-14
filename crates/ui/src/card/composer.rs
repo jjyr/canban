@@ -12,6 +12,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             (ui.page.get() == "review"
                 || ui.page.get() == "card" && !(ui.narrow.get() && ui.card_terminal_open.get()))
                 && ui.card_id() == ui.card.get()
+                && ui.editing_comment.get().is_none()
                 && !ui.card_terminal_focused.get()
         }),
     );
@@ -23,6 +24,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             (ui.page.get() == "review"
                 || ui.page.get() == "card" && !(ui.narrow.get() && ui.card_terminal_open.get()))
                 && ui.card_id() == ui.card.get()
+                && ui.editing_comment.get().is_none()
                 && !ui.card_terminal_focused.get()
                 && !ui.quick_open.get()
                 && ui.utility_popup.get().is_empty()

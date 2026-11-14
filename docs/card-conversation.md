@@ -51,7 +51,8 @@ Enter inserts a newline. Command+Enter sends through the same intent as **Send**
 The fixed header distinguishes local Card identity from GitHub Issue/PR identity.
 GitHub repository/number and cached remote state are separate from the local
 Workflow stage. Unknown remote state is labelled unavailable. The source opens
-externally through **Open in GitHub**. The cached source description remains
+in Canban's native GitHub detail view through **GitHub discussion** (when connected)
+and externally through **Open in GitHub ↗**. The cached source description remains
 readable; **Edit local context** edits only the local body, never remote prose.
 
 There is no permanent Add reference/URL form. The References row derives a
@@ -75,7 +76,15 @@ Human and Agent messages use the same identity marker, author/time header and
 bordered Markdown body along a single continuous 28-point vertical spine. Long
 bodies fold at a visual height while retaining the complete Markdown document;
 **Read full report / Show less** toggles the body. The main reader is bounded
-to 920 points in wide layouts.
+to 920 points in wide layouts. User-authored local comments (`comment.created`
+with `actor == "user"`) on active Cards expose an inline **Edit** action (also
+reachable via **Edit Latest Comment** in the Command Palette) using the shared
+Markdown editor (`Command+Enter` / **Save** / **Cancel**). Saving dispatches
+`comment.update`, increments the comment's revision, shows a muted `· edited`
+indicator at its original sequence position, appends a durable `comment.updated`
+audit event, updates any still-pending Question text and derived GitHub URL
+references, and preserves existing `@Agent` mentions without re-triggering them
+(only newly added `@Agent` mentions enqueue new Questions).
 
 Narrative messages (comments, explicit replies and un-echoed execution reports)
 pair full 28-point avatars with bordered cards, while milestone updates (stage

@@ -28,6 +28,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
         if editing.get()
             && matches!(ui.page.get().as_str(), "card" | "review")
             && ui.card_id() == ui.card.get()
+            && ui.editing_comment.get().is_none()
             && !ui.card_terminal_focused.get()
             && ui.utility_popup.get().is_empty()
             && !ui.quick_open.get()

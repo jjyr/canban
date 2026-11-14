@@ -1372,6 +1372,17 @@ pub fn conversation() -> canban_types::Snapshot {
             45_u64.saturating_sub(i * 2),
         );
     }
+    if let Some(first_comment) = s
+        .events
+        .iter_mut()
+        .find(|e| e.card_id == "card-1" && e.kind == "comment.created")
+    {
+        first_comment.data = json!({
+            "body": first_comment.message,
+            "revision": 2,
+            "edited_at": base.saturating_sub(89 * 60_000),
+        });
+    }
     s
 }
 

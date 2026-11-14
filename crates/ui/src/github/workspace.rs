@@ -27,6 +27,9 @@ pub struct Browser {
     pub cache_bytes: Signal<u64>,
     pub filters: Signal<std::collections::BTreeMap<String, BoardFilter>>,
     pub width: Signal<f32>,
+    pub editing_comment: Signal<Option<(String, u64)>>,
+    pub edit_draft: Signal<String>,
+    pub edit_error: Signal<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -70,16 +73,28 @@ impl Browser {
             cache_bytes: signal(0),
             filters: signal(Default::default()),
             width: signal(460.),
+            editing_comment: signal(None),
+            edit_draft: signal(String::new()),
+            edit_error: signal(String::new()),
         }
     }
 }
 
 pub fn open(ui: Ui, r: GitHubReference) {
+    open_section(ui, r, "overview");
+}
+
+pub fn open_section(ui: Ui, r: GitHubReference, section: &str) {
     let b = ui.github;
-    if b.reference.get_untracked().as_ref() != Some(&r) {
+    let changed_ref = b.reference.get_untracked().as_ref() != Some(&r);
+    let changed_sec = b.section.get_untracked() != section;
+    if changed_ref {
         b.reference.set(Some(r.clone()));
-        b.section.set("overview".into());
+        b.section.set(section.into());
         b.detail_page.set(1);
+        b.editing_comment.set(None);
+        b.edit_draft.set(String::new());
+        b.edit_error.set(String::new());
         // Seed overview from current list row if available so title/status render immediately.
         let seeded = b.list.with_untracked(|v| {
             v["items"]
@@ -94,6 +109,13 @@ pub fn open(ui: Ui, r: GitHubReference) {
                 .unwrap_or_else(|| json!({}))
         });
         b.overview.set(seeded);
+        b.detail.set(json!({}));
+    } else if changed_sec {
+        b.section.set(section.into());
+        b.detail_page.set(1);
+        b.editing_comment.set(None);
+        b.edit_draft.set(String::new());
+        b.edit_error.set(String::new());
         b.detail.set(json!({}));
     }
     ui.navigate("github");
@@ -274,6 +296,9 @@ fn change_tab(ui: Ui, tab: &str) {
         b.page.set(1);
         b.list.set(json!({}));
         b.reference.set(None);
+        b.editing_comment.set(None);
+        b.edit_draft.set(String::new());
+        b.edit_error.set(String::new());
     });
 }
 

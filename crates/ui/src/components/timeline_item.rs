@@ -366,6 +366,26 @@ fn render_narrative(
     let error = signal(String::new());
     let expanded = signal(false);
     let card = event.card_id.clone();
+    let project_id = event.project_id.clone();
+    let comment_id = event.id.clone();
+    let is_own_comment = event.kind == "comment.created" && event.actor == "user";
+    let was_edited = is_own_comment
+        && (event.data["edited_at"].is_u64() || event.data["revision"].as_u64().unwrap_or(1) > 1);
+    let can_edit = computed({
+        let card_id = card.clone();
+        move || {
+            is_own_comment
+                && ui
+                    .snapshot
+                    .with(|s| s.cards.iter().any(|c| c.id == card_id && c.active()))
+        }
+    });
+    let is_editing = computed({
+        let cid = comment_id.clone();
+        move || can_edit.get() && ui.editing_comment.get().as_deref() == Some(cid.as_str())
+    });
+    let edit_draft = signal(event.message.clone());
+    let edit_error = signal(String::new());
     if let Some(path) = event.data["path"].as_str().map(str::to_owned)
         && let Some(app) = crate::APP.get().cloned()
     {
@@ -409,8 +429,26 @@ fn render_narrative(
         .py_1()
         .bg(INSET)
         .child(label(actor).font_weight(FontWeight::MEDIUM))
-        .child(muted(crate::components::activity::age(event.created_at)))
-        .child(view().flex_1());
+        .child(muted(crate::components::activity::age(event.created_at)));
+    if was_edited {
+        heading = heading.child(muted("· edited").text_size(px(11.5)));
+    }
+    heading = heading.child(view().flex_1());
+    if is_own_comment {
+        let start_id = comment_id.clone();
+        heading = heading.child(when(
+            move || can_edit.get() && !is_editing.get(),
+            move || {
+                let cid = start_id.clone();
+                compact_action("Edit", Variant::Quiet, move |_| {
+                    edit_draft.set(body.get_untracked());
+                    edit_error.set(String::new());
+                    ui.card_terminal_focused.set(false);
+                    ui.editing_comment.set(Some(cid.clone()));
+                })
+            },
+        ));
+    }
     if let Some(terminal_id) = event.data["terminal_id"].as_str().map(str::to_owned) {
         let details = terminal_id.clone();
         heading = heading
@@ -422,45 +460,207 @@ fn render_narrative(
             }));
     }
     let measured = signal(0f32);
+    let save_card_id = card.clone();
+    let save_comment_id = comment_id.clone();
+    let edit_project_id = project_id;
     let message_card = view()
         .min_w(px(0.))
         .border_1()
-        .border_color(BORDER)
+        .border_color(move || if is_editing.get() { ACCENT } else { BORDER })
         .rounded(px(RADIUS))
         .overflow_hidden()
         .child(heading)
-        .child(
+        .child(dynamic(move || {
+            if is_editing.get() {
+                let save_card = save_card_id.clone();
+                let save_cid = save_comment_id.clone();
+                let proj_id = edit_project_id.clone();
+                let editor = canban_ui_kit::markdown::MarkdownInput::new();
+                let height = signal(150.);
+                let submit_ticket = signal(0u64);
+                let seen_submit = stored(0u64);
+                editor.on_submit(
+                    move || {
+                        is_editing.get()
+                            && !ui.quick_open.get()
+                            && ui.utility_popup.get().is_empty()
+                            && !ui.native_modal.get()
+                    },
+                    move || submit_ticket.update(|n| *n += 1),
+                );
+                let can_save = computed(move || {
+                    !ui.is_method_pending("comment.update")
+                        && !edit_draft.with(|s| s.trim().is_empty())
+                });
+                effect({
+                    let save_card = save_card.clone();
+                    let save_cid = save_cid.clone();
+                    move || {
+                        let t = submit_ticket.get();
+                        if seen_submit.replace(t) == t || !can_save.get_untracked() {
+                            return;
+                        }
+                        let updated = edit_draft.get_untracked();
+                        if updated == body.get_untracked() {
+                            edit_error.set(String::new());
+                            ui.editing_comment.set(None);
+                            return;
+                        }
+                        if crate::APP.get().is_none() {
+                            body.set(updated.clone());
+                            let card_id = save_card.clone();
+                            let cid = save_cid.clone();
+                            ui.snapshot.update(|s| {
+                                if let Some(ev) = s
+                                    .events
+                                    .iter_mut()
+                                    .find(|e| e.card_id == card_id && e.id == cid)
+                                {
+                                    let rev = ev.data["revision"].as_u64().unwrap_or(1) + 1;
+                                    ev.message = updated.clone();
+                                    ev.data["body"] = json!(updated);
+                                    ev.data["revision"] = json!(rev);
+                                    ev.data["edited_at"] = json!(canban_types::now());
+                                }
+                            });
+                            edit_error.set(String::new());
+                            ui.editing_comment.set(None);
+                            return;
+                        }
+                        let mentions =
+                            crate::profiles::addressed(&updated, &ui.profiles.get_untracked());
+                        edit_error.set(String::new());
+                        let cid_done = save_cid.clone();
+                        dispatch_complete(
+                            ui,
+                            "comment.update",
+                            json!({
+                                "card_id": save_card,
+                                "comment_id": save_cid,
+                                "body": updated,
+                                "mentions": mentions,
+                            }),
+                            move |result| match result {
+                                Ok(val) => {
+                                    if let Some(new_msg) = val["message"].as_str() {
+                                        body.try_set(new_msg.into());
+                                    }
+                                    edit_error.try_set(String::new());
+                                    if ui.editing_comment.get_untracked().as_deref()
+                                        == Some(cid_done.as_str())
+                                    {
+                                        ui.editing_comment.set(None);
+                                    }
+                                }
+                                Err(err) => {
+                                    edit_error.try_set(err);
+                                }
+                            },
+                        );
+                    }
+                });
+                let (source, reference_error) = crate::references::source(
+                    ui,
+                    editor,
+                    edit_draft,
+                    computed(move || proj_id.clone()),
+                    "Edit comment",
+                    "Edit comment… @Agent, #Card or #tag",
+                );
+                let accept_proj = edit_project_id.clone();
+                let source = source.on_completion_accept(
+                    move |ev: &nsh_base::editor::EditorCompletionAcceptEvent| {
+                        let _ = crate::references::accept_tag(ui, &accept_proj, ev);
+                    },
+                );
+                let focused_once = stored(false);
+                let cancel_cid = save_comment_id.clone();
+                return view()
+                    .p_2p5()
+                    .gap_2()
+                    .on_layout(move |_: &Bounds<Points>| {
+                        if !focused_once.replace(true) {
+                            editor.focus();
+                        }
+                    })
+                    .child(editor.render_with_preview(
+                        edit_draft,
+                        source,
+                        false,
+                        height,
+                        move || crate::links::reader(ui, move || edit_draft.get()).into_element(),
+                    ))
+                    .child(when(
+                        move || !reference_error.get().is_empty(),
+                        move || notice(move || reference_error.get(), Tone::Attention),
+                    ))
+                    .child(when(
+                        move || !edit_error.get().is_empty(),
+                        move || notice(move || edit_error.get(), Tone::Danger),
+                    ))
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                compact_action("Cancel", Variant::Quiet, move |_| {
+                                    edit_error.set(String::new());
+                                    if ui.editing_comment.get_untracked().as_deref()
+                                        == Some(cancel_cid.as_str())
+                                    {
+                                        ui.editing_comment.set(None);
+                                    }
+                                })
+                                .disabled(move || ui.is_method_pending("comment.update")),
+                            )
+                            .child(
+                                compact_action("Save", Variant::Primary, move |_| {
+                                    submit_ticket.update(|n| *n += 1)
+                                })
+                                .accessibility_label(|| Some("Save comment · ⌘Enter".into()))
+                                .disabled(move || !can_save.get()),
+                            ),
+                    )
+                    .into_element();
+            }
+
             view()
-                .p_3()
-                .max_h(move || px(if expanded.get() { f32::MAX } else { 280. }))
-                .overflow_hidden()
                 .child(
                     view()
-                        .flex_shrink_0()
-                        .on_layout(move |b: &Bounds<Points>| measured.set(b.size.height.0))
-                        .child(crate::links::reader(ui, move || body.get())),
-                ),
-        )
-        .child(when(
-            move || measured.get() > 256.,
-            move || {
-                action(
-                    move || {
-                        if expanded.get() {
-                            "Show less"
-                        } else {
-                            "Read full report"
-                        }
-                    },
-                    Variant::Quiet,
-                    move |_| expanded.update(|v| *v = !*v),
+                        .p_3()
+                        .max_h(move || px(if expanded.get() { f32::MAX } else { 280. }))
+                        .overflow_hidden()
+                        .child(
+                            view()
+                                .flex_shrink_0()
+                                .on_layout(move |b: &Bounds<Points>| measured.set(b.size.height.0))
+                                .child(crate::links::reader(ui, move || body.get())),
+                        ),
                 )
-            },
-        ))
-        .child(when(
-            move || !error.get().is_empty(),
-            move || notice(error.get(), Tone::Attention),
-        ));
+                .child(when(
+                    move || measured.get() > 256.,
+                    move || {
+                        action(
+                            move || {
+                                if expanded.get() {
+                                    "Show less"
+                                } else {
+                                    "Read full report"
+                                }
+                            },
+                            Variant::Quiet,
+                            move |_| expanded.update(|v| *v = !*v),
+                        )
+                    },
+                ))
+                .child(when(
+                    move || !error.get().is_empty(),
+                    move || notice(error.get(), Tone::Attention),
+                ))
+                .into_element()
+        }));
 
     let mut right = view()
         .flex_1()

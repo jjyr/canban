@@ -60,6 +60,21 @@ try:
  reply={'reference':r,'comment_id':601,'body':'ACCEPTANCE_REPLY_SENTINEL','request_key':'reply-once'}
  assert call('github.remote.reply',reply)['state']=='published';call('github.remote.reply',reply)
  assert len([v for v in requests() if v['method']=='POST' and v['path'].endswith('/comments/601/replies')])==1
+ edit_disc={'reference':r,'section':'discussion','comment_id':600,'body':'ACCEPTANCE_EDITED_COMMENT_SENTINEL','request_key':'edit-disc-once'}
+ assert call('github.remote.comment.update',edit_disc)['state']=='published';call('github.remote.comment.update',edit_disc)
+ assert len([v for v in requests() if v['method']=='PATCH' and v['path'].endswith('/issues/comments/600')])==1
+ disc_after=call('github.detail',{'reference':r,'section':'discussion'})['data']
+ assert any(c['id']==600 and c['body']=='ACCEPTANCE_EDITED_COMMENT_SENTINEL' for c in disc_after)
+ edit_thread={'reference':r,'section':'threads','comment_id':601,'body':'ACCEPTANCE_EDITED_THREAD_SENTINEL','request_key':'edit-thread-once'}
+ assert call('github.remote.comment.update',edit_thread)['state']=='published';call('github.remote.comment.update',edit_thread)
+ assert len([v for v in requests() if v['method']=='PATCH' and v['path'].endswith('/pulls/comments/601')])==1
+ threads_after=call('github.detail',{'reference':r,'section':'threads'})['data']
+ assert any(c['id']==601 and c['body']=='ACCEPTANCE_EDITED_THREAD_SENTINEL' for c in threads_after)
+ edit_rev={'reference':r,'section':'reviews','comment_id':700,'body':'ACCEPTANCE_EDITED_REVIEW_SENTINEL','request_key':'edit-rev-once'}
+ assert call('github.remote.comment.update',edit_rev)['state']=='published';call('github.remote.comment.update',edit_rev)
+ assert len([v for v in requests() if v['method']=='PUT' and v['path'].endswith('/pulls/2/reviews/700')])==1
+ revs_after=call('github.detail',{'reference':r,'section':'reviews'})['data']
+ assert any(rv['id']==700 and rv['body']=='ACCEPTANCE_EDITED_REVIEW_SENTINEL' for rv in revs_after)
  denied={'reference':r,'body':'DENY_FIXTURE','request_key':'denied-comment'}
  assert call('github.remote.comment',denied)['state']=='failed'
  unknown={'reference':r,'body':'UNKNOWN_FIXTURE','request_key':'unknown-comment'}
@@ -70,7 +85,7 @@ try:
  assert len([v for v in requests() if v['method']=='POST' and v['path'].endswith('/reviews')])==1
  call('github.sync',{'project_id':p['id']});s=call('app.snapshot');assert next(c for c in s['cards'] if c['id']==issue['id'])['title']=='Refreshed source title';assert not [t for t in s['terminals'] if t.get('agent')]
  call('github.notification.read',{'thread_id':'9','request_key':'read-once'});call('github.notification.read',{'thread_id':'9','request_key':'read-once'});assert call('github.browse',q)['items'][0]['item']['unread']==False
- db=sqlite3.connect(home/'canban.sqlite');content=''.join(row[0] for row in db.execute('SELECT data FROM cards UNION ALL SELECT data FROM events UNION ALL SELECT data FROM github_issues'));assert 'REMOTE_BODY_SENTINEL' not in content;assert 'ACCEPTANCE_COMMENT_SENTINEL' not in content;assert 'ACCEPTANCE_REPLY_SENTINEL' not in content;assert db.execute('SELECT count(*) FROM github_issues').fetchone()[0]==0;db.close()
+ db=sqlite3.connect(home/'canban.sqlite');content=''.join(row[0] for row in db.execute('SELECT data FROM cards UNION ALL SELECT data FROM events UNION ALL SELECT data FROM github_issues'));assert 'REMOTE_BODY_SENTINEL' not in content;assert 'ACCEPTANCE_COMMENT_SENTINEL' not in content;assert 'ACCEPTANCE_REPLY_SENTINEL' not in content;assert 'ACCEPTANCE_EDITED_COMMENT_SENTINEL' not in content;assert 'ACCEPTANCE_EDITED_THREAD_SENTINEL' not in content;assert 'ACCEPTANCE_EDITED_REVIEW_SENTINEL' not in content;assert db.execute('SELECT count(*) FROM github_issues').fetchone()[0]==0;db.close()
  call('app.shutdown');server.wait(timeout=15);server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log);ready();assert call('github.browse',q)['items'];assert len(call('app.snapshot')['cards'])==3
  before_state=call('app.state')
  call('github.browse',{'kind':'issues','relation':'all','state':'open','query':'new query cache','page':2})

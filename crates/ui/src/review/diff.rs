@@ -3,7 +3,7 @@ use crate::presenter::*;
 use canban_ui_kit::tokens::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 fn multiline_comment_input(
     value: Signal<String>,
@@ -80,6 +80,9 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
     let selected = st.selected_file.get();
     let active_line = st.active_line.get();
     let pending_all = st.pending_comments.get();
+    let editing_remote = st.editing_remote_comment.get();
+    let my_login = crate::github::active_login_from(&ui.snapshot.get(), &ui.github.gh_status.get());
+    let pr_target = st.pr_target.get();
 
     // Left file list pane (216px)
     let file_count = files.len();
@@ -428,7 +431,52 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                         .as_str()
                         .unwrap_or("reviewer")
                         .to_owned();
+                    let cid = rt["id"].as_u64().unwrap_or(0);
+                    let is_own = cid > 0
+                        && pr_target.is_some()
+                        && my_login
+                            .as_deref()
+                            .is_some_and(|me| author.eq_ignore_ascii_case(me));
+                    let is_editing = cid > 0 && editing_remote == Some(cid);
+                    let was_edited = match (rt["created_at"].as_str(), rt["updated_at"].as_str()) {
+                        (Some(c), Some(u)) if !c.is_empty() && !u.is_empty() => c != u,
+                        _ => false,
+                    };
                     let body_txt = rt["body"].as_str().unwrap_or("").to_owned();
+                    let mut header_row = view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(icon(Icon::GitHub).w(px(12.)).h(px(12.)))
+                        .child(
+                            label(format!("@{author}"))
+                                .text_size(px(11.5))
+                                .font_weight(FontWeight::SEMIBOLD),
+                        )
+                        .child(badge("GitHub PR comment"));
+                    if was_edited {
+                        header_row = header_row.child(muted("· edited").text_size(px(11.)));
+                    }
+                    if is_own && !is_editing {
+                        let initial_body = body_txt.clone();
+                        header_row = header_row.child(view().flex_1()).child(compact_action(
+                            "Edit",
+                            Variant::Quiet,
+                            move |_| {
+                                let body_val = initial_body.clone();
+                                batch(move || {
+                                    st.remote_edit_error.set(String::new());
+                                    st.remote_edit_draft.set(body_val);
+                                    st.editing_remote_comment.set(Some(cid));
+                                });
+                            },
+                        ));
+                    }
+                    let content = if is_editing {
+                        remote_pr_comment_editor(ui, cid, pr_target.clone()).into_element()
+                    } else {
+                        canban_ui_kit::markdown::reader(move || body_txt.clone()).into_element()
+                    };
                     rows = rows.child(
                         view()
                             .mx_4()
@@ -436,23 +484,11 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                             .p_2p5()
                             .rounded(px(RADIUS))
                             .border_1()
-                            .border_color(BORDER)
+                            .border_color(if is_editing { ACCENT } else { BORDER })
                             .bg(SURFACE)
-                            .gap_1()
-                            .child(
-                                view()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(icon(Icon::GitHub).w(px(12.)).h(px(12.)))
-                                    .child(
-                                        label(format!("@{author}"))
-                                            .text_size(px(11.5))
-                                            .font_weight(FontWeight::SEMIBOLD),
-                                    )
-                                    .child(badge("GitHub PR comment")),
-                            )
-                            .child(canban_ui_kit::markdown::reader(move || body_txt.clone())),
+                            .gap_1p5()
+                            .child(header_row)
+                            .child(content),
                     );
                 }
 
@@ -659,6 +695,121 @@ fn inline_composer_box(ui: Ui, target: LineTarget) -> View {
                         st.line_draft.set(String::new());
                     })
                     .disabled(move || st.line_draft.with(|s| s.trim().is_empty())),
+                ),
+        )
+}
+
+fn remote_pr_comment_editor(ui: Ui, comment_id: u64, pr_target: Option<Value>) -> View {
+    let st = ui.review_state;
+    view()
+        .gap_2()
+        .child(multiline_comment_input(
+            st.remote_edit_draft,
+            "Edit GitHub PR inline comment",
+            "Update your GitHub PR comment…",
+            72.,
+        ))
+        .child(when(
+            move || !st.remote_edit_error.get().is_empty(),
+            move || notice(move || st.remote_edit_error.get(), Tone::Danger),
+        ))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .child(compact_action("Cancel", Variant::Quiet, move |_| {
+                    batch(move || {
+                        st.editing_remote_comment.set(None);
+                        st.remote_edit_draft.set(String::new());
+                        st.remote_edit_error.set(String::new());
+                    });
+                }))
+                .child(
+                    compact_action("Save", Variant::Primary, move |_| {
+                        let next_body = st.remote_edit_draft.get_untracked();
+                        if next_body.trim().is_empty() {
+                            st.remote_edit_error.set("Comment cannot be empty".into());
+                            return;
+                        }
+                        let Some(ref pr) = pr_target else {
+                            return;
+                        };
+                        let repo = pr["repository"].as_str().unwrap_or("").to_owned();
+                        let number = pr["number"].as_u64().unwrap_or(0);
+                        let url = pr["url"]
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| format!("https://github.com/{repo}/pull/{number}"));
+                        if repo.is_empty() || number == 0 {
+                            st.remote_edit_error
+                                .set("Missing GitHub pull request reference".into());
+                            return;
+                        }
+                        st.remote_edit_error.set(String::new());
+                        if crate::APP.get().is_none() {
+                            st.compare_data.update(|cd| {
+                                if let Some(arr) = cd["threads"].as_array_mut()
+                                    && let Some(item) =
+                                        arr.iter_mut().find(|x| x["id"].as_u64() == Some(comment_id))
+                                {
+                                    item["body"] = json!(next_body.trim());
+                                    item["updated_at"] = json!("2026-04-19T12:00:00Z");
+                                }
+                            });
+                            st.editing_remote_comment.set(None);
+                            st.remote_edit_draft.set(String::new());
+                            ui.notify("Saved");
+                            return;
+                        }
+                        let reference = canban_types::GitHubReference {
+                            repository: repo,
+                            kind: "pr".into(),
+                            number: Some(number),
+                            sha: None,
+                            url,
+                        };
+                        dispatch_complete(
+                            ui,
+                            "github.remote.comment.update",
+                            json!({
+                                "reference": reference,
+                                "section": "threads",
+                                "comment_id": comment_id,
+                                "body": next_body,
+                                "request_key": canban_types::id(),
+                            }),
+                            move |res| match res {
+                                Ok(val) if val["state"] == "published" => {
+                                    st.editing_remote_comment.set(None);
+                                    st.remote_edit_draft.set(String::new());
+                                    st.remote_edit_error.set(String::new());
+                                    crate::review::refresh_active_diff(ui, true);
+                                    ui.notify("Saved");
+                                }
+                                Ok(val) if val["state"] == "unknown" => {
+                                    st.remote_edit_error.set(
+                                        "Publication outcome is unknown; check GitHub before retrying."
+                                            .into(),
+                                    );
+                                }
+                                Ok(val) => {
+                                    let msg = val["message"]
+                                        .as_str()
+                                        .unwrap_or("Could not update GitHub PR comment");
+                                    st.remote_edit_error.set(msg.to_owned());
+                                }
+                                Err(err) => {
+                                    st.remote_edit_error.set(err);
+                                }
+                            },
+                        );
+                    })
+                    .disabled(move || {
+                        ui.is_method_pending("github.remote.comment.update")
+                            || st.remote_edit_draft.with(|s| s.trim().is_empty())
+                    }),
                 ),
         )
 }

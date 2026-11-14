@@ -57,6 +57,7 @@ fn noise(kind: &str) -> bool {
         kind,
         "card.created"
             | "card.updated"
+            | "comment.updated"
             | "card.content_changed"
             | "card.order_changed"
             | "card.context_updated"
@@ -732,5 +733,42 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![true, false, false, false, true]
         );
+    }
+
+    #[test]
+    fn comment_updated_audit_event_is_filtered_while_edited_comment_keeps_original_sequence() {
+        let comment = Event {
+            id: "c1".into(),
+            sequence: 1,
+            project_id: "p".into(),
+            card_id: "c".into(),
+            kind: "comment.created".into(),
+            actor: "user".into(),
+            message: "Edited text".into(),
+            created_at: 100,
+            data: serde_json::json!({"body": "Edited text", "revision": 2, "edited_at": 200}),
+        };
+        let stage = Event {
+            id: "s2".into(),
+            sequence: 2,
+            kind: "card.stage_changed".into(),
+            message: "backlog → develop".into(),
+            data: serde_json::json!({}),
+            ..comment.clone()
+        };
+        let audit = Event {
+            id: "u3".into(),
+            sequence: 3,
+            kind: "comment.updated".into(),
+            message: "Edited text".into(),
+            data: serde_json::json!({"comment_id": "c1", "revision": 2}),
+            ..comment.clone()
+        };
+        let rows = visible(&[comment, stage, audit], None);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0.id, "c1");
+        assert_eq!(rows[0].0.sequence, 1);
+        assert!(rows[0].1);
+        assert_eq!(rows[1].0.kind, "card.stage_changed");
     }
 }

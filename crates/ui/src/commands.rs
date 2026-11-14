@@ -335,6 +335,14 @@ pub const CATALOG: &[Command] = &[
         keywords: "task body title",
     },
     Command {
+        id: "edit-last-comment",
+        title: "Edit Latest Comment",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "modify update message comment discussion github",
+    },
+    Command {
         id: "card-workspace-details",
         title: "Toggle Card Workspace Details",
         key: "",
@@ -615,6 +623,63 @@ pub fn execute(ui: Ui, id: &str) {
                 crate::drafts::put(ui, key, d);
             }
         }
+        "edit-last-comment" => {
+            if ui.page.get_untracked() == "github" && ui.github.reference.get_untracked().is_some()
+            {
+                let sec = ui.github.section.get_untracked();
+                if matches!(sec.as_str(), "discussion" | "threads" | "reviews") {
+                    let my_login = crate::github::active_login_untracked(ui);
+                    let target = ui.github.detail.with_untracked(|det| {
+                        det["data"].as_array().and_then(|arr| {
+                            arr.iter().rev().find_map(|entry| {
+                                let cid = entry["id"].as_u64().unwrap_or(0);
+                                let author = entry["user"]["login"].as_str().unwrap_or("");
+                                (cid > 0
+                                    && my_login
+                                        .as_deref()
+                                        .is_some_and(|me| author.eq_ignore_ascii_case(me)))
+                                .then(|| (cid, entry["body"].as_str().unwrap_or("").to_owned()))
+                            })
+                        })
+                    });
+                    if let Some((cid, body)) = target {
+                        batch(move || {
+                            ui.github.edit_error.set(String::new());
+                            ui.github.edit_draft.set(body);
+                            ui.github.editing_comment.set(Some((sec, cid)));
+                        });
+                    } else {
+                        ui.notify("No comments authored by you in this GitHub section");
+                    }
+                } else {
+                    ui.notify("Open Discussion, Threads, or Reviews to edit a GitHub comment");
+                }
+            } else if let Some(c) = ui.current_card().filter(|c| c.active()) {
+                let latest = ui.snapshot.with_untracked(|s| {
+                    s.events
+                        .iter()
+                        .filter(|e| {
+                            e.card_id == c.id && e.kind == "comment.created" && e.actor == "user"
+                        })
+                        .max_by_key(|e| e.sequence)
+                        .map(|e| (e.id.clone(), e.sequence))
+                });
+                if let Some((eid, seq)) = latest {
+                    if ui.page.get_untracked() != "card"
+                        && !(ui.page.get_untracked() == "review"
+                            && ui.review_state.card_drawer_open.get_untracked())
+                    {
+                        ui.open_card(c.id);
+                    }
+                    ui.card_event.set(Some(seq));
+                    ui.editing_comment.set(Some(eid));
+                } else {
+                    ui.notify("No user comments to edit on this Card");
+                }
+            } else {
+                ui.notify("Open an active Card or GitHub conversation first");
+            }
+        }
         "card-workspace-details" => {
             if let Some(c) = ui.current_card() {
                 let key = format!("card:{}", c.id);
@@ -873,5 +938,6 @@ mod tests {
                 .any(|(k, _)| *k == "mod+t")
         );
         assert!(CATALOG.iter().any(|c| c.id == "copy-skill-command"));
+        assert!(CATALOG.iter().any(|c| c.id == "edit-last-comment"));
     }
 }

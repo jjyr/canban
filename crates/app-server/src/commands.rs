@@ -908,6 +908,173 @@ impl AppServer {
                 db.save(&c)?;
                 Ok(serde_json::to_value(event)?)
             }),
+            "comment.update" => self.mutate(method, &p, |db| {
+                let mut c = super::resolve_card(db, &p)?;
+                ensure!(c.active(), "Restore the Card before editing comments");
+                let comment_id = strp(&p, "comment_id")?;
+                let body = strp(&p, "body")?;
+                ensure!(!body.trim().is_empty(), "Comment is empty");
+                let mut event: Event = db
+                    .get(comment_id)
+                    .map_err(|_| anyhow::anyhow!("Comment not found"))?;
+                ensure!(event.card_id == c.id, "Comment belongs to another Card");
+                ensure!(
+                    event.kind == "comment.created" && event.actor == "user",
+                    "Only your own comments can be edited"
+                );
+                let previous_body = event.data["body"]
+                    .as_str()
+                    .unwrap_or(&event.message)
+                    .to_owned();
+                let previous_revision = event.data["revision"].as_u64().unwrap_or(1);
+                if previous_body == body {
+                    return Ok(serde_json::to_value(event)?);
+                }
+                let edited_at = now();
+                let next_revision = previous_revision + 1;
+                event.message = body.into();
+                if !event.data.is_object() {
+                    event.data = json!({});
+                }
+                event.data["body"] = json!(body);
+                event.data["revision"] = json!(next_revision);
+                event.data["edited_at"] = json!(edited_at);
+                db.save(&event)?;
+
+                let instruction = canban_context::render_template(
+                    include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../prompts/runtime/comment_task.txt"
+                    ))
+                    .trim_end(),
+                    &[("body", body)],
+                );
+                for mut question in db.list::<Question>()?.into_iter().filter(|q| {
+                    q.card_id == c.id && q.comment_id == event.id && q.state == "pending"
+                }) {
+                    question.body = body.into();
+                    db.save(&question)?;
+                    if let Some(tid) = question.terminal_id.as_deref()
+                        && let Ok(mut entry) = db.get::<TerminalEntry>(tid)
+                        && let Some(agent) = entry.agent.as_mut()
+                    {
+                        let mut entry_changed = false;
+                        if agent.state == "queued"
+                            && matches!(
+                                &agent.trigger,
+                                ExecutionTrigger::Comment { comment_id: cid } if cid == &event.id
+                            )
+                        {
+                            agent.instruction = instruction.clone();
+                            agent.updated_at = edited_at;
+                            entry_changed = true;
+                        }
+                        if let Some(pending) = agent.pending.as_mut()
+                            && matches!(
+                                &pending.trigger,
+                                ExecutionTrigger::Comment { comment_id: cid } if cid == &event.id
+                            )
+                        {
+                            pending.instruction = instruction.clone();
+                            entry_changed = true;
+                        }
+                        if entry_changed {
+                            db.save(&entry)?;
+                        }
+                    }
+                }
+
+                // Preserve existing mentions without redelivery; allow newly added @Agent mentions.
+                if p.get("mentions").is_some() {
+                    let project: Project = db.get(&c.project_id)?;
+                    let stage = canban_workflow_engine::stage(&project.workflow, &c.stage)?;
+                    let mut mentions = strings(&p, "mentions");
+                    mentions.sort();
+                    mentions.dedup();
+                    for agent in mentions {
+                        let qid = format!("{}:{}", event.id, agent);
+                        if db.get::<Question>(&qid).is_ok() {
+                            continue;
+                        }
+                        let profile = canban_scheduler::select_in_project(
+                            &config,
+                            Some(&project),
+                            Some(&agent),
+                        )?;
+                        let context = crate::sessions::conversation(db, &c, &profile)?;
+                        let active = db.get::<TerminalEntry>(&context.id).ok().filter(|t| {
+                            t.agent.as_ref().is_some_and(|a| {
+                                a.card_id == c.id
+                                    && a.profile.id == agent
+                                    && (!(c.human_gate.is_some()
+                                        && a.state == "queued"
+                                        && canban_scheduler::automatic(a))
+                                        && matches!(
+                                            a.state.as_str(),
+                                            "queued"
+                                                | "starting"
+                                                | "running"
+                                                | "working"
+                                                | "blocked"
+                                        )
+                                        || matches!(a.state.as_str(), "completed" | "backlog")
+                                            && a.profile == profile
+                                            && a.terminal.is_some()
+                                            && !a.finished())
+                            })
+                        });
+                        let entry = if let Some(entry) = active {
+                            entry
+                        } else {
+                            enqueue(
+                                db,
+                                &config,
+                                &mut c,
+                                &project,
+                                stage,
+                                ExecutionTrigger::Comment {
+                                    comment_id: event.id.clone(),
+                                },
+                                Some(&agent),
+                                Some(instruction.clone()),
+                            )?
+                            .context("Question not queued")?
+                        };
+                        let question = Question {
+                            id: qid,
+                            project_id: c.project_id.clone(),
+                            card_id: c.id.clone(),
+                            profile_id: agent,
+                            comment_id: event.id.clone(),
+                            body: body.into(),
+                            terminal_id: Some(entry.id.clone()),
+                            state: "pending".into(),
+                            error: None,
+                            reply_path: None,
+                            created_at: edited_at,
+                        };
+                        db.save(&question)?;
+                    }
+                }
+
+                c.revision += 1;
+                db.save(&c)?;
+                db.append(canban_timeline::event(
+                    &c.project_id,
+                    &c.id,
+                    "comment.updated",
+                    "user",
+                    "Comment updated",
+                    json!({
+                        "comment_id": event.id,
+                        "revision": next_revision,
+                        "previous_body": previous_body,
+                        "body": body,
+                        "edited_at": edited_at,
+                    }),
+                ))?;
+                Ok(serde_json::to_value(event)?)
+            }),
             "card.attention.clear" => self.mutate(method, &p, |db| {
                 let mut c: Card = db.get(strp(&p, "card_id")?)?;
                 if c.human_gate.is_none() {

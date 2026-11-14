@@ -115,9 +115,10 @@ impl AppServer {
                 self.emit("github", None);
                 Ok(json!({"cleared":true}))
             })(),
-            "github.remote.comment" | "github.remote.review" | "github.remote.reply" => {
-                self.github_remote_action(method, p)
-            }
+            "github.remote.comment"
+            | "github.remote.comment.update"
+            | "github.remote.review"
+            | "github.remote.reply" => self.github_remote_action(method, p),
             _ => return None,
         })
     }
@@ -483,7 +484,38 @@ impl AppServer {
         let client = self.github_client()?.refreshing();
         let number = r.number.unwrap();
         let body = p["body"].as_str().unwrap_or("");
-        let (path, payload) = if method == "github.remote.review" {
+        let (http_method, path, payload) = if method == "github.remote.comment.update" {
+            ensure!(!body.trim().is_empty(), "Comment is empty");
+            let id = p["comment_id"]
+                .as_u64()
+                .filter(|n| *n > 0)
+                .context("Missing comment ID")?;
+            let section = p["section"].as_str().unwrap_or("discussion");
+            match section {
+                "discussion" => (
+                    "PATCH",
+                    format!("/repos/{}/issues/comments/{id}", r.repository),
+                    json!({"body": body}),
+                ),
+                "threads" => {
+                    ensure!(r.kind == "pr", "Only PRs support review thread comments");
+                    (
+                        "PATCH",
+                        format!("/repos/{}/pulls/comments/{id}", r.repository),
+                        json!({"body": body}),
+                    )
+                }
+                "reviews" => {
+                    ensure!(r.kind == "pr", "Only PRs support Reviews");
+                    (
+                        "PUT",
+                        format!("/repos/{}/pulls/{number}/reviews/{id}", r.repository),
+                        json!({"body": body}),
+                    )
+                }
+                _ => bail!("Unsupported GitHub comment section"),
+            }
+        } else if method == "github.remote.review" {
             ensure!(r.kind == "pr", "Only PRs support Review");
             let head = strp(p, "head")?;
             let live: Value = client.get(&item_path(&r))?;
@@ -515,6 +547,7 @@ impl AppServer {
                 );
             }
             (
+                "POST",
                 format!("/repos/{}/pulls/{number}/reviews", r.repository),
                 json!({"body":body,"event":event,"commit_id":head,"comments":comments}),
             )
@@ -527,6 +560,7 @@ impl AppServer {
                 .as_u64()
                 .context("Missing thread comment ID")?;
             (
+                "POST",
                 format!(
                     "/repos/{}/pulls/{number}/comments/{id}/replies",
                     r.repository
@@ -536,12 +570,13 @@ impl AppServer {
         } else {
             ensure!(!body.trim().is_empty(), "Comment is empty");
             (
+                "POST",
                 format!("/repos/{}/issues/{number}/comments", r.repository),
                 json!({"body":body}),
             )
         };
         self.mutate(method,p,|_db|Ok(json!({"state":"unknown","message":"Action recorded; reconcile on GitHub before retrying","request_key":key})))?;
-        let result = match client.write("POST", &path, &payload) {
+        let result = match client.write(http_method, &path, &payload) {
             Ok(value) => {
                 json!({"state":"published","id":value["id"],"url":value["html_url"],"request_key":key})
             }
@@ -554,11 +589,34 @@ impl AppServer {
             params![key, serde_json::to_string(&result)?],
         )?;
         if result["state"] == "published" {
+            let page = p["page"].as_u64().filter(|n| *n > 1);
             for section in ["overview", "discussion", "reviews", "threads"] {
                 if section == "overview" || section == "discussion" || r.kind == "pr" {
                     let _ = self
                         .github_detail(&json!({"reference":r,"section":section,"refresh":true}));
+                    if let Some(page) = page
+                        && section != "overview"
+                    {
+                        let _ = self.github_detail(
+                            &json!({"reference":r,"section":section,"page":page,"refresh":true}),
+                        );
+                    }
                 }
+            }
+            if r.kind == "pr"
+                && (method == "github.remote.reply"
+                    || method == "github.remote.review"
+                    || (method == "github.remote.comment.update"
+                        && p["section"].as_str() == Some("threads")))
+            {
+                let _ = self.github_read(
+                    &format!(
+                        "/repos/{}/pulls/{number}/comments?per_page=100",
+                        r.repository
+                    ),
+                    true,
+                    false,
+                );
             }
             self.github_sync_due.store(true, Ordering::SeqCst);
         }

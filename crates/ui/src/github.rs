@@ -14,7 +14,7 @@ use nsh_core::prelude::*;
 pub use repository::screen as repository_screen;
 use serde_json::{Value, json};
 pub use workspace::account;
-pub use workspace::{Browser, init, open, screen};
+pub use workspace::{Browser, init, open, open_section, screen};
 
 pub fn active_login_from(snapshot: &Snapshot, gh: &Value) -> Option<String> {
     snapshot

@@ -272,7 +272,27 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     state
                 )));
                 let url = source.url.clone();
-                row = row.child(view().flex_1()).child(compact_action(
+                let gh_ref = canban_types::GitHubReference {
+                    repository: source.repository.clone(),
+                    kind: c.source_kind().into(),
+                    number: Some(source.number),
+                    sha: None,
+                    url: source.url.clone(),
+                };
+                let gh_connected = crate::github::active_login_from(
+                    &ui.snapshot.get(),
+                    &ui.github.gh_status.get(),
+                )
+                .is_some();
+                row = row.child(view().flex_1());
+                if gh_connected {
+                    row = row.child(compact_action(
+                        "GitHub discussion",
+                        Variant::Quiet,
+                        move |_| crate::github::open_section(ui, gh_ref.clone(), "discussion"),
+                    ));
+                }
+                row = row.child(compact_action(
                     "Open in GitHub ↗",
                     Variant::Quiet,
                     move |_| crate::github::open_url(ui, url.clone()),

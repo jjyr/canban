@@ -21,12 +21,38 @@ if method!='GET':
   code=403 if body['body']=='DENY_FIXTURE' else 500;result={'message':'Fixture rejection'}
  elif p.startswith('/notifications/threads/'):
   s['done']=method=='DELETE';s['unread']=False;code=204
+ elif method in ['PATCH','PUT'] and '/reviews/' in p:
+  rid=int(p.rsplit('/',1)[1]);items=s.setdefault('reviews',[]);found=next((x for x in items if x['id']==rid),None)
+  if found is None:
+   found={'id':rid,'html_url':f'https://github.com/fixture/repo/pull/2#pullrequestreview-{rid}','state':'COMMENTED','user':user,'submitted_at':'2026-11-10T01:00:00Z'}
+   items.append(found)
+  found['body']=body['body'];found['updated_at']='2026-11-10T01:30:00Z';result=found
+ elif method=='PATCH' and '/pulls/comments/' in p:
+  cid=int(p.rsplit('/',1)[1]);items=s.setdefault('threads',[]);found=next((x for x in items if x['id']==cid),None)
+  if found is None:
+   found={'id':cid,'html_url':f'https://github.com/fixture/repo/pull/2#discussion_r{cid}','path':'src/lib.rs','line':1,'side':'RIGHT','user':user,'created_at':'2026-11-10T01:00:00Z'}
+   items.append(found)
+  found['body']=body['body'];found['updated_at']='2026-11-10T01:30:00Z';result=found
+ elif method=='PATCH' and '/issues/comments/' in p:
+  cid=int(p.rsplit('/',1)[1]);items=s.setdefault('comments',[]);found=next((x for x in items if x['id']==cid),None)
+  if found is None:
+   found={'id':cid,'html_url':f'https://github.com/fixture/repo/pull/2#issuecomment-{cid}','user':user,'created_at':'2026-11-10T01:00:00Z'}
+   items.append(found)
+  found['body']=body['body'];found['updated_at']='2026-11-10T01:30:00Z';result=found
  elif p.endswith('/reviews'):
   if body.get('commit_id')!=pr['head']['sha']:code=422;result={'message':'stale head'}
   else:
-   result={'id':700,'html_url':'https://github.com/fixture/repo/pull/2#pullrequestreview-700'};s.setdefault('reviews',[]).append({**result,'state':body['event'],'body':body.get('body',''),'user':user,'submitted_at':'2026-11-10T01:00:00Z'})
+   rid=700+len(s.get('reviews',[]))
+   result={'id':rid,'html_url':f'https://github.com/fixture/repo/pull/2#pullrequestreview-{rid}'};s.setdefault('reviews',[]).append({**result,'state':body['event'],'body':body.get('body',''),'user':user,'submitted_at':'2026-11-10T01:00:00Z'})
+   for idx,c in enumerate(body.get('comments') or []):
+    tid=800+len(s.get('threads',[]))+idx
+    s.setdefault('threads',[]).append({'id':tid,'html_url':f'https://github.com/fixture/repo/pull/2#discussion_r{tid}','path':c['path'],'line':c['line'],'side':c.get('side','RIGHT'),'body':c['body'],'user':user,'created_at':'2026-11-10T01:00:00Z','updated_at':'2026-11-10T01:00:00Z'})
+ elif p.endswith('/replies') and '/pulls/' in p:
+  tid=650+len(s.get('threads',[]))
+  result={'id':tid,'html_url':f'https://github.com/fixture/repo/pull/2#discussion_r{tid}','path':'src/lib.rs','line':1,'side':'RIGHT','in_reply_to_id':int(p.split('/')[-2]),'body':body['body'],'user':user,'created_at':'2026-11-10T01:00:00Z','updated_at':'2026-11-10T01:00:00Z'};s.setdefault('threads',[]).append(result)
  elif '/comments' in p:
-  result={'id':600,'html_url':'https://github.com/fixture/repo/pull/2#issuecomment-600','body':body['body'],'user':user,'updated_at':'2026-11-10T01:00:00Z'};s.setdefault('comments',[]).append(result)
+  cid=600+len(s.get('comments',[]))
+  result={'id':cid,'html_url':f'https://github.com/fixture/repo/pull/2#issuecomment-{cid}','body':body['body'],'user':user,'created_at':'2026-11-10T01:00:00Z','updated_at':'2026-11-10T01:00:00Z'};s.setdefault('comments',[]).append(result)
  else:code=404;result={'message':'fixture route not found'}
  state_path.write_text(json.dumps(s))
 elif p=='/user':result=user
@@ -46,7 +72,7 @@ elif p=='/repos/fixture/repo/pulls':result=[pr]
 elif p=='/repos/fixture/repo/pulls/2':result=pr
 elif p.endswith('/pulls/2/files'):result=[{'filename':'src/lib.rs','status':'modified','additions':1,'deletions':1,'patch':'@@ -1 +1 @@\n-old_value\n+new_value'}]
 elif p.endswith('/pulls/2/reviews'):result=s.get('reviews',[])
-elif p.endswith('/pulls/2/comments'):result=[]
+elif p.endswith('/pulls/2/comments'):result=s.get('threads',[])
 elif p.endswith('/check-runs'):result={'check_runs':[{'name':'CI','status':'completed','conclusion':'success'}],'total_count':1}
 elif p.endswith('/status'):result={'state':'success','total_count':1}
 else:code=404;result={'message':'fixture route not found'}

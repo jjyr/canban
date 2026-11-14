@@ -259,6 +259,9 @@ pub fn open_compare(ui: Ui) {
         st.mode.set("git".into());
         st.selected_file.set(String::new());
         st.active_line.set(None);
+        st.editing_remote_comment.set(None);
+        st.remote_edit_draft.set(String::new());
+        st.remote_edit_error.set(String::new());
         st.error.set(String::new());
         ui.navigate("review");
     });
@@ -333,6 +336,9 @@ pub fn open_card(ui: Ui, card_id: &str) {
         ui.review.set(None);
         st.selected_file.set(String::new());
         st.active_line.set(None);
+        st.editing_remote_comment.set(None);
+        st.remote_edit_draft.set(String::new());
+        st.remote_edit_error.set(String::new());
         st.error.set(String::new());
         st.delivery_mode.set(delivery_default.into());
         st.delivery_strategy.set(strategy_default.into());

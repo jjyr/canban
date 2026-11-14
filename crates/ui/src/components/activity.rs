@@ -14,6 +14,7 @@ pub fn age(time: u64) -> String {
 pub fn activity_header(actor: String, kind: &str, time: u64) -> impl IntoElement {
     let title = match kind {
         "comment.created" => "Comment",
+        "comment.updated" => "Comment edited",
         "comment.replied" => "Agent reply",
         "card.created" => "Card created",
         "card.updated" => "Task updated",

@@ -3037,3 +3037,137 @@ exit 0
     assert_eq!(recheck_ready["ready"], true);
     assert_eq!(recheck_ready["core_id"], "isolated-core-54");
 }
+
+#[test]
+fn comment_update_edits_own_local_comment_preserves_mentions_and_rejects_non_user_events() {
+    let (_d, app, p, c) = setup();
+    app.call(
+        "comment.add",
+        json!({"card_id": c.id, "body": "Initial thought for @codex", "mentions": ["codex"]}),
+    )
+    .unwrap();
+    let snap1 = app.snapshot().unwrap();
+    let created = snap1
+        .events
+        .iter()
+        .find(|e| e.kind == "comment.created")
+        .unwrap()
+        .clone();
+    assert_eq!(snap1.questions.len(), 1);
+    assert_eq!(snap1.questions[0].profile_id, "codex");
+    assert_eq!(snap1.questions[0].body, "Initial thought for @codex");
+
+    // Edit own comment: preserves sequence, updates message + pending Question, adds new mention without duplicating existing Question.
+    let updated: Event = serde_json::from_value(
+        app.call(
+            "comment.update",
+            json!({
+                "card_id": c.id,
+                "comment_id": created.id,
+                "body": "Refined thought for @codex and @reviewer — see https://github.com/a/b/issues/9",
+                "mentions": ["codex", "reviewer"],
+                "request_key": "edit-local-1",
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    // Idempotent replay with same request_key does not bump revision twice.
+    app.call(
+        "comment.update",
+        json!({
+            "card_id": c.id,
+            "comment_id": created.id,
+            "body": "Refined thought for @codex and @reviewer — see https://github.com/a/b/issues/9",
+            "mentions": ["codex", "reviewer"],
+            "request_key": "edit-local-1",
+        }),
+    )
+    .unwrap();
+
+    assert_eq!(updated.id, created.id);
+    assert_eq!(updated.sequence, created.sequence);
+    assert_eq!(updated.data["revision"], 2);
+    assert!(updated.data["edited_at"].as_u64().is_some());
+    assert!(updated.message.contains("Refined thought"));
+
+    let snap2 = app.snapshot().unwrap();
+    let stored = snap2.events.iter().find(|e| e.id == created.id).unwrap();
+    assert_eq!(stored.sequence, created.sequence);
+    assert_eq!(stored.data["revision"], 2);
+    assert!(snap2.events.iter().any(|e| e.kind == "comment.updated"));
+
+    // Existing @codex Question was updated in-place (not duplicated); new @reviewer Question was added.
+    let codex_qs: Vec<_> = snap2
+        .questions
+        .iter()
+        .filter(|q| q.comment_id == created.id && q.profile_id == "codex")
+        .collect();
+    assert_eq!(codex_qs.len(), 1);
+    assert!(codex_qs[0].body.contains("Refined thought"));
+    let reviewer_qs: Vec<_> = snap2
+        .questions
+        .iter()
+        .filter(|q| q.comment_id == created.id && q.profile_id == "reviewer")
+        .collect();
+    assert_eq!(reviewer_qs.len(), 1);
+
+    // Reject empty body.
+    assert!(
+        app.call(
+            "comment.update",
+            json!({"card_id": c.id, "comment_id": created.id, "body": "   "}),
+        )
+        .is_err()
+    );
+
+    // Reject editing an agent reply (`actor != "user"`).
+    let _run = admit(&app, &snap2.terminals[0]);
+    app.call(
+        "execution.report",
+        json!({
+            "project_id": p.id,
+            "card": c.number,
+            "profile_id": "codex",
+            "state": "completed",
+            "message": "Agent reply",
+            "body": "Detailed agent response",
+            "request_key": "agent-rep-1",
+        }),
+    )
+    .unwrap();
+    let snap3 = app.snapshot().unwrap();
+    let agent_reply = snap3
+        .events
+        .iter()
+        .find(|e| e.kind == "comment.replied")
+        .unwrap();
+    assert!(
+        app.call(
+            "comment.update",
+            json!({"card_id": c.id, "comment_id": agent_reply.id, "body": "Tamper"}),
+        )
+        .is_err()
+    );
+
+    // Reject editing on an archived Card.
+    let (_d2, app2, _p2, c2) = setup();
+    let added2: Event = serde_json::from_value(
+        app2.call(
+            "comment.add",
+            json!({"card_id": c2.id, "body": "Before archive"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let rev2 = app2.snapshot().unwrap().cards[0].revision;
+    app2.call("card.archive", json!({"card_id": c2.id, "revision": rev2}))
+        .unwrap();
+    assert!(
+        app2.call(
+            "comment.update",
+            json!({"card_id": c2.id, "comment_id": added2.id, "body": "Edit while archived"}),
+        )
+        .is_err()
+    );
+}

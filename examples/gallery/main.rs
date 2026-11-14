@@ -1511,6 +1511,33 @@ pub fn Gallery() -> impl IntoElement {
                     ui.github.error.set("GitHub CLI returned no HTTP response; check gh auth status".into());
                 }))
                 .child(action("GitHub PR diff",Variant::Quiet,move |_|{scene.set("workspace".into());fixtures::github_browser(ui,true);}))
+                .child(action("GitHub discussion",Variant::Quiet,move |_|{
+                    scene.set("workspace".into());
+                    fixtures::github_browser(ui,true);
+                    ui.github.section.set("discussion".into());
+                    ui.github.detail.set(json!({
+                        "data": [
+                            {
+                                "id": 501,
+                                "user": {"login": "octocat"},
+                                "author_association": "CONTRIBUTOR",
+                                "created_at": "2026-11-12T08:00:00Z",
+                                "updated_at": "2026-11-12T08:00:00Z",
+                                "body": "Ready for review — verifies inline diff and `#1` cross-links."
+                            },
+                            {
+                                "id": 502,
+                                "user": {"login": "jjy"},
+                                "author_association": "OWNER",
+                                "created_at": "2026-11-12T08:10:00Z",
+                                "updated_at": "2026-11-12T08:15:00Z",
+                                "body": "Looks great! Only our own comments (`@jjy`) show **Edit** here."
+                            }
+                        ],
+                        "page": 1,
+                        "has_next": false
+                    }));
+                }))
                 .child(action("GitHub offline cache",Variant::Quiet,move |_|{scene.set("workspace".into());fixtures::github_browser(ui,false);ui.github.error.set("Offline · showing cached GitHub content".into());}))
                 .child(action("GitHub Card",Variant::Quiet,move |_|{
                     let mut snapshot=fixtures::workspace();

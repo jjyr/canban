@@ -352,6 +352,15 @@ impl Client {
                 .header("User-Agent", "Canban")
                 .header("Accept", "application/vnd.github+json")
                 .send_json(body)?,
+            "PATCH" => agent()
+                .patch(format!("{}{path}", self.api))
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", self.token.expose_secret()),
+                )
+                .header("User-Agent", "Canban")
+                .header("Accept", "application/vnd.github+json")
+                .send_json(body)?,
             _ => anyhow::bail!("Unsupported GitHub write"),
         };
         decode(response)

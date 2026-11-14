@@ -42,7 +42,7 @@ The common detail view offers Overview and Discussion; PRs add Files changed, Re
 
 PR file pages are cached under both comparison SHAs. On a miss or explicit refresh, Canban checks the PR before and after fetching the files. A moving comparison is rejected rather than cached under the wrong version. Line comments choose the file, side and line number and collect into a pending Review. A Review contains the displayed head SHA, and submission revalidates it against GitHub. New commits do not silently re-anchor a draft.
 
-Comment and Review forms expand on demand so the diff retains its reading area. PR comments, Review submissions and replies explicitly publish to GitHub; Card comments and Agent mentions remain local. Notification Mark as read and Done are explicit operations. Remote discussion never invokes local `comment.add` or schedules an Agent.
+Comment and Review forms expand on demand so the diff retains its reading area. PR comments, Review submissions, replies, and edits to comments/reviews authored by the active signed-in GitHub user (`github.remote.comment.update` across Discussion, Review threads, Reviews, and PR Diff & Review inline threads) explicitly publish to GitHub (`PATCH` for issue and PR review comments, `PUT` for PR review summaries); Card comments and Agent mentions remain local. Notification Mark as read and Done are explicit operations. Remote discussion never invokes local `comment.add` or schedules an Agent.
 
 Writes retain an intent/receipt keyed by request key. Replaying a receipt never republishes the action. Publication outcome unknown retains the draft and requires checking GitHub before enabling a new submission; navigation never retries a write.
 

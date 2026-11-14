@@ -67,6 +67,9 @@ fn select_section(ui: Ui, section: &str) {
     batch(move || {
         ui.github.section.set(section.into());
         ui.github.detail_page.set(1);
+        ui.github.editing_comment.set(None);
+        ui.github.edit_draft.set(String::new());
+        ui.github.edit_error.set(String::new());
         ui.github.detail.set(json!({}));
     });
 }
@@ -550,6 +553,8 @@ fn review_state_badge(state: &str) -> Option<(String, Tone)> {
 
 fn discussion(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyElement {
     let section = ui.github.section.get_untracked();
+    let my_login = crate::github::active_login_from(&ui.snapshot.get(), &ui.github.gh_status.get());
+    let active_edit = ui.github.editing_comment.get();
     let entries = data.as_array().cloned().unwrap_or_default();
     if entries.is_empty() {
         return view()
@@ -572,8 +577,20 @@ fn discussion(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyEleme
             .as_str()
             .unwrap_or("GitHub")
             .to_owned();
-        let timestamp = entry["updated_at"]
+        let comment_id = entry["id"].as_u64().unwrap_or(0);
+        let is_own = comment_id > 0
+            && my_login
+                .as_deref()
+                .is_some_and(|me| author.eq_ignore_ascii_case(me));
+        let created_raw = entry["created_at"]
             .as_str()
+            .or(entry["submitted_at"].as_str());
+        let updated_raw = entry["updated_at"].as_str();
+        let was_edited = match (created_raw, updated_raw) {
+            (Some(c), Some(u)) if !c.is_empty() && !u.is_empty() => c != u,
+            _ => false,
+        };
+        let timestamp = updated_raw
             .or(entry["submitted_at"].as_str())
             .or(entry["created_at"].as_str())
             .map(super::format_timestamp_relative)
@@ -584,6 +601,9 @@ fn discussion(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyEleme
             .filter(|a| !matches!(*a, "" | "NONE"))
             .map(|a| a.to_ascii_lowercase());
         let body = entry["body"].as_str().unwrap_or("").to_owned();
+        let is_editing = active_edit
+            .as_ref()
+            .is_some_and(|(sec, cid)| sec == &section && *cid == comment_id);
 
         let mut header_row = view()
             .flex_row()
@@ -600,6 +620,12 @@ fn discussion(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyEleme
         if !timestamp.is_empty() {
             header_row = header_row.child(muted(timestamp));
         }
+        if was_edited {
+            header_row = header_row.child(muted("· edited").text_size(px(11.5)));
+        }
+
+        let mut trailing = view().flex_row().items_center().gap_1();
+        let mut has_trailing = false;
 
         if section == "threads" {
             let path = entry["path"].as_str().unwrap_or("");
@@ -619,17 +645,33 @@ fn discussion(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyEleme
                 .or(entry["id"].as_u64())
                 .unwrap_or(0);
             if reply_id > 0 {
-                header_row = header_row.child(view().flex_1()).child(compact_action(
-                    "Reply",
-                    Variant::Quiet,
-                    move |_| {
-                        d.update(|d| {
-                            d.github_reply = reply_id;
-                            d.github_compose = "comment".into();
-                        })
-                    },
-                ));
+                has_trailing = true;
+                trailing = trailing.child(compact_action("Reply", Variant::Quiet, move |_| {
+                    d.update(|d| {
+                        d.github_reply = reply_id;
+                        d.github_compose = "comment".into();
+                    })
+                }));
             }
+        }
+
+        if is_own && !is_editing {
+            has_trailing = true;
+            let edit_sec = section.clone();
+            let initial_body = body.clone();
+            trailing = trailing.child(compact_action("Edit", Variant::Quiet, move |_| {
+                let sec_val = edit_sec.clone();
+                let body_val = initial_body.clone();
+                batch(move || {
+                    ui.github.edit_error.set(String::new());
+                    ui.github.edit_draft.set(body_val);
+                    ui.github.editing_comment.set(Some((sec_val, comment_id)));
+                });
+            }));
+        }
+
+        if has_trailing {
+            header_row = header_row.child(view().flex_1()).child(trailing);
         }
 
         let mut item_view = view()
@@ -639,12 +681,110 @@ fn discussion(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyEleme
             .border_color(BORDER)
             .child(header_row);
 
-        if !body.trim().is_empty() {
+        if is_editing {
+            let save_sec = section.clone();
+            item_view = item_view.child(github_comment_editor(ui, d, save_sec, comment_id));
+        } else if !body.trim().is_empty() {
             item_view = item_view.child(crate::editor::reader(ui, move || body.clone()));
         }
         area = area.child(item_view);
     }
     area.into_element()
+}
+
+fn github_comment_editor(
+    ui: Ui,
+    d: Signal<Draft>,
+    section: String,
+    comment_id: u64,
+) -> impl IntoElement {
+    let b = ui.github;
+    view()
+        .gap_2()
+        .p_2p5()
+        .rounded(px(RADIUS))
+        .border_1()
+        .border_color(ACCENT)
+        .bg(SURFACE)
+        .child(multiline_box(
+            move || b.edit_draft.get(),
+            move |v| b.edit_draft.set(v),
+            "Edit GitHub comment",
+            "Update your GitHub comment…",
+            86.,
+        ))
+        .child(when(
+            move || !b.edit_error.get().is_empty(),
+            move || notice(move || b.edit_error.get(), Tone::Danger),
+        ))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .child(compact_action("Cancel", Variant::Quiet, move |_| {
+                    batch(move || {
+                        b.editing_comment.set(None);
+                        b.edit_draft.set(String::new());
+                        b.edit_error.set(String::new());
+                    });
+                }))
+                .child(
+                    compact_action("Save", Variant::Primary, move |_| {
+                        let next_body = b.edit_draft.get_untracked();
+                        if next_body.trim().is_empty() {
+                            b.edit_error.set("Comment cannot be empty".into());
+                            return;
+                        }
+                        let Some(r) = b.reference.get_untracked() else {
+                            return;
+                        };
+                        b.edit_error.set(String::new());
+                        if crate::APP.get().is_none() {
+                            let now_iso = "2026-04-19T12:00:00Z";
+                            b.detail.update(|det| {
+                                if let Some(arr) = det["data"].as_array_mut()
+                                    && let Some(item) = arr
+                                        .iter_mut()
+                                        .find(|x| x["id"].as_u64() == Some(comment_id))
+                                {
+                                    item["body"] = json!(next_body.trim());
+                                    item["updated_at"] = json!(now_iso);
+                                }
+                            });
+                            b.editing_comment.set(None);
+                            b.edit_draft.set(String::new());
+                            ui.notify("Saved");
+                            return;
+                        }
+                        let page = b.detail_page.get_untracked();
+                        submit(
+                            ui,
+                            d,
+                            "github.remote.comment.update",
+                            json!({
+                                "reference": r,
+                                "section": section,
+                                "comment_id": comment_id,
+                                "body": next_body,
+                                "page": page,
+                            }),
+                            move |_| {
+                                b.editing_comment.set(None);
+                                b.edit_draft.set(String::new());
+                                b.edit_error.set(String::new());
+                                load(ui, true);
+                            },
+                        );
+                    })
+                    .disabled(move || {
+                        ui.is_method_pending("github.remote.comment.update")
+                            || d.get().github_unknown
+                            || b.edit_draft.with(|s| s.trim().is_empty())
+                    }),
+                ),
+        )
 }
 
 struct ParsedDiffLine {
