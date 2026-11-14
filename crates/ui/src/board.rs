@@ -60,26 +60,9 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                 .child(when(
                     move || project.get().is_some() && !ui.narrow.get(),
                     move || {
-                        compact_action(
-                            move || {
-                                let n = project
-                                    .get()
-                                    .map(|p| {
-                                        p.agent_overrides
-                                            .values()
-                                            .filter(|ov| !ov.is_empty())
-                                            .count()
-                                    })
-                                    .unwrap_or(0);
-                                if n == 0 {
-                                    "Agents".into()
-                                } else {
-                                    format!("Agents ({n})")
-                                }
-                            },
-                            Variant::Quiet,
-                            move |_| ui.navigate("project-agents"),
-                        )
+                        compact_action("Agents", Variant::Quiet, move |_| {
+                            ui.navigate("project-agents")
+                        })
                     },
                 ))
                 .child(when(
@@ -425,4 +408,78 @@ fn project_picker(ui: Ui) -> impl IntoElement {
             )
             .on_press(move |_: &()| ui.show_search(true)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canban_types::{Project, ProjectAgentOverride, Snapshot, Workflow};
+    use nsh_core::{ApproxTextEngine, Core, MountItem, geometry::size};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn board_chrome_bar_renders_plain_agents_label_without_override_count() {
+        #[component]
+        fn ProbeRoot() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut snapshot = Snapshot::default();
+            snapshot.projects.push(Project {
+                id: "proj-1".into(),
+                name: "Canban".into(),
+                directory: "/tmp/canban".into(),
+                location: None,
+                github: None,
+                delivery_mode: Default::default(),
+                agent_overrides: BTreeMap::from([
+                    (
+                        "developer".into(),
+                        ProjectAgentOverride {
+                            agent: Some("agy".into()),
+                            model: Some("gemini-4-carbon-high".into()),
+                            effort: Some("high".into()),
+                        },
+                    ),
+                    (
+                        "reviewer".into(),
+                        ProjectAgentOverride {
+                            agent: None,
+                            model: Some("gpt-5.4".into()),
+                            effort: Some("medium".into()),
+                        },
+                    ),
+                ]),
+                tags: Vec::new(),
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: 1,
+            });
+            ui.snapshot.set(snapshot);
+            ui.project.set("proj-1".into());
+            ui.narrow.set(false);
+            view().w(px(1200.)).h(px(42.)).child(chrome_bar(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(42.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeRoot>());
+        let batch = core.commit().expect("initial mount batch");
+        let texts: Vec<String> = batch
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            texts.iter().any(|t| t == "Agents"),
+            "expected Board chrome bar to display plain `Agents`, got {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.starts_with("Agents (")),
+            "Board chrome bar must not append override count in parentheses, got {texts:?}"
+        );
+    }
 }

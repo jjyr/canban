@@ -436,7 +436,14 @@ pub fn workspace() -> canban_types::Snapshot {
     s.projects.push(Project {
         github: None,
         delivery_mode: Default::default(),
-        agent_overrides: Default::default(),
+        agent_overrides: std::collections::BTreeMap::from([(
+            "developer".into(),
+            ProjectAgentOverride {
+                agent: Some("agy".into()),
+                model: Some("gemini-4-carbon-high".into()),
+                effort: Some("high".into()),
+            },
+        )]),
         tags: vec![
             "search".into(),
             "ux".into(),
