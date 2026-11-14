@@ -2,6 +2,9 @@
 //! terminal frame/input integration references Herdr (Apache-2.0), see notices.
 use crate::ffi::*;
 use std::ffi::c_void;
+use std::time::{Duration, Instant};
+
+const RENDER_HOLD_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Default)]
 pub struct Cell {
@@ -143,10 +146,14 @@ impl Default for SurfaceGeometry {
 }
 
 struct Shared {
+    state: GhosttyRenderState,
     replies: Vec<u8>,
     clipboard: Option<String>,
     bell: bool,
     size: GhosttySizeReportSize,
+    render_held: bool,
+    render_hold_started: Option<Instant>,
+    render_hold_scrollbar: GhosttyTerminalScrollbar,
 }
 
 struct SnapshotStorage {
@@ -234,6 +241,26 @@ unsafe extern "C" fn size(
 unsafe extern "C" fn bell(_: GhosttyTerminal, ud: *mut c_void) {
     let shared = unsafe { &mut *(ud as *mut Shared) };
     shared.bell = true;
+}
+
+unsafe extern "C" fn render_hold(term: GhosttyTerminal, ud: *mut c_void, held: bool) {
+    let shared = unsafe { &mut *(ud as *mut Shared) };
+    if held {
+        ok(unsafe { ghostty_render_state_update(shared.state, term) });
+        let mut sb = GhosttyTerminalScrollbar::default();
+        let _ = unsafe {
+            ghostty_terminal_get(
+                term,
+                GHOSTTY_TERMINAL_DATA_SCROLLBAR,
+                &mut sb as *mut _ as *mut c_void,
+            )
+        };
+        shared.render_hold_scrollbar = sb;
+        shared.render_hold_started = Some(Instant::now());
+    } else {
+        shared.render_hold_started = None;
+    }
+    shared.render_held = held;
 }
 
 unsafe extern "C" fn clipboard_write(
@@ -383,6 +410,7 @@ impl Model {
 
             let geom = SurfaceGeometry::default();
             let mut shared = Box::new(Shared {
+                state,
                 replies: Vec::new(),
                 clipboard: None,
                 bell: false,
@@ -392,6 +420,9 @@ impl Model {
                     cell_width: geom.cell_width,
                     cell_height: geom.cell_height,
                 },
+                render_held: false,
+                render_hold_started: None,
+                render_hold_scrollbar: GhosttyTerminalScrollbar::default(),
             });
             ghostty_terminal_set(
                 term,
@@ -421,6 +452,12 @@ impl Model {
                 term,
                 GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE,
                 std::mem::transmute::<GhosttyTerminalClipboardWriteFn, *const c_void>(clip_cb),
+            );
+            let hold_cb: GhosttyTerminalRenderHoldFn = Some(render_hold);
+            ghostty_terminal_set(
+                term,
+                GHOSTTY_TERMINAL_OPT_RENDER_HOLD,
+                std::mem::transmute::<GhosttyTerminalRenderHoldFn, *const c_void>(hold_cb),
             );
             let max: usize = 10_000_000;
             ghostty_terminal_set(
@@ -529,10 +566,92 @@ impl Model {
                 ));
             }
         }
+        self.release_render_hold();
         self.revision += 1;
     }
 
+    fn release_render_hold(&mut self) {
+        if !self.shared.render_held {
+            return;
+        }
+        let cfg = GhosttyTerminalModeConfig {
+            mode: dec_mode(2026),
+            value: false,
+        };
+        unsafe {
+            let _ = ghostty_terminal_set(
+                self.term,
+                GHOSTTY_TERMINAL_OPT_MODE,
+                &cfg as *const _ as *const c_void,
+            );
+        }
+        self.shared.render_held = false;
+        self.shared.render_hold_started = None;
+    }
+
+    pub fn expire_render_hold_if_due(&mut self) -> bool {
+        if self.shared.render_held
+            && self
+                .shared
+                .render_hold_started
+                .is_some_and(|t| t.elapsed() >= RENDER_HOLD_TIMEOUT)
+        {
+            self.release_render_hold();
+            self.revision += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_render_held(&self) -> bool {
+        self.shared.render_held
+    }
+
+    pub fn render_state_dirty(&self) -> bool {
+        let mut dirty = GHOSTTY_RENDER_STATE_DIRTY_FALSE;
+        unsafe {
+            let _ = ghostty_render_state_get(
+                self.state,
+                GHOSTTY_RENDER_STATE_DATA_DIRTY,
+                &mut dirty as *mut _ as *mut c_void,
+            );
+        }
+        dirty != GHOSTTY_RENDER_STATE_DIRTY_FALSE
+    }
+
+    /// Predicts the terminal column span of `text` using `libghostty-vt`'s exact
+    /// Unicode width table and mode-2027 grapheme clustering state.
+    pub fn measure_text_cells(&self, text: &str) -> u16 {
+        if text.is_empty() {
+            return 0;
+        }
+        let mut total = 0usize;
+        if self.mode(dec_mode(2027)) {
+            let cps: Vec<u32> = text.chars().map(u32::from).collect();
+            let mut idx = 0usize;
+            while idx < cps.len() {
+                let mut w = 0u8;
+                let step = unsafe {
+                    ghostty_unicode_grapheme_width(cps[idx..].as_ptr(), cps.len() - idx, &mut w)
+                };
+                if step == 0 {
+                    break;
+                }
+                total = total.saturating_add(usize::from(w));
+                idx += step;
+            }
+        } else {
+            for ch in text.chars() {
+                let w = unsafe { ghostty_unicode_codepoint_width(u32::from(ch)) };
+                total = total.saturating_add(usize::from(w));
+            }
+        }
+        u16::try_from(total).unwrap_or(u16::MAX)
+    }
+
     pub fn write(&mut self, data: &[u8]) {
+        let _ = self.expire_render_hold_if_due();
         unsafe { ghostty_terminal_vt_write(self.term, data.as_ptr(), data.len()) };
         self.revision += 1;
     }
@@ -631,6 +750,7 @@ impl Model {
         if delta == 0 {
             return;
         }
+        self.release_render_hold();
         unsafe {
             let mut s = GhosttyTerminalScrollViewport {
                 tag: GHOSTTY_TERMINAL_SCROLL_VIEWPORT_DELTA,
@@ -651,6 +771,7 @@ impl Model {
                 &mut active as *mut _ as *mut c_void,
             );
             if !active {
+                self.release_render_hold();
                 let s = GhosttyTerminalScrollViewport {
                     tag: GHOSTTY_TERMINAL_SCROLL_VIEWPORT_BOTTOM,
                     ..Default::default()
@@ -1122,6 +1243,7 @@ impl Model {
         let Some(grid_ref) = self.viewport_grid_ref(col, row) else {
             return;
         };
+        self.release_render_hold();
         unsafe {
             if shift_extend {
                 let mut existing = GhosttySelection {
@@ -1229,6 +1351,7 @@ impl Model {
         let Some(grid_ref) = self.viewport_grid_ref(col, row) else {
             return 0;
         };
+        self.release_render_hold();
         let geom = self.gesture_geometry();
         let pos = GhosttySurfacePosition { x: x_px, y: y_px };
         unsafe {
@@ -1282,6 +1405,7 @@ impl Model {
                     GHOSTTY_TERMINAL_OPT_SELECTION,
                     &selection as *const _ as *const c_void,
                 );
+                self.release_render_hold();
                 self.revision += 1;
             }
             self.selection_autoscroll_direction()
@@ -1342,6 +1466,7 @@ impl Model {
                     GHOSTTY_TERMINAL_OPT_SELECTION,
                     &selection as *const _ as *const c_void,
                 );
+                self.release_render_hold();
                 self.revision += 1;
             }
             self.selection_autoscroll_direction()
@@ -1426,6 +1551,7 @@ impl Model {
             }
         };
         if ok_sel {
+            self.release_render_hold();
             self.revision += 1;
         }
         ok_sel
@@ -1433,6 +1559,7 @@ impl Model {
 
     pub fn clear_selection(&mut self) {
         if self.has_selection() {
+            self.release_render_hold();
             unsafe {
                 ghostty_selection_gesture_reset(self.gesture, self.term);
                 let _ = ghostty_terminal_set(
@@ -1655,8 +1782,11 @@ impl Model {
     }
 
     pub fn render_snapshot(&mut self, status: &str, force_full: bool) -> RenderSnapshot {
+        let _ = self.expire_render_hold_if_due();
         unsafe {
-            ok(ghostty_render_state_update(self.state, self.term));
+            if !self.shared.render_held {
+                ok(ghostty_render_state_update(self.state, self.term));
+            }
 
             let mut cols = 0u16;
             let mut rows = 0u16;
@@ -1985,12 +2115,17 @@ impl Model {
             }
             self.snap.cursor = next_cursor;
 
-            let mut sb = GhosttyTerminalScrollbar::default();
-            let _ = ghostty_terminal_get(
-                self.term,
-                GHOSTTY_TERMINAL_DATA_SCROLLBAR,
-                &mut sb as *mut _ as *mut c_void,
-            );
+            let sb = if self.shared.render_held {
+                self.shared.render_hold_scrollbar
+            } else {
+                let mut live_sb = GhosttyTerminalScrollbar::default();
+                let _ = ghostty_terminal_get(
+                    self.term,
+                    GHOSTTY_TERMINAL_DATA_SCROLLBAR,
+                    &mut live_sb as *mut _ as *mut c_void,
+                );
+                live_sb
+            };
             let next_sb = RenderScrollbar {
                 total: sb.total,
                 offset: sb.offset,
@@ -2425,5 +2560,80 @@ mod tests {
         assert!(model.frame().cursor.is_none());
         model.resize(60, 12);
         assert_eq!(model.frame().rows.len(), 12);
+    }
+
+    #[test]
+    fn synchronized_output_mode_2026_freezes_intermediate_cursor_jumps_until_end_or_timeout() {
+        let mut model = Model::new(40, 8);
+        model.write("> 你好".as_bytes());
+        assert_eq!(model.frame().cursor, Some((6, 0)));
+
+        // Simulate a shell/TUI wrapping a status-bar + prompt redraw in DEC mode 2026,
+        // split across multiple PTY reads so the cursor temporarily jumps to (0, 3) mid-frame.
+        model.write(b"!\x1b[?2026h\x1b[4;1H[status: thinking]");
+        assert!(model.is_render_held());
+
+        // Pre-hold byte '!' written before \x1b[?2026h is visible, while mid-hold cursor jump
+        // and status line remain frozen out of rendered snapshots.
+        let held_frame = model.frame();
+        assert_eq!(held_frame.cursor, Some((7, 0)));
+        let held_text = text(&mut model);
+        assert!(held_text.contains("> 你好!"));
+        assert!(!held_text.contains("[status: thinking]"));
+
+        // Second mid-hold chunk moves cursor to (0, 0) and rewrites prompt; still held.
+        model.write("\x1b[1;1H\x1b[2K> 你好，世界".as_bytes());
+        assert!(model.is_render_held());
+        assert_eq!(model.frame().cursor, Some((7, 0)));
+
+        // Ending synchronized output (\x1b[?2026l) atomically reveals both rows and final cursor.
+        model.write(b"\x1b[?2026l");
+        assert!(!model.is_render_held());
+        let final_frame = model.frame();
+        assert_eq!(final_frame.cursor, Some((12, 0)));
+        let final_text = text(&mut model);
+        assert!(final_text.contains("> 你好，世界"));
+        assert!(final_text.contains("[status: thinking]"));
+
+        // Safety timeout: if an app enters mode 2026 and stalls past RENDER_HOLD_TIMEOUT,
+        // expire_render_hold_if_due unfreezes the terminal cleanly.
+        model.write(b"\x1b[?2026h\x1b[2;1Hstalled-frame");
+        assert!(model.is_render_held());
+        assert!(!text(&mut model).contains("stalled-frame"));
+        model.shared.render_hold_started =
+            Some(Instant::now() - RENDER_HOLD_TIMEOUT - Duration::from_millis(10));
+        assert!(model.expire_render_hold_if_due());
+        assert!(!model.is_render_held());
+        assert!(text(&mut model).contains("stalled-frame"));
+    }
+
+    #[test]
+    fn measure_text_cells_matches_ghostty_vt_cursor_advancement() {
+        let mut model = Model::new(80, 4);
+        for sample in [
+            "nihao",
+            "你好",
+            "你好，世界！",
+            "abc你好123",
+            "😀🚀",
+            "e\u{0301}",
+        ] {
+            model.write(b"\r\x1b[2K");
+            let predicted = model.measure_text_cells(sample);
+            model.write(sample.as_bytes());
+            let actual = model.frame().cursor.expect("visible cursor").0;
+            assert_eq!(
+                predicted, actual,
+                "predicted cell width must match VT cursor column for {sample:?}"
+            );
+        }
+
+        // Also verify mode 2027 grapheme clustering width agreement (e.g. ZWJ emoji sequence).
+        model.write(b"\x1b[?2027h\r\x1b[2K");
+        let zwj = "👨\u{200D}💻";
+        let predicted_2027 = model.measure_text_cells(zwj);
+        model.write(zwj.as_bytes());
+        let actual_2027 = model.frame().cursor.expect("visible cursor").0;
+        assert_eq!(predicted_2027, actual_2027);
     }
 }

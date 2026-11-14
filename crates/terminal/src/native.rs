@@ -105,6 +105,7 @@ pub struct CbCallbacks {
     pub accessibility_text: extern "C" fn(*mut c_void, *mut usize) -> *const u8,
     pub take_clipboard: extern "C" fn(*mut c_void, *mut usize) -> *const u8,
     pub take_bell: extern "C" fn(*mut c_void) -> bool,
+    pub measure_text: extern "C" fn(*mut c_void, *const u8, usize) -> u16,
 }
 
 unsafe extern "C" {
@@ -120,6 +121,10 @@ unsafe extern "C" {
     fn cb_terminal_free_cstring(ptr: *mut i8);
     #[cfg(test)]
     fn cb_terminal_test_mutable_ime_buffers(view: *mut c_void) -> bool;
+    #[cfg(test)]
+    fn cb_terminal_test_ime_commit_cursor_hold(view: *mut c_void) -> bool;
+    #[cfg(test)]
+    fn cb_terminal_test_verify_post_echo_cursor(view: *mut c_void, expected_x: u16) -> bool;
 }
 
 pub fn installed_fonts() -> crate::InstalledFonts {
@@ -458,12 +463,16 @@ fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
             while !stop.load(Ordering::SeqCst) && !failed.load(Ordering::SeqCst) {
                 match attach.recv(Duration::from_millis(15)) {
                     Ok(Some(Event::Data(data))) => {
-                        let replies = {
+                        let (replies, should_wake) = {
                             let mut s = state.lock().unwrap();
                             s.model.write(&data);
-                            s.model.replies()
+                            let should_wake =
+                                !s.model.is_render_held() || s.model.render_state_dirty();
+                            (s.model.replies(), should_wake)
                         };
-                        wake.notify();
+                        if should_wake {
+                            wake.notify();
+                        }
                         let result = attach.consumed(data.len()).and_then(|_| {
                             if replies.is_empty() {
                                 Ok(())
@@ -514,7 +523,11 @@ fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                         reconnect = true;
                         break;
                     }
-                    _ => {}
+                    Ok(None) => {
+                        if state.lock().unwrap().model.expire_render_hold_if_due() {
+                            wake.notify();
+                        }
+                    }
                 }
             }
             input_stop.store(true, Ordering::SeqCst);
@@ -952,6 +965,7 @@ extern "C" fn cb_snapshot(
             host.size_cv.notify_all();
         }
     }
+    let _ = state.model.expire_render_hold_if_due();
     let replies = state.model.replies();
     let status = host.effective_status(&state);
     let status_changed = status != host.seen_status;
@@ -1272,6 +1286,17 @@ extern "C" fn cb_take_bell(host_ptr: *mut c_void) -> bool {
     host.state.lock().unwrap().model.take_bell()
 }
 
+extern "C" fn cb_measure_text(host_ptr: *mut c_void, ptr: *const u8, len: usize) -> u16 {
+    if host_ptr.is_null() || ptr.is_null() || len == 0 {
+        return 0;
+    }
+    let Ok(text) = std::str::from_utf8(unsafe { std::slice::from_raw_parts(ptr, len) }) else {
+        return 0;
+    };
+    let host = unsafe { &*(host_ptr as *const Host) };
+    host.state.lock().unwrap().model.measure_text_cells(text)
+}
+
 fn callbacks() -> CbCallbacks {
     CbCallbacks {
         snapshot: cb_snapshot,
@@ -1289,6 +1314,7 @@ fn callbacks() -> CbCallbacks {
         accessibility_text: cb_accessibility_text,
         take_clipboard: cb_take_clipboard,
         take_bell: cb_take_bell,
+        measure_text: cb_measure_text,
     }
 }
 
@@ -1610,6 +1636,88 @@ mod tests {
     }
 
     #[test]
+    fn ime_commit_holds_optimistic_cursor_until_pty_echo_and_aligns_preedit_rects() {
+        let mut host = Box::new(Host::new());
+        {
+            let mut s = host.state.lock().unwrap();
+            s.connected = true;
+            s.model.write(b"> ");
+        }
+        let (tx, rx) = mpsc::channel();
+        host.input = Some(tx);
+
+        let raw_view = unsafe { cb_terminal_new(&mut *host as *mut _ as *mut c_void, callbacks()) };
+        assert!(!raw_view.is_null());
+
+        let hold_ok = unsafe { cb_terminal_test_ime_commit_cursor_hold(raw_view as *mut c_void) };
+        assert!(
+            hold_ok,
+            "IME commit cursor hold, surrogate preedit rect, and grace fallback must hold"
+        );
+
+        // Drain the three committed UTF-8 chunks ("你好", "，", "好") sent to PTY.
+        let mut committed = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let Input::Bytes(bytes) = msg {
+                committed.extend_from_slice(&bytes);
+            }
+        }
+        assert_eq!(committed, "你好，好".as_bytes());
+
+        // Once the PTY echoes those committed characters back, polling the next snapshot
+        // clears the optimistic hold seamlessly at real cursor column 2 + 8 = 10.
+        host.state.lock().unwrap().model.write(&committed);
+        let post_echo_ok =
+            unsafe { cb_terminal_test_verify_post_echo_cursor(raw_view as *mut c_void, 10) };
+
+        unsafe {
+            cb_terminal_detach(raw_view as *mut c_void);
+            drop(Retained::from_raw(raw_view));
+        }
+        assert!(
+            post_echo_ok,
+            "PTY echo must clear optimistic commit hold and land on real VT cursor column"
+        );
+    }
+
+    #[test]
+    fn snapshot_polling_during_synchronized_output_hides_intermediate_cursor_jumps() {
+        let mut host = Host::new();
+        host.state.lock().unwrap().connected = true;
+        let ptr = &mut host as *mut Host as *mut c_void;
+        let geom = default_geom();
+
+        host.state.lock().unwrap().model.write("> 输入".as_bytes());
+        let snap1 = unsafe { &*cb_snapshot(ptr, geom, false) };
+        assert_eq!((snap1.cursor.x, snap1.cursor.y), (6, 0));
+
+        // Simulate TUI entering DEC mode 2026 and moving cursor to row 5 status bar mid-redraw,
+        // while a concurrent keyDown: calls pollSnapshotForceFull:NO.
+        host.state
+            .lock()
+            .unwrap()
+            .model
+            .write(b"\x1b[?2026h\x1b[6;1H[status]\x1b[1;1H");
+        let mid_ptr = cb_snapshot(ptr, geom, false);
+        assert!(!mid_ptr.is_null());
+        let mid_snap = unsafe { &*mid_ptr };
+        assert_eq!(
+            (mid_snap.cursor.x, mid_snap.cursor.y),
+            (6, 0),
+            "mid-hold poll must keep pre-hold cursor rather than flashing at row 5 / col 0"
+        );
+
+        // Completing synchronized redraw reveals final prompt cursor in a single step.
+        host.state
+            .lock()
+            .unwrap()
+            .model
+            .write("\x1b[1;1H\x1b[2K> 输入中文\x1b[?2026l".as_bytes());
+        let end_snap = unsafe { &*cb_snapshot(ptr, geom, false) };
+        assert_eq!((end_snap.cursor.x, end_snap.cursor.y), (10, 0));
+    }
+
+    #[test]
     fn initial_connecting_grace_hides_status_pill_then_reveals_on_slow_connect() {
         let mut host = Host::new();
         {
@@ -1729,10 +1837,16 @@ mod tests {
         assert!(!cb_snapshot(ptr, zero_geom, true).is_null());
         {
             let s = host.state.lock().unwrap();
-            assert!(!s.size_ready, "pre-layout 0x0 snapshot must not mark size_ready");
+            assert!(
+                !s.size_ready,
+                "pre-layout 0x0 snapshot must not mark size_ready"
+            );
             assert_eq!((s.model.cols, s.model.height), (80, 24));
         }
-        assert!(rx.try_recv().is_err(), "pre-layout 0x0 snapshot must not emit Resize");
+        assert!(
+            rx.try_recv().is_err(),
+            "pre-layout 0x0 snapshot must not emit Resize"
+        );
 
         let real_geom = CbGeometry {
             cols: 96,

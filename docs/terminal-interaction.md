@@ -65,7 +65,7 @@ Traversal restores selection and the existing window-owned drafts/scroll positio
 
 The native component now sends human input on a dedicated blocking-receive worker, independent of output polling. First-connection keystrokes are buffered for that binding; disconnected input is discarded and never replayed on reconnection. Ordinary pending product operations no longer globally disable an already attached Terminal. Explicit overlays and connection/closing gates still suspend input.
 
-The AppKit viewer checks updates at up to 60 Hz, invalidates changed rows/cursor/status regions, and skips unrelated rows while drawing. Frame JSON serialization occurs after releasing the VT-model lock. The terminal remains a libghostty VT model with an AppKit renderer; this change does not claim a GPU renderer or measured end-to-end display latency.
+The AppKit viewer checks updates at up to 60 Hz, invalidates changed rows/cursor/status regions, and skips unrelated rows while drawing. DEC mode 2026 synchronized output (`GHOSTTY_TERMINAL_OPT_RENDER_HOLD`, with a 1-second stall safety timeout) freezes intermediate cursor/screen mutations until a redraw completes, while CJK IME composition draws an inline preedit caret and holds the committed cursor column across the brief async PTY-echo gap so Chinese typing does not flash the cursor backward. The terminal remains a libghostty VT model with an AppKit renderer; this change does not claim a GPU renderer or measured end-to-end display latency.
 
 ## Verification
 

@@ -427,7 +427,7 @@ pub const TERMINAL: &str = concat!(
     "\x1b[1;38;2;110;210;255m│\x1b[0m CJK    : 世界你好 · café · Grid [中文对齐] · Blocks ░▒▓█▀▄▌▐  \x1b[1;38;2;110;210;255m│\x1b[0m\r\n",
     "\x1b[1;38;2;110;210;255m│\x1b[0m Braille: ⠁⠃⠇⠏⠟⠿⣿ · Links: https://canban.dev (\x1b]8;;https://ghostty.org\x07OSC-8 link\x1b]8;;\x07)     \x1b[1;38;2;110;210;255m│\x1b[0m\r\n",
     "\x1b[1;38;2;110;210;255m╰───────────────────────────────────────────────────────────────╯\x1b[0m\r\n",
-    "\x1b[32m❯\x1b[0m Select text, Cmd-hover links, or change Terminal font in Settings.\r\n",
+    "\x1b[?2026h\x1b[32m❯\x1b[0m Select text, Cmd-hover links, or type 中文 smoothly in Terminal.\x1b[?2026l\r\n",
 );
 
 pub fn workspace() -> canban_types::Snapshot {

@@ -123,6 +123,7 @@ typedef struct {
   const uint8_t *(*accessibility_text)(void *, size_t *);
   const uint8_t *(*take_clipboard)(void *, size_t *);
   bool (*take_bell)(void *);
+  uint16_t (*measure_text)(void *, const uint8_t *, size_t);
 } CbCallbacks;
 
 enum {
@@ -176,6 +177,8 @@ enum {
 
 static const CGFloat kPadX = 8.0;
 static const CGFloat kPadY = 6.0;
+static const NSTimeInterval kCommitHoldGrace = 0.12;
+static const NSTimeInterval kRecentUnmarkWindow = 0.06;
 
 static uint16_t cb_mods_from_flags(NSEventModifierFlags raw) {
   uint16_t mods = 0;
@@ -219,9 +222,47 @@ static uint32_t cb_first_scalar(NSString *s) {
 
 static int cb_char_cells(uint32_t cp) {
   if (cp == 0)
-    return 1;
+    return 0;
   int w = wcwidth((wchar_t)cp);
-  return w == 2 ? 2 : 1;
+  if (w <= 0)
+    return 0;
+  return w >= 2 ? 2 : 1;
+}
+
+static bool cb_is_single_line_printable(NSString *s) {
+  if (!s || s.length == 0)
+    return false;
+  NSUInteger len = s.length;
+  for (NSUInteger i = 0; i < len; i++) {
+    unichar c = [s characterAtIndex:i];
+    if (c < 0x20 || c == 0x7f || (c >= 0xF700 && c <= 0xF8FF))
+      return false;
+  }
+  return true;
+}
+
+static bool cb_contains_non_ascii(NSString *s) {
+  if (!s)
+    return false;
+  NSUInteger len = s.length;
+  for (NSUInteger i = 0; i < len; i++) {
+    if ([s characterAtIndex:i] >= 0x80)
+      return true;
+  }
+  return false;
+}
+
+static NSUInteger cb_clamp_utf16_boundary(NSString *s, NSUInteger idx) {
+  if (!s)
+    return 0;
+  NSUInteger len = s.length;
+  if (idx >= len)
+    return len;
+  if (idx > 0 && CFStringIsSurrogateLowCharacter([s characterAtIndex:idx]) &&
+      CFStringIsSurrogateHighCharacter([s characterAtIndex:idx - 1])) {
+    return idx - 1;
+  }
+  return idx;
 }
 
 static bool cb_draw_box_or_block(CGContextRef ctx, uint32_t cp, NSRect cell,
@@ -767,6 +808,13 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 @property(nonatomic) BOOL didDoCommand;
 @property(nonatomic) BOOL didUpdateMarkedText;
 @property(nonatomic) SEL pendingCommandSelector;
+@property(nonatomic) BOOL commitCursorActive;
+@property(nonatomic) uint16_t commitOriginX;
+@property(nonatomic) uint16_t commitOriginY;
+@property(nonatomic) uint16_t commitTargetX;
+@property(nonatomic) uint16_t commitTargetY;
+@property(nonatomic) NSTimeInterval commitHoldUntil;
+@property(nonatomic) NSTimeInterval lastUnmarkTime;
 
 @property(nonatomic, strong) NSTimer *animTimer;
 @property(nonatomic) NSTimeInterval lastBlinkTime;
@@ -850,6 +898,9 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   _physicalKeyDownHi = 0;
   [self.inputContext discardMarkedText];
   [self unmarkText];
+  _commitCursorActive = NO;
+  _commitHoldUntil = 0;
+  _lastUnmarkTime = 0;
   _selectingLocally = NO;
   _autoscrollDir = 0;
   _hoverLinkValid = NO;
@@ -892,6 +943,9 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 - (void)detachHost {
   _host = NULL;
   _snap = NULL;
+  _commitCursorActive = NO;
+  _commitHoldUntil = 0;
+  _lastUnmarkTime = 0;
   [self.animTimer invalidate];
   self.animTimer = nil;
   [[NSNotificationCenter defaultCenter] removeObserver:self];
@@ -1047,6 +1101,115 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   return NSMakeRect(0.0, y - 1.0, self.bounds.size.width, _cellHeight + 2.0);
 }
 
+- (NSUInteger)cellWidthOfString:(NSString *)str {
+  if (!str || str.length == 0)
+    return 0;
+  if (_host && _cb.measure_text) {
+    NSData *utf8 = [str dataUsingEncoding:NSUTF8StringEncoding];
+    if (utf8 && utf8.length > 0) {
+      return (NSUInteger)_cb.measure_text(_host, (const uint8_t *)utf8.bytes,
+                                          utf8.length);
+    }
+  }
+  NSUInteger total = 0;
+  for (NSUInteger idx = 0; idx < str.length; idx++) {
+    unichar u = [str characterAtIndex:idx];
+    uint32_t scalar = u;
+    if (CFStringIsSurrogateHighCharacter(u) && idx + 1 < str.length) {
+      unichar u2 = [str characterAtIndex:idx + 1];
+      if (CFStringIsSurrogateLowCharacter(u2)) {
+        scalar = CFStringGetLongCharacterForSurrogatePair(u, u2);
+        idx++;
+      }
+    }
+    total += (NSUInteger)cb_char_cells(scalar);
+  }
+  return total;
+}
+
+- (void)clearCommitCursorHold {
+  if (!_commitCursorActive)
+    return;
+  uint16_t oldTargetY = _commitTargetY;
+  uint16_t oldOriginY = _commitOriginY;
+  _commitCursorActive = NO;
+  _commitHoldUntil = 0;
+  if (_snap && oldTargetY < _snap->rows) {
+    [self setNeedsDisplayInRect:[self rectForRow:oldTargetY]];
+  }
+  if (_snap && oldOriginY < _snap->rows && oldOriginY != oldTargetY) {
+    [self setNeedsDisplayInRect:[self rectForRow:oldOriginY]];
+  }
+}
+
+- (void)recordOptimisticCommitForText:(NSString *)text hadMarked:(BOOL)hadMarked {
+  if (!_snap || !_snap->cursor.visible || _snap->cols == 0 || _snap->rows == 0)
+    return;
+  if (!cb_is_single_line_printable(text)) {
+    [self clearCommitCursorHold];
+    return;
+  }
+  NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+  BOOL recentUnmark =
+      (_lastUnmarkTime > 0.0 && (now - _lastUnmarkTime) <= kRecentUnmarkWindow);
+  BOOL shouldHold = hadMarked || recentUnmark || cb_contains_non_ascii(text);
+  if (!shouldHold)
+    return;
+  NSUInteger cells = [self cellWidthOfString:text];
+  if (cells == 0)
+    return;
+
+  uint16_t curX = _snap->cursor.x < _snap->cols ? _snap->cursor.x
+                                                : (_snap->cols - 1);
+  uint16_t curY = _snap->cursor.y < _snap->rows ? _snap->cursor.y
+                                                : (_snap->rows - 1);
+  uint16_t baseX = curX;
+  if (_commitCursorActive && now < _commitHoldUntil &&
+      curX == _commitOriginX && curY == _commitOriginY) {
+    baseX = _commitTargetX;
+  } else {
+    _commitOriginX = curX;
+    _commitOriginY = curY;
+  }
+  NSUInteger nextX = MIN((NSUInteger)(_snap->cols - 1), (NSUInteger)baseX + cells);
+  _commitTargetX = (uint16_t)nextX;
+  _commitTargetY = curY;
+  _commitHoldUntil = now + kCommitHoldGrace;
+  _commitCursorActive = YES;
+  [self setNeedsDisplayInRect:[self rectForRow:curY]];
+  [self updateAnimTimerState];
+}
+
+- (BOOL)effectiveCursorX:(uint16_t *)outX y:(uint16_t *)outY {
+  if (!_snap || _snap->cols == 0 || _snap->rows == 0) {
+    if (outX)
+      *outX = 0;
+    if (outY)
+      *outY = 0;
+    return NO;
+  }
+  uint16_t curX = _snap->cursor.x < _snap->cols ? _snap->cursor.x
+                                                : (_snap->cols - 1);
+  uint16_t curY = _snap->cursor.y < _snap->rows ? _snap->cursor.y
+                                                : (_snap->rows - 1);
+  if (_commitCursorActive && _snap->cursor.visible) {
+    NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+    if (now < _commitHoldUntil && curX == _commitOriginX &&
+        curY == _commitOriginY) {
+      if (outX)
+        *outX = _commitTargetX < _snap->cols ? _commitTargetX : (_snap->cols - 1);
+      if (outY)
+        *outY = _commitTargetY < _snap->rows ? _commitTargetY : (_snap->rows - 1);
+      return YES;
+    }
+  }
+  if (outX)
+    *outX = curX;
+  if (outY)
+    *outY = curY;
+  return NO;
+}
+
 - (void)pollSnapshotForceFull:(BOOL)forceFull {
   if (!_host || !_cb.snapshot)
     return;
@@ -1077,6 +1240,14 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
     return;
   }
   _snap = next;
+
+  if (_commitCursorActive) {
+    NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+    if (!next->cursor.visible || next->cursor.x != _commitOriginX ||
+        next->cursor.y != _commitOriginY || now >= _commitHoldUntil) {
+      [self clearCommitCursorHold];
+    }
+  }
 
   if (next->scrollbar.total > next->scrollbar.len &&
       (next->scrollbar.offset != _prevScrollOffset ||
@@ -1127,10 +1298,12 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   BOOL needAutoscroll = (_selectingLocally && _autoscrollDir != 0);
   BOOL needScrollbarFade = (now < _scrollbarVisibleUntil + 0.25);
   BOOL needLayoutSettle = (_pendingLayoutRedraws > 0);
-  BOOL needed =
-      needCursorBlink || needAutoscroll || needScrollbarFade || needLayoutSettle;
+  BOOL needCommitHold = _commitCursorActive;
+  BOOL needed = needCursorBlink || needAutoscroll || needScrollbarFade ||
+                needLayoutSettle || needCommitHold;
 
-  NSTimeInterval desiredInterval = needAutoscroll ? 0.033 : 0.08;
+  NSTimeInterval desiredInterval =
+      (needAutoscroll || needCommitHold) ? 0.033 : 0.08;
   if (!needed) {
     [self.animTimer invalidate];
     self.animTimer = nil;
@@ -1158,6 +1331,9 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
     return;
   }
   NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
+  if (_commitCursorActive && now >= _commitHoldUntil) {
+    [self clearCommitCursorHold];
+  }
   if (_selectingLocally && _autoscrollDir != 0 && _cb.select) {
     CbSelectEvent ev = {0};
     ev.kind = 3; // autoscroll tick
@@ -1220,6 +1396,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
     _physicalKeyDownHi = 0;
     [self.inputContext discardMarkedText];
     [self unmarkText];
+    [self clearCommitCursorHold];
   } else if (self.window.firstResponder == self) {
     [self.inputContext activate];
   }
@@ -1348,6 +1525,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
     _physicalKeyDownHi = 0;
     [self.inputContext discardMarkedText];
     [self unmarkText];
+    [self clearCommitCursorHold];
     NSEvent *ev = [NSApp currentEvent];
     BOOL keyboardTabStop = (ev && ev.type == NSEventTypeKeyDown &&
                             (ev.keyCode == 0x30 || ev.keyCode == 0x35));
@@ -1488,15 +1666,18 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   }
 
   BOOL cursorSolidBlock = NO;
-  uint16_t curX = snap->cursor.x;
-  uint16_t curY = snap->cursor.y;
+  uint16_t curX = 0;
+  uint16_t curY = 0;
+  BOOL optimisticCursor = [self effectiveCursorX:&curX y:&curY];
   int curCells = 1;
   BOOL showCursor = snap->cursor.visible &&
                     (!_focusedState || !snap->cursor.blinking || _cursorBlinkVisible);
   if (showCursor && curY < rows && curX < cols) {
-    const CbRenderCell *cc = &snap->cells[(size_t)curY * cols + curX];
-    if (cc->wide == CB_WIDE_WIDE && curX + 1 < cols) {
-      curCells = 2;
+    if (!optimisticCursor) {
+      const CbRenderCell *cc = &snap->cells[(size_t)curY * cols + curX];
+      if (cc->wide == CB_WIDE_WIDE && curX + 1 < cols) {
+        curCells = 2;
+      }
     }
     if (_focusedState && snap->cursor.style == CB_CURSOR_BLOCK &&
         ![self hasMarkedText]) {
@@ -1731,32 +1912,13 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
     CFRelease(curColor);
   }
 
-  // Pass 4: IME preedit (markedText) overlay at cursor position.
+  // Pass 4: IME preedit (markedText) overlay at cursor position with active caret.
   if ([self hasMarkedText] && self.markedTextStr.length > 0 && curY < rows) {
-    CGFloat mx = kPadX + (CGFloat)curX * cw;
+    uint16_t anchorCol = curX < cols ? curX : (cols - 1);
+    CGFloat mx = kPadX + (CGFloat)anchorCol * cw;
     CGFloat my = kPadY + (CGFloat)curY * ch;
     NSString *marked = self.markedTextStr;
-    NSUInteger cellSpan = 0;
-    for (NSUInteger idx = 0; idx < marked.length; idx++) {
-      unichar u = [marked characterAtIndex:idx];
-      uint32_t scalar = u;
-      if (CFStringIsSurrogateHighCharacter(u) && idx + 1 < marked.length) {
-        unichar u2 = [marked characterAtIndex:idx + 1];
-        if (CFStringIsSurrogateLowCharacter(u2)) {
-          scalar = CFStringGetLongCharacterForSurrogatePair(u, u2);
-          idx++;
-        }
-      }
-      cellSpan += (NSUInteger)cb_char_cells(scalar);
-    }
-    CGFloat mw =
-        fmin(fmax(cw, (CGFloat)cellSpan * cw), self.bounds.size.width - mx - kPadX);
-    CGFloat bgPreComp[4] = {bgR / 255.0, bgG / 255.0, bgB / 255.0, 0.96};
-    CGColorRef preBg = CGColorCreate(cs, bgPreComp);
-    CGContextSetFillColorWithColor(ctx, preBg);
-    CGContextFillRect(ctx, CGRectMake(mx, my, mw, ch));
-    CFRelease(preBg);
-
+    NSUInteger cellSpan = [self cellWidthOfString:marked];
     NSColor *fgNs = [NSColor colorWithDeviceRed:snap->foreground[0] / 255.0
                                           green:snap->foreground[1] / 255.0
                                            blue:snap->foreground[2] / 255.0
@@ -1769,6 +1931,18 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
         [[NSAttributedString alloc] initWithString:marked attributes:attrs];
     CTLineRef line =
         CTLineCreateWithAttributedString((__bridge CFAttributedStringRef)attr);
+    CGFloat lineTypoW =
+        line ? ceil(CTLineGetTypographicBounds(line, NULL, NULL, NULL)) : 0.0;
+    CGFloat maxAvailW = fmax(cw, self.bounds.size.width - mx - kPadX);
+    CGFloat mw = fmin(fmax(cw, fmax((CGFloat)cellSpan * cw, lineTypoW)),
+                      maxAvailW);
+
+    CGFloat bgPreComp[4] = {bgR / 255.0, bgG / 255.0, bgB / 255.0, 0.96};
+    CGColorRef preBg = CGColorCreate(cs, bgPreComp);
+    CGContextSetFillColorWithColor(ctx, preBg);
+    CGContextFillRect(ctx, CGRectMake(mx, my, mw, ch));
+    CFRelease(preBg);
+
     if (line) {
       CGContextSaveGState(ctx);
       CGContextTranslateCTM(ctx, mx, my + _baselineOffset);
@@ -1777,8 +1951,8 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
       CGContextSetTextPosition(ctx, 0.0, 0.0);
       CTLineDraw(line, ctx);
       CGContextRestoreGState(ctx);
-      CFRelease(line);
     }
+
     CGFloat ulComp[4] = {snap->cursor.color[0] / 255.0,
                          snap->cursor.color[1] / 255.0,
                          snap->cursor.color[2] / 255.0, 0.9};
@@ -1789,7 +1963,52 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
                          rowTopY:my
                            width:mw
                            color:preUl];
+
+    // Draw active clause emphasis and preedit bar caret so cursor never vanishes
+    // while composing or moving inside Pinyin/Kana preedit text.
+    NSRange selRange = self.selectedRangeVal;
+    if (selRange.location != NSNotFound && selRange.length > 0 && line) {
+      NSUInteger clauseStart = cb_clamp_utf16_boundary(marked, selRange.location);
+      NSUInteger clauseEnd =
+          cb_clamp_utf16_boundary(marked, NSMaxRange(selRange));
+      CGFloat sx = CTLineGetOffsetForStringIndex(line, (CFIndex)clauseStart, NULL);
+      CGFloat ex = CTLineGetOffsetForStringIndex(line, (CFIndex)clauseEnd, NULL);
+      CGFloat clauseW = fmin(mw - sx, fmax(0.0, ex - sx));
+      if (clauseW > 0.5) {
+        [self drawUnderlineInContext:ctx
+                               style:CB_UNDERLINE_DOUBLE
+                                   x:mx + sx
+                             rowTopY:my
+                               width:clauseW
+                               color:preUl];
+      }
+    }
+    if (_focusedState) {
+      NSUInteger rawCaret = (selRange.location == NSNotFound)
+                                ? marked.length
+                                : MIN(marked.length, NSMaxRange(selRange));
+      NSUInteger caretIdx = cb_clamp_utf16_boundary(marked, rawCaret);
+      CGFloat caretOff = 0.0;
+      if (line) {
+        caretOff = CTLineGetOffsetForStringIndex(line, (CFIndex)caretIdx, NULL);
+      } else if (caretIdx > 0) {
+        caretOff =
+            (CGFloat)[self cellWidthOfString:[marked substringToIndex:caretIdx]] *
+            cw;
+      }
+      CGFloat barW = fmax(2.0, round(cw * 0.22));
+      CGFloat caretX = mx + fmax(0.0, fmin(mw, caretOff));
+      if (caretX + barW > self.bounds.size.width - kPadX) {
+        caretX = fmax(mx, self.bounds.size.width - kPadX - barW);
+      }
+      CGContextSetFillColorWithColor(ctx, preUl);
+      CGContextFillRect(ctx, CGRectMake(caretX, my, barW, ch));
+    }
+
     CFRelease(preUl);
+    if (line) {
+      CFRelease(line);
+    }
   }
 
   // Pass 5: Scrollbar thumb overlay when scrolled up or actively scrolling.
@@ -1948,6 +2167,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   NSData *utf8 = [text dataUsingEncoding:NSUTF8StringEncoding];
   if (!utf8 || utf8.length == 0)
     return;
+  [self clearCommitCursorHold];
   _cb.paste(_host, (const uint8_t *)utf8.bytes, utf8.length);
   [self pollSnapshotForceFull:NO];
 }
@@ -1966,6 +2186,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   (void)sender;
   if (!_host || !_cb.clear_screen)
     return;
+  [self clearCommitCursorHold];
   _cb.clear_screen(_host);
   [self pollSnapshotForceFull:NO];
 }
@@ -2091,6 +2312,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   // avoids IME interception and prevents XPC Mach-port stalls on Ctrl+C / Ctrl+D.
   if (!markedBefore &&
       (rawFlags & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) != 0) {
+    [self clearCommitCursorHold];
     NSString *chars = [self translatedCharactersForEvent:event];
     NSData *utf8 = [chars dataUsingEncoding:NSUTF8StringEncoding];
     CbKeyEvent kev = {0};
@@ -2167,6 +2389,8 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
         // replaces them with the underlying physical keycode (e.g. keyCode 0 -> 'a').
         if (_cb.text) {
           _cb.text(_host, (const uint8_t *)utf8.bytes, utf8.length);
+          [self recordOptimisticCommitForText:str
+                                    hadMarked:(markedBefore || updatedMarked)];
         }
       } else {
         CbKeyEvent kev = {0};
@@ -2180,7 +2404,14 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
         kev.utf8_ptr = (const uint8_t *)utf8.bytes;
         kev.utf8_len = utf8.length;
         [self setPhysicalKey:kcode down:YES];
-        _cb.key(_host, kev);
+        if (_cb.key(_host, kev)) {
+          if (_commitCursorActive &&
+              (mods & (CB_MODS_CTRL | CB_MODS_ALT | CB_MODS_SUPER)) == 0) {
+            [self recordOptimisticCommitForText:str hadMarked:YES];
+          } else {
+            [self clearCommitCursorHold];
+          }
+        }
       }
     }
   } else if (cmdSel == @selector(paste:)) {
@@ -2196,6 +2427,9 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
     // raw Backspace/Enter/Escape/Arrows to the PTY.
   } else {
     BOOL composing = ([self hasMarkedText] || markedBefore || updatedMarked);
+    if (!composing) {
+      [self clearCommitCursorHold];
+    }
     NSString *chars = [self translatedCharactersForEvent:event];
     NSData *utf8 = [chars dataUsingEncoding:NSUTF8StringEncoding];
     CbKeyEvent kev = {0};
@@ -2216,7 +2450,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 
   [self pollSnapshotForceFull:NO];
   if (markedBefore != [self hasMarkedText] || [self hasMarkedText] ||
-      updatedMarked) {
+      updatedMarked || _commitCursorActive) {
     [self setNeedsDisplay:YES];
   }
 }
@@ -2321,6 +2555,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   // CFMutableString (__NSCFString) and truncates it before interpretKeyEvents:
   // returns; snapshot an immutable copy immediately.
   NSString *text = [raw copy];
+  BOOL hadMarked = [self hasMarkedText];
   [self unmarkText];
   if (!text || text.length == 0)
     return;
@@ -2332,7 +2567,9 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
     NSData *utf8 = [text dataUsingEncoding:NSUTF8StringEncoding];
     if (utf8 && utf8.length > 0) {
       _cb.text(_host, (const uint8_t *)utf8.bytes, utf8.length);
+      [self recordOptimisticCommitForText:text hadMarked:hadMarked];
       [self pollSnapshotForceFull:NO];
+      [self setNeedsDisplay:YES];
     }
   }
 }
@@ -2356,6 +2593,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
         selectedRange:(NSRange)selectedRange
      replacementRange:(NSRange)replacementRange {
   (void)replacementRange;
+  BOOL hadMarked = [self hasMarkedText];
   self.didUpdateMarkedText = YES;
   NSString *raw = [string isKindOfClass:[NSAttributedString class]]
                       ? [(NSAttributedString *)string string]
@@ -2367,6 +2605,9 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
     self.markedRangeVal = NSMakeRange(0, self.markedTextStr.length);
     self.selectedRangeVal = selectedRange;
   } else {
+    if (hadMarked) {
+      _lastUnmarkTime = [NSProcessInfo processInfo].systemUptime;
+    }
     self.markedRangeVal = NSMakeRange(NSNotFound, 0);
     self.selectedRangeVal = NSMakeRange(0, 0);
   }
@@ -2377,6 +2618,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   BOOL had = [self hasMarkedText];
   if (had) {
     self.didUpdateMarkedText = YES;
+    _lastUnmarkTime = [NSProcessInfo processInfo].systemUptime;
   }
   self.markedTextStr = nil;
   self.markedRangeVal = NSMakeRange(NSNotFound, 0);
@@ -2409,8 +2651,14 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
       *actualRange = NSMakeRange(0, 0);
     return nil;
   }
-  NSRange clamped =
-      NSIntersectionRange(range, NSMakeRange(0, self.markedTextStr.length));
+  NSUInteger len = self.markedTextStr.length;
+  NSUInteger loc =
+      (range.location == NSNotFound) ? len : MIN(range.location, len);
+  loc = cb_clamp_utf16_boundary(self.markedTextStr, loc);
+  NSUInteger maxLen = len - loc;
+  NSUInteger end =
+      cb_clamp_utf16_boundary(self.markedTextStr, loc + MIN(range.length, maxLen));
+  NSRange clamped = NSMakeRange(loc, end >= loc ? (end - loc) : 0);
   if (actualRange)
     *actualRange = clamped;
   if (clamped.length == 0)
@@ -2425,35 +2673,50 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 
 - (NSRect)firstRectForCharacterRange:(NSRange)range
                          actualRange:(NSRangePointer)actualRange {
+  NSRange clamped = NSMakeRange(0, 0);
+  if ([self hasMarkedText]) {
+    NSUInteger len = self.markedTextStr.length;
+    NSUInteger loc =
+        (range.location == NSNotFound) ? len : MIN(range.location, len);
+    loc = cb_clamp_utf16_boundary(self.markedTextStr, loc);
+    NSUInteger maxLen = len - loc;
+    NSUInteger end = cb_clamp_utf16_boundary(
+        self.markedTextStr, loc + MIN(range.length, maxLen));
+    clamped = NSMakeRange(loc, end >= loc ? (end - loc) : 0);
+  }
   if (actualRange) {
-    if ([self hasMarkedText]) {
-      *actualRange =
-          NSIntersectionRange(range, NSMakeRange(0, self.markedTextStr.length));
-    } else {
-      *actualRange = NSMakeRange(0, 0);
-    }
+    *actualRange = clamped;
   }
   CGFloat cw = _cellWidth > 0.0 ? _cellWidth : 8.0;
   CGFloat ch = _cellHeight > 0.0 ? _cellHeight : 18.0;
   CGFloat cx = kPadX;
   CGFloat cy = kPadY;
   if (_snap && _snap->cols > 0 && _snap->rows > 0) {
-    uint16_t curX = _snap->cursor.x < _snap->cols ? _snap->cursor.x
-                                                  : (_snap->cols - 1);
-    uint16_t curY = _snap->cursor.y < _snap->rows ? _snap->cursor.y
-                                                  : (_snap->rows - 1);
+    uint16_t curX = 0;
+    uint16_t curY = 0;
+    [self effectiveCursorX:&curX y:&curY];
     cx = kPadX + (CGFloat)curX * cw;
     cy = kPadY + (CGFloat)curY * ch;
   }
-  if ([self hasMarkedText] && range.location != NSNotFound &&
-      range.location > 0 && range.location <= self.markedTextStr.length) {
-    NSUInteger colsOffset = 0;
-    for (NSUInteger i = 0; i < range.location; i++) {
-      colsOffset += (NSUInteger)cb_char_cells([self.markedTextStr characterAtIndex:i]);
+  CGFloat rectW = cw;
+  if ([self hasMarkedText] && self.markedTextStr.length > 0) {
+    if (clamped.location > 0) {
+      NSString *prefix = [self.markedTextStr substringToIndex:clamped.location];
+      cx += (CGFloat)[self cellWidthOfString:prefix] * cw;
     }
-    cx += (CGFloat)colsOffset * cw;
+    if (clamped.length > 0) {
+      NSString *sub = [self.markedTextStr substringWithRange:clamped];
+      NSUInteger spanCells = [self cellWidthOfString:sub];
+      if (spanCells > 0) {
+        rectW = (CGFloat)spanCells * cw;
+      }
+    }
   }
-  NSRect localRect = NSMakeRect(cx, cy, cw, ch);
+  CGFloat maxX = fmax(kPadX, self.bounds.size.width - kPadX - cw);
+  if (self.bounds.size.width > kPadX * 2.0 + cw && cx > maxX) {
+    cx = maxX;
+  }
+  NSRect localRect = NSMakeRect(cx, cy, rectW, ch);
   if (!self.window)
     return localRect;
   NSRect winRect = [self convertRect:localRect toView:nil];
@@ -3070,5 +3333,148 @@ bool cb_terminal_test_mutable_ime_buffers(void *view) {
       return false;
     }
     return true;
+  }
+}
+
+bool cb_terminal_test_ime_commit_cursor_hold(void *view) {
+  if (!view)
+    return false;
+  @autoreleasepool {
+    CanbanTerminal *term = (__bridge CanbanTerminal *)view;
+    NSRange notFound = NSMakeRange(NSNotFound, 0);
+
+    [term setFrame:NSMakeRect(0.0, 0.0, 720.0, 440.0)];
+    term.focusedState = YES;
+    [term pollSnapshotForceFull:YES];
+
+    CGFloat cw = term.cellWidth;
+    if (cw < 4.0)
+      return false;
+
+    uint16_t cx = 0, cy = 0;
+    if ([term effectiveCursorX:&cx y:&cy] || cx != 2 || cy != 0) {
+      return false;
+    }
+
+    // Helper block to exercise offscreen CoreGraphics drawRect: paths.
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
+        initWithBitmapDataPlanes:NULL
+                      pixelsWide:720
+                      pixelsHigh:440
+                   bitsPerSample:8
+                 samplesPerPixel:4
+                        hasAlpha:YES
+                        isPlanar:NO
+                  colorSpaceName:NSDeviceRGBColorSpace
+                     bytesPerRow:0
+                    bitsPerPixel:0];
+    NSGraphicsContext *bmpCtx =
+        rep ? [NSGraphicsContext graphicsContextWithBitmapImageRep:rep] : nil;
+
+    // 1. Pinyin preedit at cursor col 2: end-of-preedit range {5, 0} must
+    // preserve actualRange {5, 0} and place the candidate rect at col 2 + 5.
+    [term setMarkedText:@"nihao"
+           selectedRange:NSMakeRange(5, 0)
+        replacementRange:notFound];
+    NSRange actual = NSMakeRange(0, 0);
+    NSRect caretRect =
+        [term firstRectForCharacterRange:NSMakeRange(5, 0) actualRange:&actual];
+    if (actual.location != 5 || actual.length != 0)
+      return false;
+    if (fabs(caretRect.origin.x - (kPadX + 7.0 * cw)) > 0.05)
+      return false;
+
+    NSRange attrActual = NSMakeRange(0, 0);
+    NSAttributedString *emptyTail =
+        [term attributedSubstringForProposedRange:NSMakeRange(5, 0)
+                                      actualRange:&attrActual];
+    if (emptyTail != nil || attrActual.location != 5 || attrActual.length != 0)
+      return false;
+
+    if (bmpCtx) {
+      [term displayRectIgnoringOpacity:term.bounds inContext:bmpCtx];
+    }
+
+    // 2. Surrogate-pair preedit ("😀a", UTF-16 length 3, terminal width 3 cols).
+    [term setMarkedText:@"😀a"
+           selectedRange:NSMakeRange(3, 0)
+        replacementRange:notFound];
+    NSRect afterEmoji =
+        [term firstRectForCharacterRange:NSMakeRange(2, 1) actualRange:&actual];
+    if (actual.location != 2 || actual.length != 1)
+      return false;
+    if (fabs(afterEmoji.origin.x - (kPadX + 4.0 * cw)) > 0.05 ||
+        fabs(afterEmoji.size.width - cw) > 0.05)
+      return false;
+    // Querying mid-surrogate {1, 0} clamps safely to UTF-16 codepoint boundary.
+    NSRect midSurrogate =
+        [term firstRectForCharacterRange:NSMakeRange(1, 0) actualRange:&actual];
+    if (actual.location != 0 || actual.length != 0 ||
+        fabs(midSurrogate.origin.x - (kPadX + 2.0 * cw)) > 0.05)
+      return false;
+
+    // 3. Commit "你好" (4 cells) before PTY echo arrives: cursor must hold at
+    // col 2 + 4 = 6 instead of flashing back to col 2.
+    [term insertText:@"你好" replacementRange:notFound];
+    if ([term hasMarkedText])
+      return false;
+    if (![term effectiveCursorX:&cx y:&cy] || cx != 6 || cy != 0)
+      return false;
+    if (bmpCtx) {
+      [term displayRectIgnoringOpacity:term.bounds inContext:bmpCtx];
+    }
+
+    // 4. Consecutive CJK punctuation commit "，" (2 cells, no prior markedText)
+    // accumulates optimistic cursor to col 6 + 2 = 8, and starting the next
+    // Pinyin preedit anchors its candidate window at col 8 rather than col 2.
+    [term insertText:@"，" replacementRange:notFound];
+    if (![term effectiveCursorX:&cx y:&cy] || cx != 8 || cy != 0)
+      return false;
+    [term setMarkedText:@"shi"
+           selectedRange:NSMakeRange(3, 0)
+        replacementRange:notFound];
+    NSRect nextWordStart =
+        [term firstRectForCharacterRange:NSMakeRange(0, 0) actualRange:&actual];
+    NSRect nextWordCaret =
+        [term firstRectForCharacterRange:NSMakeRange(3, 0) actualRange:&actual];
+    if (fabs(nextWordStart.origin.x - (kPadX + 8.0 * cw)) > 0.05 ||
+        fabs(nextWordCaret.origin.x - (kPadX + 11.0 * cw)) > 0.05)
+      return false;
+    [term unmarkText];
+
+    // 5. Non-echo fallback (e.g. password prompt): once grace expires without
+    // PTY cursor movement, effectiveCursorX falls back to real VT cursor (col 2).
+    term.commitHoldUntil = 0.0;
+    [term onAnimTick];
+    if (term.commitCursorActive || [term effectiveCursorX:&cx y:&cy] ||
+        cx != 2 || cy != 0)
+      return false;
+
+    // 6. Two-step XPC IME commit: setMarkedText:@"" followed by insertText:@"好"
+    // still activates optimistic hold via recent-unmark + non-ASCII detection.
+    [term setMarkedText:@"hao"
+           selectedRange:NSMakeRange(3, 0)
+        replacementRange:notFound];
+    [term setMarkedText:@""
+           selectedRange:NSMakeRange(0, 0)
+        replacementRange:notFound];
+    [term insertText:@"好" replacementRange:notFound];
+    if (![term effectiveCursorX:&cx y:&cy] || cx != 4 || cy != 0)
+      return false;
+
+    return true;
+  }
+}
+
+bool cb_terminal_test_verify_post_echo_cursor(void *view, uint16_t expectedX) {
+  if (!view)
+    return false;
+  @autoreleasepool {
+    CanbanTerminal *term = (__bridge CanbanTerminal *)view;
+    [term pollSnapshotForceFull:NO];
+    uint16_t cx = 0, cy = 0;
+    BOOL optimistic = [term effectiveCursorX:&cx y:&cy];
+    return (!term.commitCursorActive && !optimistic && cx == expectedX &&
+            cy == 0);
   }
 }
