@@ -20,6 +20,8 @@ jobs:
         run: |
           brew install librsvg
           curl -fsSL https://releases.herdr.dev/core/install.sh | sh
+          mkdir -p "$HOME/.local/bin"
+          curl -LsSf https://get.nexte.st/latest/mac | tar zxf - -C "$HOME/.local/bin"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run unit and packaging tests
         run: |

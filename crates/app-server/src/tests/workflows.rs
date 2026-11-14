@@ -1179,9 +1179,7 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
 
     git(&remote, &["init", "--bare", "-b", "main"]);
     git(&source, &["init", "-b", "main"]);
-    git(&source, &["config", "user.name", "Tester"]);
-    git(&source, &["config", "user.email", "tester@example.invalid"]);
-    git(&source, &["config", "commit.gpgsign", "false"]);
+    git_identity(&source);
     git(
         &source,
         &["remote", "add", "origin", remote.to_str().unwrap()],
@@ -1246,9 +1244,7 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
             db.save(&card)
         })
         .unwrap();
-    git(&wt1, &["config", "user.name", "Tester"]);
-    git(&wt1, &["config", "user.email", "tester@example.invalid"]);
-    git(&wt1, &["config", "commit.gpgsign", "false"]);
+    git_identity(&wt1);
     std::fs::write(wt1.join("feature1.txt"), "hello upstream\n").unwrap();
 
     finish_closed(&app, &snap.terminals[0], "dev-c1-done");
@@ -1339,9 +1335,7 @@ fn default_workflow_queue_merge_syncs_upstream_and_respects_local_only_option() 
             db.save(&card)
         })
         .unwrap();
-    git(&wt2, &["config", "user.name", "Tester"]);
-    git(&wt2, &["config", "user.email", "tester@example.invalid"]);
-    git(&wt2, &["config", "commit.gpgsign", "false"]);
+    git_identity(&wt2);
     std::fs::write(wt2.join("feature2.txt"), "local merge only\n").unwrap();
 
     finish_closed(&app, &req2, "dev-c2-done");
@@ -1545,7 +1539,41 @@ fn git_in(cwd: &std::path::Path, args: &[&str]) -> String {
         .trim_end_matches('\n')
         .to_owned()
 }
+fn git_config_path(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dot_git = cwd.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git.join("config"));
+    }
+    let text = std::fs::read_to_string(&dot_git).ok()?;
+    let raw = text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();
+    let gitdir = if std::path::Path::new(raw).is_absolute() {
+        std::path::PathBuf::from(raw)
+    } else {
+        cwd.join(raw)
+    };
+    let common = std::fs::read_to_string(gitdir.join("commondir"))
+        .ok()
+        .map(|s| gitdir.join(s.trim()))
+        .unwrap_or(gitdir);
+    Some(common.join("config"))
+}
 fn git_identity(cwd: &std::path::Path) {
+    if let Some(config_path) = git_config_path(cwd)
+        && let Ok(existing) = std::fs::read_to_string(&config_path)
+    {
+        if existing.contains("email = tester@example.invalid") {
+            return;
+        }
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&config_path)
+            && f.write_all(
+                b"\n[user]\n\tname = Tester\n\temail = tester@example.invalid\n[commit]\n\tgpgsign = false\n",
+            )
+            .is_ok()
+        {
+            return;
+        }
+    }
     git_in(cwd, &["config", "user.name", "Tester"]);
     git_in(cwd, &["config", "user.email", "tester@example.invalid"]);
     git_in(cwd, &["config", "commit.gpgsign", "false"]);
@@ -3630,9 +3658,7 @@ fn live_card_move_from_backlog_to_review_returns_immediately_while_delivery_merg
 
     git(&remote, &["init", "--bare", "-b", "main"]);
     git(&source, &["init", "-b", "main"]);
-    git(&source, &["config", "user.name", "Tester"]);
-    git(&source, &["config", "user.email", "tester@example.invalid"]);
-    git(&source, &["config", "commit.gpgsign", "false"]);
+    git_identity(&source);
     git(
         &source,
         &["remote", "add", "origin", remote.to_str().unwrap()],
@@ -3706,9 +3732,7 @@ fn live_card_move_from_backlog_to_review_returns_immediately_while_delivery_merg
             db.save(&card)
         })
         .unwrap();
-    git(&wt1, &["config", "user.name", "Tester"]);
-    git(&wt1, &["config", "user.email", "tester@example.invalid"]);
-    git(&wt1, &["config", "commit.gpgsign", "false"]);
+    git_identity(&wt1);
     std::fs::write(wt1.join("dragged.txt"), "backlog-to-review\n").unwrap();
     git(&wt1, &["add", "dragged.txt"]);
     git(&wt1, &["commit", "-m", "feat: ready in backlog"]);

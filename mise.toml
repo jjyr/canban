@@ -11,7 +11,8 @@ run = "cargo check --workspace"
 
 [tasks.test]
 depends = ["terminal-deps"]
-run = "cargo test --workspace"
+env = { CANBAN_UPDATES_DISABLED = "1" }
+run = "cargo nextest run --workspace"
 
 [tasks.run]
 depends = ["build-binaries"]

@@ -18,7 +18,7 @@ serde.workspace = true
 signal-hook = { version = "0.3", default-features = false }
 base64.workspace = true
 nsh-core.workspace = true
-nsh-base = { workspace = true, features = ["highlight"] }
+nsh-base.workspace = true
 nsh-platform-macos.workspace = true
 canban-types.workspace = true
 canban-profiles.workspace = true

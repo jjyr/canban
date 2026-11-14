@@ -99,6 +99,7 @@ impl AppServer {
                 if !canban_updater::handoff::active(&home) {
                     let _ = canban_updater::handoff::flush(&home);
                     if !updates_disabled
+                        && !cfg!(test)
                         && std::time::Instant::now() >= next
                         && std::env::var_os("CANBAN_UPDATES_DISABLED").is_none()
                     {

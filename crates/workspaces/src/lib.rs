@@ -11,16 +11,14 @@ impl Ops {
         }
     }
     fn git(&self, dir: &Path, args: &[&str]) -> Result<std::process::Output> {
-        let mut argv = vec![
-            "env",
-            "GIT_EDITOR=true",
-            "GIT_SEQUENCE_EDITOR=true",
-            "git",
-            "-C",
-            dir.to_str().context("Invalid path")?,
-        ];
+        let mut argv = vec!["git", "-C", dir.to_str().context("Invalid path")?];
         argv.extend(args);
-        self.host.run(Path::new("/"), &argv, None)
+        self.host.run_env(
+            Path::new("/"),
+            &[("GIT_EDITOR", "true"), ("GIT_SEQUENCE_EDITOR", "true")],
+            &argv,
+            None,
+        )
     }
     fn checked(&self, dir: &Path, args: &[&str]) -> Result<String> {
         let out = self.git(dir, args)?;

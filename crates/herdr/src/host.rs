@@ -30,8 +30,20 @@ impl Host {
         self.machine != "local"
     }
     pub fn run(&self, dir: &Path, args: &[&str], input: Option<&str>) -> Result<Output> {
+        self.run_env(dir, &[], args, input)
+    }
+
+    /// Execute a command on `local` or a remote Herdr machine with explicit environment overrides.
+    pub fn run_env(
+        &self,
+        dir: &Path,
+        envs: &[(&str, &str)],
+        args: &[&str],
+        input: Option<&str>,
+    ) -> Result<Output> {
         ensure!(!args.is_empty(), "Empty program");
         if self.remote() {
+            let env_pairs: Vec<String> = envs.iter().map(|(k, v)| format!("{k}={v}")).collect();
             let mut argv = vec![
                 "env",
                 "-u",
@@ -41,6 +53,7 @@ impl Host {
                 "-u",
                 "GIT_INDEX_FILE",
             ];
+            argv.extend(env_pairs.iter().map(String::as_str));
             argv.extend(args);
             let value=self.client.call("machine.exec",json!({"on":self.machine,"argv":argv,"cwd":dir,"input":input.map(|s|STANDARD.encode(s)),"timeout":60.0}))?;
             ensure!(
@@ -61,7 +74,8 @@ impl Host {
             .current_dir(dir)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE");
+            .env_remove("GIT_INDEX_FILE")
+            .envs(envs.iter().copied());
         if let Some(input) = input {
             let mut child = cmd
                 .stdin(Stdio::piped())
