@@ -901,10 +901,17 @@ mod tests {
         set_script_timeout_minutes(&mut d, &id, Some(10)).unwrap();
         set_script_continue_on_error(&mut d, &id, true).unwrap();
         set_step_env(&mut d, &id, BTreeMap::from([("CI".into(), "1".into())])).unwrap();
-        set_workflow_env(&mut d, BTreeMap::from([("RUST_BACKTRACE".into(), "1".into())])).unwrap();
+        set_workflow_env(
+            &mut d,
+            BTreeMap::from([("RUST_BACKTRACE".into(), "1".into())]),
+        )
+        .unwrap();
         set_on_failure(&mut d, &id, Some("agent:develop".into())).unwrap();
         let flow = d.compile().unwrap();
-        assert_eq!(flow.env.get("RUST_BACKTRACE").map(String::as_str), Some("1"));
+        assert_eq!(
+            flow.env.get("RUST_BACKTRACE").map(String::as_str),
+            Some("1")
+        );
         assert!(matches!(
             &flow.steps[&id],
             WorkflowStep::Script {

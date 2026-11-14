@@ -4705,8 +4705,11 @@ for line in sys.stdin:
         .unwrap();
     }
     let c: Card = serde_json::from_value(
-        app.call("card.create", json!({"project_id": p.id, "title": "Env flow card"}))
-            .unwrap(),
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Env flow card"}),
+        )
+        .unwrap(),
     )
     .unwrap();
     app.call(
@@ -4719,7 +4722,13 @@ for line in sys.stdin:
     app.tick().unwrap();
     let first_entry = snap_latest_card_terminal(&app, &c.id);
     assert_eq!(
-        first_entry.agent.as_ref().unwrap().applied_env.get("OVERRIDE_ME").map(String::as_str),
+        first_entry
+            .agent
+            .as_ref()
+            .unwrap()
+            .applied_env
+            .get("OVERRIDE_ME")
+            .map(String::as_str),
         Some("from_first")
     );
     app.store
@@ -4762,16 +4771,21 @@ for line in sys.stdin:
     // the warm PTY cannot be continued in place and must be replaced cleanly.
     let pending_entry = snap_latest_card_terminal(&app, &c.id);
     assert!(canban_scheduler::eligible(&snap_mid, &pending_entry));
-    assert!(!canban_scheduler::can_continue_in_place(&snap_mid, &pending_entry));
-    assert!(pending_entry
-        .agent
-        .as_ref()
-        .unwrap()
-        .pending
-        .as_ref()
-        .unwrap()
-        .instruction
-        .contains("pass"));
+    assert!(!canban_scheduler::can_continue_in_place(
+        &snap_mid,
+        &pending_entry
+    ));
+    assert!(
+        pending_entry
+            .agent
+            .as_ref()
+            .unwrap()
+            .pending
+            .as_ref()
+            .unwrap()
+            .instruction
+            .contains("pass")
+    );
 
     // Next tick kills stale `t1` and launches `agent:dev` with all 4 env layers merged.
     app.tick().unwrap();
@@ -4782,15 +4796,31 @@ for line in sys.stdin:
     );
     let dev_entry = snap_latest_card_terminal(&app, &c.id);
     let applied = &dev_entry.agent.as_ref().unwrap().applied_env;
-    assert_eq!(applied.get("WF_SHARED").map(String::as_str), Some("from_wf"));
-    assert_eq!(applied.get("DYNAMIC_VAR").map(String::as_str), Some("hello_env"));
-    assert_eq!(applied.get("MULTI_VAR").map(String::as_str), Some("line1\nline2"));
+    assert_eq!(
+        applied.get("WF_SHARED").map(String::as_str),
+        Some("from_wf")
+    );
+    assert_eq!(
+        applied.get("DYNAMIC_VAR").map(String::as_str),
+        Some("hello_env")
+    );
+    assert_eq!(
+        applied.get("MULTI_VAR").map(String::as_str),
+        Some("line1\nline2")
+    );
     assert_eq!(
         applied.get("OVERRIDE_ME").map(String::as_str),
         Some("from_agent_step")
     );
     assert_eq!(applied.get("AGENT_FLAG").map(String::as_str), Some("1"));
-    assert!(dev_entry.agent.as_ref().unwrap().instruction.contains("gate"));
+    assert!(
+        dev_entry
+            .agent
+            .as_ref()
+            .unwrap()
+            .instruction
+            .contains("gate")
+    );
 
     let launches_raw = std::fs::read_to_string(dir.path().join("launches")).unwrap();
     let last_launch: Value = serde_json::from_str(launches_raw.lines().last().unwrap()).unwrap();
@@ -4801,19 +4831,26 @@ for line in sys.stdin:
     assert_eq!(last_launch["env"]["AGENT_FLAG"], "1");
 
     // Verify persisted script log files under `cards/<cid>/scripts/`.
-    let script_dir = app.home.join(format!("projects/{}/cards/{}/scripts", p.id, c.id));
+    let script_dir = app
+        .home
+        .join(format!("projects/{}/cards/{}/scripts", p.id, c.id));
     let log_texts: Vec<String> = std::fs::read_dir(&script_dir)
         .unwrap()
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
         .map(|e| std::fs::read_to_string(e.path()).unwrap())
         .collect();
-    assert!(log_texts.iter().any(|t| t.contains(&format!("prep-ran-{}", c.id))));
+    assert!(
+        log_texts
+            .iter()
+            .any(|t| t.contains(&format!("prep-ran-{}", c.id)))
+    );
     assert!(log_texts.iter().any(|t| t.contains("python-checked")));
 }
 
 #[test]
-fn script_step_bypasses_max_agents_supports_continue_on_error_timeout_and_single_on_failure_recovery() {
+fn script_step_bypasses_max_agents_supports_continue_on_error_timeout_and_single_on_failure_recovery()
+ {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source");
     std::fs::create_dir_all(&source).unwrap();
@@ -4895,8 +4932,11 @@ workspace:
 
     // Occupy the single agent slot (`max_agents = 1`) with Card 1.
     let c1: Card = serde_json::from_value(
-        app.call("card.create", json!({"project_id": p.id, "title": "Slot holder"}))
-            .unwrap(),
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Slot holder"}),
+        )
+        .unwrap(),
     )
     .unwrap();
     app.call(
@@ -4910,8 +4950,11 @@ workspace:
     // Start Card 2 at `script:soft_fail`: scripts must bypass `max_agents = 1`, ignore non-zero under
     // `continue_on_error: true`, and trigger `on_failure: agent:fix` ONCE on `script:guarded`.
     let c2: Card = serde_json::from_value(
-        app.call("card.create", json!({"project_id": p.id, "title": "Script recovery"}))
-            .unwrap(),
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Script recovery"}),
+        )
+        .unwrap(),
     )
     .unwrap();
     let run_val = app
@@ -5014,8 +5057,11 @@ workspace:
     )
     .unwrap();
     let c: Card = serde_json::from_value(
-        app.call("card.create", json!({"project_id": p.id, "title": "Herdr script card"}))
-            .unwrap(),
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Herdr script card"}),
+        )
+        .unwrap(),
     )
     .unwrap();
 
@@ -5048,4 +5094,330 @@ workspace:
     let launch: Value = serde_json::from_str(launches.lines().next().unwrap()).unwrap();
     assert_eq!(launch["labels"]["canban.script_step"], "check");
     assert_eq!(launch["labels"]["canban.card_id"], c.id);
+}
+
+#[test]
+fn failed_merger_retry_joins_tail_of_merge_queue_behind_active_card() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    std::fs::write(source.join("a.txt"), "base\n").unwrap();
+    std::fs::write(source.join("b.txt"), "base\n").unwrap();
+    std::fs::write(source.join("c.txt"), "base\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "init"]);
+
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "Merger Retry FIFO",
+                "directory": source,
+                "workspace": {"create_worktree": true, "sync_base": false}
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    edit_development(&app, &p, |doc| {
+        canban_workflow_engine::source::set_review_manual(doc, false);
+        canban_workflow_engine::source::set_sync_upstream(doc, false);
+    });
+    let ops = canban_workspaces::Ops::local();
+
+    // Helper: create a Card whose worktree conflicts with `main` on `conflict_file`, finish `@developer`,
+    // and move the Card into the Deliver (`review`) step.
+    let enter_conflicting_deliver = |title: &str, conflict_file: &str| -> (Card, PathBuf) {
+        let card: Card = serde_json::from_value(
+            app.call("card.create", json!({"project_id": p.id, "title": title}))
+                .unwrap(),
+        )
+        .unwrap();
+        app.call(
+            "card.move",
+            json!({"card_id": card.id, "revision": card.revision, "stage": "develop"}),
+        )
+        .unwrap();
+        let dev = admit(&app, &snap_latest_card_terminal(&app, &card.id));
+        let wt = ops.prepare(&app.home, &p, &card).unwrap();
+        let br = ops.current_branch(wt.to_str().unwrap()).unwrap();
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| {
+                let mut stored: Card = db.get(&card.id)?;
+                stored.worktree = Some(wt.to_str().unwrap().into());
+                stored.branch = Some(br);
+                db.save(&stored)
+            })
+            .unwrap();
+        git_identity(&wt);
+        std::fs::write(wt.join(conflict_file), format!("{title} change\n")).unwrap();
+        git_in(&wt, &["add", "."]);
+        git_in(&wt, &["commit", "-m", &format!("feat: {title}")]);
+
+        std::fs::write(source.join(conflict_file), format!("main vs {title}\n")).unwrap();
+        git_in(&source, &["add", "."]);
+        git_in(
+            &source,
+            &["commit", "-m", &format!("main update for {title}")],
+        );
+
+        finish_closed(&app, &dev, &format!("dev-done-{title}"));
+        let updated = app
+            .snapshot()
+            .unwrap()
+            .cards
+            .into_iter()
+            .find(|c| c.id == card.id)
+            .unwrap();
+        (updated, wt)
+    };
+
+    // Card A enters Queue Merge first and hits conflict -> dispatches `@merger`.
+    let (card_a, wt_a) = enter_conflicting_deliver("Card A", "a.txt");
+    app.pump_deliveries().unwrap();
+    // Card B enters Queue Merge second and waits behind Card A.
+    let (card_b, wt_b) = enter_conflicting_deliver("Card B", "b.txt");
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.merge_queue_status(&card_a.id).unwrap().0, 1);
+    assert_eq!(snap.merge_queue_status(&card_b.id).unwrap().0, 2);
+
+    // Simulate Card A's `@merger` failing (`agent.state = "failed"`).
+    let merger_a1 = snap_latest_card_terminal(&app, &card_a.id);
+    assert_eq!(merger_a1.agent.as_ref().unwrap().profile.id, "merger");
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut entry: TerminalEntry = db.get(&merger_a1.id)?;
+            let agent = entry.agent.as_mut().unwrap();
+            agent.state = "failed".into();
+            agent.pending = None;
+            agent.terminal = None;
+            agent.error = Some("simulated merger failure".into());
+            db.save(&entry)?;
+            crate::workflow::reconcile(db)?;
+            Ok(())
+        })
+        .unwrap();
+
+    // Card A left the active queue on failure; pumping advances Card B to #1 and launches B's `@merger`.
+    app.pump_deliveries().unwrap();
+    let snap = app.snapshot().unwrap();
+    let run_a = snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == card_a.id && r.active())
+        .unwrap();
+    let run_b = snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == card_b.id && r.active())
+        .unwrap();
+    assert_eq!(run_a.state, "failed");
+    assert!(run_a.inputs["queued_at"].is_null());
+    assert_eq!(run_b.state, "waiting_agent");
+    assert_eq!(snap.merge_queue_status(&card_b.id).unwrap().0, 1);
+
+    // 1. Retry Card A via `workflow.deliver` WHILE Card B's `@merger` is actively running!
+    // Card A must enter `waiting_delivery` behind Card B (#2 of 2) instead of jumping ahead or spawning `@merger`.
+    let card_a_rev = snap
+        .cards
+        .iter()
+        .find(|c| c.id == card_a.id)
+        .unwrap()
+        .revision;
+    let retried_a = app
+        .call(
+            "workflow.deliver",
+            json!({"card_id": card_a.id, "revision": card_a_rev}),
+        )
+        .unwrap();
+    assert_eq!(retried_a["state"], "waiting_delivery");
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let (pos_b, total_b, _) = snap.merge_queue_status(&card_b.id).unwrap();
+    let (pos_a, total_a, _) = snap.merge_queue_status(&card_a.id).unwrap();
+    assert_eq!((pos_b, total_b), (1, 2));
+    assert_eq!(
+        (pos_a, total_a),
+        (2, 2),
+        "retried failed @merger must queue at #2 behind active @merger on Card B"
+    );
+    let merger_a_after_retry = snap_latest_card_terminal(&app, &card_a.id);
+    assert!(
+        merger_a_after_retry.agent.as_ref().unwrap().state == "failed",
+        "no new @merger session may start for Card A while Card B holds head-of-line"
+    );
+
+    // Complete Card B's `@merger`: Card B delivers and advances `main`.
+    let merger_b = admit(&app, &snap_latest_card_terminal(&app, &card_b.id));
+    std::fs::write(wt_b.join("b.txt"), "resolved b\n").unwrap();
+    git_in(&wt_b, &["add", "b.txt"]);
+    git_in(&wt_b, &["commit", "--no-edit"]);
+    git_in(&wt_b, &["rebase", "--skip"]);
+    finish_closed(&app, &merger_b, "merger-b-done");
+    app.pump_deliveries().unwrap();
+
+    // Card A now automatically advances to #1 and dispatches a fresh `@merger` run AFTER Card B delivered.
+    let snap = app.snapshot().unwrap();
+    assert!(
+        snap.cards
+            .iter()
+            .find(|c| c.id == card_b.id)
+            .unwrap()
+            .delivery
+            .is_some()
+    );
+    let run_a = snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == card_a.id && r.active())
+        .unwrap();
+    assert_eq!(run_a.state, "waiting_agent");
+    let merger_a2 = admit(&app, &snap_latest_card_terminal(&app, &card_a.id));
+    assert!(
+        merger_a2.agent.as_ref().unwrap().number > merger_a1.agent.as_ref().unwrap().number,
+        "Card A must get a fresh @merger run after advancing back to #1"
+    );
+    assert!(
+        merger_a2
+            .agent
+            .as_ref()
+            .unwrap()
+            .instruction
+            .contains("Merge conflict to resolve before delivery")
+    );
+
+    // 2. Simulate `merger_a2` aborting the stale rebase and reporting `--state blocked`
+    // (sets Card gate & `run.state == "blocked"`).
+    git_in(&wt_a, &["rebase", "--abort"]);
+    app.call(
+        "execution.report",
+        json!({
+            "project_id": p.id,
+            "card": card_a.number,
+            "terminal_id": merger_a2.id,
+            "state": "blocked",
+            "message": "Need product decision on a.txt",
+            "request_key": "merger-a2-blocked"
+        }),
+    )
+    .unwrap();
+    app.call("terminal.close", json!({"terminal_id": merger_a2.id}))
+        .unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut entry: TerminalEntry = db.get(&merger_a2.id)?;
+            entry.agent.as_mut().unwrap().observed =
+                Some(json!({"state":"finished","exit_code":0}));
+            db.save(&entry)
+        })
+        .unwrap();
+
+    // Card C enters and holds `#1` with an active `@merger`.
+    let (card_c, wt_c) = enter_conflicting_deliver("Card C", "c.txt");
+    app.pump_deliveries().unwrap();
+    let snap = app.snapshot().unwrap();
+    assert_eq!(snap.merge_queue_status(&card_c.id).unwrap().0, 1);
+
+    // Retry Card A's blocked `@merger` via `execution.retry` WHILE Card C's `@merger` is active!
+    // Must queue Card A in `waiting_delivery` behind Card C, NOT call `retry_agent` directly!
+    app.call("execution.retry", json!({"terminal_id": merger_a2.id}))
+        .unwrap();
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let run_a = snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == card_a.id && r.active())
+        .unwrap();
+    assert_eq!(run_a.state, "waiting_delivery");
+    assert_eq!(snap.merge_queue_status(&card_c.id).unwrap().0, 1);
+    assert_eq!(snap.merge_queue_status(&card_a.id).unwrap().0, 2);
+
+    // Finish Card C -> `main` advances to `main_after_c`, and Card A advances to #1 -> hits conflict -> dispatches `merger_a3`.
+    let merger_c = admit(&app, &snap_latest_card_terminal(&app, &card_c.id));
+    std::fs::write(wt_c.join("c.txt"), "resolved c\n").unwrap();
+    git_in(&wt_c, &["add", "c.txt"]);
+    git_in(&wt_c, &["commit", "--no-edit"]);
+    git_in(&wt_c, &["rebase", "--skip"]);
+    finish_closed(&app, &merger_c, "merger-c-done");
+    app.pump_deliveries().unwrap();
+    let main_after_c = git_in(&source, &["rev-parse", "HEAD"]);
+
+    // 3. Also verify `merger_a3` saw the updated `main_after_c` head and `card.continue` on blocked `@merger` goes through the Merge Queue.
+    let merger_a3 = admit(&app, &snap_latest_card_terminal(&app, &card_a.id));
+    assert!(
+        merger_a3
+            .agent
+            .as_ref()
+            .unwrap()
+            .instruction
+            .contains(&main_after_c),
+        "Card A's queued retry must observe the updated target HEAD after Card C delivered"
+    );
+    app.call(
+        "execution.report",
+        json!({
+            "project_id": p.id,
+            "card": card_a.number,
+            "terminal_id": merger_a3.id,
+            "state": "failed",
+            "message": "Conflict resolution failed",
+            "request_key": "merger-a3-failed"
+        }),
+    )
+    .unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut entry: TerminalEntry = db.get(&merger_a3.id)?;
+            entry.agent.as_mut().unwrap().observed =
+                Some(json!({"state":"finished","exit_code":1}));
+            db.save(&entry)
+        })
+        .unwrap();
+
+    // Resolve Card A's conflict in its worktree so the eventual queued delivery finishes cleanly.
+    std::fs::write(wt_a.join("a.txt"), "resolved a\n").unwrap();
+    git_in(&wt_a, &["add", "a.txt"]);
+    git_in(&wt_a, &["commit", "--no-edit"]);
+    git_in(&wt_a, &["rebase", "--skip"]);
+
+    let snap = app.snapshot().unwrap();
+    let card_a_rev = snap
+        .cards
+        .iter()
+        .find(|c| c.id == card_a.id)
+        .unwrap()
+        .revision;
+    app.call(
+        "card.continue",
+        json!({"card_id": card_a.id, "revision": card_a_rev}),
+    )
+    .unwrap();
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let delivered_a = snap.cards.iter().find(|c| c.id == card_a.id).unwrap();
+    assert!(
+        delivered_a.delivery.is_some(),
+        "card.continue on blocked @merger must complete via the Merge Queue"
+    );
+    assert_eq!(
+        std::fs::read_to_string(source.join("a.txt")).unwrap(),
+        "resolved a\n"
+    );
 }

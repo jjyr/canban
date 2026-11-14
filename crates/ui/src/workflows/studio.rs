@@ -107,7 +107,10 @@ fn merged_step_env(step: &source::Step) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     if let Some(obj) = step.with.get("env").and_then(|v| v.as_object()) {
         for (k, v) in obj {
-            let val = v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string());
+            let val = v
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| v.to_string());
             out.insert(k.clone(), val);
         }
     }
@@ -1637,12 +1640,8 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                     view().p_2().rounded(px(RADIUS)).bg(INSET).child(
                         muted(move || {
                             node.with(|n| {
-                                let preview = n
-                                    .script_run
-                                    .lines()
-                                    .take(4)
-                                    .collect::<Vec<_>>()
-                                    .join("\n");
+                                let preview =
+                                    n.script_run.lines().take(4).collect::<Vec<_>>().join("\n");
                                 if preview.trim().is_empty() {
                                     "Empty script command".to_owned()
                                 } else {
@@ -2237,8 +2236,10 @@ fn env_editor_dialog(ctx: Ctx) -> impl IntoElement {
                     )),
             )
             .child(
-                muted("Enter one KEY=VALUE pair per line (applied to both Script and Agent steps).")
-                    .text_size(px(12.)),
+                muted(
+                    "Enter one KEY=VALUE pair per line (applied to both Script and Agent steps).",
+                )
+                .text_size(px(12.)),
             )
             .child(when(
                 move || !parse_error.get().is_empty(),
@@ -2253,7 +2254,11 @@ fn env_editor_dialog(ctx: Ctx) -> impl IntoElement {
                     .p_2()
                     .child(
                         editor
-                            .source(text, "Environment (KEY=VALUE per line)", "CI=1\nRUST_LOG=info")
+                            .source(
+                                text,
+                                "Environment (KEY=VALUE per line)",
+                                "CI=1\nRUST_LOG=info",
+                            )
                             .size_full(),
                     ),
             )
@@ -2413,10 +2418,12 @@ steps:
         assert!(script_node.script_continue_on_error);
         assert!(script_node.pills.iter().any(|p| p == "Continue on error"));
         assert!(script_node.pills.iter().any(|p| p == "Env (1)"));
-        assert!(script_node
-            .pills
-            .iter()
-            .any(|p| p.contains("Fail (×1)") && p.contains("Implement")));
+        assert!(
+            script_node
+                .pills
+                .iter()
+                .any(|p| p.contains("Fail (×1)") && p.contains("Implement"))
+        );
 
         let agent_node = dev_lane
             .nodes

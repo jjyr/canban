@@ -187,8 +187,12 @@ fn v6_script_and_env(doc: &mut Document) -> Result<()> {
         if step.continue_on_error == Some(false) {
             step.continue_on_error = None;
         }
-        if step.uses.trim() == "script" && step.run.is_none()
-            && let Some(run) = step.with.remove("run").and_then(|v| v.as_str().map(str::to_string))
+        if step.uses.trim() == "script"
+            && step.run.is_none()
+            && let Some(run) = step
+                .with
+                .remove("run")
+                .and_then(|v| v.as_str().map(str::to_string))
         {
             step.run = Some(run);
         }

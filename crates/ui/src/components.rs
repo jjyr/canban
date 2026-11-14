@@ -25,10 +25,25 @@ pub fn run_panel(ui: Ui, entry: TerminalEntry) -> impl IntoElement {
         .find(|r| {
             r.card.id == run.card_id && r.agent().is_some_and(|a| a.profile.id == run.profile.id)
         });
+    let (card_active, is_deliver_agent, already_queued_for_merge) =
+        ui.snapshot.with_untracked(|s| {
+            let active = s.cards.iter().any(|c| c.id == run.card_id && c.active());
+            let deliver_run = s.workflow_runs.iter().find(|r| {
+                r.card_id == run.card_id
+                    && r.active()
+                    && r.step_is_deliver()
+                    && (r.terminal_id.as_deref() == Some(id.as_str())
+                        || run.workflow_run_id.as_deref() == Some(r.id.as_str()))
+            });
+            (
+                active,
+                deliver_run.is_some(),
+                deliver_run.is_some_and(|r| r.state == "waiting_delivery"),
+            )
+        });
     let can_retry = current.as_ref().is_none_or(crate::terminals::model::closed)
-        && ui
-            .snapshot
-            .with_untracked(|s| s.cards.iter().any(|c| c.id == run.card_id && c.active()));
+        && card_active
+        && !already_queued_for_merge;
     if let Some(row) = current {
         if crate::terminals::model::binding(&row).is_some() {
             let row_id = row.id.clone();
@@ -80,11 +95,20 @@ pub fn run_panel(ui: Ui, entry: TerminalEntry) -> impl IntoElement {
     if let Some(error) = run.error {
         panel = panel.child(label(error).text_color(DANGER));
     }
-    if can_retry && matches!(run.state.as_str(), "failed" | "blocked" | "needs_report") {
+    if can_retry
+        && matches!(
+            run.state.as_str(),
+            "failed" | "blocked" | "needs_report" | "missing"
+        )
+    {
         let retry_id = id.clone();
         panel = panel.child(
             action(
-                "Retry with a fresh Session",
+                if is_deliver_agent {
+                    "Retry auto-merge"
+                } else {
+                    "Retry with a fresh Session"
+                },
                 Variant::Secondary,
                 move |_| dispatch(ui, "execution.retry", json!({"terminal_id":retry_id})),
             )

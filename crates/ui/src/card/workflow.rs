@@ -105,7 +105,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
             att_profiles,
             queue_info,
         ) = ui.snapshot.with(|s| {
-            let att_profiles: std::collections::BTreeMap<String, (String, Option<u64>)> = s
+            let att_profiles: std::collections::BTreeMap<String, (String, Option<u64>, bool)> = s
                 .terminals
                 .iter()
                 .filter_map(|t| {
@@ -114,7 +114,16 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         return None;
                     }
                     let started_at = crate::components::activity::agent_started_at(s, t);
-                    Some((t.id.clone(), (a.profile.id.clone(), started_at)))
+                    let stopped = a.terminal.is_none()
+                        || a.observed.as_ref().is_some_and(|v| {
+                            matches!(v["state"].as_str(), Some("finished" | "missing"))
+                        });
+                    let retryable = stopped
+                        && matches!(
+                            a.state.as_str(),
+                            "failed" | "blocked" | "needs_report" | "missing" | "unknown"
+                        );
+                    Some((t.id.clone(), (a.profile.id.clone(), started_at, retryable)))
                 })
                 .collect();
             let card_runs: Vec<_> = s
@@ -315,8 +324,13 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         .terminal_id
                         .as_ref()
                         .and_then(|tid| att_profiles.get(tid));
-                    let active_profile = active_agent_meta.map(|(p, _)| p.as_str());
-                    let active_agent_started_at = active_agent_meta.and_then(|(_, ts)| *ts);
+                    let active_profile = active_agent_meta.map(|(p, _, _)| p.as_str());
+                    let active_agent_started_at = active_agent_meta.and_then(|(_, ts, _)| *ts);
+                    let active_agent_retryable = active_agent_meta.is_some_and(|(_, _, r)| *r);
+                    let deliver_retryable = is_deliver_step
+                        && (matches!(run.state.as_str(), "failed" | "blocked")
+                            || (run.state == "waiting_agent"
+                                && (run.error.is_some() || active_agent_retryable)));
                     let mut stepper = view().flex_row().flex_wrap().items_center().gap_1();
                     for (idx, step_id) in steps.iter().enumerate() {
                         if idx > 0 {
@@ -348,6 +362,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         if is_current
                             && matches!(step, WorkflowStep::Deliver { .. })
                             && matches!(run.state.as_str(), "waiting_agent" | "running")
+                            && !deliver_retryable
                             && let Some(prof) = active_profile
                         {
                             badge_label = format!("{badge_label} (@{prof})");
@@ -362,10 +377,13 @@ pub fn render(ui: Ui) -> impl IntoElement {
                             }
                         }
                         let tone = if is_current {
-                            if matches!(
+                            if run.state == "failed" {
+                                Tone::Danger
+                            } else if matches!(
                                 run.state.as_str(),
-                                "waiting_approval" | "stale" | "failed" | "blocked"
-                            ) {
+                                "waiting_approval" | "stale" | "blocked"
+                            ) || deliver_retryable
+                            {
                                 Tone::Attention
                             } else {
                                 Tone::Info
@@ -382,6 +400,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                 run.state.as_str(),
                                 "waiting_agent" | "running" | "waiting_script"
                             )
+                            && !deliver_retryable
                             && let Some(elapsed_base) = crate::components::activity::workflow_step_elapsed(
                                 &run,
                                 step_id,
@@ -546,15 +565,13 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                     move |_| rework_open.update(|v| *v = !*v),
                                 ));
                             }
-                        } else if matches!(
-                            run.state.as_str(),
-                            "waiting_delivery" | "failed" | "blocked"
-                        ) && is_deliver_step
+                        } else if (run.state == "waiting_delivery" && is_deliver_step)
+                            || deliver_retryable
                         {
                             actions = actions.child(
                                 compact_action(
                                     "Retry auto-merge",
-                                    if matches!(run.state.as_str(), "failed" | "blocked") {
+                                    if deliver_retryable {
                                         Variant::Primary
                                     } else {
                                         Variant::Secondary
@@ -636,7 +653,9 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         "waiting_capacity" => "Waiting for Agent slot…".to_owned(),
                         "waiting_script" => "Running script…".to_owned(),
                         "waiting_agent" | "running" => {
-                            if run.inputs["conflict_attempts"].as_u64().unwrap_or(0) > 0 {
+                            if deliver_retryable {
+                                "Auto-merge stopped".to_owned()
+                            } else if run.inputs["conflict_attempts"].as_u64().unwrap_or(0) > 0 {
                                 if let Some(prof) = active_profile {
                                     format!("Resolving merge conflict (@{prof})…")
                                 } else {
@@ -647,21 +666,27 @@ pub fn render(ui: Ui) -> impl IntoElement {
                             }
                         }
                         "blocked" => "Blocked".to_owned(),
+                        "failed" if is_deliver_step => {
+                            if card_opt.as_ref().is_some_and(|c| c.hold_auto_merge) {
+                                "Auto-merge held".to_owned()
+                            } else {
+                                "Auto-merge failed".to_owned()
+                            }
+                        }
+                        "failed" => "Workflow failed".to_owned(),
                         _ if is_deliver_step => {
                             if card_opt.as_ref().is_some_and(|c| c.hold_auto_merge) {
                                 "Auto-merge held".to_owned()
-                            } else if run.state == "failed" {
-                                "Auto-merge failed".to_owned()
                             } else {
                                 "Auto-merge paused".to_owned()
                             }
                         }
                         _ => "Review required".to_owned(),
                     };
-                    let active_step_start = matches!(
+                    let active_step_start = (matches!(
                         run.state.as_str(),
                         "waiting_agent" | "running" | "waiting_script"
-                    )
+                    ) && !deliver_retryable)
                     .then(|| {
                         let now_ms = ui.runtime_clock.get_untracked();
                         if let Some(step_id) = &run.step
@@ -717,21 +742,27 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         {
                             body = body.child(notice(head_pause.clone(), Tone::Attention));
                         }
-                    } else if matches!(
+                    } else if (matches!(
                         run.state.as_str(),
                         "waiting_approval" | "stale" | "failed" | "blocked"
-                    ) && let Some(reason) = card_opt
-                        .as_ref()
-                        .and_then(|c| {
-                            c.human_gate
-                                .as_ref()
-                                .map(|g| g.reason.clone())
-                                .or_else(|| c.attention.clone())
-                        })
-                        .filter(|r| !r.trim().is_empty())
-                        .or_else(|| run.error.clone().filter(|r| !r.trim().is_empty()))
+                    ) || deliver_retryable)
+                        && let Some(reason) = card_opt
+                            .as_ref()
+                            .and_then(|c| {
+                                c.human_gate
+                                    .as_ref()
+                                    .map(|g| g.reason.clone())
+                                    .or_else(|| c.attention.clone())
+                            })
+                            .filter(|r| !r.trim().is_empty())
+                            .or_else(|| run.error.clone().filter(|r| !r.trim().is_empty()))
                     {
-                        body = body.child(notice(reason, Tone::Attention));
+                        let notice_tone = if run.state == "failed" {
+                            Tone::Danger
+                        } else {
+                            Tone::Attention
+                        };
+                        body = body.child(notice(reason, notice_tone));
                     }
 
                     if rework_open.get() && (run.state == "waiting_approval" || run.state == "stale")

@@ -743,19 +743,27 @@ impl AppServer {
                         json!({"hold_auto_merge":hold}),
                     )?;
                     if !hold
-                        && let Some(mut run) = db
-                            .list::<WorkflowRun>()?
-                            .into_iter()
-                            .find(|r| r.card_id == c.id && r.state == "waiting_approval")
-                        && let Some(step) = &run.step
-                        && matches!(
-                            run.definition.steps.get(step),
-                            Some(WorkflowStep::Deliver { .. })
-                        )
+                        && let Some(mut run) = db.list::<WorkflowRun>()?.into_iter().find(|r| {
+                            r.card_id == c.id
+                                && r.active()
+                                && r.step_is_deliver()
+                                && matches!(r.state.as_str(), "waiting_approval" | "waiting_delivery")
+                        })
                     {
-                        canban_workflow_engine::runtime::approve_with_feedback(
-                            db, &config, &mut c, &mut run, false, None, enqueue,
-                        )?;
+                        if run.state == "waiting_approval" {
+                            canban_workflow_engine::runtime::approve_with_feedback(
+                                db, &config, &mut c, &mut run, false, None, enqueue,
+                            )?;
+                        } else {
+                            run.inputs["queued_at"] = json!(
+                                canban_workflow_engine::runtime::next_merge_queued_at(
+                                    db,
+                                    &c.project_id
+                                )?
+                            );
+                            run.updated_at = now();
+                            db.save(&run)?;
+                        }
                     }
                     db.save(&c)?;
                     Ok(serde_json::to_value(c)?)
@@ -1235,6 +1243,13 @@ impl AppServer {
                     .as_ref()
                     .context("Terminal has no Agent assignment")?;
                 let mut c: Card = db.get(&prev.card_id)?;
+                let deliver_run = db.list::<WorkflowRun>()?.into_iter().find(|r| {
+                    r.card_id == c.id
+                        && r.active()
+                        && r.step_is_deliver()
+                        && (r.terminal_id.as_deref() == Some(entry.id.as_str())
+                            || prev.workflow_run_id.as_deref() == Some(r.id.as_str()))
+                });
                 ensure!(
                     p["execution"].is_null(),
                     "Retry requires an explicit user decision"
@@ -1243,18 +1258,49 @@ impl AppServer {
                 ensure!(
                     !matches!(
                         prev.state.as_str(),
-                        "queued" | "starting" | "running" | "working" | "completed"
-                    ),
+                        "queued" | "starting" | "running" | "working"
+                    ) && !(prev.state == "completed"
+                        && deliver_run
+                            .as_ref()
+                            .is_none_or(|r| r.state != "blocked")),
                     "Execution is not retryable"
                 );
                 ensure!(
                     prev.terminal.is_none()
-                        || prev
-                            .observed
-                            .as_ref()
-                            .is_some_and(|v| v["state"] == "finished"),
+                        || prev.observed.as_ref().is_some_and(|v| {
+                            matches!(v["state"].as_str(), Some("finished" | "missing"))
+                        }),
                     "End the previous Agent before retrying"
                 );
+                if let Some(mut wf_run) = deliver_run {
+                    if wf_run.state == "waiting_delivery" {
+                        c.hold_auto_merge = false;
+                        c.human_gate = None;
+                        c.attention = None;
+                        c.revision += 1;
+                        db.save(&c)?;
+                        return Ok(serde_json::to_value(entry)?);
+                    }
+                    if wf_run.state == "waiting_approval" {
+                        let config = self.config();
+                        canban_workflow_engine::runtime::approve_with_feedback(
+                            db, &config, &mut c, &mut wf_run, false, None, enqueue,
+                        )?;
+                    } else {
+                        canban_workflow_engine::runtime::requeue_delivery(db, &mut c, &mut wf_run)?;
+                    }
+                    entry = db.get(&entry.id)?;
+                    log(
+                        db,
+                        &c,
+                        "execution.retry_queued",
+                        "user",
+                        "Queued in merge queue",
+                        Some(entry.id.clone()),
+                        json!({"terminal_id":entry.id,"workflow_run_id":wf_run.id,"queued_for_delivery":true}),
+                    )?;
+                    return Ok(serde_json::to_value(entry)?);
+                }
                 crate::sessions::retry_agent(db, &c, &mut entry)?;
                 let run_number = entry.agent.as_ref().map(|a| a.number).unwrap_or(1);
                 c.human_gate = None;

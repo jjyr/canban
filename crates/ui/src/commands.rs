@@ -327,6 +327,14 @@ pub const CATALOG: &[Command] = &[
         keywords: "accept deliver merge branch",
     },
     Command {
+        id: "retry-auto-merge",
+        title: "Retry Auto-Merge",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "deliver queue merge conflict auto-merge merger",
+    },
+    Command {
         id: "edit-card",
         title: "Edit Card Description",
         key: "",
@@ -680,6 +688,37 @@ pub fn execute(ui: Ui, id: &str) {
                     crate::card::quick_merge_start(ui, c);
                 } else {
                     ui.notify("Current Card is not eligible for local quick merge");
+                }
+            } else {
+                ui.notify("Select a Card first");
+            }
+        }
+        "retry-auto-merge" => {
+            if let Some(c) = ui.current_card() {
+                let (has_deliver_in_project, active_non_deliver) =
+                    ui.snapshot.with_untracked(|s| {
+                        let has_deliver = s.workflow_revisions.iter().any(|w| {
+                            w.project_id == c.project_id
+                                && w.definition.steps.values().any(|st| {
+                                    matches!(st, canban_types::WorkflowStep::Deliver { .. })
+                                })
+                        });
+                        let non_deliver = s
+                            .workflow_runs
+                            .iter()
+                            .any(|r| r.card_id == c.id && r.active() && !r.step_is_deliver());
+                        (has_deliver, non_deliver)
+                    });
+                if !c.active() || c.merged() || c.worktree.is_none() || !has_deliver_in_project {
+                    ui.notify("Current Card cannot retry auto-merge");
+                } else if active_non_deliver {
+                    ui.notify("Card workflow is currently active at another step");
+                } else {
+                    dispatch(
+                        ui,
+                        "workflow.deliver",
+                        json!({"card_id": c.id, "revision": c.revision}),
+                    );
                 }
             } else {
                 ui.notify("Select a Card first");
@@ -1193,5 +1232,6 @@ mod tests {
         assert!(CATALOG.iter().any(|c| c.id == "edit-last-comment"));
         assert!(CATALOG.iter().any(|c| c.id == "delete-last-comment"));
         assert!(CATALOG.iter().any(|c| c.id == "open-last-github-comment"));
+        assert!(CATALOG.iter().any(|c| c.id == "retry-auto-merge"));
     }
 }

@@ -75,6 +75,7 @@ fn noise(kind: &str) -> bool {
             | "workflow.script_started"
             | "workflow.script_completed"
             | "workflow.notified"
+            | "workflow.delivery_requeued"
             | "workflow.completed"
             | "workflow.stopped"
             | "workflow.stale"

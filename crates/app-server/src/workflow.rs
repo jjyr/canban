@@ -282,7 +282,10 @@ impl AppServer {
                     )?;
                     Ok(json!(run))
                 })?;
-                if matches!(res["state"].as_str(), Some("waiting_delivery" | "waiting_script")) {
+                if matches!(
+                    res["state"].as_str(),
+                    Some("waiting_delivery" | "waiting_script")
+                ) {
                     self.request_deliveries();
                     self.request_scripts();
                     if let Some(id) = res["id"].as_str() {
@@ -320,6 +323,12 @@ impl AppServer {
                             return Ok(json!(run));
                         }
                         if is_deliver && run.state == "waiting_delivery" {
+                            if card.hold_auto_merge || run.inputs["queued_at"].as_u64().is_none() {
+                                run.inputs["queued_at"] =
+                                    json!(engine::next_merge_queued_at(db, &card.project_id)?);
+                                run.updated_at = now();
+                                db.save(&run)?;
+                            }
                             card.hold_auto_merge = false;
                             card.human_gate = None;
                             card.attention = None;
@@ -327,43 +336,10 @@ impl AppServer {
                             db.save(&card)?;
                             return Ok(json!(run));
                         }
-                        if is_deliver && matches!(run.state.as_str(), "failed" | "blocked") {
-                            if let Some(tid) = &run.terminal_id
-                                && let Ok(entry) = db.get::<TerminalEntry>(tid)
-                                && let Some(prev) = &entry.agent
-                            {
-                                ensure!(
-                                    prev.terminal.is_none()
-                                        || prev
-                                            .observed
-                                            .as_ref()
-                                            .is_some_and(|v| v["state"] == "finished"),
-                                    "End the running Agent before retrying auto-merge"
-                                );
-                                if prev.terminal.is_none() && prev.state == "failed" {
-                                    let attempts =
-                                        run.inputs["conflict_attempts"].as_u64().unwrap_or(0);
-                                    if attempts > 0 {
-                                        run.inputs["conflict_attempts"] = json!(attempts - 1);
-                                    }
-                                }
-                            }
-                            card.hold_auto_merge = false;
-                            card.human_gate = None;
-                            card.attention = None;
-                            card.revision += 1;
-                            db.save(&card)?;
-                            if run.inputs["queued_at"].as_u64().is_none() {
-                                run.inputs["queued_at"] = json!(now());
-                            }
-                            if let Some(obj) = run.inputs.as_object_mut() {
-                                obj.remove("queue_pause_reason");
-                            }
-                            run.terminal_id = None;
-                            run.error = None;
-                            run.state = "waiting_delivery".into();
-                            run.updated_at = now();
-                            db.save(&run)?;
+                        if is_deliver
+                            && matches!(run.state.as_str(), "failed" | "blocked" | "waiting_agent")
+                        {
+                            engine::requeue_delivery(db, &mut card, &mut run)?;
                             return Ok(json!(run));
                         }
                         bail!("Card workflow is currently active at another step");
@@ -479,13 +455,14 @@ impl AppServer {
                         card.human_gate = None;
                         card.attention = None;
                         advance(db, &config, &mut card, Some(&prev_entry))?;
+                    } else if run.step_is_deliver() {
+                        engine::requeue_delivery(db, &mut card, &mut run)?;
                     } else {
                         ensure!(
                             prev.terminal.is_none()
-                                || prev
-                                    .observed
-                                    .as_ref()
-                                    .is_some_and(|v| v["state"] == "finished"),
+                                || prev.observed.as_ref().is_some_and(|v| {
+                                    matches!(v["state"].as_str(), Some("finished" | "missing"))
+                                }),
                             "Answer the live Agent first, or end it before retrying"
                         );
                         ensure!(

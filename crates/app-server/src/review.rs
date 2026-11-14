@@ -356,17 +356,22 @@ impl AppServer {
                 let db = store.db();
                 let runs = db.list::<WorkflowRun>()?;
                 let cards = db.list::<Card>()?;
-                canban_types::project_merge_queue(&runs, &cards, project_id)
-                    .into_iter()
-                    .next()
-                    .cloned()
+                let queue = canban_types::project_merge_queue(&runs, &cards, project_id);
+                // Head-of-line serialization: while any Deliver run in this Project is actively
+                // resolving a conflict via @merger (`waiting_agent` / `running`), no queued Card
+                // may merge or spawn a concurrent resolver.
+                if queue
+                    .iter()
+                    .any(|r| matches!(r.state.as_str(), "waiting_agent" | "running"))
+                {
+                    None
+                } else {
+                    queue.into_iter().next().cloned()
+                }
             };
             let Some(head) = head_run else {
                 break;
             };
-            // Head-of-line serialization: if the #1 Card in the queue is actively resolving a
-            // merge conflict via @merger (`waiting_agent` / `running`), subsequent Cards wait
-            // behind it instead of jumping ahead and advancing `main` under the resolver.
             if head.state != "waiting_delivery" {
                 break;
             }

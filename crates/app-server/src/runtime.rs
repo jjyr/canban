@@ -904,12 +904,7 @@ impl AppServer {
         };
         let mut project = project.clone();
         let wf_run = if let Some(id) = &att.workflow_run_id {
-            let wf = self
-                .store
-                .lock()
-                .unwrap()
-                .db()
-                .get::<WorkflowRun>(id)?;
+            let wf = self.store.lock().unwrap().db().get::<WorkflowRun>(id)?;
             project.workflow.workspace = wf.definition.workspace.clone();
             Some(wf)
         } else {
@@ -1056,8 +1051,8 @@ impl AppServer {
         run.connection_state.clear();
         updated_entry.agent = Some(run.clone());
         let run_dir_path = canban_context::run_dir(&home, &updated_entry);
-        let (mut env, custom_env) = crate::scripts::build_step_env(
-            crate::scripts::StepEnvContext {
+        let (mut env, custom_env) =
+            crate::scripts::build_step_env(crate::scripts::StepEnvContext {
                 cli: &cli,
                 exec_home: &home,
                 endpoint: &endpoint,
@@ -1072,8 +1067,7 @@ impl AppServer {
                     .or_else(|| wf_run.as_ref().and_then(|r| r.step.as_deref())),
                 script_env_file: None,
                 script_output_file: None,
-            },
-        );
+            });
         env.insert(
             "CANBAN_SESSION_ID".into(),
             context.provider_session_id.clone().unwrap_or_default(),

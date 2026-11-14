@@ -103,7 +103,10 @@ pub(crate) fn build_step_env(
 /// Parses GitHub Actions compatible `KEY=VALUE` and `KEY<<DELIMITER ... DELIMITER` files.
 pub(crate) fn parse_key_value_file(contents: &str) -> Result<BTreeMap<String, String>> {
     let mut out = BTreeMap::new();
-    let lines: Vec<&str> = contents.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
+    let lines: Vec<&str> = contents
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect();
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
@@ -130,7 +133,10 @@ pub(crate) fn parse_key_value_file(contents: &str) -> Result<BTreeMap<String, St
                 body.push(lines[i]);
                 i += 1;
             }
-            ensure!(closed, "Unterminated multiline delimiter `{delim}` for `{key}`");
+            ensure!(
+                closed,
+                "Unterminated multiline delimiter `{delim}` for `{key}`"
+            );
             out.insert(key.to_owned(), body.join("\n"));
             continue;
         }
@@ -147,7 +153,10 @@ pub(crate) fn parse_key_value_file(contents: &str) -> Result<BTreeMap<String, St
 
 fn validate_env_key(key: &str) -> Result<()> {
     ensure!(
-        !key.is_empty() && !key.contains('=') && !key.contains('\0') && !key.chars().any(char::is_whitespace),
+        !key.is_empty()
+            && !key.contains('=')
+            && !key.contains('\0')
+            && !key.chars().any(char::is_whitespace),
         "Invalid environment/output key `{key}`"
     );
     Ok(())
@@ -167,9 +176,19 @@ fn shell_argv(shell: Option<&str>, script_path: &Path) -> Result<Vec<String>> {
     };
     let lower = raw.to_ascii_lowercase();
     match lower.as_str() {
-        "bash" => Ok(vec!["bash".into(), "-eo".into(), "pipefail".into(), path_str]),
+        "bash" => Ok(vec![
+            "bash".into(),
+            "-eo".into(),
+            "pipefail".into(),
+            path_str,
+        ]),
         "sh" => Ok(vec!["sh".into(), "-e".into(), path_str]),
-        "zsh" => Ok(vec!["zsh".into(), "-eo".into(), "pipefail".into(), path_str]),
+        "zsh" => Ok(vec![
+            "zsh".into(),
+            "-eo".into(),
+            "pipefail".into(),
+            path_str,
+        ]),
         "python" | "python3" => Ok(vec!["python3".into(), path_str]),
         _ => {
             let mut parts: Vec<String> = raw.split_whitespace().map(str::to_owned).collect();
@@ -204,7 +223,13 @@ fn wrapped_herdr_argv(log_path: &Path, inner: &[String]) -> Vec<String> {
 fn sanitized_step_slug(step_id: &str) -> String {
     let s: String = step_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if s.is_empty() { "script".into() } else { s }
 }
@@ -223,8 +248,10 @@ fn resolve_working_directory(
             && !rel.starts_with('/')
             && !rel.starts_with('\\')
             && !rel.starts_with('~')
-            && p.components()
-                .all(|c| !matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))),
+            && p.components().all(|c| !matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )),
         "Script working_directory `{rel}` must remain relative to the workspace"
     );
     let target = base.join(p);
@@ -475,7 +502,8 @@ impl AppServer {
         };
 
         let cwd = resolve_working_directory(&ops.host, &ws_path, working_directory.as_deref())?;
-        let scripts_dir = canban_context::card_dir(&exec_home, &card.project_id, &card.id).join("scripts");
+        let scripts_dir =
+            canban_context::card_dir(&exec_home, &card.project_id, &card.id).join("scripts");
         ops.host.mkdir(&scripts_dir)?;
 
         let slug = sanitized_step_slug(step_id);
@@ -485,7 +513,8 @@ impl AppServer {
         let output_file = scripts_dir.join(format!("{stem}.output"));
         let remote_log_file = scripts_dir.join(format!("{stem}.raw.log"));
 
-        ops.host.write(&script_file.to_string_lossy(), command_body)?;
+        ops.host
+            .write(&script_file.to_string_lossy(), command_body)?;
         ops.host.write(&env_file.to_string_lossy(), "")?;
         ops.host.write(&output_file.to_string_lossy(), "")?;
         ops.host.write(&remote_log_file.to_string_lossy(), "")?;
@@ -742,11 +771,7 @@ impl AppServer {
             };
             let timeout_secs = script_timeout_secs(timeout_minutes, timeout_seconds);
 
-            if let Some(meta) = run
-                .inputs
-                .get("script_terminal")
-                .filter(|v| v.is_object())
-            {
+            if let Some(meta) = run.inputs.get("script_terminal").filter(|v| v.is_object()) {
                 let Some(addr) = meta["address"].as_str() else {
                     continue;
                 };
@@ -825,7 +850,13 @@ impl AppServer {
                 Ok(p) => p,
                 Err(e) => {
                     let msg = format!("Failed to prepare script `{step_id}`: {e:#}");
-                    let _ = self.finalize_script_error_only(&run.id, &step_id, run.visit, &msg, continue_on_error);
+                    let _ = self.finalize_script_error_only(
+                        &run.id,
+                        &step_id,
+                        run.visit,
+                        &msg,
+                        continue_on_error,
+                    );
                     continue;
                 }
             };
@@ -909,13 +940,22 @@ impl AppServer {
             };
             let continue_on_error = matches!(
                 run.definition.steps.get(&step_id),
-                Some(WorkflowStep::Script { continue_on_error: true, .. })
+                Some(WorkflowStep::Script {
+                    continue_on_error: true,
+                    ..
+                })
             );
             let prep = match self.prepare_script(&run, &step_id) {
                 Ok(p) => p,
                 Err(e) => {
                     let msg = format!("Failed to prepare script `{step_id}`: {e:#}");
-                    self.finalize_script_error_only(&run.id, &step_id, run.visit, &msg, continue_on_error)?;
+                    self.finalize_script_error_only(
+                        &run.id,
+                        &step_id,
+                        run.visit,
+                        &msg,
+                        continue_on_error,
+                    )?;
                     continue;
                 }
             };
@@ -1035,7 +1075,9 @@ fn run_local_process(
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file));
 
-    let mut child = cmd.spawn().with_context(|| format!("Failed spawning `{}`", argv[0]))?;
+    let mut child = cmd
+        .spawn()
+        .with_context(|| format!("Failed spawning `{}`", argv[0]))?;
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     loop {
         if let Some(status) = child.try_wait()? {

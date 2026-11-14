@@ -1126,14 +1126,42 @@ pub fn Gallery() -> impl IntoElement {
     }
     // Card tile states (running Agent pulse, gates, branch); `-open` keeps a
     // Card pane open so a narrow Board switches to one stage with stage tabs.
-    if let Ok(scene @ ("board-cards" | "board-cards-open" | "board-cards-conflict")) =
-        std::env::var("CANBAN_GALLERY_SCENE").as_deref()
+    if let Ok(
+        scene @ ("board-cards"
+        | "board-cards-open"
+        | "board-cards-conflict"
+        | "board-cards-merger-failed"),
+    ) = std::env::var("CANBAN_GALLERY_SCENE").as_deref()
     {
-        ui.snapshot.set(fixtures::board_cards());
+        let mut snap = fixtures::board_cards();
+        if scene == "board-cards-merger-failed" {
+            if let Some(run) = snap
+                .workflow_runs
+                .iter_mut()
+                .find(|r| r.id == "gallery-conflict-run")
+            {
+                run.state = "failed".into();
+                run.error = Some("Execution failed: inspect or explicitly retry".into());
+                if let Some(obj) = run.inputs.as_object_mut() {
+                    obj.remove("queued_at");
+                }
+            }
+            for term in &mut snap.terminals {
+                if let Some(a) = term.agent.as_mut()
+                    && a.card_id == "conflict-card"
+                    && a.profile.id == "merger"
+                {
+                    a.state = "failed".into();
+                    a.terminal = None;
+                    a.error = Some("Conflict resolution process exited non-zero".into());
+                }
+            }
+        }
+        ui.snapshot.set(snap);
         if scene == "board-cards-open" {
             ui.card.set("card-2".into());
             ui.page.set("card".into());
-        } else if scene == "board-cards-conflict" {
+        } else if matches!(scene, "board-cards-conflict" | "board-cards-merger-failed") {
             ui.card.set("conflict-card".into());
             ui.page.set("card".into());
         } else {

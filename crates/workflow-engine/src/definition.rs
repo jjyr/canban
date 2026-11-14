@@ -6,7 +6,10 @@ use std::path::{Component, Path};
 pub fn validate_env_map(env: &BTreeMap<String, String>, scope: &str) -> Result<()> {
     for (k, v) in env {
         ensure!(
-            !k.is_empty() && !k.contains('=') && !k.contains('\0') && !k.chars().any(char::is_whitespace),
+            !k.is_empty()
+                && !k.contains('=')
+                && !k.contains('\0')
+                && !k.chars().any(char::is_whitespace),
             "Invalid environment variable name `{k}` in {scope}"
         );
         ensure!(
@@ -101,11 +104,17 @@ pub fn validate_definition(
                 on_failure,
                 ..
             } => {
-                ensure!(!run.trim().is_empty(), "Script needs a `run` command at {id}");
+                ensure!(
+                    !run.trim().is_empty(),
+                    "Script needs a `run` command at {id}"
+                );
                 validate_env_map(env, &format!("step {id}"))?;
                 if let Some(sh) = shell {
                     ensure!(
-                        !sh.trim().is_empty() && !sh.contains('\n') && !sh.contains('\r') && !sh.contains('\0'),
+                        !sh.trim().is_empty()
+                            && !sh.contains('\n')
+                            && !sh.contains('\r')
+                            && !sh.contains('\0'),
                         "Invalid `shell` at {id}"
                     );
                 }
@@ -119,7 +128,12 @@ pub fn validate_definition(
                     ensure!(
                         !path.is_absolute()
                             && path.components().all(|c| {
-                                !matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+                                !matches!(
+                                    c,
+                                    Component::ParentDir
+                                        | Component::RootDir
+                                        | Component::Prefix(_)
+                                )
                             }),
                         "working_directory cannot escape the Card workspace at {id}"
                     );

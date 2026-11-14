@@ -323,7 +323,10 @@ impl Document {
                 };
                 let run = match (&step.run, with_run) {
                     (Some(a), Some(b)) if a != &b => {
-                        bail!("Step {} specifies conflicting `run` and `with.run`", step.id)
+                        bail!(
+                            "Step {} specifies conflicting `run` and `with.run`",
+                            step.id
+                        )
                     }
                     (Some(a), _) => a.clone(),
                     (None, Some(b)) => b,
@@ -367,7 +370,10 @@ impl Document {
                  -> Result<Option<u64>> {
                     let from_with = match with_val {
                         Some(v) => Some(v.as_u64().with_context(|| {
-                            format!("Step {} `with.{field}` must be a non-negative integer", step.id)
+                            format!(
+                                "Step {} `with.{field}` must be a non-negative integer",
+                                step.id
+                            )
                         })?),
                         None => None,
                     };
@@ -401,7 +407,10 @@ impl Document {
 
                 let from_with_coe = match args.remove("continue_on_error") {
                     Some(v) => Some(v.as_bool().with_context(|| {
-                        format!("Step {} `with.continue_on_error` must be a boolean", step.id)
+                        format!(
+                            "Step {} `with.continue_on_error` must be a boolean",
+                            step.id
+                        )
                     })?),
                     None => None,
                 };
@@ -417,8 +426,7 @@ impl Document {
                 args.insert(
                     "on_failure".into(),
                     json!(
-                        target(step.on_failure.clone(), true)
-                            .filter(|_| step.on_failure.is_some())
+                        target(step.on_failure.clone(), true).filter(|_| step.on_failure.is_some())
                     ),
                 );
             }
@@ -2101,11 +2109,7 @@ fn walk_stage_summary(
                 details.push(format!("• Runs {who}"));
                 cur = next.as_deref();
             }
-            WorkflowStep::Script {
-                run,
-                next,
-                ..
-            } => {
+            WorkflowStep::Script { run, next, .. } => {
                 has_script = true;
                 let preview = run
                     .lines()

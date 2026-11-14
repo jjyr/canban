@@ -546,7 +546,12 @@ fn drive(
                 run.inputs["script_started_at"] = json!(now());
                 run.input_digest = digest(db, card);
                 run.state = "waiting_script".into();
-                record(db, run, "workflow.script_started", &format!("Running script {key}"))?;
+                record(
+                    db,
+                    run,
+                    "workflow.script_started",
+                    &format!("Running script {key}"),
+                )?;
             }
             WorkflowStep::Move { column, next: to } => {
                 ensure!(
@@ -614,7 +619,8 @@ fn drive(
                     record(db, run, "workflow.waiting_for_human", title)?;
                 } else {
                     if run.inputs["queued_at"].as_u64().is_none() {
-                        run.inputs["queued_at"] = json!(now());
+                        run.inputs["queued_at"] =
+                            json!(next_merge_queued_at(db, &card.project_id)?);
                     }
                     if let Some(obj) = run.inputs.as_object_mut() {
                         obj.remove("queue_pause_reason");
@@ -728,6 +734,12 @@ pub fn reported(
             run.updated_at = now();
             db.save(&run)?;
         } else if matches!(report.state.as_str(), "blocked" | "failed") {
+            if run.step_is_deliver()
+                && let Some(obj) = run.inputs.as_object_mut()
+            {
+                obj.remove("queued_at");
+                obj.remove("queue_pause_reason");
+            }
             run.state = "blocked".into();
             run.error = Some(report.message.clone());
             db.save(&run)?;
@@ -765,6 +777,10 @@ pub fn reported(
                 gate.terminal_id = term_id.clone();
             }
             gate.next_stage = on_done;
+            if let Some(obj) = run.inputs.as_object_mut() {
+                obj.remove("queued_at");
+                obj.remove("queue_pause_reason");
+            }
             run.state = "blocked".into();
             run.inputs["pending_next"] = json!(to);
             db.save(&run)?;
@@ -835,6 +851,16 @@ pub fn advance(
                 digest(db, card) == run.input_digest,
                 "Task changed; request rework instead"
             );
+            if run.step_is_deliver() {
+                if let Some(obj) = run.inputs.as_object_mut() {
+                    obj.remove("queue_pause_reason");
+                }
+                run.inputs["queued_at"] = json!(next_merge_queued_at(db, &card.project_id)?);
+                run.visit += 1;
+                run.error = None;
+                run.state = "running".into();
+                return drive(db, config, card, &mut run, queue);
+            }
             let to = run.inputs["pending_next"].as_str().map(str::to_owned);
             next(&mut run, to);
             return drive(db, config, card, &mut run, queue);
@@ -876,7 +902,8 @@ pub fn approve_with_feedback(
                 rework: Some(to), ..
             } => Some(to.clone()),
             WorkflowStep::Script {
-                on_failure: Some(to), ..
+                on_failure: Some(to),
+                ..
             } => Some(to.clone()),
             WorkflowStep::Agent { .. } if run.state == "stale" => Some(key.clone()),
             _ => bail!("No rework path configured"),
@@ -898,6 +925,7 @@ pub fn approve_with_feedback(
             target_branch,
             strategy,
             sync_upstream,
+            max_conflict_attempts,
             next: to,
             ..
         } = &run.definition.steps[&key]
@@ -911,7 +939,13 @@ pub fn approve_with_feedback(
             if let Some(obj) = run.inputs.as_object_mut() {
                 obj.remove("queue_pause_reason");
             }
-            run.inputs["queued_at"] = json!(now());
+            if *max_conflict_attempts > 0
+                && run.inputs["conflict_attempts"].as_u64().unwrap_or(0)
+                    >= u64::from(*max_conflict_attempts)
+            {
+                run.inputs["conflict_attempts"] = json!(max_conflict_attempts - 1);
+            }
+            run.inputs["queued_at"] = json!(next_merge_queued_at(db, &card.project_id)?);
             run.inputs["pending_next"] = json!(to);
             run.inputs["target_branch"] = json!(target_branch);
             run.inputs["strategy"] = json!(strategy);
@@ -970,7 +1004,9 @@ pub fn approve_with_feedback(
             run.inputs["rework_origin"] = json!("script_failure");
             if let Some(note) = clean_feedback {
                 run.inputs["rework_feedback"] = json!(note);
-            } else if run.inputs["rework_feedback"].as_str().is_none_or(|s| s.trim().is_empty())
+            } else if run.inputs["rework_feedback"]
+                .as_str()
+                .is_none_or(|s| s.trim().is_empty())
                 && let Some(out) = run.outputs.get(&key)
             {
                 let summary = out["summary"].as_str().unwrap_or("Script failed");
@@ -1049,7 +1085,10 @@ pub fn complete_script(
     );
     let key = run.step.clone().context("Missing Script step")?;
     ensure!(
-        matches!(run.definition.steps.get(&key), Some(WorkflowStep::Script { .. })),
+        matches!(
+            run.definition.steps.get(&key),
+            Some(WorkflowStep::Script { .. })
+        ),
         "Current step is not a Script step"
     );
     merge_env_into_run(run, exported_env);
@@ -1380,6 +1419,135 @@ pub fn hold_delivery(
     Ok(())
 }
 
+/// Computes a strictly increasing `queued_at` ticket for a Project's FIFO merge queue
+/// so newly queued or retried deliveries always join behind existing queued/active entries.
+pub fn next_merge_queued_at(db: Db<'_>, project_id: &str) -> Result<u64> {
+    let max_existing = db
+        .list::<WorkflowRun>()?
+        .into_iter()
+        .filter(|r| r.project_id == project_id && r.active() && r.step_is_deliver())
+        .filter_map(|r| r.inputs["queued_at"].as_u64())
+        .max()
+        .unwrap_or(0);
+    Ok(now().max(max_existing.saturating_add(1)))
+}
+
+/// Re-queues a failed, blocked, or stopped `Deliver` workflow run at the tail of its
+/// Project's FIFO merge queue (`waiting_delivery`) rather than bypassing active queue members
+/// or re-launching `@merger` out of order.
+pub fn requeue_delivery(db: Db<'_>, card: &mut Card, run: &mut WorkflowRun) -> Result<()> {
+    ensure!(run.active(), "Workflow already ended");
+    let key = run.step.clone().context("Missing Deliver step")?;
+    let WorkflowStep::Deliver {
+        target_branch,
+        strategy,
+        sync_upstream,
+        max_conflict_attempts,
+        next: to,
+        ..
+    } = run
+        .definition
+        .steps
+        .get(&key)
+        .cloned()
+        .context("Current step is not Deliver")?
+    else {
+        bail!("Current step is not Deliver");
+    };
+    ensure!(
+        matches!(run.state.as_str(), "failed" | "blocked" | "waiting_agent"),
+        "Delivery is not retryable from state {}",
+        run.state
+    );
+    let mut handled_terminal = false;
+    let mut refund_attempt = true;
+    if let Some(tid) = &run.terminal_id
+        && let Ok(mut entry) = db.get::<TerminalEntry>(tid)
+        && let Some(agent) = &mut entry.agent
+    {
+        ensure!(
+            !matches!(
+                agent.state.as_str(),
+                "queued" | "starting" | "running" | "working"
+            ),
+            "End the running Agent before retrying auto-merge"
+        );
+        ensure!(
+            !(agent.state == "completed" && run.state != "blocked"),
+            "Completed conflict Agent is awaiting automatic delivery"
+        );
+        ensure!(
+            agent.terminal.is_none()
+                || agent
+                    .observed
+                    .as_ref()
+                    .is_some_and(|v| matches!(v["state"].as_str(), Some("finished" | "missing"))),
+            "End the running Agent before retrying auto-merge"
+        );
+        handled_terminal = true;
+        if matches!(agent.state.as_str(), "completed" | "backlog") {
+            refund_attempt = false;
+        }
+        let mut entry_changed = false;
+        if matches!(agent.state.as_str(), "blocked" | "needs_report" | "unknown")
+            || !agent.finished()
+        {
+            agent.state = "cancelled".into();
+            entry_changed = true;
+        }
+        if agent.pending.is_some() {
+            agent.pending = None;
+            entry_changed = true;
+        }
+        if entry_changed {
+            agent.updated_at = now();
+            db.save(&entry)?;
+        }
+    }
+    if run.state == "waiting_agent" && !handled_terminal {
+        bail!("End the running Agent before retrying auto-merge");
+    }
+    if refund_attempt && max_conflict_attempts > 0 {
+        let attempts = run.inputs["conflict_attempts"].as_u64().unwrap_or(0);
+        if attempts > 0 {
+            let refunded = (attempts - 1).min(u64::from(max_conflict_attempts - 1));
+            run.inputs["conflict_attempts"] = json!(refunded);
+        }
+    }
+    card.hold_auto_merge = false;
+    card.human_gate = None;
+    card.attention = None;
+    card.revision += 1;
+    run.input_digest = digest(db, card);
+    if let Some(obj) = run.inputs.as_object_mut() {
+        obj.remove("queue_pause_reason");
+    }
+    run.inputs["queued_at"] = json!(next_merge_queued_at(db, &card.project_id)?);
+    run.inputs["pending_next"] = json!(to);
+    run.inputs["target_branch"] = json!(target_branch);
+    run.inputs["strategy"] = json!(strategy);
+    run.inputs["sync_upstream"] = json!(sync_upstream);
+    run.terminal_id = None;
+    run.error = None;
+    run.state = "waiting_delivery".into();
+    run.updated_at = now();
+    run.history.push(json!({
+        "step": key,
+        "visit": run.visit,
+        "decision": "retry_queued",
+        "at": now()
+    }));
+    db.save(run)?;
+    db.save(card)?;
+    record(
+        db,
+        run,
+        "workflow.delivery_requeued",
+        "Queued for auto-merge",
+    )?;
+    Ok(())
+}
+
 pub fn initialize(db: Db<'_>, config: &Config) -> Result<()> {
     let _ = (db, config);
     Ok(())
@@ -1400,12 +1568,19 @@ pub fn reconcile(db: Db<'_>) -> Result<()> {
                 && agent.pending.is_none()
                 && matches!(agent.state.as_str(), "failed" | "unknown" | "needs_report")
             {
-                run.state = if agent.state == "failed" {
+                let next_state = if agent.state == "failed" {
                     "failed"
                 } else {
                     "waiting_agent"
+                };
+                if next_state == "failed"
+                    && run.step_is_deliver()
+                    && let Some(obj) = run.inputs.as_object_mut()
+                {
+                    obj.remove("queued_at");
+                    obj.remove("queue_pause_reason");
                 }
-                .into();
+                run.state = next_state.into();
                 run.error = Some(format!(
                     "Execution {}: inspect or explicitly retry",
                     agent.state

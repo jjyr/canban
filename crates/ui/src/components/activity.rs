@@ -176,6 +176,7 @@ pub fn activity_header(actor: String, kind: &str, time: u64) -> impl IntoElement
         "workflow.script_started" => "Script started",
         "workflow.script_completed" => "Script completed",
         "workflow.script_failed" => "Script failed",
+        "workflow.delivery_requeued" => "Auto-merge queued",
         "card.auto_merge_held" => "Auto-merge held",
         "card.auto_merge_resumed" => "Auto-merge resumed",
         "review.merge_started" | "github.pr_merge_started" => "Merge started",
@@ -507,17 +508,29 @@ mod tests {
             "created_at": 2
         }))
         .unwrap();
-        let mut run2 = run;
+        let mut run2 = snapshot.workflow_runs[0].clone();
         run2.id = "run-2".into();
         run2.card_id = "c2".into();
         run2.inputs = serde_json::json!({"queued_at": 20});
         snapshot.cards.push(card2.clone());
-        snapshot.workflow_runs.push(run2);
+        snapshot.workflow_runs.push(run2.clone());
         assert!(!is_merging(&snapshot, &card2));
         assert_eq!(
             card_status_specs(&snapshot, &card2, false),
             vec![("Queue #2".into(), Tone::Info, false)]
         );
+        // Retried failed delivery behind an active head-of-line @merger shows `Queue #2` and not `Merging`.
+        snapshot.workflow_runs[0].state = "waiting_agent".into();
+        snapshot.workflow_runs[0].inputs =
+            serde_json::json!({"queued_at": 150, "conflict_attempts": 1});
+        snapshot.workflow_runs[1].inputs = serde_json::json!({"queued_at": 250});
+        assert!(!is_merging(&snapshot, &card2));
+        assert_eq!(
+            card_status_specs(&snapshot, &card2, false),
+            vec![("Queue #2".into(), Tone::Info, false)]
+        );
+        snapshot.workflow_runs[0].state = "waiting_delivery".into();
+        snapshot.workflow_runs[0].inputs = serde_json::json!({"queued_at": 10});
         snapshot.cards.truncate(1);
         snapshot.workflow_runs.truncate(1);
 
