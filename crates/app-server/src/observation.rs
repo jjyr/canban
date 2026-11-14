@@ -266,6 +266,12 @@ impl AppServer {
                                                         .as_deref()
                                                         .is_some_and(|addr| addr.contains('/'))
                                             })
+                                        }) || s.workflow_runs.iter().any(|r| {
+                                            r.active()
+                                                && r.state == "waiting_script"
+                                                && r.inputs["script_terminal"]["address"]
+                                                    .as_str()
+                                                    .is_some_and(|addr| addr.contains('/'))
                                         }) {
                                             server.remote_health_due.store(true, Ordering::SeqCst);
                                             server.wake_runtime();
@@ -273,6 +279,13 @@ impl AppServer {
                                     }
                                     if changed {
                                         server.wake_runtime();
+                                    }
+                                    if matches!(
+                                        message["params"]["type"].as_str(),
+                                        Some("finished" | "removed")
+                                    ) || message["method"] == "missed"
+                                    {
+                                        server.wake_scripts();
                                     }
                                 }
                                 Ok(Err(e)) => break Err(e),
@@ -430,6 +443,7 @@ impl AppServer {
             db.save(&current_entry)
         })?;
         self.request_deliveries();
+        self.request_scripts();
         let _ = self.try_auto_archive_merged(&card_id);
         self.emit("runtime", Some(card_id));
         Ok(())
@@ -504,15 +518,57 @@ impl AppServer {
             }
         });
     }
+    fn start_script_worker(self: &Arc<Self>, srx: mpsc::Receiver<()>) {
+        let weak = Arc::downgrade(self);
+        std::thread::spawn(move || {
+            loop {
+                let Some(server) = weak.upgrade() else {
+                    break;
+                };
+                if server.stopped() {
+                    break;
+                }
+                let mut wait: Option<Duration> = None;
+                if canban_updater::handoff::active(&server.home) {
+                    wait = Some(Duration::from_millis(250));
+                } else {
+                    match server.pump_scripts() {
+                        Ok(true) => {
+                            wait = Some(Duration::from_millis(200));
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            eprintln!("Canban scripts: {e:#}");
+                            wait = Some(Duration::from_millis(500));
+                        }
+                    }
+                }
+                drop(server);
+                match wait {
+                    Some(d) => {
+                        let _ = srx.recv_timeout(d);
+                    }
+                    None => {
+                        if srx.recv().is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
     pub(super) fn start_runtime(self: &Arc<Self>) {
         let (tx, rx) = mpsc::sync_channel(1);
         canban_herdr::activity::subscribe(tx.clone());
         *self.runtime_wake.lock().unwrap() = Some(tx);
         let (dtx, drx) = mpsc::sync_channel(1);
         *self.delivery_wake.lock().unwrap() = Some(dtx);
+        let (stx, srx) = mpsc::sync_channel(1);
+        *self.script_wake.lock().unwrap() = Some(stx);
         self.start_observer();
         self.start_context_workers();
         self.start_delivery_worker(drx);
+        self.start_script_worker(srx);
         let weak = Arc::downgrade(self);
         std::thread::spawn(move || {
             let mut retry = Instant::now() + Duration::from_secs(1);

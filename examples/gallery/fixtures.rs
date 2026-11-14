@@ -1145,12 +1145,19 @@ pub fn board_cards() -> canban_types::Snapshot {
             "definition": {
                 "id": "delivery",
                 "name": "Development",
-                "entries": {"backlog": "agent:plan", "develop": "agent:develop", "review": "deliver:review"},
+                "entries": {"backlog": "agent:plan", "develop": "script:check", "review": "deliver:review"},
                 "steps": {
                     "agent:plan": {
                         "type": "agent",
                         "profile": "planner",
                         "instruction": "Plan",
+                        "next": "script:check"
+                    },
+                    "script:check": {
+                        "type": "script",
+                        "run": "cargo test --workspace",
+                        "shell": "bash",
+                        "on_failure": "agent:develop",
                         "next": "agent:develop"
                     },
                     "agent:develop": {
@@ -1170,16 +1177,21 @@ pub fn board_cards() -> canban_types::Snapshot {
             },
             "state": "waiting_agent",
             "step": "agent:develop",
-            "visit": 2,
+            "visit": 3,
             "terminal_id": card_2_tid,
             "trigger_event_id": null,
             "input_digest": "gallery",
             "inputs": {"sync_upstream": true},
-            "outputs": {"agent:plan": {"state": "completed"}},
+            "outputs": {
+                "agent:plan": {"state": "completed"},
+                "script:check": {"outcome": "success", "exit_code": 0, "path": "projects/gallery-project/cards/card-2/scripts/script-check-v2.log", "summary": "Script `script:check` succeeded"}
+            },
             "history": [
                 {"step": "agent:plan", "visit": 1, "event": "entered", "at": base_now.saturating_sub(74 * 60 * 1000 + 30_000)},
-                {"step": "agent:plan", "visit": 1, "event": "completed", "at": base_now.saturating_sub(70 * 60 * 1000 + 30_000)},
-                {"step": "agent:develop", "visit": 2, "event": "entered", "at": base_now.saturating_sub(70 * 60 * 1000 + 30_000)}
+                {"step": "agent:plan", "visit": 1, "event": "completed", "at": base_now.saturating_sub(72 * 60 * 1000 + 30_000)},
+                {"step": "script:check", "visit": 2, "event": "entered", "at": base_now.saturating_sub(72 * 60 * 1000 + 30_000)},
+                {"step": "script:check", "visit": 2, "event": "completed", "at": base_now.saturating_sub(70 * 60 * 1000 + 30_000)},
+                {"step": "agent:develop", "visit": 3, "event": "entered", "at": base_now.saturating_sub(70 * 60 * 1000 + 30_000)}
             ],
             "error": null,
             "created_at": base_now.saturating_sub(74 * 60 * 1000 + 30_000),

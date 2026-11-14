@@ -52,6 +52,12 @@ elif trigger == "interactive" and "ADOPT_FROM_BACKLOG" in context["card"].get("b
 else:
     if stage == "develop" and trigger in ("stage_entry", "workflow"):
         Path("canban-acceptance.txt").write_text("Herdr executed the Canban Card task.\n")
+    env_lines = "\n".join(
+        f"{k}={os.environ[k]}"
+        for k in ("ACCEPTANCE_WF_ENV", "DYNAMIC_TOKEN", "ACCEPTANCE_STEP_ENV", "SHARED_OVERRIDE")
+        if k in os.environ
+    )
+    extra = f"\n\n## Inherited Env\n{env_lines}\n" if env_lines else ""
     report = run_dir / f"report-{run_key}.md"
-    report.write_text(f"# {stage.title()} report\n\nCaptured Card: {context['card']['title']}\n\nReal Herdr PTY, explicit CLI result, and file-backed context verified.\n")
+    report.write_text(f"# {stage.title()} report\n\nCaptured Card: {context['card']['title']}\n\nReal Herdr PTY, explicit CLI result, and file-backed context verified.{extra}\n")
     subprocess.run([os.environ["CANBAN_CLI"], "report", "--state", "completed", "--message", f"Fixture {stage} complete", "--file", str(report)], check=True)

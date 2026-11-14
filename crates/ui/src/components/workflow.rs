@@ -66,6 +66,18 @@ pub fn run_view(run: WorkflowRun) -> impl IntoElement {
             WorkflowStep::Agent { profile, .. } => {
                 format!("Agent · @{}", profile.as_deref().unwrap_or("default"))
             }
+            WorkflowStep::Script { run, shell, .. } => {
+                let sh = shell
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("bash");
+                let first_line = run
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or(run);
+                format!("Script ({sh}) · {first_line}")
+            }
             WorkflowStep::Move { column, .. } => format!("Move to {column}"),
             WorkflowStep::Approval { title, .. } => title.clone(),
             WorkflowStep::Deliver {
@@ -125,6 +137,13 @@ pub fn run_view(run: WorkflowRun) -> impl IntoElement {
         } = step
         {
             row = row.child(muted(format!("Changes requested → {to}")));
+        }
+        if let WorkflowStep::Script {
+            on_failure: Some(to),
+            ..
+        } = step
+        {
+            row = row.child(muted(format!("On failure (once) → {to}")));
         }
         if let Some(result) = run.outputs.get(id).and_then(|r| r["message"].as_str()) {
             row = row.child(muted(result.to_owned()));

@@ -65,6 +65,13 @@ struct StepModel {
     message: String,
     move_column: String,
     condition: String,
+    script_run: String,
+    script_shell: String,
+    script_workdir: String,
+    script_timeout_minutes: Option<u32>,
+    script_continue_on_error: bool,
+    on_failure: String,
+    env_map: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +92,7 @@ struct GraphModel {
     workflow_name: String,
     workflow_id: String,
     workflow_enabled: bool,
+    workflow_env: BTreeMap<String, String>,
     columns: Vec<WorkflowColumn>,
     lanes: Vec<LaneModel>,
     step_count: usize,
@@ -95,15 +103,53 @@ fn with_str<'a>(step: &'a source::Step, key: &str) -> Option<&'a str> {
     step.with.get(key).and_then(|v| v.as_str())
 }
 
+fn merged_step_env(step: &source::Step) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if let Some(obj) = step.with.get("env").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            let val = v.as_str().map(str::to_owned).unwrap_or_else(|| v.to_string());
+            out.insert(k.clone(), val);
+        }
+    }
+    for (k, v) in &step.env {
+        out.insert(k.clone(), v.clone());
+    }
+    out
+}
+
+fn format_env_lines(env: &BTreeMap<String, String>) -> String {
+    env.iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn parse_env_lines(raw: &str, scope: &str) -> anyhow::Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for (idx, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = trimmed.split_once('=') else {
+            anyhow::bail!("Line {} must use KEY=VALUE format", idx + 1);
+        };
+        out.insert(k.trim().to_owned(), v.to_owned());
+    }
+    canban_workflow_engine::definition::validate_env_map(&out, scope)?;
+    Ok(out)
+}
+
 fn humanize_step_title(step: &source::Step, col_names: &BTreeMap<String, String>) -> String {
     if let Some(name) = step.name.as_deref().filter(|n| !n.trim().is_empty()) {
         return name.to_owned();
     }
-    match (step.id.as_str(), step.uses.as_str()) {
+    match (step.id.as_str(), step.kind()) {
         ("agent:plan" | "plan", "agent") => "Plan task".into(),
         ("agent:develop" | "develop", "agent") => "Implement".into(),
         ("agent:review" | "review", "agent") => "Review".into(),
         ("agent:merge" | "merge_verify", "agent") => "Pre-merge check".into(),
+        (_, "script") => "Run script".into(),
         (_, "card.move") => {
             let target = with_str(step, "column").unwrap_or("stage");
             if target == NEXT_COLUMN {
@@ -187,7 +233,38 @@ fn step_model(
                 .unwrap_or_else(|| v.to_string()))
             .unwrap_or_default()
     );
-    let (icon, tint, badge, summary) = match step.uses.as_str() {
+    let kind = step.kind();
+    let script_run = step.script_run().unwrap_or("").to_owned();
+    let script_shell = step
+        .shell
+        .as_deref()
+        .or_else(|| with_str(step, "shell"))
+        .unwrap_or("")
+        .to_owned();
+    let script_workdir = step
+        .working_directory
+        .as_deref()
+        .or_else(|| with_str(step, "working_directory"))
+        .unwrap_or("")
+        .to_owned();
+    let script_timeout_minutes = step.timeout_minutes.or_else(|| {
+        step.with
+            .get("timeout_minutes")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32)
+    });
+    let script_continue_on_error = step
+        .continue_on_error
+        .or_else(|| step.with.get("continue_on_error").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
+    let on_failure = step
+        .on_failure
+        .as_deref()
+        .or_else(|| with_str(step, "on_failure"))
+        .unwrap_or("")
+        .to_owned();
+    let env_map = merged_step_env(step);
+    let (icon, tint, badge, summary) = match kind {
         "agent" => {
             let custom = !is_default;
             (
@@ -281,6 +358,24 @@ fn step_model(
             with_str(step, "message").unwrap_or("").to_owned(),
         ),
         "card.move" => (Icon::Forward, Tint::Accent, "Move".into(), title.clone()),
+        "script" => (
+            Icon::Terminal,
+            Tint::Accent,
+            format!(
+                "Script · {}",
+                if script_shell.trim().is_empty() {
+                    "bash"
+                } else {
+                    script_shell.trim()
+                }
+            ),
+            script_run
+                .lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("Run shell command")
+                .to_owned(),
+        ),
         other => (
             Icon::Info,
             Tint::Muted,
@@ -298,7 +393,22 @@ fn step_model(
                 .unwrap_or_else(|| rework.clone())
         ));
     }
-    if step.uses == "condition" {
+    if !on_failure.is_empty() {
+        pills.push(format!(
+            "↺ Fail (×1) → {}",
+            titles
+                .get(&on_failure)
+                .cloned()
+                .unwrap_or_else(|| on_failure.clone())
+        ));
+    }
+    if script_continue_on_error {
+        pills.push("Continue on error".into());
+    }
+    if !env_map.is_empty() {
+        pills.push(format!("Env ({})", env_map.len()));
+    }
+    if kind == "condition" {
         for (key, mark) in [("then", "✓"), ("otherwise", "✕")] {
             if let Some(t) = with_str(step, key) {
                 pills.push(format!(
@@ -321,7 +431,7 @@ fn step_model(
         prev,
         title,
         name: step.name.clone().unwrap_or_default(),
-        uses: step.uses.clone(),
+        uses: kind.to_owned(),
         icon,
         tint,
         badge,
@@ -343,6 +453,13 @@ fn step_model(
         message: with_str(step, "message").unwrap_or("").to_owned(),
         move_column,
         condition,
+        script_run,
+        script_shell,
+        script_workdir,
+        script_timeout_minutes,
+        script_continue_on_error,
+        on_failure,
+        env_map,
     }
 }
 
@@ -358,7 +475,7 @@ fn build_model(doc: &Document) -> GraphModel {
         .map(|s| (s.id.clone(), humanize_step_title(s, &col_names)))
         .collect();
     let mut branches = BTreeMap::new();
-    for s in doc.steps.iter().filter(|s| s.uses == "condition") {
+    for s in doc.steps.iter().filter(|s| s.kind() == "condition") {
         if let Some(t) = with_str(s, "then") {
             branches.insert(t.to_owned(), format!("If {}", titles[&s.id]));
         }
@@ -413,13 +530,14 @@ fn build_model(doc: &Document) -> GraphModel {
         workflow_name: doc.name.clone(),
         workflow_id: doc.id.clone(),
         workflow_enabled: doc.enabled,
+        workflow_env: doc.env.clone(),
         columns: doc.columns.clone(),
         lanes,
-        step_count: doc.steps.iter().filter(|s| s.uses != "complete").count(),
+        step_count: doc.steps.iter().filter(|s| s.kind() != "complete").count(),
         rework_targets: doc
             .steps
             .iter()
-            .filter(|s| s.uses == "agent")
+            .filter(|s| s.kind() == "agent")
             .map(|s| (s.id.clone(), titles[&s.id].clone()))
             .collect(),
     }
@@ -568,6 +686,8 @@ struct Ctx {
     error: Signal<String>,
     drag: StepDrag,
     prompt: Signal<String>,
+    script_dialog: Signal<String>,
+    env_dialog: Signal<Option<String>>,
     renaming: Signal<String>,
     rename_text: Signal<String>,
     adding: Signal<String>,
@@ -635,6 +755,8 @@ pub(super) fn render(ui: Ui) -> AnyElement {
         error: signal(String::new()),
         drag: StepDrag::new(),
         prompt: signal(String::new()),
+        script_dialog: signal(String::new()),
+        env_dialog: signal(None),
         renaming: signal(String::new()),
         rename_text: signal(String::new()),
         adding: signal(String::new()),
@@ -695,6 +817,14 @@ pub(super) fn render(ui: Ui) -> AnyElement {
         .child(when(
             move || !ctx.prompt.get().is_empty(),
             move || prompt_dialog(ctx),
+        ))
+        .child(when(
+            move || !ctx.script_dialog.get().is_empty(),
+            move || script_editor_dialog(ctx),
+        ))
+        .child(when(
+            move || ctx.env_dialog.get().is_some(),
+            move || env_editor_dialog(ctx),
         ))
         .into_element()
 }
@@ -786,7 +916,27 @@ fn stage_canvas(ctx: Ctx) -> AnyElement {
                             "Click a step to configure it · drag ⋮⋮ to reorder or move it to another stage · each stage ends with its exit.",
                         )),
                 )
-                .child(add_stage),
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(compact_action(
+                            move || {
+                                ctx.graph.with(|g| {
+                                    if g.workflow_env.is_empty() {
+                                        "Workflow env…".to_owned()
+                                    } else {
+                                        format!("Workflow env ({})…", g.workflow_env.len())
+                                    }
+                                })
+                            },
+                            Variant::Secondary,
+                            move |_| ctx.env_dialog.set(Some(String::new())),
+                        ))
+                        .child(add_stage),
+                ),
         )
         .child(when(
             move || !ctx.error.get().is_empty(),
@@ -1435,7 +1585,7 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                     ),
                 )
                 .child({
-                    let (open_id, reset_id) = (id.clone(), id.clone());
+                    let (open_id, env_id, reset_id) = (id.clone(), id.clone(), id.clone());
                     view()
                         .flex_row()
                         .flex_wrap()
@@ -1444,6 +1594,19 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                             "Edit prompt…",
                             Variant::Primary,
                             move |_| ctx.prompt.set(open_id.clone()),
+                        ))
+                        .child(compact_action(
+                            move || {
+                                node.with(|n| {
+                                    if n.env_map.is_empty() {
+                                        "Step env…".to_owned()
+                                    } else {
+                                        format!("Step env ({})…", n.env_map.len())
+                                    }
+                                })
+                            },
+                            Variant::Secondary,
+                            move |_| ctx.env_dialog.set(Some(env_id.clone())),
                         ))
                         .child(when(
                             move || node.with(|n| !n.default_prompt),
@@ -1459,6 +1622,166 @@ fn step_settings(ctx: Ctx, node: ReadSignal<StepModel>) -> AnyElement {
                             move || status("Default prompt", Tone::Neutral),
                         ))
                 });
+        }
+        "script" => {
+            let (open_id, env_id, shell_id, timeout_id, coe_id, fail_id) = (
+                id.clone(),
+                id.clone(),
+                id.clone(),
+                id.clone(),
+                id.clone(),
+                id.clone(),
+            );
+            form = form
+                .child(
+                    view().p_2().rounded(px(RADIUS)).bg(INSET).child(
+                        muted(move || {
+                            node.with(|n| {
+                                let preview = n
+                                    .script_run
+                                    .lines()
+                                    .take(4)
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                if preview.trim().is_empty() {
+                                    "Empty script command".to_owned()
+                                } else {
+                                    preview
+                                }
+                            })
+                        })
+                        .text_size(px(12.)),
+                    ),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap_1()
+                        .child(compact_action(
+                            "Edit script…",
+                            Variant::Primary,
+                            move |_| ctx.script_dialog.set(open_id.clone()),
+                        ))
+                        .child(compact_action(
+                            move || {
+                                node.with(|n| {
+                                    if n.env_map.is_empty() {
+                                        "Step env…".to_owned()
+                                    } else {
+                                        format!("Step env ({})…", n.env_map.len())
+                                    }
+                                })
+                            },
+                            Variant::Secondary,
+                            move |_| ctx.env_dialog.set(Some(env_id.clone())),
+                        )),
+                )
+                .child(dynamic(move || {
+                    let current = node.with(|n| n.script_shell.clone());
+                    let mut options = vec![
+                        ("bash (default)".to_owned(), String::new()),
+                        ("sh".to_owned(), "sh".to_owned()),
+                        ("zsh".to_owned(), "zsh".to_owned()),
+                        ("python3".to_owned(), "python3".to_owned()),
+                    ];
+                    if !current.is_empty() && !options.iter().any(|(_, v)| v == &current) {
+                        options.push((current.clone(), current));
+                    }
+                    let shell_id = shell_id.clone();
+                    setting_row(
+                        "Shell",
+                        choice(
+                            options,
+                            move || node.with(|n| n.script_shell.clone()),
+                            move |sh: String| {
+                                let sid = shell_id.clone();
+                                ctx.edit(move |d| {
+                                    stages::set_script_shell(
+                                        d,
+                                        &sid,
+                                        Some(sh).filter(|s| !s.is_empty()),
+                                    )
+                                });
+                            },
+                        ),
+                    )
+                }))
+                .child(setting_row(
+                    "Working dir",
+                    text_setting(
+                        ctx,
+                        id.clone(),
+                        model.script_workdir.clone(),
+                        "Worktree root (e.g. crates/ui)",
+                        |ctx, sid, v| {
+                            let sid = sid.to_owned();
+                            ctx.edit(move |d| {
+                                stages::set_script_working_directory(d, &sid, Some(v))
+                            });
+                        },
+                    ),
+                ))
+                .child(dynamic(move || {
+                    let current = node.with(|n| n.script_timeout_minutes);
+                    let mut values = vec![5u32, 15, 30];
+                    if let Some(m) = current
+                        && !values.contains(&m)
+                    {
+                        values.push(m);
+                        values.sort_unstable();
+                    }
+                    let mut options = vec![("60m".to_owned(), None)];
+                    options.extend(values.into_iter().map(|m| (format!("{m}m"), Some(m))));
+                    let tid = timeout_id.clone();
+                    setting_row(
+                        "Timeout",
+                        choice(
+                            options,
+                            move || node.with(|n| n.script_timeout_minutes),
+                            move |mins: Option<u32>| {
+                                let tid = tid.clone();
+                                ctx.edit(move |d| {
+                                    stages::set_script_timeout_minutes(d, &tid, mins)
+                                });
+                            },
+                        ),
+                    )
+                }))
+                .child(setting_row(
+                    "Continue on error",
+                    choice(
+                        vec![("Off".to_owned(), false), ("On".to_owned(), true)],
+                        move || node.with(|n| n.script_continue_on_error),
+                        move |coe| {
+                            let cid = coe_id.clone();
+                            ctx.edit(move |d| stages::set_script_continue_on_error(d, &cid, coe));
+                        },
+                    ),
+                ))
+                .child(dynamic(move || {
+                    let targets = ctx.graph.with(|g| g.rework_targets.clone());
+                    let mut options = vec![("Pause for human".to_owned(), String::new())];
+                    options.extend(targets.into_iter().map(|(tid, title)| (title, tid)));
+                    let fid = fail_id.clone();
+                    setting_row(
+                        "On failure →",
+                        choice(
+                            options,
+                            move || node.with(|n| n.on_failure.clone()),
+                            move |t: String| {
+                                let fid = fid.clone();
+                                ctx.edit(move |d| {
+                                    stages::set_on_failure(
+                                        d,
+                                        &fid,
+                                        Some(t).filter(|t| !t.is_empty()),
+                                    )
+                                });
+                            },
+                        ),
+                    )
+                }));
         }
         "admit" => {
             let (slot_id, ready_id) = (id.clone(), id.clone());
@@ -1795,6 +2118,180 @@ fn prompt_dialog(ctx: Ctx) -> impl IntoElement {
     .into_element()
 }
 
+fn script_editor_dialog(ctx: Ctx) -> impl IntoElement {
+    let id = ctx.script_dialog.get_untracked();
+    let model = ctx.graph.with_untracked(|g| {
+        g.lanes
+            .iter()
+            .flat_map(|l| l.nodes.iter())
+            .find(|n| n.id == id)
+            .cloned()
+    });
+    let Some(model) = model else {
+        ctx.script_dialog.set(String::new());
+        return view().into_element();
+    };
+    let text = signal(model.script_run.clone());
+    let editor = canban_ui_kit::markdown::MarkdownInput::new();
+    let close = move || ctx.script_dialog.set(String::new());
+    let save_id = id.clone();
+    super::workflow_dialog(
+        view()
+            .flex_1()
+            .min_h(px(0.))
+            .gap_3()
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(icon(Icon::Terminal))
+                    .child(heading(format!("Script · {}", model.title)))
+                    .child(badge(model.badge.clone()))
+                    .child(view().flex_1())
+                    .child(chrome_button(
+                        Icon::Close,
+                        "Close script editor",
+                        move |_| close(),
+                    )),
+            )
+            .child(
+                muted("Runs in the Card worktree via Herdr Core; writes exported vars to $CANBAN_ENV and step outputs to $CANBAN_OUTPUT.")
+                    .text_size(px(12.)),
+            )
+            .child(
+                view()
+                    .flex_1()
+                    .min_h(px(240.))
+                    .bg(INSET)
+                    .rounded(px(RADIUS))
+                    .p_2()
+                    .child(
+                        editor
+                            .source(text, "Script command", "Write shell or script commands…")
+                            .size_full(),
+                    ),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(view().flex_1())
+                    .child(action("Cancel", Variant::Quiet, move |_| close()))
+                    .child(action("Apply", Variant::Primary, move |_| {
+                        let value = text.get_untracked();
+                        let sid = save_id.clone();
+                        ctx.edit(move |d| stages::set_script_run(d, &sid, value));
+                        close();
+                    })),
+            ),
+        close,
+    )
+    .into_element()
+}
+
+fn env_editor_dialog(ctx: Ctx) -> impl IntoElement {
+    let Some(target) = ctx.env_dialog.get_untracked() else {
+        return view().into_element();
+    };
+    let is_workflow = target.is_empty();
+    let (title_text, initial_env) = if is_workflow {
+        ctx.graph
+            .with_untracked(|g| ("Workflow environment".to_owned(), g.workflow_env.clone()))
+    } else {
+        let found = ctx.graph.with_untracked(|g| {
+            g.lanes
+                .iter()
+                .flat_map(|l| l.nodes.iter())
+                .find(|n| n.id == target)
+                .cloned()
+        });
+        let Some(model) = found else {
+            ctx.env_dialog.set(None);
+            return view().into_element();
+        };
+        (format!("Step env · {}", model.title), model.env_map)
+    };
+    let text = signal(format_env_lines(&initial_env));
+    let parse_error = signal(String::new());
+    let editor = canban_ui_kit::markdown::MarkdownInput::new();
+    let close = move || ctx.env_dialog.set(None);
+    super::workflow_dialog(
+        view()
+            .flex_1()
+            .min_h(px(0.))
+            .gap_3()
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .child(icon(Icon::Terminal))
+                    .child(heading(title_text))
+                    .child(view().flex_1())
+                    .child(chrome_button(
+                        Icon::Close,
+                        "Close environment editor",
+                        move |_| close(),
+                    )),
+            )
+            .child(
+                muted("Enter one KEY=VALUE pair per line (applied to both Script and Agent steps).")
+                    .text_size(px(12.)),
+            )
+            .child(when(
+                move || !parse_error.get().is_empty(),
+                move || notice(move || parse_error.get(), Tone::Danger),
+            ))
+            .child(
+                view()
+                    .flex_1()
+                    .min_h(px(220.))
+                    .bg(INSET)
+                    .rounded(px(RADIUS))
+                    .p_2()
+                    .child(
+                        editor
+                            .source(text, "Environment (KEY=VALUE per line)", "CI=1\nRUST_LOG=info")
+                            .size_full(),
+                    ),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_2()
+                    .child(action("Clear all", Variant::Secondary, move |_| {
+                        text.set(String::new());
+                        parse_error.set(String::new());
+                    }))
+                    .child(view().flex_1())
+                    .child(action("Cancel", Variant::Quiet, move |_| close()))
+                    .child(action("Apply", Variant::Primary, move |_| {
+                        let scope = if is_workflow { "workflow" } else { "step" };
+                        match parse_env_lines(&text.get_untracked(), scope) {
+                            Ok(env_map) => {
+                                parse_error.set(String::new());
+                                let tid = target.clone();
+                                ctx.edit(move |d| {
+                                    if is_workflow {
+                                        stages::set_workflow_env(d, env_map)
+                                    } else {
+                                        stages::set_step_env(d, &tid, env_map)
+                                    }
+                                });
+                                close();
+                            }
+                            Err(e) => parse_error.set(format!("{e:#}")),
+                        }
+                    })),
+            ),
+        close,
+    )
+    .into_element()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1859,5 +2356,83 @@ mod tests {
             insertion_anchor(&doc, "review", Some("deliver:review".into()), ""),
             Some("deliver:review".into())
         );
+    }
+
+    #[test]
+    fn script_shorthand_and_uses_script_render_with_env_and_failure_pills() {
+        let shorthand = r#"schema: 6
+id: wf-script-studio
+name: Script Studio
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: check
+    match:
+      column: develop
+env:
+  CI: "1"
+steps:
+  - id: check
+    stage: develop
+    run: |
+      cargo test --workspace
+    shell: zsh
+    continue_on_error: true
+    on_failure: agent:develop
+    env:
+      RUST_LOG: debug
+  - id: agent:develop
+    name: Implement
+    stage: develop
+    uses: agent
+    with:
+      profile: developer
+      env:
+        AGENT_FLAG: "true"
+  - id: __end
+    uses: complete
+"#;
+        let mut doc = source::parse(shorthand).unwrap();
+        stages::normalize(&mut doc, &[]);
+        let g = build_model(&doc);
+        assert_eq!(g.workflow_env.get("CI").map(String::as_str), Some("1"));
+        let dev_lane = g.lanes.iter().find(|l| l.id == "develop").unwrap();
+        let script_node = dev_lane.nodes.iter().find(|n| n.id == "check").unwrap();
+        assert_eq!(script_node.uses, "script");
+        assert_eq!(script_node.icon, Icon::Terminal);
+        assert_eq!(script_node.badge, "Script · zsh");
+        assert_eq!(script_node.summary, "cargo test --workspace");
+        assert_eq!(script_node.on_failure, "agent:develop");
+        assert!(script_node.script_continue_on_error);
+        assert!(script_node.pills.iter().any(|p| p == "Continue on error"));
+        assert!(script_node.pills.iter().any(|p| p == "Env (1)"));
+        assert!(script_node
+            .pills
+            .iter()
+            .any(|p| p.contains("Fail (×1)") && p.contains("Implement")));
+
+        let agent_node = dev_lane
+            .nodes
+            .iter()
+            .find(|n| n.id == "agent:develop")
+            .unwrap();
+        assert_eq!(
+            agent_node.env_map.get("AGENT_FLAG").map(String::as_str),
+            Some("true")
+        );
+        assert!(agent_node.pills.iter().any(|p| p == "Env (1)"));
+
+        let parsed = parse_env_lines("CI=1\n# comment\n\nRUST_LOG=info\n", "test").unwrap();
+        assert_eq!(parsed.get("CI").map(String::as_str), Some("1"));
+        assert_eq!(parsed.get("RUST_LOG").map(String::as_str), Some("info"));
+        assert!(parse_env_lines("NO_EQUALS", "test").is_err());
+        assert_eq!(format_env_lines(&parsed), "CI=1\nRUST_LOG=info");
     }
 }

@@ -2,6 +2,26 @@
 //! exposed TCP listener or per-machine SSH reverse tunnel.
 use super::*;
 use canban_herdr::host::Host;
+fn active_remote_script_machines(s: &Snapshot) -> impl Iterator<Item = String> + '_ {
+    s.workflow_runs
+        .iter()
+        .filter(|r| r.active() && r.state == "waiting_script")
+        .filter_map(|r| {
+            let card_machine = s
+                .cards
+                .iter()
+                .find(|c| c.id == r.card_id)
+                .and_then(|c| c.workspace.as_ref().map(|w| w.location.machine.clone()));
+            let project_machine = s
+                .projects
+                .iter()
+                .find(|p| p.id == r.project_id)
+                .map(|p| p.work_location().machine);
+            card_machine.or(project_machine)
+        })
+        .filter(|m| m != "local")
+}
+
 impl AppServer {
     pub(super) fn start_remote_workers(self: &Arc<Self>) {
         let Ok(snapshot) = self.snapshot() else {
@@ -14,6 +34,7 @@ impl AppServer {
             .filter(|a| !a.finished())
             .filter_map(|a| a.location.as_ref().map(|l| l.machine.clone()))
             .filter(|m| m != "local")
+            .chain(active_remote_script_machines(&snapshot))
             .collect();
         for machine in machines {
             if !self.remote_workers.lock().unwrap().insert(machine.clone()) {
@@ -33,6 +54,7 @@ impl AppServer {
                                 !a.finished()
                                     && a.location.as_ref().is_some_and(|l| l.machine == machine)
                             })
+                            || active_remote_script_machines(&s).any(|m| m == machine)
                     });
                     if !active {
                         break;

@@ -89,6 +89,7 @@ pub fn agent_run(
         close_requested_at: None,
         connection_state: String::new(),
         pending: None,
+        applied_env: Default::default(),
     }
 }
 
@@ -125,15 +126,31 @@ pub fn active_count(snapshot: &canban_types::Snapshot) -> usize {
 pub fn automatic(agent: &AgentRun) -> bool {
     agent.trigger.is_automatic()
 }
-/// True when `entry` holds a live, completed, idle PTY that can accept a queued `pending`
-/// assignment in-place without spawning a new PTY.
-pub fn can_continue_in_place(snapshot: &canban_types::Snapshot, entry: &TerminalEntry) -> bool {
+fn can_hand_off_idle(snapshot: &canban_types::Snapshot, entry: &TerminalEntry) -> bool {
     let Some(agent) = entry.agent.as_ref() else {
         return false;
     };
-    let Some(pending) = agent.pending.as_ref() else {
+    agent.pending.is_some()
+        && agent.terminal.is_some()
+        && agent.close_state.is_empty()
+        && !agent.finished()
+        && agent.connection_state == "connected"
+        && matches!(agent.runtime_status(), "idle" | "done")
+        && matches!(agent.state.as_str(), "completed" | "backlog")
+        && !snapshot
+            .questions
+            .iter()
+            .any(|q| q.terminal_id.as_deref() == Some(entry.id.as_str()) && q.state != "replied")
+}
+
+/// True when `entry` holds a live, completed, idle PTY that can accept a queued `pending`
+/// assignment in-place without spawning a new PTY.
+pub fn can_continue_in_place(snapshot: &canban_types::Snapshot, entry: &TerminalEntry) -> bool {
+    if !can_hand_off_idle(snapshot, entry) {
         return false;
-    };
+    }
+    let agent = entry.agent.as_ref().unwrap();
+    let pending = agent.pending.as_ref().unwrap();
     let expected_location = agent.location.clone().or_else(|| {
         snapshot
             .projects
@@ -141,19 +158,16 @@ pub fn can_continue_in_place(snapshot: &canban_types::Snapshot, entry: &Terminal
             .find(|p| p.id == agent.project_id)
             .map(|p| p.work_location())
     });
-    agent.terminal.is_some()
-        && agent.close_state.is_empty()
-        && !agent.finished()
-        && agent.location == expected_location
-        && agent.connection_state == "connected"
-        && matches!(agent.runtime_status(), "idle" | "done")
-        && matches!(agent.state.as_str(), "completed" | "backlog")
+    let expected_env = pending
+        .workflow_run_id
+        .as_deref()
+        .and_then(|id| snapshot.workflow_runs.iter().find(|r| r.id == id))
+        .map(|run| run.custom_env_for_step(pending.workflow_step.as_deref()))
+        .unwrap_or_default();
+    agent.location == expected_location
         && agent.profile.id == pending.profile.id
         && agent.profile.command_name() == pending.profile.command_name()
-        && !snapshot
-            .questions
-            .iter()
-            .any(|q| q.terminal_id.as_deref() == Some(entry.id.as_str()) && q.state != "replied")
+        && agent.applied_env == expected_env
 }
 fn queued_meta(agent: &AgentRun) -> Option<(&str, &ExecutionTrigger, Option<&str>, u64)> {
     if let Some(p) = &agent.pending {
@@ -206,7 +220,7 @@ pub fn eligible(snapshot: &canban_types::Snapshot, entry: &TerminalEntry) -> boo
         return false;
     }
     if agent.pending.is_some() {
-        can_continue_in_place(snapshot, entry) || agent.finished() || agent.terminal.is_none()
+        can_hand_off_idle(snapshot, entry) || agent.finished() || agent.terminal.is_none()
     } else {
         (agent.finished() || agent.terminal.is_none()) && agent.state != "unknown"
     }

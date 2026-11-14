@@ -184,6 +184,9 @@ fn retarget(doc: &mut Document, from: &str, to: &str) {
         if step.on_changes_requested.as_deref() == Some(from) {
             step.on_changes_requested = Some(to.to_owned());
         }
+        if step.on_failure.as_deref() == Some(from) {
+            step.on_failure = Some(to.to_owned());
+        }
         for key in ["then", "otherwise"] {
             if step.with.get(key).and_then(|v| v.as_str()) == Some(from) {
                 step.with.insert(key.into(), json!(to));
@@ -378,13 +381,90 @@ pub fn set_step_name(doc: &mut Document, id: &str, name: Option<String>) -> Resu
 pub fn set_rework(doc: &mut Document, id: &str, target: Option<String>) -> Result<()> {
     let i = index(doc, id).with_context(|| format!("Unknown step {id}"))?;
     ensure!(
-        matches!(doc.steps[i].uses.as_str(), "approval" | "deliver"),
+        matches!(doc.steps[i].kind(), "approval" | "deliver"),
         "Only approval and deliver steps have a rework path"
     );
     if let Some(t) = &target {
         ensure!(index(doc, t).is_some(), "Unknown rework target {t}");
     }
     doc.steps[i].on_changes_requested = target;
+    Ok(())
+}
+
+pub fn set_on_failure(doc: &mut Document, id: &str, target: Option<String>) -> Result<()> {
+    let i = index(doc, id).with_context(|| format!("Unknown step {id}"))?;
+    ensure!(
+        doc.steps[i].kind() == "script",
+        "Only script steps have an on_failure target"
+    );
+    if let Some(t) = &target {
+        ensure!(index(doc, t).is_some(), "Unknown on_failure target {t}");
+    }
+    doc.steps[i].on_failure = target;
+    Ok(())
+}
+
+pub fn set_workflow_env(doc: &mut Document, env: BTreeMap<String, String>) -> Result<()> {
+    doc.env = env;
+    Ok(())
+}
+
+pub fn set_step_env(doc: &mut Document, id: &str, env: BTreeMap<String, String>) -> Result<()> {
+    let i = index(doc, id).with_context(|| format!("Unknown step {id}"))?;
+    ensure!(
+        matches!(doc.steps[i].kind(), "agent" | "script"),
+        "Only agent and script steps support `env`"
+    );
+    doc.steps[i].with.remove("env");
+    doc.steps[i].env = env;
+    Ok(())
+}
+
+pub fn set_script_run(doc: &mut Document, id: &str, run: String) -> Result<()> {
+    let i = index(doc, id).with_context(|| format!("Unknown step {id}"))?;
+    ensure!(doc.steps[i].kind() == "script", "Step {id} is not a script");
+    doc.steps[i].with.remove("run");
+    doc.steps[i].run = Some(run);
+    Ok(())
+}
+
+pub fn set_script_shell(doc: &mut Document, id: &str, shell: Option<String>) -> Result<()> {
+    let i = index(doc, id).with_context(|| format!("Unknown step {id}"))?;
+    ensure!(doc.steps[i].kind() == "script", "Step {id} is not a script");
+    doc.steps[i].with.remove("shell");
+    doc.steps[i].shell = shell.filter(|s| !s.trim().is_empty());
+    Ok(())
+}
+
+pub fn set_script_working_directory(
+    doc: &mut Document,
+    id: &str,
+    working_directory: Option<String>,
+) -> Result<()> {
+    let i = index(doc, id).with_context(|| format!("Unknown step {id}"))?;
+    ensure!(doc.steps[i].kind() == "script", "Step {id} is not a script");
+    doc.steps[i].with.remove("working_directory");
+    doc.steps[i].working_directory = working_directory.filter(|s| !s.trim().is_empty());
+    Ok(())
+}
+
+pub fn set_script_timeout_minutes(
+    doc: &mut Document,
+    id: &str,
+    timeout_minutes: Option<u32>,
+) -> Result<()> {
+    let i = index(doc, id).with_context(|| format!("Unknown step {id}"))?;
+    ensure!(doc.steps[i].kind() == "script", "Step {id} is not a script");
+    doc.steps[i].with.remove("timeout_minutes");
+    doc.steps[i].timeout_minutes = timeout_minutes.filter(|&m| m > 0);
+    Ok(())
+}
+
+pub fn set_script_continue_on_error(doc: &mut Document, id: &str, coe: bool) -> Result<()> {
+    let i = index(doc, id).with_context(|| format!("Unknown step {id}"))?;
+    ensure!(doc.steps[i].kind() == "script", "Step {id} is not a script");
+    doc.steps[i].with.remove("continue_on_error");
+    doc.steps[i].continue_on_error = if coe { Some(true) } else { None };
     Ok(())
 }
 
@@ -422,13 +502,11 @@ pub fn set_exit(doc: &mut Document, column: &str, exit: Exit) -> Result<()> {
     let id = unique_id(doc, &format!("move:{column}"));
     let step = Step {
         id: id.clone(),
-        name: None,
         uses: "card.move".into(),
         with: BTreeMap::from([("column".into(), json!(target))]),
         next: Some(STAGE_ENTRY.into()),
-        on_changes_requested: None,
         stage: Some(column.to_owned()),
-        enabled: true,
+        ..Default::default()
     };
     // Tails: this Stage's steps that end the run.
     let stage_of = step_stages(doc);
@@ -613,6 +691,15 @@ pub fn template(kind: &str) -> Option<Step> {
                 ("max_ready", json!(crate::source::DEFAULT_BACKLOG_MAX_READY)),
             ],
         ),
+        "script" => {
+            return Some(Step {
+                id: "script:check".into(),
+                name: Some("Run script".into()),
+                uses: "script".into(),
+                run: Some("echo \"Running check\"".into()),
+                ..Default::default()
+            });
+        }
         "notify" => (
             "notify",
             "Notify",
@@ -626,16 +713,14 @@ pub fn template(kind: &str) -> Option<Step> {
         name: Some(name.into()),
         uses: uses.into(),
         with: with.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
-        next: None,
-        on_changes_requested: None,
-        stage: None,
-        enabled: true,
+        ..Default::default()
     })
 }
 
 /// Template kinds in "Add step" order.
 pub const TEMPLATES: &[(&str, &str)] = &[
     ("agent", "Agent"),
+    ("script", "Run script"),
     ("plan", "Plan (Agent)"),
     ("review", "Review (Agent)"),
     ("approval", "Human approval"),
@@ -803,5 +888,34 @@ mod tests {
         assert!(!d.steps.iter().any(|s| s.stage.as_deref() == Some("review")));
         compiles(&d);
         assert!(remove_column(&mut d, "nope").is_err());
+    }
+
+    #[test]
+    fn script_template_editing_and_retarget_on_failure() {
+        let mut d = doc();
+        let script = template("script").unwrap();
+        let id = insert_step(&mut d, "develop", Some("agent:develop"), script).unwrap();
+        set_script_run(&mut d, &id, "cargo test".into()).unwrap();
+        set_script_shell(&mut d, &id, Some("zsh".into())).unwrap();
+        set_script_working_directory(&mut d, &id, Some("crates/app".into())).unwrap();
+        set_script_timeout_minutes(&mut d, &id, Some(10)).unwrap();
+        set_script_continue_on_error(&mut d, &id, true).unwrap();
+        set_step_env(&mut d, &id, BTreeMap::from([("CI".into(), "1".into())])).unwrap();
+        set_workflow_env(&mut d, BTreeMap::from([("RUST_BACKTRACE".into(), "1".into())])).unwrap();
+        set_on_failure(&mut d, &id, Some("agent:develop".into())).unwrap();
+        let flow = d.compile().unwrap();
+        assert_eq!(flow.env.get("RUST_BACKTRACE").map(String::as_str), Some("1"));
+        assert!(matches!(
+            &flow.steps[&id],
+            WorkflowStep::Script {
+                run,
+                shell: Some(s),
+                working_directory: Some(wd),
+                timeout_minutes: Some(10),
+                continue_on_error: true,
+                on_failure: Some(target),
+                ..
+            } if run == "cargo test" && s == "zsh" && wd == "crates/app" && target == "agent:develop"
+        ));
     }
 }

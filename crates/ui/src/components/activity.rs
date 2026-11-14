@@ -115,6 +115,16 @@ pub fn workflow_step_elapsed(
     })
     .or_else(|| {
         is_current
+            .then(|| {
+                run.inputs["script_terminal"]["started_at"]
+                    .as_u64()
+                    .or_else(|| run.inputs["script_started_at"].as_u64())
+            })
+            .flatten()
+            .filter(|&t| t > 1_000_000_000_000)
+    })
+    .or_else(|| {
+        is_current
             .then_some(active_agent_started_at)
             .flatten()
             .filter(|&t| t > 1_000_000_000_000)
@@ -163,6 +173,9 @@ pub fn activity_header(actor: String, kind: &str, time: u64) -> impl IntoElement
         "workspace.prepared" => "Workspace prepared",
         "workflow.waiting_for_human" => "Human review required",
         "workflow.approved" => "Workflow approved",
+        "workflow.script_started" => "Script started",
+        "workflow.script_completed" => "Script completed",
+        "workflow.script_failed" => "Script failed",
         "card.auto_merge_held" => "Auto-merge held",
         "card.auto_merge_resumed" => "Auto-merge resumed",
         "review.merge_started" | "github.pr_merge_started" => "Merge started",
@@ -239,6 +252,13 @@ pub fn card_status_specs(
         specs.push(("Merged".into(), Tone::Success, false));
     } else if merging {
         specs.push(("Merging".into(), Tone::Info, true));
+    } else if card.active()
+        && snapshot
+            .workflow_runs
+            .iter()
+            .any(|r| r.card_id == card.id && r.active() && r.state == "waiting_script")
+    {
+        specs.push(("Running script".into(), Tone::Info, true));
     } else if card.active()
         && !card.hold_auto_merge
         && let Some((pos, _, head)) = snapshot.merge_queue_status(&card.id)

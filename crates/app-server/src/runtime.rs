@@ -264,6 +264,7 @@ impl AppServer {
             .unwrap()
             .write(|db| events::pump(db, &self.config()))?;
         self.request_deliveries();
+        self.request_scripts();
         let _ = self.pump_merged_archives();
         self.observe_terminals()?;
         self.pump_configuration()?;
@@ -404,6 +405,7 @@ impl AppServer {
                         || observed["status"]["state"].is_null();
                     if agent_stopped {
                         self.request_deliveries();
+                        self.request_scripts();
                     }
                     if finished {
                         let _ = self.try_auto_archive_merged(&card_id);
@@ -610,8 +612,16 @@ impl AppServer {
                     return Ok(None);
                 }
                 if continue_in_place {
-                    return Ok(Some((entry, true)));
+                    return Ok(Some((entry, true, None)));
                 }
+                let stale_terminal = (!agent.finished())
+                    .then(|| {
+                        agent
+                            .terminal
+                            .clone()
+                            .map(|addr| (addr, agent.core_id.clone()))
+                    })
+                    .flatten();
                 if agent.pending.is_some() {
                     let number = u32::try_from(db.counter(&format!("card-attempt:{}", card.id))?)?;
                     let had_session = agent.provider_session_id.is_some();
@@ -649,12 +659,24 @@ impl AppServer {
                 }
                 agent.state = "starting".into();
                 db.save(&entry)?;
-                Ok(Some((entry, false)))
+                Ok(Some((entry, false, stale_terminal)))
             })?;
-            if let Some((entry, continue_in_place)) = admitted {
+            if let Some((entry, continue_in_place, stale_terminal)) = admitted {
                 let res = if continue_in_place {
                     self.continue_assignment(&entry, &snapshot)
                 } else {
+                    if let Some((addr, expected_core)) = stale_terminal
+                        && expected_core.as_deref().is_none_or(|cid| {
+                            client
+                                .status()
+                                .ok()
+                                .and_then(|s| s["core"]["id"].as_str().map(str::to_owned))
+                                .as_deref()
+                                == Some(cid)
+                        })
+                    {
+                        let _ = client.call("terminal.kill", json!({ "terminal": addr }));
+                    }
                     self.launch(&entry, &snapshot)
                 };
                 if let Err(e) = res
@@ -881,16 +903,18 @@ impl AppServer {
             self.execution_home(&location.machine)?
         };
         let mut project = project.clone();
-        if let Some(id) = &att.workflow_run_id {
-            project.workflow.workspace = self
+        let wf_run = if let Some(id) = &att.workflow_run_id {
+            let wf = self
                 .store
                 .lock()
                 .unwrap()
                 .db()
-                .get::<WorkflowRun>(id)?
-                .definition
-                .workspace;
-        }
+                .get::<WorkflowRun>(id)?;
+            project.workflow.workspace = wf.definition.workspace.clone();
+            Some(wf)
+        } else {
+            None
+        };
         project.directory = location.directory.clone();
         project.location = Some(location.clone());
         let mut prepared = card.clone();
@@ -1031,6 +1055,33 @@ impl AppServer {
         run.close_requested_at = None;
         run.connection_state.clear();
         updated_entry.agent = Some(run.clone());
+        let run_dir_path = canban_context::run_dir(&home, &updated_entry);
+        let (mut env, custom_env) = crate::scripts::build_step_env(
+            crate::scripts::StepEnvContext {
+                cli: &cli,
+                exec_home: &home,
+                endpoint: &endpoint,
+                project: &project,
+                card,
+                workspace: run.workspace.as_ref().or(card.workspace.as_ref()),
+                run_dir: &run_dir_path,
+                workflow_run: wf_run.as_ref(),
+                step_ref: att
+                    .workflow_step
+                    .as_deref()
+                    .or_else(|| wf_run.as_ref().and_then(|r| r.step.as_deref())),
+                script_env_file: None,
+                script_output_file: None,
+            },
+        );
+        env.insert(
+            "CANBAN_SESSION_ID".into(),
+            context.provider_session_id.clone().unwrap_or_default(),
+        );
+        // Do not misidentify a child invocation using its launching Agent's ID.
+        env.insert("CANBAN_PROFILE_ID".into(), att.profile.id.clone());
+        run.applied_env = custom_env;
+        updated_entry.agent = Some(run.clone());
         self.store.lock().unwrap().write(|db| {
             let mut current: TerminalEntry = db.get(&entry.id)?;
             if let Some(cur_a) = &current.agent
@@ -1045,26 +1096,6 @@ impl AppServer {
             config: self.config(),
         };
         let core = client.status()?;
-        let env = std::collections::BTreeMap::from([
-            ("CANBAN_ENDPOINT".into(), endpoint.clone()),
-            ("CANBAN_PROJECT".into(), att.project_id.clone()),
-            ("CANBAN_CARD".into(), card.number.to_string()),
-            ("CARD_ID".into(), card.id.clone()),
-            (
-                "CANBAN_RUN_DIR".into(),
-                canban_context::run_dir(&home, &updated_entry)
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            (
-                "CANBAN_SESSION_ID".into(),
-                context.provider_session_id.clone().unwrap_or_default(),
-            ),
-            // Do not misidentify a child invocation using its launching Agent's ID.
-            ("CANBAN_PROFILE_ID".into(), att.profile.id.clone()),
-            ("CANBAN_CLI".into(), cli.to_string_lossy().into_owned()),
-            ("CANBAN_HOME".into(), home.to_string_lossy().into_owned()),
-        ]);
         let labels = std::collections::BTreeMap::from([
             ("canban.project".into(), att.project_id.clone()),
             ("canban.card".into(), card.number.to_string()),

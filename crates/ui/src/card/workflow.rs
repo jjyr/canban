@@ -53,6 +53,13 @@ fn step_badge_label(id: &str, step: &WorkflowStep) -> String {
                 role.to_owned()
             }
         }
+        WorkflowStep::Script { shell, .. } => {
+            let name = id.strip_prefix("script:").unwrap_or(id);
+            match shell.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                Some(s) => format!("Script · {name} ({s})"),
+                None => format!("Script · {name}"),
+            }
+        }
         WorkflowStep::Move { column, .. } => format!("→ {column}"),
         WorkflowStep::Approval { .. } => "Approval".into(),
         WorkflowStep::Deliver {
@@ -302,6 +309,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                             Some(WorkflowStep::Deliver { .. })
                         )
                     });
+                    let is_script_step = run.step_is_script();
 
                     let active_agent_meta = run
                         .terminal_id
@@ -322,8 +330,15 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                     .history
                                     .iter()
                                     .any(|h| h["step"] == *step_id && h["event"] == "completed"));
+                        let script_out = matches!(step, WorkflowStep::Script { .. })
+                            .then(|| run.outputs.get(step_id))
+                            .flatten();
+                        let script_failed_continued =
+                            script_out.is_some_and(|o| o["outcome"] == "failed_continued");
                         let marker = if is_current {
                             "●"
+                        } else if script_failed_continued {
+                            "!"
                         } else if is_done {
                             "✓"
                         } else {
@@ -337,6 +352,15 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         {
                             badge_label = format!("{badge_label} (@{prof})");
                         }
+                        if let Some(out) = script_out {
+                            if out["timed_out"] == true {
+                                badge_label = format!("{badge_label} (timeout)");
+                            } else if let Some(code) = out["exit_code"].as_i64()
+                                && code != 0
+                            {
+                                badge_label = format!("{badge_label} (exit {code})");
+                            }
+                        }
                         let tone = if is_current {
                             if matches!(
                                 run.state.as_str(),
@@ -346,13 +370,18 @@ pub fn render(ui: Ui) -> impl IntoElement {
                             } else {
                                 Tone::Info
                             }
+                        } else if script_failed_continued {
+                            Tone::Attention
                         } else if is_done {
                             Tone::Success
                         } else {
                             Tone::Neutral
                         };
                         if is_current
-                            && matches!(run.state.as_str(), "waiting_agent" | "running")
+                            && matches!(
+                                run.state.as_str(),
+                                "waiting_agent" | "running" | "waiting_script"
+                            )
                             && let Some(elapsed_base) = crate::components::activity::workflow_step_elapsed(
                                 &run,
                                 step_id,
@@ -434,6 +463,8 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                     compact_action(
                                         if is_deliver_step {
                                             "Retry auto-merge"
+                                        } else if is_script_step {
+                                            "Retry script"
                                         } else {
                                             "Approve and continue"
                                         },
@@ -468,6 +499,9 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                             ..
                                         } | WorkflowStep::Deliver {
                                             rework: Some(_),
+                                            ..
+                                        } | WorkflowStep::Script {
+                                            on_failure: Some(_),
                                             ..
                                         }
                                     )
@@ -543,7 +577,20 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         if let Some(path) = output["path"].as_str() {
                             let path = path.to_owned();
                             let card = card_id.clone();
-                            let label_text = if run.outputs.len() > 1 {
+                            let is_script = matches!(
+                                run.definition.steps.get(step_key),
+                                Some(WorkflowStep::Script { .. })
+                            );
+                            let label_text = if is_script {
+                                if run.outputs.len() > 1 {
+                                    format!(
+                                        "Log ({})",
+                                        step_key.strip_prefix("script:").unwrap_or(step_key)
+                                    )
+                                } else {
+                                    "Script log".into()
+                                }
+                            } else if run.outputs.len() > 1 {
                                 format!(
                                     "Report ({})",
                                     step_key.strip_prefix("agent:").unwrap_or(step_key)
@@ -587,6 +634,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                             }
                         }
                         "waiting_capacity" => "Waiting for Agent slot…".to_owned(),
+                        "waiting_script" => "Running script…".to_owned(),
                         "waiting_agent" | "running" => {
                             if run.inputs["conflict_attempts"].as_u64().unwrap_or(0) > 0 {
                                 if let Some(prof) = active_profile {
@@ -612,7 +660,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                     };
                     let active_step_start = matches!(
                         run.state.as_str(),
-                        "waiting_agent" | "running"
+                        "waiting_agent" | "running" | "waiting_script"
                     )
                     .then(|| {
                         let now_ms = ui.runtime_clock.get_untracked();

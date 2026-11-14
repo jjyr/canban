@@ -1,6 +1,6 @@
 # Unified workflow engine, Studio and implementation
 
-Status: implemented and active (reconciled 2026-11-14; SQLite schema 15, workflow schema 5, desktop API 37). This is the canonical product and engineering contract for Canban Workflows, consolidating the unified engine rules, Project/Board workflow ownership, Visual Studio UX, YAML schema, RPC/CLI operations, workspace lifecycle, and acceptance evidence. [Events and subscriptions](events-and-notifications.md) owns the durable journal envelope and trigger delivery.
+Status: implemented and active (reconciled 2026-11-14; SQLite schema 15, workflow schema 6, desktop API 41). This is the canonical product and engineering contract for Canban Workflows, consolidating the unified engine rules, Project/Board workflow ownership, Visual Studio UX, YAML schema, RPC/CLI operations, workspace lifecycle, and acceptance evidence. [Events and subscriptions](events-and-notifications.md) owns the durable journal envelope and trigger delivery.
 
 ## Core design principles
 
@@ -106,16 +106,18 @@ issue-planning.yaml  • |
 1. **Stage Execution Graph (layout-only reactive updates):** Groups steps into swimlanes matching the Project's Board stages (`columns`), showing triggers (`⚡ on:develop`), branching (`✓ Then` / `✕ Else`), rework loops (`↺ Rework`), and inline `+ Add stage` / column removal controls. Stage lanes, inline policy switches, keyed step cards, and the Step Inspector stay mounted across clicks, policy toggles, and prompt typing without global view regeneration.
 2. **Inline Stage Automation Controls:** Graph-derived stage controls (`source::derive_options`) live directly inside the **Backlog** (`New Card analyze`, `Auto-start Develop`) and **Review** (`Review delivery`, `Upstream sync`, `External PR`) lanes, surgically updating `on.backlog`, `agent:plan`, `move:backlog`, `on.review`, `condition:external_pr`, `deliver:review`, and `approval:review` in memory while preserving custom columns, custom steps, and custom prompts.
 3. **Interactive Step Inspector:** Clicking any node binds the persistent Step Inspector below the graph:
-   - `agent`: Profile selector (`@developer`, `@reviewer`, `@codex`, etc.) + persistent NSH Prompt editor with curated built-in defaults and **Reset to default prompt**.
+   - `agent`: Profile selector (`@developer`, `@reviewer`, `@codex`, etc.) + persistent NSH Prompt editor with curated built-in defaults, **Reset to default prompt**, and per-step **Environment** (`env`) editor.
+   - `script`: Editable script body dialog (**Edit script**), **Environment** (`env`), **Shell** (`sh`/`bash` default, `zsh`, `python3`, etc.), **Working dir** (relative to Card worktree or Project directory), **Timeout** (seconds / minutes), **Continue on error** toggle, and optional **On failure →** step fallback target.
    - `deliver`: **Strategy** (`Rebase` default, `Squash`, or `Merge`), **Upstream sync** (`Merge & Sync Upstream` vs. `Merge Only (Local)`), **Target branch**, **Conflict attempts**, and **Rework target**.
    - `approval`: **Gate message** (`title`) and **Rework target**.
    - `card.move`: **Destination stage** selector.
+   - Workflow-level **Environment** (`env`) dialog in Studio configures plaintext key/value defaults inherited by all `script` and `agent` steps.
 4. **YAML Source & History:** Syntax-highlighted NSH editor (2-space indent, soft wrap, line numbers), immutable **History** modal (**Load as draft**), concurrent `revision_conflict` comparison view that preserves unsaved local keystrokes, and atomic **Save** (`Command+S`).
 
 ### Board column hints and Card stepper
 
 - **Column headers** display a read-only, client-derived automation pill (`⚡ Auto develop`, `⚡ Auto merge`, `⚡ Auto plan`, `⚡ Auto start`, `⚡ Auto @<profile>`, etc.) on the right side via `source::column_automation` (`Icon::Zap`). Hovering shows a styled tooltip (`tooltip_box`) summarizing the active workflow file, step actions, external-PR gating, upstream sync, and conflict retries; clicking does not navigate. Quiet/manual columns without automatic actions (including approval-only manual Review or default Backlog) stay blank. Compact single-stage mode (`stage_tabs`) omits the pill to preserve switcher width.
-- **Card detail** renders active/recent `WorkflowRun`s as a **Step Progress Stepper** (`✓ plan (@planner) · 4m → ● implement (@developer) · 1h10m → ○ Queue merge · Sync`), displaying compact elapsed execution time on the active workflow status line (`Agent running… · 1h10m`, `Resolving merge conflict (@merger)… · 3m`) as well as per-step durations on completed and active steps (matching the compact runtime duration on Board Card Agent capsules `@developer · 12m`), exposing clickable report links, an inline **Hold auto-merge / Resume auto-merge** button when a run includes `deliver`, and a **Request changes** feedback box that injects rework instructions into the next Agent step visit.
+- **Card detail** renders active/recent `WorkflowRun`s as a **Step Progress Stepper** (`✓ plan (@planner) · 4m → ● check (Script · 12s) → ○ Queue merge · Sync`), displaying compact elapsed execution time on the active workflow status line (`Agent running… · 1h10m`, `Running script… · 12s`, `Resolving merge conflict (@merger)… · 3m`) as well as per-step durations on completed and active steps (matching the compact runtime duration on Board Card Agent capsules `@developer · 12m`), exposing clickable report and **Script log** links, an inline **Retry script** button when a script pauses in human recovery (`waiting_approval`), an inline **Hold auto-merge / Resume auto-merge** button when a run includes `deliver`, and a **Request changes** feedback box that injects rework instructions into the next Agent step visit.
 
 ---
 
@@ -124,10 +126,12 @@ issue-planning.yaml  • |
 YAML 1.2 parsing uses `serde_yaml_ng` with `deny_unknown_fields`. Duplicate keys, unknown fields, missing step targets, undeclared column/Profile IDs, and automatic cycles fail validation before publication.
 
 ```yaml
-schema: 2
+schema: 6
 id: delivery:example
 name: Development
 enabled: true
+env:
+  CI: "true"
 columns:
   - id: backlog
     name: Backlog
@@ -143,7 +147,7 @@ on:
       column: develop
   review:
     event: card.column_entered
-    start_at: condition:external_pr
+    start_at: script:check
     match:
       column: review
 steps:
@@ -158,6 +162,13 @@ steps:
     uses: card.move
     with:
       column: review
+    next: script:check
+  - id: script:check
+    name: Run checks
+    run: |
+      cargo test --workspace
+      echo "gate=ok" >> "$CANBAN_OUTPUT"
+    on_failure: agent:develop
     next: condition:external_pr
   - id: condition:external_pr
     name: External PR check
@@ -206,15 +217,27 @@ Studio UI: Stage lanes are generated from the graph (no column-specific panels).
 
 | `uses` | `with` arguments and behavior |
 | --- | --- |
-| `agent` | optional `profile` (falls back to global `default_agent`), optional `instruction` (resolves to the built-in step/role default prompt at compile time when omitted). Enqueues a `Request` bound to `run_id` and `<step_id>:<visit>`. |
+| `agent` | optional `profile` (falls back to global `default_agent`), optional `instruction` (resolves to the built-in step/role default prompt at compile time when omitted), optional `env` (`KEY: VALUE` map). Enqueues a `Request` bound to `run_id` and `<step_id>:<visit>` and injects merged workflow/step/`$CANBAN_ENV` variables into the Agent session (replacing a warm PTY cleanly if custom env values changed). |
+| `script` (or step-level `run:`) | Custom shell/interpreter script (`uses: script` + `with.run`, or shorthand step-level `run:` without `uses:`). Optional `shell` (defaults to `bash` with `-eo pipefail`, falling back to `sh -e`; supports `zsh`, `python3`, etc.), `working_directory` (relative to Card worktree or Project directory), `timeout_minutes` / `timeout_seconds`, `continue_on_error` (default `false`), step-level `env`, and `on_failure` fallback step ID. Runs via Herdr Core (local or remote Machine) without consuming `scheduler.max_agents` slots, persists logs under `cards/<card_id>/scripts/`, reads `$CANBAN_ENV` into `WorkflowRun.inputs.env` and `$CANBAN_OUTPUT` into `WorkflowRun.outputs.<step_id>`, and supports **at most 1 automatic fallback** via `on_failure` (with exit code + log tail feedback) before pausing in `waiting_approval` for Retry/Stop/Rework. |
 | `card.move` | `column` (must exist in effective columns). Emits `card.stage_changed` with `origin: "workflow"`. |
-| `condition` | JSON `pointer` into `{inputs, outputs, card}` (e.g. `/card/source_trust`), exact `equals`, `then`, and `otherwise` step IDs. |
+| `condition` | JSON `pointer` into `{inputs, outputs, card}` (e.g. `/card/source_trust` or `/outputs/<step_id>/<key>`), exact `equals`, `then`, and `otherwise` step IDs. |
 | `approval` | `title`, optional `on_changes_requested` rework step ID. Pauses the run in `waiting_approval` and sets `Card.human_gate`. |
 | `deliver` | optional `strategy` (`rebase` default \| `squash` \| `merge`), optional `profile` (conflict-resolution Agent Profile ID, defaulting to `@merger` when enabled), optional `target_branch`, optional `sync_upstream` (boolean, default `true`), optional `max_conflict_attempts` (integer, default `3`), optional `on_changes_requested` human rework step ID. Enters the Project's **FIFO Merge Queue** (`waiting_delivery`, ordered by `inputs.queued_at`): clean integrations (`rebase` linear fast-forward, `squash` single commit, or `merge` forward `--first-parent` semantic merge commit) run natively in `AppServer` without starting any Agent session, textual conflicts across any strategy dispatch a per-Card `@merger` session while holding the head of the queue so later Cards wait in line, transient main-checkout conditions (uncommitted local edits or another checked-out branch) pause non-destructively at the head of the queue and auto-resume once clean, and permanent Card blockers step aside to `waiting_approval`. |
 | `card.move` | `column` (column ID or `$next`), optional `next` (`$entry` continues at the target column's entry). |
 | `admit` | optional `agent_slot` (boolean, default `true`: wait for a free global automatic Agent slot), optional `max_ready` (1..100: at most K Cards that passed this gate may remain in its column). Enters `waiting_capacity`; the AppServer admission pump releases runs in Board order before each scheduler dispatch. |
 | `notify` | `message`. Appends a `workflow.notification` Timeline event. |
 | `complete` | Terminal node ending the `WorkflowRun` (`completed`). |
+
+### Environment variables and script context (`env`, `$CANBAN_ENV`, `$CANBAN_OUTPUT`)
+
+Plaintext environment variables can be configured at the Workflow root (`env:`) and per `agent` or `script` step (`env:` / `with.env`), and extended dynamically by preceding scripts via `$CANBAN_ENV` (both `KEY=VALUE` lines and GitHub Actions-style `KEY<<EOF` heredoc delimiters). Merging applies in ascending precedence across every `script` and `agent` step:
+
+1. Host environment + built-in `CANBAN_*` context (`CANBAN_CLI`, `CANBAN_HOME`, `CANBAN_ENDPOINT`, `CANBAN_PROJECT`, `CANBAN_PROJECT_DIR`, `CANBAN_WORKSPACE`, `CANBAN_CARD`, `CARD_ID`, `CANBAN_CARD_TITLE`, `CANBAN_BRANCH`, `CANBAN_BASE_BRANCH`, `CANBAN_SOURCE_TRUST`, `CANBAN_WORKFLOW`, `CANBAN_RUN_ID`, `CANBAN_STEP_ID`, `CANBAN_STAGE`, `CANBAN_RUN_DIR`, plus `$CANBAN_ENV` and `$CANBAN_OUTPUT` inside `script` steps).
+2. Workflow top-level `env`.
+3. Accumulated dynamic exports from earlier scripts' `$CANBAN_ENV` (`WorkflowRun.inputs.env`).
+4. Step-level `env`.
+
+Script outputs written to `$CANBAN_OUTPUT` (`key=value` or `key<<EOF`) are stored in `WorkflowRun.outputs[step_id]`, making them directly readable by `condition` pointers (for example `/outputs/script:check/gate`) and injected into downstream Agent instructions alongside workflow outputs.
 
 ### Overlap, approvals, and rework
 
@@ -265,12 +288,13 @@ CLI file transport helpers (`canban workflow submit --check` / `submit` / `expor
 ## Migration and verification summary
 
 - **SQLite schema 11–12 migration:** Upgrades legacy Project `Workflow` stage templates, queued/running `Request`s, and pending human gates into SQLite `development.yaml` revisions and `WorkflowRun` checkpoints without relaunching Agents or recreating worktrees. Downgrade refuses to discard user-authored YAML sources or active configuration sessions.
-- **Linear Workflow YAML schema migrations (`crates/workflow-engine/src/migrations.rs`, `BASELINE = 1`, `CURRENT = 5`):**
+- **Linear Workflow YAML schema migrations (`crates/workflow-engine/src/migrations.rs`, `BASELINE = 1`, `CURRENT = 6`):**
   - Authoring, compilation, and Studio UI target `CURRENT` exclusively instead of retaining legacy branches across modules.
   - `source::parse` upgrades older supported `Document.schema` inputs (`1..=CURRENT`) in memory, `workflow.apply` / `project.create` canonicalize older submitted YAML to `CURRENT`, and `AppServer` startup (`authoring::initialize`) automatically publishes a migrated `WorkflowRevision` for any active `WorkflowSource` still on an older `schema`—keeping historical revisions intact and leaving active `WorkflowRun`s pinned to their captured `definition_revision`.
   - **Workflow schema 2:** Strips unmodified v1 built-in Agent prompts from `with.instruction` so built-in prompts resolve at compile time while user-customized prompts stay explicit in YAML.
   - **Workflow schemas 3–4:** Canonicalize admission gates and `@merger` conflict retry defaults (`max_conflict_attempts: 3`) on `deliver` steps.
   - **Workflow schema 5:** Introduces `deliver.with.strategy` (`rebase` default, `squash`, `merge`), omitting redundant explicit `strategy: rebase` so default linear delivery stays concise in YAML.
+  - **Workflow schema 6:** Adds top-level and step-level `env` (`script` and `agent` steps), dual `script` step syntax (shorthand `run:` and explicit `uses: script` + `with.run`), `$CANBAN_ENV` / `$CANBAN_OUTPUT` context propagation, and single-attempt `on_failure` recovery.
 - **Verification suite:**
   - `mise run test` & `cargo clippy --workspace --all-targets -- -D warnings`: Unit and integration coverage in `crates/workflow-engine/src/source.rs` and `crates/app-server/src/tests/workflows.rs`, including default `development.yaml` (`Backlog` quiet intake, `Develop` auto-run, `Review` Queue Merge with `sync_upstream: true` against bare Git remotes vs. `sync_upstream: false` local-only merge), Backlog Auto-Analyze + Auto-Start Develop sequencing, Manual Review gates, external PR trust branching, rework feedback, and 4-column custom workflow preservation.
   - `mise run acceptance` & `mise run acceptance-workflows`: Isolated Herdr Core + real PTY end-to-end execution, restart checkpointing, optimistic `revision_conflict` protection, and CLI export/submit checks.

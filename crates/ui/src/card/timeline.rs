@@ -72,6 +72,8 @@ fn noise(kind: &str) -> bool {
             | "workspace.promoted"
             | "workflow.admitted"
             | "workflow.started"
+            | "workflow.script_started"
+            | "workflow.script_completed"
             | "workflow.notified"
             | "workflow.completed"
             | "workflow.stopped"

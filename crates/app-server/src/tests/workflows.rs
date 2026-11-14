@@ -4392,3 +4392,636 @@ fn failed_rebase_conflict_delivery_retries_via_workflow_deliver_without_burning_
     );
     assert_eq!(git_in(&source, &["rev-parse", "HEAD^"]), main_before);
 }
+
+fn script_exec_hc(app: &AppServer, dir: &Path) {
+    let hc = dir.join("script-exec-hc");
+    std::fs::write(
+        &hc,
+        r#"#!/usr/bin/python3
+import json, os, signal, subprocess, sys
+base = os.path.dirname(__file__)
+state_file = os.path.join(base, "script_counter")
+for line in sys.stdin:
+    p = json.loads(line)
+    m = p["method"]
+    args = p.get("params", {})
+    r = {}
+    if m == "hello":
+        r = {"generation": 1}
+    elif m == "server.status":
+        r = {"core": {"id": "script-test-core"}}
+    elif m == "terminal.run":
+        with open(os.path.join(base, "script_launches.jsonl"), "a") as f:
+            f.write(json.dumps(args) + "\n")
+        n = 1
+        if os.path.exists(state_file):
+            n = int(open(state_file).read().strip()) + 1
+        with open(state_file, "w") as f:
+            f.write(str(n))
+        addr = f"s{n}"
+        env = {**os.environ, **{str(k): str(v) for k, v in args.get("env", {}).items()}}
+        runner = (
+            "import os, subprocess, sys; "
+            "p = subprocess.Popen(sys.argv[3:], cwd=sys.argv[2], start_new_session=True); "
+            "open(sys.argv[1] + '.pid', 'w').write(str(p.pid)); "
+            "rc = p.wait(); "
+            "open(sys.argv[1] + '.done', 'w').write(str(rc))"
+        )
+        prefix = os.path.join(base, addr)
+        subprocess.Popen(
+            ["/usr/bin/python3", "-c", runner, prefix, args["cwd"], *args["argv"]],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        r = {"address": addr}
+    elif m == "terminal.get":
+        addr = args["terminal"]
+        prefix = os.path.join(base, addr)
+        done = prefix + ".done"
+        if os.path.exists(done):
+            rc = int(open(done).read().strip())
+            r = {"address": addr, "state": "finished", "exit_code": rc}
+        else:
+            r = {"address": addr, "state": "live"}
+    elif m == "terminal.read":
+        r = {"text": ""}
+    elif m == "terminal.kill":
+        addr = args["terminal"]
+        pid_file = os.path.join(base, addr + ".pid")
+        if os.path.exists(pid_file):
+            pid = int(open(pid_file).read().strip())
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        r = {"sent": True}
+    elif m == "terminal.list":
+        r = {"terminals": []}
+    print(json.dumps({"jsonrpc": "2.0", "id": p["id"], "result": r}), flush=True)
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hc, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    app.config.write().unwrap().hc = hc.to_string_lossy().into();
+}
+
+#[test]
+fn workflow_schema_6_migration_dual_syntax_env_outputs_and_agent_injection() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(source.join("sub")).unwrap();
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+
+    // 1. Discoverable `workflow.schema` reports schema 6 and `script` / `env`.
+    let schema = app.call("workflow.schema", json!({})).unwrap();
+    assert_eq!(schema["schema_version"], 6);
+    assert!(schema["step_types"]["script"].is_object());
+    assert!(schema["yaml"]["env"].is_string());
+
+    // 2. Submitting a schema 5 workflow on `project.create` upgrades it to schema 6.
+    let v5_yaml = r#"schema: 5
+id: delivery:migrated
+name: Migrated v5
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:dev
+    match:
+      column: develop
+steps:
+  - id: agent:dev
+    uses: agent
+    with:
+      profile: developer
+    next: __end
+  - id: __end
+    uses: complete
+workspace:
+  create_worktree: false
+  sync_base: false
+"#;
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "Schema 6 Workflow",
+                "directory": source,
+                "workflow_yaml": v5_yaml
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let wf = collection(&app, &p);
+    let stored = wf["sources"][0]["source"].as_str().unwrap();
+    assert!(stored.contains("schema: 6"));
+
+    // 3. Apply a schema 6 workflow covering 4-layer env precedence, dual syntax,
+    // `$CANBAN_ENV`, `$CANBAN_OUTPUT`, `condition` routing, and Agent PTY invalidation.
+    let v6_yaml = r#"schema: 6
+id: delivery:migrated
+name: Migrated v6
+env:
+  WF_SHARED: from_wf
+  OVERRIDE_ME: from_wf
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:first
+    match:
+      column: develop
+steps:
+  - id: agent:first
+    name: Initial agent
+    uses: agent
+    env:
+      OVERRIDE_ME: from_first
+    with:
+      profile: developer
+      instruction: Initial implementation step.
+    next: script:prep
+  - id: script:prep
+    name: Shorthand prep script
+    working_directory: sub
+    env:
+      STEP_ONLY: from_prep
+      OVERRIDE_ME: from_prep
+    run: |
+      pwd
+      [ "$(basename "$(pwd)")" = "sub" ]
+      [ -n "$CANBAN_PROJECT" ]
+      [ "$CANBAN_CARD" = "1" ]
+      [ -n "$CARD_ID" ]
+      [ -n "$CANBAN_WORKFLOW" ]
+      [ -n "$CANBAN_RUN_ID" ]
+      [ "$CANBAN_STEP_ID" = "script:prep" ]
+      [ "$CANBAN_STAGE" = "develop" ]
+      [ -n "$CANBAN_RUN_DIR" ]
+      [ -n "$CANBAN_CLI" ]
+      [ "$WF_SHARED" = "from_wf" ]
+      [ "$OVERRIDE_ME" = "from_prep" ]
+      echo "prep-ran-$CARD_ID"
+      {
+        echo "DYNAMIC_VAR=hello_env"
+        echo "OVERRIDE_ME=from_dotenv"
+        echo "MULTI_VAR<<EOF"
+        echo "line1"
+        echo "line2"
+        echo "EOF"
+      } >> "$CANBAN_ENV"
+      echo "gate=pass" >> "$CANBAN_OUTPUT"
+    next: script:explicit
+  - id: script:explicit
+    name: Explicit python script
+    uses: script
+    with:
+      shell: python3
+      env:
+        OVERRIDE_ME: from_step
+      run: |
+        import os
+        assert os.environ["WF_SHARED"] == "from_wf"
+        assert os.environ["DYNAMIC_VAR"] == "hello_env"
+        assert os.environ["MULTI_VAR"] == "line1\nline2"
+        assert os.environ["OVERRIDE_ME"] == "from_step"
+        with open(os.environ["CANBAN_OUTPUT"], "a") as f:
+            f.write("checked=yes\n")
+        print("python-checked")
+    next: condition:gate
+  - id: condition:gate
+    uses: condition
+    with:
+      pointer: /outputs/script:prep/gate
+      equals: pass
+      then: agent:dev
+      otherwise: __end
+  - id: agent:dev
+    name: Final agent
+    uses: agent
+    env:
+      OVERRIDE_ME: from_agent_step
+      AGENT_FLAG: "1"
+    with:
+      profile: developer
+      instruction: Finish after script checks.
+    next: __end
+  - id: __end
+    uses: complete
+workspace:
+  create_worktree: false
+  sync_base: false
+"#;
+    app.call(
+        "workflow.apply",
+        json!({
+            "project_id": p.id,
+            "revision": wf["revision"],
+            "sources": [{"filename": wf["sources"][0]["filename"], "source": v6_yaml}]
+        }),
+    )
+    .unwrap();
+
+    super::terminal_cases::core(&app, dir.path());
+    // Extend `test-hc` so `terminal.list`/`terminal.get` report `status: {"state": "done"}` once
+    // `done` exists, matching how live Herdr Core reports a completed turn.
+    std::fs::write(
+        dir.path().join("test-hc"),
+        r#"#!/usr/bin/python3
+import sys,json,os
+base=os.path.dirname(__file__)
+for line in sys.stdin:
+ p=json.loads(line);m=p['method'];args=p.get('params',{});r={}
+ if m=='hello':r={'generation':1}
+ elif m=='server.status':r={'core':{'id':'replacement' if os.path.exists(base+'/replace') else 'original'}}
+ elif m=='terminal.run':
+  with open(base+'/launches','a') as f:f.write(json.dumps(args)+'\n')
+  r={'address':'t1'}
+ elif m in ['terminal.get','terminal.list']:
+  launches=[json.loads(l) for l in open(base+'/launches')] if os.path.exists(base+'/launches') else []
+  cwd=open(base+'/cwd').read() if os.path.exists(base+'/cwd') else (launches[-1]['cwd'] if launches else base)
+  t={'address':'t1','cwd':launches[-1]['cwd'] if launches else base,'foreground':{'cwd':cwd},'state':'finished' if os.path.exists(base+'/finished') else 'live'}
+  if os.path.exists(base+'/done') and not os.path.exists(base+'/finished'):
+   t['status']={'state':'done'}
+  r={'terminals':[t]} if m=='terminal.list' else t
+ elif m in ['terminal.kill','terminal.interrupt']:
+  with open(base+'/controls','a') as f:f.write(m+'\n')
+  if m=='terminal.kill':open(base+'/finished','w').close()
+  r={'sent':True}
+ print(json.dumps({'jsonrpc':'2.0','id':p['id'],'result':r}),flush=True)
+"#,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            dir.path().join("test-hc"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+    }
+    let c: Card = serde_json::from_value(
+        app.call("card.create", json!({"project_id": p.id, "title": "Env flow card"}))
+            .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+    )
+    .unwrap();
+
+    // Launch `agent:first` through the real scheduler tick so `terminal` + `applied_env` are set.
+    app.tick().unwrap();
+    let first_entry = snap_latest_card_terminal(&app, &c.id);
+    assert_eq!(
+        first_entry.agent.as_ref().unwrap().applied_env.get("OVERRIDE_ME").map(String::as_str),
+        Some("from_first")
+    );
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut e: TerminalEntry = db.get(&first_entry.id)?;
+            let a = e.agent.as_mut().unwrap();
+            a.connection_state = "connected".into();
+            a.observed = Some(json!({"state": "live", "status": {"state": "done"}}));
+            db.save(&e)
+        })
+        .unwrap();
+    std::fs::write(dir.path().join("done"), "").unwrap();
+
+    // Complete `agent:first`: runs `script:prep` -> `script:explicit` -> `condition:gate` -> queues `agent:dev`!
+    app.call(
+        "execution.report",
+        json!({
+            "terminal_id": first_entry.id,
+            "request_key": "first-done",
+            "state": "completed",
+            "message": "First done",
+            "body": "ok"
+        }),
+    )
+    .unwrap();
+
+    let snap_mid = app.snapshot().unwrap();
+    let run_mid = snap_mid
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == c.id)
+        .unwrap();
+    assert_eq!(run_mid.step.as_deref(), Some("agent:dev"));
+    assert_eq!(run_mid.outputs["script:prep"]["gate"], "pass");
+    assert_eq!(run_mid.outputs["script:explicit"]["checked"], "yes");
+
+    // Because `$CANBAN_ENV` added `DYNAMIC_VAR`/`MULTI_VAR` and `agent:dev` changed `OVERRIDE_ME`/`AGENT_FLAG`,
+    // the warm PTY cannot be continued in place and must be replaced cleanly.
+    let pending_entry = snap_latest_card_terminal(&app, &c.id);
+    assert!(canban_scheduler::eligible(&snap_mid, &pending_entry));
+    assert!(!canban_scheduler::can_continue_in_place(&snap_mid, &pending_entry));
+    assert!(pending_entry
+        .agent
+        .as_ref()
+        .unwrap()
+        .pending
+        .as_ref()
+        .unwrap()
+        .instruction
+        .contains("pass"));
+
+    // Next tick kills stale `t1` and launches `agent:dev` with all 4 env layers merged.
+    app.tick().unwrap();
+    assert!(
+        std::fs::read_to_string(dir.path().join("controls"))
+            .unwrap()
+            .contains("terminal.kill")
+    );
+    let dev_entry = snap_latest_card_terminal(&app, &c.id);
+    let applied = &dev_entry.agent.as_ref().unwrap().applied_env;
+    assert_eq!(applied.get("WF_SHARED").map(String::as_str), Some("from_wf"));
+    assert_eq!(applied.get("DYNAMIC_VAR").map(String::as_str), Some("hello_env"));
+    assert_eq!(applied.get("MULTI_VAR").map(String::as_str), Some("line1\nline2"));
+    assert_eq!(
+        applied.get("OVERRIDE_ME").map(String::as_str),
+        Some("from_agent_step")
+    );
+    assert_eq!(applied.get("AGENT_FLAG").map(String::as_str), Some("1"));
+    assert!(dev_entry.agent.as_ref().unwrap().instruction.contains("gate"));
+
+    let launches_raw = std::fs::read_to_string(dir.path().join("launches")).unwrap();
+    let last_launch: Value = serde_json::from_str(launches_raw.lines().last().unwrap()).unwrap();
+    assert_eq!(last_launch["env"]["WF_SHARED"], "from_wf");
+    assert_eq!(last_launch["env"]["DYNAMIC_VAR"], "hello_env");
+    assert_eq!(last_launch["env"]["MULTI_VAR"], "line1\nline2");
+    assert_eq!(last_launch["env"]["OVERRIDE_ME"], "from_agent_step");
+    assert_eq!(last_launch["env"]["AGENT_FLAG"], "1");
+
+    // Verify persisted script log files under `cards/<cid>/scripts/`.
+    let script_dir = app.home.join(format!("projects/{}/cards/{}/scripts", p.id, c.id));
+    let log_texts: Vec<String> = std::fs::read_dir(&script_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .collect();
+    assert!(log_texts.iter().any(|t| t.contains(&format!("prep-ran-{}", c.id))));
+    assert!(log_texts.iter().any(|t| t.contains("python-checked")));
+}
+
+#[test]
+fn script_step_bypasses_max_agents_supports_continue_on_error_timeout_and_single_on_failure_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    app.config.write().unwrap().scheduler.max_agents = 1;
+
+    let wf_yaml = r#"schema: 6
+id: delivery:script-recovery
+name: Script Recovery
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:blocker
+    match:
+      column: develop
+  manual_recovery:
+    event: manual
+    start_at: script:soft_fail
+steps:
+  - id: agent:blocker
+    uses: agent
+    with:
+      profile: developer
+    next: __end
+  - id: script:soft_fail
+    name: Soft check
+    continue_on_error: true
+    run: |
+      echo "soft failure output"
+      exit 7
+    next: script:guarded
+  - id: script:guarded
+    name: Guarded build
+    uses: script
+    on_failure: agent:fix
+    with:
+      run: |
+        if [ -f fixed.ok ]; then
+          echo "build-fixed"
+          exit 0
+        fi
+        echo "UNIT_TEST_BROKEN_BUILD" >&2
+        exit 42
+    next: script:timeout_check
+  - id: agent:fix
+    name: Fix failure
+    uses: agent
+    with:
+      profile: developer
+      instruction: Repair the broken script.
+    next: script:guarded
+  - id: script:timeout_check
+    name: Slow script
+    timeout_seconds: 1
+    run: |
+      sleep 10
+    next: __end
+  - id: __end
+    uses: complete
+workspace:
+  create_worktree: false
+  sync_base: false
+"#;
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Script Recovery", "directory": source, "workflow_yaml": wf_yaml}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Occupy the single agent slot (`max_agents = 1`) with Card 1.
+    let c1: Card = serde_json::from_value(
+        app.call("card.create", json!({"project_id": p.id, "title": "Slot holder"}))
+            .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c1.id, "revision": c1.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let holder = snap_latest_card_terminal(&app, &c1.id);
+    let _holder = admit(&app, &holder);
+
+    // Start Card 2 at `script:soft_fail`: scripts must bypass `max_agents = 1`, ignore non-zero under
+    // `continue_on_error: true`, and trigger `on_failure: agent:fix` ONCE on `script:guarded`.
+    let c2: Card = serde_json::from_value(
+        app.call("card.create", json!({"project_id": p.id, "title": "Script recovery"}))
+            .unwrap(),
+    )
+    .unwrap();
+    let run_val = app
+        .call(
+            "workflow.start",
+            json!({
+                "card_id": c2.id,
+                "workflow_id": "delivery:script-recovery",
+                "entry": "manual_recovery"
+            }),
+        )
+        .unwrap();
+    let run_id = run_val["id"].as_str().unwrap().to_owned();
+
+    // First failure auto-routes to `agent:fix` carrying exit code 42 and log tail.
+    let snap1 = app.snapshot().unwrap();
+    let run1 = snap1.workflow_runs.iter().find(|r| r.id == run_id).unwrap();
+    assert_eq!(run1.step.as_deref(), Some("agent:fix"));
+    let fix_req = snap_latest_card_terminal(&app, &c2.id);
+    let fix_instr = &fix_req.agent.as_ref().unwrap().instruction;
+    assert!(fix_instr.contains("42") && fix_instr.contains("UNIT_TEST_BROKEN_BUILD"));
+
+    // Finish `agent:fix` without creating `fixed.ok`: second failure must pause for human approval
+    // instead of looping back to `agent:fix`.
+    finish(&app, &fix_req, "fix-attempt-1");
+    let snap2 = app.snapshot().unwrap();
+    let run2 = snap2.workflow_runs.iter().find(|r| r.id == run_id).unwrap();
+    let card2 = snap2.cards.iter().find(|c| c.id == c2.id).unwrap();
+    assert_eq!(run2.state, "waiting_approval");
+    assert_eq!(run2.step.as_deref(), Some("script:guarded"));
+    assert!(card2.human_gate.is_some());
+
+    // Create `fixed.ok` and click Retry (`workflow.decide` approve): `script:guarded` exits 0 and
+    // advances into `script:timeout_check` (`timeout_seconds: 1`), which terminates and pauses.
+    std::fs::write(source.join("fixed.ok"), "fixed\n").unwrap();
+    app.call(
+        "workflow.decide",
+        json!({
+            "run_id": run_id,
+            "visit": run2.visit,
+            "revision": card2.revision,
+            "decision": "approve",
+            "request_key": "retry-guarded"
+        }),
+    )
+    .unwrap();
+
+    let snap3 = app.snapshot().unwrap();
+    let run3 = snap3.workflow_runs.iter().find(|r| r.id == run_id).unwrap();
+    assert_eq!(run3.state, "waiting_approval");
+    assert_eq!(run3.step.as_deref(), Some("script:timeout_check"));
+    assert!(
+        snap3
+            .events
+            .iter()
+            .any(|e| e.kind == "workflow.script_failed" && e.message.contains("timed out"))
+    );
+}
+
+#[test]
+fn script_step_executes_via_herdr_runtime_with_labels_and_logs() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    script_exec_hc(&app, dir.path());
+
+    let wf_yaml = r#"schema: 6
+id: delivery:herdr-script
+name: Herdr Script
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  check_entry:
+    event: manual
+    start_at: check
+steps:
+  - id: check
+    run: |
+      echo "herdr-script-ok"
+      echo "done=1" >> "$CANBAN_OUTPUT"
+    next: __end
+  - id: __end
+    uses: complete
+workspace:
+  create_worktree: false
+  sync_base: false
+"#;
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Herdr Script", "directory": source, "workflow_yaml": wf_yaml}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let c: Card = serde_json::from_value(
+        app.call("card.create", json!({"project_id": p.id, "title": "Herdr script card"}))
+            .unwrap(),
+    )
+    .unwrap();
+
+    let _running = app.start().unwrap();
+    app.call(
+        "workflow.start",
+        json!({"card_id": c.id, "workflow_id": "delivery:herdr-script", "entry": "check_entry"}),
+    )
+    .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let final_run = loop {
+        app.request_scripts();
+        let snap = app.snapshot().unwrap();
+        if let Some(run) = snap
+            .workflow_runs
+            .into_iter()
+            .find(|r| r.card_id == c.id && r.state == "completed")
+        {
+            break run;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for Herdr-backed script run completion"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    assert_eq!(final_run.outputs["check"]["done"], "1");
+    let launches = std::fs::read_to_string(dir.path().join("script_launches.jsonl")).unwrap();
+    let launch: Value = serde_json::from_str(launches.lines().next().unwrap()).unwrap();
+    assert_eq!(launch["labels"]["canban.script_step"], "check");
+    assert_eq!(launch["labels"]["canban.card_id"], c.id);
+}

@@ -1,6 +1,21 @@
 use anyhow::{Result, ensure};
 use canban_types::*;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path};
+
+pub fn validate_env_map(env: &BTreeMap<String, String>, scope: &str) -> Result<()> {
+    for (k, v) in env {
+        ensure!(
+            !k.is_empty() && !k.contains('=') && !k.contains('\0') && !k.chars().any(char::is_whitespace),
+            "Invalid environment variable name `{k}` in {scope}"
+        );
+        ensure!(
+            !v.contains('\0'),
+            "Environment variable `{k}` in {scope} cannot contain NUL bytes"
+        );
+    }
+    Ok(())
+}
 
 pub fn validate_definition(
     flow: &WorkflowDefinition,
@@ -23,6 +38,7 @@ pub fn validate_definition(
         !flow.workspace.sync_base || flow.workspace.create_worktree,
         "sync_base requires create_worktree"
     );
+    validate_env_map(&flow.env, "workflow")?;
     let mut declared_cols = BTreeSet::new();
     for col in &flow.columns {
         ensure!(
@@ -63,13 +79,67 @@ pub fn validate_definition(
             WorkflowStep::Agent {
                 profile,
                 instruction,
+                env,
                 ..
             } => {
                 ensure!(!instruction.trim().is_empty(), "Empty instruction at {id}");
+                validate_env_map(env, &format!("step {id}"))?;
                 if let Some(profile) = profile {
                     ensure!(
                         profiles.contains(profile),
                         "Unknown agent @{profile} at {id}"
+                    );
+                }
+            }
+            WorkflowStep::Script {
+                run,
+                shell,
+                working_directory,
+                timeout_minutes,
+                timeout_seconds,
+                env,
+                on_failure,
+                ..
+            } => {
+                ensure!(!run.trim().is_empty(), "Script needs a `run` command at {id}");
+                validate_env_map(env, &format!("step {id}"))?;
+                if let Some(sh) = shell {
+                    ensure!(
+                        !sh.trim().is_empty() && !sh.contains('\n') && !sh.contains('\r') && !sh.contains('\0'),
+                        "Invalid `shell` at {id}"
+                    );
+                }
+                if let Some(wd) = working_directory {
+                    ensure!(!wd.trim().is_empty(), "Empty `working_directory` at {id}");
+                    ensure!(
+                        !wd.starts_with('/') && !wd.starts_with('\\') && !wd.starts_with('~'),
+                        "working_directory must be relative to the Card workspace at {id}"
+                    );
+                    let path = Path::new(wd);
+                    ensure!(
+                        !path.is_absolute()
+                            && path.components().all(|c| {
+                                !matches!(c, Component::ParentDir | Component::RootDir | Component::Prefix(_))
+                            }),
+                        "working_directory cannot escape the Card workspace at {id}"
+                    );
+                }
+                if let Some(mins) = timeout_minutes {
+                    ensure!(
+                        (1..=1440).contains(mins),
+                        "timeout_minutes must be between 1 and 1440 at {id}"
+                    );
+                }
+                if let Some(secs) = timeout_seconds {
+                    ensure!(
+                        (1..=86_400).contains(secs),
+                        "timeout_seconds must be between 1 and 86400 at {id}"
+                    );
+                }
+                if let Some(to) = on_failure {
+                    ensure!(
+                        flow.steps.contains_key(to),
+                        "Unknown on_failure target {to} at {id}"
                     );
                 }
             }

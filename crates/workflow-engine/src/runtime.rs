@@ -3,6 +3,40 @@ use anyhow::{Context, Result, bail, ensure};
 use canban_storage::Db;
 use canban_types::*;
 use serde_json::{Value, json};
+
+fn condition_matches(actual: Option<&Value>, expected: &Value) -> bool {
+    let Some(actual) = actual else {
+        return expected.is_null();
+    };
+    if actual == expected {
+        return true;
+    }
+    match (actual, expected) {
+        (Value::String(s), Value::Bool(b)) | (Value::Bool(b), Value::String(s)) => {
+            (s == "true" && *b) || (s == "false" && !*b)
+        }
+        (Value::String(s), Value::Number(n)) | (Value::Number(n), Value::String(s)) => {
+            *s == n.to_string()
+        }
+        _ => false,
+    }
+}
+
+fn merge_env_into_run(run: &mut WorkflowRun, exported_env: &BTreeMap<String, String>) {
+    if exported_env.is_empty() {
+        return;
+    }
+    let mut map = run
+        .inputs
+        .get("env")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    for (k, v) in exported_env {
+        map.insert(k.clone(), json!(v));
+    }
+    run.inputs["env"] = Value::Object(map);
+}
 pub type Queue = for<'a> fn(
     Db<'a>,
     &Config,
@@ -297,7 +331,7 @@ pub fn start_adopted(
                 let context = json!({"inputs":run.inputs,"outputs":run.outputs,"card":card_val});
                 next(
                     &mut run,
-                    Some(if context.pointer(&pointer) == Some(&equals) {
+                    Some(if condition_matches(context.pointer(&pointer), &equals) {
                         then
                     } else {
                         otherwise
@@ -411,12 +445,13 @@ fn drive(
                 profile,
                 instruction,
                 next: continuation,
+                ..
             } => {
                 let project: Project = db.get(&card.project_id)?;
-                let rework_label = if run.inputs["rework_origin"] == "merge_conflict" {
-                    "Merge conflict to resolve before delivery"
-                } else {
-                    "Human rework feedback for this visit"
+                let rework_label = match run.inputs["rework_origin"].as_str() {
+                    Some("merge_conflict") => "Merge conflict to resolve before delivery",
+                    Some("script_failure") => "Workflow script failure to fix",
+                    _ => "Human rework feedback for this visit",
                 };
                 let rework_note = run.inputs["rework_feedback"]
                     .as_str()
@@ -501,6 +536,17 @@ fn drive(
                     run.state = "blocked".into();
                     run.error = card.attention.clone();
                 }
+            }
+            WorkflowStep::Script { next: to, .. } => {
+                run.error = None;
+                if let Some(obj) = run.inputs.as_object_mut() {
+                    obj.remove("script_terminal");
+                }
+                run.inputs["pending_next"] = json!(to);
+                run.inputs["script_started_at"] = json!(now());
+                run.input_digest = digest(db, card);
+                run.state = "waiting_script".into();
+                record(db, run, "workflow.script_started", &format!("Running script {key}"))?;
             }
             WorkflowStep::Move { column, next: to } => {
                 ensure!(
@@ -593,7 +639,7 @@ fn drive(
                 let context = json!({"inputs":run.inputs,"outputs":run.outputs,"card":card_val});
                 next(
                     run,
-                    Some(if context.pointer(&pointer) == Some(&equals) {
+                    Some(if condition_matches(context.pointer(&pointer), &equals) {
                         then
                     } else {
                         otherwise
@@ -820,6 +866,7 @@ pub fn approve_with_feedback(
         "Workflow is not awaiting a decision"
     );
     let key = run.step.clone().context("No pending step")?;
+    let is_script = matches!(&run.definition.steps[&key], WorkflowStep::Script { .. });
     let to = if rework {
         match &run.definition.steps[&key] {
             WorkflowStep::Approval {
@@ -828,12 +875,19 @@ pub fn approve_with_feedback(
             | WorkflowStep::Deliver {
                 rework: Some(to), ..
             } => Some(to.clone()),
+            WorkflowStep::Script {
+                on_failure: Some(to), ..
+            } => Some(to.clone()),
             WorkflowStep::Agent { .. } if run.state == "stale" => Some(key.clone()),
             _ => bail!("No rework path configured"),
         }
     } else {
+        let skip_digest = matches!(
+            &run.definition.steps[&key],
+            WorkflowStep::Script { .. } | WorkflowStep::Deliver { .. }
+        );
         ensure!(
-            digest(db, card) == run.input_digest,
+            skip_digest || digest(db, card) == run.input_digest,
             "Approval is stale; request changes instead"
         );
         ensure!(
@@ -869,11 +923,69 @@ pub fn approve_with_feedback(
             record(db, run, "workflow.approved", "Human approved delivery")?;
             return Ok(());
         }
+        if is_script {
+            if let Some(obj) = run.inputs.as_object_mut() {
+                obj.remove("script_terminal");
+                obj.remove("rework_feedback");
+                obj.remove("rework_origin");
+            }
+            let mut failures = run
+                .inputs
+                .get("script_failures")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            failures.insert(key.clone(), json!(0));
+            run.inputs["script_failures"] = Value::Object(failures);
+            run.history.push(json!({"step":key,"visit":run.visit,"decision":"retry","outputs":run.outputs,"at":now()}));
+            card.human_gate = None;
+            card.attention = None;
+            card.revision += 1;
+            run.error = None;
+            run.input_digest = digest(db, card);
+            run.step = Some(key.clone());
+            run.terminal_id = None;
+            run.state = "running".into();
+            run.visit += 1;
+            run.updated_at = now();
+            record(db, run, "workflow.approved", "Retrying script")?;
+            return drive(db, config, card, run, queue);
+        }
         run.definition.steps[&key].next().map(str::to_owned)
     };
     let clean_feedback = feedback.map(str::trim).filter(|s| !s.is_empty());
-    if rework && let Some(note) = clean_feedback {
-        run.inputs["rework_feedback"] = json!(note);
+    if rework {
+        if is_script {
+            if let Some(obj) = run.inputs.as_object_mut() {
+                obj.remove("script_terminal");
+            }
+            let mut failures = run
+                .inputs
+                .get("script_failures")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            failures.insert(key.clone(), json!(0));
+            run.inputs["script_failures"] = Value::Object(failures);
+            run.inputs["rework_origin"] = json!("script_failure");
+            if let Some(note) = clean_feedback {
+                run.inputs["rework_feedback"] = json!(note);
+            } else if run.inputs["rework_feedback"].as_str().is_none_or(|s| s.trim().is_empty())
+                && let Some(out) = run.outputs.get(&key)
+            {
+                let summary = out["summary"].as_str().unwrap_or("Script failed");
+                let log_path = out["path"].as_str().unwrap_or("");
+                let note = if log_path.is_empty() {
+                    summary.to_owned()
+                } else {
+                    format!("{summary}\nLog: {log_path}")
+                };
+                run.inputs["rework_feedback"] = json!(note);
+            }
+        } else if let Some(note) = clean_feedback {
+            run.inputs["rework_feedback"] = json!(note);
+            run.inputs["rework_origin"] = Value::Null;
+        }
     }
     if rework && let Some(obj) = run.inputs.as_object_mut() {
         obj.remove("queued_at");
@@ -918,6 +1030,130 @@ pub fn complete_delivery(
     let to = run.inputs["pending_next"].as_str().map(str::to_owned);
     next(run, to);
     drive(db, config, card, run, queue)
+}
+
+/// Records successful (or `continue_on_error`) completion of the active `Script` step,
+/// persists `$CANBAN_ENV` and `$CANBAN_OUTPUT` into run context, and continues execution.
+pub fn complete_script(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    output: Value,
+    exported_env: &BTreeMap<String, String>,
+    queue: Queue,
+) -> Result<()> {
+    ensure!(
+        run.state == "waiting_script",
+        "Workflow is not running a script"
+    );
+    let key = run.step.clone().context("Missing Script step")?;
+    ensure!(
+        matches!(run.definition.steps.get(&key), Some(WorkflowStep::Script { .. })),
+        "Current step is not a Script step"
+    );
+    merge_env_into_run(run, exported_env);
+    if let Some(obj) = run.inputs.as_object_mut() {
+        obj.remove("script_started_at");
+        obj.remove("script_terminal");
+    }
+    run.outputs.insert(key, output);
+    let to = run.inputs["pending_next"].as_str().map(str::to_owned);
+    next(run, to);
+    drive(db, config, card, run, queue)
+}
+
+/// Records failure of the active `Script` step: jumps back to `on_failure` at most once per
+/// run when configured, or pauses in `waiting_approval` for human intervention on repeat or
+/// unconfigured failure.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Transaction-scoped script failure carries output, exported env, summary, and rework feedback"
+)]
+pub fn fail_script(
+    db: Db<'_>,
+    config: &Config,
+    card: &mut Card,
+    run: &mut WorkflowRun,
+    output: Value,
+    exported_env: &BTreeMap<String, String>,
+    summary: &str,
+    detail_feedback: &str,
+    queue: Queue,
+) -> Result<()> {
+    ensure!(
+        run.state == "waiting_script",
+        "Workflow is not running a script"
+    );
+    let key = run.step.clone().context("Missing Script step")?;
+    let on_failure = match run.definition.steps.get(&key) {
+        Some(WorkflowStep::Script { on_failure, .. }) => on_failure.clone(),
+        _ => bail!("Current step is not a Script step"),
+    };
+    merge_env_into_run(run, exported_env);
+    if let Some(obj) = run.inputs.as_object_mut() {
+        obj.remove("script_started_at");
+        obj.remove("script_terminal");
+    }
+    run.history
+        .push(json!({"step":key,"visit":run.visit,"event":"failed","outputs":output,"at":now()}));
+    run.outputs.insert(key.clone(), output.clone());
+    log(
+        db,
+        card,
+        "workflow.script_failed",
+        "system",
+        summary,
+        None,
+        json!({
+            "workflow_run_id": run.id,
+            "step": key,
+            "path": output["path"],
+            "exit_code": output["exit_code"],
+            "timed_out": output["timed_out"],
+        }),
+    )?;
+
+    let mut failures = run
+        .inputs
+        .get("script_failures")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let prior = failures.get(&key).and_then(|v| v.as_u64()).unwrap_or(0);
+    failures.insert(key.clone(), json!(prior + 1));
+    run.inputs["script_failures"] = Value::Object(failures);
+
+    if let Some(target) = on_failure
+        && prior == 0
+    {
+        run.inputs["rework_origin"] = json!("script_failure");
+        run.inputs["rework_feedback"] = json!(detail_feedback);
+        run.step = Some(target);
+        run.terminal_id = None;
+        run.error = None;
+        run.state = "running".into();
+        run.visit += 1;
+        run.updated_at = now();
+        return drive(db, config, card, run, queue);
+    }
+
+    attention(db, card, summary)?;
+    card.human_gate = Some(HumanGate {
+        reason: summary.into(),
+        terminal_id: run.terminal_id.clone(),
+        next_stage: None,
+    });
+    card.revision += 1;
+    run.state = "waiting_approval".into();
+    run.error = Some(summary.into());
+    run.inputs["rework_feedback"] = json!(detail_feedback);
+    run.input_digest = digest(db, card);
+    run.updated_at = now();
+    db.save(run)?;
+    db.save(card)?;
+    record(db, run, "workflow.waiting_for_human", summary)?;
+    Ok(())
 }
 /// Releases a run waiting at an `admit` gate. The caller (admission pump) decides
 /// capacity and Board order; this only records the decision and continues.

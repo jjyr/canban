@@ -16,6 +16,12 @@ pub struct Document {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub columns: Vec<WorkflowColumn>,
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "deserialize_env_map"
+    )]
+    pub env: BTreeMap<String, String>,
     pub on: BTreeMap<String, WorkflowRule>,
     pub steps: Vec<Step>,
     #[serde(default)]
@@ -35,13 +41,35 @@ pub struct Step {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Action type (omitted when using the top-level `run:` script shorthand).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub uses: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_minutes: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continue_on_error: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "deserialize_env_map"
+    )]
+    pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub with: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_changes_requested: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<String>,
     /// Board column (Stage) this step belongs to in Studio. Inferred when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stage: Option<String>,
@@ -49,8 +77,83 @@ pub struct Step {
     #[serde(default = "yes", skip_serializing_if = "is_yes")]
     pub enabled: bool,
 }
+impl Default for Step {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: None,
+            uses: String::new(),
+            run: None,
+            shell: None,
+            working_directory: None,
+            timeout_minutes: None,
+            timeout_seconds: None,
+            continue_on_error: None,
+            env: BTreeMap::new(),
+            with: BTreeMap::new(),
+            next: None,
+            on_changes_requested: None,
+            on_failure: None,
+            stage: None,
+            enabled: true,
+        }
+    }
+}
+impl Step {
+    /// Canonical step kind (`"script"` when `uses` is omitted and `run` is set).
+    pub fn kind(&self) -> &str {
+        let uses = self.uses.trim();
+        if uses.is_empty() && self.run.is_some() {
+            "script"
+        } else {
+            uses
+        }
+    }
+
+    /// Script command body from either top-level `run` or `with.run`.
+    pub fn script_run(&self) -> Option<&str> {
+        self.run
+            .as_deref()
+            .or_else(|| self.with.get("run").and_then(|v| v.as_str()))
+    }
+}
 fn is_yes(v: &bool) -> bool {
     *v
+}
+fn scalar_env_value(key: &str, value: Value) -> Result<String> {
+    match value {
+        Value::String(s) => Ok(s),
+        Value::Number(n) => Ok(n.to_string()),
+        Value::Bool(b) => Ok(b.to_string()),
+        _ => bail!("Environment variable {key} must have a scalar value"),
+    }
+}
+fn value_map_to_env_map(raw: BTreeMap<String, Value>) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for (k, v) in raw {
+        out.insert(k.clone(), scalar_env_value(&k, v)?);
+    }
+    Ok(out)
+}
+fn value_to_env_map(value: Value, context: &str) -> Result<BTreeMap<String, String>> {
+    let obj = value
+        .as_object()
+        .cloned()
+        .with_context(|| format!("{context} must be a mapping"))?;
+    let mut out = BTreeMap::new();
+    for (k, v) in obj {
+        out.insert(k.clone(), scalar_env_value(&k, v)?);
+    }
+    Ok(out)
+}
+fn deserialize_env_map<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Option::<BTreeMap<String, Value>>::deserialize(deserializer)?.unwrap_or_default();
+    value_map_to_env_map(raw).map_err(serde::de::Error::custom)
 }
 pub fn parse(source: &str) -> Result<Document> {
     ensure!(
@@ -156,8 +259,13 @@ impl Document {
                 continue;
             }
             let mut args: serde_json::Map<String, Value> = step.with.clone().into_iter().collect();
-            let kind = match step.uses.as_str() {
+            let raw_uses = step.uses.trim();
+            if raw_uses.is_empty() && step.run.is_none() {
+                bail!("Step {} must specify `uses` or `run`", step.id);
+            }
+            let kind = match step.kind() {
                 "agent" => "agent",
+                "script" => "script",
                 "card.move" => "move",
                 "approval" => "approval",
                 "deliver" => "deliver",
@@ -168,6 +276,152 @@ impl Document {
                 other => bail!("Unknown uses: {other}"),
             };
             args.insert("type".into(), json!(kind));
+            if kind != "script" {
+                ensure!(
+                    step.run.is_none()
+                        && step.shell.is_none()
+                        && step.working_directory.is_none()
+                        && step.timeout_minutes.is_none()
+                        && step.timeout_seconds.is_none()
+                        && step.continue_on_error.is_none()
+                        && step.on_failure.is_none(),
+                    "Step {} ({kind}) cannot define script-only fields",
+                    step.id
+                );
+            }
+            if !matches!(kind, "agent" | "script") {
+                ensure!(
+                    step.env.is_empty() && !args.contains_key("env"),
+                    "Step {} ({kind}) does not accept `env`",
+                    step.id
+                );
+            } else {
+                let mut merged_env = match args.remove("env") {
+                    Some(v) => value_to_env_map(v, &format!("Step {} `with.env`", step.id))?,
+                    None => BTreeMap::new(),
+                };
+                for (k, v) in &step.env {
+                    if let Some(prev) = merged_env.get(k)
+                        && prev != v
+                    {
+                        bail!(
+                            "Step {} specifies conflicting `env.{k}` and `with.env.{k}`",
+                            step.id
+                        );
+                    }
+                    merged_env.insert(k.clone(), v.clone());
+                }
+                if !merged_env.is_empty() {
+                    args.insert("env".into(), json!(merged_env));
+                }
+            }
+            if kind == "script" {
+                let with_run = match args.remove("run") {
+                    Some(Value::String(s)) => Some(s),
+                    Some(_) => bail!("Step {} `with.run` must be a string", step.id),
+                    None => None,
+                };
+                let run = match (&step.run, with_run) {
+                    (Some(a), Some(b)) if a != &b => {
+                        bail!("Step {} specifies conflicting `run` and `with.run`", step.id)
+                    }
+                    (Some(a), _) => a.clone(),
+                    (None, Some(b)) => b,
+                    (None, None) => bail!("Script step {} requires `run`", step.id),
+                };
+                args.insert("run".into(), json!(run));
+
+                let pick_str = |top: &Option<String>,
+                                with_val: Option<Value>,
+                                field: &str|
+                 -> Result<Option<String>> {
+                    let from_with = match with_val {
+                        Some(Value::String(s)) => Some(s),
+                        Some(_) => bail!("Step {} `with.{field}` must be a string", step.id),
+                        None => None,
+                    };
+                    match (top, from_with) {
+                        (Some(a), Some(b)) if a != &b => bail!(
+                            "Step {} specifies conflicting `{field}` and `with.{field}`",
+                            step.id
+                        ),
+                        (Some(a), _) => Ok(Some(a.clone())),
+                        (None, Some(b)) => Ok(Some(b)),
+                        (None, None) => Ok(None),
+                    }
+                };
+                if let Some(shell) = pick_str(&step.shell, args.remove("shell"), "shell")? {
+                    args.insert("shell".into(), json!(shell));
+                }
+                if let Some(wd) = pick_str(
+                    &step.working_directory,
+                    args.remove("working_directory"),
+                    "working_directory",
+                )? {
+                    args.insert("working_directory".into(), json!(wd));
+                }
+
+                let pick_u64 = |top: Option<u64>,
+                                with_val: Option<Value>,
+                                field: &str|
+                 -> Result<Option<u64>> {
+                    let from_with = match with_val {
+                        Some(v) => Some(v.as_u64().with_context(|| {
+                            format!("Step {} `with.{field}` must be a non-negative integer", step.id)
+                        })?),
+                        None => None,
+                    };
+                    match (top, from_with) {
+                        (Some(a), Some(b)) if a != b => bail!(
+                            "Step {} specifies conflicting `{field}` and `with.{field}`",
+                            step.id
+                        ),
+                        (Some(a), _) => Ok(Some(a)),
+                        (None, Some(b)) => Ok(Some(b)),
+                        (None, None) => Ok(None),
+                    }
+                };
+                if let Some(mins) = pick_u64(
+                    step.timeout_minutes.map(u64::from),
+                    args.remove("timeout_minutes"),
+                    "timeout_minutes",
+                )? {
+                    let mins_u32 = u32::try_from(mins).with_context(|| {
+                        format!("Step {} `timeout_minutes` is too large", step.id)
+                    })?;
+                    args.insert("timeout_minutes".into(), json!(mins_u32));
+                }
+                if let Some(secs) = pick_u64(
+                    step.timeout_seconds,
+                    args.remove("timeout_seconds"),
+                    "timeout_seconds",
+                )? {
+                    args.insert("timeout_seconds".into(), json!(secs));
+                }
+
+                let from_with_coe = match args.remove("continue_on_error") {
+                    Some(v) => Some(v.as_bool().with_context(|| {
+                        format!("Step {} `with.continue_on_error` must be a boolean", step.id)
+                    })?),
+                    None => None,
+                };
+                let coe = match (step.continue_on_error, from_with_coe) {
+                    (Some(a), Some(b)) if a != b => bail!(
+                        "Step {} specifies conflicting `continue_on_error` and `with.continue_on_error`",
+                        step.id
+                    ),
+                    (Some(a), _) | (None, Some(a)) => a,
+                    (None, None) => false,
+                };
+                args.insert("continue_on_error".into(), json!(coe));
+                args.insert(
+                    "on_failure".into(),
+                    json!(
+                        target(step.on_failure.clone(), true)
+                            .filter(|_| step.on_failure.is_some())
+                    ),
+                );
+            }
             if kind == "agent"
                 && args
                     .get("instruction")
@@ -243,6 +497,7 @@ impl Document {
             id: self.id.clone(),
             name: self.name.clone(),
             columns: self.columns.clone(),
+            env: self.env.clone(),
             entries,
             steps,
             workspace: self.workspace.clone(),
@@ -304,6 +559,9 @@ pub fn step_stages(doc: &Document) -> BTreeMap<String, String> {
             walk(doc, idx, &to, &after, out);
         }
         if let Some(to) = &step.on_changes_requested {
+            walk(doc, idx, to, &lane, out);
+        }
+        if let Some(to) = &step.on_failure {
             walk(doc, idx, to, &lane, out);
         }
     }
@@ -475,6 +733,7 @@ pub fn default_document(workflow_id: impl Into<String>, workspace: WorkspaceSett
                 name: "Review".into(),
             },
         ],
+        env: BTreeMap::new(),
         on: BTreeMap::from([
             (
                 "develop".into(),
@@ -508,9 +767,7 @@ pub fn default_document(workflow_id: impl Into<String>, workspace: WorkspaceSett
                 uses: "agent".into(),
                 with: BTreeMap::from([("profile".into(), json!("developer"))]),
                 next: Some("move:develop".into()),
-                on_changes_requested: None,
-                stage: None,
-                enabled: true,
+                ..Default::default()
             },
             Step {
                 id: "move:develop".into(),
@@ -518,9 +775,7 @@ pub fn default_document(workflow_id: impl Into<String>, workspace: WorkspaceSett
                 uses: "card.move".into(),
                 with: BTreeMap::from([("column".into(), json!("review"))]),
                 next: Some("condition:external_pr".into()),
-                on_changes_requested: None,
-                stage: None,
-                enabled: true,
+                ..Default::default()
             },
             Step {
                 id: "condition:external_pr".into(),
@@ -532,10 +787,7 @@ pub fn default_document(workflow_id: impl Into<String>, workspace: WorkspaceSett
                     ("then".into(), json!("approval:review")),
                     ("otherwise".into(), json!("deliver:review")),
                 ]),
-                next: None,
-                on_changes_requested: None,
-                stage: None,
-                enabled: true,
+                ..Default::default()
             },
             Step {
                 id: "deliver:review".into(),
@@ -544,8 +796,7 @@ pub fn default_document(workflow_id: impl Into<String>, workspace: WorkspaceSett
                 with: BTreeMap::from([("sync_upstream".into(), json!(true))]),
                 next: Some("__end".into()),
                 on_changes_requested: Some("agent:develop".into()),
-                stage: None,
-                enabled: true,
+                ..Default::default()
             },
             Step {
                 id: "approval:review".into(),
@@ -557,18 +808,12 @@ pub fn default_document(workflow_id: impl Into<String>, workspace: WorkspaceSett
                 )]),
                 next: Some("__end".into()),
                 on_changes_requested: Some("agent:develop".into()),
-                stage: None,
-                enabled: true,
+                ..Default::default()
             },
             Step {
                 id: "__end".into(),
-                name: None,
                 uses: "complete".into(),
-                with: BTreeMap::new(),
-                next: None,
-                on_changes_requested: None,
-                stage: None,
-                enabled: true,
+                ..Default::default()
             },
         ],
         workspace,
@@ -662,13 +907,8 @@ pub(crate) fn ensure_terminal(doc: &mut Document) -> String {
         .unwrap();
     doc.steps.push(Step {
         id: id.clone(),
-        name: None,
         uses: "complete".into(),
-        with: BTreeMap::new(),
-        next: None,
-        on_changes_requested: None,
-        stage: None,
-        enabled: true,
+        ..Default::default()
     });
     id
 }
@@ -746,6 +986,9 @@ fn is_referenced_outside(
             return true;
         }
         if s.on_changes_requested.as_deref() == Some(target_id) {
+            return true;
+        }
+        if s.on_failure.as_deref() == Some(target_id) {
             return true;
         }
         if s.uses == "condition"
@@ -931,6 +1174,9 @@ fn strip_backlog_admits(doc: &mut Document) {
             if step.on_changes_requested.as_deref() == Some(gate) {
                 step.on_changes_requested = Some(target.clone());
             }
+            if step.on_failure.as_deref() == Some(gate) {
+                step.on_failure = Some(target.clone());
+            }
             for key in ["then", "otherwise"] {
                 if step.with.get(key).and_then(|v| v.as_str()) == Some(gate) {
                     step.with.insert(key.into(), json!(target));
@@ -996,11 +1242,8 @@ fn apply_backlog_admission(doc: &mut Document, wait_for_agent: bool, max_ready: 
             id: ADMIT_DEVELOP.into(),
             name: Some("Wait for free Agent".into()),
             uses: "admit".into(),
-            with: BTreeMap::new(),
             next: Some(move_id),
-            on_changes_requested: None,
-            stage: None,
-            enabled: true,
+            ..Default::default()
         },
     );
     let plans = chain
@@ -1020,9 +1263,7 @@ fn apply_backlog_admission(doc: &mut Document, wait_for_agent: bool, max_ready: 
                     ("max_ready".into(), json!(k)),
                 ]),
                 next: Some(first),
-                on_changes_requested: None,
-                stage: None,
-                enabled: true,
+                ..Default::default()
             },
         );
     }
@@ -1156,9 +1397,7 @@ fn set_backlog_flow(doc: &mut Document, analyze: bool, auto_develop: bool) {
             uses: "card.move".into(),
             with: BTreeMap::from([("column".into(), json!(next_col_id))]),
             next: Some(next_stage_entry),
-            on_changes_requested: None,
-            stage: None,
-            enabled: true,
+            ..Default::default()
         };
         if let Some(existing) = doc.steps.iter_mut().find(|s| s.id == move_step_id) {
             *existing = move_step;
@@ -1212,9 +1451,7 @@ fn set_backlog_flow(doc: &mut Document, analyze: bool, auto_develop: bool) {
                     uses: "agent".into(),
                     with,
                     next: Some(after_plan),
-                    on_changes_requested: None,
-                    stage: None,
-                    enabled: true,
+                    ..Default::default()
                 },
             );
         }
@@ -1357,8 +1594,7 @@ pub fn set_review_manual(doc: &mut Document, manual: bool) {
                     )]),
                     next: Some(end_id.clone()),
                     on_changes_requested: rework_target,
-                    stage: None,
-                    enabled: true,
+                    ..Default::default()
                 },
             );
         }
@@ -1444,8 +1680,7 @@ pub fn set_review_manual(doc: &mut Document, manual: bool) {
                     )]),
                     next: Some(end_id.clone()),
                     on_changes_requested: rework_target.clone(),
-                    stage: None,
-                    enabled: true,
+                    ..Default::default()
                 },
             );
         }
@@ -1493,8 +1728,7 @@ pub fn set_review_manual(doc: &mut Document, manual: bool) {
                         )]),
                         next: Some(end_id.clone()),
                         on_changes_requested: rework_target,
-                        stage: None,
-                        enabled: true,
+                        ..Default::default()
                     },
                 );
             }
@@ -1508,10 +1742,7 @@ pub fn set_review_manual(doc: &mut Document, manual: bool) {
                     ("then".into(), json!(approval_id)),
                     ("otherwise".into(), json!(internal_target)),
                 ]),
-                next: None,
-                on_changes_requested: None,
-                stage: None,
-                enabled: true,
+                ..Default::default()
             };
             if let Some(existing) = doc
                 .steps
@@ -1691,8 +1922,7 @@ pub fn set_external_pr_rule(doc: &mut Document, mode: &str) {
                     )]),
                     next: Some(end_id),
                     on_changes_requested: rework_target,
-                    stage: None,
-                    enabled: true,
+                    ..Default::default()
                 },
             );
         }
@@ -1706,10 +1936,7 @@ pub fn set_external_pr_rule(doc: &mut Document, mode: &str) {
                 ("then".into(), json!(approval_id)),
                 ("otherwise".into(), json!(internal_start)),
             ]),
-            next: None,
-            on_changes_requested: None,
-            stage: None,
-            enabled: true,
+            ..Default::default()
         };
         if let Some(existing) = doc
             .steps
@@ -1814,6 +2041,7 @@ fn walk_stage_summary(
     let mut seen = BTreeSet::new();
     let mut has_deliver = false;
     let mut first_agent: Option<(String, Option<String>)> = None;
+    let mut has_script = false;
     let mut moves_to: Option<String> = None;
     let mut has_notify = false;
     let mut details = Vec::new();
@@ -1871,6 +2099,20 @@ fn walk_stage_summary(
                     .map(|p| format!("@{p}"))
                     .unwrap_or_else(|| "default Agent".into());
                 details.push(format!("• Runs {who}"));
+                cur = next.as_deref();
+            }
+            WorkflowStep::Script {
+                run,
+                next,
+                ..
+            } => {
+                has_script = true;
+                let preview = run
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("custom script");
+                details.push(format!("• Runs script: {preview}"));
                 cur = next.as_deref();
             }
             WorkflowStep::Deliver {
@@ -1936,6 +2178,8 @@ fn walk_stage_summary(
         Some("Auto merge".into())
     } else if let Some((step_id, profile)) = first_agent {
         Some(agent_auto_phrase(&step_id, profile.as_deref(), column))
+    } else if has_script {
+        Some("Auto script".into())
     } else if moves_to.is_some() {
         Some(if column == "backlog" {
             "Auto start".into()
@@ -2478,5 +2722,122 @@ steps:
                 .tooltip
                 .contains("Pauses for approval: Final sign-off")
         );
+    }
+
+    #[test]
+    fn compiles_run_shorthand_and_uses_script_equivalently_with_env() {
+        let yaml = r#"schema: 6
+id: script:demo
+name: Script Demo
+env:
+  GLOBAL_FLAG: 1
+  LOG_LEVEL: info
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+steps:
+  - id: agent:develop
+    uses: agent
+    env:
+      AGENT_ONLY: "yes"
+    next: test:shorthand
+  - id: test:shorthand
+    run: cargo test --lib
+    shell: bash
+    working_directory: crates/app
+    timeout_minutes: 5
+    continue_on_error: true
+    env:
+      STEP_FLAG: enabled
+    on_failure: agent:develop
+    next: test:explicit
+  - id: test:explicit
+    uses: script
+    with:
+      run: echo ok
+      shell: zsh
+      timeout_seconds: 30
+    next: __end
+  - id: __end
+    uses: complete
+"#;
+        let doc = parse(yaml).unwrap();
+        assert_eq!(doc.env.get("GLOBAL_FLAG").map(String::as_str), Some("1"));
+        let def = doc.compile().unwrap();
+        assert_eq!(def.env.get("LOG_LEVEL").map(String::as_str), Some("info"));
+        assert!(matches!(
+            &def.steps["agent:develop"],
+            WorkflowStep::Agent { env, .. } if env.get("AGENT_ONLY").map(String::as_str) == Some("yes")
+        ));
+        assert_eq!(
+            def.steps["test:shorthand"],
+            WorkflowStep::Script {
+                run: "cargo test --lib".into(),
+                shell: Some("bash".into()),
+                working_directory: Some("crates/app".into()),
+                timeout_minutes: Some(5),
+                timeout_seconds: None,
+                continue_on_error: true,
+                env: BTreeMap::from([("STEP_FLAG".into(), "enabled".into())]),
+                next: Some("test:explicit".into()),
+                on_failure: Some("agent:develop".into()),
+            }
+        );
+        assert_eq!(
+            def.steps["test:explicit"],
+            WorkflowStep::Script {
+                run: "echo ok".into(),
+                shell: Some("zsh".into()),
+                working_directory: None,
+                timeout_minutes: None,
+                timeout_seconds: Some(30),
+                continue_on_error: false,
+                env: BTreeMap::new(),
+                next: Some("__end".into()),
+                on_failure: None,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_conflicting_run_or_script_fields_on_non_script_steps() {
+        let conflicting = parse(
+            r#"schema: 6
+id: bad
+name: Bad
+on:
+  develop:
+    event: card.column_entered
+    start_at: check
+steps:
+  - id: check
+    uses: script
+    run: echo a
+    with:
+      run: echo b
+"#,
+        )
+        .unwrap();
+        assert!(conflicting.compile().is_err());
+
+        let misplaced = parse(
+            r#"schema: 6
+id: bad2
+name: Bad2
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:dev
+steps:
+  - id: agent:dev
+    uses: agent
+    run: echo nope
+"#,
+        )
+        .unwrap();
+        assert!(misplaced.compile().is_err());
     }
 }

@@ -326,7 +326,7 @@ impl AppServer {
                     )?;
                 }
                 if state == "backlog" {
-                    crate::workflow::stop_card(db, &card.id, "returned_to_backlog")?;
+                    crate::workflow::stop_card(db, &config, &card.id, "returned_to_backlog")?;
                     for mut pending in db.list::<TerminalEntry>()? {
                         if let Some(a) = &mut pending.agent
                             && a.card_id == card.id

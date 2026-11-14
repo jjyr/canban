@@ -20,6 +20,8 @@ pub struct WorkflowDefinition {
     pub columns: Vec<WorkflowColumn>,
     pub entries: BTreeMap<String, String>,
     pub steps: BTreeMap<String, WorkflowStep>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub workspace: WorkspaceSettings,
     #[serde(default = "default_limit")]
@@ -75,7 +77,28 @@ pub enum WorkflowStep {
     Agent {
         profile: Option<String>,
         instruction: String,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
         next: Option<String>,
+    },
+    Script {
+        run: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        working_directory: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_minutes: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        continue_on_error: bool,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_failure: Option<String>,
     },
     Move {
         column: String,
@@ -136,6 +159,7 @@ impl WorkflowStep {
     pub fn next(&self) -> Option<&str> {
         match self {
             Self::Agent { next, .. }
+            | Self::Script { next, .. }
             | Self::Move { next, .. }
             | Self::Approval { next, .. }
             | Self::Deliver { next, .. }
@@ -184,6 +208,58 @@ impl WorkflowRun {
             self.state.as_str(),
             "completed" | "cancelled" | "superseded"
         )
+    }
+
+    /// True when the run's current step is a `Script` step.
+    pub fn step_is_script(&self) -> bool {
+        self.step.as_ref().is_some_and(|k| {
+            matches!(
+                self.definition.steps.get(k),
+                Some(WorkflowStep::Script { .. })
+            )
+        })
+    }
+
+    /// Resolves a `workflow_step` reference (possibly suffixed with `:{visit}`) to a step ID.
+    pub fn resolve_step_id<'a>(&'a self, step_ref: Option<&'a str>) -> Option<&'a str> {
+        let Some(raw) = step_ref else {
+            return self.step.as_deref();
+        };
+        if self.definition.steps.contains_key(raw) {
+            return Some(raw);
+        }
+        if let Some((base, visit)) = raw.rsplit_once(':')
+            && !visit.is_empty()
+            && visit.chars().all(|c| c.is_ascii_digit())
+            && self.definition.steps.contains_key(base)
+        {
+            return Some(base);
+        }
+        self.step.as_deref()
+    }
+
+    /// Custom environment layers for `step_ref`: workflow `env` < `$CANBAN_ENV` < step `env`.
+    pub fn custom_env_for_step(&self, step_ref: Option<&str>) -> BTreeMap<String, String> {
+        let mut env = self.definition.env.clone();
+        if let Some(obj) = self.inputs["env"].as_object() {
+            for (k, v) in obj {
+                if let Some(s) = v.as_str() {
+                    env.insert(k.clone(), s.to_owned());
+                }
+            }
+        }
+        if let Some(step_id) = self.resolve_step_id(step_ref) {
+            match self.definition.steps.get(step_id) {
+                Some(WorkflowStep::Agent { env: step_env, .. })
+                | Some(WorkflowStep::Script { env: step_env, .. }) => {
+                    for (k, v) in step_env {
+                        env.insert(k.clone(), v.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        env
     }
 
     /// True when the run's current step is a `Deliver` (Queue Merge) step.

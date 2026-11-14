@@ -84,7 +84,13 @@ pub(crate) fn workspace_root() -> impl IntoElement {
         let has_active_runtime = ui.snapshot.with_untracked(|s| {
             s.workflow_runs
                 .iter()
-                .any(|r| r.active() && matches!(r.state.as_str(), "waiting_agent" | "running"))
+                .any(|r| {
+                    r.active()
+                        && matches!(
+                            r.state.as_str(),
+                            "waiting_agent" | "running" | "waiting_script"
+                        )
+                })
                 || s.terminals.iter().any(|t| {
                     t.agent.as_ref().is_some_and(|a| {
                         matches!(a.state.as_str(), "starting" | "running" | "working")

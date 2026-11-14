@@ -560,7 +560,7 @@ impl AppServer {
                             .iter()
                             .any(|r| r.card_id == c.id && r.active())
                         {
-                            workflow::stop_card(db, &c.id, "superseded")?;
+                            workflow::stop_card(db, &config, &c.id, "superseded")?;
                         }
                         cancel_other_pending(db)?;
                         let wf_run = workflow::adopt_stage(
@@ -583,7 +583,7 @@ impl AppServer {
 
                     let from = c.stage.clone();
                     cancel_other_pending(db)?;
-                    workflow::stop_card(db, &c.id, "superseded")?;
+                    workflow::stop_card(db, &config, &c.id, "superseded")?;
                     c.stage = target.into();
                     c.board_order = None;
                     canban_kanban::order::place(db, &mut c, None)?;
@@ -704,7 +704,7 @@ impl AppServer {
                     None,
                     json!({"from":from,"to":target,"before_card_id":p["before_card_id"]}),
                 )?;
-                workflow::stop_card(db, &c.id, "superseded")?;
+                workflow::stop_card(db, &self.config(), &c.id, "superseded")?;
                 db.save(&c)?;
                 Ok(serde_json::to_value(c)?)
             }),
@@ -758,6 +758,7 @@ impl AppServer {
                     Ok(serde_json::to_value(c)?)
                 })?;
                 self.request_deliveries();
+                self.request_scripts();
                 Ok(res)
             }
             "card.workspace" => {

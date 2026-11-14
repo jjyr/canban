@@ -7,7 +7,7 @@ use crate::source::Document;
 use anyhow::{Result, ensure};
 
 pub const BASELINE: u32 = 1;
-pub const CURRENT: u32 = 5;
+pub const CURRENT: u32 = 6;
 
 pub struct Migration {
     pub version: u32,
@@ -30,6 +30,10 @@ const STEPS: &[Migration] = &[
     Migration {
         version: 5,
         up: v5_deliver_merge_strategy,
+    },
+    Migration {
+        version: 6,
+        up: v6_script_and_env,
     },
 ];
 
@@ -165,6 +169,36 @@ fn v5_deliver_merge_strategy(doc: &mut Document) -> Result<()> {
     Ok(())
 }
 
+/// Normalize script steps and strip empty `env` maps / redundant script defaults for schema v6.
+fn v6_script_and_env(doc: &mut Document) -> Result<()> {
+    doc.env.retain(|k, _| !k.trim().is_empty());
+    for step in &mut doc.steps {
+        step.env.retain(|k, _| !k.trim().is_empty());
+        if let Some(shell) = &step.shell
+            && shell.trim().is_empty()
+        {
+            step.shell = None;
+        }
+        if let Some(wd) = &step.working_directory
+            && wd.trim().is_empty()
+        {
+            step.working_directory = None;
+        }
+        if step.continue_on_error == Some(false) {
+            step.continue_on_error = None;
+        }
+        if step.uses.trim() == "script" && step.run.is_none()
+            && let Some(run) = step.with.remove("run").and_then(|v| v.as_str().map(str::to_string))
+        {
+            step.run = Some(run);
+        }
+        if (step.uses.trim().is_empty() && step.run.is_some()) || step.uses.trim() == "script" {
+            step.uses = "script".into();
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,5 +288,36 @@ steps:
             Some("squash"),
             "non-default strategy is preserved"
         );
+    }
+
+    #[test]
+    fn v6_normalizes_script_steps_and_strips_redundant_defaults() {
+        let v5 = r#"schema: 5
+id: delivery:demo
+name: Development
+on:
+  develop:
+    event: card.column_entered
+    start_at: test
+    match:
+      column: develop
+steps:
+  - id: test
+    uses: script
+    with:
+      run: cargo test
+    continue_on_error: false
+    next: __end
+  - id: __end
+    uses: complete
+"#;
+        let upgraded = upgrade_yaml(v5).unwrap().expect("v5 should upgrade to v6");
+        let doc = crate::source::parse(&upgraded).unwrap();
+        assert_eq!(doc.schema, CURRENT);
+        assert_eq!(doc.steps[0].uses, "script");
+        assert_eq!(doc.steps[0].run.as_deref(), Some("cargo test"));
+        assert!(!doc.steps[0].with.contains_key("run"));
+        assert!(doc.steps[0].continue_on_error.is_none());
+        assert!(upgrade_yaml(&upgraded).unwrap().is_none());
     }
 }

@@ -55,7 +55,8 @@ fn milestone_style(kind: &str) -> MilestoneStyle {
         "execution.failed"
         | "execution.missing"
         | "review.merge_failed"
-        | "review.upstream_sync_failed" => MilestoneStyle::Danger,
+        | "review.upstream_sync_failed"
+        | "workflow.script_failed" => MilestoneStyle::Danger,
         "workflow.waiting_for_human"
         | "execution.input_required"
         | "review.merge_conflict"

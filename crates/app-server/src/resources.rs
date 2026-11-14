@@ -91,6 +91,7 @@ impl AppServer {
                 )?;
                 db.save(&c)?;
             }
+            crate::workflow::stop_card(db, &self.config(), &c.id, "cancelled")?;
             for mut entry in db.list::<TerminalEntry>()? {
                 if let Some(a) = &mut entry.agent
                     && a.card_id == c.id

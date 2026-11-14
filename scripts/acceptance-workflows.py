@@ -178,7 +178,72 @@ try:
  s=wait(lambda s:(home/'configuration-evidence/2.json').exists(),'exact configuration history resumes')
  assert s['configuration_sessions'][0]['provider_session_id']==history
  assert '--resume' in json.loads((home/'configuration-evidence/2.json').read_text())['argv']
- evidence['checks']+=['original YAML preservation','collection revision conflict','SQL source revision matches publication','explicit YAML file submit/export','Project-owned configuration PTY','exact preview and launch prompt','Continue without reinjection','exact provider history resume']
+ assert call('workflow.schema')['schema_version']==6
+ script_yaml="""schema: 6
+id: delivery:script-acceptance
+name: Script Acceptance
+enabled: true
+env:
+  ACCEPTANCE_WF_ENV: wf_default
+  SHARED_OVERRIDE: from_wf
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  develop:
+    event: card.column_entered
+    start_at: check
+    match:
+      column: develop
+steps:
+  - id: check
+    name: Acceptance script check
+    run: |
+      echo "script_env=$ACCEPTANCE_WF_ENV card=$CANBAN_CARD id=$CARD_ID"
+      echo "DYNAMIC_TOKEN=from_dotenv" >> "$CANBAN_ENV"
+      echo "SHARED_OVERRIDE=from_dotenv" >> "$CANBAN_ENV"
+      echo "gate=allow" >> "$CANBAN_OUTPUT"
+    next: gate
+  - id: gate
+    name: Output gate
+    uses: condition
+    with:
+      pointer: /outputs/check/gate
+      equals: allow
+      then: dev
+      otherwise: done
+  - id: dev
+    name: Implement
+    uses: agent
+    env:
+      ACCEPTANCE_STEP_ENV: step_value
+      SHARED_OVERRIDE: from_step
+    with:
+      profile: developer
+      instruction: Complete the card task in develop.
+    next: done
+  - id: done
+    uses: complete
+workspace:
+  create_worktree: false
+  sync_base: false
+"""
+ script_project=call('project.create',{'name':'Script Env acceptance','directory':str(source),'workspace':{'create_worktree':False,'sync_base':False},'workflow_yaml':script_yaml})
+ script_card=call('card.create',{'project_id':script_project['id'],'title':'Script env propagation'})
+ call('card.move',{'card_id':script_card['id'],'revision':script_card['revision'],'stage':'develop'})
+ s=wait(lambda s:any(r['card_id']==script_card['id'] and r['state']=='completed' for r in s['workflow_runs']),'schema 6 script and agent workflow completion')
+ script_run=next(r for r in s['workflow_runs'] if r['card_id']==script_card['id'])
+ assert script_run['outputs']['check']['gate']=='allow'
+ script_logs=list((home/'projects'/script_project['id']/'cards'/script_card['id']/'scripts').glob('*.log'))
+ assert script_logs and f'script_env=wf_default card={script_card["number"]} id={script_card["id"]}' in script_logs[0].read_text()
+ script_report=next(r for r in s['reports'] if r['card_id']==script_card['id'])
+ report_text=(home/script_report['path']).read_text()
+ assert 'ACCEPTANCE_WF_ENV=wf_default' in report_text and 'DYNAMIC_TOKEN=from_dotenv' in report_text and 'ACCEPTANCE_STEP_ENV=step_value' in report_text and 'SHARED_OVERRIDE=from_step' in report_text
+ evidence['checks']+=['original YAML preservation','collection revision conflict','SQL source revision matches publication','explicit YAML file submit/export','Project-owned configuration PTY','exact preview and launch prompt','Continue without reinjection','exact provider history resume','schema 6 script execution and inherited Agent PTY env']
  (base/'evidence.json').write_text(json.dumps(evidence,indent=2));print('WORKFLOW_ACCEPTANCE_OK '+str(base),flush=True)
  if options.native:
   bundle=base/'CanbanWorkflowAcceptance.app';shutil.copytree(repo/'.local/Canban.app',bundle)

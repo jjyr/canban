@@ -711,6 +711,8 @@ pub struct AgentRun {
     pub connection_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending: Option<QueuedAssignment>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub applied_env: std::collections::BTreeMap<String, String>,
 }
 /// Durable policy facts; runtime input waits never become workflow approvals.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -808,6 +810,7 @@ impl AgentRun {
             self.close_state.clear();
             self.connection_state.clear();
             self.lifecycle = Lifecycle::default();
+            self.applied_env.clear();
         }
         self.updated_at = pending.queued_at.max(now());
         Some(pending)
