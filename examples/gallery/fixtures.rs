@@ -1933,22 +1933,30 @@ pub fn agent_config() -> canban_types::Config {
         ..Default::default()
     };
     // Enable Antigravity (`agy`) alongside Codex and keep Claude disabled so Gallery
-    // demonstrates enabled-agent gating + custom identities (`@qa`).
+    // demonstrates enabled-agent gating + custom identities (`@qa`) + per-model effort gating
+    // (`@merger` uses `gemini-pro-orchestrator` which hides `--effort` while `@reviewer` uses
+    // `gemini-4-carbon-medium` with `medium` effort).
     let mut agy = canban_profiles::builtin_catalog()
         .into_iter()
         .find(|e| e.id == "agy")
         .unwrap()
         .to_preset_profile();
     agy.enabled = true;
+    agy.model = Some("gemini-4-carbon-medium".into());
+    agy.effort = Some("medium".into());
     cfg.profiles.push(agy);
     if let Some(claude) = cfg.profiles.iter_mut().find(|p| p.id == "claude") {
         claude.enabled = false;
     }
     if let Some(rev) = cfg.profiles.iter_mut().find(|p| p.id == "reviewer") {
         rev.preset = Some("agy".into());
+        rev.model = Some("gemini-4-carbon-medium".into());
+        rev.effort = Some("medium".into());
     }
     if let Some(merger) = cfg.profiles.iter_mut().find(|p| p.id == "merger") {
         merger.preset = Some("agy".into());
+        merger.model = Some("gemini-pro-orchestrator".into());
+        merger.effort = Some("medium".into());
     }
     cfg.profiles.push(Profile {
         id: "qa".into(),
@@ -1994,5 +2002,11 @@ pub fn agent_catalog() -> serde_json::Value {
         "default_agent": "developer",
         "agents": agents,
         "herdr_templates": ["codex", "claude", "agy", "gemini", "opencode"],
+        "raw_profiles": [
+            { "id": "agy", "preset": "agy", "model": "gemini-4-carbon-medium", "effort": "medium" },
+            { "id": "reviewer", "identity": true, "preset": "agy" },
+            { "id": "merger", "identity": true, "preset": "agy", "model": "gemini-pro-orchestrator" },
+            { "id": "qa", "identity": true, "preset": "codex", "model": "gpt-6.1-sol", "effort": "high" }
+        ],
     })
 }

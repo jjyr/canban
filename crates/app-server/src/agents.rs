@@ -8,32 +8,45 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn probe_codex_cached_models(defaults: &[ModelOption]) -> Vec<ModelOption> {
+pub(super) fn parse_codex_cached_models_json(
+    val: &Value,
+    defaults: &[ModelOption],
+) -> Vec<ModelOption> {
     let mut out = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        let cache_path = std::path::PathBuf::from(home).join(".codex/models_cache.json");
-        if let Ok(bytes) = std::fs::read(&cache_path)
-            && let Ok(val) = serde_json::from_slice::<Value>(&bytes)
-            && let Some(models) = val["models"].as_array()
-        {
-            for m in models {
-                if m["visibility"].as_str() == Some("hide") {
-                    continue;
+    if let Some(models) = val["models"].as_array() {
+        for m in models {
+            if m["visibility"].as_str() == Some("hide") {
+                continue;
+            }
+            let Some(slug) = m["slug"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let label = m["display_name"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(slug);
+            let supported_efforts = m["supported_reasoning_levels"].as_array().map(|arr| {
+                let mut levels = Vec::new();
+                for item in arr {
+                    if let Some(eff) = item["effort"]
+                        .as_str()
+                        .or_else(|| item.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        && !levels.iter().any(|existing: &String| existing == eff)
+                    {
+                        levels.push(eff.to_owned());
+                    }
                 }
-                let Some(slug) = m["slug"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
-                    continue;
-                };
-                let label = m["display_name"]
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or(slug);
-                if !out.iter().any(|x: &ModelOption| x.id == slug) {
-                    out.push(ModelOption {
-                        id: slug.to_owned(),
-                        label: label.to_owned(),
-                    });
-                }
+                levels
+            });
+            if !out.iter().any(|x: &ModelOption| x.id == slug) {
+                out.push(ModelOption {
+                    id: slug.to_owned(),
+                    label: label.to_owned(),
+                    supported_efforts,
+                });
             }
         }
     }
@@ -43,6 +56,45 @@ fn probe_codex_cached_models(defaults: &[ModelOption]) -> Vec<ModelOption> {
         }
     }
     out
+}
+
+fn probe_codex_cached_models(defaults: &[ModelOption]) -> Vec<ModelOption> {
+    if let Some(home) = std::env::var_os("HOME") {
+        let cache_path = std::path::PathBuf::from(home).join(".codex/models_cache.json");
+        if let Ok(bytes) = std::fs::read(&cache_path)
+            && let Ok(val) = serde_json::from_slice::<Value>(&bytes)
+        {
+            return parse_codex_cached_models_json(&val, defaults);
+        }
+    }
+    defaults.to_vec()
+}
+
+pub(super) fn parse_agy_models_output(text: &str) -> Vec<ModelOption> {
+    let mut parsed = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("Fetching ") {
+            continue;
+        }
+        if let Some((id, label)) = trimmed.split_once('\t') {
+            let id = id.trim();
+            let label = label.trim();
+            if !id.is_empty() && !parsed.iter().any(|m: &ModelOption| m.id == id) {
+                parsed.push(ModelOption {
+                    id: id.to_owned(),
+                    label: if label.is_empty() {
+                        id.to_owned()
+                    } else {
+                        label.to_owned()
+                    },
+                    supported_efforts: None,
+                });
+            }
+        }
+    }
+    canban_profiles::annotate_agy_model_efforts(&mut parsed);
+    parsed
 }
 
 fn probe_agy_models(agy_path: &str, defaults: &[ModelOption]) -> Vec<ModelOption> {
@@ -74,26 +126,7 @@ fn probe_agy_models(agy_path: &str, defaults: &[ModelOption]) -> Vec<ModelOption
         && output.status.success()
     {
         let text = String::from_utf8_lossy(&output.stdout);
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with("Fetching ") {
-                continue;
-            }
-            if let Some((id, label)) = trimmed.split_once('\t') {
-                let id = id.trim();
-                let label = label.trim();
-                if !id.is_empty() && !parsed.iter().any(|m: &ModelOption| m.id == id) {
-                    parsed.push(ModelOption {
-                        id: id.to_owned(),
-                        label: if label.is_empty() {
-                            id.to_owned()
-                        } else {
-                            label.to_owned()
-                        },
-                    });
-                }
-            }
-        }
+        parsed = parse_agy_models_output(&text);
     }
 
     if parsed.is_empty() {

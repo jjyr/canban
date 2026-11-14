@@ -2541,6 +2541,96 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
     assert!(agy_entry["supports_effort"].as_bool().unwrap());
     assert!(!agy_entry["models"].as_array().unwrap().is_empty());
 
+    // Verify per-model `supported_efforts` parsing for `agy models` and Codex `models_cache.json`
+    let parsed_agy = crate::agents::parse_agy_models_output(
+        "Fetching available models...\n\
+         gemini-4-carbon-medium\tGemini 4 Carbon (Medium)\n\
+         gemini-4-carbon-high\tGemini 4 Carbon (High)\n\
+         gemini-4-carbon-low\tGemini 4 Carbon (Low)\n\
+         gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)\n\
+         gemini-4-hydrogen-xhigh\tGemini 4 Hydrogen (XHigh)\n\
+         gemini-4-hydrogen-medium\tGemini 4 Hydrogen (Medium)\n\
+         gemini-4-hydrogen-low\tGemini 4 Hydrogen (Low)\n\
+         gemini-pro-orchestrator\tOrchestrator (Carbon)\n\
+         gemini-pro-orchestrator-argon\tOrchestrator (Argon)\n\
+         gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n",
+    );
+    let find_agy = |id: &str| parsed_agy.iter().find(|m| m.id == id).unwrap();
+    assert_eq!(
+        find_agy("gemini-pro-orchestrator").supported_efforts,
+        Some(Vec::new())
+    );
+    assert_eq!(
+        find_agy("gemini-pro-orchestrator-argon").supported_efforts,
+        Some(Vec::new())
+    );
+    assert_eq!(
+        find_agy("gpt-oss-120b-medium").supported_efforts,
+        Some(Vec::new())
+    );
+    assert_eq!(
+        find_agy("gemini-4-carbon-high").supported_efforts,
+        Some(vec!["low".into(), "medium".into(), "high".into()])
+    );
+    assert_eq!(
+        find_agy("gemini-4-hydrogen-high").supported_efforts,
+        Some(vec![
+            "low".into(),
+            "medium".into(),
+            "high".into(),
+            "xhigh".into()
+        ])
+    );
+
+    let codex_defaults = canban_profiles::builtin_catalog()
+        .into_iter()
+        .find(|e| e.id == "codex")
+        .unwrap()
+        .default_models;
+    let parsed_codex = crate::agents::parse_codex_cached_models_json(
+        &json!({
+            "models": [
+                {
+                    "slug": "gpt-6.1-sol",
+                    "display_name": "GPT-6.1-Sol",
+                    "supported_reasoning_levels": [
+                        {"effort": "low"},
+                        {"effort": "medium"},
+                        {"effort": "high"},
+                        {"effort": "ultra"}
+                    ]
+                },
+                {
+                    "slug": "codex-fixed-fast",
+                    "display_name": "Codex Fixed Fast",
+                    "supported_reasoning_levels": []
+                }
+            ]
+        }),
+        &codex_defaults,
+    );
+    assert_eq!(
+        parsed_codex
+            .iter()
+            .find(|m| m.id == "gpt-6.1-sol")
+            .unwrap()
+            .supported_efforts,
+        Some(vec![
+            "low".into(),
+            "medium".into(),
+            "high".into(),
+            "ultra".into()
+        ])
+    );
+    assert_eq!(
+        parsed_codex
+            .iter()
+            .find(|m| m.id == "codex-fixed-fast")
+            .unwrap()
+            .supported_efforts,
+        Some(Vec::new())
+    );
+
     // Explicit identity override on `@developer`
     app.call(
         "config.agents.save",

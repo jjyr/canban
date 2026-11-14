@@ -13,6 +13,121 @@ use serde::{Deserialize, Serialize};
 pub struct ModelOption {
     pub id: String,
     pub label: String,
+    /// Optional per-model effort capability override:
+    /// - `None`: fall back to the parent `CatalogEntry.supported_efforts`.
+    /// - `Some([])`: this model explicitly does not support reasoning effort flags.
+    /// - `Some(levels)`: exact effort levels supported by this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_efforts: Option<Vec<String>>,
+}
+
+const AGY_EFFORT_ORDER: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// Split an Antigravity (`agy`) model ID into `(base_family, effort_suffix)` when it ends
+/// with a known reasoning effort suffix (`-low`, `-medium`, `-high`, `-xhigh`, `-max`).
+pub fn split_agy_effort_suffix(model_id: &str) -> Option<(&str, &'static str)> {
+    let trimmed = model_id.trim();
+    for &eff in AGY_EFFORT_ORDER {
+        if let Some(base) = trimmed.strip_suffix(eff).and_then(|p| p.strip_suffix('-'))
+            && !base.is_empty()
+        {
+            return Some((base, eff));
+        }
+    }
+    None
+}
+
+/// Populate `ModelOption.supported_efforts` for a flat list of `agy models` entries by
+/// grouping sibling variants by base family (matching `agy`'s own family grouping):
+/// - Multi-variant families (such as `gemini-4-carbon-{low,medium,high}` or
+///   `gemini-4-hydrogen-{low,medium,high,xhigh}`) expose the exact sibling effort set.
+/// - Standalone models with no effort variants (such as `gemini-pro-orchestrator` or
+///   `gemini-pro-orchestrator-argon`) or single-fixed-tier families (such as
+///   `gpt-oss-120b-medium`) receive `Some(vec![])` (effort unsupported).
+pub fn annotate_agy_model_efforts(models: &mut [ModelOption]) {
+    let mut family_efforts: std::collections::BTreeMap<String, Vec<&'static str>> =
+        std::collections::BTreeMap::new();
+    for opt in models.iter() {
+        if let Some((base, eff)) = split_agy_effort_suffix(&opt.id) {
+            let entry = family_efforts.entry(base.to_owned()).or_default();
+            if !entry.contains(&eff) {
+                entry.push(eff);
+            }
+        }
+    }
+    for list in family_efforts.values_mut() {
+        list.sort_by_key(|eff| {
+            AGY_EFFORT_ORDER
+                .iter()
+                .position(|candidate| candidate == eff)
+                .unwrap_or(usize::MAX)
+        });
+    }
+    for opt in models.iter_mut() {
+        if let Some((base, _)) = split_agy_effort_suffix(&opt.id) {
+            let siblings = family_efforts.get(base).map(Vec::as_slice).unwrap_or(&[]);
+            if siblings.len() > 1 {
+                opt.supported_efforts = Some(siblings.iter().map(|s| (*s).to_owned()).collect());
+            } else {
+                opt.supported_efforts = Some(Vec::new());
+            }
+        } else if let Some(siblings) = family_efforts.get(opt.id.trim())
+            && !siblings.is_empty()
+        {
+            opt.supported_efforts = Some(siblings.iter().map(|s| (*s).to_owned()).collect());
+        } else {
+            opt.supported_efforts = Some(Vec::new());
+        }
+    }
+}
+
+/// Resolve the supported reasoning effort levels for a given model on an Agent catalog entry.
+/// Returns `None` when the Agent itself does not support effort flags, `Some([])` when the
+/// chosen model explicitly does not support effort, or `Some(non_empty)` when supported.
+pub fn model_supported_efforts(
+    entry: &CatalogEntry,
+    models: &[ModelOption],
+    model_id: Option<&str>,
+) -> Option<Vec<String>> {
+    if entry.effort_args.is_empty() && entry.supported_efforts.is_empty() {
+        return None;
+    }
+    let Some(mid) = model_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Some(entry.supported_efforts.clone());
+    };
+    if let Some(opt) = models.iter().find(|m| m.id == mid)
+        && let Some(effs) = &opt.supported_efforts
+    {
+        return Some(effs.clone());
+    }
+    if entry.id == "agy" {
+        // Handle custom/unlisted `agy` model IDs consistently: known orchestrator slugs and
+        // single fixed-tier slugs without multi-tier siblings in `models` omit `--effort`.
+        let lower = mid.to_ascii_lowercase();
+        if lower.contains("orchestrator") {
+            return Some(Vec::new());
+        }
+        if let Some((base, _)) = split_agy_effort_suffix(mid) {
+            let sibling_efforts: Vec<String> = AGY_EFFORT_ORDER
+                .iter()
+                .filter(|eff| {
+                    let candidate = format!("{base}-{eff}");
+                    models.iter().any(|m| m.id == candidate)
+                })
+                .map(|eff| (*eff).to_owned())
+                .collect();
+            if sibling_efforts.len() > 1 {
+                return Some(sibling_efforts);
+            }
+            if sibling_efforts.len() == 1 {
+                return Some(Vec::new());
+            }
+        }
+    }
+    if entry.id == "claude" && mid.to_ascii_lowercase().contains("haiku") {
+        return Some(Vec::new());
+    }
+    Some(entry.supported_efforts.clone())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -65,8 +180,38 @@ fn m(items: &[(&str, &str)]) -> Vec<ModelOption> {
         .map(|(id, label)| ModelOption {
             id: (*id).to_owned(),
             label: (*label).to_owned(),
+            supported_efforts: None,
         })
         .collect()
+}
+
+fn agy_default_models() -> Vec<ModelOption> {
+    let mut list = m(&[
+        ("gemini-4-carbon-high", "Gemini 4 Carbon (High)"),
+        ("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)"),
+        ("gemini-4-carbon-low", "Gemini 4 Carbon (Low)"),
+        ("gemini-4-argon-high", "Gemini 4 Argon (High)"),
+        ("gemini-4-argon-medium", "Gemini 4 Argon (Medium)"),
+        ("gemini-4-argon-low", "Gemini 4 Argon (Low)"),
+        ("gemini-4-hydrogen-high", "Gemini 4 Hydrogen (High)"),
+        ("gemini-4-hydrogen-xhigh", "Gemini 4 Hydrogen (XHigh)"),
+        ("gemini-4-hydrogen-medium", "Gemini 4 Hydrogen (Medium)"),
+        ("gemini-4-hydrogen-low", "Gemini 4 Hydrogen (Low)"),
+        ("gemini-pro-orchestrator", "Orchestrator (Carbon)"),
+        ("gemini-pro-orchestrator-argon", "Orchestrator (Argon)"),
+        ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
+        ("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"),
+        ("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"),
+        ("claude-opus-5-5-high", "Claude Opus 5.5 (High)"),
+        ("claude-opus-5-5-medium", "Claude Opus 5.5 (Medium)"),
+        ("claude-opus-5-5-low", "Claude Opus 5.5 (Low)"),
+        ("claude-sonnet-5-5-high", "Claude Sonnet 5.5 (High)"),
+        ("claude-sonnet-5-5-medium", "Claude Sonnet 5.5 (Medium)"),
+        ("claude-sonnet-5-5-low", "Claude Sonnet 5.5 (Low)"),
+        ("gpt-oss-120b-medium", "GPT-OSS 120B (Medium)"),
+    ]);
+    annotate_agy_model_efforts(&mut list);
+    list
 }
 
 fn bind_session_instruction(env_var: &str) -> String {
@@ -135,12 +280,28 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             model_args: s(&["--model", "{model}"]),
             effort_args: s(&["--effort", "{effort}"]),
             supported_efforts: s(&["low", "medium", "high", "xhigh", "max"]),
-            default_models: m(&[
-                ("opus", "Claude Opus (Latest)"),
-                ("sonnet", "Claude Sonnet (Latest)"),
-                ("haiku", "Claude Haiku (Latest)"),
-                ("fable", "Claude Fable (Latest)"),
-            ]),
+            default_models: vec![
+                ModelOption {
+                    id: "opus".into(),
+                    label: "Claude Opus (Latest)".into(),
+                    supported_efforts: None,
+                },
+                ModelOption {
+                    id: "sonnet".into(),
+                    label: "Claude Sonnet (Latest)".into(),
+                    supported_efforts: None,
+                },
+                ModelOption {
+                    id: "haiku".into(),
+                    label: "Claude Haiku (Latest)".into(),
+                    supported_efforts: Some(Vec::new()),
+                },
+                ModelOption {
+                    id: "fable".into(),
+                    label: "Claude Fable (Latest)".into(),
+                    supported_efforts: None,
+                },
+            ],
         },
         CatalogEntry {
             id: "agy".into(),
@@ -180,19 +341,7 @@ pub fn builtin_catalog() -> Vec<CatalogEntry> {
             model_args: s(&["--model", "{model}"]),
             effort_args: s(&["--effort", "{effort}"]),
             supported_efforts: s(&["low", "medium", "high", "xhigh", "max"]),
-            default_models: m(&[
-                ("gemini-4-carbon-high", "Gemini 4 Carbon (High)"),
-                ("gemini-4-carbon-medium", "Gemini 4 Carbon (Medium)"),
-                ("gemini-4-carbon-low", "Gemini 4 Carbon (Low)"),
-                ("gemini-4-argon-high", "Gemini 4 Argon (High)"),
-                ("gemini-4-argon-medium", "Gemini 4 Argon (Medium)"),
-                ("gemini-pro-orchestrator", "Orchestrator"),
-                ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
-                ("claude-opus-5-5-high", "Claude Opus 5.5 (High)"),
-                ("claude-opus-5-5-medium", "Claude Opus 5.5 (Medium)"),
-                ("claude-sonnet-5-5-high", "Claude Sonnet 5.5 (High)"),
-                ("claude-sonnet-5-5-medium", "Claude Sonnet 5.5 (Medium)"),
-            ]),
+            default_models: agy_default_models(),
         },
         CatalogEntry {
             id: "gemini".into(),

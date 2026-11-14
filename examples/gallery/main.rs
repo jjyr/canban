@@ -651,13 +651,13 @@ pub fn Gallery() -> impl IntoElement {
     }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
-        Ok("agent-setup" | "settings-agents")
+        Ok("agent-setup" | "settings-agents" | "project-agents")
     ) {
         ui.card.set(String::new());
-        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("agent-setup") {
-            ui.page.set("agent-setup".into());
-        } else {
-            ui.open_settings_section("agents");
+        match std::env::var("CANBAN_GALLERY_SCENE").as_deref() {
+            Ok("agent-setup") => ui.page.set("agent-setup".into()),
+            Ok("project-agents") => ui.page.set("project-agents".into()),
+            _ => ui.open_settings_section("agents"),
         }
         return canban_ui::frame::screen(ui).into_element();
     }

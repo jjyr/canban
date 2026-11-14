@@ -215,10 +215,56 @@ fn catalog_agents(ui: Ui) -> Vec<Value> {
 
 #[derive(Clone, Default)]
 struct EngineCatalogCaps {
-    models: Vec<(String, String)>,
+    engine_id: String,
+    models: Vec<canban_profiles::ModelOption>,
     efforts: Vec<String>,
     supports_model: bool,
     supports_effort: bool,
+}
+
+impl EngineCatalogCaps {
+    /// Resolve the supported effort levels for `model_id` (`None` when this engine or the
+    /// chosen model does not support `--effort`).
+    fn efforts_for_model(&self, model_id: Option<&str>) -> Option<Vec<String>> {
+        if !self.supports_effort {
+            return None;
+        }
+        let default_efforts = if self.efforts.is_empty() {
+            vec!["low".into(), "medium".into(), "high".into()]
+        } else {
+            self.efforts.clone()
+        };
+        let Some(mid) = model_id.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Some(default_efforts);
+        };
+        if let Some(opt) = self.models.iter().find(|m| m.id == mid)
+            && let Some(levels) = &opt.supported_efforts
+        {
+            return (!levels.is_empty()).then(|| levels.clone());
+        }
+        if let Some(entry) = canban_profiles::builtin_catalog()
+            .into_iter()
+            .find(|e| e.id == self.engine_id || e.binary == self.engine_id)
+        {
+            let resolved =
+                canban_profiles::model_supported_efforts(&entry, &self.models, Some(mid))?;
+            return (!resolved.is_empty()).then_some(resolved);
+        }
+        Some(default_efforts)
+    }
+
+    fn cleaned_effort_for_model(
+        &self,
+        model_id: Option<&str>,
+        current_effort: Option<&str>,
+    ) -> Option<Value> {
+        let cur = current_effort.map(str::trim).filter(|s| !s.is_empty())?;
+        match self.efforts_for_model(model_id) {
+            None => Some(Value::Null),
+            Some(levels) if !levels.iter().any(|l| l == cur) => Some(Value::Null),
+            Some(_) => None,
+        }
+    }
 }
 
 fn engine_key_for_profile(profile: &Profile) -> String {
@@ -239,7 +285,8 @@ fn catalog_caps_for_engine(rows: &[Value], engine_key: &str) -> EngineCatalogCap
         .iter()
         .find(|r| r["id"].as_str() == Some(engine_key) || r["binary"].as_str() == Some(engine_key))
     {
-        let models: Vec<(String, String)> = row["models"]
+        let engine_id = row["id"].as_str().unwrap_or(engine_key).to_owned();
+        let models: Vec<canban_profiles::ModelOption> = row["models"]
             .as_array()
             .map(|arr| {
                 arr.iter()
@@ -249,14 +296,24 @@ fn catalog_caps_for_engine(rows: &[Value], engine_key: &str) -> EngineCatalogCap
                             return None;
                         }
                         let label = v["label"].as_str().unwrap_or(id).trim();
-                        Some((
-                            id.to_owned(),
-                            if label.is_empty() {
+                        let supported_efforts = v.get("supported_efforts").and_then(|se| {
+                            se.as_array().map(|list| {
+                                list.iter()
+                                    .filter_map(|x| x.as_str().map(str::trim))
+                                    .filter(|s| !s.is_empty())
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                        });
+                        Some(canban_profiles::ModelOption {
+                            id: id.to_owned(),
+                            label: if label.is_empty() {
                                 id.to_owned()
                             } else {
                                 label.to_owned()
                             },
-                        ))
+                            supported_efforts,
+                        })
                     })
                     .collect()
             })
@@ -276,6 +333,7 @@ fn catalog_caps_for_engine(rows: &[Value], engine_key: &str) -> EngineCatalogCap
             .as_bool()
             .unwrap_or(!efforts.is_empty());
         return EngineCatalogCaps {
+            engine_id,
             models,
             efforts,
             supports_model,
@@ -283,6 +341,7 @@ fn catalog_caps_for_engine(rows: &[Value], engine_key: &str) -> EngineCatalogCap
         };
     }
     EngineCatalogCaps {
+        engine_id: engine_key.to_owned(),
         models: Vec::new(),
         efforts: vec!["low".into(), "medium".into(), "high".into()],
         supports_model: true,
@@ -330,7 +389,9 @@ fn profile_model_effort_buttons(
     custom_model_target: Signal<Option<String>>,
     custom_model_draft: Signal<String>,
 ) -> AnyElement {
-    if !caps.supports_model && !caps.supports_effort {
+    let active_model_id = explicit_model.as_deref().or(effective_model.as_deref());
+    let model_efforts = caps.efforts_for_model(active_model_id);
+    if !caps.supports_model && model_efforts.is_none() {
         return view().into_element();
     }
 
@@ -344,8 +405,10 @@ fn profile_model_effort_buttons(
         };
         let pid_m = profile_id.clone();
         let models_list = caps.models.clone();
+        let caps_for_menu = caps.clone();
         let cur_explicit_m = explicit_model.clone();
         let cur_effective_m = effective_model.clone();
+        let cur_explicit_e_for_model = explicit_effort.clone();
         compact_action(
             btn_label,
             if explicit_model.is_some() {
@@ -369,9 +432,11 @@ fn profile_model_effort_buttons(
                 }
                 use nsh_core::element::desktop::{MenuItem, popup_menu};
                 let opts = models_list.clone();
+                let caps_m = caps_for_menu.clone();
                 let p_id = pid_m.clone();
                 let exp_m = cur_explicit_m.clone();
                 let eff_m = cur_effective_m.clone();
+                let exp_e_m = cur_explicit_e_for_model.clone();
                 ui.spawn(async move {
                     let mut items = Vec::new();
                     let def_label = if exp_m.is_none() {
@@ -400,7 +465,9 @@ fn profile_model_effort_buttons(
                         );
                     }));
                     items.push(MenuItem::separator());
-                    for (mid, mlabel) in opts {
+                    for opt in opts {
+                        let mid = opt.id;
+                        let mlabel = opt.label;
                         let checked = exp_m.as_deref() == Some(mid.as_str());
                         let prefix = if checked { "✓ " } else { "" };
                         let title = if mlabel == mid {
@@ -410,18 +477,21 @@ fn profile_model_effort_buttons(
                         };
                         let set_id = p_id.clone();
                         let chosen = mid.clone();
+                        let cleaned_eff =
+                            caps_m.cleaned_effort_for_model(Some(&chosen), exp_e_m.as_deref());
                         items.push(MenuItem::new(title).on_select(move || {
                             custom_model_target.set(None);
-                            dispatch_then(
-                                ui,
-                                "config.agents.save",
-                                json!({
-                                    "op": "set_profile_options",
-                                    "id": set_id,
-                                    "model": chosen,
-                                }),
-                                move |_| refresh_catalog(ui, "local"),
-                            );
+                            let mut payload = json!({
+                                "op": "set_profile_options",
+                                "id": set_id,
+                                "model": chosen,
+                            });
+                            if let Some(clear_eff) = &cleaned_eff {
+                                payload["effort"] = clear_eff.clone();
+                            }
+                            dispatch_then(ui, "config.agents.save", payload, move |_| {
+                                refresh_catalog(ui, "local")
+                            });
                         }));
                     }
                     items.push(MenuItem::separator());
@@ -440,22 +510,25 @@ fn profile_model_effort_buttons(
         view().into_element()
     };
 
-    let effort_btn = if caps.supports_effort {
-        let eff_label = match (&explicit_effort, &effective_effort) {
+    let effort_btn = if let Some(efforts_list) = model_efforts {
+        let valid_explicit_effort = explicit_effort
+            .as_ref()
+            .filter(|e| efforts_list.iter().any(|l| l == *e))
+            .cloned();
+        let valid_effective_effort = effective_effort
+            .as_ref()
+            .filter(|e| efforts_list.iter().any(|l| l == *e))
+            .cloned();
+        let eff_label = match (&valid_explicit_effort, &valid_effective_effort) {
             (Some(e), _) => format!("Effort: {e} ▾"),
             (None, Some(inherited)) if is_identity => format!("Effort: {inherited} (auto) ▾"),
             _ => "Effort: Default ▾".into(),
         };
         let pid_e = profile_id;
-        let efforts_list = if caps.efforts.is_empty() {
-            vec!["low".into(), "medium".into(), "high".into()]
-        } else {
-            caps.efforts
-        };
-        let cur_explicit_e = explicit_effort.clone();
+        let cur_explicit_e = valid_explicit_effort.clone();
         compact_action(
             eff_label,
-            if explicit_effort.is_some() {
+            if valid_explicit_effort.is_some() {
                 Variant::Secondary
             } else {
                 Variant::Quiet
@@ -535,6 +608,8 @@ fn profile_model_effort_buttons(
 fn custom_model_inline_editor(
     ui: Ui,
     profile_id: String,
+    explicit_effort: Option<String>,
+    caps: EngineCatalogCaps,
     custom_model_target: Signal<Option<String>>,
     custom_model_draft: Signal<String>,
 ) -> AnyElement {
@@ -560,19 +635,23 @@ fn custom_model_inline_editor(
             let val = custom_model_draft.get_untracked();
             let trimmed = val.trim().to_owned();
             let id_c = save_id.clone();
-            dispatch_then(
-                ui,
-                "config.agents.save",
-                json!({
-                    "op": "set_profile_options",
-                    "id": id_c,
-                    "model": if trimmed.is_empty() { Value::Null } else { json!(trimmed) },
-                }),
-                move |_| {
-                    custom_model_target.set(None);
-                    refresh_catalog(ui, "local");
-                },
-            );
+            let cleaned_eff = if trimmed.is_empty() {
+                None
+            } else {
+                caps.cleaned_effort_for_model(Some(&trimmed), explicit_effort.as_deref())
+            };
+            let mut payload = json!({
+                "op": "set_profile_options",
+                "id": id_c,
+                "model": if trimmed.is_empty() { Value::Null } else { json!(trimmed) },
+            });
+            if let Some(clear_eff) = cleaned_eff {
+                payload["effort"] = clear_eff;
+            }
+            dispatch_then(ui, "config.agents.save", payload, move |_| {
+                custom_model_target.set(None);
+                refresh_catalog(ui, "local");
+            });
         }))
         .child(compact_action("Reset default", Variant::Quiet, move |_| {
             let id_c = clear_id.clone();
@@ -1524,9 +1603,9 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                 prof.model.clone(),
                                                 explicit_model,
                                                 prof.effort.clone(),
-                                                explicit_effort,
+                                                explicit_effort.clone(),
                                                 true,
-                                                caps,
+                                                caps.clone(),
                                                 custom_model_target,
                                                 custom_model_draft,
                                             ))
@@ -1589,6 +1668,8 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                 custom_model_inline_editor(
                                     ui,
                                     pid.clone(),
+                                    explicit_effort,
+                                    caps,
                                     custom_model_target,
                                     custom_model_draft,
                                 )
@@ -1856,9 +1937,9 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                         prof.model.clone(),
                                                         explicit_model,
                                                         prof.effort.clone(),
-                                                        explicit_effort,
+                                                        explicit_effort.clone(),
                                                         false,
-                                                        caps,
+                                                        caps.clone(),
                                                         custom_model_target,
                                                         custom_model_draft,
                                                     )),
@@ -1867,6 +1948,8 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                 custom_model_inline_editor(
                                                     ui,
                                                     pid,
+                                                    explicit_effort,
+                                                    caps,
                                                     custom_model_target,
                                                     custom_model_draft,
                                                 )
@@ -1909,7 +1992,9 @@ fn project_model_effort_buttons(
     custom_model_target: Signal<Option<String>>,
     custom_model_draft: Signal<String>,
 ) -> AnyElement {
-    if !caps.supports_model && !caps.supports_effort {
+    let active_model_id = explicit_model.as_deref().or(inherited_model.as_deref());
+    let model_efforts = caps.efforts_for_model(active_model_id);
+    if !caps.supports_model && model_efforts.is_none() {
         return view().into_element();
     }
 
@@ -1921,6 +2006,7 @@ fn project_model_effort_buttons(
         };
         let pid_m = role_id.clone();
         let models_list = caps.models.clone();
+        let caps_for_menu = caps.clone();
         let cur_explicit_m = explicit_model.clone();
         let cur_inherited_m = inherited_model.clone();
         compact_action(
@@ -1946,6 +2032,7 @@ fn project_model_effort_buttons(
                 }
                 use nsh_core::element::desktop::{MenuItem, popup_menu};
                 let opts = models_list.clone();
+                let caps_m = caps_for_menu.clone();
                 let p_id = pid_m.clone();
                 let exp_m = cur_explicit_m.clone();
                 let inh_m = cur_inherited_m.clone();
@@ -1974,7 +2061,9 @@ fn project_model_effort_buttons(
                         });
                     }));
                     items.push(MenuItem::separator());
-                    for (mid, mlabel) in opts {
+                    for opt in opts {
+                        let mid = opt.id;
+                        let mlabel = opt.label;
                         let checked = exp_m.as_deref() == Some(mid.as_str());
                         let prefix = if checked { "✓ " } else { "" };
                         let title = if mlabel == mid {
@@ -1984,12 +2073,20 @@ fn project_model_effort_buttons(
                         };
                         let set_id = p_id.clone();
                         let chosen = mid.clone();
+                        let caps_opt = caps_m.clone();
                         items.push(MenuItem::new(title).on_select(move || {
                             custom_model_target.set(None);
                             let k = set_id.clone();
                             let v = chosen.clone();
                             overrides.update(|m| {
-                                m.entry(k).or_default().model = Some(v);
+                                let entry = m.entry(k).or_default();
+                                if caps_opt
+                                    .cleaned_effort_for_model(Some(&v), entry.effort.as_deref())
+                                    .is_some()
+                                {
+                                    entry.effort = None;
+                                }
+                                entry.model = Some(v);
                             });
                         }));
                     }
@@ -2009,23 +2106,26 @@ fn project_model_effort_buttons(
         view().into_element()
     };
 
-    let effort_btn = if caps.supports_effort {
-        let eff_label = match (&explicit_effort, &inherited_effort) {
+    let effort_btn = if let Some(efforts_list) = model_efforts {
+        let valid_explicit_effort = explicit_effort
+            .as_ref()
+            .filter(|e| efforts_list.iter().any(|l| l == *e))
+            .cloned();
+        let valid_inherited_effort = inherited_effort
+            .as_ref()
+            .filter(|e| efforts_list.iter().any(|l| l == *e))
+            .cloned();
+        let eff_label = match (&valid_explicit_effort, &valid_inherited_effort) {
             (Some(e), _) => format!("Effort: {e} ▾"),
             (None, Some(inherited)) => format!("Effort: {inherited} (auto) ▾"),
             _ => "Effort: Default ▾".into(),
         };
         let pid_e = role_id;
-        let efforts_list = if caps.efforts.is_empty() {
-            vec!["low".into(), "medium".into(), "high".into()]
-        } else {
-            caps.efforts
-        };
-        let cur_explicit_e = explicit_effort.clone();
-        let cur_inherited_e = inherited_effort.clone();
+        let cur_explicit_e = valid_explicit_effort.clone();
+        let cur_inherited_e = valid_inherited_effort.clone();
         compact_action(
             eff_label,
-            if explicit_effort.is_some() {
+            if valid_explicit_effort.is_some() {
                 Variant::Secondary
             } else {
                 Variant::Quiet
@@ -2097,6 +2197,7 @@ fn project_model_effort_buttons(
 
 fn project_custom_model_inline_editor(
     role_id: String,
+    caps: EngineCatalogCaps,
     overrides: Signal<BTreeMap<String, ProjectAgentOverride>>,
     custom_model_target: Signal<Option<String>>,
     custom_model_draft: Signal<String>,
@@ -2123,6 +2224,7 @@ fn project_custom_model_inline_editor(
             let val = custom_model_draft.get_untracked();
             let trimmed = val.trim().to_owned();
             let k = apply_id.clone();
+            let caps_c = caps.clone();
             overrides.update(|m| {
                 if trimmed.is_empty() {
                     if let Some(ov) = m.get_mut(&k) {
@@ -2132,7 +2234,14 @@ fn project_custom_model_inline_editor(
                         }
                     }
                 } else {
-                    m.entry(k).or_default().model = Some(trimmed);
+                    let entry = m.entry(k).or_default();
+                    if caps_c
+                        .cleaned_effort_for_model(Some(&trimmed), entry.effort.as_deref())
+                        .is_some()
+                    {
+                        entry.effort = None;
+                    }
+                    entry.model = Some(trimmed);
                 }
             });
             custom_model_target.set(None);
@@ -2474,7 +2583,7 @@ pub fn project_overrides_editor(
                                         current_ov.model,
                                         inherited_effort,
                                         current_ov.effort,
-                                        caps,
+                                        caps.clone(),
                                         overrides,
                                         custom_model_target,
                                         custom_model_draft,
@@ -2485,6 +2594,7 @@ pub fn project_overrides_editor(
                                     .pl(px(26.))
                                     .child(project_custom_model_inline_editor(
                                         role_id,
+                                        caps,
                                         overrides,
                                         custom_model_target,
                                         custom_model_draft,

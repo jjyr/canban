@@ -1,8 +1,9 @@
 //! Resolve editable presets and explicit overrides; no provider dispatch at runtime.
 pub mod catalog;
 pub use catalog::{
-    CatalogEntry, ModelOption, builtin_catalog, catalog_entry_for_profile, display_name,
-    herdr_template_profile,
+    CatalogEntry, ModelOption, annotate_agy_model_efforts, builtin_catalog,
+    catalog_entry_for_profile, display_name, herdr_template_profile, model_supported_efforts,
+    split_agy_effort_suffix,
 };
 
 use anyhow::{Context, Result, bail, ensure};
@@ -621,6 +622,24 @@ pub fn command(
     let uses_effort_placeholder = base_args.iter().any(|a| a.contains("{effort}"));
     let catalog_meta = catalog_entry_for_profile(profile);
 
+    // Filter out unsupported or incompatible effort levels for the effective model so
+    // inherited Agent/Role effort (e.g. `medium`) is omitted when a role overrides to an
+    // effort-less model (such as `gemini-pro-orchestrator` or `gpt-oss-120b-medium`).
+    let effective_effort = effort_val.filter(|eff| match &catalog_meta {
+        Some(meta) if !uses_effort_placeholder => {
+            if meta.effort_args.is_empty() {
+                false
+            } else {
+                match model_supported_efforts(meta, &meta.default_models, model_val) {
+                    None => false,
+                    Some(levels) if levels.is_empty() => false,
+                    Some(levels) => levels.iter().any(|l| l == eff),
+                }
+            }
+        }
+        _ => true,
+    });
+
     let mut args = Vec::with_capacity(base_args.len() + 4);
     args.push(base_args[0].clone());
     if !is_herdr_template {
@@ -636,7 +655,7 @@ pub fn command(
                 args.push(expand_template(&item, &[("model", m)]));
             }
         }
-        if let Some(eff) = effort_val
+        if let Some(eff) = effective_effort
             && !uses_effort_placeholder
         {
             let tpl = catalog_meta
@@ -663,7 +682,7 @@ pub fn command(
     replacements.push(("project_dir", project_dir_val));
     replacements.push(("agy_trusted_settings", &agy_trusted_settings));
     replacements.push(("model", model_val.unwrap_or("")));
-    replacements.push(("effort", effort_val.unwrap_or("")));
+    replacements.push(("effort", effective_effort.unwrap_or("")));
     replacements.push(("session_id", session.unwrap_or("")));
 
     // Deduplicate consecutive or repeated `--add-dir <value>` pairs and omit empty `--add-dir ""` pairs.
@@ -1000,6 +1019,123 @@ mod tests {
                 .windows(2)
                 .any(|w| w == ["--conversation", "conv-123"])
         );
+    }
+
+    #[test]
+    fn per_model_effort_capabilities_omit_unsupported_flags_for_orchestrator_and_fixed_tier_models()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let agy_entry = builtin_catalog()
+            .into_iter()
+            .find(|e| e.id == "agy")
+            .unwrap();
+        let orch = agy_entry
+            .default_models
+            .iter()
+            .find(|m| m.id == "gemini-pro-orchestrator")
+            .unwrap();
+        assert_eq!(orch.supported_efforts, Some(Vec::new()));
+        let orch_argon = agy_entry
+            .default_models
+            .iter()
+            .find(|m| m.id == "gemini-pro-orchestrator-argon")
+            .unwrap();
+        assert_eq!(orch_argon.supported_efforts, Some(Vec::new()));
+        let fixed_oss = agy_entry
+            .default_models
+            .iter()
+            .find(|m| m.id == "gpt-oss-120b-medium")
+            .unwrap();
+        assert_eq!(fixed_oss.supported_efforts, Some(Vec::new()));
+
+        let carbon = agy_entry
+            .default_models
+            .iter()
+            .find(|m| m.id == "gemini-4-carbon-high")
+            .unwrap();
+        assert_eq!(
+            carbon.supported_efforts,
+            Some(vec!["low".into(), "medium".into(), "high".into()])
+        );
+        let hydrogen = agy_entry
+            .default_models
+            .iter()
+            .find(|m| m.id == "gemini-4-hydrogen-high")
+            .unwrap();
+        assert_eq!(
+            hydrogen.supported_efforts,
+            Some(vec![
+                "low".into(),
+                "medium".into(),
+                "high".into(),
+                "xhigh".into()
+            ])
+        );
+
+        // Inherited effort (`medium` from `@agy`) is omitted when `@merger` overrides to
+        // `gemini-pro-orchestrator` or when `xhigh` is paired with `gemini-4-carbon-high`.
+        let mut cfg = Config::default();
+        cfg.profiles.push(Profile {
+            id: "agy".into(),
+            preset: Some("agy".into()),
+            model: Some("gemini-4-carbon-medium".into()),
+            effort: Some("medium".into()),
+            ..Default::default()
+        });
+        if let Some(merger) = cfg.profiles.iter_mut().find(|p| p.id == "merger") {
+            merger.preset = Some("agy".into());
+            merger.model = Some("gemini-pro-orchestrator".into());
+        }
+        let cfg = resolve(cfg, dir.path()).unwrap();
+        let merger = cfg.profiles.iter().find(|p| p.id == "merger").unwrap();
+        assert_eq!(merger.model.as_deref(), Some("gemini-pro-orchestrator"));
+        assert_eq!(merger.effort.as_deref(), Some("medium"));
+
+        let merger_argv = command(
+            merger,
+            None,
+            true,
+            &[("home", "/tmp/h"), ("cwd", "/tmp/wt"), ("prompt", "merge")],
+        )
+        .unwrap();
+        assert!(
+            merger_argv
+                .windows(2)
+                .any(|w| w == ["--model", "gemini-pro-orchestrator"])
+        );
+        assert!(
+            !merger_argv.iter().any(|a| a == "--effort"),
+            "--effort must be omitted for gemini-pro-orchestrator: {merger_argv:?}"
+        );
+
+        // Unsupported effort tier (`xhigh`) on a `low/medium/high` model (`gemini-4-carbon-high`)
+        // is also omitted, while supported `xhigh` on `gemini-4-hydrogen-high` is passed through.
+        let mut carbon_xhigh = merger.clone();
+        carbon_xhigh.model = Some("gemini-4-carbon-high".into());
+        carbon_xhigh.effort = Some("xhigh".into());
+        let carbon_argv = command(&carbon_xhigh, None, true, &[("home", "/tmp/h")]).unwrap();
+        assert!(!carbon_argv.iter().any(|a| a == "--effort"));
+
+        let mut hydrogen_xhigh = merger.clone();
+        hydrogen_xhigh.model = Some("gemini-4-hydrogen-high".into());
+        hydrogen_xhigh.effort = Some("xhigh".into());
+        let hydrogen_argv = command(&hydrogen_xhigh, None, true, &[("home", "/tmp/h")]).unwrap();
+        assert!(hydrogen_argv.windows(2).any(|w| w == ["--effort", "xhigh"]));
+
+        // Claude Haiku also omits `--effort` even when global `@claude` sets an effort.
+        let claude = cfg.profiles.iter().find(|p| p.id == "claude").unwrap();
+        let mut claude_haiku = claude.clone();
+        claude_haiku.model = Some("haiku".into());
+        claude_haiku.effort = Some("high".into());
+        let haiku_argv = command(
+            &claude_haiku,
+            Some("sess-1"),
+            true,
+            &[("home", "/tmp/h"), ("prompt", "hi")],
+        )
+        .unwrap();
+        assert!(haiku_argv.windows(2).any(|w| w == ["--model", "haiku"]));
+        assert!(!haiku_argv.iter().any(|a| a == "--effort"));
     }
 
     #[test]
