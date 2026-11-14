@@ -137,11 +137,11 @@ fn route_chrome(ui: Ui) -> impl IntoElement {
                         .child(
                             label(move || {
                                 if let Some(c) = ui.current_card() {
-                                    format!("Diff & Review · #{} {}", c.number, c.title)
+                                    format!("Git · #{} {}", c.number, c.title)
                                 } else if let Some(pr) = ui.current_project() {
-                                    format!("Diff & Review · {}", pr.name)
+                                    format!("Git · {}", pr.name)
                                 } else {
-                                    "Diff & Review".into()
+                                    "Git".into()
                                 }
                             })
                             .font_weight(FontWeight::SEMIBOLD)

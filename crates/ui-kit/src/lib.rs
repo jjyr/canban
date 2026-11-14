@@ -25,6 +25,8 @@ pub mod icons;
 pub use icons::{Icon, icon, icon_action, icon_colored, icon_tinted};
 pub mod search_dialog;
 pub use search_dialog::{SearchChoice, search_dialog};
+pub mod picker;
+pub use picker::{PickerOption, SearchPopover, filter_picker_options, search_popover};
 
 pub mod entry_card;
 pub use entry_card::entry_card;

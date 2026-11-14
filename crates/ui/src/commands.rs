@@ -1,7 +1,7 @@
 //! One visible command catalog for global bindings, Terminal keys and Command Palette (`⌘/`, `/`, `>…`).
 //!
 //! Every user-executable UI operation across global chrome, Activity & Notifications,
-//! Board, Card Workspace, Diff & Review, Terminals, Managed Worktrees, GitHub, and
+//! Board, Card Workspace, Git, Terminals, Managed Worktrees, GitHub, and
 //! Settings is registered here and dispatches the same underlying intent as UI controls.
 use crate::presenter::*;
 use nsh_core::{keymap::When, prelude::*};
@@ -176,11 +176,11 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         id: "go-review",
-        title: "Go to Diff & Review",
+        title: "Go to Git",
         key: "",
-        display: "Review",
+        display: "Git",
         context: "Navigation",
-        keywords: "git compare patch",
+        keywords: "diff review compare patch branch commit",
     },
     Command {
         id: "go-github",
@@ -320,11 +320,11 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         id: "open-card-diff",
-        title: "Open Card Diff & Review",
+        title: "Open Card Diff in Git",
         key: "",
         display: "Card",
         context: "Card",
-        keywords: "compare patch changes",
+        keywords: "git review compare patch changes",
     },
     Command {
         id: "quick-merge-card",
@@ -498,7 +498,7 @@ pub const CATALOG: &[Command] = &[
         id: "git-fetch",
         title: "Git: Fetch Remote",
         key: "",
-        display: "Diff & Review",
+        display: "Git",
         context: "Git",
         keywords: "fetch origin remote sync prune",
     },
@@ -506,7 +506,7 @@ pub const CATALOG: &[Command] = &[
         id: "git-pull",
         title: "Git: Pull (Fast-Forward Only)",
         key: "",
-        display: "Diff & Review",
+        display: "Git",
         context: "Git",
         keywords: "pull ff-only fast-forward sync update",
     },
@@ -514,7 +514,7 @@ pub const CATALOG: &[Command] = &[
         id: "git-push",
         title: "Git: Push Current Branch",
         key: "",
-        display: "Diff & Review",
+        display: "Git",
         context: "Git",
         keywords: "push origin publish upstream",
     },
@@ -522,7 +522,7 @@ pub const CATALOG: &[Command] = &[
         id: "git-stage-all",
         title: "Git: Stage All Changes",
         key: "",
-        display: "Diff & Review",
+        display: "Git",
         context: "Git",
         keywords: "stage add working tree index",
     },
@@ -530,7 +530,7 @@ pub const CATALOG: &[Command] = &[
         id: "git-unstage-all",
         title: "Git: Unstage All Changes",
         key: "",
-        display: "Diff & Review",
+        display: "Git",
         context: "Git",
         keywords: "unstage reset index",
     },
@@ -538,7 +538,7 @@ pub const CATALOG: &[Command] = &[
         id: "git-working-tree",
         title: "Git: Open Working Tree & Commit Composer",
         key: "",
-        display: "Diff & Review",
+        display: "Git",
         context: "Git",
         keywords: "commit amend stage status diff",
     },
@@ -1242,5 +1242,9 @@ mod tests {
         assert!(CATALOG.iter().any(|c| c.id == "delete-last-comment"));
         assert!(CATALOG.iter().any(|c| c.id == "open-last-github-comment"));
         assert!(CATALOG.iter().any(|c| c.id == "retry-auto-merge"));
+        let go_git = CATALOG.iter().find(|c| c.id == "go-review").unwrap();
+        assert_eq!(go_git.title, "Go to Git");
+        assert_eq!(go_git.display, "Git");
+        assert!(go_git.keywords.contains("diff"));
     }
 }

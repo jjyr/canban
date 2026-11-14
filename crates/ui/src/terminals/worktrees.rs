@@ -388,7 +388,7 @@ pub async fn card_scope_menu(ui: Ui, card: canban_types::Card, at: Option<Point<
     items.push(MenuItem::separator());
     items.push(MenuItem::new("Open Card").on_select(move || ui.terminal_card(cid_open.clone())));
     items.push(
-        MenuItem::new("Open in Diff & Review")
+        MenuItem::new("Open in Git")
             .on_select(move || crate::review::open_card(ui, &cid_diff)),
     );
     if let Some(path) = wt_copy {
@@ -549,7 +549,7 @@ pub async fn menu(ui: Ui, wt: ManagedWorktree, at: Option<Point<Points>>) {
     }
 
     items.push(MenuItem::separator());
-    items.push(MenuItem::new("Open in Diff & Review").on_select(move || open_diff(ui, &wt_diff)));
+    items.push(MenuItem::new("Open in Git").on_select(move || open_diff(ui, &wt_diff)));
     items.push(
         MenuItem::new("Promote to Board Card…")
             .on_select(move || ui.worktree_promote.set(Some(wt_promote.clone()))),

@@ -332,13 +332,6 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                     "This commit did not introduce net file content changes relative to the selected parent."
                 })),
         );
-    } else {
-        diff_column = diff_column.child(
-            muted(
-                "Click any diff line to add an inline review comment, then click Review & Send below.",
-            )
-            .text_size(px(11.5)),
-        );
     }
 
     let visible_files: Vec<Value> = if selected.is_empty() {

@@ -103,6 +103,7 @@ fn controls() -> impl IntoElement {
     let nav_selected = signal(0_usize);
     let gutter_scroll = element_ref();
     let split_width = signal(240.0_f32);
+    let chosen_ref = signal("feat/git-client".to_string());
     view().flex_1().min_h(px(0.0)).p_5().gap_4().bg(BACKGROUND)
     .child(heading("Component Gallery"))
     .child(muted("Production components · local fixtures · no AppServer or Agent required"))
@@ -410,6 +411,70 @@ fn controls() -> impl IntoElement {
                 .child(canban_ui::components::workflow::run_view(fixtures::workflow()))
                 .child(review::diff_panel(fixtures::review()))
                 .child(canban_ui::utilities::terminal_settings(ui))
+                .child(
+                    panel()
+                        .child(label("Searchable + typeable popover picker (canban-ui-kit)"))
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    search_popover(
+                                        press_target()
+                                            .h(px(28.))
+                                            .px_2p5()
+                                            .rounded(px(RADIUS))
+                                            .border_1()
+                                            .border_color(BORDER)
+                                            .bg(INSET)
+                                            .flex_row()
+                                            .items_center()
+                                            .gap_1p5()
+                                            .child(icon(Icon::Branch).w(px(12.)).h(px(12.)))
+                                            .child(
+                                                label(move || chosen_ref.get())
+                                                    .font_family("Menlo")
+                                                    .text_size(px(11.5)),
+                                            )
+                                            .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.))),
+                                        move || {
+                                            let cur = chosen_ref.get();
+                                            vec![
+                                                PickerOption::new("main", "main")
+                                                    .group("Branches")
+                                                    .detail("default")
+                                                    .icon(Icon::Branch)
+                                                    .mono(true)
+                                                    .selected(cur == "main"),
+                                                PickerOption::new("feat/git-client", "feat/git-client")
+                                                    .group("Branches")
+                                                    .detail("↑2")
+                                                    .icon(Icon::Branch)
+                                                    .mono(true)
+                                                    .selected(cur == "feat/git-client"),
+                                                PickerOption::new("origin/release", "origin/release")
+                                                    .group("Remote Branches")
+                                                    .icon(Icon::Branch)
+                                                    .mono(true)
+                                                    .selected(cur == "origin/release"),
+                                            ]
+                                        },
+                                        move |val| chosen_ref.set(val),
+                                    )
+                                    .placeholder("Search or type custom ref…")
+                                    .custom_option(|q| {
+                                        Some(
+                                            PickerOption::new(q.to_owned(), format!("Use ref \"{q}\""))
+                                                .detail("custom")
+                                                .icon(Icon::Branch)
+                                                .mono(true),
+                                        )
+                                    }),
+                                )
+                                .child(muted(move || format!("Selected: {}", chosen_ref.get()))),
+                        ),
+                )
                 .child(
                     panel()
                         .child(label("Settings jump column controls"))

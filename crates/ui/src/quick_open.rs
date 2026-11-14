@@ -118,10 +118,10 @@ fn contextual_commands(ui: Ui, raw_query: &str) -> Vec<(usize, SearchChoice)> {
         });
         dynamic_cmds.push(DynamicCommand {
             id: format!("cmd:worktree-diff:{}", wt.id),
-            title: format!("Compare Worktree {} in Diff & Review", wt.branch),
+            title: format!("Compare Worktree {} in Git", wt.branch),
             detail: format!("{project_name} · Worktrees"),
             icon: Icon::Compare,
-            keywords: format!("worktree diff review compare {}", wt.branch),
+            keywords: format!("worktree git diff review compare {}", wt.branch),
         });
         dynamic_cmds.push(DynamicCommand {
             id: format!("cmd:worktree-delete:{}", wt.id),

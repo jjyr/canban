@@ -1,5 +1,5 @@
-//! Unified Diff & Review Workbench:
-//! - Works as a standalone Git compare client from the Left Rail even without any Card or PR.
+//! Unified Git Workbench:
+//! - Works as a standalone Git client & compare workbench from the Left Rail even without any Card or PR.
 //! - Opens directly from Local Cards (worktree/branch) and GitHub PR Cards (zero-clone remote PR diff).
 //! - Supports inline line-by-line review comments + batch dispatch to @Agent (Terminals or Card) or GitHub PR.
 pub mod diff;
@@ -770,5 +770,33 @@ mod tests {
             (lines[4].kind, lines[4].old_line, lines[4].new_line),
             ('+', None, Some(22))
         );
+    }
+
+    #[test]
+    fn git_ref_options_include_workspace_shortcuts_branches_tags_and_commits() {
+        let refs = json!({
+            "dirty_count": 3,
+            "staged_count": 1,
+            "branches": [
+                {"name": "main", "is_default": true, "short_sha": "a1b2c3d"},
+                {"name": "feat/git-client", "is_current": true, "ahead": 2, "short_sha": "e4f5a6b"},
+                {"name": "origin/main", "remote": true, "short_sha": "a1b2c3d"}
+            ],
+            "tags": [{"name": "v0.3.0", "short_sha": "1122334"}],
+            "commits": [{"sha": "e4f5a6b7890", "short_sha": "e4f5a6b", "subject": "ui: git client"}]
+        });
+
+        let compare_opts = sidebar::build_git_ref_options(&refs, false, "WORKDIR");
+        assert!(compare_opts.iter().any(|o| o.id == "WORKDIR" && o.selected));
+        assert!(compare_opts.iter().any(|o| o.id == "STAGED"));
+        assert!(compare_opts.iter().any(|o| o.id == "feat/git-client" && o.detail == "↑2"));
+        assert!(compare_opts.iter().any(|o| o.id == "origin/main" && o.group.as_deref() == Some("Remote Branches")));
+        assert!(compare_opts.iter().any(|o| o.id == "v0.3.0"));
+        assert!(compare_opts.iter().any(|o| o.id == "e4f5a6b7890"));
+
+        let base_opts = sidebar::build_git_ref_options(&refs, true, "main");
+        assert!(!base_opts.iter().any(|o| o.id == "WORKDIR"));
+        assert!(base_opts.iter().any(|o| o.id == "HEAD"));
+        assert!(base_opts.iter().any(|o| o.id == "main" && o.selected));
     }
 }

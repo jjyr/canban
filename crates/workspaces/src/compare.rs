@@ -1,4 +1,4 @@
-//! General Git reference discovery and arbitrary comparison for the Diff & Review workbench.
+//! General Git reference discovery and arbitrary comparison for the Git workbench.
 use super::Ops;
 use anyhow::{Context, Result, ensure};
 use canban_types::Project;

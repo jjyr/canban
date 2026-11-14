@@ -1,4 +1,4 @@
-//! Git client RPC surface for the Diff & Review workbench (checkout switching, branch commit logs,
+//! Git client RPC surface for the Git workbench (checkout switching, branch commit logs,
 //! single-commit diff inspection, file-level stage/unstage/discard, commit/amend, fetch/pull/push).
 use super::*;
 
@@ -250,7 +250,7 @@ impl AppServer {
     fn git_stage_rpc(&self, p: Value) -> Result<Value> {
         ensure!(
             p["execution"].is_null(),
-            "Staging files in Diff & Review requires a direct user action"
+            "Staging files in Git requires a direct user action"
         );
         let (idem, cached) = self.check_idempotent_operation("git.stage", &p)?;
         if let Some(res) = cached {
@@ -274,7 +274,7 @@ impl AppServer {
     fn git_unstage_rpc(&self, p: Value) -> Result<Value> {
         ensure!(
             p["execution"].is_null(),
-            "Unstaging files in Diff & Review requires a direct user action"
+            "Unstaging files in Git requires a direct user action"
         );
         let (idem, cached) = self.check_idempotent_operation("git.unstage", &p)?;
         if let Some(res) = cached {
@@ -322,7 +322,7 @@ impl AppServer {
     fn git_commit_rpc(&self, p: Value) -> Result<Value> {
         ensure!(
             p["execution"].is_null(),
-            "Committing from Diff & Review requires a direct user action"
+            "Committing from Git requires a direct user action"
         );
         let (idem, cached) = self.check_idempotent_operation("git.commit", &p)?;
         if let Some(res) = cached {
@@ -380,7 +380,7 @@ impl AppServer {
     fn git_fetch_rpc(&self, p: Value) -> Result<Value> {
         ensure!(
             p["execution"].is_null(),
-            "Git fetch from Diff & Review requires a direct user action"
+            "Git fetch requires a direct user action"
         );
         let (idem, cached) = self.check_idempotent_operation("git.fetch", &p)?;
         if let Some(res) = cached {
@@ -408,7 +408,7 @@ impl AppServer {
     fn git_pull_rpc(&self, p: Value) -> Result<Value> {
         ensure!(
             p["execution"].is_null(),
-            "Git pull from Diff & Review requires a direct user action"
+            "Git pull requires a direct user action"
         );
         let (idem, cached) = self.check_idempotent_operation("git.pull", &p)?;
         if let Some(res) = cached {
@@ -443,7 +443,7 @@ impl AppServer {
     fn git_push_rpc(&self, p: Value) -> Result<Value> {
         ensure!(
             p["execution"].is_null(),
-            "Git push from Diff & Review requires a direct user action"
+            "Git push requires a direct user action"
         );
         let (idem, cached) = self.check_idempotent_operation("git.push", &p)?;
         if let Some(res) = cached {

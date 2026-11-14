@@ -56,7 +56,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         ))
         .child(icon_action(
             Icon::Compare,
-            "Diff & Review".into(),
+            "Git".into(),
             move || ui.page.get() == "review",
             move || ui.review_state.pending_comments.with(Vec::len),
             move |_| crate::review::open_compare(ui),

@@ -96,14 +96,15 @@ When a delivery PR (`card.pull_request`) or a GitHub PR source Card (`CardConten
 
 Archive packages Card-owned reports/context/replies/output and exported records with zstd. Clean managed worktrees are removed after retaining their HEAD under the Card ref and retaining the named branch; dirty worktrees remain with a notice. Restore expands content without scheduling work. Provider-owned conversation files are outside this portable archive boundary.
 
-## Standalone Git client in Diff & Review
+## Standalone Git client
 
-Status: implemented 2026-11-14 (Card #49).
+Status: implemented 2026-11-14 (Card #49; refined in Card #77).
 
-In addition to Card and GitHub PR review, **Diff & Review** serves as a lightweight Git client for any registered checkout of the active Project:
+In addition to Card and GitHub PR review, the **Git** route (Left Rail `Git`) serves as a lightweight Git client for any registered checkout of the active Project:
 
-- **Checkout switcher**: Top-bar selector switches the active checkout between the Project main directory (`project`), active Card worktrees (`card`), and standalone managed branch worktrees (`worktree`). All `cwd` overrides are strictly validated against the Project's registered checkouts.
-- **Branch commit history**: Left sidebar **Commits** section includes an independent branch selector, SHA/subject filter input, and paginated history (`git.log`) with **Load more commits…**. Clicking any branch in **Quick Compare** also syncs the commit list to that branch and shows upstream `↑ahead` / `↓behind` counts.
+- **Searchable Checkout, PR & Card branch switcher**: Top-bar searchable popover (`canban-ui-kit::search_popover`) switches between the Project main directory (`project`), standalone managed branch worktrees (`worktree`), and active PR / Card branches (`#number`, title, branch name, PR `#number`), alongside the searchable **Cards & PRs** section in the left sidebar.
+- **Searchable + typeable Base & Compare refs**: Both Base and Compare pickers use searchable anchored popovers that filter branches, remote branches, tags, recent commits, and workspace targets (`Working tree`, `Staged changes`, `Unstaged changes`) while accepting arbitrary typed Git expressions (`HEAD~3`, commit SHA, tag) directly without a secondary ref drawer.
+- **Branch commit history**: Left sidebar **Commits** section includes an independent searchable + typeable branch/ref selector, SHA/subject filter input, and paginated history (`git.log`) with **Load more commits…**.
 - **Single-commit inspection**: Clicking any commit in the sidebar or in **Commits in range** displays a dedicated commit detail header (`git.commit_detail` / `commit_detail` in `git.compare`) with full commit subject + multiline body, author/timestamp metadata, **Copy SHA**, **← Newer** / **Older →** commit navigation, **← Back to range** restoration, and parent switching (`Parent 1` / `Parent 2`) for merge commits.
 - **Working tree staging & commit composer**: Selecting **Working tree** splits local changes into **Staged** and **Changes** (unstaged + untracked) with file-level `+` / `−` buttons, **+ Stage All** / **− Unstage All**, right-click context actions (**Stage**, **Unstage**, **Discard changes…** with modal confirmation), and an inline **Commit** composer supporting summary + description, **Amend**, **Stage All & Commit**, and **Commit & Push** (`git.stage`, `git.unstage`, `git.discard`, `git.commit`).
 - **Remote sync**: Top-bar **Fetch** (`git.fetch --prune`), **Pull** (`git.pull` using safe `--ff-only`, surfacing divergent branch errors without silent merges or rebases), and **Push** (`git.push`, automatically configuring `--set-upstream` when publishing a branch without upstream, never force-pushing). Gallery regression scenes: `review-commits` and `review-working-tree`.

@@ -1,13 +1,13 @@
-//! Git client actions and UI widgets for the Diff & Review workbench:
-//! - Active checkout / worktree switcher + remote sync controls (`Fetch`, `Pull`, `Push`)
+//! Git client actions and UI widgets for the Git workbench:
+//! - Active checkout / worktree / PR & Card branch switcher + remote sync controls (`Fetch`, `Pull`, `Push`)
 //! - Per-branch paginated commit history & search (`git.log`)
 //! - Single-commit inspection banner with merge-commit parent selector & prev/next navigation
 //! - File-level staging, unstaging, discard confirmation modal, and inline commit / amend composer.
-use super::{load_refs, load_refs_and_compare, refresh_active_diff, select_git_pair};
+use super::{load_refs, load_refs_and_compare, open_card, refresh_active_diff, select_git_pair};
 use crate::presenter::*;
 use canban_ui_kit::tokens::*;
 use canban_ui_kit::*;
-use nsh_core::element::desktop::{MenuItem, popup_menu, popup_menu_at};
+use nsh_core::element::desktop::{MenuItem, popup_menu_at};
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
 
@@ -447,13 +447,11 @@ pub fn run_commit(ui: Ui, and_push: bool) {
     });
 }
 
-/// Top bar checkout selector (`Project main`, `Card worktree`, `ManagedWorktree`).
+/// Top bar checkout, worktree, and PR / Card branch selector with fuzzy search.
 pub fn render_checkout_picker(ui: Ui) -> impl IntoElement {
     let st = ui.review_state;
-    let anchor = element_ref();
 
-    canban_ui_kit::press_target()
-        .element_ref(&anchor)
+    let trigger = canban_ui_kit::press_target()
         .h(px(28.))
         .px_2p5()
         .rounded(px(RADIUS))
@@ -464,10 +462,28 @@ pub fn render_checkout_picker(ui: Ui) -> impl IntoElement {
         .flex_row()
         .items_center()
         .gap_1p5()
-        .accessibility_label("Switch active Git checkout or worktree")
-        .child(icon(Icon::Branch).w(px(12.)).h(px(12.)))
+        .accessibility_label("Switch active Git checkout, worktree, or PR / Card branch")
+        .child(icon(Icon::Folder).w(px(12.)).h(px(12.)))
         .child(
             label(move || {
+                let mode = st.mode.get();
+                if mode != "git"
+                    && let Some(c) = ui.current_card()
+                {
+                    let title_short = if c.title.chars().count() > 18 {
+                        let s: String = c.title.chars().take(16).collect();
+                        format!("{s}…")
+                    } else {
+                        c.title.clone()
+                    };
+                    if mode == "github_pr"
+                        && let Some(pr) = st.pr_target.get()
+                    {
+                        let n = pr["number"].as_u64().unwrap_or(c.number);
+                        return format!("PR #{n} · {title_short}");
+                    }
+                    return format!("#{} {title_short}", c.number);
+                }
                 let refs = st.refs_data.get();
                 let cur_br = refs["current_branch"]
                     .as_str()
@@ -492,19 +508,29 @@ pub fn render_checkout_picker(ui: Ui) -> impl IntoElement {
                     "worktree" => " · wt",
                     _ => "",
                 };
-                let shown = if cur_br.len() > 20 {
-                    format!("{}…", &cur_br[..18])
+                let shown = if cur_br.chars().count() > 20 {
+                    let s: String = cur_br.chars().take(18).collect();
+                    format!("{s}…")
                 } else {
                     cur_br.to_owned()
                 };
-                format!("{shown}{tag} ▾")
+                format!("{shown}{tag}")
             })
             .font_family("Menlo")
             .text_size(px(11.5))
             .font_weight(FontWeight::MEDIUM),
         )
-        .on_press(move |_: &()| {
-            let refs = st.refs_data.get_untracked();
+        .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.)));
+
+    search_popover(
+        trigger,
+        move || {
+            let refs = st.refs_data.get();
+            let mode = st.mode.get();
+            let cur_cwd = st.checkout_cwd.get();
+            let cur_card = ui.card.get();
+            let active_pid = ui.project.get();
+
             let mut checkouts = refs["checkouts"].as_array().cloned().unwrap_or_default();
             if checkouts.is_empty()
                 && let Some(proj) = ui.current_project()
@@ -516,49 +542,126 @@ pub fn render_checkout_picker(ui: Ui) -> impl IntoElement {
                     "branch": proj.target_branch,
                 }));
             }
-            if checkouts.is_empty() {
-                return;
-            }
-            let cur_cwd = st.checkout_cwd.get_untracked();
-            ui.spawn(async move {
-                let items: Vec<MenuItem> = checkouts
-                    .into_iter()
-                    .map(|c| {
-                        let path = c["path"].as_str().unwrap_or("").to_owned();
-                        let kind = c["kind"].as_str().unwrap_or("project");
-                        let lbl = c["label"].as_str().unwrap_or("Checkout").to_owned();
-                        let br = c["branch"].as_str().unwrap_or("").to_owned();
-                        let is_cur = if cur_cwd.is_empty() {
-                            kind == "project"
-                        } else {
-                            path == cur_cwd
-                        };
-                        let target_cwd = if kind == "project" {
-                            String::new()
-                        } else {
-                            path
-                        };
-                        let title = if br.is_empty() {
-                            format!("{}{lbl}", if is_cur { "✓ " } else { "" })
-                        } else {
-                            format!("{}{lbl} — {br}", if is_cur { "✓ " } else { "" })
-                        };
-                        MenuItem::new(title).on_select(move || {
-                            select_checkout(ui, target_cwd.clone());
-                        })
-                    })
-                    .collect();
-                if let Some(bounds) = anchor.measure().await {
-                    popup_menu_at(
-                        items,
-                        point(bounds.page.x, bounds.page.y + bounds.frame.size.height),
-                    )
-                    .await;
-                } else {
-                    popup_menu(items).await;
+
+            let mut options = Vec::<PickerOption>::new();
+
+            // 1. Checkouts & Worktrees (main repo + standalone ManagedWorktrees)
+            for c in &checkouts {
+                let kind = c["kind"].as_str().unwrap_or("project");
+                if kind == "card" {
+                    continue;
                 }
+                let path = c["path"].as_str().unwrap_or("").to_owned();
+                let lbl = c["label"].as_str().unwrap_or("Checkout").to_owned();
+                let br = c["branch"].as_str().unwrap_or("").to_owned();
+                let is_cur = mode == "git"
+                    && if cur_cwd.is_empty() {
+                        kind == "project"
+                    } else {
+                        path == cur_cwd
+                    };
+                let target_id = if kind == "project" {
+                    "cwd:".to_owned()
+                } else {
+                    format!("cwd:{path}")
+                };
+                let ic = if kind == "worktree" {
+                    Icon::Branch
+                } else {
+                    Icon::Projects
+                };
+                options.push(
+                    PickerOption::new(target_id, lbl)
+                        .group("Checkouts & Worktrees")
+                        .detail(br.clone())
+                        .icon(ic)
+                        .selected(is_cur)
+                        .keywords([br, path, kind.to_owned()]),
+                );
+            }
+
+            // 2. PRs & Card Branches
+            let cards = ui.snapshot.with(|s| {
+                s.cards
+                    .iter()
+                    .filter(|c| {
+                        c.active()
+                            && (active_pid.is_empty() || c.project_id == active_pid)
+                            && (c.worktree.is_some()
+                                || c.branch.is_some()
+                                || c.is_github_pr()
+                                || c.pull_request.is_some()
+                                || c.stage == "review")
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>()
             });
-        })
+
+            for c in cards {
+                let is_sel = mode != "git" && cur_card == c.id;
+                let is_pr = c.is_github_pr() || c.pull_request.is_some();
+                let pr_num = c
+                    .pull_request
+                    .as_ref()
+                    .map(|p| p.number)
+                    .or_else(|| c.github_issue().map(|g| g.number))
+                    .unwrap_or(0);
+                let title = if is_pr && pr_num > 0 && pr_num != c.number {
+                    format!("#{} · PR #{} {}", c.number, pr_num, c.title)
+                } else if is_pr {
+                    format!("PR #{} {}", c.number, c.title)
+                } else {
+                    format!("#{} {}", c.number, c.title)
+                };
+                let br = c
+                    .branch
+                    .clone()
+                    .or_else(|| c.pull_request.as_ref().map(|p| p.head_branch.clone()))
+                    .unwrap_or_default();
+                let detail = if !br.is_empty() {
+                    format!("{br} · {}", c.stage)
+                } else {
+                    c.stage.clone()
+                };
+                let mut kw = vec![
+                    format!("#{}", c.number),
+                    c.number.to_string(),
+                    c.stage.clone(),
+                ];
+                if !br.is_empty() {
+                    kw.push(br);
+                }
+                if pr_num > 0 {
+                    kw.push(format!("PR #{pr_num}"));
+                    kw.push(pr_num.to_string());
+                }
+                if let Some(wt) = &c.worktree {
+                    kw.push(wt.clone());
+                }
+                options.push(
+                    PickerOption::new(format!("card:{}", c.id), title)
+                        .group("Cards & PRs")
+                        .detail(detail)
+                        .icon(if is_pr { Icon::GitHub } else { Icon::Board })
+                        .selected(is_sel)
+                        .keywords(kw),
+                );
+            }
+
+            options
+        },
+        move |selected_id| {
+            if let Some(cid) = selected_id.strip_prefix("card:") {
+                open_card(ui, cid);
+            } else if let Some(cwd) = selected_id.strip_prefix("cwd:") {
+                select_checkout(ui, cwd.to_owned());
+            }
+        },
+    )
+    .placeholder("Search checkouts, PRs, #card, or branch…")
+    .empty_text("No matching checkouts or PR / Card branches")
+    .width(360.)
+    .list_height(300.)
 }
 
 /// Top bar remote Git sync actions: `Fetch`, `Pull ↓M` (`--ff-only`), and `Push ↑N`.

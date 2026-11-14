@@ -169,7 +169,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 let repo = r_rev.repository.clone();
                                 let num = r_rev.number.unwrap_or(0);
                                 let url = r_rev.url.clone();
-                                compact_action("Diff & Review", Variant::Secondary, move |_| {
+                                compact_action("Diff", Variant::Secondary, move |_| {
                                     let st = ui.review_state;
                                     let repo_val = repo.clone();
                                     let url_val = url.clone();
