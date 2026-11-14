@@ -1133,6 +1133,8 @@ pub struct TerminalRuntime {
     pub agent_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_turn: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_agent: Option<String>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct TerminalContext {

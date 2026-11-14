@@ -1210,6 +1210,7 @@ impl AppServer {
                     error: None,
                     agent_status: None,
                     agent_turn: None,
+                    observed_agent: None,
                 }),
                 agent: None,
             };

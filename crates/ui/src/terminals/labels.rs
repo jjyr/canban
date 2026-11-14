@@ -75,7 +75,8 @@ pub fn tab_width(e: &Entry) -> f32 {
     if e.agent.is_some() {
         (text + profile_width(e) + stage_width(e) + 78.).clamp(280., 380.)
     } else {
-        (text + 58.).clamp(136., 230.)
+        let icon_extra = if e.provider().is_some() { 20. } else { 0. };
+        (text + 58. + icon_extra).clamp(136. + icon_extra, 230.)
     }
 }
 pub fn tab(e: &Entry) -> View {

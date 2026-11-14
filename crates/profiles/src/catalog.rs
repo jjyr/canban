@@ -732,3 +732,580 @@ pub fn catalog_entry_for_profile(profile: &Profile) -> Option<CatalogEntry> {
     let bin = profile.command_name();
     list.into_iter().find(|e| e.binary == bin || e.id == bin)
 }
+
+/// Identify a running interactive Agent CLI from Herdr push metadata (`foreground` and `status`).
+///
+/// Relies strictly on data pushed in Herdr `Terminal` snapshots and `foreground` / `status` events.
+/// Returns a canonical catalog ID (`"codex"`, `"claude"`, `"agy"`, etc.) when a known Agent CLI is
+/// active in the foreground, or `None` when the terminal is finished, at an interactive shell
+/// prompt, or running a non-Agent command.
+pub fn identify_herdr_agent(value: &serde_json::Value) -> Option<&'static str> {
+    if value["state"] == "finished" {
+        return None;
+    }
+    let fg = value.get("foreground").filter(|v| v.is_object());
+    let fg_name = fg.and_then(|v| v["name"].as_str());
+    let fg_argv: Vec<&str> = fg
+        .and_then(|v| v["argv"].as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+    let status_app = value
+        .get("status")
+        .filter(|v| v.is_object())
+        .and_then(|v| v["app"].as_str());
+    identify_agent_process(status_app, fg_name, &fg_argv)
+}
+
+/// Pure classifier for a terminal's active foreground process and optional OSC 7501 `status.app`.
+pub fn identify_agent_process(
+    status_app: Option<&str>,
+    fg_name: Option<&str>,
+    fg_argv: &[&str],
+) -> Option<&'static str> {
+    if let Some(id) = match_foreground_argv(fg_argv) {
+        return Some(id);
+    }
+    if let Some(name) = fg_name
+        && let Some(id) = match_agent_binary_token(name)
+    {
+        return Some(id);
+    }
+    // Interactive shells retain the last OSC 7501 `status` emitted by an exited child until the
+    // next OSC 7501 event. Never surface a stale `status.app` once foreground returns to a shell
+    // or is clearly running an unrelated non-wrapper binary.
+    let fg_head = fg_argv
+        .first()
+        .copied()
+        .or(fg_name)
+        .map(clean_program_basename);
+    if let Some(head) = fg_head.as_deref()
+        && is_interactive_shell(head)
+        && !shell_has_inline_command(fg_argv)
+    {
+        return None;
+    }
+    if let Some(app) = status_app {
+        let can_trust_status = match fg_head.as_deref() {
+            None => true,
+            Some(head) => is_runtime_or_wrapper(head) || match_agent_binary_token(head).is_some(),
+        };
+        if can_trust_status && let Some(id) = match_status_app(app) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+fn match_foreground_argv(argv: &[&str]) -> Option<&'static str> {
+    let mut idx = 0;
+    while idx < argv.len() {
+        let token = argv[idx].trim();
+        if token.is_empty() {
+            idx += 1;
+            continue;
+        }
+        let base = clean_program_basename(token);
+        if is_env_launcher(&base) {
+            idx += 1;
+            while idx < argv.len() {
+                let arg = argv[idx].trim();
+                if arg == "--" {
+                    idx += 1;
+                    break;
+                }
+                if arg == "-S"
+                    || arg == "--split-string"
+                    || arg == "-u"
+                    || arg == "--unset"
+                    || arg == "-C"
+                    || arg == "--chdir"
+                {
+                    idx += 2;
+                    continue;
+                }
+                if arg.starts_with('-') || arg.contains('=') {
+                    idx += 1;
+                    continue;
+                }
+                break;
+            }
+            continue;
+        }
+        if is_package_exec_launcher(&base) {
+            idx += 1;
+            if matches!(base.as_str(), "npm" | "pnpm" | "yarn")
+                && idx < argv.len()
+                && matches!(argv[idx].trim(), "exec" | "dlx")
+            {
+                idx += 1;
+            } else if base == "uv"
+                && idx + 1 < argv.len()
+                && argv[idx].trim() == "tool"
+                && argv[idx + 1].trim() == "run"
+            {
+                idx += 2;
+            } else if base == "deno" && idx < argv.len() && argv[idx].trim() == "run" {
+                idx += 1;
+            }
+            while idx < argv.len() {
+                let arg = argv[idx].trim();
+                if arg == "--" {
+                    return argv.get(idx + 1).and_then(|target| {
+                        let t = target.trim();
+                        match_agent_path_or_package(t)
+                            .or_else(|| match_agent_binary_token(&clean_program_basename(t)))
+                    });
+                }
+                if matches!(arg, "-p" | "--package") {
+                    if let Some(pkg) = argv.get(idx + 1)
+                        && let Some(id) = match_agent_path_or_package(pkg)
+                    {
+                        return Some(id);
+                    }
+                    idx += 2;
+                    continue;
+                }
+                if let Some(pkg) = arg
+                    .strip_prefix("--package=")
+                    .or_else(|| arg.strip_prefix("-p="))
+                    && let Some(id) = match_agent_path_or_package(pkg)
+                {
+                    return Some(id);
+                }
+                if arg.starts_with('-') {
+                    idx += 1;
+                    continue;
+                }
+                return match_agent_path_or_package(arg)
+                    .or_else(|| match_agent_binary_token(&clean_program_basename(arg)));
+            }
+            return None;
+        }
+        if is_script_interpreter(&base) {
+            idx += 1;
+            while idx < argv.len() {
+                let arg = argv[idx].trim();
+                if arg == "--" {
+                    return argv.get(idx + 1).and_then(|target| {
+                        let t = target.trim();
+                        match_agent_path_or_package(t)
+                            .or_else(|| match_agent_binary_token(&clean_program_basename(t)))
+                    });
+                }
+                if matches!(arg, "-c" | "-e" | "--eval" | "-p" | "--print") {
+                    return None;
+                }
+                if arg == "-m" {
+                    return argv
+                        .get(idx + 1)
+                        .and_then(|m| match_python_module(m.trim()));
+                }
+                if interpreter_flag_takes_value(&base, arg) {
+                    idx += 2;
+                    continue;
+                }
+                if arg.starts_with('-') {
+                    idx += 1;
+                    continue;
+                }
+                return match_agent_path_or_package(arg)
+                    .or_else(|| match_agent_binary_token(&clean_program_basename(arg)));
+            }
+            return None;
+        }
+        if is_interactive_shell(&base) {
+            for (pos, raw) in argv.iter().enumerate().skip(idx + 1) {
+                let arg = raw.trim();
+                if (arg == "-c"
+                    || (arg.starts_with('-') && !arg.starts_with("--") && arg.ends_with('c')))
+                    && let Some(cmd) = argv.get(pos + 1)
+                {
+                    let parts: Vec<&str> = cmd.split_whitespace().collect();
+                    return match_foreground_argv(&parts);
+                }
+            }
+            return None;
+        }
+        return match_agent_binary_token(&base).or_else(|| match_agent_path_or_package(token));
+    }
+    None
+}
+
+fn clean_program_basename(raw: &str) -> String {
+    let trimmed = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+    let file = trimmed.rsplit(['/', '\\']).next().unwrap_or(trimmed);
+    let no_login = file.strip_prefix('-').unwrap_or(file);
+    let lower = no_login.to_ascii_lowercase();
+    for suffix in [".exe", ".cmd", ".bat", ".ps1", ".mjs", ".cjs", ".js", ".py"] {
+        if let Some(stem) = lower.strip_suffix(suffix)
+            && !stem.is_empty()
+        {
+            return stem.to_owned();
+        }
+    }
+    lower
+}
+
+fn strip_arch_or_version_suffix(name: &str) -> &str {
+    // Handle packaged Mach-O / release binaries such as `grok-1.0.4-macos-aarch64` or `claude-2.1.0`.
+    if let Some((head, tail)) = name.split_once('-')
+        && tail
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_digit() || matches!(tail, "macos" | "darwin" | "linux"))
+    {
+        return head;
+    }
+    name
+}
+
+fn match_agent_binary_token(raw: &str) -> Option<&'static str> {
+    let base = clean_program_basename(raw);
+    let candidates = [base.as_str(), strip_arch_or_version_suffix(&base)];
+    for candidate in candidates {
+        let hit = match candidate {
+            "codex" => Some("codex"),
+            "claude" | "claude-code" => Some("claude"),
+            "agy" | "antigravity" | "antigravity-cli" => Some("agy"),
+            "gemini" | "gemini-cli" => Some("gemini"),
+            "opencode" | "opencode-ai" => Some("opencode"),
+            "cursor-agent" => Some("cursor"),
+            "pi" | "pi-coding-agent" => Some("pi"),
+            "omp" => Some("omp"),
+            "copilot" | "github-copilot-cli" => Some("copilot"),
+            "droid" => Some("droid"),
+            "amp" => Some("amp"),
+            "kimi" | "kimi-cli" => Some("kimi"),
+            "kiro" | "kiro-cli" | "kiro-cli-chat" => Some("kiro"),
+            "qwen" | "qwen-code" => Some("qwen"),
+            "devin" | "devin-cli" => Some("devin"),
+            "cline" | "cline-cli" => Some("cline"),
+            "grok" | "grok-cli" => Some("grok"),
+            "hermes" | "hermes-agent" => Some("hermes"),
+            "kilo" | "kilocode" => Some("kilo"),
+            "qodercli" | "qoder" => Some("qodercli"),
+            "letta" | "letta-code" => Some("letta"),
+            "mastracode" => Some("mastracode"),
+            "maki" => Some("maki"),
+            "muse" => Some("muse"),
+            _ => None,
+        };
+        if hit.is_some() {
+            return hit;
+        }
+    }
+    None
+}
+
+fn match_status_app(raw: &str) -> Option<&'static str> {
+    let norm = raw.trim().to_ascii_lowercase();
+    let norm = norm.strip_prefix("herdr:").unwrap_or(&norm);
+    match norm {
+        "cursor" | "cursor-agent" => Some("cursor"),
+        "mastra" | "mastracode" | "mastra code" => Some("mastracode"),
+        "claude code" => Some("claude"),
+        "gemini cli" => Some("gemini"),
+        "qwen code" => Some("qwen"),
+        "github copilot" => Some("copilot"),
+        other => match_agent_binary_token(other),
+    }
+}
+
+fn match_python_module(module: &str) -> Option<&'static str> {
+    let root = module
+        .split('.')
+        .next()
+        .unwrap_or(module)
+        .to_ascii_lowercase();
+    match root.as_str() {
+        "kimi_cli" | "kimi" => Some("kimi"),
+        "aider" => None,
+        "letta" | "letta_code" => Some("letta"),
+        "hermes" | "hermes_agent" => Some("hermes"),
+        other => match_agent_binary_token(other),
+    }
+}
+
+fn match_agent_path_or_package(raw: &str) -> Option<&'static str> {
+    let trimmed = raw.trim().trim_matches(|c| c == '"' || c == '\'');
+    let norm = trimmed.replace('\\', "/").to_ascii_lowercase();
+    // Scoped package / Homebrew Cellar / Caskroom / virtualenv script path patterns.
+    let without_ver = strip_package_version(&norm);
+    for needle in [without_ver, norm.as_str()] {
+        for (pattern, id) in [
+            ("@openai/codex", "codex"),
+            ("@anthropic-ai/claude-code", "claude"),
+            ("@google/gemini-cli", "gemini"),
+            ("@qwen-code/qwen-code", "qwen"),
+            ("@mariozechner/pi-coding-agent", "pi"),
+            ("@sourcegraph/amp", "amp"),
+            ("@github/copilot", "copilot"),
+            ("@vibe-kit/grok-cli", "grok"),
+            ("@kilocode/cli", "kilo"),
+            ("@letta-ai/letta-code", "letta"),
+            ("opencode-ai", "opencode"),
+            ("antigravity-cli", "agy"),
+            ("kimi-cli", "kimi"),
+            ("kiro-cli", "kiro"),
+            ("qwen-code", "qwen"),
+            ("claude-code", "claude"),
+            ("gemini-cli", "gemini"),
+            ("cursor-agent", "cursor"),
+            ("qodercli", "qodercli"),
+            ("mastracode", "mastracode"),
+        ] {
+            if contains_path_segment_or_pkg(needle, pattern) {
+                return Some(id);
+            }
+        }
+    }
+    let base = clean_program_basename(trimmed);
+    if !matches!(
+        base.as_str(),
+        "index" | "cli" | "main" | "bin" | "run" | "bundle" | "dist"
+    ) {
+        return match_agent_binary_token(&base);
+    }
+    None
+}
+
+fn strip_package_version(spec: &str) -> &str {
+    if let Some(rest) = spec.strip_prefix('@') {
+        if let Some(at) = rest.find('@') {
+            return &spec[..at + 1];
+        }
+        spec
+    } else if let Some((pkg, _)) = spec.split_once('@') {
+        pkg
+    } else {
+        spec
+    }
+}
+
+fn contains_path_segment_or_pkg(haystack: &str, pattern: &str) -> bool {
+    if haystack == pattern {
+        return true;
+    }
+    if let Some(idx) = haystack.find(pattern) {
+        let before_ok = idx == 0 || matches!(haystack.as_bytes()[idx - 1], b'/' | b':');
+        let end = idx + pattern.len();
+        let after_ok =
+            end == haystack.len() || matches!(haystack.as_bytes()[end], b'/' | b'@' | b':');
+        return before_ok && after_ok;
+    }
+    false
+}
+
+fn is_env_launcher(base: &str) -> bool {
+    matches!(base, "env" | "nohup" | "caffeinate" | "nice" | "arch")
+}
+
+fn is_package_exec_launcher(base: &str) -> bool {
+    matches!(
+        base,
+        "npx" | "bunx" | "pnpx" | "uvx" | "npm" | "pnpm" | "yarn" | "uv"
+    )
+}
+
+fn is_script_interpreter(base: &str) -> bool {
+    matches!(base, "node" | "nodejs" | "bun" | "deno")
+        || base == "python"
+        || base.strip_prefix("python").is_some_and(|rest| {
+            !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '.')
+        })
+}
+
+fn interpreter_flag_takes_value(base: &str, flag: &str) -> bool {
+    if flag.contains('=') {
+        return false;
+    }
+    match base {
+        "node" | "nodejs" | "bun" => matches!(
+            flag,
+            "-r" | "--require"
+                | "--import"
+                | "--loader"
+                | "--experimental-loader"
+                | "--conditions"
+                | "-C"
+                | "--input-type"
+                | "--watch-path"
+                | "--env-file"
+                | "--config"
+        ),
+        "deno" => matches!(flag, "-c" | "--config" | "--import-map" | "--lock"),
+        _ => matches!(flag, "-W" | "-X"),
+    }
+}
+
+fn is_runtime_or_wrapper(base: &str) -> bool {
+    is_env_launcher(base) || is_package_exec_launcher(base) || is_script_interpreter(base)
+}
+
+fn is_interactive_shell(base: &str) -> bool {
+    matches!(
+        base,
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "dash"
+            | "ksh"
+            | "mksh"
+            | "tcsh"
+            | "csh"
+            | "nu"
+            | "nushell"
+            | "pwsh"
+            | "powershell"
+            | "elvish"
+            | "xonsh"
+            | "login"
+    )
+}
+
+fn shell_has_inline_command(argv: &[&str]) -> bool {
+    argv.iter().skip(1).any(|raw| {
+        let arg = raw.trim();
+        arg == "-c" || (arg.starts_with('-') && !arg.starts_with("--") && arg.ends_with('c'))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn identifies_direct_and_packaged_agent_binaries() {
+        assert_eq!(
+            identify_agent_process(None, Some("agy"), &["/opt/homebrew/bin/agy"]),
+            Some("agy")
+        );
+        assert_eq!(
+            identify_agent_process(
+                None,
+                Some("codex"),
+                &[
+                    "/opt/homebrew/Caskroom/codex/0.167.2/bin/codex",
+                    "--no-daemon"
+                ]
+            ),
+            Some("codex")
+        );
+        assert_eq!(
+            identify_agent_process(None, Some("claude"), &["claude", "--resume", "abc"]),
+            Some("claude")
+        );
+        assert_eq!(
+            identify_agent_process(
+                None,
+                Some("grok-1.0.4-macos-aarch64"),
+                &["/opt/homebrew/Caskroom/grok-build/1.0.4/grok-1.0.4-macos-aarch64"]
+            ),
+            Some("grok")
+        );
+        assert_eq!(
+            identify_agent_process(None, Some("cursor-agent"), &["cursor-agent"]),
+            Some("cursor")
+        );
+        assert_eq!(
+            identify_agent_process(None, Some("kiro-cli"), &["kiro-cli"]),
+            Some("kiro")
+        );
+    }
+
+    #[test]
+    fn identifies_node_python_and_env_shebang_wrappers() {
+        assert_eq!(
+            identify_agent_process(
+                None,
+                Some("node"),
+                &[
+                    "/opt/homebrew/opt/node/bin/node",
+                    "/opt/homebrew/Cellar/qwen-code/0.17.1/libexec/lib/node_modules/@qwen-code/qwen-code/cli.js"
+                ]
+            ),
+            Some("qwen")
+        );
+        assert_eq!(
+            identify_agent_process(
+                None,
+                Some("python3.12"),
+                &[
+                    "/opt/homebrew/Cellar/kimi-cli/1.46.0/libexec/bin/python",
+                    "/opt/homebrew/Cellar/kimi-cli/1.46.0/libexec/bin/kimi"
+                ]
+            ),
+            Some("kimi")
+        );
+        assert_eq!(
+            identify_agent_process(
+                None,
+                Some("env"),
+                &[
+                    "/usr/bin/env",
+                    "node",
+                    "--no-warnings",
+                    "/Users/dev/.nvm/lib/node_modules/@anthropic-ai/claude-code/cli.js"
+                ]
+            ),
+            Some("claude")
+        );
+        assert_eq!(
+            identify_agent_process(
+                None,
+                Some("npm"),
+                &["npx", "-y", "@google/gemini-cli@latest"]
+            ),
+            Some("gemini")
+        );
+        assert_eq!(
+            identify_agent_process(None, Some("npm"), &["npm", "exec", "--", "@openai/codex"]),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn clears_stale_osc_status_after_returning_to_shell_and_ignores_ordinary_commands() {
+        // Stale OSC 7501 status retained on PTY after child exits back to zsh must NOT show an icon.
+        assert_eq!(
+            identify_agent_process(Some("codex"), Some("zsh"), &["/bin/zsh", "-l"]),
+            None
+        );
+        assert_eq!(
+            identify_agent_process(Some("claude"), Some("-zsh"), &["-zsh"]),
+            None
+        );
+        // Active OSC 7501 status while running under node/python without identifiable script path works.
+        assert_eq!(
+            identify_agent_process(Some("codex"), Some("node"), &["node", "/tmp/bundle.js"]),
+            Some("codex")
+        );
+        // Unrelated foreground tools never match, even if stale OSC 7501 status exists or editor `cursor` runs.
+        assert_eq!(
+            identify_agent_process(Some("codex"), Some("git"), &["git", "status"]),
+            None
+        );
+        assert_eq!(
+            identify_agent_process(None, Some("cursor"), &["cursor", "."]),
+            None
+        );
+        assert_eq!(
+            identify_agent_process(None, Some("vim"), &["vim", "README.md"]),
+            None
+        );
+        assert_eq!(
+            identify_agent_process(None, Some("python3"), &["python3", "scripts/build.py"]),
+            None
+        );
+        // Finished Herdr terminal never reports an active agent.
+        assert_eq!(
+            identify_herdr_agent(&json!({
+                "state": "finished",
+                "status": {"app": "agy", "state": "working"},
+                "foreground": {"name": "agy", "argv": ["agy"]}
+            })),
+            None
+        );
+    }
+}

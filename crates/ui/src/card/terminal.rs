@@ -227,6 +227,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                     e.ended(),
                     e.inactive(),
                     e.attention_reason(),
+                    e.provider(),
                 )
             })
             .collect::<Vec<_>>()

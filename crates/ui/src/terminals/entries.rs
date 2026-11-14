@@ -39,7 +39,12 @@ impl Entry {
         {
             return Some(crate::profiles::provider(profile));
         }
-        let engine = self.saved.agent_engine.as_deref()?;
+        let engine = self.saved.agent_engine.as_deref().or_else(|| {
+            let r = self.saved.runtime.as_ref()?;
+            (r.state != "finished" && r.connection == "connected")
+                .then_some(())
+                .and(r.observed_agent.as_deref())
+        })?;
         if let Some(tpl) = engine.strip_prefix("herdr:") {
             return Some((crate::profiles::agent_icon(tpl), format!("Herdr · {tpl}")));
         }

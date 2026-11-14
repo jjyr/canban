@@ -388,6 +388,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                             e.ended(),
                             e.inactive(),
                             e.needs_attention(),
+                            e.provider(),
                         )
                     })
                     .collect::<Vec<_>>()

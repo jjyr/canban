@@ -2,8 +2,8 @@
 pub mod catalog;
 pub use catalog::{
     CatalogEntry, ModelOption, annotate_agy_model_efforts, builtin_catalog,
-    catalog_entry_for_profile, display_name, herdr_template_profile, model_supported_efforts,
-    split_agy_effort_suffix,
+    catalog_entry_for_profile, display_name, herdr_template_profile, identify_agent_process,
+    identify_herdr_agent, model_supported_efforts, split_agy_effort_suffix,
 };
 
 use anyhow::{Context, Result, bail, ensure};

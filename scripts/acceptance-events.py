@@ -97,6 +97,15 @@ try:
  wait(lambda s:context(s,terminal['id']).get('cwd')==str(outside),'cwd event')
  git(outside,'init','-b','new-repository')
  wait(lambda s:context(s,terminal['id']).get('branch')=='new-repository','new .git invalidation')
+ stub=base/'agy';stub.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(0.8)\n');stub.chmod(0o755)
+ before_agent=len(methods())
+ hc('terminal.send',{'terminal':terminal['runtime']['terminal'],'text':str(stub),'force':True})
+ def term_row(s,tid):return next((t for t in s['terminals'] if t['id']==tid),{})
+ s_live=wait(lambda s:term_row(s,terminal['id']).get('runtime',{}).get('observed_agent')=='agy','foreground agent push')
+ assert term_row(s_live,terminal['id']).get('agent_engine') is None
+ wait(lambda s:term_row(s,terminal['id']).get('runtime',{}).get('observed_agent') is None,'foreground shell return')
+ assert not {'terminal.list','terminal.get','server.status'} & set(methods()[before_agent:]),methods()[before_agent:]
+ print('FOREGROUND_AGENT_PUSH_ONLY_OK',flush=True)
  card=call('card.create',{'project_id':project['id'],'title':'Report-free failure'})
  opened=call('agent.open',{'card_id':card['id'],'profile_id':'codex'})
  def attempt(s):

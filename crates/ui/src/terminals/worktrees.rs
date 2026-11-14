@@ -439,6 +439,7 @@ pub fn open_shell(ui: Ui, wt: &ManagedWorktree) {
                 error: None,
                 agent_status: None,
                 agent_turn: None,
+                observed_agent: None,
             }),
         };
         let ctx = canban_types::TerminalContext {

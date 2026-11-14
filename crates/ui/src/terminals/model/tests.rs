@@ -159,6 +159,7 @@ fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() 
             error: None,
             agent_status: None,
             agent_turn: None,
+            observed_agent: None,
         }),
         agent: None,
         created_at: 0,
@@ -216,6 +217,7 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
             error: None,
             agent_status: None,
             agent_turn: None,
+            observed_agent: None,
         }),
         agent: None,
         created_at: 0,
@@ -473,6 +475,7 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             error: None,
             agent_status: None,
             agent_turn: None,
+            observed_agent: None,
         }),
         agent: None,
         created_at: 2,
@@ -495,6 +498,7 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             error: None,
             agent_status: None,
             agent_turn: None,
+            observed_agent: None,
         }),
         agent: None,
         created_at: 3,
@@ -517,6 +521,7 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             error: None,
             agent_status: None,
             agent_turn: None,
+            observed_agent: None,
         }),
         agent: None,
         created_at: 4,
@@ -586,6 +591,7 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
             error: None,
             agent_status: None,
             agent_turn: None,
+            observed_agent: None,
         }),
         agent: None,
         created_at: 2,
@@ -608,6 +614,7 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
             error: None,
             agent_status: None,
             agent_turn: None,
+            observed_agent: None,
         }),
         agent: None,
         created_at: 3,
@@ -658,6 +665,7 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
             error: None,
             agent_status: Some("idle".into()),
             agent_turn: Some(3),
+            observed_agent: None,
         }),
         agent: None,
         created_at: 2,
@@ -680,6 +688,7 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
             error: None,
             agent_status: Some("idle".into()),
             agent_turn: Some(0),
+            observed_agent: None,
         }),
         agent: None,
         created_at: 3,
@@ -758,6 +767,7 @@ fn card_open_collapses_terminal_by_default_while_terminal_and_pill_entries_expan
                 error: None,
                 agent_status: None,
                 agent_turn: None,
+                observed_agent: None,
             }),
             agent: None,
             created_at: 2,
@@ -874,6 +884,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 error: None,
                 agent_status: None,
                 agent_turn: None,
+                observed_agent: None,
             }),
             agent: None,
             created_at: 10,
@@ -896,6 +907,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 error: None,
                 agent_status: None,
                 agent_turn: None,
+                observed_agent: None,
             }),
             agent: None,
             created_at: 11,
@@ -928,6 +940,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 error: None,
                 agent_status: Some("working".into()),
                 agent_turn: Some(1),
+                observed_agent: None,
             }),
             agent: None,
             created_at: 12,
@@ -1065,6 +1078,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                     error: None,
                     agent_status: Some("working".into()),
                     agent_turn: Some(2),
+                    observed_agent: None,
                 }),
                 agent: None,
                 created_at: 13,
@@ -1129,6 +1143,7 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
                     error: None,
                     agent_status: None,
                     agent_turn: None,
+                    observed_agent: None,
                 }),
                 agent: None,
                 created_at: 21,
@@ -1151,6 +1166,7 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
                     error: None,
                     agent_status: None,
                     agent_turn: None,
+                    observed_agent: None,
                 }),
                 agent: None,
                 created_at: 22,
@@ -1294,6 +1310,7 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
                 error: None,
                 agent_status: None,
                 agent_turn: None,
+                observed_agent: None,
             }),
             agent: None,
             created_at: num,
@@ -1462,6 +1479,7 @@ fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_the
                 error: None,
                 agent_status: None,
                 agent_turn: None,
+                observed_agent: None,
             }),
             agent: None,
             created_at: num,
@@ -1669,6 +1687,7 @@ fn merge_batch_terminal_lives_directly_in_project_root_without_polluting_root_gi
             error: None,
             agent_status: Some("running".into()),
             agent_turn: Some(1),
+            observed_agent: None,
         }),
         agent: None,
         created_at: 2,
@@ -1699,4 +1718,58 @@ fn merge_batch_terminal_lives_directly_in_project_root_without_polluting_root_gi
     assert!(!summary.dirty);
     assert_eq!(summary.ahead, 0);
     assert_eq!(summary.behind, 0);
+}
+
+#[test]
+fn manual_shell_observed_agent_exposes_icon_only_without_changing_title_or_close_confirmation() {
+    use canban_ui_kit::Icon;
+    let mut s = fixture();
+    s.terminals.push(TerminalEntry {
+        id: "manual-shell".into(),
+        conversation_id: None,
+        number: 10,
+        name: None,
+        manual_number: Some(2),
+        origin_card_id: Some("c1".into()),
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: Some("core".into()),
+            core_id: Some("core".into()),
+            terminal: Some("pty-shell".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: None,
+            agent_turn: None,
+            observed_agent: Some("agy".into()),
+        }),
+        agent: None,
+        created_at: 10,
+    });
+
+    let entry = crate::terminals::entries(&s)
+        .into_iter()
+        .find(|e| e.saved.id == "manual-shell")
+        .unwrap();
+    // Title remains "Terminal 2" (icon-only, no rename to "Antigravity 2").
+    assert_eq!(entry.title(), "Terminal 2");
+    assert_eq!(entry.provider(), Some((Icon::Agy, "Antigravity".into())));
+    assert!(!entry.needs_attention());
+    // Without OSC 7501 working state, plain shells do not gain unexpected close modals.
+    assert_eq!(entry.close_confirm_reason(&s), None);
+
+    // If Herdr connection is unavailable or finished, provider icon is hidden.
+    s.terminals
+        .last_mut()
+        .unwrap()
+        .runtime
+        .as_mut()
+        .unwrap()
+        .connection = "unavailable".into();
+    let disconnected = crate::terminals::entries(&s)
+        .into_iter()
+        .find(|e| e.saved.id == "manual-shell")
+        .unwrap();
+    assert_eq!(disconnected.provider(), None);
 }

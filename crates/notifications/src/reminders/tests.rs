@@ -484,6 +484,7 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
             error: None,
             agent_status: Some("idle".into()),
             agent_turn: Some(0),
+            observed_agent: None,
         }),
         agent: None,
         created_at: 2,

@@ -726,6 +726,7 @@ fn configuration_sessions_have_project_ownership_reuse_and_exact_history_resume(
                 error: None,
                 agent_status: None,
                 agent_turn: None,
+                observed_agent: None,
             });
             db.save(&t)
         })
@@ -781,6 +782,7 @@ fn configuration_open_uses_configured_default_agent_and_auto_fresh_fallback() {
                 error: None,
                 agent_status: None,
                 agent_turn: None,
+                observed_agent: None,
             });
             db.save(&t)
         })

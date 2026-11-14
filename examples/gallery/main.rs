@@ -1293,7 +1293,7 @@ pub fn Gallery() -> impl IntoElement {
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminals") {
         canban_ui::frame::configure_window_chrome();
         ui.snapshot.set(fixtures::terminal_workspace());
-        ui.open_terminal("gallery-manual".into());
+        ui.open_terminal("gallery-project-root-shell".into());
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminal-close-confirm") {

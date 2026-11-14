@@ -396,6 +396,7 @@ fn gallery_create_entry(
             error: None,
             agent_status: None,
             agent_turn: None,
+            observed_agent: None,
         }),
     };
     let inherited_location = inherited.and_then(|e| e.location);

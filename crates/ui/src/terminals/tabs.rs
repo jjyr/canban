@@ -415,6 +415,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                             super::worktrees::entry_scope(&s, e),
                             e.title(),
                             e.hint(),
+                            e.provider(),
                         )
                     })
                     .collect::<Vec<_>>()

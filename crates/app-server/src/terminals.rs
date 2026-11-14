@@ -21,7 +21,7 @@ impl AppServer {
             }
             if let Ok(mut configuration)=db.get::<ConfigurationSession>(terminal_id) && configuration.state=="queued" {
                 configuration.state="cancelled".into();db.save(&configuration)?;
-                item.runtime=Some(TerminalRuntime{machine:"local".into(),owner_core_id:None,core_id:None,terminal:None,state:"finished".into(),connection:"connected".into(),error:None,agent_status:None,agent_turn:None});db.save(&item)?;
+                item.runtime=Some(TerminalRuntime{machine:"local".into(),owner_core_id:None,core_id:None,terminal:None,state:"finished".into(),connection:"connected".into(),error:None,agent_status:None,agent_turn:None,observed_agent:None});db.save(&item)?;
             }
             if let Some(run) = &mut item.agent {
                 if !run.finished() && run.terminal.is_some() {
@@ -405,6 +405,7 @@ impl AppServer {
                     error: None,
                     agent_status: None,
                     agent_turn: None,
+                    observed_agent: None,
                 }),
                 agent: None,
             };
@@ -831,19 +832,24 @@ impl AppServer {
                         if v["state"] == "finished" {
                             runtime.state = "finished".into();
                             runtime.agent_status = None;
+                            runtime.observed_agent = None;
                         } else {
                             runtime.agent_status = v["status"]["state"].as_str().map(str::to_owned);
                             runtime.agent_turn = v["turn"].as_u64();
+                            runtime.observed_agent =
+                                canban_profiles::identify_herdr_agent(v).map(str::to_owned);
                         }
                     }
                     (Ok((core, _)), _) if runtime.core_id.as_ref().is_some_and(|id| id != core) => {
                         runtime.connection = "replaced".into();
+                        runtime.observed_agent = None;
                         runtime.error = Some(
                             "Original Core identity changed; this terminal was not replaced".into(),
                         );
                     }
                     (Err(e), _) => {
                         runtime.connection = "unavailable".into();
+                        runtime.observed_agent = None;
                         runtime.error = Some(format!("{e:#}"));
                     }
                     _ if runtime.state != "finished" => {
@@ -852,6 +858,7 @@ impl AppServer {
                             && now().saturating_sub(item.created_at) < 3_000;
                         if !fresh_launch {
                             runtime.connection = "unavailable".into();
+                            runtime.observed_agent = None;
                         }
                     }
                     _ => {}
@@ -959,6 +966,7 @@ mod tests {
                 error: None,
                 agent_status: None,
                 agent_turn: None,
+                observed_agent: None,
             }),
             agent: None,
         };
@@ -992,5 +1000,142 @@ mod tests {
             s2.terminals[0].runtime.as_ref().unwrap().connection,
             "unavailable"
         );
+    }
+
+    #[test]
+    fn observe_terminals_tracks_foreground_agent_from_herdr_push_and_clears_on_shell_or_disconnect()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+        app.observer_running.store(true, Ordering::SeqCst);
+        let created = now().saturating_sub(10_000);
+        let entry = TerminalEntry {
+            id: "shell-1".into(),
+            conversation_id: None,
+            number: 1,
+            name: None,
+            manual_number: Some(1),
+            origin_card_id: None,
+            agent_engine: None,
+            created_at: created,
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: Some("core-1".into()),
+                core_id: Some("core-1".into()),
+                terminal: Some("t1".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+            }),
+            agent: None,
+        };
+        app.store
+            .lock()
+            .unwrap()
+            .write(|db| db.save(&entry))
+            .unwrap();
+
+        // 1. Plain shell in Herdr inventory -> no observed_agent, title stays "Terminal 1".
+        {
+            let mut inv = app.inventory.lock().unwrap();
+            inv.core = "core-1".into();
+            inv.last_at = now();
+            inv.records.insert(
+                "t1".into(),
+                json!({
+                    "address": "t1",
+                    "state": "live",
+                    "foreground": {"pid": 100, "name": "zsh", "argv": ["/bin/zsh", "-l"], "cwd": "/tmp"}
+                }),
+            );
+        }
+        app.observe_terminals().unwrap();
+        let t = &app.snapshot().unwrap().terminals[0];
+        assert_eq!(t.title(), "Terminal 1");
+        assert_eq!(t.runtime.as_ref().unwrap().observed_agent, None);
+
+        // 2. User launches `agy` inside the shell -> Herdr foreground push identifies `"agy"`, keeping title "Terminal 1".
+        {
+            let mut inv = app.inventory.lock().unwrap();
+            inv.last_at = now();
+            inv.records.insert(
+                "t1".into(),
+                json!({
+                    "address": "t1",
+                    "state": "live",
+                    "foreground": {"pid": 101, "name": "agy", "argv": ["/opt/homebrew/bin/agy"], "cwd": "/tmp"}
+                }),
+            );
+        }
+        app.observe_terminals().unwrap();
+        let t = &app.snapshot().unwrap().terminals[0];
+        assert_eq!(t.title(), "Terminal 1");
+        assert_eq!(t.agent_engine, None);
+        assert_eq!(
+            t.runtime.as_ref().unwrap().observed_agent.as_deref(),
+            Some("agy")
+        );
+
+        // 3. Agent exits back to `zsh` (even if last OSC 7501 status remains on PTY) -> clears `observed_agent`.
+        {
+            let mut inv = app.inventory.lock().unwrap();
+            inv.last_at = now();
+            inv.records.insert(
+                "t1".into(),
+                json!({
+                    "address": "t1",
+                    "state": "live",
+                    "status": {"state": "done", "app": "agy"},
+                    "foreground": {"pid": 100, "name": "zsh", "argv": ["/bin/zsh", "-l"], "cwd": "/tmp"}
+                }),
+            );
+        }
+        app.observe_terminals().unwrap();
+        assert_eq!(
+            app.snapshot().unwrap().terminals[0]
+                .runtime
+                .as_ref()
+                .unwrap()
+                .observed_agent,
+            None
+        );
+
+        // 4. Subscription disconnect / error clears `observed_agent` so unreadable sessions show no icon.
+        {
+            let mut inv = app.inventory.lock().unwrap();
+            inv.last_at = now();
+            inv.records.insert(
+                "t1".into(),
+                json!({
+                    "address": "t1",
+                    "state": "live",
+                    "foreground": {"pid": 102, "name": "codex", "argv": ["codex"], "cwd": "/tmp"}
+                }),
+            );
+        }
+        app.observe_terminals().unwrap();
+        assert_eq!(
+            app.snapshot().unwrap().terminals[0]
+                .runtime
+                .as_ref()
+                .unwrap()
+                .observed_agent
+                .as_deref(),
+            Some("codex")
+        );
+        {
+            let mut inv = app.inventory.lock().unwrap();
+            inv.error = Some("Herdr disconnected".into());
+        }
+        app.observe_terminals().unwrap();
+        let rt = app.snapshot().unwrap().terminals[0]
+            .runtime
+            .clone()
+            .unwrap();
+        assert_eq!(rt.connection, "unavailable");
+        assert_eq!(rt.observed_agent, None);
     }
 }
