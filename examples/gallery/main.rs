@@ -953,7 +953,7 @@ pub fn Gallery() -> impl IntoElement {
     }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
-        Ok("workflows") | Ok("workflow-agent") | Ok("workflows-conflict")
+        Ok("workflows") | Ok("workflows-yaml") | Ok("workflow-agent") | Ok("workflows-conflict")
     ) {
         let default_raw = canban_workflow_engine::source::encode(
             &canban_workflow_engine::source::default_document(
@@ -981,6 +981,9 @@ pub fn Gallery() -> impl IntoElement {
         ui.workflows.drafts.update(|d| {
             d.insert(ui.project.get_untracked(), draft);
         });
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("workflows-yaml") {
+            ui.workflows.mode.set("yaml".into());
+        }
         ui.workflows.prompt.set("You are the Workflow Configuration Assistant for the current Canban Project.\nYour scope covers all Workflows in this Project, not just a single file.\n\nFirst, perform a read-only analysis of all Workflow YAML sources, present an ASCII overview of triggers, Agents, approvals, and Board columns, and wait for the user's specific modification instructions before validating and publishing.\n".repeat(4));
         ui.workflows.profile.set(ui.default_agent.get_untracked());
         ui.page.set("workflows".into());
