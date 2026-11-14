@@ -49,6 +49,126 @@ pub fn presets(home: &Path) -> Result<BTreeMap<String, Profile>> {
     Ok(presets)
 }
 
+/// Split a POSIX-style argument string into tokens, honoring single quotes (`'...'`),
+/// double quotes (`"..."`), and `\` escapes without invoking a shell.
+pub fn split_posix_words(input: &str) -> Result<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            Some('"') => match ch {
+                '"' => quote = None,
+                '\\' => {
+                    if let Some(&next) = chars.peek() {
+                        if matches!(next, '"' | '\\' | '$' | '`' | '\n') {
+                            let escaped = chars.next().unwrap();
+                            if escaped != '\n' {
+                                current.push(escaped);
+                            }
+                        } else {
+                            current.push('\\');
+                        }
+                    } else {
+                        bail!("Trailing backslash in double-quoted argument");
+                    }
+                }
+                _ => current.push(ch),
+            },
+            Some(_) => unreachable!(),
+            None => match ch {
+                c if c.is_whitespace() => {
+                    if in_word {
+                        words.push(std::mem::take(&mut current));
+                        in_word = false;
+                    }
+                }
+                '\'' | '"' => {
+                    in_word = true;
+                    quote = Some(ch);
+                }
+                '\\' => {
+                    in_word = true;
+                    match chars.next() {
+                        Some('\n') => {}
+                        Some(escaped) => current.push(escaped),
+                        None => bail!("Trailing backslash at end of arguments"),
+                    }
+                }
+                _ => {
+                    in_word = true;
+                    current.push(ch);
+                }
+            },
+        }
+    }
+
+    if let Some(q) = quote {
+        bail!("Unclosed quote ({q}) in arguments");
+    }
+    if in_word {
+        words.push(current);
+    }
+    Ok(words)
+}
+
+/// Format an argument slice back into a human-editable POSIX string that round-trips
+/// through [`split_posix_words`]. Plain tokens (including `{prompt}` placeholders) stay unquoted.
+pub fn join_posix_words(words: &[String]) -> String {
+    words
+        .iter()
+        .map(|w| {
+            if w.is_empty() {
+                "''".to_owned()
+            } else if !w
+                .chars()
+                .any(|c| c.is_whitespace() || matches!(c, '\'' | '"' | '\\'))
+            {
+                w.clone()
+            } else if !w.contains('\'') {
+                format!("'{w}'")
+            } else {
+                let mut out = String::with_capacity(w.len() + 2);
+                out.push('"');
+                for c in w.chars() {
+                    if matches!(c, '"' | '\\' | '$' | '`') {
+                        out.push('\\');
+                    }
+                    out.push(c);
+                }
+                out.push('"');
+                out
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn sync_inherited_resume_binary(
+    resume_argv: Option<Vec<String>>,
+    custom_argv: Option<&[String]>,
+    default_binary: Option<&str>,
+) -> Option<Vec<String>> {
+    let mut resume = resume_argv?;
+    if let Some(custom_bin) = custom_argv.and_then(|a| a.first())
+        && let Some(first) = resume.first_mut()
+        && default_binary.is_none_or(|def| first == def)
+    {
+        *first = custom_bin.clone();
+    }
+    Some(resume)
+}
+
 pub fn resolve(config: Config, home: &Path) -> Result<Config> {
     let presets = presets(home)?;
     let mut config = config;
@@ -79,17 +199,35 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
                     profile.argv = Some(vec![tpl.to_owned(), "{prompt}".into()]);
                 }
             } else if let Some(preset) = presets.get(name) {
+                let preset_default_bin = preset
+                    .argv
+                    .as_ref()
+                    .and_then(|a| a.first())
+                    .map(String::as_str);
                 if profile.argv.is_none() {
-                    profile.argv = preset.argv.clone();
+                    profile.argv = peer_agent
+                        .and_then(|p| p.argv.clone())
+                        .or_else(|| preset.argv.clone());
                 }
                 if profile.resume_argv.is_none() {
-                    profile.resume_argv = preset.resume_argv.clone();
+                    let inherited_resume = peer_agent
+                        .and_then(|p| p.resume_argv.clone())
+                        .or_else(|| preset.resume_argv.clone());
+                    profile.resume_argv = sync_inherited_resume_binary(
+                        inherited_resume,
+                        profile.argv.as_deref(),
+                        preset_default_bin,
+                    );
                 }
                 if profile.exit.is_none() {
-                    profile.exit = preset.exit.clone();
+                    profile.exit = peer_agent
+                        .and_then(|p| p.exit.clone())
+                        .or_else(|| preset.exit.clone());
                 }
                 if profile.session_instruction.is_none() {
-                    profile.session_instruction = preset.session_instruction.clone();
+                    profile.session_instruction = peer_agent
+                        .and_then(|p| p.session_instruction.clone())
+                        .or_else(|| preset.session_instruction.clone());
                 }
                 if profile.model.is_none() {
                     profile.model = peer_agent
@@ -107,6 +245,10 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
                 }
             } else if let Some(peer) = peer_agent {
                 let peer_preset = peer.preset.as_deref().and_then(|pn| presets.get(pn));
+                let preset_default_bin = peer_preset
+                    .and_then(|pp| pp.argv.as_ref())
+                    .and_then(|a| a.first())
+                    .map(String::as_str);
                 if profile.argv.is_none() {
                     profile.argv = peer
                         .argv
@@ -114,10 +256,15 @@ pub fn resolve(config: Config, home: &Path) -> Result<Config> {
                         .or_else(|| peer_preset.and_then(|pp| pp.argv.clone()));
                 }
                 if profile.resume_argv.is_none() {
-                    profile.resume_argv = peer
+                    let inherited_resume = peer
                         .resume_argv
                         .clone()
                         .or_else(|| peer_preset.and_then(|pp| pp.resume_argv.clone()));
+                    profile.resume_argv = sync_inherited_resume_binary(
+                        inherited_resume,
+                        profile.argv.as_deref(),
+                        preset_default_bin,
+                    );
                 }
                 if profile.exit.is_none() {
                     profile.exit = peer
@@ -179,19 +326,26 @@ pub fn resolve_engine(config: &Config, engine_id: &str, home: Option<&Path>) -> 
         .find(|p| p.id == engine_id && !p.is_identity())
     {
         let mut resolved = peer.clone();
-        if resolved.argv.is_none()
-            && let Some(preset_name) = resolved.preset.as_deref()
-        {
+        if let Some(preset_name) = resolved.preset.as_deref() {
             if let Some(tpl) = preset_name.strip_prefix("herdr:") {
                 ensure!(!tpl.trim().is_empty(), "Empty Herdr template");
                 let p = herdr_template_profile(tpl);
-                resolved.argv = p.argv;
+                if resolved.argv.is_none() {
+                    resolved.argv = p.argv;
+                }
             } else if let Some(entry) = builtin_catalog().into_iter().find(|e| e.id == preset_name)
             {
                 let p = entry.to_preset_profile();
-                resolved.argv = p.argv;
+                let def_bin = p.argv.as_ref().and_then(|a| a.first()).map(String::as_str);
+                if resolved.argv.is_none() {
+                    resolved.argv = p.argv.clone();
+                }
                 if resolved.resume_argv.is_none() {
-                    resolved.resume_argv = p.resume_argv;
+                    resolved.resume_argv = sync_inherited_resume_binary(
+                        p.resume_argv,
+                        resolved.argv.as_deref(),
+                        def_bin,
+                    );
                 }
                 if resolved.exit.is_none() {
                     resolved.exit = p.exit;
@@ -203,9 +357,16 @@ pub fn resolve_engine(config: &Config, engine_id: &str, home: Option<&Path>) -> 
                 && let Ok(map) = presets(home)
                 && let Some(p) = map.get(preset_name)
             {
-                resolved.argv = p.argv.clone();
+                let def_bin = p.argv.as_ref().and_then(|a| a.first()).map(String::as_str);
+                if resolved.argv.is_none() {
+                    resolved.argv = p.argv.clone();
+                }
                 if resolved.resume_argv.is_none() {
-                    resolved.resume_argv = p.resume_argv.clone();
+                    resolved.resume_argv = sync_inherited_resume_binary(
+                        p.resume_argv.clone(),
+                        resolved.argv.as_deref(),
+                        def_bin,
+                    );
                 }
                 if resolved.exit.is_none() {
                     resolved.exit = p.exit.clone();
@@ -765,15 +926,15 @@ mod tests {
     fn overrides_replace_whole_commands_and_presets_do_not_install_hooks() {
         let dir = tempfile::tempdir().unwrap();
         let mut c = Config::default();
-        c.profiles[0].argv = Some(vec!["own-codex-wrapper".into(), "{prompt}".into()]);
-        c.profiles[0].resume_argv = Some(vec![]);
-        c.profiles[0].exit = Some(ExitAction::Manual);
+        c.profiles[2].argv = Some(vec!["own-codex-wrapper".into(), "{prompt}".into()]);
+        c.profiles[2].resume_argv = Some(vec![]);
+        c.profiles[2].exit = Some(ExitAction::Manual);
         let c = resolve(c, dir.path()).unwrap();
-        assert_eq!(c.profiles[0].command()[0], "own-codex-wrapper");
-        assert!(command(&c.profiles[0], Some("thread"), false, &[]).is_err());
-        assert_eq!(c.profiles[0].exit, Some(ExitAction::Manual));
+        assert_eq!(c.profiles[2].command()[0], "own-codex-wrapper");
+        assert!(command(&c.profiles[2], Some("thread"), false, &[]).is_err());
+        assert_eq!(c.profiles[2].exit, Some(ExitAction::Manual));
         let argv = command(
-            &c.profiles[2],
+            &c.profiles[0],
             Some("exact-thread"),
             false,
             &[("prompt", "task"), ("home", "/tmp/home")],
@@ -1512,6 +1673,78 @@ mod tests {
         assert_eq!(
             argv.last().map(String::as_str),
             Some("Resolve batch conflict")
+        );
+    }
+
+    #[test]
+    fn posix_words_roundtrip_and_custom_agent_argv_syncs_resume_and_identities() {
+        let parsed = split_posix_words(
+            r#"--add-dir {home} --settings '{"trusted":["/my repo"]}' --label "hello \"world\"" -i {prompt}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                "--add-dir",
+                "{home}",
+                "--settings",
+                r#"{"trusted":["/my repo"]}"#,
+                "--label",
+                r#"hello "world""#,
+                "-i",
+                "{prompt}",
+            ]
+        );
+        let joined = join_posix_words(&parsed);
+        assert_eq!(split_posix_words(&joined).unwrap(), parsed);
+        assert!(split_posix_words("--flag 'unterminated").is_err());
+        assert!(split_posix_words("--flag trailing\\").is_err());
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.profiles.push(Profile {
+            id: "agy".into(),
+            preset: Some("agy".into()),
+            argv: Some(vec![
+                "/bin/agy-modified".into(),
+                "--custom".into(),
+                "-i".into(),
+                "{prompt}".into(),
+            ]),
+            ..Default::default()
+        });
+        cfg.profiles.push(Profile {
+            id: "agy-dev".into(),
+            identity: true,
+            preset: Some("agy".into()),
+            role_instruction: "Dev".into(),
+            ..Default::default()
+        });
+        let resolved = resolve(cfg, dir.path()).unwrap();
+        let agy = resolved.profiles.iter().find(|p| p.id == "agy").unwrap();
+        assert_eq!(
+            agy.command(),
+            &["/bin/agy-modified", "--custom", "-i", "{prompt}"]
+        );
+        assert_eq!(
+            agy.resume_command().first().map(String::as_str),
+            Some("/bin/agy-modified"),
+            "Inherited preset resume_argv[0] must follow custom argv[0]"
+        );
+
+        let agy_dev = resolved
+            .profiles
+            .iter()
+            .find(|p| p.id == "agy-dev")
+            .unwrap();
+        assert_eq!(
+            agy_dev.command(),
+            &["/bin/agy-modified", "--custom", "-i", "{prompt}"],
+            "Identities referencing @agy inherit its customized argv"
+        );
+        assert_eq!(
+            agy_dev.resume_command().first().map(String::as_str),
+            Some("/bin/agy-modified")
         );
     }
 }

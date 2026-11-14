@@ -223,6 +223,14 @@ pub const CATALOG: &[Command] = &[
         keywords: "project-agents setup agent identity override roles model effort",
     },
     Command {
+        id: "go-settings-agents",
+        title: "Agents · Identities & Custom Commands",
+        key: "",
+        display: "Settings",
+        context: "Preferences",
+        keywords: "agents identities command argv custom cli model effort defaults",
+    },
+    Command {
         id: "go-drafts",
         title: "Open Drafts",
         key: "",
@@ -636,6 +644,7 @@ pub fn execute(ui: Ui, id: &str) {
             }
         }
         "go-agent-setup" => ui.navigate("agent-setup"),
+        "go-settings-agents" => ui.open_settings_section("agents"),
         "go-drafts" => ui.navigate("drafts"),
         "go-archive" => ui.navigate("archive"),
         "go-settings" => ui.navigate("settings"),

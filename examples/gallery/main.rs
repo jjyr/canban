@@ -657,7 +657,34 @@ pub fn Gallery() -> impl IntoElement {
         match std::env::var("CANBAN_GALLERY_SCENE").as_deref() {
             Ok("agent-setup") => ui.page.set("agent-setup".into()),
             Ok("project-agents") => ui.page.set("project-agents".into()),
-            _ => ui.open_settings_section("agents"),
+            _ => {
+                let mut cfg = fixtures::agent_config();
+                let custom_argv = vec![
+                    "/bin/agy-modified".into(),
+                    "--add-dir".into(),
+                    "{home}".into(),
+                    "--add-dir".into(),
+                    "{cwd}".into(),
+                    "--add-dir".into(),
+                    "{project_dir}".into(),
+                    "--settings".into(),
+                    "{agy_trusted_settings}".into(),
+                    "-i".into(),
+                    "{prompt}".into(),
+                ];
+                if let Some(agy) = cfg.profiles.iter_mut().find(|p| p.id == "agy") {
+                    agy.argv = Some(custom_argv.clone());
+                }
+                ui.apply_config(&cfg);
+                ui.agent_catalog.update(|cat| {
+                    if let Some(arr) = cat["raw_profiles"].as_array_mut()
+                        && let Some(item) = arr.iter_mut().find(|v| v["id"].as_str() == Some("agy"))
+                    {
+                        item["argv"] = json!(custom_argv);
+                    }
+                });
+                ui.open_settings_section("agents");
+            }
         }
         return canban_ui::frame::screen(ui).into_element();
     }
@@ -1769,6 +1796,10 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Settings", Variant::Quiet, move |_| {
                     scene.set("workspace".into());
                     ui.navigate("settings");
+                }))
+                .child(action("Settings · Agents", Variant::Quiet, move |_| {
+                    scene.set("workspace".into());
+                    ui.open_settings_section("agents");
                 }))
                 .child(action("Acknowledgements", Variant::Quiet, move |_| {
                     scene.set("workspace".into());

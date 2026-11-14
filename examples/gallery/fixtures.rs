@@ -1985,15 +1985,14 @@ pub fn agent_config() -> canban_types::Config {
     // demonstrates enabled-agent gating + custom identities (`@qa`) + per-model effort gating
     // (`@merger` uses `gemini-pro-orchestrator` which hides `--effort` while `@reviewer` uses
     // `gemini-4-carbon-medium` with `medium` effort).
-    let mut agy = canban_profiles::builtin_catalog()
-        .into_iter()
-        .find(|e| e.id == "agy")
-        .unwrap()
-        .to_preset_profile();
-    agy.enabled = true;
-    agy.model = Some("gemini-4-carbon-medium".into());
-    agy.effort = Some("medium".into());
-    cfg.profiles.push(agy);
+    cfg.profiles.push(Profile {
+        id: "agy".into(),
+        enabled: true,
+        preset: Some("agy".into()),
+        model: Some("gemini-4-carbon-medium".into()),
+        effort: Some("medium".into()),
+        ..Default::default()
+    });
     if let Some(claude) = cfg.profiles.iter_mut().find(|p| p.id == "claude") {
         claude.enabled = false;
     }
@@ -2017,7 +2016,8 @@ pub fn agent_config() -> canban_types::Config {
         role_instruction: "Run end-to-end acceptance checks and verify edge cases.".into(),
         ..Default::default()
     });
-    cfg
+    let tmp = std::env::temp_dir().join("canban-gallery-profiles-fixture");
+    canban_profiles::resolve(cfg.clone(), &tmp).unwrap_or(cfg)
 }
 
 pub fn agent_catalog() -> serde_json::Value {
@@ -2032,6 +2032,7 @@ pub fn agent_catalog() -> serde_json::Value {
                 "id": entry.id,
                 "display_name": entry.display_name,
                 "binary": entry.binary,
+                "default_argv": entry.argv,
                 "kind": "builtin",
                 "resumable": entry.resumable,
                 "installed": inst,

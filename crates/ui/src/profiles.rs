@@ -221,7 +221,13 @@ pub fn provider(profile: &Profile) -> (Icon, String) {
     let command = profile.command_name();
     let provider_key = match command.as_str() {
         "codex" | "claude" => command.as_str(),
-        _ => profile.preset.as_deref().unwrap_or(&command),
+        _ => profile.preset.as_deref().unwrap_or_else(|| {
+            if !profile.is_identity() && canban_profiles::display_name(&profile.id).is_some() {
+                profile.id.as_str()
+            } else {
+                &command
+            }
+        }),
     };
     if let Some(tpl) = provider_key.strip_prefix("herdr:") {
         return (agent_icon(tpl), format!("Herdr · {tpl}"));

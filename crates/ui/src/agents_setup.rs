@@ -163,10 +163,14 @@ fn fallback_catalog_entries(all_profiles: &[Profile]) -> Vec<Value> {
         let existing = all_profiles
             .iter()
             .find(|p| p.id == entry.id && !p.is_identity());
+        let effective_bin = existing
+            .and_then(|p| p.command().first().cloned())
+            .unwrap_or_else(|| entry.binary.clone());
         rows.push(json!({
             "id": entry.id,
             "display_name": existing.and_then(|p| p.name.clone()).unwrap_or_else(|| entry.display_name.clone()),
-            "binary": entry.binary,
+            "binary": effective_bin,
+            "default_argv": entry.argv,
             "kind": "builtin",
             "resumable": entry.resumable,
             "installed": matches!(entry.id.as_str(), "codex" | "claude"),
@@ -185,10 +189,17 @@ fn fallback_catalog_entries(all_profiles: &[Profile]) -> Vec<Value> {
                 .preset
                 .as_deref()
                 .is_some_and(|s| s.starts_with("herdr:"));
+            let default_argv = prof
+                .preset
+                .as_deref()
+                .and_then(|pn| pn.strip_prefix("herdr:"))
+                .map(|tpl| vec![tpl.to_owned(), "{prompt}".to_owned()])
+                .unwrap_or_default();
             rows.push(json!({
                 "id": prof.id,
                 "display_name": prof.name.clone().unwrap_or_else(|| prof.id.clone()),
                 "binary": prof.command_name(),
+                "default_argv": default_argv,
                 "kind": "custom",
                 "resumable": !prof.resume_command().is_empty(),
                 "installed": true,
@@ -366,6 +377,264 @@ fn raw_profile_options(
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
     Some((m, e))
+}
+
+fn preset_default_argv(rows: &[Value], profile: &Profile) -> Option<Vec<String>> {
+    if let Some(row) = rows
+        .iter()
+        .find(|r| r["id"].as_str() == Some(profile.id.as_str()))
+        && let Some(arr) = row["default_argv"].as_array()
+    {
+        let parsed: Vec<String> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+        if !parsed.is_empty() {
+            return Some(parsed);
+        }
+    }
+    if let Some(preset) = profile.preset.as_deref() {
+        if let Some(tpl) = preset.strip_prefix("herdr:") {
+            return Some(vec![tpl.to_owned(), "{prompt}".to_owned()]);
+        }
+        if let Some(entry) = canban_profiles::builtin_catalog()
+            .into_iter()
+            .find(|e| e.id == preset)
+        {
+            return Some(entry.argv);
+        }
+    }
+    None
+}
+
+fn raw_profile_has_custom_argv(catalog_val: &Value, rows: &[Value], profile: &Profile) -> bool {
+    let Some(default_argv) = preset_default_argv(rows, profile) else {
+        return false;
+    };
+    if let Some(arr) = catalog_val["raw_profiles"].as_array()
+        && let Some(item) = arr
+            .iter()
+            .find(|v| v["id"].as_str() == Some(profile.id.as_str()))
+    {
+        if let Some(raw_argv) = item["argv"].as_array() {
+            let parsed: Vec<String> = raw_argv
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            return !parsed.is_empty() && parsed != default_argv;
+        }
+        return false;
+    }
+    let cur = profile.command();
+    !cur.is_empty() && cur != default_argv.as_slice()
+}
+
+const COMMAND_VARIABLES_HINT: &str = "Variables: {prompt} {cwd} {project_dir} {home} {session_id} {model} {effort} {cli} {agy_trusted_settings}";
+
+fn assemble_command_argv(command_raw: &str, args_raw: &str) -> Result<Vec<String>, String> {
+    let cmd = command_raw.trim();
+    if cmd.is_empty() {
+        return Err("Command cannot be empty".into());
+    }
+    let mut argv = vec![cmd.to_owned()];
+    let rest = canban_profiles::split_posix_words(args_raw).map_err(|e| format!("{e:#}"))?;
+    argv.extend(rest);
+    Ok(argv)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn agent_command_inline_editor(
+    ui: Ui,
+    profile_id: String,
+    preset_default: Option<Vec<String>>,
+    command_target: Signal<Option<String>>,
+    command_bin_draft: Signal<String>,
+    command_args_draft: Signal<String>,
+    command_error: Signal<String>,
+) -> AnyElement {
+    let save_id = profile_id.clone();
+    let reset_id = profile_id;
+    let has_preset = preset_default.is_some();
+    let preset_for_reset = preset_default;
+
+    view()
+        .gap_2()
+        .pt_1p5()
+        .pb_0p5()
+        .pl(px(23.))
+        .child(
+            view()
+                .gap_1()
+                .child(muted("Command").text_size(px(12.)))
+                .child(
+                    bound_field(
+                        move || command_bin_draft.get(),
+                        move |v| {
+                            command_error.set(String::new());
+                            command_bin_draft.set(v.to_owned());
+                        },
+                        "Executable name or path (e.g. agy or /bin/agy-modified)",
+                    )
+                    .font_family(MONO_FONT)
+                    .label("Command"),
+                ),
+        )
+        .child(
+            view()
+                .gap_1()
+                .child(muted("Argv").text_size(px(12.)))
+                .child(
+                    bound_field(
+                        move || command_args_draft.get(),
+                        move |v| {
+                            command_error.set(String::new());
+                            command_args_draft.set(v.to_owned());
+                        },
+                        "Arguments template (e.g. --add-dir {cwd} -i {prompt})",
+                    )
+                    .font_family(MONO_FONT)
+                    .label("Argv"),
+                ),
+        )
+        .child(when(
+            move || !command_error.get().is_empty(),
+            move || notice(move || command_error.get(), Tone::Attention),
+        ))
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    muted(COMMAND_VARIABLES_HINT)
+                        .font_family(MONO_FONT)
+                        .text_size(px(11.))
+                        .min_w(px(0.))
+                        .flex_1(),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(if has_preset {
+                            compact_action("Reset", Variant::Quiet, move |_| {
+                                let id_c = reset_id.clone();
+                                let def_c = preset_for_reset.clone();
+                                if crate::APP.get().is_none() {
+                                    if let Some(def) = def_c {
+                                        let next_bin = def.first().cloned().unwrap_or_default();
+                                        let next_args = if def.len() > 1 {
+                                            canban_profiles::join_posix_words(&def[1..])
+                                        } else {
+                                            String::new()
+                                        };
+                                        command_bin_draft.set(next_bin);
+                                        command_args_draft.set(next_args);
+                                        command_error.set(String::new());
+                                        ui.all_profiles.update(|list| {
+                                            if let Some(p) = list.iter_mut().find(|x| x.id == id_c)
+                                            {
+                                                p.argv = Some(def.clone());
+                                            }
+                                        });
+                                        ui.profiles.update(|list| {
+                                            if let Some(p) = list.iter_mut().find(|x| x.id == id_c)
+                                            {
+                                                p.argv = Some(def);
+                                            }
+                                        });
+                                        ui.agent_catalog.update(|cat| {
+                                            if let Some(arr) = cat["raw_profiles"].as_array_mut()
+                                                && let Some(item) = arr.iter_mut().find(|v| {
+                                                    v["id"].as_str() == Some(id_c.as_str())
+                                                })
+                                                && let Some(obj) = item.as_object_mut()
+                                            {
+                                                obj.remove("argv");
+                                            }
+                                        });
+                                    }
+                                    command_target.set(None);
+                                    return;
+                                }
+                                dispatch_then(
+                                    ui,
+                                    "config.agents.save",
+                                    json!({
+                                        "op": "set_profile_options",
+                                        "id": id_c,
+                                        "argv": Value::Null,
+                                    }),
+                                    move |_| {
+                                        command_error.set(String::new());
+                                        command_target.set(None);
+                                        refresh_catalog(ui, "local");
+                                    },
+                                );
+                            })
+                            .into_element()
+                        } else {
+                            view().into_element()
+                        })
+                        .child(compact_action("Save", Variant::Primary, move |_| {
+                            let bin_val = command_bin_draft.get_untracked();
+                            let args_val = command_args_draft.get_untracked();
+                            let argv = match assemble_command_argv(&bin_val, &args_val) {
+                                Ok(v) => v,
+                                Err(msg) => {
+                                    command_error.set(msg);
+                                    return;
+                                }
+                            };
+                            let id_c = save_id.clone();
+                            if crate::APP.get().is_none() {
+                                ui.all_profiles.update(|list| {
+                                    if let Some(p) = list.iter_mut().find(|x| x.id == id_c) {
+                                        p.argv = Some(argv.clone());
+                                    }
+                                });
+                                ui.profiles.update(|list| {
+                                    if let Some(p) = list.iter_mut().find(|x| x.id == id_c) {
+                                        p.argv = Some(argv.clone());
+                                    }
+                                });
+                                ui.agent_catalog.update(|cat| {
+                                    if let Some(arr) = cat["raw_profiles"].as_array_mut() {
+                                        if let Some(item) = arr
+                                            .iter_mut()
+                                            .find(|v| v["id"].as_str() == Some(id_c.as_str()))
+                                        {
+                                            item["argv"] = json!(argv);
+                                        } else {
+                                            arr.push(json!({ "id": id_c, "argv": argv }));
+                                        }
+                                    }
+                                });
+                                command_error.set(String::new());
+                                command_target.set(None);
+                                return;
+                            }
+                            dispatch_then(
+                                ui,
+                                "config.agents.save",
+                                json!({
+                                    "op": "set_profile_options",
+                                    "id": id_c,
+                                    "argv": argv,
+                                }),
+                                move |_| {
+                                    command_error.set(String::new());
+                                    command_target.set(None);
+                                    refresh_catalog(ui, "local");
+                                },
+                            );
+                        })),
+                ),
+        )
+        .into_element()
 }
 
 fn short_model_badge(model_id: &str) -> String {
@@ -1268,8 +1537,14 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
     let adding_custom_agent = signal(false);
     let custom_agent_id = signal(String::new());
     let custom_agent_cmd = signal(String::new());
+    let custom_agent_args = signal(String::new());
+    let custom_agent_error = signal(String::new());
     let custom_model_target = signal(Option::<String>::None);
     let custom_model_draft = signal(String::new());
+    let command_target = signal(Option::<String>::None);
+    let command_bin_draft = signal(String::new());
+    let command_args_draft = signal(String::new());
+    let command_error = signal(String::new());
 
     let copy_path = config_path.clone();
 
@@ -1742,7 +2017,15 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                             }
                         },
                         Variant::Quiet,
-                        move |_| adding_custom_agent.update(|v| *v = !*v),
+                        move |_| {
+                            custom_agent_error.set(String::new());
+                            if !adding_custom_agent.get_untracked()
+                                && custom_agent_args.get_untracked().is_empty()
+                            {
+                                custom_agent_args.set("{prompt}".into());
+                            }
+                            adding_custom_agent.update(|v| *v = !*v);
+                        },
                     )),
             )
             .child(when(
@@ -1751,49 +2034,113 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                     panel()
                         .gap_2p5()
                         .child(
-                            bound_field(
-                                move || custom_agent_id.get(),
-                                move |v| custom_agent_id.set(v.to_owned()),
-                                "Agent ID (e.g. my-agent)",
-                            )
-                            .label("Custom Agent ID"),
+                            view()
+                                .gap_1()
+                                .child(muted("Agent ID").text_size(px(12.)))
+                                .child(
+                                    bound_field(
+                                        move || custom_agent_id.get(),
+                                        move |v| {
+                                            custom_agent_error.set(String::new());
+                                            custom_agent_id.set(v.to_owned());
+                                        },
+                                        "Agent ID (e.g. agy-modified)",
+                                    )
+                                    .label("Agent ID"),
+                                ),
                         )
                         .child(
-                            bound_field(
-                                move || custom_agent_cmd.get(),
-                                move |v| custom_agent_cmd.set(v.to_owned()),
-                                "Command tokens (e.g. my-agent --interactive {prompt})",
-                            )
-                            .label("Launch command"),
+                            view()
+                                .gap_1()
+                                .child(muted("Command").text_size(px(12.)))
+                                .child(
+                                    bound_field(
+                                        move || custom_agent_cmd.get(),
+                                        move |v| {
+                                            custom_agent_error.set(String::new());
+                                            custom_agent_cmd.set(v.to_owned());
+                                        },
+                                        "Executable name or path (e.g. /bin/agy-modified)",
+                                    )
+                                    .font_family(MONO_FONT)
+                                    .label("Command"),
+                                ),
                         )
-                        .child(view().flex_row().justify_end().child(compact_action(
-                            "Save Custom Agent",
-                            Variant::Primary,
-                            move |_| {
-                                let id = custom_agent_id.get_untracked();
-                                let argv: Vec<String> = custom_agent_cmd
-                                    .get_untracked()
-                                    .split_whitespace()
-                                    .map(str::to_owned)
-                                    .collect();
-                                dispatch_then(
-                                    ui,
-                                    "config.agents.save",
-                                    json!({
-                                        "op": "upsert_custom_agent",
-                                        "id": id,
-                                        "argv": argv,
-                                        "enabled": true,
-                                    }),
+                        .child(
+                            view()
+                                .gap_1()
+                                .child(muted("Argv").text_size(px(12.)))
+                                .child(
+                                    bound_field(
+                                        move || custom_agent_args.get(),
+                                        move |v| {
+                                            custom_agent_error.set(String::new());
+                                            custom_agent_args.set(v.to_owned());
+                                        },
+                                        "Arguments template (e.g. --add-dir {cwd} -i {prompt})",
+                                    )
+                                    .font_family(MONO_FONT)
+                                    .label("Argv"),
+                                ),
+                        )
+                        .child(when(
+                            move || !custom_agent_error.get().is_empty(),
+                            move || notice(move || custom_agent_error.get(), Tone::Attention),
+                        ))
+                        .child(
+                            view()
+                                .flex_row()
+                                .flex_wrap()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    muted(COMMAND_VARIABLES_HINT)
+                                        .font_family(MONO_FONT)
+                                        .text_size(px(11.))
+                                        .min_w(px(0.))
+                                        .flex_1(),
+                                )
+                                .child(compact_action(
+                                    "Save Custom Agent",
+                                    Variant::Primary,
                                     move |_| {
-                                        adding_custom_agent.set(false);
-                                        custom_agent_id.set(String::new());
-                                        custom_agent_cmd.set(String::new());
-                                        refresh_catalog(ui, "local");
+                                        let id = custom_agent_id.get_untracked().trim().to_owned();
+                                        if id.is_empty() {
+                                            custom_agent_error.set("Agent ID cannot be empty".into());
+                                            return;
+                                        }
+                                        let argv = match assemble_command_argv(
+                                            &custom_agent_cmd.get_untracked(),
+                                            &custom_agent_args.get_untracked(),
+                                        ) {
+                                            Ok(v) => v,
+                                            Err(msg) => {
+                                                custom_agent_error.set(msg);
+                                                return;
+                                            }
+                                        };
+                                        dispatch_then(
+                                            ui,
+                                            "config.agents.save",
+                                            json!({
+                                                "op": "upsert_custom_agent",
+                                                "id": id,
+                                                "argv": argv,
+                                                "enabled": true,
+                                            }),
+                                            move |_| {
+                                                adding_custom_agent.set(false);
+                                                custom_agent_id.set(String::new());
+                                                custom_agent_cmd.set(String::new());
+                                                custom_agent_args.set(String::new());
+                                                custom_agent_error.set(String::new());
+                                                refresh_catalog(ui, "local");
+                                            },
+                                        );
                                     },
-                                );
-                            },
-                        )))
+                                )),
+                        )
                 },
             ))
             .child(dynamic(move || {
@@ -1801,6 +2148,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                 let all_profs = ui.all_profiles.get();
                 let cat_val = ui.agent_catalog.get();
                 let active_custom_model = custom_model_target.get();
+                let active_command = command_target.get();
                 let enabled_direct: Vec<Profile> = all_profs
                     .into_iter()
                     .filter(|p| !p.is_identity() && p.enabled)
@@ -1901,6 +2249,32 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                             );
                                         let is_editing_custom =
                                             active_custom_model.as_deref() == Some(pid.as_str());
+                                        let is_editing_command =
+                                            active_command.as_deref() == Some(pid.as_str());
+                                        let preset_default = preset_default_argv(&rows, &prof);
+                                        let has_custom_cmd =
+                                            raw_profile_has_custom_argv(&cat_val, &rows, &prof);
+                                        let is_pure_custom = rows
+                                            .iter()
+                                            .find(|r| r["id"].as_str() == Some(pid.as_str()))
+                                            .is_some_and(|r| r["kind"].as_str() == Some("custom"));
+                                        let effective_argv: Vec<String> = if !prof.command().is_empty() {
+                                            prof.command().to_vec()
+                                        } else {
+                                            preset_default.clone().unwrap_or_default()
+                                        };
+                                        let seed_bin = effective_argv
+                                            .first()
+                                            .cloned()
+                                            .unwrap_or_else(|| pid.clone());
+                                        let seed_args = if effective_argv.len() > 1 {
+                                            canban_profiles::join_posix_words(&effective_argv[1..])
+                                        } else {
+                                            String::new()
+                                        };
+                                        let cmd_pid = pid.clone();
+                                        let del_pid = pid.clone();
+
                                         view()
                                             .py_2()
                                             .border_b_1()
@@ -1929,29 +2303,109 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                             )
                                                             .child(
                                                                 muted(prov_name).text_size(px(12.)),
-                                                            ),
+                                                            )
+                                                            .child(if has_custom_cmd {
+                                                                badge("Custom").into_element()
+                                                            } else {
+                                                                view().into_element()
+                                                            }),
                                                     )
-                                                    .child(profile_model_effort_buttons(
-                                                        ui,
-                                                        pid.clone(),
-                                                        prof.model.clone(),
-                                                        explicit_model,
-                                                        prof.effort.clone(),
-                                                        explicit_effort.clone(),
-                                                        false,
-                                                        caps.clone(),
-                                                        custom_model_target,
-                                                        custom_model_draft,
-                                                    )),
+                                                    .child(
+                                                        view()
+                                                            .flex_row()
+                                                            .flex_wrap()
+                                                            .items_center()
+                                                            .gap_1p5()
+                                                            .child(profile_model_effort_buttons(
+                                                                ui,
+                                                                pid.clone(),
+                                                                prof.model.clone(),
+                                                                explicit_model,
+                                                                prof.effort.clone(),
+                                                                explicit_effort.clone(),
+                                                                false,
+                                                                caps.clone(),
+                                                                custom_model_target,
+                                                                custom_model_draft,
+                                                            ))
+                                                            .child(compact_action(
+                                                                if is_editing_command {
+                                                                    "▾ Command"
+                                                                } else {
+                                                                    "▸ Command"
+                                                                },
+                                                                if is_editing_command || has_custom_cmd {
+                                                                    Variant::Secondary
+                                                                } else {
+                                                                    Variant::Quiet
+                                                                },
+                                                                move |_| {
+                                                                    command_error.set(String::new());
+                                                                    if command_target
+                                                                        .get_untracked()
+                                                                        .as_deref()
+                                                                        == Some(cmd_pid.as_str())
+                                                                    {
+                                                                        command_target.set(None);
+                                                                    } else {
+                                                                        command_bin_draft
+                                                                            .set(seed_bin.clone());
+                                                                        command_args_draft
+                                                                            .set(seed_args.clone());
+                                                                        command_target.set(Some(
+                                                                            cmd_pid.clone(),
+                                                                        ));
+                                                                    }
+                                                                },
+                                                            ))
+                                                            .child(when(
+                                                                move || is_pure_custom,
+                                                                move || {
+                                                                    let d = del_pid.clone();
+                                                                    compact_action(
+                                                                        "Delete",
+                                                                        Variant::Danger,
+                                                                        move |_| {
+                                                                            dispatch_then(
+                                                                                ui,
+                                                                                "config.agents.save",
+                                                                                json!({
+                                                                                    "op": "delete_profile",
+                                                                                    "id": d,
+                                                                                }),
+                                                                                move |_| {
+                                                                                    refresh_catalog(
+                                                                                        ui, "local",
+                                                                                    )
+                                                                                },
+                                                                            );
+                                                                        },
+                                                                    )
+                                                                },
+                                                            )),
+                                                    ),
                                             )
                                             .child(if is_editing_custom {
                                                 custom_model_inline_editor(
                                                     ui,
-                                                    pid,
+                                                    pid.clone(),
                                                     explicit_effort,
                                                     caps,
                                                     custom_model_target,
                                                     custom_model_draft,
+                                                )
+                                            } else {
+                                                view().into_element()
+                                            })
+                                            .child(if is_editing_command {
+                                                agent_command_inline_editor(
+                                                    ui,
+                                                    pid,
+                                                    preset_default,
+                                                    command_target,
+                                                    command_bin_draft,
+                                                    command_args_draft,
+                                                    command_error,
                                                 )
                                             } else {
                                                 view().into_element()

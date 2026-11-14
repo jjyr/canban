@@ -724,6 +724,11 @@ pub fn catalog_entry_for_profile(profile: &Profile) -> Option<CatalogEntry> {
             return Some(hit.clone());
         }
     }
+    if !profile.is_identity()
+        && let Some(hit) = list.iter().find(|e| e.id == profile.id)
+    {
+        return Some(hit.clone());
+    }
     let bin = profile.command_name();
     list.into_iter().find(|e| e.binary == bin || e.id == bin)
 }

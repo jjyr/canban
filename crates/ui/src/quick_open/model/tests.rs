@@ -390,9 +390,13 @@ fn command_queries_require_gt_prefix_and_match_agent_setup_commands() {
     assert!(!crate::quick_open::is_command_query("agent"));
 
     let gt_agent = crate::quick_open::matching_commands(">agent");
-    assert!(gt_agent.len() >= 2);
+    assert!(gt_agent.len() >= 3);
     assert_eq!(gt_agent[0].id, "go-agent-setup");
     assert_eq!(gt_agent[1].id, "go-project-agents");
+    assert!(gt_agent.iter().any(|c| c.id == "go-settings-agents"));
+
+    let gt_argv = crate::quick_open::matching_commands(">argv");
+    assert!(gt_argv.iter().any(|c| c.id == "go-settings-agents"));
 
     let gt_setup = crate::quick_open::matching_commands(">setup agent");
     assert!(!gt_setup.is_empty());

@@ -247,15 +247,26 @@ impl AppServer {
                 .profiles
                 .iter()
                 .find(|prof| prof.id == entry.id && !prof.is_identity());
-            let installed_path = probed.get(&entry.binary).cloned();
-            let models = models_for_entry(entry, &machine, installed_path.as_deref());
+            let effective_bin = existing
+                .and_then(|p| p.command().first().map(String::as_str))
+                .unwrap_or(entry.binary.as_str());
+            let installed_path = probed
+                .get(effective_bin)
+                .or_else(|| probed.get(&entry.binary))
+                .cloned();
+            let probe_for_models = probed
+                .get(effective_bin)
+                .or_else(|| probed.get(&entry.binary))
+                .map(String::as_str);
+            let models = models_for_entry(entry, &machine, probe_for_models);
             agents.push(json!({
                 "id": entry.id,
                 "display_name": existing.and_then(|p| p.name.clone()).unwrap_or_else(|| entry.display_name.clone()),
-                "binary": entry.binary,
+                "binary": effective_bin,
+                "default_argv": entry.argv,
                 "kind": "builtin",
                 "resumable": entry.resumable,
-                "installed": installed_path.is_some(),
+                "installed": probed.contains_key(effective_bin),
                 "path": installed_path,
                 "configured": existing.is_some(),
                 "enabled": existing.is_some_and(|p| p.enabled),
@@ -275,10 +286,9 @@ impl AppServer {
                 .profiles
                 .iter()
                 .find(|prof| prof.id == *preset_id && !prof.is_identity());
-            let bin = preset_prof
-                .command()
-                .first()
-                .cloned()
+            let bin = existing
+                .and_then(|p| p.command().first().cloned())
+                .or_else(|| preset_prof.command().first().cloned())
                 .unwrap_or_else(|| preset_id.clone());
             let installed_path = probed.get(&bin).cloned();
             let meta = canban_profiles::catalog_entry_for_profile(preset_prof);
@@ -291,13 +301,21 @@ impl AppServer {
                 .map(|m| m.supported_efforts.clone())
                 .unwrap_or_default();
             let supports_effort = meta.as_ref().is_some_and(|m| !m.effort_args.is_empty())
-                || preset_prof.command().iter().any(|a| a.contains("{effort}"));
+                || existing
+                    .unwrap_or(preset_prof)
+                    .command()
+                    .iter()
+                    .any(|a| a.contains("{effort}"));
             agents.push(json!({
                 "id": preset_id,
-                "display_name": preset_prof.name.clone().unwrap_or_else(|| preset_id.clone()),
+                "display_name": existing
+                    .and_then(|p| p.name.clone())
+                    .or_else(|| preset_prof.name.clone())
+                    .unwrap_or_else(|| preset_id.clone()),
                 "binary": bin,
+                "default_argv": preset_prof.command(),
                 "kind": "preset",
-                "resumable": !preset_prof.resume_command().is_empty(),
+                "resumable": !existing.unwrap_or(preset_prof).resume_command().is_empty(),
                 "installed": installed_path.is_some(),
                 "path": installed_path,
                 "configured": existing.is_some(),
@@ -343,10 +361,24 @@ impl AppServer {
             let supports_effort = !is_herdr_tpl
                 && (meta.as_ref().is_some_and(|m| !m.effort_args.is_empty())
                     || prof.command().iter().any(|a| a.contains("{effort}")));
+            let default_argv = if let Some(tpl) = prof
+                .preset
+                .as_deref()
+                .and_then(|s| s.strip_prefix("herdr:"))
+            {
+                vec![tpl.to_owned(), "{prompt}".into()]
+            } else if let Some(pn) = prof.preset.as_deref()
+                && let Some(pp) = presets.get(pn)
+            {
+                pp.command().to_vec()
+            } else {
+                Vec::new()
+            };
             agents.push(json!({
                 "id": prof.id,
                 "display_name": prof.name.clone().unwrap_or_else(|| prof.id.clone()),
                 "binary": bin,
+                "default_argv": default_argv,
                 "kind": if is_herdr_tpl { "herdr_template" } else { "custom" },
                 "resumable": !prof.resume_command().is_empty(),
                 "installed": installed_path.is_some(),
@@ -721,9 +753,9 @@ impl AppServer {
             "set_profile_options" => {
                 let id = strp(&p, "id")?.trim().trim_start_matches('@');
                 validate_profile_id(id)?;
+                let catalog = canban_profiles::builtin_catalog();
+                let presets = canban_profiles::presets(&self.home).unwrap_or_default();
                 if !raw.profiles.iter().any(|x| x.id == id) {
-                    let catalog = canban_profiles::builtin_catalog();
-                    let presets = canban_profiles::presets(&self.home).unwrap_or_default();
                     if let Some(entry) = catalog.iter().find(|e| e.id == id) {
                         raw.profiles.push(Profile {
                             id: entry.id.clone(),
@@ -763,6 +795,36 @@ impl AppServer {
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .map(str::to_owned);
+                }
+                if let Some(argv_val) = p.get("argv") {
+                    let preset_default_argv: Option<Vec<String>> =
+                        prof.preset.as_deref().and_then(|pn| {
+                            if let Some(tpl) = pn.strip_prefix("herdr:") {
+                                Some(vec![tpl.to_owned(), "{prompt}".into()])
+                            } else {
+                                presets.get(pn).and_then(|pp| pp.argv.clone())
+                            }
+                        });
+                    if argv_val.is_null() {
+                        ensure!(
+                            preset_default_argv.is_some(),
+                            "Custom CLI Agent @{id} has no preset default command to reset to"
+                        );
+                        prof.argv = None;
+                    } else {
+                        let parsed = strings(&p, "argv");
+                        ensure!(
+                            !parsed.is_empty() && !parsed[0].trim().is_empty(),
+                            "Command cannot be empty"
+                        );
+                        let mut cleaned = parsed;
+                        cleaned[0] = cleaned[0].trim().to_owned();
+                        if preset_default_argv.as_ref() == Some(&cleaned) {
+                            prof.argv = None;
+                        } else {
+                            prof.argv = Some(cleaned);
+                        }
+                    }
                 }
             }
             "upsert_identity" => {

@@ -2691,6 +2691,156 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
         .unwrap();
     assert_eq!(dev_switched.model, None);
     assert_eq!(dev_switched.effort, None);
+
+    // 8. Customizing an enabled Agent's Command + Argv (`set_profile_options` `argv`):
+    //    - Saving custom `argv` on `@agy` overrides `argv[0]` (`/bin/agy-modified`) and args,
+    //      synchronizes inherited `resume_argv[0]` to `/bin/agy-modified`, propagates to
+    //      `@reviewer` (backed by `agy`) without rewriting `@reviewer.argv` in raw JSON,
+    //      and survives re-running `agent.setup`.
+    //    - Saving `argv` identical to preset defaults or `argv: null` clears raw `argv`
+    //      and restores `agy` for both launch and resume.
+    assert!(
+        app.call(
+            "config.agents.save",
+            json!({
+                "op": "set_profile_options",
+                "id": "agy",
+                "argv": [""],
+            }),
+        )
+        .is_err(),
+        "Empty executable in argv[0] must be rejected"
+    );
+    app.call(
+        "config.agents.save",
+        json!({
+            "op": "set_profile_options",
+            "id": "agy",
+            "argv": [
+                "/bin/agy-modified",
+                "--custom-flag",
+                "{cwd}",
+                "--settings",
+                "{agy_trusted_settings}",
+                "-i",
+                "{prompt}"
+            ],
+        }),
+    )
+    .unwrap();
+    let cfg_custom_cmd = app.config();
+    let agy_custom = cfg_custom_cmd
+        .profiles
+        .iter()
+        .find(|p| p.id == "agy")
+        .unwrap();
+    assert_eq!(agy_custom.command()[0], "/bin/agy-modified");
+    assert_eq!(
+        agy_custom.resume_command()[0],
+        "/bin/agy-modified",
+        "Inherited resume_argv[0] must sync to custom Command"
+    );
+    let rev_custom = cfg_custom_cmd
+        .profiles
+        .iter()
+        .find(|p| p.id == "reviewer")
+        .unwrap();
+    assert_eq!(
+        rev_custom.command()[0],
+        "/bin/agy-modified",
+        "@reviewer backed by agy must inherit @agy's customized Command"
+    );
+    assert_eq!(rev_custom.resume_command()[0], "/bin/agy-modified");
+
+    let cat_custom = app
+        .call("agent.catalog", json!({"machine": "local"}))
+        .unwrap();
+    let raw_agy = cat_custom["raw_profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "agy")
+        .unwrap();
+    assert_eq!(raw_agy["argv"][0], "/bin/agy-modified");
+    let raw_rev = cat_custom["raw_profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "reviewer")
+        .unwrap();
+    assert!(
+        raw_rev.get("argv").is_none() || raw_rev["argv"].is_null(),
+        "Identity raw profile must not duplicate peer Agent argv"
+    );
+    let agy_cat_row = cat_custom["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["id"] == "agy")
+        .unwrap();
+    assert_eq!(agy_cat_row["binary"], "/bin/agy-modified");
+    assert_eq!(agy_cat_row["default_argv"][0], "agy");
+
+    // Re-running `agent.setup` preserves direct Agent's custom `argv`
+    app.call(
+        "agent.setup",
+        json!({
+            "enabled_agents": ["codex", "agy"],
+            "default_engine": "agy",
+        }),
+    )
+    .unwrap();
+    let cfg_after_rerun = app.config();
+    assert_eq!(
+        cfg_after_rerun
+            .profiles
+            .iter()
+            .find(|p| p.id == "agy")
+            .unwrap()
+            .command()[0],
+        "/bin/agy-modified"
+    );
+    assert_eq!(
+        cfg_after_rerun
+            .profiles
+            .iter()
+            .find(|p| p.id == "developer")
+            .unwrap()
+            .command()[0],
+        "/bin/agy-modified"
+    );
+
+    // Resetting `argv: null` clears raw `argv` and restores preset `agy`
+    app.call(
+        "config.agents.save",
+        json!({
+            "op": "set_profile_options",
+            "id": "agy",
+            "argv": serde_json::Value::Null,
+        }),
+    )
+    .unwrap();
+    let cfg_reset_cmd = app.config();
+    let agy_reset = cfg_reset_cmd
+        .profiles
+        .iter()
+        .find(|p| p.id == "agy")
+        .unwrap();
+    assert_eq!(agy_reset.command()[0], "agy");
+    assert_eq!(agy_reset.resume_command()[0], "agy");
+    let cat_reset = app
+        .call("agent.catalog", json!({"machine": "local"}))
+        .unwrap();
+    let raw_agy_reset = cat_reset["raw_profiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "agy")
+        .unwrap();
+    assert!(
+        raw_agy_reset.get("argv").is_none() || raw_agy_reset["argv"].is_null(),
+        "Resetting argv must clear raw argv override"
+    );
 }
 
 pub(super) fn apply_project_yaml(app: &AppServer, project_id: &str, yaml: &str) {
