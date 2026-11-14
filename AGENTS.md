@@ -2,6 +2,7 @@
 
 - Read [docs/README.md](docs/README.md) for current product and architecture directions.
 - Keep project documentation in English.
+- Keep all prompts, role/session instructions, prompt templates (`prompts/`), and built-in skills (`skills/`) in English, and obtain explicit user approval before modifying any prompt.
 - Follow [development conventions](docs/development-conventions.md).
 - Cargo package names use canban-xxx; crate directories use crates/xxx and source/module filenames omit the canban- prefix.
 - Canban uses Apache-2.0. Future Cargo workspace packages inherit that license. Preserve applicable third-party licenses/notices when importing code or assets.
