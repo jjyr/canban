@@ -37,11 +37,11 @@
 
 ## Highlights
 
-### Kanban for Human–Agent Collaboration
+### Kanban for Human
 
 Move Cards across customizable stages (`Backlog → Develop → Review`) with live `@developer`, `@reviewer`, and `@merger` status capsules right on the Board. Each Card combines Markdown specs, pasted screenshots, `#Card` / `#tag` links, `Cmd+O` Quick Open, and GitHub Issue/PR sync with approval gates for external PRs.
 
-### GitHub Actions-Style Declarative Workflows
+### GitHub Actions Style Workflows
 
 Automate column transitions, `@agent` runs, custom scripts, conditions, human approvals, and serialized FIFO **Queue Merge** (`deliver` with automatic `@merger` conflict resolution) inside isolated per-Card Git worktrees — authored visually in Workflow Studio, in YAML, or via **Edit with agent**.
 
@@ -49,7 +49,7 @@ Automate column transitions, `@agent` runs, custom scripts, conditions, human ap
   <img src="docs/assets/readme-workflow.png" width="840" alt="Canban Visual Workflow Studio in Monokai theme" />
 </p>
 
-### Native Herdr Terminal — Switch Anytime
+### Herdr Terminal
 
 Press `Cmd+J` on any Card for a side-by-side terminal split or open the dedicated **Terminals** workspace. Built in Rust with `longbridge/nsh` (AppKit/Metal) and `libghostty-vt` over local or remote SSH `herdr-core`, running agent PTYs survive app restarts and upgrades across 17 built-in dark themes.
 

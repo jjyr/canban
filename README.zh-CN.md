@@ -49,7 +49,7 @@ Card 沿 `Backlog → Develop → Review`（或自定义列）流转，卡片上
   <img src="docs/assets/readme-workflow.png" width="840" alt="Monokai 主题下的 Canban 可视化 Workflow Studio" />
 </p>
 
-### 原生 Herdr Terminal — 随时无缝切换
+### 原生 Herdr Terminal
 
 在任意 Card 中按 `Cmd+J` 即可并排打开终端分栏，或切到独立的 **Terminals** 工作区管理多分支会话。基于 Rust、`longbridge/nsh`（原生 AppKit / Metal）与 `libghostty-vt` 构建，支持本地与远程 SSH `herdr-core`，重启或升级应用不会中断运行中的 Agent PTY，并内置 17 款暗色主题。
 
