@@ -311,7 +311,7 @@ pub fn rail(ui: Ui) -> impl IntoElement {
     )
 }
 pub fn settings(ui: Ui) -> impl IntoElement {
-    settings_section("Updates", "Internal releases from main.")
+    settings_section("Updates", "Published desktop releases.")
         .trailing(dynamic(move || {
             let value = ui.update.get();
             if value["disabled"] == true {

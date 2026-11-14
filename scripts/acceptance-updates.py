@@ -63,7 +63,7 @@ os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_n
             if self.path.startswith('/repos/'):
                 asset={'name':artifact.name,'size':artifact.stat().st_size,'browser_download_url':url+'/artifact'}
                 meta={'name':'manifest-'+candidate_info['platform']+'.json','browser_download_url':url+'/manifest'}
-                body=json.dumps([{'tag_name':'20990101-999','draft':True,'assets':[asset,meta]},{'tag_name':candidate_info['version'],'draft':False,'prerelease':True,'body':'Disposable update fixture','assets':[asset,meta]}]).encode()
+                body=json.dumps([{'tag_name':'20990101-999','draft':True,'assets':[asset,meta]},{'tag_name':candidate_info['version'],'draft':False,'prerelease':False,'body':'Disposable update fixture','assets':[asset,meta]}]).encode()
             elif self.path=='/manifest':body=json.dumps(manifest).encode()
             elif self.path=='/artifact':
                 self.send_response(200);self.send_header('Content-Length',str(artifact.stat().st_size));self.end_headers()
@@ -105,11 +105,11 @@ os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_n
         (source/'seed').write_text('preserve');subprocess.run(['git','-C',str(source),'add','.'],check=True,capture_output=True);subprocess.run(['git','-C',str(source),'commit','-m','Seed'],check=True,capture_output=True)
         project=call('project.create',{'workspace':{'sync_base':False},'name':'Self update acceptance','directory':str(source)})
         card=call('card.create',{'project_id':project['id'],'title':'Keep the Agent alive across update','body':'Disposable update acceptance.'});call('card.move',{'card_id':card['id'],'revision':card['revision'],'stage':'develop'})
-        attempt=wait(lambda:next((a for a in call('app.snapshot')['attempts'] if a.get('provider_session_id')),None),'provider binding')
+        attempt=wait(lambda:next(({'id':t['id'],**t['agent']} for t in call('app.snapshot')['terminals'] if (t.get('agent') or {}).get('provider_session_id')),None),'provider binding')
         core_id=attempt['owner_core_id'];terminal=attempt['terminal'];worktree=call('card.get',{'card_id':card['id']})['worktree']
         wait(lambda:call('update.state')['state'].get('available'),'automatic release discovery')
         assert call('update.state')['state']['available']['manifest']['version']==candidate_info['version']
-        agent_install=subprocess.run([str(cli),'call','update.install',json.dumps({'version':candidate_info['version']})],env={**env,'CANBAN_REQUEST_ID':attempt['request_id'],'CANBAN_ATTEMPT':str(attempt['number'])},capture_output=True,text=True,timeout=15)
+        agent_install=subprocess.run([str(cli),'call','update.install',json.dumps({'version':candidate_info['version']})],env={**env,'CANBAN_PROFILE_ID':'developer','CANBAN_CARD':str(card['number']),'CANBAN_PROJECT':project['id']},capture_output=True,text=True,timeout=15)
         assert agent_install.returncode!=0 and 'explicit user action' in agent_install.stderr
         ui=subprocess.Popen([str(target/'Contents/MacOS/canban-ui')],env=env,stdout=log,stderr=log)
         sent=threading.Event()
@@ -139,10 +139,10 @@ os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_n
             wait(lambda:journal()['phase']==expected,expected)
             assert sent.is_set()
             if expected!='manual_recovery':
-                wait(lambda:any(r['card_id']==card['id'] and r['stage']=='develop' and r['state']=='completed' for r in call('app.snapshot')['requests']),'queued completion delivered')
-                state=call('app.snapshot');original=next(a for a in state['attempts'] if a['id']==attempt['id']);assert original['terminal']==terminal and original['owner_core_id']==core_id
+                wait(lambda:any((t.get('agent') or {}).get('card_id')==card['id'] and t['agent']['stage']=='develop' and t['agent']['state']=='completed' for t in call('app.snapshot')['terminals']),'queued completion delivered')
+                state=call('app.snapshot');original=next(t['agent'] for t in state['terminals'] if t['id']==attempt['id']);assert original['terminal']==terminal and original['owner_core_id']==core_id
                 assert call('card.get',{'card_id':card['id']})['worktree']==worktree
-                assert len([r for r in state['reports'] if r['request_id']==attempt['request_id'] and r['state']=='completed'])==1
+                assert len([r for r in state['reports'] if r['terminal_id']==attempt['id'] and r['state']=='completed'])==1
                 if expected=='complete':assert call('app.ping')['build']==candidate_info
                 else:assert call('app.ping')['build']['version']!=candidate_info['version']
             else:

@@ -62,10 +62,12 @@ class Releases(unittest.TestCase):
                 for command in ['reserve','reserve','publish']:
                     with patch.object(sys,'argv',['release.py',command,'--directory',directory]):release.main()
         self.assertEqual(sum(m=='POST' and p=='/repos/fixture/app/releases' for m,p,_,_ in calls),1)
+        created=next(b for m,p,b,_ in calls if m=='POST' and p=='/repos/fixture/app/releases')
+        self.assertIs(created['prerelease'],False)
         uploads=[p for m,p,_,_ in calls if m=='POST' and p.startswith('/upload/')]
         self.assertEqual(len(uploads),2)
         self.assertTrue(all('/releases/42/assets?' in p for p in uploads))
-        self.assertEqual(calls[-1][:3],('PATCH','/repos/fixture/app/releases/42',{'draft':False,'prerelease':True}))
+        self.assertEqual(calls[-1][:3],('PATCH','/repos/fixture/app/releases/42',{'draft':False,'prerelease':False}))
         self.assertEqual(calls[-2][0],'POST')
     def test_draft_lookup_paginates_and_missing_publish_never_creates_a_release(self):
         first=[{'tag_name':f'other-{i}'} for i in range(100)]
@@ -88,11 +90,18 @@ class Releases(unittest.TestCase):
             with patch.object(release,'api',api),patch.object(sys,'argv',['release.py','publish','--directory',directory]),patch.dict(os.environ,{'CANBAN_RELEASE_COMMIT':'c'*40,'CANBAN_RELEASE_VERSION':'20261110-1'}):
                 with self.assertRaisesRegex(RuntimeError,'Injected upload failure'):release.main()
         self.assertFalse(any(method=='PATCH' for method,_ in calls))
-    def test_workflow_is_manual_only(self):
+    def test_workflow_is_manual_only_official_release_with_pre_release_integration_tests(self):
         workflow=pathlib.Path(__file__).resolve().parents[1]/'.github/workflows/release.yml'
         content=workflow.read_text()
+        self.assertTrue(content.startswith('name: Release\n'))
+        self.assertNotIn('internal release',content.lower())
         self.assertIn('workflow_dispatch:',content)
         self.assertNotIn('push:',content)
+        self.assertIn('https://releases.herdr.dev/core/install.sh',content)
+        self.assertIn('mise run test-integration',content)
+        self.assertLess(content.index('mise run test-integration'),content.index('scripts/release.py reserve'))
+        self.assertLess(content.index('scripts/release.py reserve'),content.index('mise run build-release'))
+        self.assertLess(content.index('mise run build-release'),content.index('scripts/release.py publish'))
     def test_dispatch_triggers_workflow_discovers_run_and_supports_watch(self):
         calls=[];subproc=[]
         now=release.datetime.datetime.now(release.datetime.timezone.utc).isoformat().replace('+00:00','Z')

@@ -1,4 +1,4 @@
-name: Internal release
+name: Release
 on:
   workflow_dispatch:
 permissions:
@@ -16,19 +16,22 @@ jobs:
         with:
           ref: ${{ github.sha }}
       - uses: jdx/mise-action@v2
-      - name: Reserve immutable release identity
-        id: identity
-        run: python3 scripts/release.py reserve
-      - name: Test
+      - name: Install build and integration test dependencies
+        run: |
+          brew install librsvg
+          curl -fsSL https://releases.herdr.dev/core/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Run unit and packaging tests
         run: |
           mise run test
           mise run test-release
-      - name: Install SVG icon renderer
-        run: brew install librsvg
-      - name: Test macOS packaging
-        run: |
           mise run test-package
           mise run test-dev
+      - name: Run integration tests
+        run: mise run test-integration
+      - name: Reserve immutable release identity
+        id: identity
+        run: python3 scripts/release.py reserve
       - name: Build release bundle
         env:
           CANBAN_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
@@ -41,7 +44,7 @@ jobs:
         with:
           name: canban-${{ steps.identity.outputs.version }}
           path: dist/
-      - name: Publish complete internal release
+      - name: Publish release
         env:
           CANBAN_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
         run: python3 scripts/release.py publish

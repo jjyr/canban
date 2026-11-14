@@ -127,6 +127,20 @@ run = "/usr/bin/python3 scripts/test-package.py"
 [tasks.test-dev]
 run = "/usr/bin/python3 scripts/test-dev.py"
 
+[tasks.test-integration]
+depends = ["build"]
+run = [
+  "/usr/bin/python3 scripts/acceptance.py",
+  "/usr/bin/python3 scripts/acceptance-interactive.py",
+  "/usr/bin/python3 scripts/acceptance-workflows.py",
+  "/usr/bin/python3 scripts/acceptance-github-workspace.py",
+  "/usr/bin/python3 scripts/acceptance-notifications.py",
+  "/usr/bin/python3 scripts/acceptance-scheduling.py",
+  "/usr/bin/python3 scripts/acceptance-events.py",
+  "/usr/bin/python3 scripts/acceptance-dev.py",
+  "/usr/bin/python3 scripts/acceptance-backend.py",
+]
+
 [tasks.acceptance-github-workspace]
 depends = ["build"]
 run = "/usr/bin/python3 scripts/acceptance-github-workspace.py"

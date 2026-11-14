@@ -4,13 +4,16 @@ from pathlib import Path
 import json,os,socket,struct,subprocess,tempfile,time,sqlite3,statistics
 repo=Path(__file__).resolve().parents[1];base=Path(tempfile.mkdtemp(prefix='cb-retained-',dir='/private/tmp'));home=base/'home';cli=repo/'target/debug/canban'
 env={**{k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')},'CANBAN_HOME':str(home)}
-core={'HC_SESSION':'retained-test','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'state'),'XDG_CONFIG_HOME':str(base/'config')}
+core={'HC_SESSION':'default','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'state'),'XDG_CONFIG_HOME':str(base/'config')}
+env.update(core)
 log=open(base/'server.log','w');server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log);viewer=None
 
 def call(method,p=None):
  r=subprocess.run([str(cli),'call',method,json.dumps(p or {})],env=env,capture_output=True,text=True,timeout=40)
  if r.returncode:raise RuntimeError(r.stderr)
  return json.loads(r.stdout)
+def agent(s):
+ return next(({'id':t['id'],**t['agent']} for t in s['terminals'] if t.get('agent')),None)
 def wait(test,label,timeout=45):
  end=time.monotonic()+timeout
  while time.monotonic()<end:
@@ -92,14 +95,14 @@ steps:
  project=call('project.create',{'name':'Retained','directory':str(base/'source'),'workflow_yaml':retained_yaml})
  card=call('card.create',{'project_id':project['id'],'title':'Retained workflow'})
  call('card.move',{'card_id':card['id'],'revision':card['revision'],'stage':'develop'})
- s=wait(lambda s:s['attempts'] and s['attempts'][0].get('provider_session_id'),'Agent bound');first=s['attempts'][0];terminal=first['terminal'];sid=first['provider_session_id']
+ s=wait(lambda s:agent(s) and agent(s).get('provider_session_id'),'Agent bound');first=agent(s);terminal=first['terminal'];sid=first['provider_session_id']
  send(terminal,'finish')
- s=wait(lambda s:len(s['reports'])==2 and len(s['attempts'])==2,'same-profile Review in retained PTY')
- current=s['attempts'][-1];assert current['terminal']==terminal and current['provider_session_id']==sid
- assert s['attempts'][0]['state']=='continued' and current['state']=='completed'
+ s=wait(lambda s:len(s['reports'])==2 and agent(s)['number']==2 and agent(s)['state']=='completed','same-profile Review in retained PTY')
+ current=agent(s);assert current['terminal']==terminal and current['provider_session_id']==sid
+ assert any(e['kind']=='execution.continued' for e in s['events']) and current['state']=='completed'
  call('comment.add',{'card_id':card['id'],'body':'Followup after completion','mentions':['developer']})
  s=wait(lambda s:s['questions'] and all(q['state']=='replied' for q in s['questions']),'completed-session reply')
- assert len(s['reports'])==2 and len(s['attempts'])==2 and s['cards'][0]['stage']=='review'
+ assert len(s['reports'])==2 and agent(s)['number']==2 and s['cards'][0]['stage']=='review'
  print('RETAINED_WORKFLOW_AND_FOLLOWUP_OK',flush=True)
  viewer=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);viewer.settimeout(15);viewer.connect(str(home/'app.sock'))
  viewer.sendall((json.dumps({'jsonrpc':'2.0','id':0,'method':'herdr.connect','params':{'terminal':terminal}})+'\n').encode())
@@ -118,20 +121,20 @@ steps:
  for i in range(20):
   marker=('LATENCY_'+str(i)).encode();start=time.monotonic();frame(channel,0,marker+b'\r');output_until(b'INPUT '+marker);samples.append((time.monotonic()-start)*1000)
  frame(channel,0,b'idle\r');output_until(b'IDLE_READY')
- s=wait(lambda s:s['attempts'][-1]['lifecycle'].get('last_interaction_at') and s['attempts'][-1]['lifecycle'].get('idle_since'),'human activity observed')
+ s=wait(lambda s:agent(s)['lifecycle'].get('last_interaction_at') and agent(s)['lifecycle'].get('idle_since'),'human activity observed')
  old=round(time.time()*1000)-120000
- db=sqlite3.connect(home/'canban.sqlite');row=json.loads(db.execute('select data from attempts where id=?',(current['id'],)).fetchone()[0]);row['lifecycle']['idle_since']=old;row['lifecycle']['last_interaction_at']=old;db.execute('update attempts set data=? where id=?',(json.dumps(row),current['id']));db.commit();db.close()
- time.sleep(1.2);s=call('app.snapshot');assert s['attempts'][-1]['observed']['state']=='live'
+ db=sqlite3.connect(home/'canban.sqlite');row=json.loads(db.execute('select data from terminals where id=?',(current['id'],)).fetchone()[0]);row['agent']['lifecycle']['idle_since']=old;row['agent']['lifecycle']['last_interaction_at']=old;db.execute('update terminals set data=? where id=?',(json.dumps(row),current['id']));db.commit();db.close()
+ time.sleep(1.2);s=call('app.snapshot');assert agent(s)['observed']['state']=='live'
  print('HUMAN_INPUT_RESETS_IDLE_OK; RELAY_ROUNDTRIP_MS median=%.2f p95=%.2f'%(statistics.median(samples),sorted(samples)[18]),flush=True)
  print('WAITING_FOR_ONE_MINUTE_IDLE_EXIT',flush=True)
- s=wait(lambda s:s['attempts'][-1]['observed']['state']=='finished','idle exit while viewer open',timeout=75)
- assert s['attempts'][-1]['state']=='idle_closed';viewer.close();viewer=None
+ s=wait(lambda s:agent(s)['observed']['state']=='finished','idle exit while viewer open',timeout=75)
+ assert agent(s)['state']=='idle_closed';viewer.close();viewer=None
  print('IDLE_EXIT_WITH_OPEN_VIEWER_OK',flush=True)
- opened=call('agent.open',{'card_id':card['id'],'profile_id':'developer','expected_attempt_id':current['id']})
- s=wait(lambda s:len(s['attempts'])==3 and s['attempts'][-1].get('provider_session_id'),'explicit exact Resume')
- assert s['attempts'][-1]['provider_session_id']==sid
- live=s['attempts'][-1];card=s['cards'][0];call('card.archive',{'card_id':card['id'],'revision':card['revision']})
- s=call('app.snapshot');assert s['attempts'][-1]['observed']['state']=='finished' and s['attempts'][-1]['lifecycle']['close_reason']=='archive'
+ opened=call('agent.open',{'card_id':card['id'],'profile_id':'developer','expected_terminal_id':current['id']})
+ s=wait(lambda s:agent(s)['number']==3 and (agent(s).get('observed') or {}).get('state')=='live','explicit exact Resume')
+ assert agent(s)['provider_session_id']==sid
+ live=agent(s);card=s['cards'][0];call('card.archive',{'card_id':card['id'],'revision':card['revision']})
+ s=call('app.snapshot');assert agent(s)['observed']['state']=='finished' and agent(s)['lifecycle']['close_reason']=='archive'
  assert call('resource.read',{'card_id':card['id'],'path':s['questions'][0]['reply_path']})['body']
  (base/'evidence.json').write_text(json.dumps({'snapshot':s,'relay_roundtrip_ms':samples},indent=2))
  print('ARCHIVE_CLOSE_AND_HISTORY_OK\nRETAINED_ACCEPTANCE_PASSED\nBASE='+str(base),flush=True)

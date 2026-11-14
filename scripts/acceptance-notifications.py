@@ -52,8 +52,9 @@ def read(card):
 
 def run(card):
     opened = call('agent.open', {'card_id':card['id'], 'profile_id':'developer'})
-    s = wait(lambda s:any(a['request_id'] == opened['request_id'] and a.get('provider_session_id') for a in s['attempts']), 'bound provider')
-    return next(a for a in s['attempts'] if a['request_id'] == opened['request_id'])
+    s = wait(lambda s:any(t['id'] == opened['terminal_id'] and (t.get('agent') or {}).get('provider_session_id') for t in s['terminals']), 'bound provider')
+    entry = next(t for t in s['terminals'] if t['id'] == opened['terminal_id'])
+    return {'id': entry['id'], **entry['agent']}
 
 def send(attempt, text, force=False):
     r = subprocess.run(['hc','send',attempt['terminal'],text,'--json',*(['--force'] if force else [])],
@@ -94,7 +95,7 @@ try:
     question(cards['short'],'Explain the current task')
     assert len(items(cards['short'])) == 1 and items(cards['short'])[0]['unread']
     send(short_run,'permission')
-    wait(lambda s:any(a['id']==short_run['id'] and a['lifecycle'].get('waiting') for a in s['attempts']), 'permission episode')
+    wait(lambda s:any(t['id']==short_run['id'] and (t.get('agent') or {}).get('lifecycle',{}).get('waiting') for t in s['terminals']), 'permission episode')
     assert len(items(cards['short'])) == 2
     before = next(c for c in call('app.snapshot')['cards'] if c['id']==cards['short']['id'])
     position = read(cards['short'])
@@ -102,7 +103,7 @@ try:
     assert call('notifications.read',{'card_id':cards['short']['id'],'sequence':1}) == position
     assert before == next(c for c in call('app.snapshot')['cards'] if c['id']==cards['short']['id'])
     send(short_run,'working',force=True)
-    wait(lambda s:any(a['id']==short_run['id'] and not a['lifecycle'].get('waiting') for a in s['attempts']), 'permission resolved')
+    wait(lambda s:any(t['id']==short_run['id'] and not (t.get('agent') or {}).get('lifecycle',{}).get('waiting') for t in s['terminals']), 'permission resolved')
     assert not items(cards['short'])
     print('REPLY_READ_PERMISSION_OK',flush=True)
     gate_run = run(cards['gate'])

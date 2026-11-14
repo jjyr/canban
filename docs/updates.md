@@ -1,13 +1,13 @@
-# Internal releases and desktop updates
+# Releases and desktop updates
 
 Status: implemented on macOS arm64, updated 2026-11-14. Local fixture and native acceptance are recorded below; GitHub publication uses manual workflow dispatch.
 
 ## Product boundary
 
-Releases are triggered manually via `mise run release` (or GitHub Actions `workflow_dispatch`), rather than automatically on every push to `main` (superseded 2026-11-14). Releases do not become Cards or workflow stages. The installed AppServer checks for published internal releases once per rolling 24 hours and on explicit request. Automatic checks persist their start time before networking, including failed attempts, so restarting does not trigger another check within the interval. First launch or an overdue restart checks immediately. Manual checks bypass the interval; interrupted checks remain inspectable and may be retried manually. The compact navigation rail reserves its bottom for a highlighted Update button when a newer compatible release exists. Clicking it downloads and immediately installs/restarts; it never waits for automatic Agent tasks to complete. Download/progress/error/retry share the same operation path. Settings offers a manual check and current version details.
+Releases are triggered manually via `mise run release` (or GitHub Actions `workflow_dispatch`), rather than automatically on every push to `main` (superseded 2026-11-14). Releases do not become Cards or workflow stages. The installed AppServer checks for published releases once per rolling 24 hours and on explicit request. Automatic checks persist their start time before networking, including failed attempts, so restarting does not trigger another check within the interval. First launch or an overdue restart checks immediately. Manual checks bypass the interval; interrupted checks remain inspectable and may be retried manually. The compact navigation rail reserves its bottom for a highlighted Update button when a newer compatible release exists. Clicking it downloads and immediately installs/restarts; it never waits for automatic Agent tasks to complete. Download/progress/error/retry share the same operation path. Settings offers a manual check and current version details.
 
 ```text
-mise run release / workflow_dispatch -> GitHub Actions -> versioned GitHub Prerelease
+mise run release / workflow_dispatch -> GitHub Actions -> unit/package/integration tests -> versioned GitHub Release
                                              |
                           automatic / manual version check
                                              |
@@ -23,7 +23,7 @@ mise run release / workflow_dispatch -> GitHub Actions -> versioned GitHub Prere
 
 ## Release identity and publication
 
-Display/tag versions are `YYYYMMDD-N`, using Asia/Shanghai and a numeric daily sequence. Compare the date and numeric sequence, not lexical strings. Reserve tags atomically; publication retries reuse their reservation, and failed reservations may leave gaps. Build the triggering commit, never a moving main checkout. Drafts remain invisible until every artifact and manifest is uploaded. Internal releases are prereleases; enumerate published releases instead of relying on GitHub's stable-only latest endpoint.
+Display/tag versions are `YYYYMMDD-N`, using Asia/Shanghai and a numeric daily sequence. Compare the date and numeric sequence, not lexical strings. Run unit, packaging and headless integration tests (`mise run test-integration`) before reserving a tag so failed runs never create orphan tags or draft releases. Reserve tags atomically; publication retries reuse their reservation, and failed reservations may leave gaps. Build the triggering commit, never a moving main checkout. Drafts remain invisible until every artifact and manifest is uploaded. Releases are published as official GitHub Releases (`prerelease: false`, superseding the earlier internal prerelease flag); discovery enumerates non-draft releases so historical prereleases and official releases share one monotonic `YYYYMMDD-N` timeline.
 
 Reservation/retry and publication look up releases through the authenticated, paginated release list, which includes drafts. GitHub's release-by-tag endpoint resolves published releases and can return 404 for the reserved draft. All draft asset replacement and publication then address the found release ID; a missing reserved release fails without creating another during publication. Published releases remain immutable.
 
@@ -52,8 +52,8 @@ The implementation lives in `crates/storage/src/migrations.rs`. Append a `Migrat
 ## Implemented ownership and interfaces
 
 ```text
-GitHub Actions / scripts/release.py
-  reserve tag -> test -> build-release -> package -> publish draft
+GitHub Actions (`Release`) / scripts/release.py
+  unit & packaging tests -> test-integration -> reserve tag -> build-release -> package -> publish release
                                      |
 canban-github -> authenticated release/asset requests
                                      |
@@ -86,7 +86,7 @@ The in-app updater remains the release installation path. A newer App installed
 externally can also activate its bundled backend through the explicit startup
 action below. Opening an App never silently replaces an answering backend.
 
-`mise run build` packages UI, CLI and updater together. `mise run build-release` produces optimized, ad-hoc-signed binaries; it does not publish. `mise run install-app` (alias `mise run install`) builds the release bundle and atomically installs it into `/Applications/Canban.app`. `mise run release` dispatches `.github/workflows/release.yml` via `workflow_dispatch` (defaulting to `--ref main`, with optional `-- --ref <branch>` and `-- --watch`, authenticating through `GH_TOKEN`/`GITHUB_TOKEN` or `gh auth token`). `.github/workflows/release.yml` runs only on `workflow_dispatch`, builds the triggering SHA on a macOS arm64 runner, uploads `Canban-macos-aarch64.tar.zst` plus `manifest-macos-aarch64.json`, and publishes the completed draft as a prerelease. Packaging includes existing third-party notices. Developer ID signing/notarization is not implemented.
+`mise run build` packages UI, CLI and updater together. `mise run build-release` produces optimized, ad-hoc-signed binaries; it does not publish. `mise run install-app` builds the release bundle and atomically installs it into `/Applications/Canban.app`. `mise run release` dispatches `.github/workflows/release.yml` (`Release`) via `workflow_dispatch` (defaulting to `--ref main`, with optional `-- --ref <branch>` and `-- --watch`, authenticating through `GH_TOKEN`/`GITHUB_TOKEN` or `gh auth token`). `.github/workflows/release.yml` runs only on `workflow_dispatch`, installs `librsvg` and Herdr Core (`hc`), runs unit/packaging tests and the deterministic headless integration suite (`mise run test-integration`), and only then reserves `YYYYMMDD-N`, builds the triggering SHA on a macOS arm64 runner, uploads `Canban-macos-aarch64.tar.zst` plus `manifest-macos-aarch64.json`, and publishes the completed draft as an official GitHub Release (`prerelease: false`). Packaging includes existing third-party notices. Developer ID signing/notarization is not implemented.
 
 Development uses `mise run dev`, which derives an isolated checkout/branch home
 and disables channel updates; it does not replace the installed `~/.canban`

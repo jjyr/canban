@@ -111,7 +111,7 @@ def main():
         if os.environ.get('GITHUB_OUTPUT'):
             with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('version='+version+'\n')
         release=find_release(repo,version)
-        if release is None:api('POST',f'/repos/{repo}/releases',{'tag_name':version,'target_commitish':commit,'name':version,'draft':True,'prerelease':True,'generate_release_notes':True})
+        if release is None:api('POST',f'/repos/{repo}/releases',{'tag_name':version,'target_commitish':commit,'name':version,'draft':True,'prerelease':False,'generate_release_notes':True})
         print(version);return
     args.directory.mkdir(parents=True,exist_ok=True)
     if args.command=='package':
@@ -129,6 +129,6 @@ def main():
     for asset in release['assets']:api('DELETE',f'/repos/{repo}/releases/assets/{asset["id"]}')
     for path in sorted(args.directory.iterdir()):
         if path.is_file():api('POST',f'/upload/repos/{repo}/releases/{release["id"]}/assets?name={path.name}',raw=path.read_bytes(),content_type='application/octet-stream')
-    api('PATCH',f'/repos/{repo}/releases/{release["id"]}',{'draft':False,'prerelease':True})
+    api('PATCH',f'/repos/{repo}/releases/{release["id"]}',{'draft':False,'prerelease':False})
     print('Published '+version)
 if __name__=='__main__':main()

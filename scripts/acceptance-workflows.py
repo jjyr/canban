@@ -27,6 +27,8 @@ def call(method,p=None):
  r=subprocess.run([str(cli),'call',method,json.dumps(p or {})],env=env,text=True,capture_output=True,timeout=90)
  if r.returncode:raise RuntimeError(r.stderr)
  return json.loads(r.stdout)
+def agents(s,card_id=None):
+ return [t['agent'] for t in s['terminals'] if t.get('agent') and (card_id is None or t['agent']['card_id']==card_id)]
 def wait(predicate,label):
  end=time.monotonic()+60
  while time.monotonic()<end:
@@ -103,23 +105,24 @@ try:
  observer=call('subscription.save',{'revision':0,'enabled':True,'selector':{'project_id':project['id'],'types':['*']},'target':{'type':'consumer'}})
  card=call('card.create',{'project_id':project['id'],'title':'Plan in Backlog','body':'Preserve three columns and exact plan approval.'})
  s=wait(lambda s:any(r['state']=='waiting_approval' for r in s['workflow_runs']),'planning completes')
- run=s['workflow_runs'][0];assert s['cards'][0]['stage']=='backlog';assert len(s['requests'])==1
+ run=s['workflow_runs'][0];assert s['cards'][0]['stage']=='backlog';assert len(agents(s))==1
  upsert_yaml('plan-deliver.yaml',plan_yaml('Produce plan SECOND_VERSION'))
  assert call('workflow.run',{'run_id':run['id']})['definition_revision']==1
- before=len(s['requests']);server.terminate();server.wait(timeout=10);start()
- s=call('app.snapshot');assert len(s['requests'])==before and s['workflow_runs'][0]['state']=='waiting_approval'
+ before=len(agents(s));server.terminate();server.wait(timeout=10);start()
+ s=call('app.snapshot');assert len(agents(s))==before and s['workflow_runs'][0]['state']=='waiting_approval'
  current=s['cards'][0];decision={'run_id':run['id'],'visit':run['visit'],'revision':current['revision'],'decision':'approve','request_key':'approve-plan-once'}
  call('workflow.decide',decision);call('workflow.decide',decision)
  s=wait(lambda s:s['workflow_runs'][0]['state']=='completed','development and review finish')
- assert len(s['requests'])==3 and s['cards'][0]['stage']=='review'
- assert len({r['workflow_run_id'] for r in s['requests']})==1
- assert any('report_id' in r['instruction'] for r in s['requests'][1:])
+ first_agents=sorted(agents(s,card['id']),key=lambda a:a['number'])
+ assert len(first_agents)==3 and s['cards'][0]['stage']=='review'
+ assert len({r['workflow_run_id'] for r in first_agents})==1
+ assert any('report_id' in r['instruction'] for r in first_agents[1:])
  deliveries=call('subscription.deliveries',{'subscription_id':observer['id']});assert deliveries
  call('subscription.ack',{'delivery_id':deliveries[0]['id']})
  second=call('card.create',{'project_id':project['id'],'title':'New revision','body':'Use the published revision immediately.'})
  s=wait(lambda s:len(s['workflow_runs'])==2 and s['workflow_runs'][1]['state']=='waiting_approval','new revision planning')
  assert s['workflow_runs'][1]['definition_revision']==2
- assert 'SECOND_VERSION' in next(r for r in s['requests'] if r['card_id']==second['id'])['instruction']
+ assert 'SECOND_VERSION' in next(r for r in agents(s,second['id']))['instruction']
  # Interactive Backlog session updates Card with confirmed design, adopts `develop` without re-triggering scheduling, and completes through Review!
  adopt_yaml=plan_yaml('Plan').replace('id: plan-deliver','id: adopt-deliver')
  adopt_project=call('project.create',{'name':'Adopt acceptance','directory':str(source),'workspace':{'create_worktree':False,'sync_base':False},'workflow_yaml':adopt_yaml})
@@ -128,7 +131,7 @@ try:
  s=wait(lambda s:any(c['id']==adopt_card['id'] and c['stage']=='review' for c in s['cards']) and any(r['card_id']==adopt_card['id'] and r['state']=='completed' for r in s['workflow_runs']),'interactive Backlog adopt and Review completion')
  adopted_c=next(c for c in s['cards'] if c['id']==adopt_card['id'])
  assert adopted_c['title']=='Adopted Interactive Spec' and 'Confirmed design key points' in adopted_c['body']
- adopt_reqs=[r for r in s['requests'] if r['card_id']==adopt_card['id']]
+ adopt_reqs=sorted(agents(s,adopt_card['id']),key=lambda a:a['number'])
  assert len(adopt_reqs)==2 and adopt_reqs[0]['trigger']=='interactive' and adopt_reqs[1]['profile']['id']=='reviewer'
  evidence={'base':str(base),'project_id':project['id'],'card_id':second['id'],'first_run':run['id'],'api_version':call('app.ping')['api_version'],'schema':json.loads(subprocess.check_output([str(cli),'build-info'],env=env,text=True))['schema'],'checks':['backlog planning','explicit approval','frozen run revision','immediate new revision','restart checkpoint','duplicate decision receipt','single workflow-owned movement','real isolated PTY reports','consumer acknowledgement','interactive card update and stage adopt']}
  # Project YAML authoring and a configuration Agent share real transport,
@@ -165,7 +168,7 @@ try:
  assert session['terminal_id']==f"configuration:{project['id']}:workflows:developer"
  s=wait(lambda s:(home/'configuration-evidence/1.json').exists(),'configuration Agent starts')
  payload=json.loads((home/'configuration-evidence/1.json').read_text());assert payload['prompt']==prompt
- assert len(s['requests'])==len(before['requests']) and len(s['cards'])==len(before['cards'])
+ assert len(agents(s))==len(agents(before)) and len(s['cards'])==len(before['cards'])
  reused=call('configuration.open',{'project_id':project['id'],'auto_fresh':True});assert reused['reused'] and reused['terminal_id']==session['terminal_id']
  assert len(list((home/'configuration-evidence').glob('*.json')))==1
  history=s['configuration_sessions'][0]['provider_session_id'];assert history

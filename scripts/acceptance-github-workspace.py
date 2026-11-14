@@ -39,7 +39,7 @@ try:
  p=call('project.create',{'name':'GitHub workspace acceptance','directory':str(source)})
  call('project.github',{'project_id':p['id'],'repository':'fixture/repo','intake':'all','pr_intake':'all'})
  call('github.sync',{'project_id':p['id']})
- s=wait(lambda s:len(s['cards'])==2);assert all(c['stage']=='backlog' for c in s['cards']);assert not s['requests']
+ s=wait(lambda s:len(s['cards'])==2);assert all(c['stage']=='backlog' for c in s['cards']);assert not [t for t in s['terminals'] if t.get('agent')]
  issue=next(c for c in s['cards'] if c['content']['kind']=='github_issue');prcard=next(c for c in s['cards'] if c['content']['kind']=='github_pr')
  r={'repository':'fixture/repo','kind':'pr','number':2,'sha':None,'url':'https://github.com/fixture/repo/pull/2'}
  restored=call('github.item.add',{'project_id':p['id'],'reference':r});assert restored['id']==prcard['id']
@@ -68,7 +68,7 @@ try:
  remote(head='c'*40,title='Refreshed source title',updated_at='2026-11-10T02:00:00Z')
  assert 'error' in call('github.remote.review',{**review,'request_key':'stale-review'},check=False)
  assert len([v for v in requests() if v['method']=='POST' and v['path'].endswith('/reviews')])==1
- call('github.sync',{'project_id':p['id']});s=call('app.snapshot');assert next(c for c in s['cards'] if c['id']==issue['id'])['title']=='Refreshed source title';assert not s['requests']
+ call('github.sync',{'project_id':p['id']});s=call('app.snapshot');assert next(c for c in s['cards'] if c['id']==issue['id'])['title']=='Refreshed source title';assert not [t for t in s['terminals'] if t.get('agent')]
  call('github.notification.read',{'thread_id':'9','request_key':'read-once'});call('github.notification.read',{'thread_id':'9','request_key':'read-once'});assert call('github.browse',q)['items'][0]['item']['unread']==False
  db=sqlite3.connect(home/'canban.sqlite');content=''.join(row[0] for row in db.execute('SELECT data FROM cards UNION ALL SELECT data FROM events UNION ALL SELECT data FROM github_issues'));assert 'REMOTE_BODY_SENTINEL' not in content;assert 'ACCEPTANCE_COMMENT_SENTINEL' not in content;assert 'ACCEPTANCE_REPLY_SENTINEL' not in content;assert db.execute('SELECT count(*) FROM github_issues').fetchone()[0]==0;db.close()
  call('app.shutdown');server.wait(timeout=15);server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log);ready();assert call('github.browse',q)['items'];assert len(call('app.snapshot')['cards'])==3

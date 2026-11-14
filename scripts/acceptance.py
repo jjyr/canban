@@ -40,6 +40,9 @@ def call(method, params=None):
         raise RuntimeError(result.stderr)
     return json.loads(result.stdout)
 
+def agents(snapshot):
+    return [t["agent"] for t in snapshot["terminals"] if t.get("agent")]
+
 def wait_for(predicate, label, timeout=40):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -133,23 +136,22 @@ steps:
     move = {"card_id": card["id"], "revision": card["revision"], "stage": "develop", "request_key": "acceptance-move"}
     call("card.move", move)
     call("card.move", move)
-    state = wait_for(lambda s: len(s["reports"]) >= 2 and all(r["state"] == "completed" for r in s["requests"]), "Develop -> Review reports")
-    assert len(state["requests"]) == 2
-    assert {r["stage"]: r["profile"]["id"] for r in state["requests"]} == {"develop": "developer", "review": "reviewer"}
-    for attempt in state["attempts"]:
+    state = wait_for(lambda s: len(s["reports"]) >= 2 and len(agents(s)) == 2 and all(r["state"] == "completed" for r in agents(s)), "Develop -> Review reports")
+    assert len(agents(state)) == 2
+    assert {r["stage"]: r["profile"]["id"] for r in agents(state)} == {"develop": "developer", "review": "reviewer"}
+    for attempt in agents(state):
         prompt = (home / attempt["input_path"]).read_text()
         context = json.loads((home / attempt["input_path"]).with_name("context.json").read_text())
         assert context["notes"] == [] and "canban note" not in prompt
-        request = next(r for r in state["requests"] if r["id"] == attempt["request_id"])
-        assert request["profile"]["role_instruction"] in prompt
-        assert "ACCEPTANCE_ROLE_" + request["profile"]["id"].upper() in prompt
+        assert attempt["profile"]["role_instruction"] in prompt
+        assert "ACCEPTANCE_ROLE_" + attempt["profile"]["id"].upper() in prompt
     assert call("note.read", {"note_id": note["id"]})["body"] == note["body"]  # Legacy data remains intact.
     help_text = subprocess.run([str(cli), "--help"], capture_output=True, text=True, check=True).stdout
     assert not any(line.strip().startswith("note ") for line in help_text.splitlines())
     current = next(c for c in state["cards"] if c["id"] == card["id"])
     assert current["stage"] == "review"
     assert (source / "canban-acceptance.txt").exists()
-    assert all(a["core_id"] == core["core"]["id"] and a["terminal"] for a in state["attempts"])
+    assert all(a["core_id"] == core["core"]["id"] and a["terminal"] for a in agents(state))
     print("DEVELOP_REVIEW_OK separate template-selected profiles, captured roles, explicit results and runtime bindings", flush=True)
     call("comment.add", {"card_id": card["id"], "body": "@fixture explain the change"})
     state = wait_for(lambda s: len(s["reports"]) >= 3, "Fresh mention Session")
@@ -175,7 +177,7 @@ steps:
     server.wait(timeout=10)
     server = subprocess.Popen([str(cli), "serve"], env=env, stdout=log, stderr=log)
     restored = wait_for(lambda s: len(s["reports"]) >= 4, "AppServer restart")
-    assert len(restored["requests"]) == 4
+    assert len(agents(restored)) == 3 and max(a["number"] for a in agents(restored)) == 4
     print("RESTART_OK", flush=True)
     cards = []
     for index in range(3):
@@ -185,14 +187,14 @@ steps:
         call("comment.add", {"card_id": card["id"], "body": "@fixture concurrency-barrier"})
     barrier = home / "acceptance-barrier"
     state = wait_for(lambda s: barrier.exists() and len(list(barrier.iterdir())) == 3
-                     and len([a for a in s["attempts"] if a["card_id"] in cards and a["terminal"]]) == 3,
+                     and len([a for a in agents(s) if a["card_id"] in cards and a["terminal"]]) == 3,
                      "Three same-profile Agents running across Boards within the global budget")
-    concurrent = [a for a in state["attempts"] if a["card_id"] in cards]
+    concurrent = [a for a in agents(state) if a["card_id"] in cards]
     assert len({a["project_id"] for a in concurrent}) == 3
     assert len({a["terminal"] for a in concurrent}) == 3
     assert all(a["core_id"] == core["core"]["id"] for a in concurrent)
     (barrier / "release").touch()
-    wait_for(lambda s: len(s["reports"]) == 7 and all(r["state"] == "completed" for r in s["requests"] if r["card_id"] in cards),
+    wait_for(lambda s: len(s["reports"]) == 7 and all(r["state"] == "completed" for r in agents(s) if r["card_id"] in cards),
              "Concurrent Agents report independently")
     print(f"GLOBAL_BUDGET_CONCURRENCY_OK three Boards, one profile, ignored legacy capacity=1\nACCEPTANCE_HOME={home}\nACCEPTANCE_PASSED", flush=True)
 finally:

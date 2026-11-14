@@ -3,7 +3,7 @@
 import json,os,re,sys,uuid,termios,tty,base64
 from pathlib import Path
 import subprocess
-home=Path(os.environ['CANBAN_HOME']);request=os.environ['CANBAN_REQUEST_ID'];attempt=int(os.environ['CANBAN_ATTEMPT'])
+home=Path(os.environ['CANBAN_HOME']);run_dir=Path(os.environ['CANBAN_RUN_DIR'])
 args=sys.argv[1:];session=args[args.index('--resume')+1] if '--resume' in args else str(uuid.uuid4())
 history=home/'fixture-history'/f'{session}.json';history.parent.mkdir(exist_ok=True)
 if '--resume' in args and not history.exists():
@@ -12,8 +12,9 @@ saved=json.loads(history.read_text()) if history.exists() else {'session':sessio
 history.write_text(json.dumps(saved))
 def call(method,p):
  r=subprocess.run([os.environ['CANBAN_CLI'],'call',method,json.dumps(p)],capture_output=True,text=True,check=True);return json.loads(r.stdout)
-call('agent.bind',{'request_id':request,'attempt':attempt,'session_id':session})
-manifest=next(home.glob(f'projects/*/cards/*/runs/{request}/{attempt}/context.json'));context=json.loads(manifest.read_text())
+manifest=run_dir/'context.json';context=json.loads(manifest.read_text())
+terminal_id=context['terminal_id'];run_number=int(context['agent']['number'])
+call('agent.bind',{'terminal_id':terminal_id,'session_id':session})
 print(f'\x1b[36mINTERACTIVE_READY {session}\x1b[0m',flush=True)
 print('\x1b[?2004h',end='',flush=True)
 def state(word,kind=None,title='',msg=''):
@@ -23,18 +24,18 @@ def state(word,kind=None,title='',msg=''):
   if v:fields.append(k+'='+base64.b64encode(v.encode()).decode())
  print('\x1b]7501;'+':'.join(fields)+'\x1b\\',end='',flush=True)
 def reply(q):
- f=manifest.parent/f'answer-{q["id"]}.md';f.write_text(f'Answer for {q["id"]}; session={session}; turns={saved["turns"]}; Card={context["card"]["id"]}\n')
- call('agent.reply',{'request_key':'fixture-reply:'+q['id'],'question_id':q['id'],'request_id':request,'attempt':attempt,'body':f.read_text()})
+ f=manifest.parent/f'answer-{q["id"].replace(":","_")}.md';f.write_text(f'Answer for {q["id"]}; session={session}; turns={saved["turns"]}; Card={context["card"]["id"]}\n')
+ call('agent.reply',{'request_key':'fixture-reply:'+q['id'],'question_id':q['id'],'terminal_id':terminal_id,'body':f.read_text()})
  saved['turns']+=1;history.write_text(json.dumps(saved));print('QUESTION_REPLIED '+q['id'],flush=True)
 def finish():
  history.write_text(json.dumps(saved))
  f=manifest.parent/'fixture-report.md';f.write_text(f'# Interactive report\nSession: {session}\nCard: {context["card"]["id"]}\n')
- call('execution.report',{'request_key':f'fixture-complete:{request}:{attempt}','execution':{'request_id':request,'attempt_number':attempt},'state':'completed','message':'Interactive fixture completed','body':f.read_text()})
+ call('execution.report',{'request_key':f'fixture-complete:{terminal_id}:{run_number}','terminal_id':terminal_id,'state':'completed','message':'Interactive fixture completed','body':f.read_text()})
  print('FINAL_RESPONSE_SAVED',flush=True)
  state('done')
 state('working')
 initial=context.get('questions',[])
-if context['request']['stage']=='review' and context['request']['trigger']=='stage_entry':finish()
+if context['agent']['stage']=='review' and context['agent']['trigger'] in ('stage_entry','workflow'):finish()
 for q in initial:reply(q)
 if initial:finish()
 old=termios.tcgetattr(sys.stdin.fileno());tty.setraw(sys.stdin.fileno())
@@ -59,12 +60,13 @@ try:
    match=re.search(r'Canban question ([^\s]+)',line)
    if match:
     qid=match.group(1);q=next(q for q in call('app.snapshot',{})['questions'] if q['id']==qid);reply(q);state('working')
-   elif line.startswith('Canban assignment '):
-    binding,_=json.JSONDecoder().raw_decode(line[len('Canban assignment '):])
-    request=binding['request_id'];attempt=binding['attempt'];manifest=Path(binding['manifest']);context=json.loads(manifest.read_text())
-    os.environ.update(CANBAN_REQUEST_ID=request,CANBAN_ATTEMPT=str(attempt),CANBAN_RUN_DIR=binding['run_dir'])
-    print('ASSIGNMENT_READY '+request,flush=True)
-    if context['request']['stage']=='review':finish()
+   elif line.startswith('New Canban assignment on Card #'):
+    m=re.search(r"CANBAN_RUN_DIR=(?:'([^']+)'|(\S+))",line)
+    if m:run_dir=Path(m.group(1) or m.group(2));os.environ['CANBAN_RUN_DIR']=str(run_dir)
+    manifest=run_dir/'context.json';context=json.loads(manifest.read_text())
+    terminal_id=context['terminal_id'];run_number=int(context['agent']['number'])
+    print('ASSIGNMENT_READY '+terminal_id+':'+str(run_number),flush=True)
+    if context['agent']['stage']=='review':finish()
    elif line.startswith('note-write '):
     _,note_id,body=line.split(' ',2)
     note=call('note.get',{'note_id':note_id})
@@ -77,7 +79,7 @@ try:
    elif line=='working':state('working');print('WORKING_READY',flush=True)
    elif line=='done-only':state('done');print('DONE_WITHOUT_REPORT',flush=True)
    elif line=='block':
-    call('execution.report',{'request_key':f'fixture-block:{request}:{attempt}','execution':{'request_id':request,'attempt_number':attempt},'state':'blocked','message':'Human answer required'})
+    call('execution.report',{'request_key':f'fixture-block:{terminal_id}:{run_number}','terminal_id':terminal_id,'state':'blocked','message':'Human answer required'})
     state('idle');print('HUMAN_INPUT_REQUIRED',flush=True)
    elif line=='finish':finish()
    else:print('\r\nINPUT '+line+'\r\n',end='',flush=True)

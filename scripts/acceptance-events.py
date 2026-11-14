@@ -4,7 +4,7 @@ from pathlib import Path
 import json, os, shutil, subprocess, tempfile, time
 repo=Path(__file__).resolve().parents[1]
 base=Path(tempfile.mkdtemp(prefix='cb-events-',dir='/private/tmp'));home=base/'home';cli=repo/'target/debug/canban'
-core={'HC_SESSION':'events-acceptance','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'hc-state'),'XDG_CONFIG_HOME':str(base/'hc-config')}
+core={'HC_SESSION':'default','HC_SOCKET':str(base/'hc.sock'),'XDG_STATE_HOME':str(base/'hc-state'),'XDG_CONFIG_HOME':str(base/'hc-config')}
 env={**{k:v for k,v in os.environ.items() if not k.startswith('CANBAN_')},**core,'CANBAN_HOME':str(home)}
 wrapper=base/'hc-wrapper'
 wrapper.write_text('''#!/usr/bin/python3
@@ -99,7 +99,9 @@ try:
  wait(lambda s:context(s,terminal['id']).get('branch')=='new-repository','new .git invalidation')
  card=call('card.create',{'project_id':project['id'],'title':'Report-free failure'})
  opened=call('agent.open',{'card_id':card['id'],'profile_id':'codex'})
- def attempt(s):return next((a for a in s['attempts'] if a['request_id']==opened['request_id'] and a.get('provider_session_id')),None)
+ def attempt(s):
+  t=next((t for t in s['terminals'] if t['id']==opened['terminal_id']),None)
+  return t['agent'] if t and (t.get('agent') or {}).get('provider_session_id') else None
  s=wait(lambda s:attempt(s),'Agent');a=attempt(s)
  hc('terminal.send',{'terminal':a['terminal'],'text':'permission','force':True})
  wait(lambda s:attempt(s).get('lifecycle',{}).get('waiting'),'permission')
