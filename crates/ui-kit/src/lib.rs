@@ -31,7 +31,11 @@ pub use picker::{PickerOption, SearchPopover, filter_picker_options, search_popo
 pub mod entry_card;
 pub use entry_card::entry_card;
 pub mod directory_field;
-pub use directory_field::{directory_field, directory_input};
+pub use directory_field::{
+    PathCandidate, PathCandidateKind, PathEntry, PathListing, PathQuery, compact_home,
+    directory_field, drill_down_path, expand_tilde, filter_path_candidates, finalize_path,
+    parse_path_query, path_combobox,
+};
 pub mod settings;
 pub use settings::{settings_field, settings_nav_heading, settings_nav_item, settings_section};
 pub mod section_group;

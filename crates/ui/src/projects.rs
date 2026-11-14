@@ -27,10 +27,15 @@ pub fn new_project_form(
     effect(move || {
         let path = directory.get();
         if !custom_name.get_untracked() {
-            let suggestion = std::path::Path::new(path.trim())
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
+            let trimmed = path.trim();
+            let suggestion = if trimmed == "~" || trimmed == "/" {
+                String::new()
+            } else {
+                std::path::Path::new(trimmed)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            };
             name.set(suggestion);
         }
     });

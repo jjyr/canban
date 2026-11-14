@@ -3,7 +3,7 @@ use crate::presenter::*;
 use canban_types::*;
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
-use serde_json::{Value, json};
+use serde_json::json;
 pub fn refresh_catalog(ui: Ui) {
     if ui.machines_loading.get_untracked() {
         return;
@@ -89,144 +89,197 @@ pub fn picker(ui: Ui, machine: Signal<String>, directory: Signal<String>) -> imp
         .self_start()
     })
 }
+fn fixture_listing(machine: &str, base_dir: &str) -> PathListing {
+    let home = if machine == "local" {
+        "/Users/demo".to_owned()
+    } else {
+        "/home/builder".to_owned()
+    };
+    let resolved = if base_dir.is_empty() {
+        home.clone()
+    } else {
+        expand_tilde(base_dir, &home)
+    };
+    let clean = if resolved.len() > 1 {
+        resolved.trim_end_matches('/').to_owned()
+    } else {
+        resolved
+    };
+    let subdirs: &[&str] = match (machine, clean.as_str()) {
+        ("local", "/") => &["Applications", "Users", "opt", "tmp"],
+        ("local", "/Users") => &["Shared", "demo"],
+        ("local", "/Users/demo") => &[".canban", ".config", "Desktop", "Documents", "Workspace"],
+        ("local", "/Users/demo/Workspace") => &[
+            ".git",
+            "Machines",
+            "canban",
+            "canban-site",
+            "herdr",
+            "sheprd",
+        ],
+        (_, "/") => &["home", "opt", "srv", "tmp", "var"],
+        (_, "/home") => &["builder"],
+        (_, "/home/builder") => &[".cache", ".ssh", "projects", "workspaces"],
+        (_, "/home/builder/workspaces") => &["canban", "core-service", "infra"],
+        _ => &[],
+    };
+    let exists = !subdirs.is_empty()
+        || matches!(
+            clean.as_str(),
+            "/Users/demo/Workspace/canban"
+                | "/Users/demo/Workspace/canban-site"
+                | "/Users/demo/Workspace/herdr"
+                | "/Users/demo/Workspace/sheprd"
+                | "/Users/demo/Workspace/Machines"
+                | "/home/builder/workspaces/canban"
+                | "/home/builder/workspaces/core-service"
+                | "/home/builder/workspaces/infra"
+        );
+    let entries = subdirs
+        .iter()
+        .map(|name| {
+            let full = if clean == "/" {
+                format!("/{name}")
+            } else {
+                format!("{clean}/{name}")
+            };
+            PathEntry::new(*name, full)
+        })
+        .collect();
+    PathListing {
+        base_dir: clean,
+        home,
+        exists,
+        entries,
+        loading: false,
+        error: String::new(),
+    }
+}
+
 fn browse(
     ui: Ui,
     machine: Signal<String>,
     path: String,
-    result: Signal<Value>,
-    busy: Signal<bool>,
-    error: Signal<String>,
+    listing: Signal<PathListing>,
     epoch: Signal<u64>,
 ) {
+    let host = machine.get_untracked();
     let Some(app) = crate::APP.get().cloned() else {
+        listing.set(fixture_listing(&host, &path));
         return;
     };
-    let host = machine.get_untracked();
     let generation = epoch.get_untracked() + 1;
     epoch.set(generation);
-    busy.set(true);
-    error.set(String::new());
+    listing.update(|l| {
+        l.loading = true;
+        l.error.clear();
+    });
+    let delay_ms = if host == "local" { 0 } else { 120 };
     ui.spawn(async move {
+        if delay_ms > 0 {
+            timer(std::time::Duration::from_millis(delay_ms)).await;
+            if epoch.try_get() != Some(generation)
+                || machine.try_get().as_deref() != Some(host.as_str())
+            {
+                return;
+            }
+        }
         let target = host.clone();
+        let req_path = path.clone();
         let value =
-            blocking(move || app.call("directory.list", json!({"machine":target,"path":path})))
+            blocking(move || app.call("directory.list", json!({"machine":target,"path":req_path})))
                 .await;
-        if epoch.try_get() != Some(generation) || machine.try_get() != Some(host) {
+        if epoch.try_get() != Some(generation)
+            || machine.try_get().as_deref() != Some(host.as_str())
+        {
             return;
         }
-        busy.try_set(false);
         match value {
             Ok(Ok(v)) => {
-                result.try_set(v);
+                let resolved_base = v["path"].as_str().unwrap_or(&path).to_owned();
+                let home = v["home"].as_str().unwrap_or("").to_owned();
+                let exists = v["exists"].as_bool().unwrap_or(true);
+                let entries = v["directories"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|row| {
+                                Some(PathEntry::new(row["name"].as_str()?, row["path"].as_str()?))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                listing.try_set(PathListing {
+                    base_dir: resolved_base,
+                    home,
+                    exists,
+                    entries,
+                    loading: false,
+                    error: String::new(),
+                });
             }
             Ok(Err(e)) => {
-                error.try_set(format!("{e:#}"));
+                let msg = format!("{e:#}");
+                listing.update(|l| {
+                    l.loading = false;
+                    l.error = msg;
+                });
             }
             Err(e) => {
-                error.try_set(e.to_string());
+                let msg = e.to_string();
+                listing.update(|l| {
+                    l.loading = false;
+                    l.error = msg;
+                });
             }
         }
     });
 }
-/// Editable path with one machine-appropriate chooser, shared by creation/settings.
+/// Inline editable path combobox with live machine-aware directory filtering,
+/// shared by New Project and Work location settings.
 pub fn directory_picker(
     ui: Ui,
     machine: Signal<String>,
     directory: Signal<String>,
 ) -> impl IntoElement {
-    let open = signal(false);
-    let result = signal(Value::Null);
-    let busy = signal(false);
-    let error = signal(String::new());
-    let epoch = signal(0u64);
-    effect(move || {
-        let _ = machine.get();
-        epoch.update(|n| *n += 1);
-        open.set(false);
-        busy.set(false);
-        result.set(Value::Null);
-        error.set(String::new());
+    let default_home = if crate::APP.get().is_some() {
+        std::env::var("HOME").unwrap_or_default()
+    } else {
+        "/Users/demo".to_owned()
+    };
+    let listing = signal(PathListing {
+        home: default_home,
+        ..Default::default()
     });
-    view()
-        .min_w(px(0.))
-        .gap_2()
-        .child(dynamic(move || {
-            if machine.get() == "local" && std::env::var_os("CANBAN_ENDPOINT").is_none() {
-                directory_field(directory, |_| {}).into_element()
+    let epoch = signal(0u64);
+    let prev_machine = stored(machine.get_untracked());
+    effect(move || {
+        let current = machine.get();
+        if prev_machine.replace(current.clone()) != current {
+            epoch.update(|n| *n += 1);
+            let next_home = if current == "local" {
+                if crate::APP.get().is_some() {
+                    std::env::var("HOME").unwrap_or_default()
+                } else {
+                    "/Users/demo".to_owned()
+                }
             } else {
-                directory_input(
-                    directory,
-                    move || busy.get(),
-                    move |_| {
-                        open.set(true);
-                        browse(
-                            ui,
-                            machine,
-                            directory.get_untracked(),
-                            result,
-                            busy,
-                            error,
-                            epoch,
-                        );
-                    },
-                )
-                .into_element()
-            }
-        }))
-        .child(dynamic(move || {
-            if !open.get() {
-                return view();
-            }
-            let v = result.get();
-            let path = v["path"].as_str().unwrap_or("").to_owned();
-            let mut panel = panel().gap_2().max_h(px(320.));
-            if busy.get() {
-                panel = panel.child(muted("Loading directories…"));
-            }
-            if !error.get().is_empty() {
-                panel = panel.child(notice(error.get(), Tone::Attention));
-            }
-            if !path.is_empty() {
-                let choose = path.clone();
-                let parent = v["parent"].as_str().unwrap_or("/").to_owned();
-                panel = panel.child(label(path)).child(
-                    view()
-                        .flex_row()
-                        .gap_2()
-                        .child(
-                            action("Use this directory", Variant::Primary, move |_| {
-                                directory.set(choose.clone());
-                                open.set(false);
-                            })
-                            .disabled(move || busy.get()),
-                        )
-                        .child(
-                            action("Parent", Variant::Quiet, move |_| {
-                                browse(ui, machine, parent.clone(), result, busy, error, epoch)
-                            })
-                            .disabled(move || busy.get()),
-                        ),
-                );
-            }
-            let mut dirs = view().gap_1();
-            for row in v["directories"].as_array().cloned().unwrap_or_default() {
-                let path = row["path"].as_str().unwrap_or("").to_owned();
-                let title = row["name"].as_str().unwrap_or("").to_owned();
-                dirs = dirs.child(
-                    action(title, Variant::Quiet, move |_| {
-                        browse(ui, machine, path.clone(), result, busy, error, epoch)
-                    })
-                    .disabled(move || busy.get()),
-                );
-            }
-            panel
-                .child(scroll().max_h(px(200.)).child(dirs))
-                .child(action("Close browser", Variant::Quiet, move |_| {
-                    epoch.update(|v| *v += 1);
-                    busy.set(false);
-                    open.set(false);
-                }))
-        }))
+                String::new()
+            };
+            listing.set(PathListing {
+                home: next_home,
+                ..Default::default()
+            });
+        }
+    });
+    path_combobox(
+        directory,
+        move || listing.get(),
+        move |base_dir| {
+            browse(ui, machine, base_dir, listing, epoch);
+        },
+        |_| {},
+    )
 }
 pub fn location_fields(
     ui: Ui,
@@ -243,7 +296,7 @@ pub fn location_fields(
         ))
         .child(settings_field(
             "Directory",
-            "Enter an absolute path on the selected machine. New directories are created on save.",
+            "Filter and select subdirectories inline or type an absolute/`~/` path. New directories are created on save.",
             directory_picker(ui, machine, directory),
         ))
 }

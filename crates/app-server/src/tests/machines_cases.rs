@@ -320,3 +320,42 @@ fn provider_session_ids_are_scoped_to_the_owning_machine() {
         .unwrap();
     app.call("agent.bind",json!({"project_id":p.id,"card":second["number"],"profile_id":"codex","session_id":"short-provider-id"})).unwrap();
 }
+
+#[test]
+fn directory_list_returns_sorted_subdirs_home_and_nonexistent_gracefully() {
+    let (dir, app, _, _) = setup();
+    let ws = dir.path().join("workspace");
+    std::fs::create_dir_all(ws.join("zebra")).unwrap();
+    std::fs::create_dir_all(ws.join("alpha")).unwrap();
+    std::fs::create_dir_all(ws.join(".hidden")).unwrap();
+    std::fs::write(ws.join("README.md"), b"not a directory").unwrap();
+
+    let res = app
+        .call("directory.list", json!({"machine": "local", "path": ws}))
+        .unwrap();
+    assert_eq!(res["exists"], json!(true));
+    assert!(res["home"].as_str().is_some_and(|h| !h.is_empty()));
+    let names: Vec<&str> = res["directories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec![".hidden", "alpha", "zebra"]);
+
+    let missing = dir.path().join("workspace/not-created-yet");
+    let res_missing = app
+        .call(
+            "directory.list",
+            json!({"machine": "local", "path": missing}),
+        )
+        .unwrap();
+    assert_eq!(res_missing["exists"], json!(false));
+    assert_eq!(res_missing["directories"], json!([]));
+    assert!(res_missing["home"].as_str().is_some_and(|h| !h.is_empty()));
+
+    let res_tilde = app
+        .call("directory.list", json!({"machine": "local", "path": "~"}))
+        .unwrap();
+    assert_eq!(res_tilde["exists"], json!(true));
+}

@@ -16,15 +16,19 @@ Board                                     Board
 
 The Project-name selector still offers existing Projects and New Project in its footer. Clicking the entry opens the same creation form. Cancel returns to Board without creating anything.
 
-### Simplified New Project form (2026-11-09)
+### Simplified New Project form (2026-11-09, updated 2026-11-15)
 
-The creation form now shows Directory first, then Name, a collapsed Execution machine disclosure, and Cancel / Create Project. The page subtitle, Project details section heading and routine field descriptions are removed. Fields retain accessible labels, shared focus/disabled styling and necessary error feedback.
+The creation form shows Directory first, then Name, a collapsed Execution machine disclosure, and Cancel / Create Project. The page subtitle, Project details section heading and routine field descriptions are removed. Fields retain accessible labels, shared focus/disabled styling and necessary error feedback.
 
 ```text
 New Project
 
 Directory
-[/absolute/path/to/canban                 ] [Choose…]
+[/absolute/path/to/canban                          ]
+┌──────────────────────────────────────────────────┐
+│ 📁 canban                 /absolute/path/to      │
+│ 📁 canban-tools           /absolute/path/to      │
+└──────────────────────────────────────────────────┘
 
 Name
 [canban                                            ]
@@ -36,20 +40,21 @@ Name
 
 The default execution machine is local (the AppServer host); users do not need to open or fill the machine setting. Expanding it reveals the existing machine picker. A selected remote machine remains named in the collapsed summary. Switching machines clears the previous directory, resets browser results and invalidates pending responses; a custom Project name is retained.
 
-Name follows the directory basename, including typed/pasted paths and either chooser. It keeps following directory changes until the user explicitly edits Name; later directory changes preserve that custom text. Trailing directory separators are handled. Empty names/directories disable Create Project. New paths are still created by the existing server operation.
+Name follows the directory basename, including typed/pasted paths and candidate selection. It keeps following directory changes until the user explicitly edits Name; later directory changes preserve that custom text. Trailing directory separators and bare `~` / `/` roots are handled cleanly. Empty names/directories disable Create Project. New paths are created by the server operation (`mkdir -p`) on save, including `~` / `~/` expansion on the target machine.
 
-There is one Choose action beside the path: directly local UI uses the macOS folder picker, while remote machines and explicit AppServer endpoints use the server-side browser. The duplicate Browse on machine action is removed. Work location settings reuse this same path control while retaining their execution-change explanation.
+Directory uses a single inline-filtering path combobox without an external **Choose…** button or native folder sheet, uniformly across local and remote SSH machines through `directory.list`. Work location settings reuse this exact path combobox while retaining their execution-change explanation.
 
 ## Source directory
 
-The shared `ui-kit::directory_field` combines an editable path with **Choose…**. It uses NSH `pick_paths(OpenDialog::folders())`, so macOS displays its native folder-selection sheet; no new native bridge or dialog dependency is introduced.
+The shared `ui-kit::path_combobox` (with standalone local helper `ui-kit::directory_field`) provides one editable text input (`Role::Combobox`) paired with an anchored subdirectory filter overlay:
 
-- Choosing a folder fills the path. The New Project presenter generates its name from the basename until the user edits it; a user-supplied name is preserved.
-- Cancelling preserves the path and name. The chooser disables its own launch action while open, reports picker failures inline and ignores answers after its owning field has been disposed.
-- If a path has already been entered, the chooser starts at its nearest existing absolute directory. Typed/pasted paths remain supported, including a directory that will be created on submit.
-- Choosing a folder does not create a Project. The explicit Create Project action remains the commit point.
+- Focusing or typing splits the query at the last `/` into `(base_dir, segment_filter)` (expanding `~` / `~/` against the host's home directory) and ranks matching subdirectories in real time (`canban_ui_kit::search::score_field`). Dot-prefixed directories stay hidden unless `segment_filter` starts with `.`.
+- `↑` / `↓` move the highlighted candidate while keeping keyboard focus and IME composition inside the text input. `Tab` drills into the highlighted directory by appending `/` and loading its subdirectories without closing the dropdown.
+- `Enter` or clicking a candidate row finalizes the directory selection (stripping trailing `/`), closes the dropdown, and emits `on_choose`. `Escape` or outside click closes the dropdown while preserving typed text.
+- Typing a path that does not yet exist offers a `Use "<path>" · New directory` candidate so new directories can be confirmed and created seamlessly on submit.
+- Choosing or confirming a path does not create a Project immediately. The explicit Create Project / Save location action remains the commit point.
 
-The UI Kit emits the chosen path; Project-name policy and `project.create` stay in product UI. Field values and submit validation are controlled by the form. The existing backend remains responsible for directory creation and Project validation.
+The UI Kit owns path query parsing, filtering, keyboard navigation and overlay presentation; AppServer `directory.list` fetching, Project-name policy and `project.create` / `project.location` stay in product UI. The backend expands `~` / `~/`, creates missing directories and canonicalizes the saved path.
 
 ## Overview
 
@@ -78,7 +83,7 @@ Save scheduling settings persists both fields; concurrency must be positive, idl
 | Owner | Contract |
 | --- | --- |
 | `ui-kit/entry_card.rs` | Generic icon, title, supporting text and press intent; one NSH Button |
-| `ui-kit/directory_field.rs` | Controlled directory string, native chooser/cancellation/error/pending behavior and path-selected intent |
+| `ui-kit/directory_field.rs` | Controlled `path_combobox` / `directory_field`: single editable path input, inline subdirectory filtering, `Tab` drill-down, `Enter`/click selection, `New directory` fallback, and path-selected intent (no external `Choose…` button) |
 | `ui-kit/settings.rs` | Section/field visual composition plus `settings_nav_heading` / `settings_nav_item` jump controls; parent owns scrolling and persistence |
 | `ui/settings.rs` | Settings middle jump rail, narrow horizontal jump strip, scroll-spy/pin model, and `Acknowledgements & Licenses` section |
 | `ui/board.rs`, `ui/screens.rs` | Project availability, form/autoname policy and application operations |

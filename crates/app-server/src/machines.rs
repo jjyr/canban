@@ -66,21 +66,35 @@ impl AppServer {
     pub(super) fn work_location(&self, p: &Value) -> Result<WorkLocation> {
         let raw = p.get("location").filter(|v| v.is_object()).unwrap_or(p);
         let machine = self.resolve_machine(raw["machine"].as_str().unwrap_or("local"), false)?;
-        let directory = strp(raw, "directory")?.trim();
-        ensure!(
-            !directory.is_empty() && Path::new(directory).is_absolute(),
-            "An absolute directory on the selected machine is required"
-        );
+        let raw_dir = strp(raw, "directory")?.trim();
         let host = Host::new(self.config(), &machine);
         // An offline configuration is valid. Actual execution always preflights.
         let available = self.resolve_machine(&machine, true).is_ok();
+        let expanded = if raw_dir == "~" {
+            ensure!(available, "Machine must be connected to expand '~'");
+            host.home()?
+        } else if let Some(rest) = raw_dir.strip_prefix("~/") {
+            ensure!(available, "Machine must be connected to expand '~/'");
+            let home = host.home()?;
+            if home == "/" {
+                format!("/{rest}")
+            } else {
+                format!("{home}/{rest}")
+            }
+        } else {
+            raw_dir.to_owned()
+        };
+        ensure!(
+            !expanded.is_empty() && Path::new(&expanded).is_absolute(),
+            "An absolute directory on the selected machine is required"
+        );
         let directory = if available {
-            host.mkdir(Path::new(directory))?;
-            host.canonical(Path::new(directory))?
+            host.mkdir(Path::new(&expanded))?;
+            host.canonical(Path::new(&expanded))?
                 .to_string_lossy()
                 .into_owned()
         } else {
-            directory.into()
+            expanded
         };
         Ok(WorkLocation { machine, directory })
     }
@@ -155,18 +169,90 @@ impl AppServer {
     pub(super) fn browse_directory(&self, p: Value) -> Result<Value> {
         let machine = self.resolve_machine(p["machine"].as_str().unwrap_or("local"), true)?;
         let host = Host::new(self.config(), &machine);
-        let path = p["path"]
-            .as_str()
-            .filter(|v| !v.is_empty())
-            .map(str::to_owned)
-            .unwrap_or(host.home()?);
+        let raw = p["path"].as_str().map(str::trim).filter(|v| !v.is_empty());
+        let path = match raw {
+            Some("~") => host.home()?,
+            Some(rest) if rest.starts_with("~/") => {
+                let home = host.home()?;
+                if home == "/" {
+                    format!("/{}", &rest[2..])
+                } else {
+                    format!("{home}/{}", &rest[2..])
+                }
+            }
+            Some(other) => other.to_owned(),
+            None => host.home()?,
+        };
         ensure!(
             Path::new(&path).is_absolute(),
             "An absolute directory is required"
         );
-        host.python(r#"import os,sys,json
-p=os.path.realpath(sys.argv[1]);assert os.path.isdir(p), 'Directory unavailable'
-print(json.dumps({'path':p,'parent':os.path.dirname(p),'directories':[{'name':n,'path':os.path.join(p,n)} for n in sorted(os.listdir(p)) if os.path.isdir(os.path.join(p,n))]}))"#,&[&path])
+        if !host.remote() {
+            let home = host.home().unwrap_or_default();
+            let target = Path::new(&path);
+            if !target.is_dir() {
+                return Ok(json!({
+                    "path": path,
+                    "parent": target.parent().map(|d| d.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into()),
+                    "home": home,
+                    "exists": false,
+                    "directories": [],
+                }));
+            }
+            let real = target
+                .canonicalize()
+                .unwrap_or_else(|_| target.to_path_buf());
+            let mut directories = Vec::new();
+            if let Ok(entries) = std::fs::read_dir(&real) {
+                for entry in entries.flatten() {
+                    let entry_path = entry.path();
+                    if entry_path.is_dir()
+                        && let Some(name) = entry.file_name().to_str()
+                    {
+                        directories
+                            .push((name.to_owned(), entry_path.to_string_lossy().into_owned()));
+                    }
+                }
+            }
+            directories.sort_by(|a, b| a.0.cmp(&b.0));
+            let parent = real
+                .parent()
+                .map(|d| d.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "/".into());
+            return Ok(json!({
+                "path": real.to_string_lossy(),
+                "parent": parent,
+                "home": home,
+                "exists": true,
+                "directories": directories
+                    .into_iter()
+                    .map(|(name, p)| json!({"name": name, "path": p}))
+                    .collect::<Vec<_>>(),
+            }));
+        }
+        host.python(
+            r#"import os,sys,json
+raw=sys.argv[1]
+home=os.path.expanduser('~')
+if not os.path.isdir(raw):
+    print(json.dumps({'path':raw,'parent':os.path.dirname(raw) or '/','home':home,'exists':False,'directories':[]}))
+else:
+    p=os.path.realpath(raw)
+    try:
+        names=sorted(os.listdir(p))
+    except OSError:
+        names=[]
+    dirs=[]
+    for n in names:
+        full=os.path.join(p,n)
+        try:
+            if os.path.isdir(full):
+                dirs.append({'name':n,'path':full})
+        except OSError:
+            pass
+    print(json.dumps({'path':p,'parent':os.path.dirname(p) or '/','home':home,'exists':True,'directories':dirs}))"#,
+            &[&path],
+        )
     }
     pub(super) fn add_machine(&self, p: Value) -> Result<Value> {
         // Interactive CLI handles host keys, login and installation on AppServer host.

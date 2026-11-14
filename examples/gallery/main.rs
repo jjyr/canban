@@ -97,7 +97,21 @@ fn controls() -> impl IntoElement {
     let input = signal("Card 现在编辑用中文时 mixed English @developer 与 `code` 对齐测试".into());
     let profile_fixture = signal(canban_types::Config::default().profiles);
     let count = signal(0_u32);
-    let directory = signal(String::new());
+    let directory = signal("~/Workspace/".to_owned());
+    let directory_listing = signal(PathListing {
+        base_dir: "/Users/demo/Workspace".into(),
+        home: "/Users/demo".into(),
+        exists: true,
+        entries: vec![
+            PathEntry::new("Machines", "/Users/demo/Workspace/Machines"),
+            PathEntry::new("canban", "/Users/demo/Workspace/canban"),
+            PathEntry::new("canban-site", "/Users/demo/Workspace/canban-site"),
+            PathEntry::new("herdr", "/Users/demo/Workspace/herdr"),
+            PathEntry::new("sheprd", "/Users/demo/Workspace/sheprd"),
+        ],
+        loading: false,
+        error: String::new(),
+    });
     let markdown = canban_ui_kit::markdown::MarkdownInput::new();
     let group_open = signal(true);
     let nav_selected = signal(0_usize);
@@ -119,7 +133,58 @@ fn controls() -> impl IntoElement {
                         .child(entry_card(Icon::Plus, "Create a Project", "One accessible clickable surface.", move |_| {
                             count.set(count.get_untracked() + 1);
                         }))
-                        .child(directory_field(directory, |_| {})),
+                        .child(path_combobox(
+                            directory,
+                            move || directory_listing.get(),
+                            move |base_dir| {
+                                let home = "/Users/demo".to_owned();
+                                let resolved = if base_dir.is_empty() {
+                                    home.clone()
+                                } else {
+                                    expand_tilde(&base_dir, &home)
+                                };
+                                let clean = if resolved.len() > 1 {
+                                    resolved.trim_end_matches('/').to_owned()
+                                } else {
+                                    resolved
+                                };
+                                let names: &[&str] = match clean.as_str() {
+                                    "/" => &["Applications", "Users", "opt", "tmp"],
+                                    "/Users" => &["Shared", "demo"],
+                                    "/Users/demo" => &[".canban", "Desktop", "Documents", "Workspace"],
+                                    "/Users/demo/Workspace" => &[
+                                        ".git",
+                                        "Machines",
+                                        "canban",
+                                        "canban-site",
+                                        "herdr",
+                                        "sheprd",
+                                    ],
+                                    _ => &[],
+                                };
+                                let exists = !names.is_empty()
+                                    || clean.starts_with("/Users/demo/Workspace/canban");
+                                directory_listing.set(PathListing {
+                                    base_dir: clean.clone(),
+                                    home,
+                                    exists,
+                                    entries: names
+                                        .iter()
+                                        .map(|n| {
+                                            let p = if clean == "/" {
+                                                format!("/{n}")
+                                            } else {
+                                                format!("{clean}/{n}")
+                                            };
+                                            PathEntry::new(*n, p)
+                                        })
+                                        .collect(),
+                                    loading: false,
+                                    error: String::new(),
+                                });
+                            },
+                            |_| {},
+                        )),
                 )
                 .child(dynamic(move || {
                     let is_open = group_open.get();
@@ -1346,6 +1411,16 @@ pub fn Gallery() -> impl IntoElement {
         );
         ui.snapshot.set(snapshot);
         ui.page.set("project-agents".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("new-project") {
+        ui.card.set(String::new());
+        ui.page.set("new-project".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("project-location") {
+        ui.card.set(String::new());
+        ui.page.set("project-location".into());
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("settings") {
