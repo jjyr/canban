@@ -96,7 +96,7 @@ pub fn prepare_locked(
         .context("Check for an update first")?;
     let target = bundle(cli)?;
     let staged = feed::stage(home, &release, client.as_ref())?;
-    let token = canban_types::id();
+    let token = canban_types::token_id();
     let parent = target.parent().context("App parent missing")?;
     // Copy into the target's filesystem before shutdown, so bundle switches are renames.
     let candidate = parent.join(format!(".Canban-next-{token}.app"));

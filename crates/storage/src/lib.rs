@@ -297,6 +297,7 @@ impl Store {
         }
         migrations::prepare(home, &conn, migrations::CURRENT)?;
         migrations::apply(&mut conn, migrations::CURRENT)?;
+        migrations::sync_paths(home, &conn)?;
         Ok(Self {
             conn,
             home: home.to_owned(),

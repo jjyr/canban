@@ -170,6 +170,53 @@ fn path_within(root: &str, target: &str) -> bool {
     let t = std::fs::canonicalize(target).unwrap_or_else(|_| PathBuf::from(target));
     t.starts_with(&r)
 }
+pub(crate) fn resolve_project_id(db: Db<'_>, raw: &str) -> Result<String> {
+    let raw = raw.trim();
+    ensure!(!raw.is_empty(), "Missing project_id");
+    if db.get::<Project>(raw).is_ok() {
+        return Ok(raw.to_owned());
+    }
+    let migrated: Option<String> = db
+        .conn
+        .query_row(
+            "SELECT new_id FROM id_migrations WHERE kind='project' AND old_id=?1",
+            [raw],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap_or(None);
+    if let Some(new_id) = migrated
+        && db.get::<Project>(&new_id).is_ok()
+    {
+        return Ok(new_id);
+    }
+    let projects = db.list::<Project>()?;
+    if raw.len() >= 4 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
+        let needle = raw.to_ascii_lowercase();
+        let prefix_matches: Vec<_> = projects
+            .iter()
+            .filter(|p| p.id.to_ascii_lowercase().starts_with(&needle))
+            .collect();
+        if prefix_matches.len() == 1 {
+            return Ok(prefix_matches[0].id.clone());
+        }
+        if prefix_matches.len() > 1 {
+            bail!("Ambiguous project prefix: {raw}");
+        }
+    }
+    let name_matches: Vec<_> = projects
+        .iter()
+        .filter(|p| p.name.eq_ignore_ascii_case(raw))
+        .collect();
+    if name_matches.len() == 1 {
+        return Ok(name_matches[0].id.clone());
+    }
+    if name_matches.len() > 1 {
+        bail!("Ambiguous project name: {raw}");
+    }
+    bail!("Project not found: {raw}")
+}
+
 pub(crate) fn resolve_card(db: Db<'_>, p: &Value) -> Result<Card> {
     if let Some(raw_id) = p["card_id"]
         .as_str()
@@ -179,6 +226,34 @@ pub(crate) fn resolve_card(db: Db<'_>, p: &Value) -> Result<Card> {
         if let Ok(card) = db.get::<Card>(raw_id) {
             return Ok(card);
         }
+        let migrated: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT new_id FROM id_migrations WHERE kind='card' AND old_id=?1",
+                [raw_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        if let Some(new_id) = migrated
+            && let Ok(card) = db.get::<Card>(&new_id)
+        {
+            return Ok(card);
+        }
+        if raw_id.len() >= 4 && raw_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            let needle = raw_id.to_ascii_lowercase();
+            let prefix_matches: Vec<_> = db
+                .list::<Card>()?
+                .into_iter()
+                .filter(|c| c.removed_at.is_none() && c.id.to_ascii_lowercase().starts_with(&needle))
+                .collect();
+            if prefix_matches.len() == 1 {
+                return Ok(prefix_matches.into_iter().next().unwrap());
+            }
+            if prefix_matches.len() > 1 {
+                bail!("Ambiguous card prefix: {raw_id}");
+            }
+        }
         if parse_card_number(&json!(raw_id)).is_none() {
             bail!("Card not found: {raw_id}");
         }
@@ -187,11 +262,12 @@ pub(crate) fn resolve_card(db: Db<'_>, p: &Value) -> Result<Card> {
         .or_else(|| parse_card_number(&p["card_id"]))
         .context("Supply --card <number> (or CANBAN_CARD) or card_id")?;
     let cards = db.list::<Card>()?;
-    if let Some(pid) = p["project_id"]
+    if let Some(raw_pid) = p["project_id"]
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
+        let pid = resolve_project_id(db, raw_pid)?;
         return cards
             .into_iter()
             .find(|c| c.project_id == pid && c.number == number && c.removed_at.is_none())
@@ -304,6 +380,7 @@ fn enqueue(
     let profile_id = profile.id.clone();
     let run_number = if has_live_pty {
         let agent = entry.agent.as_mut().unwrap();
+        agent.card_number = card.number;
         agent.pending = Some(QueuedAssignment {
             stage: stage.id.clone(),
             trigger: trigger.clone(),
@@ -329,6 +406,7 @@ fn enqueue(
             instruction_str,
             on_completed,
         );
+        run.card_number = card.number;
         run.require_human_review = require_human_review;
         if let Some(prev) = prior_agent
             && explicit.is_some()
@@ -383,13 +461,13 @@ impl AppServer {
             .open(&identity_path)?;
         identity_file.lock()?;
         if identity_file.metadata()?.len() == 0 {
-            identity_file.write_all(id().as_bytes())?;
+            identity_file.write_all(token_id().as_bytes())?;
             identity_file.sync_all()?;
         }
         let identity = std::fs::read_to_string(&identity_path)?;
         drop(identity_file);
         ensure!(
-            identity.len() == 32 && identity.chars().all(|c| c.is_ascii_hexdigit()),
+            matches!(identity.len(), 8 | 32) && identity.chars().all(|c| c.is_ascii_hexdigit()),
             "Invalid AppServer identity"
         );
         // Existing attention is a real pause after upgrading, not merely a badge.

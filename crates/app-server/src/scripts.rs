@@ -503,7 +503,7 @@ impl AppServer {
 
         let cwd = resolve_working_directory(&ops.host, &ws_path, working_directory.as_deref())?;
         let scripts_dir =
-            canban_context::card_dir(&exec_home, &card.project_id, &card.id).join("scripts");
+            canban_context::card_dir(&exec_home, &card.project_id, card.number).join("scripts");
         ops.host.mkdir(&scripts_dir)?;
 
         let slug = sanitized_step_slug(step_id);
@@ -634,7 +634,7 @@ impl AppServer {
                 return Ok(None);
             }
             let slug = sanitized_step_slug(out.step_id);
-            let local_log = canban_context::card_dir(&self.home, &card.project_id, &card.id)
+            let local_log = canban_context::card_dir(&self.home, &card.project_id, card.number)
                 .join("scripts")
                 .join(format!("{slug}-v{}.log", out.visit));
             let mut log_body = raw_log.clone();
@@ -999,7 +999,7 @@ impl AppServer {
             }
             let mut card: Card = db.get(&current_run.card_id)?;
             let slug = sanitized_step_slug(step_id);
-            let local_log = canban_context::card_dir(&self.home, &card.project_id, &card.id)
+            let local_log = canban_context::card_dir(&self.home, &card.project_id, card.number)
                 .join("scripts")
                 .join(format!("{slug}-v{visit}.log"));
             canban_context::atomic(&local_log, summary.as_bytes())?;

@@ -4830,10 +4830,10 @@ for line in sys.stdin:
     assert_eq!(last_launch["env"]["OVERRIDE_ME"], "from_agent_step");
     assert_eq!(last_launch["env"]["AGENT_FLAG"], "1");
 
-    // Verify persisted script log files under `cards/<cid>/scripts/`.
+    // Verify persisted script log files under `cards/<number>/scripts/`.
     let script_dir = app
         .home
-        .join(format!("projects/{}/cards/{}/scripts", p.id, c.id));
+        .join(format!("projects/{}/cards/{}/scripts", p.id, c.number));
     let log_texts: Vec<String> = std::fs::read_dir(&script_dir)
         .unwrap()
         .filter_map(|e| e.ok())

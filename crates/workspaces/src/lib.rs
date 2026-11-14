@@ -39,10 +39,27 @@ pub fn card_branch(project: &Project, card: &Card) -> String {
         .unwrap_or_else(|| format!("{}/{}", names::namespace(project), card.number))
 }
 fn managed_card_path(home: &Path, project: &Project, card: &Card, path: &Path) -> bool {
-    let root = home.join("worktrees").join(&project.id);
-    path == root.join(card.number.to_string())
+    let worktrees = home.join("worktrees");
+    let root = worktrees.join(&project.id);
+    if path == root.join(card.number.to_string())
         || path == root.join(&card.id)
         || names::managed_path(home, card, path)
+    {
+        return true;
+    }
+    // Pre-migration managed worktrees could live under worktrees/<32-hex-project-id>/<number|card_id>.
+    if let Ok(rel) = path.strip_prefix(&worktrees)
+        && let Some(dir) = rel.parent().and_then(|p| p.to_str())
+        && dir.len() == 32
+        && dir.chars().all(|c| c.is_ascii_hexdigit())
+        && dir
+            .to_ascii_lowercase()
+            .starts_with(&project.id.to_ascii_lowercase())
+        && let Some(leaf) = rel.file_name().and_then(|l| l.to_str())
+    {
+        return leaf == card.number.to_string() || leaf == card.id;
+    }
+    false
 }
 impl Ops {
     fn sync_base(&self, source: &Path, base: &str, remote: &str) -> Result<()> {

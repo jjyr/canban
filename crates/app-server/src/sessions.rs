@@ -37,6 +37,7 @@ pub(super) fn retry_agent(db: Db<'_>, card: &Card, entry: &mut TerminalEntry) ->
     );
     next.workflow_run_id = previous.workflow_run_id.clone();
     next.workflow_step = previous.workflow_step.clone();
+    next.card_number = card.number;
     next.require_human_review = previous.require_human_review;
     next.resume_session = previous.provider_session_id.is_some() || previous.resume_session;
     if next.resume_session {
@@ -309,6 +310,7 @@ impl AppServer {
         {
             let run = promoted_entry.agent.as_mut().unwrap();
             run.promote_pending();
+            run.card_number = card.number;
             run.number = next_number;
             run.started_at = Some(now());
             run.state = "running".into();
@@ -467,29 +469,53 @@ impl AppServer {
         Ok(result)
     }
     pub(super) fn reply(&self, p: Value) -> Result<Value> {
-        let (question, entry_opt) = {
+        let (question, card, entry_opt) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
-            let q: Question = db.get(strp(&p, "question_id")?)?;
+            let raw_qid = strp(&p, "question_id")?;
+            let q: Question = match db.get(raw_qid) {
+                Ok(q) => q,
+                Err(_) => {
+                    let mapped: Option<String> = db
+                        .conn
+                        .query_row(
+                            "SELECT new_id FROM id_migrations WHERE kind='question' AND old_id=?1",
+                            [raw_qid],
+                            |r| r.get(0),
+                        )
+                        .optional()
+                        .unwrap_or(None);
+                    if let Some(new_id) = mapped {
+                        db.get(&new_id)?
+                    } else {
+                        db.get(raw_qid)?
+                    }
+                }
+            };
             if p["card_id"].as_str().is_some_and(|s| !s.trim().is_empty())
                 || super::parse_card_number(&p["card"]).is_some()
             {
                 let resolved = super::resolve_card(db, &p)?;
                 ensure!(resolved.id == q.card_id, "Question belongs to another Card");
             }
+            let card: Card = db.get(&q.card_id)?;
             let entry = q
                 .terminal_id
                 .as_ref()
                 .and_then(|tid| db.get::<TerminalEntry>(tid).ok());
-            (q, entry)
+            (q, card, entry)
         };
         let body = strp(&p, "body")?;
-        let file = if let Some(entry) = &entry_opt {
-            canban_context::run_dir(&self.home, entry)
+        let file = if let Some(entry) = &entry_opt
+            && let Some(run) = &entry.agent
+        {
+            canban_context::card_dir(&self.home, &card.project_id, card.number)
+                .join("agents")
+                .join(&run.profile.id)
                 .join("replies")
                 .join(format!("{}.md", question.id))
         } else {
-            canban_context::card_dir(&self.home, &question.project_id, &question.card_id)
+            canban_context::card_dir(&self.home, &card.project_id, card.number)
                 .join("replies")
                 .join(format!("{}.md", question.id))
         };

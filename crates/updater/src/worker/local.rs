@@ -76,7 +76,7 @@ pub fn prepare(
         schema_before <= build.schema,
         "Database is newer than this App; use a newer Canban App"
     );
-    let token = canban_types::id();
+    let token = canban_types::token_id();
     let job = home.join("updates/jobs").join(&token);
     std::fs::create_dir_all(&job)?;
     let helper = job.join("canban-updater");

@@ -838,8 +838,10 @@ impl AppServer {
         let card_ctx = {
             let store = self.store.lock().unwrap();
             let db = store.db();
-            if let Some(card_id) = p["card_id"].as_str().filter(|s| !s.is_empty()) {
-                let c: Card = db.get(card_id)?;
+            if p["card_id"].as_str().is_some_and(|s| !s.trim().is_empty())
+                || super::parse_card_number(&p["card"]).is_some()
+            {
+                let c = super::resolve_card(db, &p)?;
                 let warning = activity_warning(db, &c)?;
                 Some((c, warning))
             } else {

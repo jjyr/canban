@@ -132,12 +132,20 @@ impl AppServer {
                 Ok(serde_json::to_value(super::resolve_card(store.db(), &p)?)?)
             }
             "card.list" => {
-                let cards = self.store.lock().unwrap().db().list::<Card>()?;
+                let store = self.store.lock().unwrap();
+                let db = store.db();
+                let filter_pid = p["project_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|raw| super::resolve_project_id(db, raw))
+                    .transpose()?;
+                let cards = db.list::<Card>()?;
                 Ok(serde_json::to_value(
                     cards
                         .into_iter()
                         .filter(|c| c.removed_at.is_none() || p["include_removed"] == true)
-                        .filter(|c| p["project_id"].as_str().is_none_or(|id| c.project_id == id))
+                        .filter(|c| filter_pid.as_deref().is_none_or(|id| c.project_id == id))
                         .collect::<Vec<_>>(),
                 )?)
             }
@@ -323,7 +331,8 @@ impl AppServer {
                 })
             }
             "tag.create" => self.mutate(method, &p, |db| {
-                let mut project: Project = db.get(strp(&p, "project_id")?)?;
+                let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+                let mut project: Project = db.get(&pid)?;
                 let raw = strp(&p, "tag")?;
                 let tag = canban_types::normalize_tag(raw).ok_or_else(|| {
                     anyhow::anyhow!(
@@ -351,7 +360,8 @@ impl AppServer {
                     p.get("tags").is_none(),
                     "Routing tags are no longer supported; use a workflow Profile or @profile"
                 );
-                let project: Project = db.get(strp(&p, "project_id")?)?;
+                let project: Project =
+                    db.get(&super::resolve_project_id(db, strp(&p, "project_id")?)?)?;
                 let mut c = canban_kanban::create(
                     db,
                     &project,
@@ -1324,7 +1334,7 @@ impl AppServer {
                 let card: Card = self.store.lock().unwrap().db().get(strp(&p, "card_id")?)?;
                 let path = strp(&p, "path")?;
                 let full = self.home.join(path);
-                let root = canban_context::card_dir(&self.home, &card.project_id, &card.id);
+                let root = canban_context::card_dir(&self.home, &card.project_id, card.number);
                 ensure!(
                     full.starts_with(root)
                         && !Path::new(path)

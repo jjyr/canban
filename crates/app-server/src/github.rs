@@ -133,18 +133,19 @@ impl AppServer {
                 Ok(result)
             }
             "github.source.disconnect" => self.mutate(method, &p, |db| {
-                let mut project: Project = db.get(strp(&p, "project_id")?)?;
+                let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+                let mut project: Project = db.get(&pid)?;
                 project.github = None;
                 db.save(&project)?;
                 Ok(serde_json::to_value(project)?)
             }),
             "github.reference.search" => {
-                let project: Project = self
-                    .store
-                    .lock()
-                    .unwrap()
-                    .db()
-                    .get(strp(&p, "project_id")?)?;
+                let project: Project = {
+                    let store = self.store.lock().unwrap();
+                    let db = store.db();
+                    let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+                    db.get(&pid)?
+                };
                 let source = project
                     .github
                     .context("Connect this Project to a GitHub repository first")?;

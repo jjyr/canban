@@ -32,7 +32,8 @@ impl AppServer {
                 session.provider_session_id=Some(id.into());db.save(&session)?;Ok(json!({"bound":true}))
             }),
             "configuration.open" => self.mutate(method,&p,|db| {
-                let project:Project=db.get(strp(&p,"project_id")?)?;
+                let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+                let project:Project=db.get(&pid)?;
                 let explicit_profile=p["profile_id"].as_str().map(str::trim).filter(|s|!s.is_empty());
                 let profile=canban_scheduler::select_in_project(&self.config(),Some(&project),explicit_profile)?;
                 let key=format!("configuration:{}:workflows:{}",project.id,profile.id);

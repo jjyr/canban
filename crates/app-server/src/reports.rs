@@ -119,11 +119,19 @@ impl AppServer {
         let report_id = id();
         let path = if let Some(body) = p["body"].as_str() {
             let path = if let Some(entry) = &entry_opt {
-                canban_context::run_dir(&self.home, entry)
-                    .join("reports")
-                    .join(format!("{report_id}.md"))
+                if let Some(run) = &entry.agent {
+                    canban_context::card_dir(&self.home, &card.project_id, card.number)
+                        .join("agents")
+                        .join(&run.profile.id)
+                        .join("reports")
+                        .join(format!("{report_id}.md"))
+                } else {
+                    canban_context::run_dir(&self.home, entry)
+                        .join("reports")
+                        .join(format!("{report_id}.md"))
+                }
             } else {
-                canban_context::card_dir(&self.home, &card.project_id, &card.id)
+                canban_context::card_dir(&self.home, &card.project_id, card.number)
                     .join("reports")
                     .join(format!("{report_id}.md"))
             };

@@ -1,14 +1,6 @@
 use super::*;
 pub(super) fn uuid_session_id() -> String {
-    let s = id();
-    format!(
-        "{}-{}-{}-{}-{}",
-        &s[..8],
-        &s[8..12],
-        &s[12..16],
-        &s[16..20],
-        &s[20..]
-    )
+    canban_types::uuid_v4()
 }
 
 impl AppServer {
@@ -626,6 +618,7 @@ impl AppServer {
                     let number = u32::try_from(db.counter(&format!("card-attempt:{}", card.id))?)?;
                     let had_session = agent.provider_session_id.is_some();
                     agent.promote_pending();
+                    agent.card_number = card.number;
                     agent.number = number;
                     agent.resume_session = had_session && !agent.trigger.is_automatic();
                     if !agent.resume_session {

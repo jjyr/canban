@@ -113,17 +113,29 @@ pub fn atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::File::open(path.parent().unwrap())?.sync_all()?;
     Ok(())
 }
-pub fn card_dir(home: &Path, project: &str, card: &str) -> PathBuf {
-    home.join("projects").join(project).join("cards").join(card)
+pub fn card_dir(home: &Path, project: &str, card_number: u64) -> PathBuf {
+    home.join("projects")
+        .join(project)
+        .join("cards")
+        .join(card_number.to_string())
 }
-pub fn scratch_dir(home: &Path, project: &str, card: &str) -> PathBuf {
-    card_dir(home, project, card).join("scratch")
+pub fn scratch_dir(home: &Path, project: &str, card_number: u64) -> PathBuf {
+    card_dir(home, project, card_number).join("scratch")
 }
 pub fn run_dir(home: &Path, entry: &TerminalEntry) -> PathBuf {
     if let Some(run) = &entry.agent {
-        card_dir(home, &run.project_id, &run.card_id)
-            .join("agents")
-            .join(&run.profile.id)
+        if run.card_number > 0 {
+            card_dir(home, &run.project_id, run.card_number)
+                .join("agents")
+                .join(&run.profile.id)
+        } else {
+            home.join("projects")
+                .join(&run.project_id)
+                .join("cards")
+                .join(&run.card_id)
+                .join("agents")
+                .join(&run.profile.id)
+        }
     } else {
         home.join("terminals").join(&entry.id)
     }
@@ -163,7 +175,13 @@ pub fn capture_for(
         context_card.title = format!("{}#{}", source.repository, source.number);
     }
     let card = &context_card;
-    let dir = run_dir(home, entry);
+    let dir = if run.card_number == card.number {
+        run_dir(home, entry)
+    } else {
+        card_dir(home, &run.project_id, card.number)
+            .join("agents")
+            .join(&run.profile.id)
+    };
     let timeline: Vec<_> = snapshot
         .events
         .iter()
@@ -294,7 +312,7 @@ pub fn capture_for(
     let cli_quoted = shell_quote(&cli.to_string_lossy());
     if let Some(source) = github_source {
         let number = source.number.to_string();
-        let params = shell_quote(&serde_json::json!({"card_id": card.id}).to_string());
+        let params = shell_quote(&serde_json::json!({"project_id": project.id, "card": card.number}).to_string());
         prompt.push('\n');
         prompt.push_str(&render_template(
             GITHUB_SOURCE_TEMPLATE,
@@ -382,7 +400,7 @@ pub fn attachment(
 ) -> Result<Artifact> {
     ensure!(bytes.len() <= 32 * 1024 * 1024, "Attachment exceeds 32 MiB");
     let artifact_id = id();
-    let path = card_dir(home, &card.project_id, &card.id)
+    let path = card_dir(home, &card.project_id, card.number)
         .join("resources")
         .join(format!("{artifact_id}{}", suffix(name)));
     atomic(&path, bytes)?;
@@ -398,7 +416,10 @@ pub fn attachment(
     })
 }
 pub fn pack(home: &Path, card: &Card, snapshot: &Snapshot) -> Result<String> {
-    let dir = home.join("archives").join(&card.project_id).join(&card.id);
+    let dir = home
+        .join("archives")
+        .join(&card.project_id)
+        .join(card.number.to_string());
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{}.tar.zst", id()));
     let tmp = path.with_extension("tmp");
@@ -421,7 +442,7 @@ pub fn pack(home: &Path, card: &Card, snapshot: &Snapshot) -> Result<String> {
     header.set_mode(0o600);
     header.set_cksum();
     archive.append_data(&mut header, "records.json", &bytes[..])?;
-    let files = card_dir(home, &card.project_id, &card.id);
+    let files = card_dir(home, &card.project_id, card.number);
     if files.exists() {
         archive.append_dir_all("files", files)?;
     }
@@ -457,7 +478,7 @@ pub fn read_archive(home: &Path, path: &str) -> Result<Snapshot> {
 pub fn restore_files(home: &Path, card: &Card, path: &str) -> Result<()> {
     let decoder = zstd::Decoder::new(std::fs::File::open(home.join(path))?)?;
     let mut archive = tar::Archive::new(decoder);
-    let dest = card_dir(home, &card.project_id, &card.id);
+    let dest = card_dir(home, &card.project_id, card.number);
     for entry in archive.entries()? {
         let mut entry = entry?;
         let p = entry.path()?.into_owned();
@@ -484,7 +505,7 @@ pub fn archived_file(home: &Path, card: &Card, relative_path: &str) -> Result<Ve
         .archive
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Resource file is missing"))?;
-    let card_path = card_dir(home, &card.project_id, &card.id);
+    let card_path = card_dir(home, &card.project_id, card.number);
     let full = home.join(relative_path);
     let rel = full.strip_prefix(card_path)?;
     let wanted = Path::new("files").join(rel);
@@ -503,7 +524,7 @@ pub fn archived_file(home: &Path, card: &Card, relative_path: &str) -> Result<Ve
 }
 pub fn compact_files(home: &Path, card: &Card, path: &str) -> Result<()> {
     let mut archive = tar::Archive::new(zstd::Decoder::new(std::fs::File::open(home.join(path))?)?);
-    let root = card_dir(home, &card.project_id, &card.id);
+    let root = card_dir(home, &card.project_id, card.number);
     for entry in archive.entries()? {
         let mut entry = entry?;
         let p = entry.path()?.into_owned();

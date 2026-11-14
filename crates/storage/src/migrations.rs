@@ -1,9 +1,11 @@
 //! Paired database-only migrations after the legacy schema-8 baseline.
 use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 15;
+pub const CURRENT: u32 = 16;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -46,6 +48,11 @@ const STEPS: &[Migration] = &[
         version: 15,
         up: remove_attempts_up,
         down: remove_attempts_down,
+    },
+    Migration {
+        version: 16,
+        up: short_ids_up,
+        down: short_ids_down,
     },
 ];
 fn workflows_up(tx: &Transaction<'_>) -> Result<()> {
@@ -218,6 +225,9 @@ pub fn migrate(home: &Path, target: u32) -> Result<u32> {
     prepare(home, &conn, target)?;
     apply(&mut conn, target)?;
     let result = version(&conn)?;
+    if result >= 16 {
+        sync_paths(home, &conn)?;
+    }
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     Ok(result)
 }
@@ -308,6 +318,9 @@ pub fn prepare(home: &Path, conn: &Connection, target: u32) -> Result<()> {
             f.persist(root.join("v8.json"))?;
             std::fs::File::open(&root)?.sync_all()?;
         }
+    }
+    if before >= 16 && target < 16 {
+        sync_paths_down(home, conn)?;
     }
     Ok(())
 }
@@ -1174,6 +1187,1348 @@ fn remove_attempts_down(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+fn is_legacy_32hex(s: &str) -> bool {
+    s.len() == 32 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn table_exists(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [name],
+        |r| r.get(0),
+    )?)
+}
+
+fn allocate_short_id(
+    kind: &str,
+    old_id: &str,
+    existing: &HashMap<(String, String), String>,
+    used: &mut HashSet<String>,
+) -> String {
+    if let Some(prev) = existing.get(&(kind.to_owned(), old_id.to_owned())) {
+        used.insert(prev.clone());
+        return prev.clone();
+    }
+    let prefix = old_id[..8].to_ascii_lowercase();
+    if used.insert(prefix.clone()) {
+        return prefix;
+    }
+    for attempt in 1u64.. {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in kind
+            .bytes()
+            .chain(b":".iter().copied())
+            .chain(old_id.bytes())
+            .chain(attempt.to_le_bytes())
+        {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        let cand = format!("{:08x}", (h as u32) ^ ((h >> 32) as u32));
+        if used.insert(cand.clone()) {
+            return cand;
+        }
+    }
+    unreachable!()
+}
+
+fn remap_composite_id(s: &str, map: &HashMap<String, String>) -> String {
+    if let Some(mapped) = map.get(s) {
+        return mapped.clone();
+    }
+    if !s.contains(':') {
+        return s.to_owned();
+    }
+    let mut changed = false;
+    let parts: Vec<&str> = s.split(':').collect();
+    let out: Vec<String> = parts
+        .iter()
+        .map(|seg| {
+            if let Some(mapped) = map.get(*seg) {
+                changed = true;
+                mapped.clone()
+            } else {
+                (*seg).to_owned()
+            }
+        })
+        .collect();
+    if changed {
+        out.join(":")
+    } else {
+        s.to_owned()
+    }
+}
+
+fn rewrite_rel_path(
+    raw: &str,
+    row_card_id: Option<&str>,
+    id_map: &HashMap<String, String>,
+    card_numbers: &HashMap<String, u64>,
+    path_map: Option<&mut HashMap<String, String>>,
+) -> String {
+    let parts: Vec<&str> = raw.split('/').collect();
+    let mut new_parts: Vec<String> = parts.iter().map(|s| (*s).to_owned()).collect();
+    let mut changed = false;
+
+    if parts.len() >= 4 && parts[0] == "projects" && parts[2] == "cards" {
+        if let Some(new_pid) = id_map.get(parts[1]) {
+            new_parts[1] = new_pid.clone();
+            changed = true;
+        }
+        let num = card_numbers
+            .get(parts[3])
+            .copied()
+            .or_else(|| row_card_id.and_then(|cid| card_numbers.get(cid).copied()));
+        if let Some(num) = num {
+            let num_str = num.to_string();
+            if parts[3] != num_str
+                && (card_numbers.contains_key(parts[3]) || row_card_id == Some(parts[3]))
+            {
+                new_parts[3] = num_str;
+                changed = true;
+            }
+        }
+        let rest_len = parts.len();
+        if rest_len >= 6 && parts[rest_len - 2] == "reports" {
+            let file = parts[rest_len - 1];
+            if let Some(stem) = file.strip_suffix(".md")
+                && let Some(new_id) = id_map.get(stem)
+            {
+                new_parts[rest_len - 1] = format!("{new_id}.md");
+                changed = true;
+            }
+        }
+        if parts.len() == 6 && parts[4] == "resources" {
+            let file = parts[5];
+            let (stem, suffix) = match file.find('.') {
+                Some(idx) => (&file[..idx], &file[idx..]),
+                None => (file, ""),
+            };
+            if let Some(new_id) = id_map.get(stem) {
+                new_parts[5] = format!("{new_id}{suffix}");
+                changed = true;
+            }
+        }
+    } else if parts.len() >= 3 && parts[0] == "archives" {
+        if let Some(new_pid) = id_map.get(parts[1]) {
+            new_parts[1] = new_pid.clone();
+            changed = true;
+        }
+        let num = card_numbers
+            .get(parts[2])
+            .copied()
+            .or_else(|| row_card_id.and_then(|cid| card_numbers.get(cid).copied()));
+        if let Some(num) = num {
+            let num_str = num.to_string();
+            if parts[2] != num_str
+                && (card_numbers.contains_key(parts[2]) || row_card_id == Some(parts[2]))
+            {
+                new_parts[2] = num_str;
+                changed = true;
+            }
+        }
+    } else if parts.len() >= 2
+        && parts[0] == "projects"
+        && let Some(new_pid) = id_map.get(parts[1])
+    {
+        new_parts[1] = new_pid.clone();
+        changed = true;
+    }
+
+    if !changed {
+        return raw.to_owned();
+    }
+    let rewritten = new_parts.join("/");
+    if let Some(map) = path_map {
+        map.entry(raw.to_owned()).or_insert_with(|| rewritten.clone());
+    }
+    rewritten
+}
+
+const ID_JSON_KEYS: &[&str] = &[
+    "id",
+    "project_id",
+    "card_id",
+    "terminal_id",
+    "conversation_id",
+    "workflow_run_id",
+    "revision_id",
+    "report_id",
+    "artifact_id",
+    "event_id",
+    "comment_id",
+    "question_id",
+    "answer_event_id",
+    "trigger_event_id",
+    "reply_to",
+    "subscription_id",
+    "run_id",
+    "note_id",
+    "target_id",
+];
+const ID_ARRAY_JSON_KEYS: &[&str] = &["linked_cards", "card_ids", "links"];
+const PATH_JSON_KEYS: &[&str] = &["input_path", "output_path", "path", "reply_path", "archive"];
+
+fn rewrite_json_fields(
+    v: &mut Value,
+    parent_key: Option<&str>,
+    row_card_id: Option<&str>,
+    id_map: &HashMap<String, String>,
+    card_numbers: &HashMap<String, u64>,
+    mut path_map: Option<&mut HashMap<String, String>>,
+) {
+    match v {
+        Value::String(s) => {
+            if let Some(k) = parent_key {
+                if PATH_JSON_KEYS.contains(&k) {
+                    *s = rewrite_rel_path(
+                        s,
+                        row_card_id,
+                        id_map,
+                        card_numbers,
+                        path_map.as_deref_mut(),
+                    );
+                    return;
+                }
+                if ID_JSON_KEYS.contains(&k) {
+                    let remapped = remap_composite_id(s, id_map);
+                    if remapped != *s {
+                        *s = remapped;
+                    }
+                    return;
+                }
+            }
+            if (s.starts_with("projects/") || s.starts_with("archives/")) && s.contains('/') {
+                *s = rewrite_rel_path(s, row_card_id, id_map, card_numbers, path_map);
+            }
+        }
+        Value::Array(arr) => {
+            let in_id_arr = parent_key.is_some_and(|k| ID_ARRAY_JSON_KEYS.contains(&k));
+            for item in arr {
+                if in_id_arr {
+                    if let Value::String(s) = item {
+                        let remapped = remap_composite_id(s, id_map);
+                        if remapped != *s {
+                            *s = remapped;
+                        }
+                    }
+                } else {
+                    rewrite_json_fields(
+                        item,
+                        None,
+                        row_card_id,
+                        id_map,
+                        card_numbers,
+                        path_map.as_deref_mut(),
+                    );
+                }
+            }
+        }
+        Value::Object(obj) => {
+            for (k, val) in obj.iter_mut() {
+                if matches!(k.as_str(), "definition" | "source_yaml") {
+                    continue;
+                }
+                rewrite_json_fields(
+                    val,
+                    Some(k.as_str()),
+                    row_card_id,
+                    id_map,
+                    card_numbers,
+                    path_map.as_deref_mut(),
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_json_exact_inverse(
+    v: &mut Value,
+    parent_key: Option<&str>,
+    id_rev: &HashMap<String, String>,
+    path_rev: &HashMap<String, String>,
+) {
+    match v {
+        Value::String(s) => {
+            if let Some(old_rel) = path_rev.get(s.as_str()) {
+                *s = old_rel.clone();
+                return;
+            }
+            if parent_key.is_some_and(|k| ID_JSON_KEYS.contains(&k)) {
+                let remapped = remap_composite_id(s, id_rev);
+                if remapped != *s {
+                    *s = remapped;
+                }
+            }
+        }
+        Value::Array(arr) => {
+            let in_id_arr = parent_key.is_some_and(|k| ID_ARRAY_JSON_KEYS.contains(&k));
+            for item in arr {
+                if in_id_arr {
+                    if let Value::String(s) = item {
+                        let remapped = remap_composite_id(s, id_rev);
+                        if remapped != *s {
+                            *s = remapped;
+                        }
+                    }
+                } else {
+                    rewrite_json_exact_inverse(item, None, id_rev, path_rev);
+                }
+            }
+        }
+        Value::Object(obj) => {
+            for (k, val) in obj.iter_mut() {
+                if matches!(k.as_str(), "definition" | "source_yaml") {
+                    continue;
+                }
+                rewrite_json_exact_inverse(val, Some(k.as_str()), id_rev, path_rev);
+            }
+        }
+        _ => {}
+    }
+}
+
+const ENTITY_TABLES: &[(&str, &str)] = &[
+    ("projects", "project"),
+    ("cards", "card"),
+    ("events", "event"),
+    ("reports", "report"),
+    ("artifacts", "artifact"),
+    ("notes", "note"),
+    ("notifications", "notice"),
+    ("questions", "question"),
+    ("workflow_revisions", "workflow_revision"),
+    ("workflow_runs", "workflow_run"),
+    ("workflow_bindings", "workflow_binding"),
+    ("workflow_templates", "workflow_template"),
+    ("event_subscriptions", "event_subscription"),
+    ("event_deliveries", "event_delivery"),
+    ("managed_worktrees", "managed_worktree"),
+    ("github_issues", "github_issue"),
+    ("note_events", "note_event"),
+    ("source_observations", "source_observation"),
+];
+
+const CHILD_SCOPED_TABLES: &[(&str, &str)] = &[
+    ("conversations", "conversation"),
+    ("terminals", "terminal"),
+    ("reports", "report"),
+    ("artifacts", "artifact"),
+    ("questions", "question"),
+    ("notifications", "notice"),
+    ("card_reads", "card_read"),
+    ("github_issues", "github_issue"),
+    ("notes", "note"),
+    ("note_revisions", "note_revision"),
+    ("note_events", "note_event"),
+    ("workflow_sources", "workflow_source"),
+    ("workflow_revisions", "workflow_revision"),
+    ("workflow_runs", "workflow_run"),
+    ("workflow_bindings", "workflow_binding"),
+    ("workflow_templates", "workflow_template"),
+    ("event_subscriptions", "event_subscription"),
+    ("event_deliveries", "event_delivery"),
+    ("configuration_sessions", "configuration_session"),
+    ("managed_worktrees", "managed_worktree"),
+];
+
+fn short_ids_up(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS id_migrations(kind TEXT NOT NULL, old_id TEXT NOT NULL, new_id TEXT NOT NULL, PRIMARY KEY(kind, old_id));
+         CREATE INDEX IF NOT EXISTS id_migrations_new ON id_migrations(kind, new_id);
+         CREATE TABLE IF NOT EXISTS path_migrations(old_rel TEXT PRIMARY KEY, new_rel TEXT NOT NULL);",
+    )?;
+
+    let mut existing_map: HashMap<(String, String), String> = HashMap::new();
+    let mut used: HashSet<String> = HashSet::new();
+    {
+        let mut q = tx.prepare("SELECT kind, old_id, new_id FROM id_migrations")?;
+        for row in q.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (kind, old_id, new_id) = row?;
+            used.insert(old_id.clone());
+            used.insert(new_id.clone());
+            existing_map.insert((kind, old_id), new_id);
+        }
+    }
+    for (table, _) in ENTITY_TABLES
+        .iter()
+        .chain(CHILD_SCOPED_TABLES.iter())
+        .chain([&("source_observations", "source_observation")].iter().copied())
+    {
+        if !table_exists(tx, table)? {
+            continue;
+        }
+        let mut q = tx.prepare(&format!("SELECT id FROM {table}"))?;
+        for id in q.query_map([], |r| r.get::<_, String>(0))? {
+            used.insert(id?);
+        }
+    }
+
+    let mut new_mappings: Vec<(String, String, String)> = Vec::new();
+    let mut id_map: HashMap<String, String> = HashMap::new();
+    for ((_, old_id), new_id) in &existing_map {
+        id_map.insert(old_id.clone(), new_id.clone());
+    }
+
+    for (table, kind) in ENTITY_TABLES {
+        if !table_exists(tx, table)? {
+            continue;
+        }
+        let ids: Vec<String> = {
+            let mut q = tx.prepare(&format!("SELECT id FROM {table} ORDER BY rowid"))?;
+            q.query_map([], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for old_id in ids {
+            if is_legacy_32hex(&old_id) {
+                let new_id = allocate_short_id(kind, &old_id, &existing_map, &mut used);
+                id_map.insert(old_id.clone(), new_id.clone());
+                new_mappings.push(((*kind).to_owned(), old_id, new_id));
+            }
+        }
+    }
+
+    // Collect card numbers (both old and new card IDs -> card number).
+    let mut card_numbers: HashMap<String, u64> = HashMap::new();
+    {
+        let mut q = tx.prepare("SELECT id, number FROM cards")?;
+        for row in q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, u64>(1)?)))? {
+            let (cid, num) = row?;
+            card_numbers.insert(cid.clone(), num);
+            if let Some(new_cid) = id_map.get(&cid) {
+                card_numbers.insert(new_cid.clone(), num);
+            }
+        }
+    }
+
+    // Also pre-collect composite terminal IDs and question/conversation IDs so cards/events/reports can remap terminal_id accurately.
+    for (table, kind) in [
+        ("terminals", "terminal"),
+        ("conversations", "conversation"),
+        ("questions", "question"),
+        ("note_revisions", "note_revision"),
+        ("workflow_sources", "workflow_source"),
+        ("github_issues", "github_issue"),
+        ("configuration_sessions", "configuration_session"),
+        ("card_reads", "card_read"),
+    ] {
+        if !table_exists(tx, table)? {
+            continue;
+        }
+        let ids: Vec<String> = {
+            let mut q = tx.prepare(&format!("SELECT id FROM {table} ORDER BY rowid"))?;
+            q.query_map([], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for old_id in ids {
+            if !is_legacy_32hex(&old_id) {
+                let new_id = remap_composite_id(&old_id, &id_map);
+                if new_id != old_id {
+                    id_map.insert(old_id.clone(), new_id.clone());
+                    new_mappings.push(((*kind).to_owned(), old_id, new_id));
+                }
+            }
+        }
+    }
+
+    let mut path_map: HashMap<String, String> = HashMap::new();
+    {
+        let mut q = tx.prepare("SELECT old_rel, new_rel FROM path_migrations")?;
+        for row in q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (o, n) = row?;
+            path_map.insert(o, n);
+        }
+    }
+
+    tx.execute_batch(
+        "DROP INDEX IF EXISTS card_numbers;
+         DROP INDEX IF EXISTS github_card_source;
+         DROP INDEX IF EXISTS github_source_card;
+         DROP INDEX IF EXISTS event_order;",
+    )?;
+
+    // 1. Insert new project rows (or update in-place if ID stayed unchanged).
+    let project_rows: Vec<(String, Option<String>, Option<String>, String, i64, String)> = {
+        let mut q = tx.prepare("SELECT id, project_id, card_id, state, number, data FROM projects")?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    let mut old_project_ids = Vec::new();
+    for (old_id, proj_col, card_col, state, number, raw) in project_rows {
+        let new_id = id_map.get(&old_id).cloned().unwrap_or_else(|| old_id.clone());
+        let mut v: Value = serde_json::from_str(&raw)?;
+        rewrite_json_fields(&mut v, None, None, &id_map, &card_numbers, Some(&mut path_map));
+        let new_data = serde_json::to_string(&v)?;
+        if new_id != old_id {
+            tx.execute(
+                "INSERT INTO projects(id, project_id, card_id, state, number, data) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![new_id, proj_col, card_col, state, number, new_data],
+            )?;
+            old_project_ids.push(old_id);
+        } else if new_data != raw {
+            tx.execute(
+                "UPDATE projects SET data=?2 WHERE id=?1",
+                params![old_id, new_data],
+            )?;
+        }
+    }
+
+    // 2. Insert new card rows (referencing new projects) or update in place.
+    let card_rows: Vec<(String, Option<String>, Option<String>, String, i64, String)> = {
+        let mut q = tx.prepare("SELECT id, project_id, card_id, state, number, data FROM cards")?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    let mut old_card_ids = Vec::new();
+    for (old_id, proj_col, card_col, state, number, raw) in card_rows {
+        let new_id = id_map.get(&old_id).cloned().unwrap_or_else(|| old_id.clone());
+        let new_proj = proj_col
+            .as_ref()
+            .map(|p| id_map.get(p).cloned().unwrap_or_else(|| p.clone()));
+        let mut v: Value = serde_json::from_str(&raw)?;
+        rewrite_json_fields(
+            &mut v,
+            None,
+            Some(&old_id),
+            &id_map,
+            &card_numbers,
+            Some(&mut path_map),
+        );
+        let new_data = serde_json::to_string(&v)?;
+        if new_id != old_id {
+            tx.execute(
+                "INSERT INTO cards(id, project_id, card_id, state, number, data) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![new_id, new_proj, card_col, state, number, new_data],
+            )?;
+            old_card_ids.push(old_id);
+        } else {
+            tx.execute(
+                "UPDATE cards SET project_id=?2, data=?3 WHERE id=?1",
+                params![old_id, new_proj, new_data],
+            )?;
+        }
+    }
+
+    // 3. Migrate events + event_journal.
+    let event_rows: Vec<(String, Option<String>, Option<String>, String, i64, String)> = {
+        let mut q = tx.prepare("SELECT id, project_id, card_id, state, number, data FROM events")?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    for (old_id, proj_col, card_col, state, number, raw) in event_rows {
+        let new_id = id_map.get(&old_id).cloned().unwrap_or_else(|| old_id.clone());
+        let new_proj = proj_col
+            .as_ref()
+            .map(|p| id_map.get(p).cloned().unwrap_or_else(|| p.clone()));
+        let new_card = card_col
+            .as_ref()
+            .map(|c| id_map.get(c).cloned().unwrap_or_else(|| c.clone()));
+        let mut v: Value = serde_json::from_str(&raw)?;
+        rewrite_json_fields(
+            &mut v,
+            None,
+            card_col.as_deref(),
+            &id_map,
+            &card_numbers,
+            Some(&mut path_map),
+        );
+        let new_data = serde_json::to_string(&v)?;
+        if new_id != old_id {
+            tx.execute(
+                "INSERT INTO events(id, project_id, card_id, state, number, data) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![new_id, new_proj, new_card, state, number, new_data],
+            )?;
+            tx.execute(
+                "UPDATE event_journal SET event_id=?2 WHERE event_id=?1",
+                params![old_id, new_id],
+            )?;
+            tx.execute("DELETE FROM events WHERE id=?1", [old_id])?;
+        } else {
+            tx.execute(
+                "UPDATE events SET project_id=?2, card_id=?3, data=?4 WHERE id=?1",
+                params![old_id, new_proj, new_card, new_data],
+            )?;
+        }
+    }
+
+    // 4. Update child-scoped tables in place.
+    for (table, _) in CHILD_SCOPED_TABLES {
+        if !table_exists(tx, table)? {
+            continue;
+        }
+        let rows: Vec<(String, Option<String>, Option<String>, String)> = {
+            let mut q = tx.prepare(&format!("SELECT id, project_id, card_id, data FROM {table}"))?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (old_id, proj_col, card_col, raw) in rows {
+            let new_id = id_map
+                .get(&old_id)
+                .cloned()
+                .unwrap_or_else(|| remap_composite_id(&old_id, &id_map));
+            let new_proj = proj_col
+                .as_ref()
+                .map(|p| id_map.get(p).cloned().unwrap_or_else(|| p.clone()));
+            let new_card = card_col
+                .as_ref()
+                .map(|c| id_map.get(c).cloned().unwrap_or_else(|| c.clone()));
+            let mut v: Value = serde_json::from_str(&raw)?;
+            rewrite_json_fields(
+                &mut v,
+                None,
+                card_col.as_deref(),
+                &id_map,
+                &card_numbers,
+                Some(&mut path_map),
+            );
+            if *table == "terminals"
+                && let Some(agent) = v.get_mut("agent").and_then(Value::as_object_mut)
+                && let Some(cid) = agent.get("card_id").and_then(Value::as_str)
+                && let Some(&num) = card_numbers.get(cid)
+            {
+                agent.insert("card_number".into(), serde_json::json!(num));
+            }
+            let new_data = serde_json::to_string(&v)?;
+            if new_id != old_id || new_proj != proj_col || new_card != card_col || new_data != raw {
+                tx.execute(
+                    &format!("UPDATE {table} SET id=?2, project_id=?3, card_id=?4, data=?5 WHERE id=?1"),
+                    params![old_id, new_id, new_proj, new_card, new_data],
+                )?;
+            }
+        }
+    }
+
+    // 5. Update non-scoped tables (source_observations, editor_drafts, counters, operations).
+    if table_exists(tx, "source_observations")? {
+        let rows: Vec<(String, String)> = {
+            let mut q = tx.prepare("SELECT id, data FROM source_observations")?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (old_id, raw) in rows {
+            let new_id = id_map
+                .get(&old_id)
+                .cloned()
+                .unwrap_or_else(|| remap_composite_id(&old_id, &id_map));
+            let mut v: Value = serde_json::from_str(&raw)?;
+            rewrite_json_fields(&mut v, None, None, &id_map, &card_numbers, Some(&mut path_map));
+            let new_data = serde_json::to_string(&v)?;
+            if new_id != old_id || new_data != raw {
+                tx.execute(
+                    "UPDATE source_observations SET id=?2, data=?3 WHERE id=?1",
+                    params![old_id, new_id, new_data],
+                )?;
+            }
+        }
+    }
+    if table_exists(tx, "editor_drafts")? {
+        let rows: Vec<(String, String)> = {
+            let mut q = tx.prepare("SELECT id, data FROM editor_drafts")?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (old_id, raw) in rows {
+            let new_id = remap_composite_id(&old_id, &id_map);
+            if new_id != old_id {
+                new_mappings.push(("editor_draft".into(), old_id.clone(), new_id.clone()));
+            }
+            let mut v: Value = serde_json::from_str(&raw)?;
+            rewrite_json_fields(&mut v, None, None, &id_map, &card_numbers, Some(&mut path_map));
+            let new_data = serde_json::to_string(&v)?;
+            if new_id != old_id || new_data != raw {
+                tx.execute(
+                    "UPDATE editor_drafts SET id=?2, data=?3 WHERE id=?1",
+                    params![old_id, new_id, new_data],
+                )?;
+            }
+        }
+    }
+    if table_exists(tx, "counters")? {
+        let keys: Vec<String> = {
+            let mut q = tx.prepare("SELECT id FROM counters")?;
+            q.query_map([], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for old_id in keys {
+            let new_id = remap_composite_id(&old_id, &id_map);
+            if new_id != old_id {
+                new_mappings.push(("counter".into(), old_id.clone(), new_id.clone()));
+                tx.execute(
+                    "UPDATE counters SET id=?2 WHERE id=?1",
+                    params![old_id, new_id],
+                )?;
+            }
+        }
+    }
+    if table_exists(tx, "operations")? {
+        let rows: Vec<(String, String)> = {
+            let mut q = tx.prepare("SELECT id, result FROM operations")?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (id, raw) in rows {
+            if let Ok(mut v) = serde_json::from_str::<Value>(&raw) {
+                rewrite_json_fields(&mut v, None, None, &id_map, &card_numbers, Some(&mut path_map));
+                let new_res = serde_json::to_string(&v)?;
+                if new_res != raw {
+                    tx.execute(
+                        "UPDATE operations SET result=?2 WHERE id=?1",
+                        params![id, new_res],
+                    )?;
+                }
+            }
+        }
+    }
+
+    // 6. Delete superseded card and project rows, then recreate unique indexes.
+    for old_cid in old_card_ids {
+        tx.execute("DELETE FROM cards WHERE id=?1", [old_cid])?;
+    }
+    for old_pid in old_project_ids {
+        tx.execute("DELETE FROM projects WHERE id=?1", [old_pid])?;
+    }
+    tx.execute_batch(
+        "CREATE UNIQUE INDEX card_numbers ON cards(project_id, number);
+         CREATE UNIQUE INDEX github_card_source ON cards(project_id, json_extract(data,'$.content.source.repository_id'), json_extract(data,'$.content.source.issue_id')) WHERE json_extract(data,'$.content.kind')='github_issue';
+         CREATE UNIQUE INDEX github_source_card ON cards(project_id, json_extract(data,'$.content.source.repository_id'), json_extract(data,'$.content.source.issue_id')) WHERE json_extract(data,'$.content.kind') IN ('github_issue','github_pr');
+         CREATE UNIQUE INDEX event_order ON events(card_id, number);",
+    )?;
+
+    for (kind, old_id, new_id) in new_mappings {
+        tx.execute(
+            "INSERT OR REPLACE INTO id_migrations(kind, old_id, new_id) VALUES(?1, ?2, ?3)",
+            params![kind, old_id, new_id],
+        )?;
+    }
+    for (old_rel, new_rel) in path_map {
+        tx.execute(
+            "INSERT OR REPLACE INTO path_migrations(old_rel, new_rel) VALUES(?1, ?2)",
+            params![old_rel, new_rel],
+        )?;
+    }
+    Ok(())
+}
+
+fn short_ids_down(tx: &Transaction<'_>) -> Result<()> {
+    if !table_exists(tx, "id_migrations")? {
+        return Ok(());
+    }
+    let mut rev_by_kind: HashMap<(String, String), String> = HashMap::new();
+    let mut id_rev: HashMap<String, String> = HashMap::new();
+    {
+        let mut q = tx.prepare("SELECT kind, old_id, new_id FROM id_migrations")?;
+        for row in q.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (kind, old_id, new_id) = row?;
+            rev_by_kind.insert((kind, new_id.clone()), old_id.clone());
+            id_rev.insert(new_id, old_id);
+        }
+    }
+    let mut path_rev: HashMap<String, String> = HashMap::new();
+    if table_exists(tx, "path_migrations")? {
+        let mut q = tx.prepare("SELECT old_rel, new_rel FROM path_migrations")?;
+        for row in q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (old_rel, new_rel) = row?;
+            path_rev.insert(new_rel, old_rel);
+        }
+    }
+
+    tx.execute_batch(
+        "DROP INDEX IF EXISTS card_numbers;
+         DROP INDEX IF EXISTS github_card_source;
+         DROP INDEX IF EXISTS github_source_card;
+         DROP INDEX IF EXISTS event_order;",
+    )?;
+
+    // 1. Restore old project rows.
+    let project_rows: Vec<(String, Option<String>, Option<String>, String, i64, String)> = {
+        let mut q = tx.prepare("SELECT id, project_id, card_id, state, number, data FROM projects")?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    let mut drop_project_ids = Vec::new();
+    for (new_id, proj_col, card_col, state, number, raw) in project_rows {
+        let old_id = rev_by_kind
+            .get(&("project".into(), new_id.clone()))
+            .cloned()
+            .unwrap_or_else(|| new_id.clone());
+        let mut v: Value = serde_json::from_str(&raw)?;
+        rewrite_json_exact_inverse(&mut v, None, &id_rev, &path_rev);
+        let old_data = serde_json::to_string(&v)?;
+        if old_id != new_id {
+            tx.execute(
+                "INSERT INTO projects(id, project_id, card_id, state, number, data) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![old_id, proj_col, card_col, state, number, old_data],
+            )?;
+            drop_project_ids.push(new_id);
+        } else if old_data != raw {
+            tx.execute(
+                "UPDATE projects SET data=?2 WHERE id=?1",
+                params![new_id, old_data],
+            )?;
+        }
+    }
+
+    // 2. Restore old card rows.
+    let card_rows: Vec<(String, Option<String>, Option<String>, String, i64, String)> = {
+        let mut q = tx.prepare("SELECT id, project_id, card_id, state, number, data FROM cards")?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    let mut drop_card_ids = Vec::new();
+    for (new_id, proj_col, card_col, state, number, raw) in card_rows {
+        let old_id = rev_by_kind
+            .get(&("card".into(), new_id.clone()))
+            .cloned()
+            .unwrap_or_else(|| new_id.clone());
+        let old_proj = proj_col
+            .as_ref()
+            .map(|p| id_rev.get(p).cloned().unwrap_or_else(|| p.clone()));
+        let mut v: Value = serde_json::from_str(&raw)?;
+        rewrite_json_exact_inverse(&mut v, None, &id_rev, &path_rev);
+        let old_data = serde_json::to_string(&v)?;
+        if old_id != new_id {
+            tx.execute(
+                "INSERT INTO cards(id, project_id, card_id, state, number, data) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![old_id, old_proj, card_col, state, number, old_data],
+            )?;
+            drop_card_ids.push(new_id);
+        } else {
+            tx.execute(
+                "UPDATE cards SET project_id=?2, data=?3 WHERE id=?1",
+                params![new_id, old_proj, old_data],
+            )?;
+        }
+    }
+
+    // 3. Restore events + event_journal.
+    let event_rows: Vec<(String, Option<String>, Option<String>, String, i64, String)> = {
+        let mut q = tx.prepare("SELECT id, project_id, card_id, state, number, data FROM events")?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    for (new_id, proj_col, card_col, state, number, raw) in event_rows {
+        let old_id = rev_by_kind
+            .get(&("event".into(), new_id.clone()))
+            .cloned()
+            .unwrap_or_else(|| new_id.clone());
+        let old_proj = proj_col
+            .as_ref()
+            .map(|p| id_rev.get(p).cloned().unwrap_or_else(|| p.clone()));
+        let old_card = card_col
+            .as_ref()
+            .map(|c| id_rev.get(c).cloned().unwrap_or_else(|| c.clone()));
+        let mut v: Value = serde_json::from_str(&raw)?;
+        rewrite_json_exact_inverse(&mut v, None, &id_rev, &path_rev);
+        let old_data = serde_json::to_string(&v)?;
+        if old_id != new_id {
+            tx.execute(
+                "INSERT INTO events(id, project_id, card_id, state, number, data) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                params![old_id, old_proj, old_card, state, number, old_data],
+            )?;
+            tx.execute(
+                "UPDATE event_journal SET event_id=?2 WHERE event_id=?1",
+                params![new_id, old_id],
+            )?;
+            tx.execute("DELETE FROM events WHERE id=?1", [new_id])?;
+        } else {
+            tx.execute(
+                "UPDATE events SET project_id=?2, card_id=?3, data=?4 WHERE id=?1",
+                params![new_id, old_proj, old_card, old_data],
+            )?;
+        }
+    }
+
+    // 4. Restore child tables.
+    for (table, kind) in CHILD_SCOPED_TABLES {
+        if !table_exists(tx, table)? {
+            continue;
+        }
+        let rows: Vec<(String, Option<String>, Option<String>, String)> = {
+            let mut q = tx.prepare(&format!("SELECT id, project_id, card_id, data FROM {table}"))?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (new_id, proj_col, card_col, raw) in rows {
+            let old_id = rev_by_kind
+                .get(&((*kind).to_owned(), new_id.clone()))
+                .cloned()
+                .unwrap_or_else(|| new_id.clone());
+            let old_proj = proj_col
+                .as_ref()
+                .map(|p| id_rev.get(p).cloned().unwrap_or_else(|| p.clone()));
+            let old_card = card_col
+                .as_ref()
+                .map(|c| id_rev.get(c).cloned().unwrap_or_else(|| c.clone()));
+            let mut v: Value = serde_json::from_str(&raw)?;
+            rewrite_json_exact_inverse(&mut v, None, &id_rev, &path_rev);
+            if *table == "terminals"
+                && let Some(agent) = v.get_mut("agent").and_then(Value::as_object_mut)
+            {
+                agent.remove("card_number");
+            }
+            let old_data = serde_json::to_string(&v)?;
+            if old_id != new_id || old_proj != proj_col || old_card != card_col || old_data != raw {
+                tx.execute(
+                    &format!("UPDATE {table} SET id=?2, project_id=?3, card_id=?4, data=?5 WHERE id=?1"),
+                    params![new_id, old_id, old_proj, old_card, old_data],
+                )?;
+            }
+        }
+    }
+
+    if table_exists(tx, "source_observations")? {
+        let rows: Vec<(String, String)> = {
+            let mut q = tx.prepare("SELECT id, data FROM source_observations")?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (new_id, raw) in rows {
+            let old_id = rev_by_kind
+                .get(&("source_observation".into(), new_id.clone()))
+                .cloned()
+                .unwrap_or_else(|| new_id.clone());
+            let mut v: Value = serde_json::from_str(&raw)?;
+            rewrite_json_exact_inverse(&mut v, None, &id_rev, &path_rev);
+            let old_data = serde_json::to_string(&v)?;
+            if old_id != new_id || old_data != raw {
+                tx.execute(
+                    "UPDATE source_observations SET id=?2, data=?3 WHERE id=?1",
+                    params![new_id, old_id, old_data],
+                )?;
+            }
+        }
+    }
+    if table_exists(tx, "editor_drafts")? {
+        let rows: Vec<(String, String)> = {
+            let mut q = tx.prepare("SELECT id, data FROM editor_drafts")?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (new_id, raw) in rows {
+            let old_id = rev_by_kind
+                .get(&("editor_draft".into(), new_id.clone()))
+                .cloned()
+                .unwrap_or_else(|| new_id.clone());
+            let mut v: Value = serde_json::from_str(&raw)?;
+            rewrite_json_exact_inverse(&mut v, None, &id_rev, &path_rev);
+            let old_data = serde_json::to_string(&v)?;
+            if old_id != new_id || old_data != raw {
+                tx.execute(
+                    "UPDATE editor_drafts SET id=?2, data=?3 WHERE id=?1",
+                    params![new_id, old_id, old_data],
+                )?;
+            }
+        }
+    }
+    if table_exists(tx, "counters")? {
+        let keys: Vec<String> = {
+            let mut q = tx.prepare("SELECT id FROM counters")?;
+            q.query_map([], |r| r.get(0))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for new_id in keys {
+            if let Some(old_id) = rev_by_kind.get(&("counter".into(), new_id.clone())) {
+                tx.execute(
+                    "UPDATE counters SET id=?2 WHERE id=?1",
+                    params![new_id, old_id],
+                )?;
+            }
+        }
+    }
+    if table_exists(tx, "operations")? {
+        let rows: Vec<(String, String)> = {
+            let mut q = tx.prepare("SELECT id, result FROM operations")?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (id, raw) in rows {
+            if let Ok(mut v) = serde_json::from_str::<Value>(&raw) {
+                rewrite_json_exact_inverse(&mut v, None, &id_rev, &path_rev);
+                let old_res = serde_json::to_string(&v)?;
+                if old_res != raw {
+                    tx.execute(
+                        "UPDATE operations SET result=?2 WHERE id=?1",
+                        params![id, old_res],
+                    )?;
+                }
+            }
+        }
+    }
+
+    for new_cid in drop_card_ids {
+        tx.execute("DELETE FROM cards WHERE id=?1", [new_cid])?;
+    }
+    for new_pid in drop_project_ids {
+        tx.execute("DELETE FROM projects WHERE id=?1", [new_pid])?;
+    }
+    tx.execute_batch(
+        "CREATE UNIQUE INDEX card_numbers ON cards(project_id, number);
+         CREATE UNIQUE INDEX github_card_source ON cards(project_id, json_extract(data,'$.content.source.repository_id'), json_extract(data,'$.content.source.issue_id')) WHERE json_extract(data,'$.content.kind')='github_issue';
+         CREATE UNIQUE INDEX github_source_card ON cards(project_id, json_extract(data,'$.content.source.repository_id'), json_extract(data,'$.content.source.issue_id')) WHERE json_extract(data,'$.content.kind') IN ('github_issue','github_pr');
+         CREATE UNIQUE INDEX event_order ON events(card_id, number);
+         DROP TABLE IF EXISTS path_migrations;
+         DROP TABLE IF EXISTS id_migrations;",
+    )?;
+    Ok(())
+}
+
+fn move_tree(src: &Path, dst: &Path, report_map: &HashMap<String, String>) -> Result<()> {
+    if !src.exists() {
+        return Ok(());
+    }
+    if src.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let child_src = entry.path();
+            let mut name = entry.file_name().to_string_lossy().into_owned();
+            if src.file_name().is_some_and(|n| n == "reports")
+                && let Some(stem) = name.strip_suffix(".md")
+                && let Some(mapped) = report_map.get(stem)
+            {
+                name = format!("{mapped}.md");
+            } else if src.file_name().is_some_and(|n| n == "resources") {
+                let (stem, ext) = match name.find('.') {
+                    Some(i) => (&name[..i], &name[i..]),
+                    None => (name.as_str(), ""),
+                };
+                if let Some(mapped) = report_map.get(stem) {
+                    name = format!("{mapped}{ext}");
+                }
+            }
+            move_tree(&child_src, &dst.join(name), report_map)?;
+        }
+        let _ = std::fs::remove_dir(src);
+    } else if !dst.exists() {
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(src, dst)?;
+    }
+    Ok(())
+}
+
+fn sync_git_card_refs(
+    conn: &Connection,
+    mappings: &[(String, String)],
+) -> Result<()> {
+    if mappings.is_empty() || !table_exists(conn, "projects")? {
+        return Ok(());
+    }
+    let mut dirs = Vec::new();
+    let mut q = conn.prepare("SELECT data FROM projects")?;
+    for row in q.query_map([], |r| r.get::<_, String>(0))? {
+        let v: Value = serde_json::from_str(&row?)?;
+        let is_local = v["location"].is_null()
+            || v["location"]["machine"].as_str().unwrap_or("local") == "local";
+        if !is_local {
+            continue;
+        }
+        if let Some(dir) = v["location"]["directory"]
+            .as_str()
+            .or_else(|| v["directory"].as_str())
+        {
+            dirs.push(dir.to_owned());
+        }
+    }
+    let by_src: HashMap<&str, &str> = mappings
+        .iter()
+        .map(|(s, d)| (s.as_str(), d.as_str()))
+        .collect();
+    for dir in dirs {
+        let repo = Path::new(&dir);
+        if !repo.is_dir() {
+            continue;
+        }
+        let Ok(out) = std::process::Command::new("git")
+            .args([
+                "-C",
+                &dir,
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/canban/cards/",
+            ])
+            .output()
+        else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        for line in stdout.lines() {
+            let Some((refname, oid)) = line.split_once(' ') else {
+                continue;
+            };
+            let Some(cid) = refname.strip_prefix("refs/canban/cards/") else {
+                continue;
+            };
+            let Some(dst_cid) = by_src.get(cid) else {
+                continue;
+            };
+            let dst_ref = format!("refs/canban/cards/{dst_cid}");
+            let already = std::process::Command::new("git")
+                .args(["-C", &dir, "rev-parse", "--verify", "--quiet", &dst_ref])
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if !already {
+                let _ = std::process::Command::new("git")
+                    .args(["-C", &dir, "update-ref", &dst_ref, oid])
+                    .output();
+            }
+            let _ = std::process::Command::new("git")
+                .args(["-C", &dir, "update-ref", "-d", refname])
+                .output();
+        }
+    }
+    Ok(())
+}
+
+/// Moves on-disk Card/archive files and local Git retain refs to match schema-16 short IDs.
+pub fn sync_paths(home: &Path, conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "id_migrations")? && !table_exists(conn, "path_migrations")? {
+        return Ok(());
+    }
+    let mut path_pairs = Vec::new();
+    if table_exists(conn, "path_migrations")? {
+        let mut q = conn.prepare("SELECT old_rel, new_rel FROM path_migrations")?;
+        for row in q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            path_pairs.push(row?);
+        }
+    }
+    let mut proj_map = HashMap::new();
+    let mut card_pairs = Vec::new();
+    let mut card_old_to_new = HashMap::new();
+    let mut file_id_map = HashMap::new();
+    if table_exists(conn, "id_migrations")? {
+        let mut q = conn.prepare("SELECT kind, old_id, new_id FROM id_migrations")?;
+        for row in q.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (kind, old_id, new_id) = row?;
+            match kind.as_str() {
+                "project" => {
+                    proj_map.insert(old_id, new_id);
+                }
+                "card" => {
+                    card_old_to_new.insert(old_id.clone(), new_id.clone());
+                    card_pairs.push((old_id, new_id));
+                }
+                "report" | "artifact" => {
+                    file_id_map.insert(old_id, new_id);
+                }
+                _ => {}
+            }
+        }
+    }
+    if path_pairs.is_empty() && proj_map.is_empty() && card_pairs.is_empty() {
+        return Ok(());
+    }
+
+    for (old_rel, new_rel) in &path_pairs {
+        let src = home.join(old_rel);
+        let dst = home.join(new_rel);
+        if src.exists() && !dst.exists() {
+            if let Some(parent) = dst.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::rename(&src, &dst)?;
+        }
+    }
+
+    let mut card_info: HashMap<String, (String, u64)> = HashMap::new();
+    if table_exists(conn, "cards")? {
+        let mut q = conn.prepare("SELECT id, project_id, number FROM cards")?;
+        for row in q.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, u64>(2)?,
+            ))
+        })? {
+            let (cid, pid, num) = row?;
+            card_info.insert(cid, (pid, num));
+        }
+    }
+
+    let projects_root = home.join("projects");
+    if projects_root.is_dir() {
+        for entry in std::fs::read_dir(&projects_root)? {
+            let entry = entry?;
+            let p_name = entry.file_name().to_string_lossy().into_owned();
+            let dst_pid = proj_map.get(&p_name).cloned().unwrap_or_else(|| p_name.clone());
+            if let Some(mapped_pid) = proj_map.get(&p_name) {
+                let p_path = entry.path();
+                if p_path.join("cards").is_dir() {
+                    for card_entry in std::fs::read_dir(p_path.join("cards"))? {
+                        let card_entry = card_entry?;
+                        let c_name = card_entry.file_name().to_string_lossy().into_owned();
+                        let cid = card_old_to_new.get(&c_name).map(String::as_str).unwrap_or(&c_name);
+                        let leaf = card_info
+                            .get(cid)
+                            .map(|(_, num)| num.to_string())
+                            .unwrap_or_else(|| c_name.clone());
+                        let dst = projects_root.join(mapped_pid).join("cards").join(leaf);
+                        move_tree(&card_entry.path(), &dst, &file_id_map)?;
+                    }
+                    let _ = std::fs::remove_dir(p_path.join("cards"));
+                }
+                move_tree(&p_path, &projects_root.join(mapped_pid), &file_id_map)?;
+            } else if entry.path().join("cards").is_dir() {
+                for card_entry in std::fs::read_dir(entry.path().join("cards"))? {
+                    let card_entry = card_entry?;
+                    let c_name = card_entry.file_name().to_string_lossy().into_owned();
+                    let cid = card_old_to_new.get(&c_name).map(String::as_str).unwrap_or(&c_name);
+                    if let Some((expected_pid, num)) = card_info.get(cid)
+                        && *expected_pid == dst_pid
+                        && c_name != num.to_string()
+                    {
+                        let dst = projects_root.join(&dst_pid).join("cards").join(num.to_string());
+                        move_tree(&card_entry.path(), &dst, &file_id_map)?;
+                    }
+                }
+            }
+        }
+    }
+
+    let archives_root = home.join("archives");
+    if archives_root.is_dir() {
+        for entry in std::fs::read_dir(&archives_root)? {
+            let entry = entry?;
+            let p_name = entry.file_name().to_string_lossy().into_owned();
+            let dst_pid = proj_map.get(&p_name).cloned().unwrap_or_else(|| p_name.clone());
+            if entry.path().is_dir() {
+                for card_entry in std::fs::read_dir(entry.path())? {
+                    let card_entry = card_entry?;
+                    let c_name = card_entry.file_name().to_string_lossy().into_owned();
+                    let cid = card_old_to_new.get(&c_name).map(String::as_str).unwrap_or(&c_name);
+                    if let Some((expected_pid, num)) = card_info.get(cid)
+                        && *expected_pid == dst_pid
+                    {
+                        let dst = archives_root.join(&dst_pid).join(num.to_string());
+                        if card_entry.path() != dst {
+                            move_tree(&card_entry.path(), &dst, &file_id_map)?;
+                        }
+                    }
+                }
+                if proj_map.contains_key(&p_name) {
+                    let _ = std::fs::remove_dir(entry.path());
+                }
+            }
+        }
+    }
+
+    sync_git_card_refs(conn, &card_pairs)?;
+    Ok(())
+}
+
+fn sync_paths_down(home: &Path, conn: &Connection) -> Result<()> {
+    if !table_exists(conn, "id_migrations")? && !table_exists(conn, "path_migrations")? {
+        return Ok(());
+    }
+    if table_exists(conn, "path_migrations")? {
+        let mut q = conn.prepare("SELECT old_rel, new_rel FROM path_migrations")?;
+        for row in q.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (old_rel, new_rel) = row?;
+            let src = home.join(&new_rel);
+            let dst = home.join(&old_rel);
+            if src.exists() && !dst.exists() {
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::rename(&src, &dst)?;
+            }
+        }
+    }
+
+    let mut rev_proj = HashMap::new();
+    let mut rev_card = HashMap::new();
+    let mut card_pairs_rev = Vec::new();
+    let mut rev_files = HashMap::new();
+    if table_exists(conn, "id_migrations")? {
+        let mut q = conn.prepare("SELECT kind, old_id, new_id FROM id_migrations")?;
+        for row in q.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })? {
+            let (kind, old_id, new_id) = row?;
+            match kind.as_str() {
+                "project" => {
+                    rev_proj.insert(new_id, old_id);
+                }
+                "card" => {
+                    rev_card.insert(new_id.clone(), old_id.clone());
+                    card_pairs_rev.push((new_id, old_id));
+                }
+                "report" | "artifact" => {
+                    rev_files.insert(new_id, old_id);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if table_exists(conn, "cards")? {
+        let mut q = conn.prepare("SELECT id, project_id, number FROM cards")?;
+        for row in q.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, u64>(2)?,
+            ))
+        })? {
+            let (new_cid, new_pid, num) = row?;
+            let old_pid = rev_proj.get(&new_pid).cloned().unwrap_or_else(|| new_pid.clone());
+            let old_cid = rev_card.get(&new_cid).cloned().unwrap_or_else(|| new_cid.clone());
+            let num_str = num.to_string();
+            let cur_card_dir = home.join("projects").join(&new_pid).join("cards").join(&num_str);
+            let old_card_dir = home.join("projects").join(&old_pid).join("cards").join(&old_cid);
+            if cur_card_dir != old_card_dir && cur_card_dir.exists() {
+                move_tree(&cur_card_dir, &old_card_dir, &rev_files)?;
+            }
+            let cur_arch_dir = home.join("archives").join(&new_pid).join(&num_str);
+            let old_arch_dir = home.join("archives").join(&old_pid).join(&old_cid);
+            if cur_arch_dir != old_arch_dir && cur_arch_dir.exists() {
+                move_tree(&cur_arch_dir, &old_arch_dir, &rev_files)?;
+            }
+        }
+    }
+    for (new_pid, old_pid) in &rev_proj {
+        let cur = home.join("projects").join(new_pid);
+        if cur.is_dir() {
+            let _ = std::fs::remove_dir(cur.join("cards"));
+            move_tree(&cur, &home.join("projects").join(old_pid), &rev_files)?;
+        }
+        let cur_arch = home.join("archives").join(new_pid);
+        if cur_arch.is_dir() {
+            move_tree(&cur_arch, &home.join("archives").join(old_pid), &rev_files)?;
+        }
+    }
+
+    sync_git_card_refs(conn, &card_pairs_rev)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1362,8 +2717,8 @@ mod tests {
         use serde_json::{Value, json};
         let home = tempfile::tempdir().unwrap();
         let mut store = crate::Store::open(home.path()).unwrap();
-        assert_eq!(CURRENT, 15);
-        assert_eq!(version(&store.conn).unwrap(), 15);
+        assert_eq!(CURRENT, 16);
+        assert_eq!(version(&store.conn).unwrap(), 16);
 
         // Downgrade empty DB to schema 13 and populate representative Request + Attempt records.
         apply(&mut store.conn, 13).unwrap();
@@ -1566,5 +2921,190 @@ mod tests {
         assert_eq!(att_count, 2);
         apply(&mut store.conn, 15).unwrap();
         assert_eq!(version(&store.conn).unwrap(), 15);
+    }
+
+    #[test]
+    fn schema_16_short_ids_and_paths_roundtrip_and_preserves_data() {
+        use serde_json::{Value, json};
+        let home = tempfile::tempdir().unwrap();
+        let mut store = crate::Store::open(home.path()).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), 16);
+
+        // Downgrade empty DB to schema 15 and insert 32-char UUID records & disk files.
+        apply(&mut store.conn, 15).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), 15);
+
+        let old_pid = "0afddd435c7a45f793b2c8237d74bab8";
+        let old_cid = "e49615534ea24b04904bdd536ae69910";
+        let old_eid = "11112222333344445555666677778888";
+        let old_rep = "714d094ca4274c6da06947b11a484760";
+        let old_art = "99990000aaaabbbbccccddddeeeeffff";
+        let old_nid = "abcdef0123456789abcdef0123456789";
+        let old_nev = "fedcba9876543210fedcba9876543210";
+        let old_run = "deadbeefcafebabe1234567890abcdef";
+        let old_tid = format!("{old_cid}:agy");
+        let old_qid = format!("{old_eid}:agy");
+        let old_report_rel = format!("projects/{old_pid}/cards/{old_cid}/agents/agy/reports/{old_rep}.md");
+        let old_prompt_rel = format!("projects/{old_pid}/cards/{old_cid}/agents/agy/prompt.md");
+        let old_art_rel = format!("projects/{old_pid}/cards/{old_cid}/resources/{old_art}.txt");
+        let old_arch_rel = format!("archives/{old_pid}/{old_cid}/pack.tar.zst");
+
+        store.conn.execute(
+            "INSERT INTO projects(id,project_id,card_id,state,number,data) VALUES(?1,NULL,NULL,'',0,?2)",
+            params![old_pid, json!({"id":old_pid,"name":"Repo","directory":home.path().join("repo"),"workflow":{"stages":[]},"created_at":1}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO cards(id,project_id,card_id,state,number,data) VALUES(?1,?2,NULL,'develop',69,?3)",
+            params![old_cid, old_pid, json!({"id":old_cid,"project_id":old_pid,"number":69,"title":"Task","body":"","stage":"develop","revision":2,"archive":old_arch_rel,"human_gate":{"reason":"Check","terminal_id":old_tid,"next_stage":null},"created_at":1}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO events(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,'comment.added',1,?4)",
+            params![old_eid, old_pid, old_cid, json!({"id":old_eid,"project_id":old_pid,"card_id":old_cid,"sequence":1,"kind":"comment.added","actor":"user","message":"hi","data":{"terminal_id":old_tid,"workflow_run_id":old_run,"report_id":old_rep},"created_at":2}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO event_journal(event_id) VALUES(?1)",
+            [old_eid],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO conversations(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,'',0,?4)",
+            params![old_tid, old_pid, old_cid, json!({"id":old_tid,"project_id":old_pid,"card_id":old_cid,"profile_id":"agy","provider":"agy","provider_session_id":"11111111-2222-4333-8444-555555555555"}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO terminals(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,'running',1,?4)",
+            params![old_tid, old_pid, old_cid, json!({"id":old_tid,"conversation_id":old_tid,"number":1,"created_at":3,"agent":{"project_id":old_pid,"card_id":old_cid,"number":1,"profile":{"id":"agy","name":"Agy"},"input_path":old_prompt_rel,"workflow_run_id":old_run,"state":"running"}}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO reports(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,'completed',0,?4)",
+            params![old_rep, old_pid, old_cid, json!({"id":old_rep,"project_id":old_pid,"card_id":old_cid,"terminal_id":old_tid,"workflow_run_id":old_run,"state":"completed","message":"ok","path":old_report_rel,"request_key":"rk1","fingerprint":"fp1","created_at":4}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO artifacts(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,'',0,?4)",
+            params![old_art, old_pid, old_cid, json!({"id":old_art,"project_id":old_pid,"card_id":old_cid,"name":"log.txt","media_type":"text/plain","path":old_art_rel,"digest":"abc","bytes":3}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO questions(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,'pending',0,?4)",
+            params![old_qid, old_pid, old_cid, json!({"id":old_qid,"project_id":old_pid,"card_id":old_cid,"profile_id":"agy","comment_id":old_eid,"terminal_id":old_tid,"body":"why?","state":"pending","created_at":4}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO notes(id,project_id,card_id,state,number,data) VALUES(?1,?2,NULL,'',0,?3)",
+            params![old_nid, old_pid, json!({"id":old_nid,"project_id":old_pid,"title":"N","body":"B","revision":1,"created_at":1,"card_ids":[old_cid]}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO note_revisions(id,project_id,card_id,state,number,data) VALUES(?1,?2,NULL,'',1,?3)",
+            params![format!("{old_nid}:1"), old_pid, json!({"id":format!("{old_nid}:1"),"project_id":old_pid,"note_id":old_nid,"revision":1,"title":"N","body":"B","created_at":1}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO note_events(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,'note.created',1,?4)",
+            params![old_nev, old_pid, old_cid, json!({"id":old_nev,"project_id":old_pid,"note_id":old_nid,"sequence":1,"kind":"note.created","actor":"user","message":"created","card_id":old_cid,"revision":1,"data":{"terminal_id":old_tid},"created_at":1}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO workflow_sources(id,project_id,card_id,state,number,data) VALUES(?1,?2,NULL,'',0,?3)",
+            params![format!("{old_pid}:default.yaml"), old_pid, json!({"id":format!("{old_pid}:default.yaml"),"project_id":old_pid,"filename":"default.yaml","workflow_id":"canban-default","revision":1,"hash":"h","revision_id":"canban-default:1","enabled":true,"rules":{}}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO workflow_revisions(id,project_id,card_id,state,number,data) VALUES('canban-default:1',?1,NULL,'',1,?2)",
+            params![old_pid, json!({"id":"canban-default:1","project_id":old_pid,"workflow_id":"canban-default","revision":1,"definition":{"id":"canban-default","name":"Default","steps":{}},"created_at":1}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO workflow_runs(id,project_id,card_id,state,number,data) VALUES(?1,?2,?3,'waiting_agent',0,?4)",
+            params![old_run, old_pid, old_cid, json!({"id":old_run,"project_id":old_pid,"card_id":old_cid,"workflow_id":"canban-default","definition_revision":1,"definition":{"id":"canban-default","name":"Default","steps":{}},"state":"waiting_agent","visit":1,"terminal_id":old_tid,"trigger_event_id":old_eid}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO editor_drafts(id,revision,updated_at,data) VALUES(?1,1,1,?2)",
+            params![format!("card:{old_cid}"), json!({"project_id":old_pid,"card_id":old_cid,"body":"draft"}).to_string()],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO counters(id,value) VALUES(?1,69)",
+            [format!("card-number:{old_pid}")],
+        ).unwrap();
+        store.conn.execute(
+            "INSERT INTO operations(id,fingerprint,result) VALUES('op1','fp',?1)",
+            [json!({"id":old_rep,"card_id":old_cid,"path":old_report_rel}).to_string()],
+        ).unwrap();
+
+        // Populate matching on-disk files, including unindexed context.json & scratch.
+        for (rel, content) in [
+            (old_report_rel.as_str(), "report body"),
+            (old_prompt_rel.as_str(), "prompt body"),
+            (old_art_rel.as_str(), "art"),
+            (old_arch_rel.as_str(), "archive"),
+        ] {
+            let p = home.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, content).unwrap();
+        }
+        let unindexed = home
+            .path()
+            .join(format!("projects/{old_pid}/cards/{old_cid}/context.json"));
+        std::fs::write(&unindexed, "{}").unwrap();
+        drop(store);
+
+        // Migrate 15 -> 16 via migrate() so DB + disk files migrate together.
+        assert_eq!(migrate(home.path(), 16).unwrap(), 16);
+        let store = crate::Store::open(home.path()).unwrap();
+
+        let new_pid = "0afddd43";
+        let new_cid = "e4961553";
+        let new_rep = "714d094c";
+        let new_art = "99990000";
+        let new_report_rel = format!("projects/{new_pid}/cards/69/agents/agy/reports/{new_rep}.md");
+        let new_prompt_rel = format!("projects/{new_pid}/cards/69/agents/agy/prompt.md");
+        let new_art_rel = format!("projects/{new_pid}/cards/69/resources/{new_art}.txt");
+        let new_arch_rel = format!("archives/{new_pid}/69/pack.tar.zst");
+
+        assert!(home.path().join(&new_report_rel).exists());
+        assert!(home.path().join(&new_prompt_rel).exists());
+        assert!(home.path().join(&new_art_rel).exists());
+        assert!(home.path().join(&new_arch_rel).exists());
+        assert!(home.path().join(format!("projects/{new_pid}/cards/69/context.json")).exists());
+        assert!(!home.path().join(&old_report_rel).exists());
+
+        let proj_count: i64 = store.conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(proj_count, 1);
+        let mapped_pid: String = store.conn.query_row("SELECT id FROM projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(mapped_pid, new_pid);
+        let mapped_cid: String = store.conn.query_row("SELECT id FROM cards", [], |r| r.get(0)).unwrap();
+        assert_eq!(mapped_cid, new_cid);
+
+        let wf_id: String = store.conn.query_row("SELECT json_extract(data,'$.workflow_id') FROM workflow_revisions", [], |r| r.get(0)).unwrap();
+        assert_eq!(wf_id, "canban-default");
+
+        let term_raw: String = store.conn.query_row("SELECT data FROM terminals", [], |r| r.get(0)).unwrap();
+        let term: Value = serde_json::from_str(&term_raw).unwrap();
+        assert_eq!(term["id"], json!(format!("{new_cid}:agy")));
+        assert_eq!(term["agent"]["card_number"], json!(69));
+        assert_eq!(term["agent"]["input_path"], json!(new_prompt_rel));
+        assert_eq!(term["agent"]["workflow_run_id"], json!("deadbeef"));
+
+        let cnt_id: String = store.conn.query_row("SELECT id FROM counters WHERE value=69", [], |r| r.get(0)).unwrap();
+        assert_eq!(cnt_id, format!("card-number:{new_pid}"));
+        let draft_id: String = store.conn.query_row("SELECT id FROM editor_drafts", [], |r| r.get(0)).unwrap();
+        assert_eq!(draft_id, format!("card:{new_cid}"));
+        drop(store);
+
+        // Downgrade 16 -> 15 and verify full restoration of DB IDs & on-disk paths!
+        assert_eq!(migrate(home.path(), 15).unwrap(), 15);
+        assert!(home.path().join(&old_report_rel).exists());
+        assert!(home.path().join(&old_prompt_rel).exists());
+        assert!(home.path().join(&old_art_rel).exists());
+        assert!(home.path().join(&old_arch_rel).exists());
+        assert!(home.path().join(format!("projects/{old_pid}/cards/{old_cid}/context.json")).exists());
+        assert!(!home.path().join(&new_report_rel).exists());
+
+        let conn = Connection::open(home.path().join("canban.sqlite")).unwrap();
+        let restored_pid: String = conn.query_row("SELECT id FROM projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(restored_pid, old_pid);
+        let restored_cid: String = conn.query_row("SELECT id FROM cards", [], |r| r.get(0)).unwrap();
+        assert_eq!(restored_cid, old_cid);
+        let restored_term: String = conn.query_row("SELECT data FROM terminals", [], |r| r.get(0)).unwrap();
+        let restored_term_v: Value = serde_json::from_str(&restored_term).unwrap();
+        assert!(restored_term_v["agent"].get("card_number").is_none());
+        assert_eq!(restored_term_v["agent"]["input_path"], json!(old_prompt_rel));
+        drop(conn);
+
+        // Upgrade 15 -> 16 again (roundtrip idempotence).
+        assert_eq!(migrate(home.path(), 16).unwrap(), 16);
+        assert!(home.path().join(&new_report_rel).exists());
+        assert!(home.path().join(format!("projects/{new_pid}/cards/69/context.json")).exists());
     }
 }

@@ -206,16 +206,22 @@ impl AppServer {
     pub(super) fn note_read(&self, method: &str, p: &Value) -> Result<Value> {
         let store = self.store.lock().unwrap();
         let db = store.db();
+        let filter_pid = p["project_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|raw| super::resolve_project_id(db, raw))
+            .transpose()?;
         if method == "note.list" {
             let notes = db
                 .list::<Note>()?
                 .into_iter()
-                .filter(|n| p["project_id"].as_str().is_none_or(|id| n.project_id == id))
+                .filter(|n| filter_pid.as_deref().is_none_or(|id| n.project_id == id))
                 .collect::<Vec<_>>();
             return Ok(serde_json::to_value(notes)?);
         }
         let n: Note = db.get(strp(p, "note_id")?)?;
-        if let Some(project) = p["project_id"].as_str() {
+        if let Some(project) = filter_pid.as_deref() {
             ensure!(
                 n.project_id == project,
                 "Note belongs to a different Project"
@@ -248,9 +254,15 @@ impl AppServer {
         }
         self.mutate(method,&p,|db| {
             let old=p["note_id"].as_str().map(|id|db.get::<Note>(id)).transpose()?;
-            let project=old.as_ref().map(|n|n.project_id.as_str()).or(p["project_id"].as_str()).context("project_id required for a new Note")?.to_owned();
+            let resolved_param_pid = p["project_id"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|raw| super::resolve_project_id(db, raw))
+                .transpose()?;
+            let project=old.as_ref().map(|n|n.project_id.clone()).or(resolved_param_pid.clone()).context("project_id required for a new Note")?;
             let _:Project=db.get(&project)?;
-            if let Some(scope)=p["project_id"].as_str(){ensure!(scope==project,"Note belongs to a different Project");}
+            if let Some(scope)=resolved_param_pid.as_deref(){ensure!(scope==project,"Note belongs to a different Project");}
             let source=origin(db,&p,&project)?;
             let mut n=old.clone().unwrap_or_else(||Note{id:id(),project_id:project.clone(),title:String::new(),body:String::new(),revision:0,created_at:now(),updated_at:now(),links:Vec::new(),card_ids:Vec::new()});
             if old.is_some(){ensure!(p["revision"].as_u64()==Some(n.revision),"Note revision conflict: reload the saved version; your draft has not been changed");}

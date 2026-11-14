@@ -410,22 +410,22 @@ impl AppServer {
         if method == "workflow.sources" {
             let mut store = self.store.lock().unwrap();
             return store.write(|db| {
-                let project: Project = db.get(strp(&p, "project_id")?)?;
+                let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+                let project: Project = db.get(&pid)?;
                 initialize(&self.home, db, &self.config(), &project)?;
                 files(&self.home, db, &project)
             });
         }
         if method == "workflow.prompt" {
-            let project: Project = self
-                .store
-                .lock()
-                .unwrap()
-                .db()
-                .get(strp(&p, "project_id")?)?;
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+            let project: Project = db.get(&pid)?;
             return Ok(json!({"prompt":self.workflow_prompt(&project)}));
         }
         self.mutate(method, &p, |db| {
-            let project: Project = db.get(strp(&p, "project_id")?)?;
+            let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+            let project: Project = db.get(&pid)?;
             let current = files(&self.home, db, &project)?;
             ensure!(
                 p["revision"] == current["revision"],

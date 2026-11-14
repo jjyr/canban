@@ -911,7 +911,8 @@ impl AppServer {
         let config = self.config();
         let overrides = self.parse_agent_overrides(&config, p.get("agent_overrides"))?;
         self.mutate("project.agents", &p, |db| {
-            let mut project: Project = db.get(strp(&p, "project_id")?)?;
+            let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+            let mut project: Project = db.get(&pid)?;
             project.agent_overrides = overrides;
             db.save(&project)?;
             Ok(serde_json::to_value(project)?)

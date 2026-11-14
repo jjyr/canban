@@ -3,7 +3,13 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 pub fn id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..8].to_owned()
+}
+pub fn token_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
+}
+pub fn uuid_v4() -> String {
+    uuid::Uuid::new_v4().hyphenated().to_string()
 }
 pub fn now() -> u64 {
     std::time::SystemTime::now()
@@ -672,6 +678,8 @@ pub struct AgentRun {
     pub lifecycle: Lifecycle,
     pub project_id: String,
     pub card_id: String,
+    #[serde(default)]
+    pub card_number: u64,
     #[serde(default)]
     pub number: u32,
     pub state: String,
@@ -1429,5 +1437,20 @@ mod tests {
         assert_eq!(open.board_cmp(&merged), std::cmp::Ordering::Less);
         merged.delivery = None;
         assert_eq!(merged.board_cmp(&open), std::cmp::Ordering::Less);
+    }
+
+    #[test]
+    fn id_generators_produce_expected_formats() {
+        let short = id();
+        assert_eq!(short.len(), 8);
+        assert!(short.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+
+        let token = token_id();
+        assert_eq!(token.len(), 32);
+        assert!(token.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+
+        let v4 = uuid_v4();
+        assert_eq!(v4.len(), 36);
+        assert_eq!(v4.split('-').map(str::len).collect::<Vec<_>>(), vec![8, 4, 4, 4, 12]);
     }
 }

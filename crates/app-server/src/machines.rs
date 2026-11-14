@@ -87,7 +87,8 @@ impl AppServer {
     pub(super) fn update_location(&self, p: Value) -> Result<Value> {
         let location = self.work_location(&p)?;
         self.mutate("project.location", &p, |db| {
-            let mut project: Project = db.get(strp(&p, "project_id")?)?;
+            let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+            let mut project: Project = db.get(&pid)?;
             if let Some(expected) = p.get("expected_location") {
                 ensure!(
                     serde_json::to_value(project.work_location())? == *expected,

@@ -156,7 +156,7 @@ print(json.dumps(rows))"#,
         )?;
         let skill = canban_context::skill_path(home);
         host.write(&skill.to_string_lossy(), canban_context::SKILL_MD)?;
-        let local = canban_context::card_dir(&self.home, &card.project_id, &card.id);
+        let local = canban_context::card_dir(&self.home, &card.project_id, card.number);
         fn copy(host: &Host, root: &Path, target: &Path, path: &Path) -> Result<()> {
             if !path.exists() {
                 return Ok(());

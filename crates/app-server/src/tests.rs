@@ -3479,3 +3479,64 @@ fn git_client_rpcs_enforce_checkout_containment_user_guard_and_remote_sync() {
         .unwrap();
     assert_eq!(fetch_res["remote"], "origin");
 }
+
+#[test]
+fn short_ids_card_number_paths_and_legacy_alias_resolution() {
+    let (_d, app, p, c) = setup();
+    assert_eq!(p.id.len(), 8);
+    assert!(p.id.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(c.id.len(), 8);
+    assert!(c.id.bytes().all(|b| b.is_ascii_hexdigit()));
+
+    // Move to develop, admit, add a comment to create a Question, then report & reply.
+    app.call("card.move", json!({"card_id":c.id,"revision":c.revision,"stage":"develop"})).unwrap();
+    let entry = app.snapshot().unwrap().terminals.into_iter().next().unwrap();
+    assert_eq!(entry.agent.as_ref().unwrap().card_number, c.number);
+    let _running = admit(&app, &entry);
+    app.call("comment.add", json!({"card_id":c.id,"body":"@developer quick question"})).unwrap();
+    app.call(
+        "execution.report",
+        json!({"project_id":&p.id[..4],"card":c.number,"state":"completed","message":"done","body":"Full report","request_key":"rep-short"}),
+    )
+    .unwrap();
+    let snap = app.snapshot().unwrap();
+    let rep = &snap.reports[0];
+    assert_eq!(rep.id.len(), 8);
+    assert_eq!(
+        rep.path.as_deref(),
+        Some(format!("projects/{}/cards/{}/agents/developer/reports/{}.md", p.id, c.number, rep.id).as_str())
+    );
+
+    // Prefix + name + legacy id_migrations lookup.
+    let old_pid = format!("{}000000000000000000000000", p.id);
+    let old_cid = format!("{}111111111111111111111111", c.id);
+    let old_qid = "22223333444455556666777788889999";
+    let real_qid = snap.questions[0].id.clone();
+    app.store.lock().unwrap().write(|db| {
+        db.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS id_migrations(kind TEXT NOT NULL, old_id TEXT NOT NULL, new_id TEXT NOT NULL, PRIMARY KEY(kind, old_id));",
+        )?;
+        db.conn.execute("INSERT OR REPLACE INTO id_migrations VALUES('project',?1,?2)", rusqlite::params![old_pid, p.id])?;
+        db.conn.execute("INSERT OR REPLACE INTO id_migrations VALUES('card',?1,?2)", rusqlite::params![old_cid, c.id])?;
+        db.conn.execute("INSERT OR REPLACE INTO id_migrations VALUES('question',?1,?2)", rusqlite::params![old_qid, real_qid])?;
+        Ok(())
+    }).unwrap();
+
+    // Legacy 32-char project_id + prefix + project name resolve on card.get / card.list.
+    let by_legacy = app.call("card.get", json!({"project_id":old_pid,"card":c.number})).unwrap();
+    assert_eq!(by_legacy["id"], c.id);
+    let by_name = app.call("card.get", json!({"project_id":"Example","card":c.number})).unwrap();
+    assert_eq!(by_name["id"], c.id);
+    let by_old_card = app.call("card.get", json!({"card_id":old_cid})).unwrap();
+    assert_eq!(by_old_card["id"], c.id);
+    let by_prefix = app.call("card.get", json!({"card_id":&c.id[..4]})).unwrap();
+    assert_eq!(by_prefix["id"], c.id);
+
+    // Legacy 32-char question_id + project alias resolve on agent.reply.
+    app.call(
+        "agent.reply",
+        json!({"project_id":old_pid,"card":c.number,"question_id":old_qid,"body":"Answered via old question id","request_key":"rep-legacy-q"}),
+    )
+    .unwrap();
+    assert_eq!(app.snapshot().unwrap().questions[0].state, "replied");
+}

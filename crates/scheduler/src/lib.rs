@@ -69,6 +69,7 @@ pub fn agent_run(
         lifecycle: Lifecycle::default(),
         project_id: project.into(),
         card_id: card.into(),
+        card_number: 0,
         number,
         state: "queued".into(),
         core_id: None,

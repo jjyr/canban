@@ -3,7 +3,7 @@ use super::*;
 impl AppServer {
     pub(super) fn read_resource(&self, card_id: &str, path: &str) -> Result<Value> {
         let c: Card = self.store.lock().unwrap().db().get(card_id)?;
-        let root = canban_context::card_dir(&self.home, &c.project_id, &c.id);
+        let root = canban_context::card_dir(&self.home, &c.project_id, c.number);
         let full = self.home.join(path);
         ensure!(
             full.starts_with(&root)
@@ -489,7 +489,26 @@ impl AppServer {
         );
         let value = client.read(terminal)?;
         let text = value["text"].as_str().context("No terminal text")?;
-        let path = canban_context::run_dir(&self.home, entry).join(format!("output-{}.txt", id()));
+        let dir = if run.card_number > 0 {
+            canban_context::run_dir(&self.home, entry)
+        } else {
+            let card_number = self
+                .store
+                .lock()
+                .unwrap()
+                .db()
+                .get::<Card>(&run.card_id)
+                .map(|c| c.number)
+                .unwrap_or(0);
+            if card_number > 0 {
+                canban_context::card_dir(&self.home, &run.project_id, card_number)
+                    .join("agents")
+                    .join(&run.profile.id)
+            } else {
+                canban_context::run_dir(&self.home, entry)
+            }
+        };
+        let path = dir.join(format!("output-{}.txt", id()));
         canban_context::atomic(&path, text.as_bytes())?;
         let relative = canban_context::relative(&self.home, &path)?;
         self.store.lock().unwrap().write(|db| {
