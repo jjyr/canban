@@ -53,6 +53,9 @@ impl AppServer {
         if method.starts_with("worktree.") {
             return self.worktree_call(method, p);
         }
+        if method.starts_with("git.") {
+            return self.git_call(method, p);
+        }
         let config = self.config();
         match method {
             "notifications.read" => self.read_card(p),
@@ -1212,8 +1215,6 @@ impl AppServer {
                 self.note_read(method, &p)
             }
             "note.save" | "note.write" | "note.rename" => self.note_write(method, p),
-            "git.refs" => self.git_refs(p),
-            "git.compare" => self.git_compare(p),
             "review.preview" => self.review_preview(p),
             "review.merge" => self.review_merge(p),
             "review.github_pr" => self.review_github_pr(p),

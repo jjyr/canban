@@ -828,33 +828,23 @@ impl AppServer {
         Ok(advance_queue)
     }
 
-    pub(super) fn git_refs(&self, p: Value) -> Result<Value> {
-        let project: Project = self
-            .store
-            .lock()
-            .unwrap()
-            .db()
-            .get(strp(&p, "project_id")?)?;
-        self.ops(&project.work_location().machine)
-            .git_refs(&project)
-    }
-
     pub(super) fn git_compare(&self, p: Value) -> Result<Value> {
-        let (project, card_ctx) = {
+        let ctx = self.resolve_project_checkout(&p)?;
+        let card_ctx = {
             let store = self.store.lock().unwrap();
             let db = store.db();
             if let Some(card_id) = p["card_id"].as_str().filter(|s| !s.is_empty()) {
                 let c: Card = db.get(card_id)?;
-                let proj: Project = db.get(&c.project_id)?;
-                let proj = self.bound_project(&proj, &c);
                 let warning = activity_warning(db, &c)?;
-                (proj, Some((c, warning)))
+                Some((c, warning))
             } else {
-                let proj: Project = db.get(strp(&p, "project_id")?)?;
-                (proj, None)
+                None
             }
         };
-        let ops = self.ops(&project.work_location().machine);
+        let project = ctx.project;
+        let machine = project.work_location().machine;
+        let _permit = self.check(&machine);
+        let ops = self.ops(&machine);
         let three_dot = p["three_dot"].as_bool().unwrap_or(true);
 
         if p["use_card_worktree"].as_bool().unwrap_or(false)
@@ -902,11 +892,7 @@ impl AppServer {
 
         let base = strp(&p, "base")?;
         let compare = strp(&p, "compare")?;
-        let cwd = p["cwd"]
-            .as_str()
-            .filter(|s| !s.is_empty())
-            .or_else(|| card_ctx.as_ref().and_then(|(c, _)| c.worktree.as_deref()));
-        ops.git_compare(&project, base, compare, cwd, three_dot)
+        ops.git_compare(&project, base, compare, Some(&ctx.cwd), three_dot)
     }
 
     pub(super) fn review_github_pr(&self, p: Value) -> Result<Value> {

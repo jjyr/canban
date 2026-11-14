@@ -824,6 +824,7 @@ pub fn rpc(endpoint: &Path, method: &str, params: Value) -> Result<Value> {
 #[cfg(test)]
 mod tests;
 
+mod git;
 mod review;
 
 mod utilities;

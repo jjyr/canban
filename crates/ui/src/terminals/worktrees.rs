@@ -482,7 +482,11 @@ pub fn open_agent(ui: Ui, wt: &ManagedWorktree, profile_id: &str) {
 
 pub fn open_diff(ui: Ui, wt: &ManagedWorktree) {
     ui.project.set(wt.project_id.clone());
+    ui.review_state.checkout_cwd.set(wt.path.clone());
+    ui.review_state.log_branch.set(wt.branch.clone());
     crate::review::select_git_pair(ui, wt.base_branch.clone(), wt.branch.clone());
+    crate::review::load_refs(ui);
+    crate::review::git_ops::load_branch_log(ui, wt.branch.clone(), false);
     ui.navigate("review");
 }
 

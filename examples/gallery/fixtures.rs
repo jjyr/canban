@@ -135,12 +135,76 @@ pub fn review() -> ReviewPreview {
 
 pub fn git_refs() -> serde_json::Value {
     json!({
+        "cwd": "/example/project",
         "current_branch": "feat/diff-workbench",
         "default_branch": "main",
         "head_sha": "c207c08a91fe001234567890abcdef0123456789",
+        "upstream": "origin/feat/diff-workbench",
+        "ahead": 2,
+        "behind": 1,
+        "has_remote": true,
+        "remote_name": "origin",
         "dirty": true,
         "dirty_count": 3,
         "staged_count": 1,
+        "unstaged_count": 2,
+        "last_commit_subject": "ui: add unified Diff & Review workbench",
+        "last_commit_body": "Supports standalone Git compare, branch commit log, and working tree commit controls.",
+        "checkouts": [
+            {
+                "kind": "project",
+                "label": "Canban workspace (main)",
+                "path": "/example/project",
+                "branch": "main"
+            },
+            {
+                "kind": "card",
+                "card_id": "card-1",
+                "card_number": 1,
+                "label": "#1 Improve search and preserve the user's context",
+                "path": "/preview/worktrees/card-1",
+                "branch": "canban/gallery/1"
+            },
+            {
+                "kind": "worktree",
+                "worktree_id": "wt-gallery-1",
+                "label": "feat/diff-workbench (worktree)",
+                "path": "/preview/worktrees/wt-diff",
+                "branch": "feat/diff-workbench"
+            }
+        ],
+        "status_files": [
+            {
+                "path": "crates/workspaces/src/git_client.rs",
+                "orig_path": null,
+                "index_code": "A",
+                "worktree_code": " ",
+                "staged": true,
+                "unstaged": false,
+                "untracked": false,
+                "conflicted": false
+            },
+            {
+                "path": "crates/ui/src/review/sidebar.rs",
+                "orig_path": null,
+                "index_code": " ",
+                "worktree_code": "M",
+                "staged": false,
+                "unstaged": true,
+                "untracked": false,
+                "conflicted": false
+            },
+            {
+                "path": "crates/ui/src/review/git_ops.rs",
+                "orig_path": null,
+                "index_code": "?",
+                "worktree_code": "?",
+                "staged": false,
+                "unstaged": false,
+                "untracked": true,
+                "conflicted": false
+            }
+        ],
         "branches": [
             {
                 "name": "feat/diff-workbench",
@@ -151,6 +215,9 @@ pub fn git_refs() -> serde_json::Value {
                 "subject": "ui: add unified Diff & Review workbench",
                 "is_current": true,
                 "is_default": false,
+                "ahead": 2,
+                "behind": 1,
+                "gone": false,
             },
             {
                 "name": "main",
@@ -161,6 +228,9 @@ pub fn git_refs() -> serde_json::Value {
                 "subject": "ui: apply borderless SectionGroup layout",
                 "is_current": false,
                 "is_default": true,
+                "ahead": 0,
+                "behind": 0,
+                "gone": false,
             },
             {
                 "name": "canban/gallery/1",
@@ -171,6 +241,9 @@ pub fn git_refs() -> serde_json::Value {
                 "subject": "feat(search): preserve user context",
                 "is_current": false,
                 "is_default": false,
+                "ahead": 1,
+                "behind": 0,
+                "gone": false,
             },
             {
                 "name": "origin/feat/remote-pr",
@@ -181,6 +254,9 @@ pub fn git_refs() -> serde_json::Value {
                 "subject": "fix(github): cache PR review threads",
                 "is_current": false,
                 "is_default": false,
+                "ahead": 0,
+                "behind": 0,
+                "gone": false,
             }
         ],
         "tags": [
@@ -212,6 +288,95 @@ pub fn git_refs() -> serde_json::Value {
                 "relative_time": "1d ago",
                 "author": "JJy",
                 "subject": "feat(github): unify auth UX around gh CLI",
+            }
+        ]
+    })
+}
+
+pub fn git_commit_compare() -> serde_json::Value {
+    json!({
+        "base_ref": "c207c08~1",
+        "compare_ref": "c207c08a91fe001234567890abcdef0123456789",
+        "base_sha": "1cfcce8111222333444555666777888999000aaa",
+        "compare_sha": "c207c08a91fe001234567890abcdef0123456789",
+        "three_dot": false,
+        "total_additions": 14,
+        "total_deletions": 3,
+        "truncated": false,
+        "cwd": "/example/project",
+        "commits": [
+            {
+                "sha": "c207c08a91fe001234567890abcdef0123456789",
+                "short_sha": "c207c08",
+                "relative_time": "2m ago",
+                "author": "JJy",
+                "subject": "Merge branch 'feat/diff-workbench' into main",
+            }
+        ],
+        "commit_detail": {
+            "sha": "c207c08a91fe001234567890abcdef0123456789",
+            "short_sha": "c207c08",
+            "author": "JJy",
+            "email": "jjyruby@gmail.com",
+            "date_iso": "2026-11-14T16:45:00+08:00",
+            "relative_time": "2 minutes ago",
+            "subject": "feat(review): add branch commit log, single-commit diff & Git sync",
+            "body": "- Browse paginated commit history per branch with instant SHA/subject filtering\n- Inspect individual commits with full message body and merge-parent switching\n- Stage, unstage, commit/amend, fetch, fast-forward pull, and push directly in Diff & Review",
+            "parent_index": 0,
+            "parents": [
+                {
+                    "index": 0,
+                    "sha": "1cfcce8111222333444555666777888999000aaa",
+                    "short_sha": "1cfcce8",
+                    "subject": "ui: apply borderless SectionGroup layout"
+                },
+                {
+                    "index": 1,
+                    "sha": "d93a6a2999888777666555444333222111000fff",
+                    "short_sha": "d93a6a2",
+                    "subject": "feat(github): unify auth UX around gh CLI"
+                }
+            ]
+        },
+        "files": git_compare()["files"].clone(),
+    })
+}
+
+pub fn git_workdir_compare() -> serde_json::Value {
+    let refs = git_refs();
+    json!({
+        "base_ref": "HEAD",
+        "compare_ref": "WORKDIR",
+        "base_sha": "c207c08a91fe001234567890abcdef0123456789",
+        "compare_sha": "c207c08a91fe001234567890abcdef0123456789",
+        "three_dot": false,
+        "total_additions": 26,
+        "total_deletions": 4,
+        "truncated": false,
+        "cwd": "/example/project",
+        "commits": [],
+        "status_files": refs["status_files"].clone(),
+        "files": [
+            {
+                "filename": "crates/workspaces/src/git_client.rs",
+                "status": "added",
+                "additions": 15,
+                "deletions": 0,
+                "patch": "@@ -0,0 +1,6 @@\n+impl Ops {\n+    pub fn git_pull(&self, project: &Project, dir: &Path) -> Result<Value> {\n+        // Safe fast-forward only (`--ff-only`)\n+        self.checked(dir, &[\"pull\", \"--ff-only\"])\n+    }\n+}"
+            },
+            {
+                "filename": "crates/ui/src/review/sidebar.rs",
+                "status": "modified",
+                "additions": 8,
+                "deletions": 4,
+                "patch": "@@ -35,6 +35,10 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {\n-    .child(project_picker)\n+    .child(project_picker)\n+    .child(git_ops::render_checkout_picker(ui))\n+    .child(git_ops::render_sync_controls(ui))"
+            },
+            {
+                "filename": "crates/ui/src/review/git_ops.rs",
+                "status": "added",
+                "additions": 3,
+                "deletions": 0,
+                "patch": "@@ -0,0 +1,3 @@\n+pub fn run_commit(ui: Ui, and_push: bool) {\n+    // Dispatches git.commit with optional stage_all & push\n+}"
             }
         ]
     })

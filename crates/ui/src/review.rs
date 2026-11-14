@@ -3,6 +3,7 @@
 //! - Opens directly from Local Cards (worktree/branch) and GitHub PR Cards (zero-clone remote PR diff).
 //! - Supports inline line-by-line review comments + batch dispatch to @Agent (Terminals or Card) or GitHub PR.
 pub mod diff;
+pub mod git_ops;
 pub mod model;
 pub mod sidebar;
 pub mod submit;
@@ -256,6 +257,9 @@ pub fn open_compare(ui: Ui) {
         ui.review.set(None);
         st.card_drawer_open.set(false);
         st.pr_target.set(None);
+        st.checkout_cwd.set(String::new());
+        st.log_branch.set(String::new());
+        st.range_backup.set(None);
         st.mode.set("git".into());
         st.selected_file.set(String::new());
         st.active_line.set(None);
@@ -336,6 +340,10 @@ pub fn open_card(ui: Ui, card_id: &str) {
         ui.project.set(card.project_id.clone());
         ui.card.set(card.id.clone());
         ui.review.set(None);
+        st.checkout_cwd
+            .set(card.worktree.clone().unwrap_or_default());
+        st.log_branch.set(card.branch.clone().unwrap_or_default());
+        st.range_backup.set(None);
         st.selected_file.set(String::new());
         st.active_line.set(None);
         st.editing_remote_comment.set(None);
@@ -379,20 +387,37 @@ pub fn load_refs(ui: Ui) {
         return;
     };
     let Some(app) = crate::APP.get().cloned() else {
+        if st.log_commits.with_untracked(Vec::is_empty) {
+            git_ops::load_branch_log(ui, String::new(), false);
+        }
         return;
     };
     let ticket = st.refs_ticket.get_untracked() + 1;
     st.refs_ticket.set(ticket);
     st.refs_loading.set(true);
     let pid = project.id.clone();
+    let cwd = st.checkout_cwd.get_untracked();
     ui.spawn(async move {
-        let res = blocking(move || app.call("git.refs", json!({ "project_id": pid }))).await;
+        let mut req = json!({ "project_id": pid });
+        if !cwd.is_empty() {
+            req["cwd"] = json!(cwd);
+        }
+        let res = blocking(move || app.call("git.refs", req)).await;
         if st.refs_ticket.try_get() != Some(ticket) {
             return;
         }
         st.refs_loading.set(false);
         if let Ok(Ok(val)) = res {
+            let cur_br = val["current_branch"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .or_else(|| val["default_branch"].as_str())
+                .unwrap_or("HEAD")
+                .to_owned();
             st.refs_data.set(val);
+            if st.log_branch.get_untracked().is_empty() {
+                git_ops::load_branch_log(ui, cur_br, false);
+            }
         }
     });
 }
@@ -403,39 +428,51 @@ pub fn load_refs_and_compare(ui: Ui, choose_smart_default: bool) {
         return;
     };
     let Some(app) = crate::APP.get().cloned() else {
+        git_ops::load_branch_log(ui, String::new(), false);
         return;
     };
     let ticket = st.refs_ticket.get_untracked() + 1;
     st.refs_ticket.set(ticket);
     st.refs_loading.set(true);
     let pid = project.id.clone();
+    let cwd = st.checkout_cwd.get_untracked();
     ui.spawn(async move {
-        let res = blocking(move || app.call("git.refs", json!({ "project_id": pid }))).await;
+        let mut req = json!({ "project_id": pid });
+        if !cwd.is_empty() {
+            req["cwd"] = json!(cwd);
+        }
+        let res = blocking(move || app.call("git.refs", req)).await;
         if st.refs_ticket.try_get() != Some(ticket) {
             return;
         }
         st.refs_loading.set(false);
         match res {
             Ok(Ok(val)) => {
+                let current = val["current_branch"].as_str().unwrap_or("").to_owned();
+                let default_br = val["default_branch"].as_str().unwrap_or("main").to_owned();
                 if choose_smart_default
                     || st.base_ref.get_untracked().is_empty()
                     || st.compare_ref.get_untracked().is_empty()
                 {
                     let dirty = val["dirty"].as_bool().unwrap_or(false);
-                    let current = val["current_branch"].as_str().unwrap_or("").to_owned();
-                    let default_br = val["default_branch"].as_str().unwrap_or("main").to_owned();
                     if dirty {
                         st.base_ref.set("HEAD".into());
                         st.compare_ref.set("WORKDIR".into());
                     } else if !current.is_empty() && current != default_br {
-                        st.base_ref.set(default_br);
-                        st.compare_ref.set(current);
+                        st.base_ref.set(default_br.clone());
+                        st.compare_ref.set(current.clone());
                     } else {
                         st.base_ref.set("HEAD~1".into());
                         st.compare_ref.set("HEAD".into());
                     }
                 }
+                let log_br = if !current.is_empty() {
+                    current
+                } else {
+                    default_br
+                };
                 st.refs_data.set(val);
+                git_ops::load_branch_log(ui, log_br, false);
                 refresh_active_diff(ui, false);
             }
             Ok(Err(e)) => st.error.set(format!("{e:#}")),
@@ -543,6 +580,7 @@ pub fn refresh_active_diff(ui: Ui, force_remote_refresh: bool) {
         return;
     };
     let pid = project.id.clone();
+    let cwd = st.checkout_cwd.get_untracked();
     let base = {
         let b = st.base_ref.get_untracked();
         if b.is_empty() { "HEAD".into() } else { b }
@@ -554,18 +592,16 @@ pub fn refresh_active_diff(ui: Ui, force_remote_refresh: bool) {
     let three_dot = st.three_dot.get_untracked();
 
     ui.spawn(async move {
-        let res = blocking(move || {
-            app.call(
-                "git.compare",
-                json!({
-                    "project_id": pid,
-                    "base": base,
-                    "compare": compare,
-                    "three_dot": three_dot,
-                }),
-            )
-        })
-        .await;
+        let mut req = json!({
+            "project_id": pid,
+            "base": base,
+            "compare": compare,
+            "three_dot": three_dot,
+        });
+        if !cwd.is_empty() {
+            req["cwd"] = json!(cwd);
+        }
+        let res = blocking(move || app.call("git.compare", req)).await;
         if st.compare_ticket.try_get() != Some(ticket) {
             return;
         }
@@ -588,6 +624,7 @@ pub(crate) fn select_git_pair(ui: Ui, base: impl Into<String>, compare: impl Int
         ui.review.set(None);
         st.card_drawer_open.set(false);
         st.pr_target.set(None);
+        st.range_backup.set(None);
         st.mode.set("git".into());
         st.base_ref.set(base.into());
         st.compare_ref.set(compare.into());

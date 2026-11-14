@@ -234,6 +234,7 @@ impl Ui {
             || self.worktree_modal.get_untracked().is_some()
             || self.worktree_promote.get_untracked().is_some()
             || self.worktree_remove_confirm.get_untracked().is_some()
+            || self.review_state.discard_confirm.get_untracked().is_some()
     }
     pub fn close_card(self) {
         self.editing_comment.set(None);
@@ -828,6 +829,35 @@ pub fn dispatch_complete(
                         "worktree.create" => ui.notify("Managed worktree created"),
                         "worktree.promote" => ui.notify("Promoted worktree to Card"),
                         "worktree.remove" => ui.notify("Worktree deleted"),
+                        "git.stage" => ui.notify("Staged changes"),
+                        "git.unstage" => ui.notify("Unstaged changes"),
+                        "git.discard" => ui.notify("Discarded local changes"),
+                        "git.commit" => {
+                            let short = value["short_sha"].as_str().unwrap_or("");
+                            if value["pushed"] == true {
+                                ui.notify(format!("Committed {short} & pushed"));
+                            } else if value["amended"] == true {
+                                ui.notify(format!("Amended commit {short}"));
+                            } else {
+                                ui.notify(format!("Committed {short}"));
+                            }
+                        }
+                        "git.fetch" => {
+                            let r = value["remote"].as_str().unwrap_or("remote");
+                            ui.notify(format!("Fetched from {r}"));
+                        }
+                        "git.pull" => {
+                            if value["fast_forwarded"] == true {
+                                ui.notify("Fast-forwarded current branch");
+                            } else {
+                                ui.notify("Already up to date");
+                            }
+                        }
+                        "git.push" => {
+                            let r = value["remote"].as_str().unwrap_or("remote");
+                            let b = value["branch"].as_str().unwrap_or("branch");
+                            ui.notify(format!("Pushed {b} to {r}"));
+                        }
                         _ => ui.notify("Saved"),
                     }
                 }

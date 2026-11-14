@@ -478,6 +478,54 @@ pub const CATALOG: &[Command] = &[
         context: "Preferences",
         keywords: "bug feedback diagnostics",
     },
+    Command {
+        id: "git-fetch",
+        title: "Git: Fetch Remote",
+        key: "",
+        display: "Diff & Review",
+        context: "Git",
+        keywords: "fetch origin remote sync prune",
+    },
+    Command {
+        id: "git-pull",
+        title: "Git: Pull (Fast-Forward Only)",
+        key: "",
+        display: "Diff & Review",
+        context: "Git",
+        keywords: "pull ff-only fast-forward sync update",
+    },
+    Command {
+        id: "git-push",
+        title: "Git: Push Current Branch",
+        key: "",
+        display: "Diff & Review",
+        context: "Git",
+        keywords: "push origin publish upstream",
+    },
+    Command {
+        id: "git-stage-all",
+        title: "Git: Stage All Changes",
+        key: "",
+        display: "Diff & Review",
+        context: "Git",
+        keywords: "stage add working tree index",
+    },
+    Command {
+        id: "git-unstage-all",
+        title: "Git: Unstage All Changes",
+        key: "",
+        display: "Diff & Review",
+        context: "Git",
+        keywords: "unstage reset index",
+    },
+    Command {
+        id: "git-working-tree",
+        title: "Git: Open Working Tree & Commit Composer",
+        key: "",
+        display: "Diff & Review",
+        context: "Git",
+        keywords: "commit amend stage status diff",
+    },
 ];
 
 pub fn execute(ui: Ui, id: &str) {
@@ -986,6 +1034,42 @@ pub fn execute(ui: Ui, id: &str) {
         "check-herdr" => dispatch(ui, "herdr.status", json!({})),
         "check-updates" => crate::updates::check(ui),
         "report-issue" => crate::utilities::report::open(ui),
+        "git-fetch" => {
+            if ui.page.get_untracked() != "review" {
+                crate::review::open_compare(ui);
+            }
+            crate::review::git_ops::run_fetch(ui);
+        }
+        "git-pull" => {
+            if ui.page.get_untracked() != "review" {
+                crate::review::open_compare(ui);
+            }
+            crate::review::git_ops::run_pull(ui);
+        }
+        "git-push" => {
+            if ui.page.get_untracked() != "review" {
+                crate::review::open_compare(ui);
+            }
+            crate::review::git_ops::run_push(ui);
+        }
+        "git-stage-all" => {
+            if ui.page.get_untracked() != "review" {
+                crate::review::open_compare(ui);
+            }
+            crate::review::select_git_pair(ui, "HEAD", "WORKDIR");
+            crate::review::git_ops::run_stage(ui, Vec::new(), true);
+        }
+        "git-unstage-all" => {
+            if ui.page.get_untracked() != "review" {
+                crate::review::open_compare(ui);
+            }
+            crate::review::select_git_pair(ui, "HEAD", "WORKDIR");
+            crate::review::git_ops::run_unstage(ui, Vec::new(), true);
+        }
+        "git-working-tree" => {
+            crate::review::open_compare(ui);
+            crate::review::select_git_pair(ui, "HEAD", "WORKDIR");
+        }
         _ => {}
     }
 }

@@ -335,4 +335,5 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .child(terminals::tabs::rename_dialog(ui))
         .child(terminals::tabs::close_confirm_dialog(ui))
         .child(crate::terminals::worktrees::modals(ui))
+        .child(crate::review::git_ops::render_discard_modal(ui))
 }

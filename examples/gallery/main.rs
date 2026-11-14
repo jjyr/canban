@@ -1322,6 +1322,58 @@ pub fn Gallery() -> impl IntoElement {
         }
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("review-commits") {
+        canban_ui::frame::configure_window_chrome();
+        ui.snapshot.set(fixtures::workspace());
+        ui.select_project("gallery-project".into());
+        ui.card.set(String::new());
+        ui.review.set(None);
+        let refs = fixtures::git_refs();
+        ui.review_state.mode.set("git".into());
+        ui.review_state.refs_data.set(refs.clone());
+        ui.review_state.log_branch.set("feat/diff-workbench".into());
+        ui.review_state
+            .log_commits
+            .set(refs["commits"].as_array().cloned().unwrap_or_default());
+        ui.review_state
+            .compare_data
+            .set(fixtures::git_commit_compare());
+        ui.review_state.base_ref.set("c207c08~1".into());
+        ui.review_state
+            .compare_ref
+            .set("c207c08a91fe001234567890abcdef0123456789".into());
+        ui.review_state.range_backup.set(Some((
+            "git".into(),
+            "main".into(),
+            "feat/diff-workbench".into(),
+        )));
+        ui.page.set("review".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("review-working-tree") {
+        canban_ui::frame::configure_window_chrome();
+        ui.snapshot.set(fixtures::workspace());
+        ui.select_project("gallery-project".into());
+        ui.card.set(String::new());
+        ui.review.set(None);
+        let refs = fixtures::git_refs();
+        ui.review_state.mode.set("git".into());
+        ui.review_state.refs_data.set(refs.clone());
+        ui.review_state.log_branch.set("feat/diff-workbench".into());
+        ui.review_state
+            .log_commits
+            .set(refs["commits"].as_array().cloned().unwrap_or_default());
+        ui.review_state
+            .compare_data
+            .set(fixtures::git_workdir_compare());
+        ui.review_state.base_ref.set("HEAD".into());
+        ui.review_state.compare_ref.set("WORKDIR".into());
+        ui.review_state
+            .commit_summary
+            .set("feat(review): add working tree stage & commit controls".into());
+        ui.page.set("review".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("motion") {
         ui.page.set("board".into());
         return view()
@@ -1429,11 +1481,59 @@ pub fn Gallery() -> impl IntoElement {
                     ui.select_project("gallery-project".into());
                     ui.card.set(String::new());
                     ui.review.set(None);
+                    let refs = fixtures::git_refs();
                     ui.review_state.mode.set("git".into());
-                    ui.review_state.refs_data.set(fixtures::git_refs());
+                    ui.review_state.refs_data.set(refs.clone());
+                    ui.review_state.log_branch.set("feat/diff-workbench".into());
+                    ui.review_state.log_commits.set(
+                        refs["commits"].as_array().cloned().unwrap_or_default(),
+                    );
                     ui.review_state.compare_data.set(fixtures::git_compare());
                     ui.review_state.base_ref.set("main".into());
                     ui.review_state.compare_ref.set("feat/diff-workbench".into());
+                    ui.page.set("review".into());
+                }))
+                .child(action("Git Commit Detail", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::workspace());
+                    ui.select_project("gallery-project".into());
+                    ui.card.set(String::new());
+                    ui.review.set(None);
+                    let refs = fixtures::git_refs();
+                    ui.review_state.mode.set("git".into());
+                    ui.review_state.refs_data.set(refs.clone());
+                    ui.review_state.log_branch.set("feat/diff-workbench".into());
+                    ui.review_state.log_commits.set(
+                        refs["commits"].as_array().cloned().unwrap_or_default(),
+                    );
+                    ui.review_state.compare_data.set(fixtures::git_commit_compare());
+                    ui.review_state.base_ref.set("c207c08~1".into());
+                    ui.review_state
+                        .compare_ref
+                        .set("c207c08a91fe001234567890abcdef0123456789".into());
+                    ui.review_state.range_backup.set(Some((
+                        "git".into(),
+                        "main".into(),
+                        "feat/diff-workbench".into(),
+                    )));
+                    ui.page.set("review".into());
+                }))
+                .child(action("Git Working Tree", Variant::Secondary, move |_| {
+                    scene.set("workspace".into());
+                    ui.snapshot.set(fixtures::workspace());
+                    ui.select_project("gallery-project".into());
+                    ui.card.set(String::new());
+                    ui.review.set(None);
+                    let refs = fixtures::git_refs();
+                    ui.review_state.mode.set("git".into());
+                    ui.review_state.refs_data.set(refs.clone());
+                    ui.review_state.log_branch.set("feat/diff-workbench".into());
+                    ui.review_state.log_commits.set(
+                        refs["commits"].as_array().cloned().unwrap_or_default(),
+                    );
+                    ui.review_state.compare_data.set(fixtures::git_workdir_compare());
+                    ui.review_state.base_ref.set("HEAD".into());
+                    ui.review_state.compare_ref.set("WORKDIR".into());
                     ui.page.set("review".into());
                 }))
                 .child(action("Review delivery", Variant::Secondary, move |_| {

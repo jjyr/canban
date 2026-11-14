@@ -3351,3 +3351,131 @@ fn comment_delete_tombstones_own_comment_cancels_pending_questions_and_preserves
         .is_err()
     );
 }
+
+#[test]
+fn git_client_rpcs_enforce_checkout_containment_user_guard_and_remote_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let remote = dir.path().join("origin.git");
+    let source = dir.path().join("source");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&remote).unwrap();
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+
+    let git = |cwd: &Path, args: &[&str]| {
+        let st = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(st.success());
+    };
+    git(&remote, &["init", "--bare", "-b", "main"]);
+    git(&source, &["init", "-b", "main"]);
+    for (k, v) in [
+        ("user.name", "Reviewer"),
+        ("user.email", "reviewer@example.invalid"),
+        ("core.hooksPath", "/dev/null"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&source, &["config", k, v]);
+    }
+    git(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    std::fs::write(source.join("README.md"), "# Demo\n").unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "initial"]);
+    git(&source, &["push", "-u", "origin", "main"]);
+
+    let app = AppServer::open(home, PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Demo", "directory": source, "target_branch": "main"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Outside directory must be rejected.
+    let bad_cwd = app.call("git.refs", json!({"project_id": p.id, "cwd": outside}));
+    assert!(bad_cwd.is_err());
+
+    // Agent execution context must be rejected on mutating git.* RPCs.
+    let exec_err = app.call(
+        "git.stage",
+        json!({"project_id": p.id, "all": true, "execution": {"request_id": "r1"}}),
+    );
+    assert!(exec_err.is_err());
+
+    // Create standalone managed worktree and verify it appears in git.refs checkouts.
+    let wt_res = app
+        .call(
+            "worktree.create",
+            json!({"project_id": p.id, "branch": "feat/git-ui", "launch": "none"}),
+        )
+        .unwrap();
+    let wt_path = wt_res["worktree"]["path"].as_str().unwrap().to_owned();
+
+    let refs = app
+        .call("git.refs", json!({"project_id": p.id, "cwd": wt_path}))
+        .unwrap();
+    assert_eq!(refs["current_branch"], "feat/git-ui");
+    assert_eq!(refs["checkouts"].as_array().unwrap().len(), 2);
+
+    // Stage, commit + push on managed worktree via RPCs.
+    std::fs::write(Path::new(&wt_path).join("client.rs"), "pub fn sync() {}\n").unwrap();
+    app.call(
+        "git.stage",
+        json!({"project_id": p.id, "cwd": wt_path, "paths": ["client.rs"], "request_key": "stg-1"}),
+    )
+    .unwrap();
+
+    let commit_res = app
+        .call(
+            "git.commit",
+            json!({
+                "project_id": p.id,
+                "cwd": wt_path,
+                "message": "feat: add git client rpc\n\nverified in worktree",
+                "push": true,
+                "request_key": "cmt-1"
+            }),
+        )
+        .unwrap();
+    assert_eq!(commit_res["pushed"], true);
+    let sha = commit_res["sha"].as_str().unwrap().to_owned();
+
+    let log_res = app
+        .call(
+            "git.log",
+            json!({"project_id": p.id, "cwd": wt_path, "rev": "feat/git-ui", "limit": 10}),
+        )
+        .unwrap();
+    assert_eq!(log_res["commits"].as_array().unwrap().len(), 2);
+
+    let detail = app
+        .call(
+            "git.commit_detail",
+            json!({"project_id": p.id, "cwd": wt_path, "sha": sha}),
+        )
+        .unwrap();
+    assert_eq!(
+        detail["commit_detail"]["subject"],
+        "feat: add git client rpc"
+    );
+    assert_eq!(detail["commit_detail"]["body"], "verified in worktree");
+    assert_eq!(detail["files"][0]["filename"], "client.rs");
+
+    // Fetch from main checkout and verify feat/git-ui was pushed to origin.
+    let fetch_res = app
+        .call(
+            "git.fetch",
+            json!({"project_id": p.id, "request_key": "fetch-1"}),
+        )
+        .unwrap();
+    assert_eq!(fetch_res["remote"], "origin");
+}

@@ -1,4 +1,6 @@
-use super::{State, load_refs, open_card, open_compare, refresh_active_diff, select_git_pair};
+use super::{
+    State, git_ops, load_refs, open_card, open_compare, refresh_active_diff, select_git_pair,
+};
 use crate::presenter::*;
 use canban_types::Card;
 use canban_ui_kit::tokens::*;
@@ -35,9 +37,11 @@ pub fn render_left_sidebar(ui: Ui) -> impl IntoElement {
                 )
                 .child(chrome_button(
                     Icon::Refresh,
-                    "Refresh Git refs & diff",
+                    "Refresh Git refs, log & diff",
                     move |_| {
                         load_refs(ui);
+                        let br = st.log_branch.get_untracked();
+                        git_ops::load_branch_log(ui, br, false);
                         refresh_active_diff(ui, true);
                     },
                 )),
@@ -125,6 +129,8 @@ fn render_sidebar_sections(ui: Ui, st: State) -> AnyElement {
             let is_cur = br["is_current"].as_bool().unwrap_or(false) || name == current_branch;
             let is_def = br["is_default"].as_bool().unwrap_or(false) || name == default_branch;
             let short = br["short_sha"].as_str().unwrap_or("").to_owned();
+            let br_ahead = br["ahead"].as_u64().unwrap_or(0);
+            let br_behind = br["behind"].as_u64().unwrap_or(0);
             let selected_row = mode == "git" && cur_cmp == name && cur_cmp != "WORKDIR";
             let target_base = if is_def {
                 format!("{name}~1")
@@ -132,7 +138,15 @@ fn render_sidebar_sections(ui: Ui, st: State) -> AnyElement {
                 default_branch.clone()
             };
             let click_name = name.clone();
-            let meta = if is_cur {
+            let sync_tag = match (br_ahead > 0, br_behind > 0) {
+                (true, true) => format!("↑{br_ahead} ↓{br_behind}"),
+                (true, false) => format!("↑{br_ahead}"),
+                (false, true) => format!("↓{br_behind}"),
+                (false, false) => String::new(),
+            };
+            let meta = if !sync_tag.is_empty() {
+                sync_tag
+            } else if is_cur {
                 "current".to_owned()
             } else if is_def {
                 "default".to_owned()
@@ -144,7 +158,10 @@ fn render_sidebar_sections(ui: Ui, st: State) -> AnyElement {
                 meta,
                 is_cur,
                 selected_row,
-                move || select_git_pair(ui, target_base.clone(), click_name.clone()),
+                move || {
+                    select_git_pair(ui, target_base.clone(), click_name.clone());
+                    git_ops::load_branch_log(ui, click_name.clone(), false);
+                },
             ));
         }
     }
@@ -189,12 +206,140 @@ fn render_sidebar_sections(ui: Ui, st: State) -> AnyElement {
         Some(grp)
     };
 
-    // 3. RECENT COMMITS
-    let commits_section = if commits.is_empty() {
-        None
+    // 3. BRANCH COMMITS (with branch switcher, search filter, and pagination)
+    let log_branch = {
+        let lb = st.log_branch.get();
+        if lb.is_empty() {
+            if !current_branch.is_empty() {
+                current_branch.clone()
+            } else {
+                default_branch.clone()
+            }
+        } else {
+            lb
+        }
+    };
+    let loaded_log = st.log_commits.get();
+    let display_commits = if !loaded_log.is_empty() || !st.log_query.get().trim().is_empty() {
+        loaded_log
     } else {
-        let mut grp = section_group("Recent Commits").count(commits.len().min(15));
-        for cm in commits.into_iter().take(15) {
+        commits
+    };
+    let has_more = st.log_has_more.get();
+    let log_loading = st.log_loading.get();
+    let log_br_anchor = element_ref();
+    let branches_for_menu = branches;
+
+    let mut commits_grp = view().gap_1p5();
+    commits_grp = commits_grp.child(
+        view()
+            .px_1p5()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_1()
+            .child(
+                muted("Commits")
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .element_ref(&log_br_anchor)
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(BORDER)
+                    .bg(INSET)
+                    .hover(|s| s.bg(CARD_HOVER))
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .accessibility_label("Choose branch for commit history")
+                    .child(icon(Icon::Branch).w(px(10.5)).h(px(10.5)))
+                    .child(
+                        label({
+                            let shown = if log_branch.len() > 16 {
+                                format!("{}…", &log_branch[..14])
+                            } else {
+                                log_branch.clone()
+                            };
+                            format!("{shown} ▾")
+                        })
+                        .font_family("Menlo")
+                        .text_size(px(10.5)),
+                    )
+                    .on_press(move |_: &()| {
+                        let br_list = branches_for_menu.clone();
+                        let cur_lb = st.log_branch.get_untracked();
+                        ui.spawn(async move {
+                            let mut items = Vec::<MenuItem>::new();
+                            for br in br_list.into_iter().take(30) {
+                                let name = br["name"].as_str().unwrap_or("").to_owned();
+                                if name.is_empty() {
+                                    continue;
+                                }
+                                let is_cur = name == cur_lb;
+                                let chosen = name.clone();
+                                items.push(
+                                    MenuItem::new(format!(
+                                        "{}{}",
+                                        if is_cur { "✓ " } else { "" },
+                                        name
+                                    ))
+                                    .on_select(move || {
+                                        git_ops::load_branch_log(ui, chosen.clone(), false);
+                                    }),
+                                );
+                            }
+                            if items.is_empty() {
+                                return;
+                            }
+                            if let Some(bounds) = log_br_anchor.measure().await {
+                                popup_menu_at(
+                                    items,
+                                    point(bounds.page.x, bounds.page.y + bounds.frame.size.height),
+                                )
+                                .await;
+                            } else {
+                                popup_menu(items).await;
+                            }
+                        });
+                    }),
+            ),
+    );
+
+    let filter_br = log_branch.clone();
+    commits_grp = commits_grp.child(
+        view().px_1().child(
+            field(st.log_query, "Filter commits or SHA…")
+                .on_change({
+                    let br = filter_br.clone();
+                    move |_: &str| {
+                        git_ops::load_branch_log(ui, br.clone(), false);
+                    }
+                })
+                .on_submit(move |_: &str| {
+                    git_ops::load_branch_log(ui, filter_br.clone(), false);
+                }),
+        ),
+    );
+
+    if display_commits.is_empty() {
+        commits_grp = commits_grp.child(
+            view().px_2().py_1p5().child(
+                muted(if log_loading {
+                    "Loading commits…"
+                } else {
+                    "No matching commits"
+                })
+                .text_size(px(11.)),
+            ),
+        );
+    } else {
+        let mut list_rows = view().gap_0p5();
+        for cm in display_commits {
             let sha = cm["sha"].as_str().unwrap_or("").to_owned();
             let short = cm["short_sha"].as_str().unwrap_or("").to_owned();
             let subj = cm["subject"].as_str().unwrap_or("").to_owned();
@@ -203,22 +348,36 @@ fn render_sidebar_sections(ui: Ui, st: State) -> AnyElement {
                 continue;
             }
             let is_sel = mode == "git" && cur_cmp == sha;
-            let parent = format!("{sha}~1");
             let click_sha = sha.clone();
-            grp = grp.child(sidebar_commit_row(short, subj, rel, is_sel, move || {
-                select_git_pair(ui, parent.clone(), click_sha.clone())
+            list_rows = list_rows.child(sidebar_commit_row(short, subj, rel, is_sel, move || {
+                git_ops::select_single_commit(ui, click_sha.clone(), 0, false);
             }));
         }
-        Some(grp)
-    };
+        if has_more {
+            let more_br = log_branch;
+            list_rows = list_rows.child(
+                view().pt_1().px_1().child(
+                    compact_action(
+                        if log_loading {
+                            "Loading…"
+                        } else {
+                            "Load more commits…"
+                        },
+                        Variant::Quiet,
+                        move |_| git_ops::load_branch_log(ui, more_br.clone(), true),
+                    )
+                    .disabled(move || st.log_loading.get()),
+                ),
+            );
+        }
+        commits_grp = commits_grp.child(list_rows);
+    }
 
     let mut container = view().p_2p5().gap_4().child(quick);
     if let Some(cs) = cards_section {
         container = container.child(cs);
     }
-    if let Some(cm) = commits_section {
-        container = container.child(cm);
-    }
+    container = container.child(commits_grp);
     container.into_element()
 }
 
@@ -450,6 +609,7 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                                     });
                                 }),
                         )
+                        .child(git_ops::render_checkout_picker(ui))
                         .child(
                             canban_ui_kit::press_target()
                                 .element_ref(&base_anchor)
@@ -507,6 +667,7 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                                         let shown = match c.as_str() {
                                             "" | "WORKDIR" => "Working tree".into(),
                                             "STAGED" => "Staged only".into(),
+                                            "UNSTAGED" => "Unstaged only".into(),
                                             other if other.len() > 18 && !other.contains('/') => {
                                                 format!("{}…", &other[..10])
                                             }
@@ -525,7 +686,7 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                                 st.mode.get() == "git"
                                     && !matches!(
                                         st.compare_ref.get().as_str(),
-                                        "WORKDIR" | "STAGED"
+                                        "WORKDIR" | "STAGED" | "UNSTAGED"
                                     )
                             },
                             move || {
@@ -566,8 +727,10 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
                 .child(
                     view()
                         .flex_row()
+                        .flex_wrap()
                         .items_center()
                         .gap_1p5()
+                        .child(git_ops::render_sync_controls(ui))
                         .child(dynamic(move || {
                             let Some(card) = ui.current_card() else {
                                 return view().into_element();
@@ -697,6 +860,9 @@ fn show_ref_picker(ui: Ui, anchor: ElementRef, is_base: bool) {
                     cur_b
                 };
                 select_git_pair(ui, b, "STAGED");
+            }));
+            items.push(MenuItem::new("Unstaged changes only").on_select(move || {
+                select_git_pair(ui, "HEAD", "UNSTAGED");
             }));
             items.push(MenuItem::separator());
         } else {

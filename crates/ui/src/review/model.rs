@@ -59,6 +59,22 @@ pub struct State {
     pub delivery_customize: Signal<bool>,
     pub delivery_mode: Signal<String>,
     pub delivery_strategy: Signal<String>,
+    /// Active checkout path override for Git client operations (empty = Project main directory).
+    pub checkout_cwd: Signal<String>,
+    /// Selected branch or ref in the left sidebar `Commits` explorer.
+    pub log_branch: Signal<String>,
+    pub log_query: Signal<String>,
+    pub log_commits: Signal<Vec<Value>>,
+    pub log_has_more: Signal<bool>,
+    pub log_loading: Signal<bool>,
+    pub log_ticket: Signal<u64>,
+    /// Saved `(mode, base_ref, compare_ref)` when drilling into a commit from `Commits in range`.
+    pub range_backup: Signal<Option<(String, String, String)>>,
+    pub commit_parent_idx: Signal<usize>,
+    pub commit_summary: Signal<String>,
+    pub commit_description: Signal<String>,
+    pub commit_amend: Signal<bool>,
+    pub discard_confirm: Signal<Option<Vec<String>>>,
 }
 
 impl Default for State {
@@ -106,6 +122,19 @@ impl State {
             delivery_customize: signal(false),
             delivery_mode: signal("local".into()),
             delivery_strategy: signal("rebase".into()),
+            checkout_cwd: signal(String::new()),
+            log_branch: signal(String::new()),
+            log_query: signal(String::new()),
+            log_commits: signal(Vec::new()),
+            log_has_more: signal(false),
+            log_loading: signal(false),
+            log_ticket: signal(0),
+            range_backup: signal(None),
+            commit_parent_idx: signal(0),
+            commit_summary: signal(String::new()),
+            commit_description: signal(String::new()),
+            commit_amend: signal(false),
+            discard_confirm: signal(None),
         }
     }
 }

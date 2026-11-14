@@ -678,6 +678,7 @@ mod tests {
 
 pub mod compare;
 pub mod context;
+pub mod git_client;
 pub mod review;
 
 #[cfg(test)]

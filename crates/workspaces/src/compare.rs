@@ -5,7 +5,7 @@ use canban_types::Project;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+pub(crate) const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const MAX_PATCH_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Default)]
@@ -17,7 +17,7 @@ struct ParsedFile {
     patch: String,
 }
 
-fn validate_ref_arg(value: &str) -> Result<()> {
+pub(crate) fn validate_ref_arg(value: &str) -> Result<()> {
     let trimmed = value.trim();
     ensure!(!trimmed.is_empty(), "Git reference cannot be empty");
     ensure!(
@@ -229,50 +229,122 @@ impl Ops {
     }
 
     pub fn git_refs(&self, project: &Project) -> Result<Value> {
-        let dir = Path::new(&project.directory);
+        self.git_refs_in(project, None)
+    }
+
+    pub fn git_refs_in(&self, project: &Project, cwd_override: Option<&str>) -> Result<Value> {
+        let dir_str = cwd_override
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&project.directory);
+        let dir = Path::new(dir_str);
         ensure!(
             self.host.is_dir(dir),
-            "Project directory is not available: {}",
-            project.directory
+            "Repository directory is not available: {}",
+            dir.display()
         );
+        let remote_name = if project.workflow.workspace.remote.trim().is_empty() {
+            "origin".to_owned()
+        } else {
+            project.workflow.workspace.remote.trim().to_owned()
+        };
+        let has_remote = !remote_name.starts_with('-')
+            && self
+                .git(dir, &["remote", "get-url", &remote_name])
+                .is_ok_and(|o| o.status.success());
+
         let has_head = self
             .git(dir, &["rev-parse", "--verify", "HEAD"])?
             .status
             .success();
+        let current_branch = self.current_branch(dir_str).unwrap_or_default();
         if !has_head {
+            let status_files = self.status_files(dir).unwrap_or_default();
+            let staged_count = status_files.iter().filter(|f| f["staged"] == true).count();
+            let unstaged_count = status_files
+                .iter()
+                .filter(|f| f["unstaged"] == true || f["untracked"] == true)
+                .count();
             return Ok(json!({
-                "current_branch": self.current_branch(&project.directory).unwrap_or_default(),
+                "cwd": dir_str,
+                "current_branch": current_branch,
                 "default_branch": project.target_branch.clone().unwrap_or_else(|| "main".into()),
                 "head_sha": "",
-                "dirty": false,
-                "dirty_count": 0,
-                "staged_count": 0,
+                "upstream": "",
+                "ahead": 0,
+                "behind": 0,
+                "has_remote": has_remote,
+                "remote_name": remote_name,
+                "dirty": !status_files.is_empty(),
+                "dirty_count": status_files.len(),
+                "staged_count": staged_count,
+                "unstaged_count": unstaged_count,
+                "status_files": status_files,
+                "last_commit_subject": "",
+                "last_commit_body": "",
                 "branches": [],
                 "tags": [],
                 "commits": [],
             }));
         }
-        let current_branch = self.current_branch(&project.directory).unwrap_or_default();
+
         let default_branch = self.resolve_default_branch(dir, project, &current_branch);
         let head_sha = self
             .checked(dir, &["rev-parse", "HEAD"])
             .unwrap_or_default();
 
-        let status_out = self
-            .git(
+        let status_files = self.status_files(dir).unwrap_or_default();
+        let dirty_count = status_files.len();
+        let staged_count = status_files.iter().filter(|f| f["staged"] == true).count();
+        let unstaged_count = status_files
+            .iter()
+            .filter(|f| f["unstaged"] == true || f["untracked"] == true)
+            .count();
+
+        let upstream = if !current_branch.is_empty() {
+            self.checked(
                 dir,
-                &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-            )?
-            .stdout;
-        let mut dirty_count = 0usize;
-        let mut staged_count = 0usize;
-        for entry in status_out.split(|b| *b == 0).filter(|e| e.len() >= 3) {
-            dirty_count += 1;
-            let idx = entry[0] as char;
-            if idx != ' ' && idx != '?' && idx != '!' {
-                staged_count += 1;
-            }
-        }
+                &[
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{upstream}",
+                ],
+            )
+            .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let (ahead, behind) = if !upstream.is_empty() {
+            self.checked(
+                dir,
+                &[
+                    "rev-list",
+                    "--left-right",
+                    "--count",
+                    &format!("{upstream}...HEAD"),
+                ],
+            )
+            .ok()
+            .and_then(|s| {
+                let mut it = s.split_whitespace();
+                let beh = it.next()?.parse::<u64>().ok()?;
+                let ahd = it.next()?.parse::<u64>().ok()?;
+                Some((ahd, beh))
+            })
+            .unwrap_or((0, 0))
+        } else {
+            (0, 0)
+        };
+
+        let (last_commit_subject, last_commit_body) = self
+            .checked(dir, &["log", "-n", "1", "--format=%s%x00%b", "HEAD"])
+            .ok()
+            .and_then(|raw| {
+                let (subj, body) = raw.split_once('\0')?;
+                Some((subj.trim().to_owned(), body.trim().to_owned()))
+            })
+            .unwrap_or_default();
 
         let mut branches = Vec::new();
         if let Ok(raw) = self.checked(
@@ -280,22 +352,28 @@ impl Ops {
             &[
                 "for-each-ref",
                 "--sort=-committerdate",
-                "--count=45",
-                "--format=%(refname:short)%09%(objectname)%09%(objectname:short)%09%(committerdate:relative)%09%(contents:subject)",
+                "--count=100",
+                "--format=%(refname:short)%09%(objectname)%09%(objectname:short)%09%(committerdate:relative)%09%(upstream:short)%09%(upstream:track)%09%(contents:subject)",
                 "refs/heads",
             ],
         ) {
             for line in raw.lines().filter(|l| !l.is_empty()) {
-                let parts: Vec<&str> = line.splitn(5, '\t').collect();
-                if parts.len() >= 5 {
+                let parts: Vec<&str> = line.splitn(7, '\t').collect();
+                if parts.len() >= 7 {
                     let name = parts[0];
+                    let (br_ahead, br_behind, br_gone) =
+                        super::git_client::parse_upstream_track(parts[5]);
                     branches.push(json!({
                         "name": name,
                         "kind": "local",
                         "sha": parts[1],
                         "short_sha": parts[2],
                         "relative_time": parts[3],
-                        "subject": parts[4],
+                        "upstream": parts[4],
+                        "ahead": br_ahead,
+                        "behind": br_behind,
+                        "gone": br_gone,
+                        "subject": parts[6],
                         "is_current": name == current_branch,
                         "is_default": name == default_branch,
                     }));
@@ -307,7 +385,7 @@ impl Ops {
             &[
                 "for-each-ref",
                 "--sort=-committerdate",
-                "--count=25",
+                "--count=40",
                 "--format=%(refname:short)%09%(objectname)%09%(objectname:short)%09%(committerdate:relative)%09%(contents:subject)",
                 "refs/remotes",
             ],
@@ -316,7 +394,7 @@ impl Ops {
                 let parts: Vec<&str> = line.splitn(5, '\t').collect();
                 if parts.len() >= 5 {
                     let name = parts[0];
-                    if name.ends_with("/HEAD") || name == "origin" {
+                    if name.ends_with("/HEAD") || !name.contains('/') {
                         continue;
                     }
                     branches.push(json!({
@@ -325,6 +403,10 @@ impl Ops {
                         "sha": parts[1],
                         "short_sha": parts[2],
                         "relative_time": parts[3],
+                        "upstream": "",
+                        "ahead": 0,
+                        "behind": 0,
+                        "gone": false,
                         "subject": parts[4],
                         "is_current": false,
                         "is_default": false,
@@ -360,29 +442,46 @@ impl Ops {
         let mut commits = Vec::new();
         if let Ok(raw) = self.checked(
             dir,
-            &["log", "-n", "40", "--format=%H%x09%h%x09%cr%x09%an%x09%s"],
+            &[
+                "log",
+                "-n",
+                "40",
+                "--format=%H%x09%h%x09%P%x09%cr%x09%an%x09%s",
+            ],
         ) {
             for line in raw.lines().filter(|l| !l.is_empty()) {
-                let parts: Vec<&str> = line.splitn(5, '\t').collect();
-                if parts.len() >= 5 {
+                let parts: Vec<&str> = line.splitn(6, '\t').collect();
+                if parts.len() >= 6 {
+                    let parents: Vec<&str> = parts[2].split_whitespace().collect();
                     commits.push(json!({
                         "sha": parts[0],
                         "short_sha": parts[1],
-                        "relative_time": parts[2],
-                        "author": parts[3],
-                        "subject": parts[4],
+                        "parents": parents,
+                        "relative_time": parts[3],
+                        "author": parts[4],
+                        "subject": parts[5],
                     }));
                 }
             }
         }
 
         Ok(json!({
+            "cwd": dir_str,
             "current_branch": current_branch,
             "default_branch": default_branch,
             "head_sha": head_sha,
+            "upstream": upstream,
+            "ahead": ahead,
+            "behind": behind,
+            "has_remote": has_remote,
+            "remote_name": remote_name,
             "dirty": dirty_count > 0,
             "dirty_count": dirty_count,
             "staged_count": staged_count,
+            "unstaged_count": unstaged_count,
+            "status_files": status_files,
+            "last_commit_subject": last_commit_subject,
+            "last_commit_body": last_commit_body,
             "branches": branches,
             "tags": tags,
             "commits": commits,
@@ -409,16 +508,18 @@ impl Ops {
         let base_trimmed = base.trim();
         let compare_trimmed = compare.trim();
 
-        // Resolve base commit (supporting EMPTY_TREE or `sha~1` on root commits gracefully).
-        let base_sha = if base_trimmed == EMPTY_TREE {
-            EMPTY_TREE.to_owned()
+        // Resolve base commit (supporting EMPTY_TREE, `sha~1`/`sha^`/`sha^1` on root commits,
+        // or `sha^N` for merge commit parent selection).
+        let (base_sha, single_parent_idx) = if base_trimmed == EMPTY_TREE {
+            (EMPTY_TREE.to_owned(), Some(0usize))
         } else if let Some(stem) = base_trimmed
             .strip_suffix("~1")
+            .or_else(|| base_trimmed.strip_suffix("^1"))
             .or_else(|| base_trimmed.strip_suffix('^'))
         {
             validate_ref_arg(stem)?;
-            let parent_spec = format!("{stem}^");
-            if let Ok(out) = self.git(
+            let parent_spec = format!("{stem}^1");
+            let resolved = if let Ok(out) = self.git(
                 dir,
                 &[
                     "rev-parse",
@@ -435,17 +536,39 @@ impl Ops {
                     &["rev-parse", "--verify", &format!("{stem}^{{commit}}")],
                 )?;
                 EMPTY_TREE.to_owned()
-            }
+            };
+            let is_single = stem == compare_trimmed;
+            (resolved, is_single.then_some(0usize))
+        } else if let Some((stem, idx_str)) = base_trimmed.rsplit_once('^')
+            && !stem.is_empty()
+            && let Ok(p_num) = idx_str.parse::<usize>()
+            && p_num >= 2
+        {
+            validate_ref_arg(stem)?;
+            let resolved = self
+                .checked(
+                    dir,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        &format!("{stem}^{p_num}^{{commit}}"),
+                    ],
+                )
+                .with_context(|| format!("Unknown parent reference '{base_trimmed}'"))?;
+            let is_single = stem == compare_trimmed;
+            (resolved, is_single.then_some(p_num - 1))
         } else {
-            self.checked(
-                dir,
-                &[
-                    "rev-parse",
-                    "--verify",
-                    &format!("{base_trimmed}^{{commit}}"),
-                ],
-            )
-            .with_context(|| format!("Unknown base reference '{base_trimmed}'"))?
+            let resolved = self
+                .checked(
+                    dir,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        &format!("{base_trimmed}^{{commit}}"),
+                    ],
+                )
+                .with_context(|| format!("Unknown base reference '{base_trimmed}'"))?;
+            (resolved, None)
         };
 
         let mut raw_patch = Vec::<u8>::new();
@@ -534,6 +657,44 @@ impl Ops {
                 String::from_utf8_lossy(&diff_out.stderr).trim()
             );
             raw_patch.extend_from_slice(&diff_out.stdout);
+        } else if compare_trimmed == "UNSTAGED" {
+            compare_sha = self
+                .checked(dir, &["rev-parse", "--verify", "HEAD^{commit}"])
+                .unwrap_or_else(|_| base_sha.clone());
+            effective_base_sha = base_sha.clone();
+            let diff_out =
+                self.git(dir, &["diff", "--no-ext-diff", "--no-textconv", "-M", "--"])?;
+            ensure!(
+                diff_out.status.success(),
+                "git diff failed: {}",
+                String::from_utf8_lossy(&diff_out.stderr).trim()
+            );
+            raw_patch.extend_from_slice(&diff_out.stdout);
+
+            let untracked_out =
+                self.git(dir, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+            if untracked_out.status.success() {
+                for rel in zero_separated_names(&untracked_out.stdout) {
+                    if raw_patch.len() > MAX_PATCH_BYTES {
+                        break;
+                    }
+                    let out = self.git(
+                        dir,
+                        &[
+                            "diff",
+                            "--no-ext-diff",
+                            "--no-textconv",
+                            "--no-index",
+                            "--",
+                            "/dev/null",
+                            &rel,
+                        ],
+                    )?;
+                    if out.status.code() == Some(1) || out.status.success() {
+                        raw_patch.extend_from_slice(&out.stdout);
+                    }
+                }
+            }
         } else {
             compare_sha = self
                 .checked(
@@ -580,7 +741,20 @@ impl Ops {
         let capped = String::from_utf8_lossy(&raw_patch[..raw_patch.len().min(MAX_PATCH_BYTES)]);
         let (files, total_additions, total_deletions) = split_unified_patch(&capped);
 
-        Ok(json!({
+        let is_workdir_mode = matches!(compare_trimmed, "WORKDIR" | "STAGED" | "UNSTAGED");
+        let status_files = is_workdir_mode.then(|| self.status_files(dir).unwrap_or_default());
+        let commit_detail = if !is_workdir_mode && let Some(p_idx) = single_parent_idx {
+            self.commit_metadata(dir, &compare_sha)
+                .ok()
+                .map(|mut detail| {
+                    detail["parent_index"] = json!(p_idx);
+                    detail
+                })
+        } else {
+            None
+        };
+
+        let mut resp = json!({
             "base_ref": base_trimmed,
             "compare_ref": compare_trimmed,
             "base_sha": effective_base_sha,
@@ -592,7 +766,14 @@ impl Ops {
             "total_deletions": total_deletions,
             "truncated": truncated,
             "cwd": dir.to_string_lossy(),
-        }))
+        });
+        if let Some(sf) = status_files {
+            resp["status_files"] = json!(sf);
+        }
+        if let Some(cd) = commit_detail {
+            resp["commit_detail"] = cd;
+        }
+        Ok(resp)
     }
 
     fn log_between(&self, dir: &Path, from: &str, to: &str) -> Vec<Value> {
@@ -603,7 +784,7 @@ impl Ops {
                 "log",
                 "-n",
                 "50",
-                "--format=%H%x09%h%x09%cr%x09%an%x09%s",
+                "--format=%H%x09%h%x09%P%x09%cr%x09%an%x09%s",
                 &range,
             ],
         ) else {
@@ -612,14 +793,16 @@ impl Ops {
         raw.lines()
             .filter(|l| !l.is_empty())
             .filter_map(|line| {
-                let parts: Vec<&str> = line.splitn(5, '\t').collect();
-                (parts.len() >= 5).then(|| {
+                let parts: Vec<&str> = line.splitn(6, '\t').collect();
+                (parts.len() >= 6).then(|| {
+                    let parents: Vec<&str> = parts[2].split_whitespace().collect();
                     json!({
                         "sha": parts[0],
                         "short_sha": parts[1],
-                        "relative_time": parts[2],
-                        "author": parts[3],
-                        "subject": parts[4],
+                        "parents": parents,
+                        "relative_time": parts[3],
+                        "author": parts[4],
+                        "subject": parts[5],
                     })
                 })
             })
@@ -633,7 +816,7 @@ impl Ops {
                 "log",
                 "-n",
                 "1",
-                "--format=%H%x09%h%x09%cr%x09%an%x09%s",
+                "--format=%H%x09%h%x09%P%x09%cr%x09%an%x09%s",
                 sha,
             ],
         ) else {
@@ -642,14 +825,16 @@ impl Ops {
         raw.lines()
             .filter(|l| !l.is_empty())
             .filter_map(|line| {
-                let parts: Vec<&str> = line.splitn(5, '\t').collect();
-                (parts.len() >= 5).then(|| {
+                let parts: Vec<&str> = line.splitn(6, '\t').collect();
+                (parts.len() >= 6).then(|| {
+                    let parents: Vec<&str> = parts[2].split_whitespace().collect();
                     json!({
                         "sha": parts[0],
                         "short_sha": parts[1],
-                        "relative_time": parts[2],
-                        "author": parts[3],
-                        "subject": parts[4],
+                        "parents": parents,
+                        "relative_time": parts[3],
+                        "author": parts[4],
+                        "subject": parts[5],
                     })
                 })
             })
@@ -689,7 +874,7 @@ impl Ops {
     ) -> Result<PathBuf> {
         validate_ref_arg(run_id)?;
         let source = Path::new(&project.directory);
-        let resolved = if matches!(target_ref.trim(), "" | "WORKDIR" | "STAGED") {
+        let resolved = if matches!(target_ref.trim(), "" | "WORKDIR" | "STAGED" | "UNSTAGED") {
             "HEAD".to_owned()
         } else {
             validate_ref_arg(target_ref)?;

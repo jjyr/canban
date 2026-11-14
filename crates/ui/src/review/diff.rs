@@ -1,3 +1,4 @@
+use super::git_ops;
 use super::model::{LineTarget, PendingInlineComment, parse_unified_hunk_lines};
 use crate::presenter::*;
 use canban_ui_kit::tokens::*;
@@ -52,8 +53,16 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
     let total_add = data["total_additions"].as_u64().unwrap_or(0);
     let total_del = data["total_deletions"].as_u64().unwrap_or(0);
     let truncated = data["truncated"].as_bool().unwrap_or(false);
+    let commit_detail = data["commit_detail"]
+        .as_object()
+        .map(|_| &data["commit_detail"]);
+    let is_workdir_mode = st.mode.get() == "git"
+        && matches!(
+            st.compare_ref.get().as_str(),
+            "" | "WORKDIR" | "STAGED" | "UNSTAGED"
+        );
 
-    if loading && files.is_empty() {
+    if loading && files.is_empty() && commit_detail.is_none() && !is_workdir_mode {
         return view()
             .flex_1()
             .items_center()
@@ -63,7 +72,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
             .into_element();
     }
 
-    if files.is_empty() {
+    if files.is_empty() && commit_detail.is_none() && !is_workdir_mode {
         return view()
             .flex_1()
             .items_center()
@@ -97,126 +106,145 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
             })
     });
 
-    // Left file list pane (216px)
-    let file_count = files.len();
-    let mut file_list = view().gap_0p5().p_1p5();
-    let all_selected = selected.is_empty();
-    file_list = file_list.child(
-        canban_ui_kit::press_target()
-            .w_full()
-            .min_h(px(28.))
-            .px_2()
-            .py_1()
-            .rounded(px(5.))
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap_1p5()
-            .bg(if all_selected { SELECTED } else { CLEAR })
-            .hover(|s| s.bg(if all_selected { SELECTED } else { CARD_HOVER }))
-            .on_press(move |_: &()| st.selected_file.set(String::new()))
-            .child(
-                label(format!("All files ({file_count})"))
-                    .text_size(px(12.))
-                    .font_weight(if all_selected {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::MEDIUM
-                    }),
-            )
-            .child(
-                muted(format!("+{total_add} −{total_del}"))
-                    .font_family("Menlo")
-                    .text_size(px(10.5)),
-            ),
-    );
+    let status_files_for_actions: Vec<Value> = if is_workdir_mode {
+        data["status_files"]
+            .as_array()
+            .cloned()
+            .or_else(|| st.refs_data.with(|v| v["status_files"].as_array().cloned()))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
-    for f in &files {
-        let fname = f["filename"].as_str().unwrap_or("").to_owned();
-        let f_add = f["additions"].as_u64().unwrap_or(0);
-        let f_del = f["deletions"].as_u64().unwrap_or(0);
-        let f_status = f["status"].as_str().unwrap_or("modified");
-        let is_sel = selected == fname;
-        let click_name = fname.clone();
-        let pending_for_file = pending_all.iter().filter(|c| c.path == fname).count();
-        let short_name = fname.rsplit('/').next().unwrap_or(&fname).to_owned();
-        let status_char = match f_status {
-            "added" => ("A", SUCCESS),
-            "removed" => ("D", DANGER),
-            "renamed" => ("R", ACCENT),
-            _ => ("M", MUTED),
-        };
-
-        let mut right_meta = view().flex_row().items_center().gap_1().flex_shrink_0();
-        if pending_for_file > 0 {
-            right_meta = right_meta.child(status(pending_for_file.to_string(), Tone::Info));
-        }
-        right_meta = right_meta
-            .child(
-                label(format!("+{f_add}"))
-                    .font_family("Menlo")
-                    .text_size(px(10.5))
-                    .text_color(SUCCESS),
-            )
-            .child(
-                label(format!("−{f_del}"))
-                    .font_family("Menlo")
-                    .text_size(px(10.5))
-                    .text_color(DANGER),
-            );
-
+    let left_pane = if is_workdir_mode {
+        git_ops::render_working_tree_pane(ui, data)
+    } else {
+        // Standard file list pane (216px)
+        let file_count = files.len();
+        let mut file_list = view().gap_0p5().p_1p5();
+        let all_selected = selected.is_empty();
         file_list = file_list.child(
-            view().tooltip(hint_tooltip(fname.clone())).child(
-                canban_ui_kit::press_target()
-                    .w_full()
-                    .min_h(px(27.))
-                    .px_2()
-                    .py_0p5()
-                    .rounded(px(5.))
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap_1p5()
-                    .bg(if is_sel { SELECTED } else { CLEAR })
-                    .hover(|s| s.bg(if is_sel { SELECTED } else { CARD_HOVER }))
-                    .on_press(move |_: &()| st.selected_file.set(click_name.clone()))
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap_1p5()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .child(
-                                label(status_char.0)
-                                    .font_family("Menlo")
-                                    .text_size(px(10.5))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(status_char.1),
-                            )
-                            .child(
-                                label(short_name)
-                                    .text_size(px(12.))
-                                    .truncate()
-                                    .min_w(px(0.)),
-                            ),
-                    )
-                    .child(right_meta),
-            ),
+            canban_ui_kit::press_target()
+                .w_full()
+                .min_h(px(28.))
+                .px_2()
+                .py_1()
+                .rounded(px(5.))
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_1p5()
+                .bg(if all_selected { SELECTED } else { CLEAR })
+                .hover(|s| s.bg(if all_selected { SELECTED } else { CARD_HOVER }))
+                .on_press(move |_: &()| st.selected_file.set(String::new()))
+                .child(
+                    label(format!("All files ({file_count})"))
+                        .text_size(px(12.))
+                        .font_weight(if all_selected {
+                            FontWeight::SEMIBOLD
+                        } else {
+                            FontWeight::MEDIUM
+                        }),
+                )
+                .child(
+                    muted(format!("+{total_add} −{total_del}"))
+                        .font_family("Menlo")
+                        .text_size(px(10.5)),
+                ),
         );
-    }
 
-    let left_pane = view()
-        .w(px(216.))
-        .flex_shrink_0()
-        .min_h(px(0.))
-        .border_r_1()
-        .border_color(BORDER)
-        .bg(SURFACE)
-        .child(scroll().flex_1().min_h(px(0.)).child(file_list));
+        for f in &files {
+            let fname = f["filename"].as_str().unwrap_or("").to_owned();
+            let f_add = f["additions"].as_u64().unwrap_or(0);
+            let f_del = f["deletions"].as_u64().unwrap_or(0);
+            let f_status = f["status"].as_str().unwrap_or("modified");
+            let is_sel = selected == fname;
+            let click_name = fname.clone();
+            let pending_for_file = pending_all.iter().filter(|c| c.path == fname).count();
+            let short_name = fname.rsplit('/').next().unwrap_or(&fname).to_owned();
+            let status_char = match f_status {
+                "added" => ("A", SUCCESS),
+                "removed" => ("D", DANGER),
+                "renamed" => ("R", ACCENT),
+                _ => ("M", MUTED),
+            };
+
+            let mut right_meta = view().flex_row().items_center().gap_1().flex_shrink_0();
+            if pending_for_file > 0 {
+                right_meta = right_meta.child(status(pending_for_file.to_string(), Tone::Info));
+            }
+            right_meta = right_meta
+                .child(
+                    label(format!("+{f_add}"))
+                        .font_family("Menlo")
+                        .text_size(px(10.5))
+                        .text_color(SUCCESS),
+                )
+                .child(
+                    label(format!("−{f_del}"))
+                        .font_family("Menlo")
+                        .text_size(px(10.5))
+                        .text_color(DANGER),
+                );
+
+            file_list = file_list.child(
+                view().tooltip(hint_tooltip(fname.clone())).child(
+                    canban_ui_kit::press_target()
+                        .w_full()
+                        .min_h(px(27.))
+                        .px_2()
+                        .py_0p5()
+                        .rounded(px(5.))
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_1p5()
+                        .bg(if is_sel { SELECTED } else { CLEAR })
+                        .hover(|s| s.bg(if is_sel { SELECTED } else { CARD_HOVER }))
+                        .on_press(move |_: &()| st.selected_file.set(click_name.clone()))
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_1p5()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(
+                                    label(status_char.0)
+                                        .font_family("Menlo")
+                                        .text_size(px(10.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(status_char.1),
+                                )
+                                .child(
+                                    label(short_name)
+                                        .text_size(px(12.))
+                                        .truncate()
+                                        .min_w(px(0.)),
+                                ),
+                        )
+                        .child(right_meta),
+                ),
+            );
+        }
+
+        view()
+            .w(px(216.))
+            .flex_shrink_0()
+            .min_h(px(0.))
+            .border_r_1()
+            .border_color(BORDER)
+            .bg(SURFACE)
+            .child(scroll().flex_1().min_h(px(0.)).child(file_list))
+            .into_element()
+    };
 
     // Right main diff viewer
     let mut diff_column = view().gap_3().p_3();
+
+    if let Some(detail) = commit_detail {
+        diff_column = diff_column.child(git_ops::render_commit_detail_card(ui, detail));
+    }
 
     if truncated {
         diff_column = diff_column.child(notice(
@@ -225,18 +253,21 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
         ));
     }
 
-    // Optional collapsible commit summary bar when comparing commits/branches
-    if !commits.is_empty() {
+    // Collapsible commit summary bar when comparing branches/ranges (clickable to inspect single commit!)
+    if !commits.is_empty() && commit_detail.is_none() {
         let commit_len = commits.len();
         let is_open = st.commits_open.get();
         let mut commit_rows = view().gap_1().pt_1();
-        for c in commits.iter().take(25) {
+        for c in commits.iter().take(30) {
+            let sha = c["sha"].as_str().unwrap_or("").to_owned();
             let short = c["short_sha"].as_str().unwrap_or("").to_owned();
             let subj = c["subject"].as_str().unwrap_or("").to_owned();
             let author = c["author"].as_str().unwrap_or("").to_owned();
             let rel = c["relative_time"].as_str().unwrap_or("").to_owned();
+            let click_sha = sha.clone();
             commit_rows = commit_rows.child(
-                view()
+                canban_ui_kit::press_target()
+                    .w_full()
                     .flex_row()
                     .items_center()
                     .gap_2()
@@ -244,6 +275,12 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                     .py_1()
                     .rounded(px(4.))
                     .bg(INSET)
+                    .hover(|s| s.bg(CARD_HOVER))
+                    .on_press(move |_: &()| {
+                        if !click_sha.is_empty() {
+                            git_ops::select_single_commit(ui, click_sha.clone(), 0, true);
+                        }
+                    })
                     .child(
                         label(short)
                             .font_family("Menlo")
@@ -257,7 +294,8 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                             .min_w(px(0.))
                             .truncate(),
                     )
-                    .child(muted(format!("{author} · {rel}")).text_size(px(11.))),
+                    .child(muted(format!("{author} · {rel}")).text_size(px(11.)))
+                    .child(muted("Inspect →").text_size(px(10.5))),
             );
         }
         diff_column = diff_column.child(collapsible_section_group(
@@ -269,12 +307,39 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
         ));
     }
 
-    diff_column = diff_column.child(
-        muted(
-            "Click any diff line to add an inline review comment, then click Review & Send below.",
-        )
-        .text_size(px(11.5)),
-    );
+    if files.is_empty() {
+        diff_column = diff_column.child(
+            view()
+                .p_6()
+                .rounded(px(RADIUS))
+                .border_1()
+                .border_color(BORDER)
+                .bg(SURFACE)
+                .items_center()
+                .justify_center()
+                .gap_1p5()
+                .child(
+                    label(if is_workdir_mode {
+                        "Working tree is clean"
+                    } else {
+                        "No file changes in this commit"
+                    })
+                    .font_weight(FontWeight::SEMIBOLD),
+                )
+                .child(muted(if is_workdir_mode {
+                    "No modified or untracked files in this checkout. You can still pull, push, or amend the last commit."
+                } else {
+                    "This commit did not introduce net file content changes relative to the selected parent."
+                })),
+        );
+    } else {
+        diff_column = diff_column.child(
+            muted(
+                "Click any diff line to add an inline review comment, then click Review & Send below.",
+            )
+            .text_size(px(11.5)),
+        );
+    }
 
     let visible_files: Vec<Value> = if selected.is_empty() {
         files
@@ -292,8 +357,20 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
         let deletions = file["deletions"].as_u64().unwrap_or(0);
         let patch = file["patch"].as_str().unwrap_or("").to_owned();
         let file_btn_path = path.clone();
+        let sf_entry = status_files_for_actions
+            .iter()
+            .find(|s| s["path"].as_str() == Some(path.as_str()));
+        let is_file_staged = sf_entry
+            .and_then(|s| s["staged"].as_bool())
+            .unwrap_or(false);
+        let is_file_unstaged = sf_entry
+            .map(|s| {
+                s["unstaged"].as_bool().unwrap_or(false)
+                    || s["untracked"].as_bool().unwrap_or(false)
+            })
+            .unwrap_or(false);
 
-        let header = view()
+        let mut header = view()
             .flex_row()
             .flex_wrap()
             .items_center()
@@ -324,20 +401,40 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                     .text_size(px(11.5))
                     .font_family("Menlo")
                     .text_color(DANGER),
-            )
-            .child(compact_action(
-                "+ File comment",
-                Variant::Quiet,
-                move |_| {
-                    st.active_line.set(Some(LineTarget {
-                        path: file_btn_path.clone(),
-                        line: 1,
-                        side: "RIGHT".into(),
-                        snippet: String::new(),
-                    }));
-                    st.line_draft.set(String::new());
-                },
-            ));
+            );
+
+        if is_workdir_mode {
+            if is_file_unstaged || !is_file_staged {
+                let p_stage = path.clone();
+                header = header.child(compact_action("+ Stage", Variant::Quiet, move |_| {
+                    git_ops::run_stage(ui, vec![p_stage.clone()], false);
+                }));
+            }
+            if is_file_staged {
+                let p_unstage = path.clone();
+                header = header.child(compact_action("− Unstage", Variant::Quiet, move |_| {
+                    git_ops::run_unstage(ui, vec![p_unstage.clone()], false);
+                }));
+            }
+            let p_discard = path.clone();
+            header = header.child(compact_action("Discard…", Variant::Quiet, move |_| {
+                git_ops::request_discard(ui, vec![p_discard.clone()]);
+            }));
+        }
+
+        header = header.child(compact_action(
+            "+ File comment",
+            Variant::Quiet,
+            move |_| {
+                st.active_line.set(Some(LineTarget {
+                    path: file_btn_path.clone(),
+                    line: 1,
+                    side: "RIGHT".into(),
+                    snippet: String::new(),
+                }));
+                st.line_draft.set(String::new());
+            },
+        ));
 
         let body = if patch.trim().is_empty() {
             view()
