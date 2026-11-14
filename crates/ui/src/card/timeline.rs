@@ -27,25 +27,47 @@ pub fn entries(events: &[Event]) -> Vec<(Event, bool)> {
     ordered.sort_by_key(|e| e.sequence);
     ordered
         .into_iter()
-        .map(|event| {
-            let echoed_report = event.kind == "execution.reported"
-                && (event.data["comment_replied"] == true
-                    || events.iter().any(|other| {
-                        other.kind == "comment.replied"
-                            && other.data["terminal_id"] == event.data["terminal_id"]
-                            && event.data["terminal_id"].as_str().is_some()
-                            && ((event.data["report_id"].as_str().is_some()
-                                && other.data["report_id"] == event.data["report_id"])
-                                || (event.data["path"].as_str().is_some()
-                                    && other.data["path"] == event.data["path"]))
-                    }));
-            let narrative = matches!(
-                event.kind.as_str(),
-                "comment.created" | "comment.replied" | "github.comment"
-            ) || event.kind == "execution.reported" && !echoed_report;
-            (event.clone(), narrative)
-        })
+        .map(|event| (event.clone(), is_narrative_event(event, events)))
         .collect()
+}
+
+/// Counts visible narrative messages (comments, Agent replies, GitHub comments, and
+/// non-echoed reports) for `card_id` without cloning or sorting `Snapshot.events`.
+pub(crate) fn reply_count(events: &[Event], card_id: &str) -> usize {
+    let card_events: Vec<&Event> = events.iter().filter(|e| e.card_id == card_id).collect();
+    card_events
+        .iter()
+        .filter(|event| is_narrative_event_ref(event, &card_events))
+        .count()
+}
+
+fn is_narrative_event(event: &Event, events: &[Event]) -> bool {
+    let echoed_report = event.kind == "execution.reported"
+        && (event.data["comment_replied"] == true
+            || events.iter().any(|other| is_echoing_reply(event, other)));
+    matches!(
+        event.kind.as_str(),
+        "comment.created" | "comment.replied" | "github.comment"
+    ) || event.kind == "execution.reported" && !echoed_report
+}
+
+fn is_narrative_event_ref(event: &Event, events: &[&Event]) -> bool {
+    let echoed_report = event.kind == "execution.reported"
+        && (event.data["comment_replied"] == true
+            || events.iter().any(|other| is_echoing_reply(event, other)));
+    matches!(
+        event.kind.as_str(),
+        "comment.created" | "comment.replied" | "github.comment"
+    ) || event.kind == "execution.reported" && !echoed_report
+}
+
+fn is_echoing_reply(event: &Event, other: &Event) -> bool {
+    other.kind == "comment.replied"
+        && other.data["terminal_id"] == event.data["terminal_id"]
+        && event.data["terminal_id"].as_str().is_some()
+        && ((event.data["report_id"].as_str().is_some()
+            && other.data["report_id"] == event.data["report_id"])
+            || (event.data["path"].as_str().is_some() && other.data["path"] == event.data["path"]))
 }
 
 /// Process bookkeeping and low-value card metadata mutations that clutter
@@ -808,5 +830,64 @@ mod tests {
         let rows = visible(&[deleted, stage, audit], None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0.kind, "card.stage_changed");
+    }
+
+    #[test]
+    fn reply_count_matches_narrative_entries_per_card() {
+        let mk = |seq: u64, card_id: &str, kind: &str, data: serde_json::Value| Event {
+            id: format!("e-{seq}"),
+            sequence: seq,
+            project_id: "p".into(),
+            card_id: card_id.into(),
+            kind: kind.into(),
+            actor: "user".into(),
+            message: format!("msg {seq}"),
+            data,
+            created_at: seq,
+        };
+        let events = vec![
+            mk(1, "c-zero", "card.created", serde_json::json!({})),
+            mk(2, "c-zero", "card.stage_changed", serde_json::json!({})),
+            mk(3, "c-zero", "comment.deleted", serde_json::json!({})),
+            mk(4, "c-zero", "comment.updated", serde_json::json!({})),
+            // Card with 3 visible narrative messages (echoed report deduplicated).
+            mk(10, "c-three", "comment.created", serde_json::json!({})),
+            mk(11, "c-three", "execution.started", serde_json::json!({})),
+            mk(
+                12,
+                "c-three",
+                "execution.reported",
+                serde_json::json!({"report_id": "r1", "terminal_id": "t1"}),
+            ),
+            mk(
+                13,
+                "c-three",
+                "comment.replied",
+                serde_json::json!({"report_id": "r1", "terminal_id": "t1"}),
+            ),
+            mk(14, "c-three", "github.comment", serde_json::json!({})),
+            // Standalone non-echoed report on another Card counts as 1 narrative message.
+            mk(
+                20,
+                "c-one",
+                "execution.reported",
+                serde_json::json!({"report_id": "r2", "terminal_id": "t2"}),
+            ),
+        ];
+
+        assert_eq!(reply_count(&events, "c-zero"), 0);
+        assert_eq!(reply_count(&events, "c-three"), 3);
+        assert_eq!(reply_count(&events, "c-one"), 1);
+        assert_eq!(reply_count(&events, "c-missing"), 0);
+
+        for cid in ["c-zero", "c-three", "c-one"] {
+            let scoped: Vec<Event> = events
+                .iter()
+                .filter(|e| e.card_id == cid)
+                .cloned()
+                .collect();
+            let expected = entries(&scoped).into_iter().filter(|(_, n)| *n).count();
+            assert_eq!(reply_count(&events, cid), expected, "mismatch on {cid}");
+        }
     }
 }

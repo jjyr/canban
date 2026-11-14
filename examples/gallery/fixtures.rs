@@ -1577,6 +1577,55 @@ pub fn board_cards() -> canban_types::Snapshot {
     long.title="Keep a long Card title readable without repeating the stage, routing configuration or empty execution state".into();
     long.body = String::new();
     s.cards.push(long);
+    for (seq, card_id, kind, actor, message) in [
+        (
+            2,
+            "card-1",
+            "comment.replied",
+            "agent:agy",
+            "Proposed ASCII layout options for Board Card reply counts.",
+        ),
+        (
+            3,
+            "card-1",
+            "comment.created",
+            "user",
+            "Go with Option A in the footer row; hide when 0.",
+        ),
+        (
+            4,
+            "card-2",
+            "comment.created",
+            "user",
+            "@developer Check edge cases around echoed reports.",
+        ),
+        (
+            5,
+            "card-2",
+            "comment.replied",
+            "agent:developer",
+            "Deduplicating echoed reports so Board matches Timeline.",
+        ),
+        (
+            6,
+            "card-3",
+            "comment.created",
+            "user",
+            "Keep the collapsed rail at 56pt so Board columns stay roomy.",
+        ),
+    ] {
+        s.events.push(Event {
+            id: format!("board-reply-{seq}"),
+            project_id: "gallery-project".into(),
+            card_id: card_id.into(),
+            sequence: seq,
+            kind: kind.into(),
+            actor: actor.into(),
+            message: message.into(),
+            data: json!({}),
+            created_at: base_now.saturating_sub((10 - seq) * 60_000),
+        });
+    }
     s
 }
 

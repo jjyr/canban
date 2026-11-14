@@ -7,7 +7,7 @@ use super::*;
 /// GitHub Issue #12 · open · by author
 /// First body line, truncated
 /// [#search] [#ux] [#agent] +1
-/// Needs review  ⎇ branch            [((●)) ✦ @developer]
+/// Needs review  ⎇ branch  💬 2      [((●)) ✦ @developer]
 /// ```
 /// The `[>_]` button opens this Card's quick terminal split directly on the Card page
 /// (pinned with a highlighted icon when a session is running, or revealed on hover); active
@@ -196,7 +196,12 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
         .filter(|e| e.agent.is_none() && e.saved.agent_engine.is_some())
         .collect();
     let branch = card.branch.clone().filter(|b| !b.is_empty());
-    if !chips.is_empty() || !running.is_empty() || !ephemeral_agents.is_empty() || branch.is_some()
+    let replies = crate::card::timeline::reply_count(&snapshot.events, &card.id);
+    if !chips.is_empty()
+        || !running.is_empty()
+        || !ephemeral_agents.is_empty()
+        || branch.is_some()
+        || replies > 0
     {
         let mut left = view()
             .flex_row()
@@ -221,6 +226,23 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
                             .truncate()
                             .min_w(px(0.)),
                     ),
+            );
+        }
+        if replies > 0 {
+            let tip = if replies == 1 {
+                "1 reply".to_owned()
+            } else {
+                format!("{replies} replies")
+            };
+            left = left.child(
+                view()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_1()
+                    .tooltip(hint_tooltip(tip))
+                    .child(icon(Icon::MessageSquare).w(px(12.)).h(px(12.)))
+                    .child(muted(replies.to_string())),
             );
         }
         let mut pills: Vec<AnyElement> = running
@@ -597,5 +619,106 @@ mod tests {
                 "terminal button `{label}` must render only its SVG icon without an extra dot badge child"
             );
         }
+    }
+
+    #[test]
+    fn card_tile_renders_reply_count_with_icon_when_positive_and_hides_zero() {
+        fn collect_texts_and_svgs(s: Snapshot, card_id: &str) -> (Vec<String>, usize) {
+            thread_local! {
+                static SNAPSHOT: std::cell::RefCell<Snapshot> = std::cell::RefCell::new(Snapshot::default());
+                static CARD_ID: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+            }
+            SNAPSHOT.with(|slot| *slot.borrow_mut() = s);
+            CARD_ID.with(|slot| *slot.borrow_mut() = card_id.to_owned());
+
+            #[component]
+            fn TileProbe() -> impl IntoElement {
+                canban_ui_kit::tokens::install_theme();
+                let ui = Ui::new();
+                let snap = SNAPSHOT.with(|slot| slot.borrow().clone());
+                let cid = CARD_ID.with(|slot| slot.borrow().clone());
+                let card = snap.cards.iter().find(|c| c.id == cid).unwrap().clone();
+                ui.snapshot.set(snap);
+                ui.project.set("p1".into());
+                view().child(card_tile(ui, card))
+            }
+
+            let mut core = Core::new(ApproxTextEngine, size(px(400.0), px(300.0)));
+            core.mount_root(&nsh_core::element::Root::of::<TileProbe>());
+            let batch = core.commit().expect("initial mount batch");
+            let mut texts = Vec::new();
+            let mut svg_count = 0usize;
+            for item in batch.items {
+                match item {
+                    MountItem::Text { text, .. } => texts.push(text.text.to_string()),
+                    MountItem::Canvas { .. } => svg_count += 1,
+                    _ => {}
+                }
+            }
+            (texts, svg_count)
+        }
+
+        // 0 replies on a quiet Card (no branch, no status): only the terminal button SVG exists,
+        // and "0" is never rendered.
+        let quiet = sample_snapshot();
+        let (quiet_texts, quiet_svgs) = collect_texts_and_svgs(quiet, "c-idle");
+        assert!(
+            !quiet_texts.iter().any(|t| t == "0"),
+            "0 replies must not render '0': {quiet_texts:?}"
+        );
+        assert_eq!(quiet_svgs, 1, "quiet 0-reply Card renders only [>_] SVG");
+
+        // 0 replies on a Card that already has a footer (branch): still must not render "0"
+        // or add a MessageSquare SVG.
+        let mut with_branch = sample_snapshot();
+        with_branch.cards[0].branch = Some("canban/1".into());
+        let (branch_texts, branch_svgs) = collect_texts_and_svgs(with_branch, "c-idle");
+        assert!(
+            !branch_texts.iter().any(|t| t == "0"),
+            "0 replies with branch footer must not render '0': {branch_texts:?}"
+        );
+        assert_eq!(branch_svgs, 2, "branch + [>_] SVGs only when replies == 0");
+
+        // Positive replies (3 narrative messages; echoed report + deleted comment ignored):
+        // renders MessageSquare SVG + exact count "3".
+        let mut with_replies = sample_snapshot();
+        let push_ev = |s: &mut Snapshot, seq: u64, kind: &str, data: serde_json::Value| {
+            s.events.push(Event {
+                id: format!("ev-{seq}"),
+                sequence: seq,
+                project_id: "p1".into(),
+                card_id: "c-idle".into(),
+                kind: kind.into(),
+                actor: "user".into(),
+                message: "hello".into(),
+                data,
+                created_at: seq,
+            });
+        };
+        push_ev(&mut with_replies, 1, "comment.created", json!({}));
+        push_ev(&mut with_replies, 2, "comment.deleted", json!({}));
+        push_ev(
+            &mut with_replies,
+            3,
+            "execution.reported",
+            json!({"report_id": "r1", "terminal_id": "t1"}),
+        );
+        push_ev(
+            &mut with_replies,
+            4,
+            "comment.replied",
+            json!({"report_id": "r1", "terminal_id": "t1"}),
+        );
+        push_ev(&mut with_replies, 5, "github.comment", json!({}));
+
+        let (reply_texts, reply_svgs) = collect_texts_and_svgs(with_replies, "c-idle");
+        assert!(
+            reply_texts.iter().any(|t| t == "3"),
+            "expected reply count '3' in {reply_texts:?}"
+        );
+        assert_eq!(
+            reply_svgs, 2,
+            "quiet Card with replies renders [>_] + MessageSquare SVGs"
+        );
     }
 }

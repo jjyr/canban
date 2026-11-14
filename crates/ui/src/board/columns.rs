@@ -254,13 +254,25 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
         .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
         .label(move || {
             let c = card.get();
-            let merging = ui.snapshot.with(|s| ui.is_card_merging(s, &c));
+            let (merging, replies) = ui.snapshot.with(|s| {
+                (
+                    ui.is_card_merging(s, &c),
+                    crate::card::timeline::reply_count(&s.events, &c.id),
+                )
+            });
             let count = ui
                 .reminder_counts
                 .with(|all| all.get(&c.id).map(|n| n.total).unwrap_or(0));
             let mut label = format!("Card #{} {}", c.number, c.title);
             if merging {
                 label.push_str(" · Merging");
+            }
+            if replies > 0 {
+                label.push_str(&format!(
+                    " · {} {}",
+                    replies,
+                    if replies == 1 { "reply" } else { "replies" }
+                ));
             }
             if count > 0 {
                 label.push_str(&format!(

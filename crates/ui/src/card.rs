@@ -6,7 +6,7 @@ mod header;
 mod quick_merge;
 mod task;
 pub mod terminal;
-mod timeline;
+pub(crate) mod timeline;
 mod workflow;
 
 use crate::{drafts::*, presenter::*};
