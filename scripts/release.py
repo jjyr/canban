@@ -36,6 +36,73 @@ def get_optional(path):
         if error.code==404:return None
         raise
 
+def parse_version(tag):
+    parts=tag.split('-')
+    if len(parts)!=2 or len(parts[0])!=8 or not parts[0].isdigit() or not parts[1].isdigit() or parts[1].startswith('0'):return None
+    date,seq=int(parts[0]),int(parts[1])
+    return (date,seq) if seq>0 else None
+
+def find_previous_release_tag(repo,version):
+    target=parse_version(version)
+    if target is None:return None
+    # Inspect only the newest page of releases rather than walking full release history;
+    # evaluate all entries on that page numerically so multi-digit daily sequences
+    # (assuming <= 10 tags/day in normal operation) still beat single-digit tags.
+    releases=api('GET',f'/repos/{repo}/releases?per_page=30&page=1') or []
+    best=None
+    for release in releases:
+        if release.get('draft'):continue
+        tag=release.get('tag_name','')
+        parsed=parse_version(tag)
+        if parsed is not None and parsed<target and (best is None or parsed>best[0]):
+            best=(parsed,tag)
+    return best[1] if best is not None else None
+
+def format_commit_bullet(entry):
+    message=((entry.get('commit') or {}).get('message') or '').strip()
+    summary=message.splitlines()[0].strip() if message else ''
+    sha=(entry.get('sha') or '')[:7]
+    if summary and sha:return f'- {summary} ({sha})'
+    return f'- {summary or sha}'
+
+def build_release_notes(repo,version,commit,limit=16000):
+    prev_tag=find_previous_release_tag(repo,version)
+    commits=[];extra=0
+    if prev_tag is not None:
+        comparison=get_optional(f'/repos/{repo}/compare/{urllib.parse.quote(prev_tag,safe="")}...{commit}')
+        if comparison is not None:
+            raw_commits=comparison.get('commits') or []
+            total=comparison.get('total_commits',len(raw_commits))
+            extra=max(0,total-len(raw_commits))
+            non_merge=[c for c in raw_commits if len(c.get('parents') or [])<=1]
+            commits=list(reversed(non_merge if non_merge else raw_commits))
+        footer=f'**Full Changelog**: https://github.com/{repo}/compare/{prev_tag}...{version}'
+    else:
+        raw_commits=get_optional(f'/repos/{repo}/commits?sha={commit}&per_page=100') or []
+        non_merge=[c for c in raw_commits if len(c.get('parents') or [])<=1]
+        commits=non_merge if non_merge else list(raw_commits)
+        footer=f'**Full Changelog**: https://github.com/{repo}/commits/{version}'
+    if not commits and extra==0:return footer
+    header="## What's Changed\n"
+    bullets=[format_commit_bullet(c) for c in commits]
+    kept=[];dropped=extra
+    for idx,line in enumerate(bullets):
+        candidate=header+'\n'.join([*kept,line])+f'\n\n{footer}'
+        if len(candidate)>limit:
+            dropped=len(bullets)-idx+extra
+            break
+        kept.append(line)
+    while dropped>0 and kept:
+        more=f'- ... and {dropped} more commits'
+        body=header+'\n'.join([*kept,more])+f'\n\n{footer}'
+        if len(body)<=limit:return body
+        kept.pop();dropped+=1
+    if dropped>0:
+        more=f'- ... and {dropped} more commits'
+        body=header+more+f'\n\n{footer}'
+        return body if len(body)<=limit else footer[:limit]
+    return header+'\n'.join(kept)+f'\n\n{footer}'
+
 def find_release(repo,version):
     # GitHub's release-by-tag endpoint only resolves published releases.
     # The authenticated list includes drafts, so reserve retries and publication
@@ -120,7 +187,9 @@ def main():
         if os.environ.get('GITHUB_OUTPUT'):
             with open(os.environ['GITHUB_OUTPUT'],'a') as output:output.write('version='+version+'\n')
         release=find_release(repo,version)
-        if release is None:api('POST',f'/repos/{repo}/releases',{'tag_name':version,'target_commitish':commit,'name':version,'draft':True,'prerelease':False,'generate_release_notes':True})
+        if release is None:
+            notes=build_release_notes(repo,version,commit)
+            api('POST',f'/repos/{repo}/releases',{'tag_name':version,'target_commitish':commit,'name':version,'body':notes,'draft':True,'prerelease':False,'generate_release_notes':False})
         print(version);return
     args.directory.mkdir(parents=True,exist_ok=True)
     if args.command=='package':
@@ -140,6 +209,7 @@ def main():
     for asset in release['assets']:api('DELETE',f'/repos/{repo}/releases/assets/{asset["id"]}')
     for path in sorted(args.directory.iterdir()):
         if path.is_file():api('POST',f'/upload/repos/{repo}/releases/{release["id"]}/assets?name={path.name}',raw=path.read_bytes(),content_type='application/octet-stream')
-    api('PATCH',f'/repos/{repo}/releases/{release["id"]}',{'draft':False,'prerelease':False})
+    notes=build_release_notes(repo,version,commit)
+    api('PATCH',f'/repos/{repo}/releases/{release["id"]}',{'draft':False,'prerelease':False,'body':notes})
     print('Published '+version)
 if __name__=='__main__':main()

@@ -45,15 +45,21 @@ class Releases(unittest.TestCase):
         with patch.object(release,'api',api),patch.object(sys,'argv',['release.py','publish','--directory','/private/tmp/canban-release-test-empty']),patch.dict(os.environ,{'CANBAN_RELEASE_COMMIT':'c'*40,'CANBAN_RELEASE_VERSION':'20261110-1'}):release.main()
         self.assertEqual(calls,['GET'])
     def test_reserve_and_publish_find_the_same_draft_without_release_by_tag(self):
-        calls=[];releases=[]
+        calls=[];releases=[{'id':10,'tag_name':'20261109-2','draft':False}]
         def api(method,path,body=None,**kwargs):
             calls.append((method,path,body,kwargs))
             if '/releases/tags/' in path:raise urllib.error.HTTPError(path,404,'Draft is not published',{},None)
             if method=='GET' and '/releases?' in path:return releases
+            if method=='GET' and '/compare/' in path:
+                return {'total_commits':3,'commits':[
+                    {'sha':'1111111aaaa','parents':[{'sha':'p0'}],'commit':{'message':'feat: older feature\n\nbody'}},
+                    {'sha':'2222222bbbb','parents':[{'sha':'p1'},{'sha':'p2'}],'commit':{'message':'Merge commit into branch'}},
+                    {'sha':'3333333cccc','parents':[{'sha':'p1'}],'commit':{'message':'fix: newest bugfix'}},
+                ]}
             if method=='POST' and path=='/repos/fixture/app/releases':
-                releases.append({'id':42,'tag_name':body['tag_name'],'draft':True,'assets':[{'id':7}]});return releases[0]
+                releases.append({'id':42,'tag_name':body['tag_name'],'draft':True,'assets':[{'id':7}]});return releases[-1]
             if method=='DELETE' or path.startswith('/upload/'):return {}
-            if method=='PATCH':return {**releases[0],**body}
+            if method=='PATCH':return {**releases[-1],**body}
             raise AssertionError((method,path,body))
         with tempfile.TemporaryDirectory(prefix='cb-release-regression-') as directory:
             pathlib.Path(directory,'manifest-macos-aarch64.json').write_text('{}')
@@ -64,11 +70,77 @@ class Releases(unittest.TestCase):
         self.assertEqual(sum(m=='POST' and p=='/repos/fixture/app/releases' for m,p,_,_ in calls),1)
         created=next(b for m,p,b,_ in calls if m=='POST' and p=='/repos/fixture/app/releases')
         self.assertIs(created['prerelease'],False)
+        self.assertIs(created['generate_release_notes'],False)
+        expected_notes="## What's Changed\n- fix: newest bugfix (3333333)\n- feat: older feature (1111111)\n\n**Full Changelog**: https://github.com/fixture/app/compare/20261109-2...20261110-1"
+        self.assertEqual(created['body'],expected_notes)
         uploads=[p for m,p,_,_ in calls if m=='POST' and p.startswith('/upload/')]
         self.assertEqual(len(uploads),2)
         self.assertTrue(all('/releases/42/assets?' in p for p in uploads))
-        self.assertEqual(calls[-1][:3],('PATCH','/repos/fixture/app/releases/42',{'draft':False,'prerelease':False}))
-        self.assertEqual(calls[-2][0],'POST')
+        self.assertEqual(calls[-1][:3],('PATCH','/repos/fixture/app/releases/42',{'draft':False,'prerelease':False,'body':expected_notes}))
+        self.assertTrue(any(m=='POST' and p.startswith('/upload/') for m,p,_,_ in calls[:-1]))
+    def test_release_notes_single_page_numeric_base_merge_filter_and_truncation(self):
+        # Single-page lookup (no pagination walk), skips drafts & newer/equal versions, and orders YYYYMMDD-N numerically (10 > 9).
+        releases=[
+            {'tag_name':'20261114-11','draft':True},
+            {'tag_name':'20261114-12','draft':False},
+            {'tag_name':'20261114-9','draft':False},
+            {'tag_name':'20261114-10','draft':False},
+            {'tag_name':'20261113-4','draft':False},
+        ]
+        routes=[]
+        def api(method,path,body=None,**kwargs):
+            routes.append(path)
+            if '/releases?' in path:
+                self.assertIn('page=1',path)
+                return releases
+            if '/compare/20261114-10...' in path:
+                return {'total_commits':4,'commits':[
+                    {'sha':'aaaaaaa1111','parents':[{'sha':'0'}],'commit':{'message':'feat: first commit'}},
+                    {'sha':'bbbbbbb2222','parents':[{'sha':'1'},{'sha':'2'}],'commit':{'message':"Merge branch 'main' into card"}},
+                    {'sha':'ccccccc3333','parents':[{'sha':'1'}],'commit':{'message':'fix: second commit\n\nextra detail'}},
+                    {'sha':'ddddddd4444','parents':[{'sha':'3'}],'commit':{'message':'perf: third commit'}},
+                ]}
+            raise AssertionError((method,path))
+        with patch.object(release,'api',api):
+            notes=release.build_release_notes('fixture/app','20261114-11','f'*40)
+        self.assertEqual(sum('/releases?' in r for r in routes),1)
+        self.assertEqual(notes,(
+            "## What's Changed\n"
+            "- perf: third commit (ddddddd)\n"
+            "- fix: second commit (ccccccc)\n"
+            "- feat: first commit (aaaaaaa)\n\n"
+            "**Full Changelog**: https://github.com/fixture/app/compare/20261114-10...20261114-11"
+        ))
+        # Initial release without a prior published tag falls back to commit listing (newest-first, non-merge)
+        def initial_api(method,path,body=None,**kwargs):
+            if '/releases?' in path:return [{'tag_name':'20261114-1','draft':True}]
+            if '/commits?sha=' in path:
+                return [
+                    {'sha':'9999999ffff','parents':[{'sha':'1'},{'sha':'2'}],'commit':{'message':'Merge pull request'}},
+                    {'sha':'8888888eeee','parents':[{'sha':'1'}],'commit':{'message':'feat: bootstrap app'}},
+                    {'sha':'7777777dddd','parents':[],'commit':{'message':'chore: initial commit'}},
+                ]
+            raise AssertionError((method,path))
+        with patch.object(release,'api',initial_api):
+            initial_notes=release.build_release_notes('fixture/app','20261114-1','e'*40)
+        self.assertEqual(initial_notes,(
+            "## What's Changed\n"
+            "- feat: bootstrap app (8888888)\n"
+            "- chore: initial commit (7777777)\n\n"
+            "**Full Changelog**: https://github.com/fixture/app/commits/20261114-1"
+        ))
+        # Truncation respects limit and accounts for omitted commits beyond the 250-commit compare window
+        many=[{'sha':f'{i:07x}0000','parents':[{'sha':'p'}],'commit':{'message':f'feat: change number {i} with description'}} for i in range(20)]
+        def big_api(method,path,body=None,**kwargs):
+            if '/releases?' in path:return [{'tag_name':'20261114-1','draft':False}]
+            if '/compare/' in path:return {'total_commits':30,'commits':many}
+            raise AssertionError((method,path))
+        with patch.object(release,'api',big_api):
+            truncated=release.build_release_notes('fixture/app','20261114-2','d'*40,limit=260)
+        self.assertLessEqual(len(truncated),260)
+        self.assertIn('- feat: change number 19 with description (0000013)',truncated)
+        self.assertIn('more commits',truncated)
+        self.assertTrue(truncated.endswith('**Full Changelog**: https://github.com/fixture/app/compare/20261114-1...20261114-2'))
     def test_draft_lookup_paginates_and_missing_publish_never_creates_a_release(self):
         first=[{'tag_name':f'other-{i}'} for i in range(100)]
         with patch.object(release,'api',side_effect=[first,[{'tag_name':'20261110-1','id':42,'draft':True}]]) as request:
