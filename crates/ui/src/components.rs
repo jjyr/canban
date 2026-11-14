@@ -8,6 +8,7 @@ use crate::presenter::*;
 use canban_types::Event;
 use canban_types::*;
 use canban_ui_kit::{tokens::*, *};
+pub(crate) use card_tile::card_terminal_icon_tint;
 pub use card_tile::card_tile;
 use nsh_core::prelude::*;
 use serde_json::json;

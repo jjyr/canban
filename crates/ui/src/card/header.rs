@@ -5,28 +5,26 @@ fn close(ui: Ui) {
     ui.close_card();
 }
 fn terminal_button(ui: Ui) -> View {
-    let dot_state = computed(move || {
-        let cid = ui.card_id();
-        if cid.is_empty() {
-            return 0u8;
-        }
-        let live = crate::terminals::card_live_entries_for_ui(ui, &cid);
-        if live.is_empty() {
-            0
-        } else if live.iter().any(|e| e.needs_attention()) {
-            2
-        } else {
-            1
-        }
-    });
     let selected = computed(move || ui.page.get() == "card" && ui.card_terminal_open.get());
+    let has_live = computed(move || {
+        let cid = ui.card_id();
+        !cid.is_empty() && !crate::terminals::card_live_entries_for_ui(ui, &cid).is_empty()
+    });
+    let icon_tint = computed(move || {
+        let cid = ui.card_id();
+        let live = if cid.is_empty() {
+            Vec::new()
+        } else {
+            crate::terminals::card_live_entries_for_ui(ui, &cid)
+        };
+        crate::components::card_terminal_icon_tint(&live, selected.get())
+    });
     view()
         .flex_shrink_0()
         .window_drag(false)
         .tooltip(hint_tooltip("Toggle Terminal · ⌘J").placement(Placement::Bottom))
         .child(
             canban_ui_kit::press_target()
-                .relative()
                 .disabled_style(|s| s.opacity(0.4))
                 .w(px(30.))
                 .h(px(30.))
@@ -42,37 +40,15 @@ fn terminal_button(ui: Ui) -> View {
                         || ui.current_card().is_none_or(|c| {
                             c.archived_at.is_some()
                                 && !ui.card_terminal_open.get()
-                                && dot_state.get() == 0
+                                && !has_live.get()
                         })
                 })
                 .accessibility_label(|| Some("Toggle Terminal · ⌘J".into()))
                 .child(
-                    icon_tinted(
-                        Icon::Terminal,
-                        move || {
-                            if selected.get() { ACCENT } else { MUTED }
-                        },
-                    )
-                    .w(px(16.))
-                    .h(px(16.)),
+                    icon_tinted(Icon::Terminal, move || icon_tint.get().resolve())
+                        .w(px(16.))
+                        .h(px(16.)),
                 )
-                .child(dynamic(move || match dot_state.get() {
-                    1 | 2 => view()
-                        .absolute()
-                        .top(px(4.))
-                        .right(px(4.))
-                        .w(px(6.))
-                        .h(px(6.))
-                        .rounded_full()
-                        .bg(if dot_state.get() == 2 {
-                            ATTENTION
-                        } else {
-                            ACCENT
-                        })
-                        .pointer_events(PointerEvents::None)
-                        .into_element(),
-                    _ => view().into_element(),
-                }))
                 .on_press(move |_: &()| {
                     if let Some(c) = ui.current_card() {
                         if ui.page.get_untracked() != "card" {

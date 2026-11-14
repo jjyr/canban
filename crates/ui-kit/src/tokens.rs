@@ -55,7 +55,7 @@ pub fn current_theme() -> &'static canban_themes::Theme {
     });
     canban_themes::resolve(&name)
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThemeColor(usize);
 impl ThemeColor {
     pub fn resolve(self) -> AdaptiveColor {

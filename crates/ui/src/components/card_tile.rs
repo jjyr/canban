@@ -10,7 +10,7 @@ use super::*;
 /// Needs review  ⎇ branch            [((●)) ✦ @developer]
 /// ```
 /// The `[>_]` button opens this Card's quick terminal split directly on the Card page
-/// (pinned with an active dot when a session is running, or revealed on hover); active
+/// (pinned with a highlighted icon when a session is running, or revealed on hover); active
 /// Agent pills pulse (or flag attention) and open that Agent tab on the Card.
 pub fn card_tile(ui: Ui, card: Card) -> View {
     let reminder_id = card.id.clone();
@@ -25,13 +25,7 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
     let snapshot = ui.snapshot.get_untracked();
     let live_entries = crate::terminals::card_live_entries(&snapshot, &card.id);
     let has_terminal = !live_entries.is_empty();
-    let dot_tone = if !has_terminal {
-        None
-    } else if live_entries.iter().any(|e| e.needs_attention()) {
-        Some(ATTENTION)
-    } else {
-        Some(ACCENT)
-    };
+    let terminal_tint = card_terminal_icon_tint(&live_entries, false);
     let hovered = signal(false);
     let active = card.active();
     let merged = card.merged();
@@ -100,7 +94,7 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
                     .child(when(
                         move || active || has_terminal,
                         move || {
-                            terminal_button(ui, terminal_card.clone(), card_number, dot_tone)
+                            terminal_button(ui, terminal_card.clone(), card_number, terminal_tint)
                                 .opacity(move || {
                                     if has_terminal || hovered.get() {
                                         1.0_f32
@@ -304,12 +298,26 @@ fn archive_button(ui: Ui, card: Card) -> View {
     .h(px(22.))
 }
 
+/// Icon tint shared by Board Card tiles and Card header Terminal toggles:
+/// highlights the `[>_]` icon directly when live sessions exist instead of adding a badge dot.
+pub(crate) fn card_terminal_icon_tint(
+    live_entries: &[crate::terminals::Entry],
+    selected: bool,
+) -> ThemeColor {
+    if live_entries.iter().any(|e| e.needs_attention()) {
+        ATTENTION
+    } else if !live_entries.is_empty() || selected {
+        ACCENT
+    } else {
+        MUTED
+    }
+}
+
 /// Quick or live Terminal entry: open this Card's side-by-side terminal split directly.
-fn terminal_button(ui: Ui, card: String, number: u64, dot_tone: Option<ThemeColor>) -> View {
+fn terminal_button(ui: Ui, card: String, number: u64, tint: ThemeColor) -> View {
     let title = format!("Open Terminal for Card #{number}");
     let hint = title.clone();
-    let mut btn = press_target()
-        .relative()
+    let btn = press_target()
         .w(px(22.))
         .h(px(22.))
         .items_center()
@@ -319,21 +327,8 @@ fn terminal_button(ui: Ui, card: String, number: u64, dot_tone: Option<ThemeColo
         .hover(|s| s.bg(INSET))
         .focus(|s| s.border_1().border_color(ACCENT))
         .accessibility_label(move || Some(title.clone().into()))
-        .child(icon(Icon::Terminal).w(px(15.)).h(px(15.)))
+        .child(icon_tinted(Icon::Terminal, tint).w(px(15.)).h(px(15.)))
         .on_press(move |_: &()| crate::terminals::open_card_quick(ui, &card));
-    if let Some(color) = dot_tone {
-        btn = btn.child(
-            view()
-                .absolute()
-                .top(px(2.))
-                .right(px(2.))
-                .w(px(5.))
-                .h(px(5.))
-                .rounded_full()
-                .bg(color)
-                .pointer_events(PointerEvents::None),
-        );
-    }
     view()
         .flex_shrink_0()
         .w(px(22.))
@@ -455,4 +450,152 @@ fn ephemeral_agent_pill(
             )
             .on_press(move |_: &()| ui.open_card_with_terminal(cid.clone(), Some(tid.clone()))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nsh_core::{ApproxTextEngine, Core, MountItem, NodeId, geometry::size};
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    fn sample_snapshot() -> Snapshot {
+        let mut s = Snapshot::default();
+        s.projects.push(
+            serde_json::from_value(json!({
+                "id": "p1",
+                "name": "Canban",
+                "directory": "/tmp/project",
+                "workflow": Workflow::default(),
+                "created_at": 1
+            }))
+            .unwrap(),
+        );
+        for (i, id) in [(1u64, "c-idle"), (2, "c-live"), (3, "c-attention")] {
+            s.cards.push(
+                serde_json::from_value(json!({
+                    "id": id,
+                    "project_id": "p1",
+                    "number": i,
+                    "title": format!("Card {i}"),
+                    "body": "",
+                    "stage": "develop",
+                    "revision": 1,
+                    "created_at": 1
+                }))
+                .unwrap(),
+            );
+        }
+        s.terminals.push(TerminalEntry {
+            id: "shell-live".into(),
+            conversation_id: None,
+            number: 1,
+            name: None,
+            manual_number: Some(1),
+            origin_card_id: Some("c-live".into()),
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some("pty-live".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+            }),
+            agent: None,
+            created_at: 1,
+        });
+        s.terminals.push(TerminalEntry {
+            id: "cli-attention".into(),
+            conversation_id: None,
+            number: 2,
+            name: None,
+            manual_number: Some(2),
+            origin_card_id: Some("c-attention".into()),
+            agent_engine: Some("agy".into()),
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some("pty-attention".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: Some("blocked".into()),
+                agent_turn: Some(1),
+            }),
+            agent: None,
+            created_at: 1,
+        });
+        s
+    }
+
+    #[test]
+    fn card_terminal_icon_tint_highlights_active_and_attention_without_dot_badge() {
+        let s = sample_snapshot();
+        let idle = crate::terminals::card_live_entries(&s, "c-idle");
+        let live = crate::terminals::card_live_entries(&s, "c-live");
+        let attention = crate::terminals::card_live_entries(&s, "c-attention");
+
+        assert_eq!(card_terminal_icon_tint(&idle, false), MUTED);
+        assert_eq!(card_terminal_icon_tint(&idle, true), ACCENT);
+        assert_eq!(card_terminal_icon_tint(&live, false), ACCENT);
+        assert_eq!(card_terminal_icon_tint(&live, true), ACCENT);
+        assert_eq!(card_terminal_icon_tint(&attention, false), ATTENTION);
+        assert_eq!(card_terminal_icon_tint(&attention, true), ATTENTION);
+
+        #[component]
+        fn ProbeRoot() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let s = sample_snapshot();
+            let c_idle = s.cards[0].clone();
+            let c_live = s.cards[1].clone();
+            let c_attn = s.cards[2].clone();
+            ui.snapshot.set(s);
+            ui.project.set("p1".into());
+            ui.card.set("c-live".into());
+            ui.page.set("card".into());
+            view()
+                .child(card_tile(ui, c_idle))
+                .child(card_tile(ui, c_live))
+                .child(card_tile(ui, c_attn))
+                .child(crate::card::screen(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(900.0), px(600.0)));
+        core.mount_root(&nsh_core::element::Root::of::<ProbeRoot>());
+        let batch = core.commit().expect("initial mount batch");
+
+        let mut children_of: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut terminal_buttons: Vec<(String, NodeId)> = Vec::new();
+        for item in &batch.items {
+            match item {
+                MountItem::Insert { parent, child, .. } => {
+                    children_of.entry(*parent).or_default().push(*child);
+                }
+                MountItem::ViewProps { id, props } => {
+                    if let Some(label) = &props.accessibility.label
+                        && (label.starts_with("Open Terminal for Card #")
+                            || label.as_ref() == "Toggle Terminal · ⌘J")
+                    {
+                        terminal_buttons.push((label.to_string(), *id));
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(terminal_buttons.len(), 4);
+        for (label, button_id) in terminal_buttons {
+            let direct = children_of.get(&button_id).cloned().unwrap_or_default();
+            assert_eq!(
+                direct.len(),
+                1,
+                "terminal button `{label}` must render only its SVG icon without an extra dot badge child"
+            );
+        }
+    }
 }
