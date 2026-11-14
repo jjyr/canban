@@ -1773,3 +1773,378 @@ fn manual_shell_observed_agent_exposes_icon_only_without_changing_title_or_close
         .unwrap();
     assert_eq!(disconnected.provider(), None);
 }
+
+#[test]
+fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_marks_selected_tab() {
+    use nsh_core::{
+        AccessibilityRole, ApproxTextEngine, Core, EventKind, EventPayload, MountItem, NodeId,
+        element::JsEvent, geometry::size, prelude::*,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    #[component]
+    fn HeaderProbe() -> impl IntoElement {
+        canban_ui_kit::tokens::install_theme();
+        let ui = crate::presenter::Ui::new();
+        let mut s = fixture();
+        s.projects[0].directory = "/repo/p1".into();
+        s.projects[0].target_branch = Some("main".into());
+        s.cards[0].title = "Worktree Card Task".into();
+        s.cards[0].worktree = Some("/repo/p1-worktrees/c1".into());
+        s.cards[0].branch = Some("canban/1".into());
+        s.worktrees.push(ManagedWorktree {
+            id: "wt-1".into(),
+            project_id: "p1".into(),
+            branch: "feat/isolated".into(),
+            base_branch: "main".into(),
+            base_commit: None,
+            path: "/repo/p1-worktrees/feat-isolated".into(),
+            location: WorkLocation {
+                machine: "local".into(),
+                directory: "/repo/p1-worktrees/feat-isolated".into(),
+            },
+            created_at: 3,
+        });
+
+        let mk_shell = |id: &str, num: u64, origin: Option<&str>| TerminalEntry {
+            id: id.into(),
+            conversation_id: None,
+            number: num,
+            name: None,
+            manual_number: Some(num),
+            origin_card_id: origin.map(str::to_owned),
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some(format!("pty-{id}")),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+            }),
+            agent: None,
+            created_at: num,
+        };
+
+        s.terminals.extend([
+            mk_shell("root-shell", 17, None),
+            mk_shell("card-shell", 18, Some("c1")),
+            mk_shell("wt-shell-1", 19, None),
+            mk_shell("wt-shell-2", 20, None),
+        ]);
+        s.terminal_contexts.extend([
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "root-shell".into(),
+                core_id: "core".into(),
+                terminal: "pty-root-shell".into(),
+                cwd: Some("/repo/p1".into()),
+                project_id: Some("p1".into()),
+                branch: Some("main".into()),
+                ..Default::default()
+            },
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "card-shell".into(),
+                core_id: "core".into(),
+                terminal: "pty-card-shell".into(),
+                cwd: Some("/repo/p1-worktrees/c1".into()),
+                project_id: Some("p1".into()),
+                card_id: Some("c1".into()),
+                branch: Some("canban/1".into()),
+                ..Default::default()
+            },
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "wt-shell-1".into(),
+                core_id: "core".into(),
+                terminal: "pty-wt-shell-1".into(),
+                cwd: Some("/repo/p1-worktrees/feat-isolated".into()),
+                project_id: Some("p1".into()),
+                worktree_id: Some("wt-1".into()),
+                branch: Some("feat/isolated".into()),
+                ..Default::default()
+            },
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "wt-shell-2".into(),
+                core_id: "core".into(),
+                terminal: "pty-wt-shell-2".into(),
+                cwd: Some("/repo/p1-worktrees/feat-isolated".into()),
+                project_id: Some("p1".into()),
+                worktree_id: Some("wt-1".into()),
+                branch: Some("feat/isolated".into()),
+                ..Default::default()
+            },
+        ]);
+
+        ui.snapshot.set(s);
+        ui.snapshot_ready.set(true);
+        ui.project.set("p1".into());
+        ui.page.set("terminals".into());
+        // Initially select the ProjectRoot shell (`Terminal 17`).
+        ui.open_terminal("root-shell".into());
+
+        view()
+            .w(px(1200.))
+            .h(px(42.))
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Select CardWorktree Shell".into()))
+                    .on_press(move |_: &()| ui.open_terminal("card-shell".into())),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Select ManagedWorktree Shell".into()))
+                    .on_press(move |_: &()| ui.open_terminal("wt-shell-1".into())),
+            )
+            .child(crate::terminals::tabs::header(ui))
+    }
+
+    struct MountedTree {
+        alive: HashSet<NodeId>,
+        parents: HashMap<NodeId, NodeId>,
+        texts: HashMap<NodeId, (String, FontWeight)>,
+        tabs: HashMap<NodeId, (String, bool)>,
+        labels: HashMap<String, NodeId>,
+    }
+
+    impl MountedTree {
+        fn new() -> Self {
+            Self {
+                alive: HashSet::new(),
+                parents: HashMap::new(),
+                texts: HashMap::new(),
+                tabs: HashMap::new(),
+                labels: HashMap::new(),
+            }
+        }
+        fn apply(&mut self, batch: &nsh_core::MountBatch) {
+            for item in &batch.items {
+                match item {
+                    MountItem::Create { id, .. } => {
+                        self.alive.insert(*id);
+                    }
+                    MountItem::Insert { parent, child, .. } => {
+                        self.parents.insert(*child, *parent);
+                    }
+                    MountItem::Remove { id } => {
+                        self.parents.remove(id);
+                    }
+                    MountItem::Delete { id } => {
+                        self.alive.remove(id);
+                        self.parents.remove(id);
+                        self.texts.remove(id);
+                        self.tabs.remove(id);
+                    }
+                    MountItem::Text { id, text, .. } => {
+                        let weight = text
+                            .spans
+                            .first()
+                            .map(|s| FontWeight(s.style.font_weight))
+                            .unwrap_or(FontWeight::NORMAL);
+                        self.texts.insert(*id, (text.text.to_string(), weight));
+                    }
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(label) = &props.accessibility.label {
+                            self.labels.insert(label.to_string(), *id);
+                        }
+                        if props.accessibility.role == AccessibilityRole::Tab {
+                            let lbl = props
+                                .accessibility
+                                .label
+                                .as_ref()
+                                .map(|s| s.to_string())
+                                .unwrap_or_default();
+                            self.tabs
+                                .insert(*id, (lbl, props.accessibility.state.selected));
+                        } else {
+                            self.tabs.remove(id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        fn is_mounted(&self, mut id: NodeId) -> bool {
+            if !self.alive.contains(&id) {
+                return false;
+            }
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let Some(&parent) = self.parents.get(&id) else {
+                    return false;
+                };
+                id = parent;
+                guard += 1;
+                if guard > 256 {
+                    return false;
+                }
+            }
+            true
+        }
+        fn mounted_texts(&self) -> Vec<(String, FontWeight)> {
+            self.texts
+                .iter()
+                .filter(|(id, _)| self.is_mounted(**id))
+                .map(|(_, v)| v.clone())
+                .collect()
+        }
+        fn mounted_tabs(&self) -> Vec<(String, bool)> {
+            self.tabs
+                .iter()
+                .filter(|(id, _)| self.is_mounted(**id))
+                .map(|(_, v)| v.clone())
+                .collect()
+        }
+    }
+
+    fn pump(core: &mut Core<ApproxTextEngine>, tree: &mut MountedTree) {
+        for _ in 0..8 {
+            let had_batch = if let Some(batch) = core.commit() {
+                tree.apply(&batch);
+                true
+            } else {
+                false
+            };
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            let mut dispatched = false;
+            for ev in events {
+                match ev {
+                    JsEvent::Event(id, kind, payload) => {
+                        core.component_event(id, kind, &payload);
+                        dispatched = true;
+                    }
+                    JsEvent::LayoutListener {
+                        host,
+                        id,
+                        listener,
+                        frame,
+                    } => {
+                        core.component_layout(host, id, &listener, frame);
+                        dispatched = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !had_batch && !dispatched {
+                break;
+            }
+        }
+    }
+
+    let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(42.)));
+    core.set_components(nsh_base::registry());
+    core.mount_root(&nsh_core::element::Root::of::<HeaderProbe>());
+    let mut tree = MountedTree::new();
+    pump(&mut core, &mut tree);
+
+    // 1. Initial mount on `root-shell` (`ProjectRoot("p1")`): only `Terminal 17` is rendered & selected.
+    let texts_initial = tree.mounted_texts();
+    assert!(
+        texts_initial
+            .iter()
+            .any(|(t, w)| t == "Terminal 17" && *w == FontWeight::SEMIBOLD),
+        "expected selected ProjectRoot tab `Terminal 17` in SEMIBOLD, got {texts_initial:?}"
+    );
+    assert!(
+        !texts_initial
+            .iter()
+            .any(|(t, _)| t == "Terminal 18" || t == "Terminal 19"),
+        "worktree terminals must not appear while ProjectRoot is selected: {texts_initial:?}"
+    );
+    assert_eq!(tree.mounted_tabs().len(), 1);
+    assert!(tree.mounted_tabs()[0].1);
+
+    // 2. Switch `terminal_selection` to `card-shell` (`CardWorktree("c1")`) WITHOUT mutating `snapshot`:
+    //    `Terminal 17` (ProjectRoot) MUST disappear from the tab strip immediately, and BOTH `c1`'s Agent
+    //    and `Terminal 18` MUST appear, with `Terminal 18` marked selected (`SEMIBOLD` + `selected: true`).
+    let select_card_btn = *tree
+        .labels
+        .get("Select CardWorktree Shell")
+        .expect("Select CardWorktree Shell button");
+    assert!(core.component_event(select_card_btn, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+
+    let texts_card = tree.mounted_texts();
+    assert!(
+        !texts_card.iter().any(|(t, _)| t == "Terminal 17"),
+        "ProjectRoot `Terminal 17` leaked into CardWorktree tab bar after switching selection: {texts_card:?}"
+    );
+    assert!(
+        texts_card
+            .iter()
+            .any(|(t, w)| t == "Terminal 18" && *w == FontWeight::SEMIBOLD),
+        "current CardWorktree shell `Terminal 18` must appear in top tabs as SEMIBOLD: {texts_card:?}"
+    );
+    assert!(
+        texts_card
+            .iter()
+            .any(|(t, w)| t == "Worktree Card Task" && *w == FontWeight::NORMAL),
+        "sibling CardWorktree Agent tab must appear alongside current shell in NORMAL weight: {texts_card:?}"
+    );
+    let card_tabs = tree.mounted_tabs();
+    assert_eq!(
+        card_tabs.len(),
+        2,
+        "expected 2 tabs in CardWorktree, got {card_tabs:?}"
+    );
+    assert_eq!(
+        card_tabs.iter().filter(|(_, sel)| *sel).count(),
+        1,
+        "exactly one tab must be selected: {card_tabs:?}"
+    );
+    assert!(
+        card_tabs
+            .iter()
+            .any(|(lbl, sel)| lbl.contains("Terminal 18") && *sel),
+        "expected `Terminal 18` tab to carry `selected: true`, got {card_tabs:?}"
+    );
+
+    // 3. Switch `terminal_selection` to `wt-shell-1` (`ManagedWorktree("wt-1")`):
+    //    Both `Terminal 17` and CardWorktree tabs disappear; `Terminal 19` (selected, SEMIBOLD)
+    //    and `Terminal 20` (unselected, NORMAL) render in the top strip.
+    let select_wt_btn = *tree
+        .labels
+        .get("Select ManagedWorktree Shell")
+        .expect("Select ManagedWorktree Shell button");
+    assert!(core.component_event(select_wt_btn, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+
+    let texts_wt = tree.mounted_texts();
+    assert!(
+        !texts_wt
+            .iter()
+            .any(|(t, _)| t == "Terminal 17" || t == "Terminal 18"),
+        "neither ProjectRoot nor CardWorktree tabs may leak into ManagedWorktree: {texts_wt:?}"
+    );
+    assert!(
+        texts_wt
+            .iter()
+            .any(|(t, w)| t == "Terminal 19" && *w == FontWeight::SEMIBOLD),
+        "selected ManagedWorktree tab `Terminal 19` must be SEMIBOLD: {texts_wt:?}"
+    );
+    assert!(
+        texts_wt
+            .iter()
+            .any(|(t, w)| t == "Terminal 20" && *w == FontWeight::NORMAL),
+        "sibling ManagedWorktree tab `Terminal 20` must be NORMAL: {texts_wt:?}"
+    );
+    let wt_tabs = tree.mounted_tabs();
+    assert_eq!(wt_tabs.len(), 2);
+    assert!(
+        wt_tabs
+            .iter()
+            .any(|(lbl, sel)| lbl.contains("Terminal 19") && *sel)
+    );
+    assert!(
+        wt_tabs
+            .iter()
+            .any(|(lbl, sel)| lbl.contains("Terminal 20") && !*sel)
+    );
+}

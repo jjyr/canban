@@ -79,7 +79,13 @@ pub fn tab_width(e: &Entry) -> f32 {
         (text + 58. + icon_extra).clamp(136. + icon_extra, 230.)
     }
 }
-pub fn tab(e: &Entry) -> View {
+pub fn tab(e: &Entry, selected: bool) -> View {
+    let weight = if selected {
+        FontWeight::SEMIBOLD
+    } else {
+        FontWeight::NORMAL
+    };
+    let title_color = if selected { TEXT } else { MUTED };
     let title = if e.agent.is_some() && e.saved.name.is_none() {
         let card = e.card.as_ref().unwrap();
         let number = format!("#{}", card.number);
@@ -89,13 +95,28 @@ pub fn tab(e: &Entry) -> View {
             .flex_row()
             .items_center()
             .gap_1()
-            .child(label(number).flex_shrink_0())
-            .child(label(card.title.clone()).flex_1().min_w(px(0.)).truncate())
+            .child(
+                label(number)
+                    .font_weight(weight)
+                    .text_color(title_color)
+                    .flex_shrink_0(),
+            )
+            .child(
+                label(card.title.clone())
+                    .font_weight(weight)
+                    .text_color(title_color)
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate(),
+            )
     } else {
-        view()
-            .flex_1()
-            .min_w(px(0.))
-            .child(label(e.title()).w_full().truncate())
+        view().flex_1().min_w(px(0.)).child(
+            label(e.title())
+                .font_weight(weight)
+                .text_color(title_color)
+                .w_full()
+                .truncate(),
+        )
     };
     if e.agent.is_some() {
         view()

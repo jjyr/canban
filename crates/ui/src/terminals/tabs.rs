@@ -174,7 +174,7 @@ fn tab(ui: Ui, e: Entry, capacity: Memo<f32>) -> impl IntoElement {
             );
         }
         tab_button = tab_button
-            .child(super::labels::tab(&e))
+            .child(super::labels::tab(&e, selected))
             .on_press_down(move |event: &nsh_core::PressEvent| {
                 if event.clicks >= 2 {
                     ui.terminal_rename.set(Some(rename.clone()));
@@ -184,7 +184,8 @@ fn tab(ui: Ui, e: Entry, capacity: Memo<f32>) -> impl IntoElement {
                 ui.spawn(menu(ui, context.clone(), Some(event.page_position)));
             })
             .on_press(move |_: &nsh_core::PressEvent| ui.open_terminal(id.clone()));
-        view()
+        let mut cell = view()
+            .relative()
             .w(move || px(base_width.min(capacity.get())))
             .h_full()
             .flex_shrink_0()
@@ -203,7 +204,20 @@ fn tab(ui: Ui, e: Entry, capacity: Memo<f32>) -> impl IntoElement {
                 Icon::Close,
                 format!("Close terminal {}", e.title()),
                 move |_| close_tab(ui, &close),
-            ))
+            ));
+        if selected {
+            cell = cell.child(
+                view()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(2.))
+                    .bg(ACCENT)
+                    .pointer_events(PointerEvents::None),
+            );
+        }
+        cell
     })
 }
 async fn switcher_menu(ui: Ui, at: Option<Point<Points>>) {
@@ -403,18 +417,31 @@ async fn switcher_menu(ui: Ui, at: Option<Point<Points>>) {
 }
 
 pub fn header(ui: Ui) -> impl IntoElement {
+    let active_scope = computed(move || {
+        let cur = current(ui)?;
+        Some(ui.snapshot.with(|s| super::worktrees::entry_scope(s, &cur)))
+    });
     let inventory = computed(move || {
+        let Some(target_scope) = active_scope.get() else {
+            return Vec::new();
+        };
         let s = ui.snapshot.get();
         ui.closing_terminals.with(|closing| {
             ui.terminal_entries.with(|rows| {
                 rows.iter()
-                    .filter(|e| e.listed() && !closing.contains(&e.saved.id))
+                    .filter(|e| {
+                        e.listed()
+                            && !closing.contains(&e.saved.id)
+                            && super::worktrees::entry_scope(&s, e) == target_scope
+                    })
                     .map(|e| {
                         (
                             e.saved.id.clone(),
-                            super::worktrees::entry_scope(&s, e),
                             e.title(),
                             e.hint(),
+                            e.ended(),
+                            e.inactive(),
+                            e.attention_reason(),
                             e.provider(),
                         )
                     })
@@ -425,6 +452,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
     let context = computed(move || {
         (
             ui.project.get(),
+            active_scope.get(),
             ui.snapshot.with(|s| {
                 (
                     s.projects.len(),
@@ -432,6 +460,18 @@ pub fn header(ui: Ui) -> impl IntoElement {
                     s.projects
                         .iter()
                         .map(|p| (p.id.clone(), p.name.clone(), p.target_branch.clone()))
+                        .collect::<Vec<_>>(),
+                    s.terminal_contexts
+                        .iter()
+                        .map(|c| {
+                            (
+                                c.terminal_id.clone(),
+                                c.branch.clone(),
+                                c.dirty,
+                                c.ahead,
+                                c.behind,
+                            )
+                        })
                         .collect::<Vec<_>>(),
                 )
             }),
