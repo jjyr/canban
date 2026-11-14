@@ -2031,4 +2031,60 @@ mod tests {
             Some("Already implemented in main")
         );
     }
+
+    #[test]
+    fn describe_row_suppresses_automatic_unreported_idle_until_one_hour_fallback() {
+        let mut s = canban_types::Snapshot::default();
+        s.cards.push(base_card());
+        let mut attempt = canban_scheduler::agent_run(
+            "p1",
+            "c1",
+            1,
+            "develop",
+            "stage_entry",
+            canban_types::Config::default().profiles[0].clone(),
+            "implement".into(),
+            None,
+        );
+        attempt.state = "running".into();
+        attempt.terminal = Some("t1".into());
+        attempt.connection_state = "connected".into();
+        attempt.observed = Some(json!({"state": "live", "turn": 1, "status": {"state": "idle"}}));
+        attempt.lifecycle.observed_at = Some(u64::MAX);
+        attempt.lifecycle.idle_since = Some(canban_types::now().saturating_sub(5 * 60_000));
+        s.terminals.push(canban_types::TerminalEntry {
+            id: "c1:agy".into(),
+            conversation_id: Some("c1:agy".into()),
+            number: 1,
+            name: None,
+            manual_number: None,
+            origin_card_id: Some("c1".into()),
+            agent_engine: None,
+            runtime: None,
+            agent: Some(attempt),
+            created_at: 1,
+        });
+
+        // Under 1 hour (e.g. agy running background tasks), no "Stopped before reporting" error.
+        let rows = overview(&s);
+        assert_eq!(rows[0].group, "Idle");
+        assert!(!rows[0].actionable());
+        let quiet_ev = describe_row(&s, &rows[0]);
+        assert_eq!(quiet_ev.tone, Tone::Neutral);
+        assert_eq!(quiet_ev.headline, "Idle");
+
+        // After 1 continuous hour without reporting, surfaces "Stopped before reporting".
+        s.terminals[0].agent.as_mut().unwrap().lifecycle.idle_since = Some(
+            canban_types::now()
+                .saturating_sub(canban_notifications::UNREPORTED_IDLE_ALERT_MS + 1_000),
+        );
+        let rows = overview(&s);
+        assert_eq!(rows[0].group, "Needs attention");
+        assert!(rows[0].actionable());
+        let stalled_ev = describe_row(&s, &rows[0]);
+        assert_eq!(stalled_ev.icon, Icon::TriangleAlert);
+        assert_eq!(stalled_ev.tone, Tone::Danger);
+        assert_eq!(stalled_ev.headline, "Stopped before reporting");
+        assert_eq!(stalled_ev.detail.as_deref(), Some("Inspect terminal"));
+    }
 }

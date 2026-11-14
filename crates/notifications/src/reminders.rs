@@ -150,7 +150,14 @@ pub fn reminders(s: &Snapshot) -> Vec<Reminder> {
                                 .and_then(|a| a.observed.as_ref())
                                 .and_then(|v| v["turn"].as_u64())
                                 .unwrap_or(0);
-                            format!("idle:{target}:{turn}")
+                            if agent.is_some_and(|a| a.trigger.is_automatic()) {
+                                let anchor = agent
+                                    .and_then(|a| crate::unreported_idle_anchor(s, target, a))
+                                    .unwrap_or(turn);
+                                format!("stalled:{target}:{anchor}")
+                            } else {
+                                format!("idle:{target}:{turn}")
+                            }
                         } else {
                             format!("runtime:{target}")
                         }
@@ -213,10 +220,13 @@ pub fn reminders(s: &Snapshot) -> Vec<Reminder> {
 /// 1. Human intervention / replies: runtime input/permission waits (`wait:*`),
 ///    task/review/approval `human_gate` or `attention`, Agent `blocked` or `backlog`
 ///    reports, and explicit `comment.replied` answers to `@agent` questions.
-///    Runtime `idle` / `done` status transitions remain visual indicators only and
-///    do not play a sound, avoiding false chimes when Agents pause transiently.
+///    Interactive runtime `idle` / `done` turns (`idle:*`) remain visual indicators only
+///    and do not play a sound, while automatic runs transiently pausing in `idle` / `done`
+///    stay suppressed until they have remained stalled without reporting for at least
+///    `UNREPORTED_IDLE_ALERT_MS` (`stalled:*`, which alerts visually and chimes).
 /// 2. Agent failures: `failed` reports, `execution.failed`, `execution.missing`, runtime
-///    errors, recovery states, and uncertain question deliveries.
+///    errors, 1-hour unreported stalls (`stalled:*`), recovery states, and uncertain
+///    question deliveries.
 /// 3. Merge failures / held deliveries: `review.merge_failed`, `review.upstream_sync_failed`,
 ///    `github.pr_merge_attention`, or exhausted conflict budgets / held deliveries (`human_gate`).
 ///    Automatic in-budget `review.merge_conflict` rework stays silent.
@@ -234,9 +244,9 @@ pub fn sound_items_with_reminders(s: &Snapshot, reminder_items: &[Reminder]) -> 
     let mut ids = std::collections::BTreeSet::<String>::new();
 
     // Pending items (permission/input wait, human_gate, attention, runtime error,
-    // recovery, delivery_unknown) require user intervention and are audible, except
-    // runtime `idle:*` items which stay visual-only because some Agents report idle
-    // transiently during active turns.
+    // 1-hour stalled automatic run `stalled:*`, recovery, delivery_unknown) require user
+    // intervention and are audible, except interactive runtime `idle:*` items which stay
+    // visual-only.
     // Unread-only items are audible only when they are explicit `@agent` question replies
     // or `backlog` / `blocked` / `failed` reports — never automated `completed` stage steps.
     for item in reminder_items {

@@ -270,10 +270,15 @@ impl AppServer {
                 && let Some(ref mut run) = entry.agent
                 && !matches!(run.state.as_str(), "completed" | "backlog")
             {
+                let report_at = now();
                 run.state = state.into();
+                run.updated_at = report_at;
+                if state == "working" && run.lifecycle.idle_since.is_some() {
+                    run.lifecycle.idle_since = Some(report_at);
+                }
                 if terminal_done {
                     run.close_state = String::new();
-                    run.completed_at = Some(now());
+                    run.completed_at = Some(report_at);
                     run.completion_turn = Some(
                         run.observed
                             .as_ref()

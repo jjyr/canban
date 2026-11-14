@@ -50,7 +50,73 @@ pub const GROUPS: [&str; 6] = [
     "Closed",
 ];
 
+/// Continuous idle/done duration before an unreported automatic Agent run
+/// surfaces `"Stopped before reporting"` (`1 hour`).
+///
+/// CLI Agents running background tasks or subagents (such as Antigravity `agy`)
+/// can pause their foreground turn so Herdr observes `idle` or `done` while work
+/// continues in the background. Suppressing the alert until an entire hour has
+/// elapsed without status change, terminal interaction, or task report prevents
+/// false positives while keeping a deterministic stall fallback.
+pub const UNREPORTED_IDLE_ALERT_MS: u64 = 60 * 60 * 1_000;
+
+/// Anchor timestamp from which an unreported automatic Agent run has remained
+/// continuously in `idle` / `done` without status change, user interaction, or
+/// task report.
+pub fn unreported_idle_anchor(snapshot: &Snapshot, entry_id: &str, run: &AgentRun) -> Option<u64> {
+    if run.finished()
+        || !run.close_state.is_empty()
+        || !run.trigger.is_automatic()
+        || !matches!(run.state.as_str(), "running" | "working")
+    {
+        return None;
+    }
+    let runtime = if run.terminal.is_some() || run.observed.is_some() {
+        run.runtime_status()
+    } else {
+        "unknown"
+    };
+    if !matches!(runtime, "idle" | "done") {
+        return None;
+    }
+    let since = run.lifecycle.idle_since?;
+    let last_report = snapshot
+        .reports
+        .iter()
+        .filter(|r| r.terminal_id.as_deref() == Some(entry_id))
+        .map(|r| r.created_at)
+        .max()
+        .unwrap_or(0);
+    Some(
+        since
+            .max(run.lifecycle.last_interaction_at.unwrap_or(0))
+            .max(last_report),
+    )
+}
+
+pub fn unreported_idle_deadline(
+    snapshot: &Snapshot,
+    entry_id: &str,
+    run: &AgentRun,
+) -> Option<u64> {
+    unreported_idle_anchor(snapshot, entry_id, run)
+        .map(|anchor| anchor.saturating_add(UNREPORTED_IDLE_ALERT_MS))
+}
+
+pub fn unreported_idle_stalled(
+    snapshot: &Snapshot,
+    entry_id: &str,
+    run: &AgentRun,
+    at: u64,
+) -> bool {
+    unreported_idle_deadline(snapshot, entry_id, run).is_some_and(|deadline| at >= deadline)
+}
+
 pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
+    overview_at(snapshot, now())
+}
+
+pub fn overview_at(snapshot: &Snapshot, at: u64) -> Vec<OverviewRow> {
     let mut rows = Vec::new();
     for entry in &snapshot.terminals {
         let Some(run) = entry.agent.as_ref() else {
@@ -96,7 +162,7 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                     .observed
                     .as_ref()
                     .is_some_and(|v| v["status"]["state"].as_str().is_none())
-                && now().saturating_sub(run.updated_at) < 3_000;
+                && at.saturating_sub(run.updated_at) < 3_000;
             if !run.finished()
                 && (runtime == "unknown" && run.state != "starting" && !awaiting_first_status
                     || run.close_state == "error")
@@ -120,15 +186,21 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                 && matches!(runtime, "idle" | "done")
                 && matches!(run.state.as_str(), "running" | "working")
             {
-                let msg = if run.trigger.is_automatic() {
-                    "Agent stopped without reporting an outcome — inspect terminal".into()
+                if run.trigger.is_automatic() {
+                    if unreported_idle_stalled(snapshot, &entry.id, run, at) {
+                        reasons.push(OverviewReason {
+                            source: "runtime".into(),
+                            message:
+                                "Agent stopped without reporting an outcome — inspect terminal"
+                                    .into(),
+                        });
+                    }
                 } else {
-                    "Agent finished its turn and is waiting for your input".into()
-                };
-                reasons.push(OverviewReason {
-                    source: "runtime".into(),
-                    message: msg,
-                });
+                    reasons.push(OverviewReason {
+                        source: "runtime".into(),
+                        message: "Agent finished its turn and is waiting for your input".into(),
+                    });
+                }
             }
         } else if matches!(run.state.as_str(), "unknown" | "needs_report" | "blocked") {
             reasons.push(OverviewReason {

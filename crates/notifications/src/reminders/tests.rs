@@ -63,7 +63,7 @@ fn card_counts_items_and_project_counts_cards_without_progress_or_own_comments()
     assert!(reminders(&s).is_empty());
 }
 fn counts_count(s: &Snapshot) -> ReminderCount {
-    counts(&reminders(s))["c"]
+    counts(&reminders(s)).get("c").copied().unwrap_or_default()
 }
 fn agent_terminal(id: &str, agent: serde_json::Value) -> TerminalEntry {
     TerminalEntry {
@@ -404,11 +404,33 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
     assert_eq!(reminders(&s)[0].id, "idle:c:codex:1");
     assert!(sound_items(&s).is_empty());
 
-    // Automatic stage Agent transiently entering `idle` before reporting also stays silent.
+    // Automatic stage Agent transiently entering `idle` before reporting (< 1 hour)
+    // produces neither a pending notification badge nor a sound (background task protection).
     s.terminals[0].agent.as_mut().unwrap().trigger = ExecutionTrigger::parse("stage_entry");
-    assert_eq!(counts_count(&s).pending, 1);
+    s.terminals[0].agent.as_mut().unwrap().lifecycle.idle_since = Some(canban_types::now());
+    assert_eq!(counts_count(&s).pending, 0);
+    assert!(reminders(&s).is_empty());
     assert!(sound_items(&s).is_empty());
+
+    // If the automatic stage Agent remains in the same `idle`/`done` state continuously for
+    // >= 1 hour without reporting or user interaction, the fallback surfaces `stalled:*`
+    // in `Needs you` AND plays an audible notification once.
+    let stalled_anchor =
+        canban_types::now().saturating_sub(crate::UNREPORTED_IDLE_ALERT_MS + 5_000);
+    s.terminals[0].agent.as_mut().unwrap().lifecycle.idle_since = Some(stalled_anchor);
+    assert_eq!(counts_count(&s).pending, 1);
+    let expected_stalled_id = format!("stalled:c:codex:{stalled_anchor}");
+    assert_eq!(reminders(&s)[0].id, expected_stalled_id);
+    assert_eq!(
+        delivery.observe(&sound_items(&s)),
+        vec![expected_stalled_id]
+    );
+    // Repeated snapshots while still stalled do not replay the chime.
+    assert!(delivery.observe(&sound_items(&s)).is_empty());
+
+    // Restore interactive trigger for subsequent interactive turn tests.
     s.terminals[0].agent.as_mut().unwrap().trigger = ExecutionTrigger::parse("interactive");
+    s.terminals[0].agent.as_mut().unwrap().lifecycle.idle_since = Some(10);
 
     // User replies -> Agent resumes working -> pending clears.
     s.terminals[0].agent.as_mut().unwrap().observed =

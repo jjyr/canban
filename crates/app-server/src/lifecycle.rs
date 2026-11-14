@@ -63,13 +63,29 @@ impl AppServer {
         let previous = run.observed.as_ref().map(|v| &v["status"]);
         let changed = previous != Some(&observed["status"])
             || run.observed.as_ref().map(|v| &v["state"]) != Some(&observed["state"])
+            || run.observed.as_ref().map(|v| &v["turn"]) != Some(&observed["turn"])
             || run.connection_state != "connected";
+        let current_at = now();
+        let stall_crossed = matches!(status, "idle" | "done")
+            && observed["state"] != "finished"
+            && run.close_state.is_empty()
+            && run.trigger.is_automatic()
+            && matches!(run.state.as_str(), "running" | "working")
+            && run.lifecycle.idle_since.is_some_and(|since| {
+                let anchor = since
+                    .max(run.lifecycle.last_interaction_at.unwrap_or(0))
+                    .max(activity.last_at);
+                let deadline =
+                    anchor.saturating_add(canban_notifications::UNREPORTED_IDLE_ALERT_MS);
+                current_at >= deadline && run.lifecycle.observed_at.unwrap_or(0) < deadline
+            });
         // Poll freshness is durable, but avoid rewriting every unchanged poll.
         if !changed
+            && !stall_crossed
             && run
                 .lifecycle
                 .observed_at
-                .is_some_and(|t| now().saturating_sub(t) < 10_000)
+                .is_some_and(|t| current_at.saturating_sub(t) < 10_000)
             && activity.last_at <= run.lifecycle.last_interaction_at.unwrap_or(0)
         {
             return Ok(());

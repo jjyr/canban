@@ -704,7 +704,8 @@ impl AppServer {
                     && a.connection_state == "connected"
                     && a.core_id.as_deref() == Some(&inv.core)
                 {
-                    a.lifecycle.observed_at = Some(inv.last_at);
+                    a.lifecycle.observed_at =
+                        Some(a.lifecycle.observed_at.unwrap_or(0).max(inv.last_at));
                 }
             }
         }

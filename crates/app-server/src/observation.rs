@@ -569,6 +569,19 @@ impl AppServer {
                             .unwrap_or(t.created_at);
                         due(anchor.saturating_add(Self::DELIVERY_AGENT_SETTLE_MS + 1));
                     }
+                    if let Some(anchor) = canban_notifications::unreported_idle_anchor(&s, &t.id, a)
+                    {
+                        let activity = canban_herdr::activity::get(
+                            a.core_id.as_deref().unwrap_or(""),
+                            a.terminal.as_deref().unwrap_or(""),
+                        );
+                        let deadline = anchor
+                            .max(activity.last_at)
+                            .saturating_add(canban_notifications::UNREPORTED_IDLE_ALERT_MS);
+                        if a.lifecycle.observed_at.unwrap_or(0) < deadline {
+                            due(deadline.saturating_add(1));
+                        }
+                    }
                     if lifecycle::idle_candidate(
                         &s,
                         a,

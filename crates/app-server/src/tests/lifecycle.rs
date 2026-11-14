@@ -243,12 +243,40 @@ fn overview_is_global_deduplicates_conversations_and_surfaces_unfinished_idle_ag
     let mut entry = admit(&app, &req);
     let mut s = app.snapshot().unwrap();
     observed(&mut entry, "done");
+    entry.agent.as_mut().unwrap().lifecycle.idle_since = Some(now());
     s.terminals = vec![entry.clone()];
-    // Unfinished assignment whose Agent stopped at the prompt immediately alerts the user.
+    // Automatic assignment pausing in `idle`/`done` while background tasks run stays quiet (<1h).
+    let rows = canban_notifications::overview(&s);
+    assert_eq!(rows[0].group, "Idle");
+    assert!(!rows[0].actionable());
+    assert!(rows[0].reasons.is_empty());
+    // After 1 continuous hour in `done`/`idle` without reporting or interaction, it alerts the user.
+    let stale_since = now().saturating_sub(canban_notifications::UNREPORTED_IDLE_ALERT_MS + 1_000);
+    entry.agent.as_mut().unwrap().lifecycle.idle_since = Some(stale_since);
+    s.terminals = vec![entry.clone()];
     let rows = canban_notifications::overview(&s);
     assert_eq!(rows[0].group, "Needs attention");
     assert!(rows[0].actionable());
     assert_eq!(rows[0].reasons[0].source, "runtime");
+    // Interim `working` report or recent terminal interaction resets the 1-hour stall window.
+    s.reports.push(Report {
+        id: "rep-interim".into(),
+        terminal_id: Some(entry.id.clone()),
+        workflow_run_id: None,
+        actor: "agent:developer".into(),
+        project_id: p.id.clone(),
+        card_id: c.id.clone(),
+        state: "working".into(),
+        message: "Running background verification".into(),
+        path: None,
+        request_key: "rk-interim".into(),
+        fingerprint: "fp-interim".into(),
+        created_at: now(),
+    });
+    let rows = canban_notifications::overview(&s);
+    assert_eq!(rows[0].group, "Idle");
+    assert!(!rows[0].actionable());
+    s.reports.clear();
     // Once reported `completed` without a human gate, the live idle terminal is quiet (`Idle`).
     entry.agent.as_mut().unwrap().state = "completed".into();
     s.terminals = vec![entry.clone()];
