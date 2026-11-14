@@ -353,7 +353,7 @@ fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
         }
         let mut first_attach = true;
         while !stop.load(Ordering::SeqCst) {
-            let attempt = (|| -> anyhow::Result<Attachment> {
+            let attempt = (|| -> anyhow::Result<(Attachment, (u16, u16))> {
                 if !relay_fenced {
                     anyhow::ensure!(
                         client.status()?["core"]["id"] == core,
@@ -369,9 +369,9 @@ fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 if !relay_fenced {
                     attachment.track_view(&core, &terminal);
                 }
-                Ok(attachment)
+                Ok((attachment, size))
             })();
-            let attach = match attempt {
+            let (attach, attached_size) = match attempt {
                 Ok(v) => v,
                 Err(e) => {
                     {
@@ -407,11 +407,15 @@ fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 }
                 s.status = String::new();
                 s.connecting_since = None;
-                let setup_res = if s.focused {
+                let mut setup_res = if s.focused {
                     attach.focus(true)
                 } else {
                     Ok(())
                 };
+                // Layout may have resized the view while attach was connecting or across a reconnect.
+                if setup_res.is_ok() && s.size_ready && size != attached_size {
+                    setup_res = attach.resize(size.0, size.1);
+                }
                 if let Err(e) = setup_res {
                     s.status = format!("Attach setup failed: {e} · reconnecting");
                     drop(s);
@@ -473,8 +477,12 @@ fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                         }
                     }
                     Ok(Some(Event::Resize(c, r))) => {
-                        state.lock().unwrap().model.resize(c, r);
-                        wake.notify();
+                        let mut s = state.lock().unwrap();
+                        if !s.size_ready {
+                            s.model.resize(c, r);
+                            drop(s);
+                            wake.notify();
+                        }
                     }
                     Ok(Some(Event::Closed(reason))) => {
                         {
@@ -921,26 +929,28 @@ extern "C" fn cb_snapshot(
     let host = unsafe { &mut *(host_ptr as *mut Host) };
     host.wake.ack();
 
-    let cols = geom.cols.clamp(2, 500);
-    let rows = geom.rows.clamp(1, 200);
     let mut state = host.state.lock().unwrap();
-    let became_ready = !state.size_ready;
-    state.size_ready = true;
-    let grid_changed = state.model.resize_with_metrics(
-        cols,
-        rows,
-        geom.cell_width.max(1),
-        geom.cell_height.max(1),
-        geom.pad_left,
-        geom.pad_right,
-        geom.pad_top,
-        geom.pad_bottom,
-    );
-    if grid_changed && let Some(tx) = &host.input {
-        let _ = tx.send(Input::Resize(cols, rows));
-    }
-    if became_ready {
-        host.size_cv.notify_all();
+    if geom.cols >= 2 && geom.rows >= 1 {
+        let cols = geom.cols.clamp(2, 500);
+        let rows = geom.rows.clamp(1, 200);
+        let became_ready = !state.size_ready;
+        state.size_ready = true;
+        let grid_changed = state.model.resize_with_metrics(
+            cols,
+            rows,
+            geom.cell_width.max(1),
+            geom.cell_height.max(1),
+            geom.pad_left,
+            geom.pad_right,
+            geom.pad_top,
+            geom.pad_bottom,
+        );
+        if grid_changed && let Some(tx) = &host.input {
+            let _ = tx.send(Input::Resize(cols, rows));
+        }
+        if became_ready {
+            host.size_cv.notify_all();
+        }
     }
     let replies = state.model.replies();
     let status = host.effective_status(&state);
@@ -1701,5 +1711,74 @@ mod tests {
             "expected system monospaced fonts in {:?}",
             catalog.monospaced
         );
+    }
+
+    #[test]
+    fn unlaid_out_zero_bounds_do_not_clamp_terminal_to_two_columns_before_layout() {
+        // 1. Pre-layout snapshot with zero cols/rows keeps size_ready false and preserves 80x24
+        //    until real view geometry arrives.
+        let mut host = Host::new();
+        let (tx, rx) = mpsc::channel();
+        host.input = Some(tx);
+        let ptr = &mut host as *mut Host as *mut c_void;
+        let zero_geom = CbGeometry {
+            cols: 0,
+            rows: 0,
+            ..default_geom()
+        };
+        assert!(!cb_snapshot(ptr, zero_geom, true).is_null());
+        {
+            let s = host.state.lock().unwrap();
+            assert!(!s.size_ready, "pre-layout 0x0 snapshot must not mark size_ready");
+            assert_eq!((s.model.cols, s.model.height), (80, 24));
+        }
+        assert!(rx.try_recv().is_err(), "pre-layout 0x0 snapshot must not emit Resize");
+
+        let real_geom = CbGeometry {
+            cols: 96,
+            rows: 38,
+            ..default_geom()
+        };
+        assert!(!cb_snapshot(ptr, real_geom, false).is_null());
+        {
+            let s = host.state.lock().unwrap();
+            assert!(s.size_ready);
+            assert_eq!((s.model.cols, s.model.height), (96, 38));
+        }
+        assert!(matches!(rx.try_recv(), Ok(Input::Resize(96, 38))));
+
+        // 2. End-to-end AppKit mount order: NSZeroRect -> set_font -> bind -> sync_rebind.
+        let config = Config {
+            hc: "/usr/bin/false".into(),
+            hc_session: "unit-zero-bounds".into(),
+            ..Default::default()
+        };
+        let mut mounted_host = Box::new(Host::new());
+        let raw_view =
+            unsafe { cb_terminal_new(&mut *mounted_host as *mut _ as *mut c_void, callbacks()) };
+        assert!(!raw_view.is_null());
+        let c_fam = CString::new("Menlo").unwrap();
+        unsafe { cb_terminal_set_font(raw_view as *mut c_void, c_fam.as_ptr(), 13.0) };
+        let bind_val = json!({"config": config, "core_id": "core-zero", "terminal": "tty-zero"});
+        assert!(mounted_host.bind(&bind_val));
+        unsafe { cb_terminal_sync_rebind(raw_view as *mut c_void) };
+        {
+            let s = mounted_host.state.lock().unwrap();
+            assert!(
+                !s.size_ready,
+                "NSZeroRect font/rebind callbacks must not unblock attach with size_ready=true"
+            );
+            assert_eq!(
+                (s.model.cols, s.model.height),
+                (80, 24),
+                "NSZeroRect callbacks must not shrink model to 2 columns"
+            );
+        }
+        mounted_host.detach_current_session();
+        evict_session("core-zero", "tty-zero");
+        unsafe {
+            cb_terminal_detach(raw_view as *mut c_void);
+            drop(Retained::from_raw(raw_view));
+        }
     }
 }

@@ -796,7 +796,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 @implementation CanbanTerminal
 
 - (instancetype)initWithHost:(void *)host callbacks:(CbCallbacks)callbacks {
-  self = [super initWithFrame:NSMakeRect(0, 0, 640, 380)];
+  self = [super initWithFrame:NSZeroRect];
   if (!self)
     return nil;
   _host = host;
@@ -1020,19 +1020,25 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   NSRect b = self.bounds;
   CGFloat cw = _cellWidth > 0.0 ? _cellWidth : 8.0;
   CGFloat ch = _cellHeight > 0.0 ? _cellHeight : 18.0;
-  CGFloat innerW = fmax(cw * 2.0, b.size.width - kPadX * 2.0);
-  CGFloat innerH = fmax(ch, b.size.height - kPadY * 2.0);
-  uint16_t cols = (uint16_t)fmax(2.0, fmin(500.0, floor(innerW / cw)));
-  uint16_t rows = (uint16_t)fmax(1.0, fmin(200.0, floor(innerH / ch)));
   CbGeometry g;
-  g.cols = cols;
-  g.rows = rows;
   g.cell_width = (uint32_t)fmax(1.0, round(cw));
   g.cell_height = (uint32_t)fmax(1.0, round(ch));
   g.pad_left = (uint32_t)kPadX;
   g.pad_right = (uint32_t)kPadX;
   g.pad_top = (uint32_t)kPadY;
   g.pad_bottom = (uint32_t)kPadY;
+  // Unlaid-out views mount with NSZeroRect before setFrame:; keep cols/rows at
+  // zero so Rust does not attach or resize the PTY to 2x1 before layout.
+  if (b.size.width < kPadX * 2.0 + cw * 2.0 ||
+      b.size.height < kPadY * 2.0 + ch) {
+    g.cols = 0;
+    g.rows = 0;
+    return g;
+  }
+  CGFloat innerW = fmax(cw * 2.0, b.size.width - kPadX * 2.0);
+  CGFloat innerH = fmax(ch, b.size.height - kPadY * 2.0);
+  g.cols = (uint16_t)fmax(2.0, fmin(500.0, floor(innerW / cw)));
+  g.rows = (uint16_t)fmax(1.0, fmin(200.0, floor(innerH / ch)));
   return g;
 }
 

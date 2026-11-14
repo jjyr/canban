@@ -128,6 +128,10 @@ run = "/usr/bin/python3 scripts/test-package.py"
 [tasks.test-dev]
 run = "/usr/bin/python3 scripts/test-dev.py"
 
+[tasks.test-install]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/test-install.py"
+
 [tasks.test-integration]
 depends = ["build"]
 run = [

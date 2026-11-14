@@ -233,6 +233,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
     });
 
     view()
+        .w_full()
         .flex_1()
         .min_w(px(0.))
         .min_h(px(0.))
@@ -391,6 +392,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                             )),
                         )
                         .prop("read_only", json!(true))
+                        .w_full()
                         .flex_1()
                         .min_h(px(0.))
                         .into_element();
@@ -425,6 +427,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                                 .unwrap_or(""))
                         })
                     })
+                    .w_full()
                     .flex_1()
                     .min_h(px(0.))
                     .into_element();

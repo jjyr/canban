@@ -1,7 +1,16 @@
 #!/usr/bin/env python3
 """GitHub release dispatch, reservation, and publication; never modifies main or an existing release."""
-import argparse, datetime, hashlib, json, os, pathlib, shutil, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
+import argparse, datetime, hashlib, json, os, pathlib, shutil, subprocess, sys, tarfile, time, urllib.error, urllib.parse, urllib.request
 from zoneinfo import ZoneInfo
+
+def pack_tar_gz(source, output):
+    source=pathlib.Path(source)
+    with tarfile.open(output,'w:gz') as archive:
+        archive.add(source,arcname='Canban.app',recursive=False)
+        for entry in sorted(source.rglob('*')):
+            if entry.is_symlink() or not (entry.is_file() or entry.is_dir()):
+                raise RuntimeError(f'App bundle contains unsafe link or special file: {entry}')
+            archive.add(entry,arcname=str(pathlib.Path('Canban.app')/entry.relative_to(source)),recursive=False)
 
 def resolve_gh_token():
     token=os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
@@ -118,8 +127,10 @@ def main():
         helper=pathlib.Path('target/release/canban-updater');cli=pathlib.Path('target/release/canban')
         build=json.loads(subprocess.check_output([str(cli),'build-info'],text=True));assert build['version']==version and build['commit']==commit
         name='Canban-'+build['platform']+'.tar.zst';asset=args.directory/name
+        gz_name='Canban-'+build['platform']+'.tar.gz';gz_asset=args.directory/gz_name
         subprocess.run([str(helper),'pack','.local/Canban.app',str(asset)],check=True)
-        manifest={**build,'rollback_floor':8,'asset':name,'size':asset.stat().st_size,'sha256':hashlib.sha256(asset.read_bytes()).hexdigest()}
+        pack_tar_gz('.local/Canban.app',gz_asset)
+        manifest={**build,'rollback_floor':8,'asset':name,'size':asset.stat().st_size,'sha256':hashlib.sha256(asset.read_bytes()).hexdigest(),'tar_gz':gz_name,'tar_gz_size':gz_asset.stat().st_size,'tar_gz_sha256':hashlib.sha256(gz_asset.read_bytes()).hexdigest()}
         (args.directory/('manifest-'+build['platform']+'.json')).write_text(json.dumps(manifest,indent=2)+'\n');return
     release=find_release(repo,version)
     if release is None:raise RuntimeError('Reserved release is missing: '+version)

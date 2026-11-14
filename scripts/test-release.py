@@ -2,7 +2,7 @@
 """Offline release-number reservation and immutable publication regressions."""
 import sys
 sys.dont_write_bytecode=True
-import importlib.util, pathlib, tempfile, unittest, urllib.error, os
+import importlib.util, json, pathlib, tarfile, tempfile, unittest, urllib.error, os, hashlib
 from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('release',pathlib.Path(__file__).with_name('release.py'));release=importlib.util.module_from_spec(spec);spec.loader.exec_module(release)
 class Releases(unittest.TestCase):
@@ -119,4 +119,41 @@ class Releases(unittest.TestCase):
         self.assertEqual(calls[0],('POST','/repos/fixture/app/actions/workflows/release.yml/dispatches',{'ref':'release/branch'},'gh-token-xyz'))
         self.assertIn('branch=release%2Fbranch',calls[1][1])
         self.assertEqual(subproc,[['/usr/local/bin/gh','auth','token'],['/usr/local/bin/gh','run','watch','987','--repo','fixture/app','--exit-status']])
+    def test_package_creates_tar_zst_and_tar_gz_with_manifest_digests(self):
+        with tempfile.TemporaryDirectory(prefix='cb-release-pkg-') as directory:
+            root=pathlib.Path(directory)
+            (root/'target/release').mkdir(parents=True)
+            (root/'.local/Canban.app/Contents/MacOS').mkdir(parents=True)
+            (root/'.local/Canban.app/Contents/Resources').mkdir(parents=True)
+            (root/'.local/Canban.app/Contents/Info.plist').write_text('plist')
+            (root/'.local/Canban.app/Contents/MacOS/canban').write_text('#!/bin/sh\necho ok\n')
+            build={'version':'20261114-1','commit':'c'*40,'schema':12,'api':36,'platform':'macos-aarch64'}
+            cli=root/'target/release/canban'
+            cli.write_text('#!/usr/bin/env python3\nimport json\nprint(json.dumps('+repr(build)+'))\n');cli.chmod(0o755)
+            helper=root/'target/release/canban-updater'
+            helper.write_text('#!/usr/bin/env python3\nimport pathlib, sys\npathlib.Path(sys.argv[3]).write_bytes(b"zst-fixture")\n');helper.chmod(0o755)
+            dist=root/'dist'
+            cwd=os.getcwd()
+            try:
+                os.chdir(root)
+                with patch.dict(os.environ,{'CANBAN_RELEASE_COMMIT':'c'*40,'CANBAN_RELEASE_VERSION':'20261114-1'}),patch.object(sys,'argv',['release.py','package','--directory',str(dist)]):
+                    release.main()
+            finally:
+                os.chdir(cwd)
+            zst=dist/'Canban-macos-aarch64.tar.zst'
+            gz=dist/'Canban-macos-aarch64.tar.gz'
+            manifest_path=dist/'manifest-macos-aarch64.json'
+            self.assertTrue(zst.is_file());self.assertTrue(gz.is_file());self.assertTrue(manifest_path.is_file())
+            manifest=json.loads(manifest_path.read_text())
+            self.assertEqual(manifest['asset'],'Canban-macos-aarch64.tar.zst')
+            self.assertEqual(manifest['size'],zst.stat().st_size)
+            self.assertEqual(manifest['sha256'],hashlib.sha256(zst.read_bytes()).hexdigest())
+            self.assertEqual(manifest['tar_gz'],'Canban-macos-aarch64.tar.gz')
+            self.assertEqual(manifest['tar_gz_size'],gz.stat().st_size)
+            self.assertEqual(manifest['tar_gz_sha256'],hashlib.sha256(gz.read_bytes()).hexdigest())
+            with tarfile.open(gz,'r:gz') as archive:
+                names=archive.getnames()
+            self.assertIn('Canban.app',names)
+            self.assertIn('Canban.app/Contents/MacOS/canban',names)
+            self.assertIn('Canban.app/Contents/Info.plist',names)
 if __name__=='__main__':unittest.main()

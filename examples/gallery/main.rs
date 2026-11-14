@@ -480,6 +480,7 @@ fn controls() -> impl IntoElement {
                             .prop("font", move || canban_ui::utilities::terminal_font(ui))
                             .prop("content", json!(fixtures::TERMINAL))
                             .prop("read_only", json!(true))
+                            .w_full()
                             .h(px(320.0)),
                     ),
                 ),

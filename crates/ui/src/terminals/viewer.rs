@@ -146,6 +146,7 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                     )),
                 )
                 .prop("read_only", json!(true))
+                .w_full()
                 .flex_1()
                 .min_h(px(0.))
                 .into_element();
@@ -192,6 +193,7 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                     )
                 })
             })
+            .w_full()
             .flex_1()
             .min_h(px(0.))
             .into_element()
@@ -216,6 +218,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             })
     });
     view()
+        .w_full()
         .flex_1()
         .min_h(px(0.))
         .min_w(px(0.))
