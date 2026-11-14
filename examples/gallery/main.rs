@@ -662,13 +662,13 @@ pub fn Gallery() -> impl IntoElement {
     }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
-        Ok("card-local" | "card-issue" | "card-pr")
+        Ok("card-local" | "card-local-delete-confirm" | "card-issue" | "card-pr")
     ) {
         let mut snapshot = fixtures::workspace();
         let scene = std::env::var("CANBAN_GALLERY_SCENE").unwrap();
         snapshot.cards[0].body = "## Conversation layout\n\nKeep the task and discussion readable. Reference [Issue #42](https://github.com/acme/app/issues/42) or paste https://github.com/acme/app/pull/57.\n\n- [ ] Verify narrow layout\n- [ ] Keep draft on blur".into();
         snapshot.cards[0].title = "Improve Card discussion and content references".into();
-        if scene != "card-local" {
+        if !matches!(scene.as_str(), "card-local" | "card-local-delete-confirm") {
             let pr = scene == "card-pr";
             let source = canban_types::GitHubIssueRef {
                 repository: "acme/app".into(),
@@ -750,6 +750,9 @@ pub fn Gallery() -> impl IntoElement {
         ui.card.set("card-1".into());
         ui.page.set("card".into());
         ui.card_standalone.set(true);
+        if scene == "card-local-delete-confirm" {
+            ui.deleting_comment.set(Some("card-conversation-0".into()));
+        }
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("references") {
@@ -1238,6 +1241,87 @@ pub fn Gallery() -> impl IntoElement {
         ui.open_card_with_terminal("card-1".into(), None);
         return canban_ui::frame::screen(ui).into_element();
     }
+    let scene_env = std::env::var("CANBAN_GALLERY_SCENE").unwrap_or_default();
+    if matches!(
+        scene_env.as_str(),
+        "github-discussion" | "github-discussion-delete-confirm"
+    ) {
+        fixtures::github_browser(ui, true);
+        ui.github.section.set("discussion".into());
+        ui.github.detail.set(json!({
+            "data": [
+                {
+                    "id": 501,
+                    "html_url": "https://github.com/fixture/repo/pull/2#issuecomment-501",
+                    "user": {"login": "octocat"},
+                    "author_association": "CONTRIBUTOR",
+                    "created_at": "2026-11-12T08:00:00Z",
+                    "updated_at": "2026-11-12T08:00:00Z",
+                    "body": "Ready for review — verifies external `GitHub ↗` comment anchor jump and `#1` cross-links."
+                },
+                {
+                    "id": 502,
+                    "html_url": "https://github.com/fixture/repo/pull/2#issuecomment-502",
+                    "user": {"login": "jjy"},
+                    "author_association": "OWNER",
+                    "created_at": "2026-11-12T08:10:00Z",
+                    "updated_at": "2026-11-12T08:15:00Z",
+                    "body": "Looks great! Own comments (`@jjy`) fold **Edit** and **Delete** under `⋯`, keeping only `GitHub ↗` outside."
+                }
+            ],
+            "page": 1,
+            "has_next": false
+        }));
+        if scene_env == "github-discussion-delete-confirm" {
+            ui.github
+                .deleting_comment
+                .set(Some(("discussion".into(), 502)));
+        }
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if matches!(
+        scene_env.as_str(),
+        "github-pr-review" | "github-pr-review-delete-confirm"
+    ) {
+        fixtures::github_browser(ui, true);
+        let mut compare = fixtures::git_compare();
+        compare["threads"] = json!([
+            {
+                "id": 801,
+                "html_url": "https://github.com/fixture/repo/pull/2#discussion_r801",
+                "path": "crates/ui/src/rail.rs",
+                "line": 56,
+                "side": "RIGHT",
+                "user": {"login": "octocat"},
+                "created_at": "2026-11-12T08:05:00Z",
+                "updated_at": "2026-11-12T08:05:00Z",
+                "body": "Please verify the pending comment badge count."
+            },
+            {
+                "id": 802,
+                "html_url": "https://github.com/fixture/repo/pull/2#discussion_r802",
+                "path": "crates/ui/src/rail.rs",
+                "line": 56,
+                "side": "RIGHT",
+                "user": {"login": "jjy"},
+                "created_at": "2026-11-12T08:12:00Z",
+                "updated_at": "2026-11-12T08:14:00Z",
+                "body": "Verified — `GitHub ↗` stays outside and own-comment Edit/Delete live inside `⋯`."
+            }
+        ]);
+        ui.review_state.mode.set("github_pr".into());
+        ui.review_state.pr_target.set(Some(json!({
+            "repository": "fixture/repo",
+            "number": 2,
+            "url": "https://github.com/fixture/repo/pull/2"
+        })));
+        ui.review_state.compare_data.set(compare);
+        ui.page.set("review".into());
+        if scene_env == "github-pr-review-delete-confirm" {
+            ui.review_state.deleting_remote_comment.set(Some(802));
+        }
+        return canban_ui::frame::screen(ui).into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("motion") {
         ui.page.set("board".into());
         return view()
@@ -1523,6 +1607,7 @@ pub fn Gallery() -> impl IntoElement {
                         "data": [
                             {
                                 "id": 501,
+                                "html_url": "https://github.com/fixture/repo/pull/2#issuecomment-501",
                                 "user": {"login": "octocat"},
                                 "author_association": "CONTRIBUTOR",
                                 "created_at": "2026-11-12T08:00:00Z",
@@ -1531,11 +1616,12 @@ pub fn Gallery() -> impl IntoElement {
                             },
                             {
                                 "id": 502,
+                                "html_url": "https://github.com/fixture/repo/pull/2#issuecomment-502",
                                 "user": {"login": "jjy"},
                                 "author_association": "OWNER",
                                 "created_at": "2026-11-12T08:10:00Z",
                                 "updated_at": "2026-11-12T08:15:00Z",
-                                "body": "Looks great! Only our own comments (`@jjy`) show **Edit** here."
+                                "body": "Looks great! Own comments (`@jjy`) fold **Edit** and **Delete** under `⋯`, keeping only `GitHub ↗` outside."
                             }
                         ],
                         "page": 1,

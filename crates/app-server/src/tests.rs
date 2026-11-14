@@ -3171,3 +3171,183 @@ fn comment_update_edits_own_local_comment_preserves_mentions_and_rejects_non_use
         .is_err()
     );
 }
+
+#[test]
+fn comment_delete_tombstones_own_comment_cancels_pending_questions_and_preserves_running_agents() {
+    let (_d, app, p, c) = setup();
+    let comment1: Event = serde_json::from_value(
+        app.call(
+            "comment.add",
+            json!({
+                "card_id": c.id,
+                "body": "Queued question for @codex and https://github.com/a/b/issues/55",
+                "mentions": ["codex"],
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let snap1 = app.snapshot().unwrap();
+    assert_eq!(snap1.questions.len(), 1);
+    assert_eq!(snap1.questions[0].state, "pending");
+    assert_eq!(snap1.terminals[0].agent.as_ref().unwrap().state, "queued");
+
+    // Delete own comment: tombstones event in place, cancels pending Question and its still-queued AgentRun.
+    let del_res = app
+        .call(
+            "comment.delete",
+            json!({
+                "card_id": c.id,
+                "comment_id": comment1.id,
+                "request_key": "del-local-1",
+            }),
+        )
+        .unwrap();
+    assert_eq!(del_res["deleted"], true);
+    assert_eq!(del_res["comment_id"], comment1.id);
+
+    // Idempotent replay with same request_key returns cached result without failing.
+    let replay = app
+        .call(
+            "comment.delete",
+            json!({
+                "card_id": c.id,
+                "comment_id": comment1.id,
+                "request_key": "del-local-1",
+            }),
+        )
+        .unwrap();
+    assert_eq!(replay, del_res);
+
+    let snap2 = app.snapshot().unwrap();
+    let tombstoned = snap2
+        .events
+        .iter()
+        .find(|e| e.id == comment1.id)
+        .expect("tombstoned event keeps sequence slot");
+    assert_eq!(tombstoned.sequence, comment1.sequence);
+    assert_eq!(tombstoned.kind, "comment.deleted");
+    assert!(!tombstoned.message.contains("issues/55"));
+    assert_eq!(snap2.questions[0].state, "cancelled");
+    assert_eq!(
+        snap2.terminals[0].agent.as_ref().unwrap().state,
+        "cancelled"
+    );
+
+    // Deleting an already-deleted comment with a new request_key fails cleanly.
+    assert!(
+        app.call(
+            "comment.delete",
+            json!({"card_id": c.id, "comment_id": comment1.id}),
+        )
+        .is_err()
+    );
+
+    // If an Agent is already running when a follow-up @mention comment is deleted,
+    // the pending Question is cancelled while the running Agent and its later reply survive.
+    let comment2: Event = serde_json::from_value(
+        app.call(
+            "comment.add",
+            json!({"card_id": c.id, "body": "Start @reviewer", "mentions": ["reviewer"]}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let snap3 = app.snapshot().unwrap();
+    let rev_entry = snap3
+        .terminals
+        .iter()
+        .find(|t| t.agent.as_ref().is_some_and(|a| a.profile.id == "reviewer"))
+        .unwrap();
+    let _running = admit(&app, rev_entry);
+    let comment3: Event = serde_json::from_value(
+        app.call(
+            "comment.add",
+            json!({"card_id": c.id, "body": "Accidental follow-up @reviewer", "mentions": ["reviewer"]}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "comment.delete",
+        json!({"card_id": c.id, "comment_id": comment3.id}),
+    )
+    .unwrap();
+    let snap4 = app.snapshot().unwrap();
+    let active_rev = snap4
+        .terminals
+        .iter()
+        .find(|t| t.id == rev_entry.id)
+        .unwrap()
+        .agent
+        .as_ref()
+        .unwrap();
+    assert_eq!(active_rev.state, "running");
+    assert_eq!(
+        snap4
+            .questions
+            .iter()
+            .find(|q| q.comment_id == comment3.id)
+            .unwrap()
+            .state,
+        "cancelled"
+    );
+    assert_eq!(
+        snap4
+            .questions
+            .iter()
+            .find(|q| q.comment_id == comment2.id)
+            .unwrap()
+            .state,
+        "pending"
+    );
+
+    // Agent replies (`comment.replied`) cannot be deleted by `comment.delete`.
+    app.call(
+        "execution.report",
+        json!({
+            "project_id": p.id,
+            "card": c.number,
+            "profile_id": "reviewer",
+            "state": "completed",
+            "message": "Done",
+            "body": "Agent reply body",
+            "request_key": "rev-rep-del-test",
+        }),
+    )
+    .unwrap();
+    let snap5 = app.snapshot().unwrap();
+    let reply = snap5
+        .events
+        .iter()
+        .find(|e| e.kind == "comment.replied")
+        .unwrap();
+    assert!(
+        app.call(
+            "comment.delete",
+            json!({"card_id": c.id, "comment_id": reply.id}),
+        )
+        .is_err()
+    );
+
+    // Archived Cards reject `comment.delete`.
+    let (_d2, app2, _p2, c2) = setup();
+    let comment_arch: Event = serde_json::from_value(
+        app2.call(
+            "comment.add",
+            json!({"card_id": c2.id, "body": "Before archive"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let rev2 = app2.snapshot().unwrap().cards[0].revision;
+    app2.call("card.archive", json!({"card_id": c2.id, "revision": rev2}))
+        .unwrap();
+    assert!(
+        app2.call(
+            "comment.delete",
+            json!({"card_id": c2.id, "comment_id": comment_arch.id}),
+        )
+        .is_err()
+    );
+}

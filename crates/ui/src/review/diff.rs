@@ -81,8 +81,21 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
     let active_line = st.active_line.get();
     let pending_all = st.pending_comments.get();
     let editing_remote = st.editing_remote_comment.get();
+    let deleting_remote = st.deleting_remote_comment.get();
     let my_login = crate::github::active_login_from(&ui.snapshot.get(), &ui.github.gh_status.get());
     let pr_target = st.pr_target.get();
+    let pr_base_url = pr_target.as_ref().and_then(|pr| {
+        pr["url"]
+            .as_str()
+            .filter(|u| !u.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                let repo = pr["repository"].as_str().unwrap_or("");
+                let num = pr["number"].as_u64().unwrap_or(0);
+                (!repo.is_empty() && num > 0)
+                    .then(|| format!("https://github.com/{repo}/pull/{num}"))
+            })
+    });
 
     // Left file list pane (216px)
     let file_count = files.len();
@@ -432,12 +445,15 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                         .unwrap_or("reviewer")
                         .to_owned();
                     let cid = rt["id"].as_u64().unwrap_or(0);
+                    let web_url =
+                        crate::github::comment_web_url(rt, pr_base_url.as_deref(), "threads");
                     let is_own = cid > 0
                         && pr_target.is_some()
                         && my_login
                             .as_deref()
                             .is_some_and(|me| author.eq_ignore_ascii_case(me));
                     let is_editing = cid > 0 && editing_remote == Some(cid);
+                    let is_deleting = cid > 0 && deleting_remote == Some(cid);
                     let was_edited = match (rt["created_at"].as_str(), rt["updated_at"].as_str()) {
                         (Some(c), Some(u)) if !c.is_empty() && !u.is_empty() => c != u,
                         _ => false,
@@ -445,6 +461,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                     let body_txt = rt["body"].as_str().unwrap_or("").to_owned();
                     let mut header_row = view()
                         .flex_row()
+                        .flex_wrap()
                         .items_center()
                         .gap_2()
                         .child(icon(Icon::GitHub).w(px(12.)).h(px(12.)))
@@ -457,19 +474,108 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                     if was_edited {
                         header_row = header_row.child(muted("· edited").text_size(px(11.)));
                     }
-                    if is_own && !is_editing {
+                    let mut trailing = view().flex_row().items_center().gap_1();
+                    let mut has_trailing = false;
+                    if let Some(jump_url) = web_url {
+                        has_trailing = true;
+                        trailing = trailing.child(
+                            view()
+                                .tooltip(hint_tooltip("Open comment in GitHub"))
+                                .child(
+                                    compact_action("GitHub ↗", Variant::Quiet, move |_| {
+                                        crate::github::open_url(ui, jump_url.clone())
+                                    })
+                                    .accessibility_label(|| Some("Open comment in GitHub".into())),
+                                ),
+                        );
+                    }
+                    if is_own && !is_editing && !is_deleting {
+                        has_trailing = true;
                         let initial_body = body_txt.clone();
-                        header_row = header_row.child(view().flex_1()).child(compact_action(
-                            "Edit",
-                            Variant::Quiet,
-                            move |_| {
-                                let body_val = initial_body.clone();
-                                batch(move || {
-                                    st.remote_edit_error.set(String::new());
-                                    st.remote_edit_draft.set(body_val);
-                                    st.editing_remote_comment.set(Some(cid));
-                                });
-                            },
+                        let anchor = element_ref();
+                        trailing = trailing.child(
+                            canban_ui_kit::press_target()
+                                .element_ref(&anchor)
+                                .w(px(26.))
+                                .h(px(26.))
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(5.))
+                                .bg(CLEAR)
+                                .hover(|s| s.bg(INSET))
+                                .focus(|s| s.border_1().border_color(ACCENT))
+                                .accessibility_label(|| Some("PR comment actions".into()))
+                                .child(icon_tinted(Icon::More, MUTED).w(px(15.)).h(px(15.)))
+                                .on_press(move |_: &()| {
+                                    use nsh_core::element::desktop::{MenuItem, popup_menu_at};
+                                    let body_val = initial_body.clone();
+                                    ui.spawn(async move {
+                                        let Some(bounds) = anchor.measure().await else {
+                                            return;
+                                        };
+                                        popup_menu_at(
+                                            vec![
+                                                MenuItem::new("Edit comment").on_select(
+                                                    move || {
+                                                        let b = body_val.clone();
+                                                        batch(move || {
+                                                            st.remote_edit_error.set(String::new());
+                                                            st.remote_delete_error
+                                                                .set(String::new());
+                                                            st.deleting_remote_comment.set(None);
+                                                            st.remote_edit_draft.set(b);
+                                                            st.editing_remote_comment
+                                                                .set(Some(cid));
+                                                        });
+                                                    },
+                                                ),
+                                                MenuItem::new("Delete comment…").on_select(
+                                                    move || {
+                                                        batch(move || {
+                                                            st.remote_delete_error
+                                                                .set(String::new());
+                                                            st.remote_edit_error.set(String::new());
+                                                            st.editing_remote_comment.set(None);
+                                                            st.deleting_remote_comment
+                                                                .set(Some(cid));
+                                                        });
+                                                    },
+                                                ),
+                                            ],
+                                            point(
+                                                bounds.page.x,
+                                                bounds.page.y + bounds.frame.size.height,
+                                            ),
+                                        )
+                                        .await;
+                                    });
+                                }),
+                        );
+                    }
+                    if has_trailing {
+                        header_row = header_row.child(view().flex_1()).child(trailing);
+                    }
+                    let mut comment_card = view()
+                        .mx_4()
+                        .my_1()
+                        .p_2p5()
+                        .rounded(px(RADIUS))
+                        .border_1()
+                        .border_color(if is_deleting {
+                            DANGER
+                        } else if is_editing {
+                            ACCENT
+                        } else {
+                            BORDER
+                        })
+                        .bg(SURFACE)
+                        .gap_1p5()
+                        .child(header_row);
+                    if is_deleting {
+                        comment_card = comment_card.child(remote_pr_comment_delete_confirm(
+                            ui,
+                            cid,
+                            pr_target.clone(),
                         ));
                     }
                     let content = if is_editing {
@@ -477,19 +583,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                     } else {
                         canban_ui_kit::markdown::reader(move || body_txt.clone()).into_element()
                     };
-                    rows = rows.child(
-                        view()
-                            .mx_4()
-                            .my_1()
-                            .p_2p5()
-                            .rounded(px(RADIUS))
-                            .border_1()
-                            .border_color(if is_editing { ACCENT } else { BORDER })
-                            .bg(SURFACE)
-                            .gap_1p5()
-                            .child(header_row)
-                            .child(content),
-                    );
+                    rows = rows.child(comment_card.child(content));
                 }
 
                 // Render any pending inline comments saved for this file + line + side
@@ -812,4 +906,129 @@ fn remote_pr_comment_editor(ui: Ui, comment_id: u64, pr_target: Option<Value>) -
                     }),
                 ),
         )
+}
+
+fn remote_pr_comment_delete_confirm(ui: Ui, comment_id: u64, pr_target: Option<Value>) -> View {
+    let st = ui.review_state;
+    view()
+        .gap_2()
+        .px_2p5()
+        .py_1p5()
+        .rounded(px(RADIUS))
+        .border_1()
+        .border_color(DANGER)
+        .bg(DANGER_SURFACE)
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    label("Delete this inline comment on GitHub?")
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(DANGER),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            compact_action("Cancel", Variant::Quiet, move |_| {
+                                batch(move || {
+                                    st.deleting_remote_comment.set(None);
+                                    st.remote_delete_error.set(String::new());
+                                });
+                            })
+                            .disabled(move || ui.is_method_pending("github.remote.comment.delete")),
+                        )
+                        .child(
+                            compact_action("Delete", Variant::Danger, move |_| {
+                                let Some(ref pr) = pr_target else {
+                                    return;
+                                };
+                                let repo = pr["repository"].as_str().unwrap_or("").to_owned();
+                                let number = pr["number"].as_u64().unwrap_or(0);
+                                let url = pr["url"]
+                                    .as_str()
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| {
+                                        format!("https://github.com/{repo}/pull/{number}")
+                                    });
+                                if repo.is_empty() || number == 0 {
+                                    st.remote_delete_error
+                                        .set("Missing GitHub pull request reference".into());
+                                    return;
+                                }
+                                st.remote_delete_error.set(String::new());
+                                if crate::APP.get().is_none() {
+                                    st.compare_data.update(|cd| {
+                                        if let Some(arr) = cd["threads"].as_array_mut() {
+                                            arr.retain(|x| x["id"].as_u64() != Some(comment_id));
+                                        }
+                                    });
+                                    st.deleting_remote_comment.set(None);
+                                    ui.notify("Comment deleted");
+                                    return;
+                                }
+                                let reference = canban_types::GitHubReference {
+                                    repository: repo,
+                                    kind: "pr".into(),
+                                    number: Some(number),
+                                    sha: None,
+                                    url,
+                                };
+                                dispatch_complete(
+                                    ui,
+                                    "github.remote.comment.delete",
+                                    json!({
+                                        "reference": reference,
+                                        "section": "threads",
+                                        "comment_id": comment_id,
+                                        "request_key": canban_types::id(),
+                                    }),
+                                    move |res| match res {
+                                        Ok(val) if val["state"] == "published" => {
+                                            st.deleting_remote_comment.set(None);
+                                            st.remote_delete_error.set(String::new());
+                                            crate::review::refresh_active_diff(ui, true);
+                                            ui.notify("Comment deleted");
+                                        }
+                                        Ok(val) if val["state"] == "unknown" => {
+                                            st.remote_delete_error.set(
+                                                val["message"]
+                                                    .as_str()
+                                                    .unwrap_or(
+                                                        "Deletion outcome is unknown; check GitHub before retrying.",
+                                                    )
+                                                    .to_owned(),
+                                            );
+                                        }
+                                        Ok(val) => {
+                                            st.remote_delete_error.set(
+                                                val["message"]
+                                                    .as_str()
+                                                    .unwrap_or(
+                                                        "Could not delete GitHub PR comment",
+                                                    )
+                                                    .to_owned(),
+                                            );
+                                        }
+                                        Err(err) => {
+                                            st.remote_delete_error.set(err);
+                                        }
+                                    },
+                                );
+                            })
+                            .disabled(move || ui.is_method_pending("github.remote.comment.delete")),
+                        ),
+                ),
+        )
+        .child(when(
+            move || !st.remote_delete_error.get().is_empty(),
+            move || notice(move || st.remote_delete_error.get(), Tone::Danger),
+        ))
 }

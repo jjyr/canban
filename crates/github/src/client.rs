@@ -361,6 +361,15 @@ impl Client {
                 .header("User-Agent", "Canban")
                 .header("Accept", "application/vnd.github+json")
                 .send_json(body)?,
+            "DELETE" => agent()
+                .delete(format!("{}{path}", self.api))
+                .header(
+                    "Authorization",
+                    format!("Bearer {}", self.token.expose_secret()),
+                )
+                .header("User-Agent", "Canban")
+                .header("Accept", "application/vnd.github+json")
+                .call()?,
             _ => anyhow::bail!("Unsupported GitHub write"),
         };
         decode(response)
@@ -836,5 +845,52 @@ mod cache_tests {
         }
         worker.join().unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn delete_write_accepts_empty_no_content_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).unwrap();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            tx.send(request_line).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+        let client = Client {
+            token: SecretString::from("fixture"),
+            api,
+            cache: None,
+            refresh: false,
+            cache_generation: 0,
+            cli: None,
+        };
+        let value = client
+            .write(
+                "DELETE",
+                "/repos/fixture/repo/issues/comments/42",
+                &json!({}),
+            )
+            .unwrap();
+        assert_eq!(value, Value::Null);
+        assert!(
+            rx.recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .starts_with("DELETE /repos/fixture/repo/issues/comments/42 ")
+        );
+        worker.join().unwrap();
     }
 }

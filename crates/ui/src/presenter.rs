@@ -95,6 +95,7 @@ pub struct Ui {
     pub terminal_pending_open: Signal<Option<crate::terminals::navigation::PendingOpen>>,
     pub card_event: Signal<Option<u64>>,
     pub editing_comment: Signal<Option<String>>,
+    pub deleting_comment: Signal<Option<String>>,
     pub project: Signal<String>,
     pub archive_query: Signal<String>,
     pub archive_folds: Signal<BTreeSet<String>>,
@@ -236,6 +237,7 @@ impl Ui {
     }
     pub fn close_card(self) {
         self.editing_comment.set(None);
+        self.deleting_comment.set(None);
         self.card_tab.set(String::new());
         self.card_terminal_open.set(false);
         self.card_terminal_focused.set(false);
@@ -332,6 +334,7 @@ impl Ui {
             terminal_pending_open: signal(None),
             card_event: signal(None),
             editing_comment: signal(None),
+            deleting_comment: signal(None),
             max_agents: signal(
                 crate::APP
                     .get()
@@ -526,6 +529,7 @@ impl Ui {
     pub fn open_card(self, id: String) {
         if self.card.get_untracked() != id {
             self.editing_comment.set(None);
+            self.deleting_comment.set(None);
         }
         self.request.set(String::new());
         self.card_event.set(None);

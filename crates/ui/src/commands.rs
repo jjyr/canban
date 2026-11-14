@@ -343,6 +343,22 @@ pub const CATALOG: &[Command] = &[
         keywords: "modify update message comment discussion github",
     },
     Command {
+        id: "delete-last-comment",
+        title: "Delete Latest Comment…",
+        key: "",
+        display: "Card",
+        context: "Card",
+        keywords: "remove erase trash message comment discussion github",
+    },
+    Command {
+        id: "open-last-github-comment",
+        title: "Open Latest GitHub Comment in Browser",
+        key: "",
+        display: "GitHub",
+        context: "Navigation",
+        keywords: "jump link external web browser anchor comment discussion pr issue",
+    },
+    Command {
         id: "card-workspace-details",
         title: "Toggle Card Workspace Details",
         key: "",
@@ -672,12 +688,153 @@ pub fn execute(ui: Ui, id: &str) {
                         ui.open_card(c.id);
                     }
                     ui.card_event.set(Some(seq));
+                    ui.deleting_comment.set(None);
                     ui.editing_comment.set(Some(eid));
                 } else {
                     ui.notify("No user comments to edit on this Card");
                 }
             } else {
                 ui.notify("Open an active Card or GitHub conversation first");
+            }
+        }
+        "delete-last-comment" => {
+            if ui.page.get_untracked() == "github" && ui.github.reference.get_untracked().is_some()
+            {
+                let sec = ui.github.section.get_untracked();
+                if matches!(sec.as_str(), "discussion" | "threads") {
+                    let my_login = crate::github::active_login_untracked(ui);
+                    let target = ui.github.detail.with_untracked(|det| {
+                        det["data"].as_array().and_then(|arr| {
+                            arr.iter().rev().find_map(|entry| {
+                                let cid = entry["id"].as_u64().unwrap_or(0);
+                                let author = entry["user"]["login"].as_str().unwrap_or("");
+                                (cid > 0
+                                    && my_login
+                                        .as_deref()
+                                        .is_some_and(|me| author.eq_ignore_ascii_case(me)))
+                                .then_some(cid)
+                            })
+                        })
+                    });
+                    if let Some(cid) = target {
+                        batch(move || {
+                            ui.github.delete_error.set(String::new());
+                            ui.github.editing_comment.set(None);
+                            ui.github.deleting_comment.set(Some((sec, cid)));
+                        });
+                    } else {
+                        ui.notify("No comments authored by you in this GitHub section");
+                    }
+                } else if sec == "reviews" {
+                    ui.notify("GitHub does not support deleting submitted pull request reviews");
+                } else {
+                    ui.notify("Open Discussion or Review threads to delete a GitHub comment");
+                }
+            } else if ui.page.get_untracked() == "review"
+                && ui.review_state.mode.get_untracked() == "github_pr"
+            {
+                let my_login = crate::github::active_login_untracked(ui);
+                let target = ui.review_state.compare_data.with_untracked(|cd| {
+                    cd["threads"].as_array().and_then(|arr| {
+                        arr.iter().rev().find_map(|entry| {
+                            let cid = entry["id"].as_u64().unwrap_or(0);
+                            let author = entry["user"]["login"].as_str().unwrap_or("");
+                            (cid > 0
+                                && my_login
+                                    .as_deref()
+                                    .is_some_and(|me| author.eq_ignore_ascii_case(me)))
+                            .then_some(cid)
+                        })
+                    })
+                });
+                if let Some(cid) = target {
+                    batch(move || {
+                        ui.review_state.remote_delete_error.set(String::new());
+                        ui.review_state.editing_remote_comment.set(None);
+                        ui.review_state.deleting_remote_comment.set(Some(cid));
+                    });
+                } else {
+                    ui.notify("No inline PR comments authored by you on this diff");
+                }
+            } else if let Some(c) = ui.current_card().filter(|c| c.active()) {
+                let latest = ui.snapshot.with_untracked(|s| {
+                    s.events
+                        .iter()
+                        .filter(|e| {
+                            e.card_id == c.id && e.kind == "comment.created" && e.actor == "user"
+                        })
+                        .max_by_key(|e| e.sequence)
+                        .map(|e| (e.id.clone(), e.sequence))
+                });
+                if let Some((eid, seq)) = latest {
+                    if ui.page.get_untracked() != "card"
+                        && !(ui.page.get_untracked() == "review"
+                            && ui.review_state.card_drawer_open.get_untracked())
+                    {
+                        ui.open_card(c.id);
+                    }
+                    ui.card_event.set(Some(seq));
+                    ui.editing_comment.set(None);
+                    ui.deleting_comment.set(Some(eid));
+                } else {
+                    ui.notify("No user comments to delete on this Card");
+                }
+            } else {
+                ui.notify("Open an active Card or GitHub conversation first");
+            }
+        }
+        "open-last-github-comment" => {
+            if ui.page.get_untracked() == "github"
+                && let Some(r) = ui.github.reference.get_untracked()
+            {
+                let sec = ui.github.section.get_untracked();
+                if matches!(sec.as_str(), "discussion" | "threads" | "reviews") {
+                    let url = ui.github.detail.with_untracked(|det| {
+                        det["data"].as_array().and_then(|arr| {
+                            arr.iter().rev().find_map(|entry| {
+                                crate::github::comment_web_url(entry, Some(r.url.as_str()), &sec)
+                            })
+                        })
+                    });
+                    if let Some(url) = url {
+                        crate::github::open_url(ui, url);
+                    } else {
+                        ui.notify("No GitHub comments in this section");
+                    }
+                } else {
+                    crate::github::open_url(ui, r.url);
+                }
+            } else if ui.page.get_untracked() == "review"
+                && let Some(pr) = ui.review_state.pr_target.get_untracked()
+            {
+                let base_url = pr["url"]
+                    .as_str()
+                    .filter(|u| !u.is_empty())
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        let repo = pr["repository"].as_str().unwrap_or("");
+                        let num = pr["number"].as_u64().unwrap_or(0);
+                        (!repo.is_empty() && num > 0)
+                            .then(|| format!("https://github.com/{repo}/pull/{num}"))
+                    });
+                let url = ui.review_state.compare_data.with_untracked(|cd| {
+                    cd["threads"].as_array().and_then(|arr| {
+                        arr.iter().rev().find_map(|entry| {
+                            crate::github::comment_web_url(entry, base_url.as_deref(), "threads")
+                        })
+                    })
+                });
+                if let Some(url) = url.or(base_url) {
+                    crate::github::open_url(ui, url);
+                } else {
+                    ui.notify("No GitHub pull request link available");
+                }
+            } else if let Some(c) = ui.current_card()
+                && let Some(src) = c.github_issue()
+            {
+                crate::github::open_url(ui, src.url.clone());
+            } else {
+                ui.notify("Open a GitHub conversation or GitHub Card first");
             }
         }
         "card-workspace-details" => {
@@ -939,5 +1096,7 @@ mod tests {
         );
         assert!(CATALOG.iter().any(|c| c.id == "copy-skill-command"));
         assert!(CATALOG.iter().any(|c| c.id == "edit-last-comment"));
+        assert!(CATALOG.iter().any(|c| c.id == "delete-last-comment"));
+        assert!(CATALOG.iter().any(|c| c.id == "open-last-github-comment"));
     }
 }

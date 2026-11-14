@@ -58,6 +58,7 @@ fn noise(kind: &str) -> bool {
         "card.created"
             | "card.updated"
             | "comment.updated"
+            | "comment.deleted"
             | "card.content_changed"
             | "card.order_changed"
             | "card.context_updated"
@@ -770,5 +771,39 @@ mod tests {
         assert_eq!(rows[0].0.sequence, 1);
         assert!(rows[0].1);
         assert_eq!(rows[1].0.kind, "card.stage_changed");
+    }
+
+    #[test]
+    fn comment_deleted_tombstone_and_audit_events_are_hidden_from_card_activity() {
+        let deleted = Event {
+            id: "c1".into(),
+            sequence: 1,
+            project_id: "p".into(),
+            card_id: "c".into(),
+            kind: "comment.deleted".into(),
+            actor: "user".into(),
+            message: "Comment deleted".into(),
+            created_at: 100,
+            data: serde_json::json!({"comment_id": "c1", "deleted_at": 200}),
+        };
+        let stage = Event {
+            id: "s2".into(),
+            sequence: 2,
+            kind: "card.stage_changed".into(),
+            message: "backlog → develop".into(),
+            data: serde_json::json!({}),
+            ..deleted.clone()
+        };
+        let audit = Event {
+            id: "d3".into(),
+            sequence: 3,
+            kind: "comment.deleted".into(),
+            message: "Comment deleted".into(),
+            data: serde_json::json!({"comment_id": "c1", "deleted_at": 200}),
+            ..deleted.clone()
+        };
+        let rows = visible(&[deleted, stage, audit], None);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0.kind, "card.stage_changed");
     }
 }

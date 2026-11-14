@@ -75,6 +75,16 @@ try:
  assert len([v for v in requests() if v['method']=='PUT' and v['path'].endswith('/pulls/2/reviews/700')])==1
  revs_after=call('github.detail',{'reference':r,'section':'reviews'})['data']
  assert any(rv['id']==700 and rv['body']=='ACCEPTANCE_EDITED_REVIEW_SENTINEL' for rv in revs_after)
+ assert 'error' in call('github.remote.comment.delete',{'reference':r,'section':'reviews','comment_id':700,'request_key':'del-rev-rejected'},check=False)
+ del_thread={'reference':r,'section':'threads','comment_id':800,'request_key':'del-thread-once'}
+ assert call('github.remote.comment.delete',del_thread)['state']=='published';call('github.remote.comment.delete',del_thread)
+ assert len([v for v in requests() if v['method']=='DELETE' and v['path'].endswith('/pulls/comments/800')])==1
+ assert all(c['id']!=800 for c in call('github.detail',{'reference':r,'section':'threads'})['data'])
+ assert all(c['id']!=800 for c in call('review.github_pr',{'repository':'fixture/repo','number':2})['threads'])
+ del_disc={'reference':r,'section':'discussion','comment_id':600,'request_key':'del-disc-once'}
+ assert call('github.remote.comment.delete',del_disc)['state']=='published';call('github.remote.comment.delete',del_disc)
+ assert len([v for v in requests() if v['method']=='DELETE' and v['path'].endswith('/issues/comments/600')])==1
+ assert all(c['id']!=600 for c in call('github.detail',{'reference':r,'section':'discussion'})['data'])
  denied={'reference':r,'body':'DENY_FIXTURE','request_key':'denied-comment'}
  assert call('github.remote.comment',denied)['state']=='failed'
  unknown={'reference':r,'body':'UNKNOWN_FIXTURE','request_key':'unknown-comment'}

@@ -384,8 +384,13 @@ fn render_narrative(
         let cid = comment_id.clone();
         move || can_edit.get() && ui.editing_comment.get().as_deref() == Some(cid.as_str())
     });
+    let is_deleting = computed({
+        let cid = comment_id.clone();
+        move || can_edit.get() && ui.deleting_comment.get().as_deref() == Some(cid.as_str())
+    });
     let edit_draft = signal(event.message.clone());
     let edit_error = signal(String::new());
+    let delete_error = signal(String::new());
     if let Some(path) = event.data["path"].as_str().map(str::to_owned)
         && let Some(app) = crate::APP.get().cloned()
     {
@@ -435,17 +440,60 @@ fn render_narrative(
     }
     heading = heading.child(view().flex_1());
     if is_own_comment {
-        let start_id = comment_id.clone();
+        let menu_cid = comment_id.clone();
         heading = heading.child(when(
-            move || can_edit.get() && !is_editing.get(),
+            move || can_edit.get() && !is_editing.get() && !is_deleting.get(),
             move || {
-                let cid = start_id.clone();
-                compact_action("Edit", Variant::Quiet, move |_| {
-                    edit_draft.set(body.get_untracked());
-                    edit_error.set(String::new());
-                    ui.card_terminal_focused.set(false);
-                    ui.editing_comment.set(Some(cid.clone()));
-                })
+                let cid = menu_cid.clone();
+                let anchor = element_ref();
+                canban_ui_kit::press_target()
+                    .element_ref(&anchor)
+                    .w(px(26.))
+                    .h(px(24.))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.))
+                    .bg(CLEAR)
+                    .hover(|s| s.bg(CARD_HOVER))
+                    .focus(|s| s.border_1().border_color(ACCENT))
+                    .accessibility_label(|| Some("Comment actions".into()))
+                    .child(icon_tinted(Icon::More, MUTED).w(px(15.)).h(px(15.)))
+                    .on_press(move |_: &()| {
+                        use nsh_core::element::desktop::{MenuItem, popup_menu_at};
+                        let cid_edit = cid.clone();
+                        let cid_del = cid.clone();
+                        ui.spawn(async move {
+                            let Some(bounds) = anchor.measure().await else {
+                                return;
+                            };
+                            popup_menu_at(
+                                vec![
+                                    MenuItem::new("Edit comment").on_select(move || {
+                                        let id = cid_edit.clone();
+                                        batch(move || {
+                                            edit_draft.set(body.get_untracked());
+                                            edit_error.set(String::new());
+                                            delete_error.set(String::new());
+                                            ui.deleting_comment.set(None);
+                                            ui.card_terminal_focused.set(false);
+                                            ui.editing_comment.set(Some(id));
+                                        });
+                                    }),
+                                    MenuItem::new("Delete comment…").on_select(move || {
+                                        let id = cid_del.clone();
+                                        batch(move || {
+                                            delete_error.set(String::new());
+                                            ui.editing_comment.set(None);
+                                            ui.card_terminal_focused.set(false);
+                                            ui.deleting_comment.set(Some(id));
+                                        });
+                                    }),
+                                ],
+                                point(bounds.page.x, bounds.page.y + bounds.frame.size.height),
+                            )
+                            .await;
+                        });
+                    })
             },
         ));
     }
@@ -466,10 +514,122 @@ fn render_narrative(
     let message_card = view()
         .min_w(px(0.))
         .border_1()
-        .border_color(move || if is_editing.get() { ACCENT } else { BORDER })
+        .border_color(move || {
+            if is_deleting.get() {
+                DANGER
+            } else if is_editing.get() {
+                ACCENT
+            } else {
+                BORDER
+            }
+        })
         .rounded(px(RADIUS))
         .overflow_hidden()
         .child(heading)
+        .child(when(move || is_deleting.get(), {
+            let del_card = save_card_id.clone();
+            let del_cid = save_comment_id.clone();
+            move || {
+                let cancel_cid = del_cid.clone();
+                let confirm_card = del_card.clone();
+                let confirm_cid = del_cid.clone();
+                view()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .bg(DANGER_SURFACE)
+                    .border_b_1()
+                    .border_color(BORDER)
+                    .child(
+                        view()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(
+                                label("Delete this comment?")
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(DANGER),
+                            )
+                            .child(
+                                view()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1p5()
+                                    .child(
+                                        compact_action("Cancel", Variant::Quiet, move |_| {
+                                            delete_error.set(String::new());
+                                            if ui.deleting_comment.get_untracked().as_deref()
+                                                == Some(cancel_cid.as_str())
+                                            {
+                                                ui.deleting_comment.set(None);
+                                            }
+                                        })
+                                        .disabled(move || ui.is_method_pending("comment.delete")),
+                                    )
+                                    .child(
+                                        compact_action("Delete", Variant::Danger, move |_| {
+                                            delete_error.set(String::new());
+                                            if crate::APP.get().is_none() {
+                                                let card_id = confirm_card.clone();
+                                                let cid = confirm_cid.clone();
+                                                ui.snapshot.update(|s| {
+                                                    if let Some(ev) =
+                                                        s.events.iter_mut().find(|e| {
+                                                            e.card_id == card_id && e.id == cid
+                                                        })
+                                                    {
+                                                        ev.kind = "comment.deleted".into();
+                                                        ev.message = "Comment deleted".into();
+                                                        ev.data = json!({
+                                                            "comment_id": cid,
+                                                            "deleted_at": canban_types::now(),
+                                                        });
+                                                    }
+                                                });
+                                                ui.deleting_comment.set(None);
+                                                ui.notify("Comment deleted");
+                                                return;
+                                            }
+                                            let cid_done = confirm_cid.clone();
+                                            dispatch_complete(
+                                                ui,
+                                                "comment.delete",
+                                                json!({
+                                                    "card_id": confirm_card,
+                                                    "comment_id": confirm_cid,
+                                                }),
+                                                move |result| match result {
+                                                    Ok(_) => {
+                                                        delete_error.try_set(String::new());
+                                                        if ui
+                                                            .deleting_comment
+                                                            .get_untracked()
+                                                            .as_deref()
+                                                            == Some(cid_done.as_str())
+                                                        {
+                                                            ui.deleting_comment.set(None);
+                                                        }
+                                                        ui.notify("Comment deleted");
+                                                    }
+                                                    Err(err) => {
+                                                        delete_error.try_set(err);
+                                                    }
+                                                },
+                                            );
+                                        })
+                                        .disabled(move || ui.is_method_pending("comment.delete")),
+                                    ),
+                            ),
+                    )
+                    .child(when(
+                        move || !delete_error.get().is_empty(),
+                        move || notice(move || delete_error.get(), Tone::Danger),
+                    ))
+            }
+        }))
         .child(dynamic(move || {
             if is_editing.get() {
                 let save_card = save_card_id.clone();

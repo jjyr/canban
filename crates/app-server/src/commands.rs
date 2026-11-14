@@ -1075,6 +1075,112 @@ impl AppServer {
                 ))?;
                 Ok(serde_json::to_value(event)?)
             }),
+            "comment.delete" => self.mutate(method, &p, |db| {
+                let mut c = super::resolve_card(db, &p)?;
+                ensure!(c.active(), "Restore the Card before deleting comments");
+                let comment_id = strp(&p, "comment_id")?;
+                let mut event: Event = db
+                    .get(comment_id)
+                    .map_err(|_| anyhow::anyhow!("Comment not found"))?;
+                ensure!(event.card_id == c.id, "Comment belongs to another Card");
+                ensure!(
+                    event.kind == "comment.created" && event.actor == "user",
+                    "Only your own comments can be deleted"
+                );
+                let deleted_at = now();
+                let previous_body = event.data["body"]
+                    .as_str()
+                    .unwrap_or(&event.message)
+                    .to_owned();
+                let next_revision = event.data["revision"].as_u64().unwrap_or(1) + 1;
+                event.kind = "comment.deleted".into();
+                event.message = "Comment deleted".into();
+                event.data = json!({
+                    "comment_id": event.id,
+                    "revision": next_revision,
+                    "deleted_at": deleted_at,
+                });
+                db.save(&event)?;
+
+                let all_questions = db.list::<Question>()?;
+                let mut affected_terminals = Vec::new();
+                for mut question in all_questions
+                    .iter()
+                    .filter(|q| {
+                        q.card_id == c.id && q.comment_id == event.id && q.state == "pending"
+                    })
+                    .cloned()
+                {
+                    question.state = "cancelled".into();
+                    db.save(&question)?;
+                    if let Some(tid) = question.terminal_id
+                        && !affected_terminals.contains(&tid)
+                    {
+                        affected_terminals.push(tid);
+                    }
+                }
+                for tid in affected_terminals {
+                    let other_pending = all_questions.iter().any(|q| {
+                        q.card_id == c.id
+                            && q.comment_id != event.id
+                            && q.state == "pending"
+                            && q.terminal_id.as_deref() == Some(tid.as_str())
+                    });
+                    if other_pending {
+                        continue;
+                    }
+                    if let Ok(mut entry) = db.get::<TerminalEntry>(&tid)
+                        && let Some(agent) = entry.agent.as_mut()
+                    {
+                        let mut entry_changed = false;
+                        if agent.state == "queued"
+                            && matches!(
+                                &agent.trigger,
+                                ExecutionTrigger::Comment { comment_id: cid } if cid == &event.id
+                            )
+                        {
+                            agent.state = "cancelled".into();
+                            agent.updated_at = deleted_at;
+                            entry_changed = true;
+                        }
+                        if agent.pending.as_ref().is_some_and(|pending| {
+                            matches!(
+                                &pending.trigger,
+                                ExecutionTrigger::Comment { comment_id: cid } if cid == &event.id
+                            )
+                        }) {
+                            agent.pending = None;
+                            agent.updated_at = deleted_at;
+                            entry_changed = true;
+                        }
+                        if entry_changed {
+                            db.save(&entry)?;
+                        }
+                    }
+                }
+
+                c.revision += 1;
+                db.save(&c)?;
+                db.append(canban_timeline::event(
+                    &c.project_id,
+                    &c.id,
+                    "comment.deleted",
+                    "user",
+                    "Comment deleted",
+                    json!({
+                        "comment_id": event.id,
+                        "revision": next_revision,
+                        "previous_body": previous_body,
+                        "deleted_at": deleted_at,
+                    }),
+                ))?;
+                Ok(json!({
+                    "deleted": true,
+                    "comment_id": event.id,
+                    "card_id": c.id,
+                    "revision": c.revision,
+                }))
+            }),
             "card.attention.clear" => self.mutate(method, &p, |db| {
                 let mut c: Card = db.get(strp(&p, "card_id")?)?;
                 if c.human_gate.is_none() {

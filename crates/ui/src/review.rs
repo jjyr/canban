@@ -262,6 +262,8 @@ pub fn open_compare(ui: Ui) {
         st.editing_remote_comment.set(None);
         st.remote_edit_draft.set(String::new());
         st.remote_edit_error.set(String::new());
+        st.deleting_remote_comment.set(None);
+        st.remote_delete_error.set(String::new());
         st.error.set(String::new());
         ui.navigate("review");
     });
@@ -339,6 +341,8 @@ pub fn open_card(ui: Ui, card_id: &str) {
         st.editing_remote_comment.set(None);
         st.remote_edit_draft.set(String::new());
         st.remote_edit_error.set(String::new());
+        st.deleting_remote_comment.set(None);
+        st.remote_delete_error.set(String::new());
         st.error.set(String::new());
         st.delivery_mode.set(delivery_default.into());
         st.delivery_strategy.set(strategy_default.into());

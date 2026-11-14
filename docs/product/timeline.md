@@ -83,7 +83,7 @@ A structured mention identifies the Profile; text alone is not executable. A pre
 
 No question/stage Session classes are needed. WorkflowRun adds process-level progress above Conversations/Requests/Attempts. See [Session model](sessions.md).
 
-Recommendation: comment edits preserve revisions without automatically redelivering old mentions. New mentions/resends are attributable separately. Removal retains a tombstone; retention/redaction needs separate policy. Ordinary replies cannot approve a workflow decision. (Implemented for user-authored local comments via `comment.update` / `comment.updated` and for user-authored remote GitHub comments/reviews via `github.remote.comment.update`.)
+Recommendation: comment edits preserve revisions without automatically redelivering old mentions. New mentions/resends are attributable separately. Removal retains a tombstone; retention/redaction needs separate policy. Ordinary replies cannot approve a workflow decision. (Implemented for user-authored local comments via `comment.update` / `comment.updated` and `comment.delete` / `comment.deleted`, and for user-authored remote GitHub comments/reviews via `github.remote.comment.update` and `github.remote.comment.delete`.)
 
 ## Resources and pasted images
 

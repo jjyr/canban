@@ -76,15 +76,22 @@ Human and Agent messages use the same identity marker, author/time header and
 bordered Markdown body along a single continuous 28-point vertical spine. Long
 bodies fold at a visual height while retaining the complete Markdown document;
 **Read full report / Show less** toggles the body. The main reader is bounded
-to 920 points in wide layouts. User-authored local comments (`comment.created`
-with `actor == "user"`) on active Cards expose an inline **Edit** action (also
-reachable via **Edit Latest Comment** in the Command Palette) using the shared
-Markdown editor (`Command+Enter` / **Save** / **Cancel**). Saving dispatches
+to 920 points in wide layouts. User-authored local comments (`comment.created` with `actor == "user"`) on
+active Cards fold **Edit comment** and **Delete comment…** inside a compact `⋯`
+popup menu on the comment header (also reachable via **Edit Latest Comment**
+and **Delete Latest Comment…** in the Command Palette). Saving an edit via the
+shared Markdown editor (`Command+Enter` / **Save** / **Cancel**) dispatches
 `comment.update`, increments the comment's revision, shows a muted `· edited`
 indicator at its original sequence position, appends a durable `comment.updated`
 audit event, updates any still-pending Question text and derived GitHub URL
 references, and preserves existing `@Agent` mentions without re-triggering them
-(only newly added `@Agent` mentions enqueue new Questions).
+(only newly added `@Agent` mentions enqueue new Questions). Confirming deletion
+dispatches `comment.delete`, tombstones the original event in place (`kind ==
+"comment.deleted"`, preserving per-Card sequence monotonicity while removing the
+comment from Activity, derived references, and Agent prompt context), appends a
+`comment.deleted` audit event, and cancels any still-pending Questions or
+not-yet-started queued Agent runs triggered solely by that comment while leaving
+running Agents and delivered replies intact.
 
 Narrative messages (comments, explicit replies and un-echoed execution reports)
 pair full 28-point avatars with bordered cards, while milestone updates (stage

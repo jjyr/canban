@@ -117,6 +117,7 @@ impl AppServer {
             })(),
             "github.remote.comment"
             | "github.remote.comment.update"
+            | "github.remote.comment.delete"
             | "github.remote.review"
             | "github.remote.reply" => self.github_remote_action(method, p),
             _ => return None,
@@ -515,6 +516,31 @@ impl AppServer {
                 }
                 _ => bail!("Unsupported GitHub comment section"),
             }
+        } else if method == "github.remote.comment.delete" {
+            let id = p["comment_id"]
+                .as_u64()
+                .filter(|n| *n > 0)
+                .context("Missing comment ID")?;
+            let section = p["section"].as_str().unwrap_or("discussion");
+            match section {
+                "discussion" => (
+                    "DELETE",
+                    format!("/repos/{}/issues/comments/{id}", r.repository),
+                    json!({}),
+                ),
+                "threads" => {
+                    ensure!(r.kind == "pr", "Only PRs support review thread comments");
+                    (
+                        "DELETE",
+                        format!("/repos/{}/pulls/comments/{id}", r.repository),
+                        json!({}),
+                    )
+                }
+                "reviews" => {
+                    bail!("GitHub does not support deleting submitted pull request reviews")
+                }
+                _ => bail!("Unsupported GitHub comment section"),
+            }
         } else if method == "github.remote.review" {
             ensure!(r.kind == "pr", "Only PRs support Review");
             let head = strp(p, "head")?;
@@ -606,7 +632,8 @@ impl AppServer {
             if r.kind == "pr"
                 && (method == "github.remote.reply"
                     || method == "github.remote.review"
-                    || (method == "github.remote.comment.update"
+                    || ((method == "github.remote.comment.update"
+                        || method == "github.remote.comment.delete")
                         && p["section"].as_str() == Some("threads")))
             {
                 let _ = self.github_read(

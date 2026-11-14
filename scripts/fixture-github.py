@@ -39,6 +39,10 @@ if method!='GET':
    found={'id':cid,'html_url':f'https://github.com/fixture/repo/pull/2#issuecomment-{cid}','user':user,'created_at':'2026-11-10T01:00:00Z'}
    items.append(found)
   found['body']=body['body'];found['updated_at']='2026-11-10T01:30:00Z';result=found
+ elif method=='DELETE' and '/pulls/comments/' in p:
+  cid=int(p.rsplit('/',1)[1]);s['threads']=[x for x in s.get('threads',[]) if x['id']!=cid];code=204
+ elif method=='DELETE' and '/issues/comments/' in p:
+  cid=int(p.rsplit('/',1)[1]);s['comments']=[x for x in s.get('comments',[]) if x['id']!=cid];code=204
  elif p.endswith('/reviews'):
   if body.get('commit_id')!=pr['head']['sha']:code=422;result={'message':'stale head'}
   else:

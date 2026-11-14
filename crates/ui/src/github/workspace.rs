@@ -30,6 +30,8 @@ pub struct Browser {
     pub editing_comment: Signal<Option<(String, u64)>>,
     pub edit_draft: Signal<String>,
     pub edit_error: Signal<String>,
+    pub deleting_comment: Signal<Option<(String, u64)>>,
+    pub delete_error: Signal<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -76,6 +78,8 @@ impl Browser {
             editing_comment: signal(None),
             edit_draft: signal(String::new()),
             edit_error: signal(String::new()),
+            deleting_comment: signal(None),
+            delete_error: signal(String::new()),
         }
     }
 }
@@ -95,6 +99,8 @@ pub fn open_section(ui: Ui, r: GitHubReference, section: &str) {
         b.editing_comment.set(None);
         b.edit_draft.set(String::new());
         b.edit_error.set(String::new());
+        b.deleting_comment.set(None);
+        b.delete_error.set(String::new());
         // Seed overview from current list row if available so title/status render immediately.
         let seeded = b.list.with_untracked(|v| {
             v["items"]
@@ -116,6 +122,8 @@ pub fn open_section(ui: Ui, r: GitHubReference, section: &str) {
         b.editing_comment.set(None);
         b.edit_draft.set(String::new());
         b.edit_error.set(String::new());
+        b.deleting_comment.set(None);
+        b.delete_error.set(String::new());
         b.detail.set(json!({}));
     }
     ui.navigate("github");
@@ -299,6 +307,8 @@ fn change_tab(ui: Ui, tab: &str) {
         b.editing_comment.set(None);
         b.edit_draft.set(String::new());
         b.edit_error.set(String::new());
+        b.deleting_comment.set(None);
+        b.delete_error.set(String::new());
     });
 }
 

@@ -46,6 +46,10 @@ pub fn open_url(ui: Ui, url: String) {
         ui.operation_error.set("Invalid GitHub URL".into());
         return;
     }
+    if crate::APP.get().is_none() {
+        ui.notify(format!("Fixture: opens {url}"));
+        return;
+    }
     ui.spawn(async move {
         let result = blocking(move || {
             std::process::Command::new("/usr/bin/open")
@@ -58,6 +62,32 @@ pub fn open_url(ui: Ui, url: String) {
                 .set("Could not open GitHub in the browser".into());
         }
     });
+}
+
+/// Resolves the browser jump URL for a GitHub comment, inline PR thread comment, or review.
+pub fn comment_web_url(entry: &Value, item_url: Option<&str>, section: &str) -> Option<String> {
+    if let Some(url) = entry["html_url"]
+        .as_str()
+        .filter(|u| u.starts_with("https://github.com/"))
+    {
+        return Some(url.to_owned());
+    }
+    let cid = entry["id"].as_u64().filter(|&n| n > 0)?;
+    let base = item_url
+        .filter(|u| u.starts_with("https://github.com/"))?
+        .split('#')
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    let anchor = match section {
+        "threads" => format!("discussion_r{cid}"),
+        "reviews" => format!("pullrequestreview-{cid}"),
+        _ => format!("issuecomment-{cid}"),
+    };
+    Some(format!("{base}#{anchor}"))
 }
 pub fn choice(
     ui: Ui,
@@ -1026,4 +1056,75 @@ pub fn pr_panel(ui: Ui) -> impl IntoElement {
         }
         area.into_element()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn comment_web_url_uses_html_url_and_builds_fallback_anchors_per_section() {
+        let explicit = json!({
+            "id": 601,
+            "html_url": "https://github.com/acme/app/pull/42#discussion_r601"
+        });
+        assert_eq!(
+            comment_web_url(
+                &explicit,
+                Some("https://github.com/acme/app/pull/42"),
+                "threads"
+            )
+            .as_deref(),
+            Some("https://github.com/acme/app/pull/42#discussion_r601")
+        );
+
+        let fallback = json!({"id": 77});
+        assert_eq!(
+            comment_web_url(
+                &fallback,
+                Some("https://github.com/acme/app/issues/12"),
+                "discussion"
+            )
+            .as_deref(),
+            Some("https://github.com/acme/app/issues/12#issuecomment-77")
+        );
+        assert_eq!(
+            comment_web_url(
+                &fallback,
+                Some("https://github.com/acme/app/pull/12/"),
+                "threads"
+            )
+            .as_deref(),
+            Some("https://github.com/acme/app/pull/12#discussion_r77")
+        );
+        assert_eq!(
+            comment_web_url(
+                &fallback,
+                Some("https://github.com/acme/app/pull/12#files"),
+                "reviews"
+            )
+            .as_deref(),
+            Some("https://github.com/acme/app/pull/12#pullrequestreview-77")
+        );
+
+        // Rejects non-GitHub URLs and missing IDs.
+        let untrusted =
+            json!({"id": 77, "html_url": "https://evil.example/pull/12#issuecomment-77"});
+        assert!(
+            comment_web_url(
+                &untrusted,
+                Some("https://evil.example/pull/12"),
+                "discussion"
+            )
+            .is_none()
+        );
+        assert!(
+            comment_web_url(
+                &json!({"id": 0}),
+                Some("https://github.com/acme/app/issues/12"),
+                "discussion"
+            )
+            .is_none()
+        );
+    }
 }

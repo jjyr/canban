@@ -33,7 +33,8 @@ impl Service {
         self.user.lock().unwrap().clone()
     }
     pub fn write(&self, method: &str, path: &str, body: &Value) -> Result<Value> {
-        Ok(request_with_body(path, None, method, Some(body))?.data)
+        let payload = if method == "DELETE" { None } else { Some(body) };
+        Ok(request_with_body(path, None, method, payload)?.data)
     }
     pub fn login(&self) -> Option<String> {
         self.user.lock().unwrap().as_ref().map(|u| u.login.clone())

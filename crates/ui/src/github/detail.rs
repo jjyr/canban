@@ -70,6 +70,8 @@ fn select_section(ui: Ui, section: &str) {
         ui.github.editing_comment.set(None);
         ui.github.edit_draft.set(String::new());
         ui.github.edit_error.set(String::new());
+        ui.github.deleting_comment.set(None);
+        ui.github.delete_error.set(String::new());
         ui.github.detail.set(json!({}));
     });
 }
@@ -553,8 +555,15 @@ fn review_state_badge(state: &str) -> Option<(String, Tone)> {
 
 fn discussion(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyElement {
     let section = ui.github.section.get_untracked();
+    let item_url = ui
+        .github
+        .reference
+        .get_untracked()
+        .map(|r| r.url)
+        .unwrap_or_default();
     let my_login = crate::github::active_login_from(&ui.snapshot.get(), &ui.github.gh_status.get());
     let active_edit = ui.github.editing_comment.get();
+    let active_delete = ui.github.deleting_comment.get();
     let entries = data.as_array().cloned().unwrap_or_default();
     if entries.is_empty() {
         return view()
@@ -578,6 +587,11 @@ fn discussion(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyEleme
             .unwrap_or("GitHub")
             .to_owned();
         let comment_id = entry["id"].as_u64().unwrap_or(0);
+        let web_url = super::comment_web_url(
+            &entry,
+            (!item_url.is_empty()).then_some(item_url.as_str()),
+            &section,
+        );
         let is_own = comment_id > 0
             && my_login
                 .as_deref()
@@ -602,6 +616,9 @@ fn discussion(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyEleme
             .map(|a| a.to_ascii_lowercase());
         let body = entry["body"].as_str().unwrap_or("").to_owned();
         let is_editing = active_edit
+            .as_ref()
+            .is_some_and(|(sec, cid)| sec == &section && *cid == comment_id);
+        let is_deleting = active_delete
             .as_ref()
             .is_some_and(|(sec, cid)| sec == &section && *cid == comment_id);
 
@@ -655,19 +672,80 @@ fn discussion(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyEleme
             }
         }
 
-        if is_own && !is_editing {
+        if let Some(jump_url) = web_url {
+            has_trailing = true;
+            trailing = trailing.child(
+                view()
+                    .tooltip(hint_tooltip("Open comment in GitHub"))
+                    .child(
+                        compact_action("GitHub ↗", Variant::Quiet, move |_| {
+                            open_url(ui, jump_url.clone())
+                        })
+                        .accessibility_label(|| Some("Open comment in GitHub".into())),
+                    ),
+            );
+        }
+
+        if is_own && !is_editing && !is_deleting {
             has_trailing = true;
             let edit_sec = section.clone();
+            let del_sec = section.clone();
             let initial_body = body.clone();
-            trailing = trailing.child(compact_action("Edit", Variant::Quiet, move |_| {
-                let sec_val = edit_sec.clone();
-                let body_val = initial_body.clone();
-                batch(move || {
-                    ui.github.edit_error.set(String::new());
-                    ui.github.edit_draft.set(body_val);
-                    ui.github.editing_comment.set(Some((sec_val, comment_id)));
-                });
-            }));
+            let can_delete = matches!(section.as_str(), "discussion" | "threads");
+            let anchor = element_ref();
+            trailing = trailing.child(
+                canban_ui_kit::press_target()
+                    .element_ref(&anchor)
+                    .w(px(26.))
+                    .h(px(26.))
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.))
+                    .bg(CLEAR)
+                    .hover(|s| s.bg(INSET))
+                    .focus(|s| s.border_1().border_color(ACCENT))
+                    .accessibility_label(|| Some("GitHub comment actions".into()))
+                    .child(icon_tinted(Icon::More, MUTED).w(px(15.)).h(px(15.)))
+                    .on_press(move |_: &()| {
+                        use nsh_core::element::desktop::{MenuItem, popup_menu_at};
+                        let sec_edit = edit_sec.clone();
+                        let sec_del = del_sec.clone();
+                        let body_val = initial_body.clone();
+                        ui.spawn(async move {
+                            let Some(bounds) = anchor.measure().await else {
+                                return;
+                            };
+                            let mut items =
+                                vec![MenuItem::new("Edit comment").on_select(move || {
+                                    let s = sec_edit.clone();
+                                    let b = body_val.clone();
+                                    batch(move || {
+                                        ui.github.edit_error.set(String::new());
+                                        ui.github.delete_error.set(String::new());
+                                        ui.github.deleting_comment.set(None);
+                                        ui.github.edit_draft.set(b);
+                                        ui.github.editing_comment.set(Some((s, comment_id)));
+                                    });
+                                })];
+                            if can_delete {
+                                items.push(MenuItem::new("Delete comment…").on_select(move || {
+                                    let s = sec_del.clone();
+                                    batch(move || {
+                                        ui.github.delete_error.set(String::new());
+                                        ui.github.edit_error.set(String::new());
+                                        ui.github.editing_comment.set(None);
+                                        ui.github.deleting_comment.set(Some((s, comment_id)));
+                                    });
+                                }));
+                            }
+                            popup_menu_at(
+                                items,
+                                point(bounds.page.x, bounds.page.y + bounds.frame.size.height),
+                            )
+                            .await;
+                        });
+                    }),
+            );
         }
 
         if has_trailing {
@@ -681,6 +759,11 @@ fn discussion(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyEleme
             .border_color(BORDER)
             .child(header_row);
 
+        if is_deleting {
+            let del_sec = section.clone();
+            item_view = item_view.child(github_comment_delete_confirm(ui, d, del_sec, comment_id));
+        }
+
         if is_editing {
             let save_sec = section.clone();
             item_view = item_view.child(github_comment_editor(ui, d, save_sec, comment_id));
@@ -690,6 +773,121 @@ fn discussion(ui: Ui, d: Signal<Draft>, data: &Value, loading: bool) -> AnyEleme
         area = area.child(item_view);
     }
     area.into_element()
+}
+
+fn github_comment_delete_confirm(
+    ui: Ui,
+    d: Signal<Draft>,
+    section: String,
+    comment_id: u64,
+) -> impl IntoElement {
+    let b = ui.github;
+    view()
+        .gap_2()
+        .px_3()
+        .py_2()
+        .rounded(px(RADIUS))
+        .border_1()
+        .border_color(DANGER)
+        .bg(DANGER_SURFACE)
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    label("Delete this comment on GitHub?")
+                        .text_size(px(12.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(DANGER),
+                )
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(
+                            compact_action("Cancel", Variant::Quiet, move |_| {
+                                batch(move || {
+                                    b.deleting_comment.set(None);
+                                    b.delete_error.set(String::new());
+                                });
+                            })
+                            .disabled(move || ui.is_method_pending("github.remote.comment.delete")),
+                        )
+                        .child(
+                            compact_action("Delete", Variant::Danger, move |_| {
+                                let Some(r) = b.reference.get_untracked() else {
+                                    return;
+                                };
+                                b.delete_error.set(String::new());
+                                if crate::APP.get().is_none() {
+                                    b.detail.update(|det| {
+                                        if let Some(arr) = det["data"].as_array_mut() {
+                                            arr.retain(|x| x["id"].as_u64() != Some(comment_id));
+                                        }
+                                    });
+                                    b.deleting_comment.set(None);
+                                    ui.notify("Comment deleted");
+                                    return;
+                                }
+                                let page = b.detail_page.get_untracked();
+                                dispatch_complete(
+                                    ui,
+                                    "github.remote.comment.delete",
+                                    json!({
+                                        "reference": r,
+                                        "section": section,
+                                        "comment_id": comment_id,
+                                        "page": page,
+                                        "request_key": canban_types::id(),
+                                    }),
+                                    move |res| match res {
+                                        Ok(val) if val["state"] == "published" => {
+                                            d.update(|d| d.github_unknown = false);
+                                            b.deleting_comment.set(None);
+                                            b.delete_error.set(String::new());
+                                            load(ui, true);
+                                            ui.notify("Comment deleted");
+                                        }
+                                        Ok(val) if val["state"] == "unknown" => {
+                                            d.update(|d| d.github_unknown = true);
+                                            b.delete_error.set(
+                                                val["message"]
+                                                    .as_str()
+                                                    .unwrap_or(
+                                                        "Deletion outcome is unknown; check GitHub before retrying.",
+                                                    )
+                                                    .to_owned(),
+                                            );
+                                        }
+                                        Ok(val) => {
+                                            b.delete_error.set(
+                                                val["message"]
+                                                    .as_str()
+                                                    .unwrap_or("Could not delete GitHub comment")
+                                                    .to_owned(),
+                                            );
+                                        }
+                                        Err(err) => {
+                                            b.delete_error.set(err);
+                                        }
+                                    },
+                                );
+                            })
+                            .disabled(move || {
+                                ui.is_method_pending("github.remote.comment.delete")
+                                    || d.get().github_unknown
+                            }),
+                        ),
+                ),
+        )
+        .child(when(
+            move || !b.delete_error.get().is_empty(),
+            move || notice(move || b.delete_error.get(), Tone::Danger),
+        ))
 }
 
 fn github_comment_editor(
