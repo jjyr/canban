@@ -51,7 +51,7 @@ pub fn presets(home: &Path) -> Result<BTreeMap<String, Profile>> {
 pub fn resolve(config: Config, home: &Path) -> Result<Config> {
     let presets = presets(home)?;
     let mut config = config;
-    config.hc = executable(&config.hc);
+    config.hc = executable_with_env(&config.hc, &config.hc_env);
     let snapshot_profiles = config.profiles.clone();
     for profile in &mut config.profiles {
         profile.model = profile
@@ -250,28 +250,78 @@ pub fn apply_project_override(
 
 /// Find an executable path on the local host if installed; returns `None` when missing.
 pub fn find_local_executable(program: &str) -> Option<PathBuf> {
+    find_local_executable_with_env(program, &BTreeMap::new())
+}
+
+/// Find a local executable, honoring optional overrides (`CANBAN_HERDR_SEARCH_PATHS`,
+/// `HC_INSTALL_DIR`) from `env` or process environment, and falling back from default
+/// `hc` to `herdr-core` when another tool did not claim `hc`.
+pub fn find_local_executable_with_env(
+    program: &str,
+    env: &BTreeMap<String, String>,
+) -> Option<PathBuf> {
+    let program = program.trim();
+    if program.is_empty() {
+        return None;
+    }
     if Path::new(program).components().count() != 1 {
         let p = PathBuf::from(program);
         return p.is_file().then_some(p);
     }
-    let mut paths =
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        paths.push(home.join(".local/bin"));
-        paths.push(home.join(".cargo/bin"));
-        paths.push(home.join(".bun/bin"));
-        paths.push(home.join("bin"));
+    let search_override = env
+        .get("CANBAN_HERDR_SEARCH_PATHS")
+        .map(std::ffi::OsString::from)
+        .or_else(|| std::env::var_os("CANBAN_HERDR_SEARCH_PATHS"));
+    let paths: Vec<PathBuf> = if let Some(override_paths) = search_override {
+        std::env::split_paths(&override_paths).collect()
+    } else {
+        let mut paths = Vec::new();
+        if let Some(install_dir) = env
+            .get("HC_INSTALL_DIR")
+            .map(std::ffi::OsString::from)
+            .or_else(|| std::env::var_os("HC_INSTALL_DIR"))
+        {
+            let dir = PathBuf::from(install_dir);
+            if !dir.as_os_str().is_empty() {
+                paths.push(dir);
+            }
+        }
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        if let Some(home) = env
+            .get("HOME")
+            .map(std::ffi::OsString::from)
+            .or_else(|| std::env::var_os("HOME"))
+        {
+            let home = PathBuf::from(home);
+            paths.push(home.join(".local/bin"));
+            paths.push(home.join(".cargo/bin"));
+            paths.push(home.join(".bun/bin"));
+            paths.push(home.join("bin"));
+        }
+        paths.extend(["/opt/homebrew/bin".into(), "/usr/local/bin".into()]);
+        paths
+    };
+    let candidates: &[&str] = if program == "hc" {
+        &["hc", "herdr-core"]
+    } else {
+        std::slice::from_ref(&program)
+    };
+    for name in candidates {
+        if let Some(found) = paths.iter().map(|p| p.join(name)).find(|p| p.is_file()) {
+            return Some(found);
+        }
     }
-    paths.extend(["/opt/homebrew/bin".into(), "/usr/local/bin".into()]);
-    paths
-        .into_iter()
-        .map(|p| p.join(program))
-        .find(|p| p.is_file())
+    None
 }
 
 pub fn executable(program: &str) -> String {
-    find_local_executable(program)
+    executable_with_env(program, &BTreeMap::new())
+}
+
+pub fn executable_with_env(program: &str, env: &BTreeMap<String, String>) -> String {
+    find_local_executable_with_env(program, env)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| program.into())
 }
@@ -1134,5 +1184,41 @@ mod machine_tests {
         let resolved = resolve(config, home.path()).unwrap();
         assert_eq!(resolved.profiles[0].command()[0], "sh");
         assert!(Path::new(&executable("sh")).is_absolute());
+    }
+
+    #[test]
+    fn find_local_executable_honors_search_paths_override_and_herdr_core_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let mut env = BTreeMap::new();
+        env.insert(
+            "CANBAN_HERDR_SEARCH_PATHS".into(),
+            bin.display().to_string(),
+        );
+        assert!(find_local_executable_with_env("hc", &env).is_none());
+
+        // Fallback to `herdr-core` when `hc` is absent in search paths.
+        let herdr_core = bin.join("herdr-core");
+        std::fs::write(&herdr_core, "#!/bin/sh\n").unwrap();
+        assert_eq!(
+            find_local_executable_with_env("hc", &env),
+            Some(herdr_core.clone())
+        );
+
+        // Prefer `hc` when both exist.
+        let hc = bin.join("hc");
+        std::fs::write(&hc, "#!/bin/sh\n").unwrap();
+        assert_eq!(find_local_executable_with_env("hc", &env), Some(hc.clone()));
+
+        // Explicit custom path checks exact file existence.
+        let missing = dir.path().join("custom/hc");
+        assert!(find_local_executable_with_env(&missing.display().to_string(), &env).is_none());
+        std::fs::create_dir_all(missing.parent().unwrap()).unwrap();
+        std::fs::write(&missing, "#!/bin/sh\n").unwrap();
+        assert_eq!(
+            find_local_executable_with_env(&missing.display().to_string(), &env),
+            Some(missing)
+        );
     }
 }

@@ -306,13 +306,25 @@ impl AppServer {
                 server.wake_runtime();
                 drop(server);
                 // Interruptible reconnect backoff, not a runtime scan.
+                let mut woke_early = false;
                 for _ in 0..delay * 10 {
-                    if weak.upgrade().is_none_or(|s| s.stopped()) {
+                    let Some(s) = weak.upgrade() else {
+                        return;
+                    };
+                    if s.stopped() {
                         return;
                     }
+                    let cfg = s.config();
+                    let next_key =
+                        serde_json::to_vec(&json!([cfg.hc, cfg.hc_session, cfg.hc_env])).unwrap();
+                    if s.herdr_wake.swap(false, Ordering::SeqCst) || next_key != config_key {
+                        woke_early = true;
+                        break;
+                    }
+                    drop(s);
                     std::thread::sleep(Duration::from_millis(100));
                 }
-                delay = (delay * 2).min(30);
+                delay = if woke_early { 1 } else { (delay * 2).min(30) };
             }
         });
     }

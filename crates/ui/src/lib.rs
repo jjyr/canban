@@ -43,7 +43,10 @@ static APP: std::sync::OnceLock<Arc<canban_app_server::AppClient>> = std::sync::
 fn native(_: &mut Registry) {}
 #[component]
 pub fn Canban() -> impl IntoElement {
-    startup::watch_quit();
+    workspace_root()
+}
+
+pub(crate) fn workspace_root() -> impl IntoElement {
     startup::ready();
     let ui = Ui::new();
     ui.backend_notice.set(
@@ -120,18 +123,21 @@ pub fn run() -> Result<()> {
     nsh_platform_macos::set_components(canban_terminal::native::register);
     nsh_platform_macos::set_ui_sets(vec![nsh_base::registry(), registry()]);
     let mut session = None;
+    let mut ran_window = false;
     let result = (|| {
         session = startup::prepare()?;
-        run_application()
+        run_application(&mut ran_window)
     })();
-    if let Err(error) = &result {
+    if let Err(error) = &result
+        && !ran_window
+    {
         startup::show(error);
     }
     drop(session);
     result
 }
 
-fn run_application() -> Result<()> {
+fn run_application(ran_window: &mut bool) -> Result<()> {
     let home = canban_app_server::default_home()?;
     let cli = std::env::current_exe()?.with_file_name("canban");
     anyhow::ensure!(
@@ -147,13 +153,11 @@ fn run_application() -> Result<()> {
             nsh_platform_macos::Root::of::<updates::Recovery>().app_id(app_id.clone()),
         )
     } else {
-        let app = canban_app_server::AppClient::connect_or_start(home, &cli)?;
-        drafts::persistence::start(app.clone())?;
-        APP.set(app).ok();
         nsh_platform_macos::AppSource::Rust(
-            nsh_platform_macos::Root::of::<Canban>().app_id(app_id.clone()),
+            nsh_platform_macos::Root::of::<startup::Bootstrap>().app_id(app_id.clone()),
         )
     };
+    *ran_window = true;
     let result = nsh_platform_macos::run_app(
         source,
         nsh_platform_macos::AppOptions {
@@ -164,6 +168,9 @@ fn run_application() -> Result<()> {
         },
     );
     drafts::persistence::flush();
+    if startup::fatal_exit() {
+        anyhow::bail!("Canban startup failed");
+    }
     if result != std::process::ExitCode::SUCCESS {
         anyhow::bail!("Native application exited with an error");
     }

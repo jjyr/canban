@@ -359,7 +359,7 @@ impl AppServer {
         Ok(resolved)
     }
 
-    fn load_unmigrated_config(&self) -> Result<Config> {
+    pub(super) fn load_unmigrated_config(&self) -> Result<Config> {
         let path = self.home.join("config/agents.json");
         let bytes = std::fs::read(&path)?;
         let mut value: Value = serde_json::from_slice(&bytes)?;
