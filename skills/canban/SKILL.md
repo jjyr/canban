@@ -115,12 +115,12 @@ Call any public AppServer JSON-RPC method via `"$CANBAN_CLI" call <METHOD> '<JSO
 "$CANBAN_CLI" call card.list '{"project_id":"<PROJECT_ID>"}'
 
 # Read a Card, its Timeline events, or Diff preview
-"$CANBAN_CLI" call card.get '{"card_id":"<CARD_ID>"}'
-"$CANBAN_CLI" call timeline.list '{"card_id":"<CARD_ID>","limit":50}'
-"$CANBAN_CLI" call review.preview '{"card_id":"<CARD_ID>"}'
+"$CANBAN_CLI" call card.get '{"card":<CARD_NUMBER>,"project_id":"<PROJECT_ID>"}'
+"$CANBAN_CLI" call timeline.list '{"card":<CARD_NUMBER>,"project_id":"<PROJECT_ID>","limit":50}'
+"$CANBAN_CLI" call review.preview '{"card":<CARD_NUMBER>,"project_id":"<PROJECT_ID>"}'
 
 # Post a Card comment (supports @profile mentions to schedule another role)
-"$CANBAN_CLI" call comment.add '{"card_id":"<CARD_ID>","body":"Ready for @reviewer"}'
+"$CANBAN_CLI" call comment.add '{"card":<CARD_NUMBER>,"project_id":"<PROJECT_ID>","body":"Ready for @reviewer"}'
 
 # Create a follow-up Card in Backlog
 "$CANBAN_CLI" call card.create '{"project_id":"<PROJECT_ID>","title":"Follow-up task","body":"Details..."}'

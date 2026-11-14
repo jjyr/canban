@@ -41,7 +41,7 @@ impl AppServer {
         let (card, project, warning) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
-            let c: Card = db.get(strp(&p, "card_id")?)?;
+            let c = super::resolve_card(db, &p)?;
             let project: Project = db.get(&c.project_id)?;
             let project = self.bound_project(&project, &c);
             let warning = activity_warning(db, &c)?;

@@ -890,6 +890,13 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
         .into_iter()
         .find(|c| c.id == card.id)
         .unwrap();
+    let preview_by_num = app
+        .call(
+            "review.preview",
+            json!({"project_id":card.project_id,"card":card.number}),
+        )
+        .unwrap();
+    assert_eq!(preview_by_num["merge_allowed"], true, "{preview_by_num}");
     let preview = app
         .call("review.preview", json!({"card_id":card.id}))
         .unwrap();
@@ -3555,6 +3562,10 @@ fn short_ids_card_number_paths_and_legacy_alias_resolution() {
     assert_eq!(by_old_card["id"], c.id);
     let by_prefix = app.call("card.get", json!({"card_id":&c.id[..4]})).unwrap();
     assert_eq!(by_prefix["id"], c.id);
+    let preview_err = app
+        .call("review.preview", json!({"project_id":&p.id,"card":c.number}))
+        .unwrap_err();
+    assert!(preview_err.to_string().contains("no prepared worktree"));
 
     // Legacy 32-char question_id + project alias resolve on agent.reply.
     app.call(
