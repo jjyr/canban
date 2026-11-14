@@ -644,6 +644,9 @@ impl AppServer {
                 } else {
                     project.work_location()
                 });
+                if agent.started_at.is_none() {
+                    agent.started_at = Some(now());
+                }
                 agent.state = "starting".into();
                 db.save(&entry)?;
                 Ok(Some((entry, false)))
@@ -1008,6 +1011,9 @@ impl AppServer {
         run.workspace = Some(workspace);
         run.owner_core_id = None;
         run.lifecycle = Lifecycle::default();
+        if run.started_at.is_none() {
+            run.started_at = Some(now());
+        }
         run.state = "starting".into();
         run.core_id = None;
         run.terminal = None;

@@ -78,6 +78,7 @@ pub fn agent_run(
         output_path: None,
         observed: None,
         error: None,
+        started_at: None,
         updated_at: now(),
         provider_session_id: None,
         close_state: String::new(),

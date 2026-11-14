@@ -1061,7 +1061,10 @@ pub fn board_cards() -> canban_types::Snapshot {
         "Work on the Card".into(),
         None,
     );
+    let base_now = now();
     running_attempt.state = "running".into();
+    running_attempt.started_at = Some(base_now.saturating_sub(70 * 60 * 1000 + 30_000));
+    running_attempt.updated_at = base_now.saturating_sub(70 * 60 * 1000 + 30_000);
     running_attempt.core_id = Some("gallery".into());
     running_attempt.terminal = Some("gallery-card-2-pty".into());
     running_attempt.cwd = "/preview/worktrees/card-2".into();
@@ -1070,7 +1073,61 @@ pub fn board_cards() -> canban_types::Snapshot {
     running_attempt.provider_session_id = Some("session-gallery-card-2".into());
     running_attempt.connection_state = "connected".into();
     running_attempt.lifecycle.observed_at = Some(u64::MAX);
-    push_agent_terminal(&mut s, running_attempt);
+    running_attempt.workflow_run_id = Some("gallery-card-2-run".into());
+    running_attempt.workflow_step = Some("agent:develop:2".into());
+    let card_2_tid = push_agent_terminal(&mut s, running_attempt);
+    s.workflow_runs.push(
+        serde_json::from_value(json!({
+            "id": "gallery-card-2-run",
+            "project_id": "gallery-project",
+            "card_id": "card-2",
+            "workflow_id": "delivery",
+            "definition_revision": 1,
+            "definition": {
+                "id": "delivery",
+                "name": "Development",
+                "entries": {"backlog": "agent:plan", "develop": "agent:develop", "review": "deliver:review"},
+                "steps": {
+                    "agent:plan": {
+                        "type": "agent",
+                        "profile": "planner",
+                        "instruction": "Plan",
+                        "next": "agent:develop"
+                    },
+                    "agent:develop": {
+                        "type": "agent",
+                        "profile": "developer",
+                        "instruction": "Implement",
+                        "next": "deliver:review"
+                    },
+                    "deliver:review": {
+                        "type": "deliver",
+                        "sync_upstream": true,
+                        "max_conflict_attempts": 3,
+                        "next": "__end"
+                    },
+                    "__end": {"type": "complete"}
+                }
+            },
+            "state": "waiting_agent",
+            "step": "agent:develop",
+            "visit": 2,
+            "terminal_id": card_2_tid,
+            "trigger_event_id": null,
+            "input_digest": "gallery",
+            "inputs": {"sync_upstream": true},
+            "outputs": {"agent:plan": {"state": "completed"}},
+            "history": [
+                {"step": "agent:plan", "visit": 1, "event": "entered", "at": base_now.saturating_sub(74 * 60 * 1000 + 30_000)},
+                {"step": "agent:plan", "visit": 1, "event": "completed", "at": base_now.saturating_sub(70 * 60 * 1000 + 30_000)},
+                {"step": "agent:develop", "visit": 2, "event": "entered", "at": base_now.saturating_sub(70 * 60 * 1000 + 30_000)}
+            ],
+            "error": null,
+            "created_at": base_now.saturating_sub(74 * 60 * 1000 + 30_000),
+            "updated_at": base_now.saturating_sub(70 * 60 * 1000 + 30_000)
+        }))
+        .unwrap(),
+    );
     s.terminals.push(TerminalEntry {
         id: "gallery-card-1-cli-agent".into(),
         conversation_id: None,
@@ -1091,7 +1148,7 @@ pub fn board_cards() -> canban_types::Snapshot {
             agent_turn: Some(1),
         }),
         agent: None,
-        created_at: now(),
+        created_at: base_now.saturating_sub(8 * 60 * 1000 + 30_000),
     });
     let mut queued = s.cards[2].clone();
     queued.id = "queued-card".into();
@@ -1175,6 +1232,8 @@ pub fn board_cards() -> canban_types::Snapshot {
         None,
     );
     merger_attempt.state = "working".into();
+    merger_attempt.started_at = Some(base_now.saturating_sub(3 * 60 * 1000 + 30_000));
+    merger_attempt.updated_at = base_now.saturating_sub(3 * 60 * 1000 + 30_000);
     merger_attempt.workflow_run_id = Some("gallery-conflict-run".into());
     merger_attempt.workflow_step = Some("deliver:review:2".into());
     let merger_terminal_id = push_agent_terminal(&mut s, merger_attempt);
@@ -1213,10 +1272,14 @@ pub fn board_cards() -> canban_types::Snapshot {
             "input_digest": "gallery",
             "inputs": {"sync_upstream": true, "conflict_attempts": 1, "queued_at": 200},
             "outputs": {"agent:develop": {"state": "completed"}},
-            "history": [{"step": "agent:develop", "visit": 1, "event": "completed"}],
+            "history": [
+                {"step": "agent:develop", "visit": 1, "event": "entered", "at": base_now.saturating_sub(31 * 60 * 1000 + 30_000)},
+                {"step": "agent:develop", "visit": 1, "event": "completed", "at": base_now.saturating_sub(3 * 60 * 1000 + 30_000)},
+                {"step": "deliver:review", "visit": 2, "decision": "merge_conflict", "at": base_now.saturating_sub(3 * 60 * 1000 + 30_000)}
+            ],
             "error": null,
-            "created_at": 0,
-            "updated_at": 0
+            "created_at": base_now.saturating_sub(31 * 60 * 1000 + 30_000),
+            "updated_at": base_now.saturating_sub(3 * 60 * 1000 + 30_000)
         }))
         .unwrap(),
     );

@@ -2,6 +2,145 @@
 use canban_ui_kit::tokens::*;
 use canban_ui_kit::*;
 use nsh_core::prelude::*;
+/// Compact elapsed runtime label (`42s`, `1m`, `30m`, `1h10m`, `2h`, `1d2h`, `2d`).
+pub fn compact_duration(elapsed_ms: u64) -> String {
+    let total_secs = elapsed_ms / 1000;
+    if total_secs < 60 {
+        return format!("{total_secs}s");
+    }
+    let total_mins = total_secs / 60;
+    if total_mins < 60 {
+        return format!("{total_mins}m");
+    }
+    let total_hours = total_mins / 60;
+    let mins = total_mins % 60;
+    if total_hours < 24 {
+        return if mins == 0 {
+            format!("{total_hours}h")
+        } else {
+            format!("{total_hours}h{mins}m")
+        };
+    }
+    let days = total_hours / 24;
+    let hours = total_hours % 24;
+    if hours == 0 {
+        format!("{days}d")
+    } else {
+        format!("{days}d{hours}h")
+    }
+}
+
+/// Start timestamp (ms) of a running Card-role Agent execution, returning `None` if unavailable/sentinel.
+pub fn agent_started_at(snapshot: &canban_types::Snapshot, entry: &canban_types::TerminalEntry) -> Option<u64> {
+    let agent = entry.agent.as_ref()?;
+    if let Some(ts) = agent.started_at.filter(|&t| t > 1_000_000_000_000) {
+        return Some(ts);
+    }
+    if let Some(ev) = snapshot.events.iter().rev().find(|e| {
+        e.card_id == agent.card_id
+            && matches!(e.kind.as_str(), "execution.started" | "execution.continued")
+            && e.data["run_number"].as_u64() == Some(u64::from(agent.number))
+    }) && ev.created_at > 1_000_000_000_000
+    {
+        return Some(ev.created_at);
+    }
+    if agent.updated_at > 1_000_000_000_000 {
+        Some(agent.updated_at)
+    } else if entry.created_at > 1_000_000_000_000 {
+        Some(entry.created_at)
+    } else {
+        None
+    }
+}
+
+/// Elapsed duration (ms) for a step on a `WorkflowRun`, when timestamps exist.
+pub fn workflow_step_elapsed(
+    run: &canban_types::WorkflowRun,
+    step_id: &str,
+    now_ms: u64,
+    active_agent_started_at: Option<u64>,
+) -> Option<u64> {
+    let is_current = run.step.as_deref() == Some(step_id) && run.active();
+    let target_visit = if is_current {
+        Some(u64::from(run.visit))
+    } else {
+        run.history
+            .iter()
+            .rev()
+            .find(|h| {
+                h["step"].as_str() == Some(step_id)
+                    && matches!(
+                        h["event"].as_str(),
+                        Some("completed" | "conflict_resolved" | "returned_to_backlog")
+                    )
+            })
+            .and_then(|h| h["visit"].as_u64())
+    };
+    let start_ts = if is_current
+        && matches!(
+            run.definition.steps.get(step_id),
+            Some(canban_types::WorkflowStep::Deliver { .. })
+        )
+        && matches!(run.state.as_str(), "waiting_agent" | "running")
+        && run.inputs["conflict_attempts"].as_u64().unwrap_or(0) > 0
+    {
+        run.history
+            .iter()
+            .rev()
+            .find(|h| {
+                h["step"].as_str() == Some(step_id)
+                    && (target_visit.is_none() || h["visit"].as_u64() == target_visit)
+                    && h["decision"].as_str() == Some("merge_conflict")
+            })
+            .and_then(|h| h["at"].as_u64())
+            .filter(|&t| t > 1_000_000_000_000)
+            .or_else(|| active_agent_started_at.filter(|&t| t > 1_000_000_000_000))
+    } else {
+        None
+    }
+    .or_else(|| {
+        run.history
+            .iter()
+            .rev()
+            .find(|h| {
+                h["step"].as_str() == Some(step_id)
+                    && (target_visit.is_none() || h["visit"].as_u64() == target_visit)
+                    && h["event"].as_str() == Some("entered")
+            })
+            .and_then(|h| h["at"].as_u64())
+            .filter(|&t| t > 1_000_000_000_000)
+    })
+    .or_else(|| {
+        is_current
+            .then_some(active_agent_started_at)
+            .flatten()
+            .filter(|&t| t > 1_000_000_000_000)
+    })
+    .or_else(|| {
+        (is_current && run.updated_at > 1_000_000_000_000).then_some(run.updated_at)
+    })?;
+
+    if is_current {
+        Some(now_ms.saturating_sub(start_ts))
+    } else {
+        let end_ts = run
+            .history
+            .iter()
+            .rev()
+            .find(|h| {
+                h["step"].as_str() == Some(step_id)
+                    && (target_visit.is_none() || h["visit"].as_u64() == target_visit)
+                    && matches!(
+                        h["event"].as_str(),
+                        Some("completed" | "conflict_resolved" | "returned_to_backlog")
+                    )
+            })
+            .and_then(|h| h["at"].as_u64())
+            .filter(|&t| t > 1_000_000_000_000)?;
+        Some(end_ts.saturating_sub(start_ts))
+    }
+}
+
 pub fn age(time: u64) -> String {
     let seconds = canban_types::now().saturating_sub(time) / 1000;
     match seconds {
@@ -395,5 +534,126 @@ mod tests {
         card.archived_at = Some(3);
         assert!(!is_merging(&snapshot, &card));
         assert!(card_status_specs(&snapshot, &card, true).is_empty());
+    }
+
+    #[test]
+    fn compact_duration_formats_seconds_minutes_hours_and_days() {
+        assert_eq!(compact_duration(0), "0s");
+        assert_eq!(compact_duration(42_500), "42s");
+        assert_eq!(compact_duration(59_999), "59s");
+        assert_eq!(compact_duration(60_000), "1m");
+        assert_eq!(compact_duration(30 * 60_000), "30m");
+        assert_eq!(compact_duration(60 * 60_000), "1h");
+        assert_eq!(compact_duration(70 * 60_000), "1h10m");
+        assert_eq!(compact_duration(2 * 3_600_000), "2h");
+        assert_eq!(compact_duration(26 * 3_600_000 + 15 * 60_000), "1d2h");
+        assert_eq!(compact_duration(48 * 3_600_000), "2d");
+    }
+
+    #[test]
+    fn agent_and_workflow_step_elapsed_resolve_start_and_completion_timestamps() {
+        let t0 = 1_760_000_000_000_u64;
+        let mut snapshot = canban_types::Snapshot::default();
+        let mut attempt = canban_scheduler::agent_run(
+            "p",
+            "c",
+            2,
+            "develop",
+            "workflow",
+            canban_types::Config::default().profiles[0].clone(),
+            "task".into(),
+            None,
+        );
+        attempt.state = "running".into();
+        attempt.updated_at = t0 + 10_000;
+        let mut entry = canban_types::TerminalEntry {
+            id: "c:developer".into(),
+            conversation_id: Some("c:developer".into()),
+            number: 1,
+            name: None,
+            manual_number: None,
+            origin_card_id: Some("c".into()),
+            agent_engine: None,
+            runtime: None,
+            agent: Some(attempt),
+            created_at: t0,
+        };
+        // Legacy run without `started_at` resolves matching `execution.started` event first.
+        snapshot.events.push(canban_types::Event {
+            id: "ev1".into(),
+            project_id: "p".into(),
+            card_id: "c".into(),
+            sequence: 1,
+            kind: "execution.started".into(),
+            actor: "system".into(),
+            message: "@developer started".into(),
+            data: serde_json::json!({"run_number": 2}),
+            created_at: t0 + 5_000,
+        });
+        assert_eq!(agent_started_at(&snapshot, &entry), Some(t0 + 5_000));
+
+        // Explicit `started_at` on `AgentRun` takes precedence.
+        entry.agent.as_mut().unwrap().started_at = Some(t0 + 2_000);
+        assert_eq!(agent_started_at(&snapshot, &entry), Some(t0 + 2_000));
+
+        // Workflow step elapsed covers completed steps, active steps, and merge-conflict rounds.
+        let mut run: canban_types::WorkflowRun = serde_json::from_value(serde_json::json!({
+            "id": "run-1",
+            "project_id": "p",
+            "card_id": "c",
+            "workflow_id": "delivery",
+            "definition_revision": 1,
+            "definition": {
+                "id": "delivery",
+                "name": "Development",
+                "entries": {"backlog": "agent:plan"},
+                "steps": {
+                    "agent:plan": {"type": "agent", "profile": "planner", "instruction": "Plan", "next": "agent:develop"},
+                    "agent:develop": {"type": "agent", "profile": "developer", "instruction": "Dev", "next": "deliver:review"},
+                    "deliver:review": {"type": "deliver", "sync_upstream": true, "max_conflict_attempts": 3, "next": "done"},
+                    "done": {"type": "complete"}
+                }
+            },
+            "state": "waiting_agent",
+            "step": "agent:develop",
+            "visit": 2,
+            "terminal_id": "c:developer",
+            "trigger_event_id": null,
+            "input_digest": "d",
+            "inputs": {},
+            "outputs": {"agent:plan": {"state": "completed"}},
+            "history": [
+                {"step": "agent:plan", "visit": 1, "event": "entered", "at": t0},
+                {"step": "agent:plan", "visit": 1, "event": "completed", "at": t0 + 4 * 60_000},
+                {"step": "agent:develop", "visit": 2, "event": "entered", "at": t0 + 4 * 60_000}
+            ],
+            "error": null,
+            "created_at": t0,
+            "updated_at": t0 + 4 * 60_000
+        }))
+        .unwrap();
+
+        let now_ms = t0 + 74 * 60_000;
+        assert_eq!(
+            workflow_step_elapsed(&run, "agent:plan", now_ms, None),
+            Some(4 * 60_000)
+        );
+        assert_eq!(
+            workflow_step_elapsed(&run, "agent:develop", now_ms, Some(t0 + 4 * 60_000)),
+            Some(70 * 60_000)
+        );
+        assert_eq!(workflow_step_elapsed(&run, "deliver:review", now_ms, None), None);
+
+        // Merge-conflict round on `deliver` uses the `merge_conflict` dispatch timestamp rather than initial queue entry.
+        run.step = Some("deliver:review".into());
+        run.visit = 4;
+        run.inputs = serde_json::json!({"conflict_attempts": 1});
+        run.history.push(serde_json::json!({"step": "agent:develop", "visit": 2, "event": "completed", "at": t0 + 30 * 60_000}));
+        run.history.push(serde_json::json!({"step": "deliver:review", "visit": 3, "event": "entered", "at": t0 + 30 * 60_000}));
+        run.history.push(serde_json::json!({"step": "deliver:review", "visit": 4, "decision": "merge_conflict", "at": t0 + 71 * 60_000}));
+        assert_eq!(
+            workflow_step_elapsed(&run, "deliver:review", now_ms, Some(t0 + 71 * 60_000)),
+            Some(3 * 60_000)
+        );
     }
 }

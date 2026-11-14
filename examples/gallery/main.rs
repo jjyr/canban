@@ -533,6 +533,7 @@ pub fn Gallery() -> impl IntoElement {
     canban_ui::utilities::init(ui);
     canban_ui::terminals::bindings(ui);
     set_interval(std::time::Duration::from_secs(5), move || {
+        ui.runtime_clock.set(canban_types::now());
         ui.snapshot.update(|s| {
             for a in s.terminals.iter_mut().filter_map(|t| t.agent.as_mut()) {
                 if a.connection_state == "connected" && !a.finished() {
@@ -1122,12 +1123,15 @@ pub fn Gallery() -> impl IntoElement {
     }
     // Card tile states (running Agent pulse, gates, branch); `-open` keeps a
     // Card pane open so a narrow Board switches to one stage with stage tabs.
-    if let Ok(scene @ ("board-cards" | "board-cards-open")) =
+    if let Ok(scene @ ("board-cards" | "board-cards-open" | "board-cards-conflict")) =
         std::env::var("CANBAN_GALLERY_SCENE").as_deref()
     {
         ui.snapshot.set(fixtures::board_cards());
         if scene == "board-cards-open" {
             ui.card.set("card-2".into());
+            ui.page.set("card".into());
+        } else if scene == "board-cards-conflict" {
+            ui.card.set("conflict-card".into());
             ui.page.set("card".into());
         } else {
             ui.card.set(String::new());

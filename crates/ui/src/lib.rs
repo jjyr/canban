@@ -80,7 +80,22 @@ pub(crate) fn workspace_root() -> impl IntoElement {
     refresh(ui);
     machines::refresh_catalog(ui);
     set_interval(std::time::Duration::from_secs(5), move || {
-        machines::refresh_catalog(ui)
+        machines::refresh_catalog(ui);
+        let has_active_runtime = ui.snapshot.with_untracked(|s| {
+            s.workflow_runs
+                .iter()
+                .any(|r| r.active() && matches!(r.state.as_str(), "waiting_agent" | "running"))
+                || s.terminals.iter().any(|t| {
+                    t.agent.as_ref().is_some_and(|a| {
+                        matches!(a.state.as_str(), "starting" | "running" | "working")
+                    }) || (t.agent.is_none()
+                        && t.agent_engine.is_some()
+                        && t.runtime.as_ref().is_some_and(|r| r.state != "finished"))
+                })
+        });
+        if has_active_runtime {
+            ui.runtime_clock.set(canban_types::now());
+        }
     });
     let events = stored(crate::APP.get().unwrap().subscribe());
     let dirty = signal(false);

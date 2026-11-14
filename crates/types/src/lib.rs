@@ -690,6 +690,8 @@ pub struct AgentRun {
     #[serde(default)]
     pub error: Option<String>,
     #[serde(default)]
+    pub started_at: Option<u64>,
+    #[serde(default)]
     pub updated_at: u64,
     #[serde(default)]
     pub provider_session_id: Option<String>,
@@ -791,6 +793,7 @@ impl AgentRun {
         self.require_human_review = pending.require_human_review;
         self.state = "queued".into();
         self.error = None;
+        self.started_at = None;
         self.completed_at = None;
         self.completion_turn = None;
         self.turn_ended_at = None;

@@ -231,13 +231,16 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
         }
         let mut pills: Vec<AnyElement> = running
             .into_iter()
-            .map(|request| agent_pill(ui, request).into_element())
+            .map(|request| {
+                let started_at = crate::components::activity::agent_started_at(&snapshot, &request);
+                agent_pill(ui, request, started_at).into_element()
+            })
             .collect();
-        pills.extend(
-            ephemeral_agents
-                .into_iter()
-                .map(|entry| ephemeral_agent_pill(ui, &card.id, entry).into_element()),
-        );
+        pills.extend(ephemeral_agents.into_iter().map(|entry| {
+            let started_at =
+                (entry.saved.created_at > 1_000_000_000_000).then_some(entry.saved.created_at);
+            ephemeral_agent_pill(ui, &card.id, entry, started_at).into_element()
+        }));
         tile = tile.child(
             view()
                 .flex_row()
@@ -340,8 +343,8 @@ fn terminal_button(ui: Ui, card: String, number: u64, dot_tone: Option<ThemeColo
         .child(btn)
 }
 
-/// A running workflow/profile Agent: pulsing mark + provider icon + profile. Opens Card + Agent terminal.
-fn agent_pill(ui: Ui, entry: TerminalEntry) -> impl IntoElement {
+/// A running workflow/profile Agent: pulsing mark + provider icon + profile + compact elapsed runtime. Opens Card + Agent terminal.
+fn agent_pill(ui: Ui, entry: TerminalEntry, started_at: Option<u64>) -> impl IntoElement {
     let agent = entry
         .agent
         .as_ref()
@@ -368,18 +371,32 @@ fn agent_pill(ui: Ui, entry: TerminalEntry) -> impl IntoElement {
             .child(live_dot(ACCENT))
             .child(icon(mark).w(px(12.)).h(px(12.)))
             .child(
-                text(format!("@{profile}"))
-                    .text_size(px(CAPTION_SIZE))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(ACCENT)
-                    .truncate(),
+                text(move || {
+                    if let Some(ts) = started_at {
+                        let elapsed = crate::components::activity::compact_duration(
+                            ui.runtime_clock.get().saturating_sub(ts),
+                        );
+                        format!("@{profile} · {elapsed}")
+                    } else {
+                        format!("@{profile}")
+                    }
+                })
+                .text_size(px(CAPTION_SIZE))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(ACCENT)
+                .truncate(),
             )
             .on_press(move |_: &()| crate::terminals::open_request(ui, &id)),
     )
 }
 
 /// A live interactive CLI Agent spawned on this Card: opens the Card with that Agent tab selected.
-fn ephemeral_agent_pill(ui: Ui, card_id: &str, entry: crate::terminals::Entry) -> impl IntoElement {
+fn ephemeral_agent_pill(
+    ui: Ui,
+    card_id: &str,
+    entry: crate::terminals::Entry,
+    started_at: Option<u64>,
+) -> impl IntoElement {
     let (mark, provider) = entry
         .provider()
         .unwrap_or_else(|| (Icon::Agent, "Agent".into()));
@@ -421,11 +438,20 @@ fn ephemeral_agent_pill(ui: Ui, card_id: &str, entry: crate::terminals::Entry) -
             })
             .child(icon(mark).w(px(12.)).h(px(12.)))
             .child(
-                text(title)
-                    .text_size(px(CAPTION_SIZE))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(tone_color)
-                    .truncate(),
+                text(move || {
+                    if let Some(ts) = started_at {
+                        let elapsed = crate::components::activity::compact_duration(
+                            ui.runtime_clock.get().saturating_sub(ts),
+                        );
+                        format!("{title} · {elapsed}")
+                    } else {
+                        title.clone()
+                    }
+                })
+                .text_size(px(CAPTION_SIZE))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(tone_color)
+                .truncate(),
             )
             .on_press(move |_: &()| ui.open_card_with_terminal(cid.clone(), Some(tid.clone()))),
     )

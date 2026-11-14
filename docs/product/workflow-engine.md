@@ -1,6 +1,6 @@
 # Unified workflow engine, Studio and implementation
 
-Status: implemented and active (reconciled 2026-11-14; SQLite schema 15, workflow schema 5, desktop API 36). This is the canonical product and engineering contract for Canban Workflows, consolidating the unified engine rules, Project/Board workflow ownership, Visual Studio UX, YAML schema, RPC/CLI operations, workspace lifecycle, and acceptance evidence. [Events and subscriptions](events-and-notifications.md) owns the durable journal envelope and trigger delivery.
+Status: implemented and active (reconciled 2026-11-14; SQLite schema 15, workflow schema 5, desktop API 37). This is the canonical product and engineering contract for Canban Workflows, consolidating the unified engine rules, Project/Board workflow ownership, Visual Studio UX, YAML schema, RPC/CLI operations, workspace lifecycle, and acceptance evidence. [Events and subscriptions](events-and-notifications.md) owns the durable journal envelope and trigger delivery.
 
 ## Core design principles
 
@@ -115,7 +115,7 @@ issue-planning.yaml  • |
 ### Board column hints and Card stepper
 
 - **Column headers** display a read-only, client-derived automation pill (`⚡ Auto develop`, `⚡ Auto merge`, `⚡ Auto plan`, `⚡ Auto start`, `⚡ Auto @<profile>`, etc.) on the right side via `source::column_automation` (`Icon::Zap`). Hovering shows a styled tooltip (`tooltip_box`) summarizing the active workflow file, step actions, external-PR gating, upstream sync, and conflict retries; clicking does not navigate. Quiet/manual columns without automatic actions (including approval-only manual Review or default Backlog) stay blank. Compact single-stage mode (`stage_tabs`) omits the pill to preserve switcher width.
-- **Card detail** renders active/recent `WorkflowRun`s as a **Step Progress Stepper** (`✓ Analyze task → ● Implement → ○ Queue merge`), exposing clickable report links, an inline **Hold auto-merge / Resume auto-merge** button when a run includes `deliver`, and a **Request changes** feedback box that injects rework instructions into the next Agent step visit.
+- **Card detail** renders active/recent `WorkflowRun`s as a **Step Progress Stepper** (`✓ plan (@planner) · 4m → ● implement (@developer) · 1h10m → ○ Queue merge · Sync`), displaying compact elapsed execution time on the active workflow status line (`Agent running… · 1h10m`, `Resolving merge conflict (@merger)… · 3m`) as well as per-step durations on completed and active steps (matching the compact runtime duration on Board Card Agent capsules `@developer · 12m`), exposing clickable report links, an inline **Hold auto-merge / Resume auto-merge** button when a run includes `deliver`, and a **Request changes** feedback box that injects rework instructions into the next Agent step visit.
 
 ---
 

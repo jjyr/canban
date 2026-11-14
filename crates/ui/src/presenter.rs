@@ -111,6 +111,8 @@ pub struct Ui {
     pub pending_methods: Signal<BTreeSet<&'static str>>,
     /// Cards with a UI-initiated merge operation currently in flight.
     pub merging_cards: Signal<BTreeSet<String>>,
+    /// Periodic wall-clock timestamp (ms) updated on a slow timer for non-realtime elapsed badges.
+    pub runtime_clock: Signal<u64>,
     pub refreshing: Signal<bool>,
     pub snapshot_epoch: Signal<u64>,
     pub output: Signal<String>,
@@ -374,6 +376,7 @@ impl Ui {
             pending: signal(false),
             pending_methods: signal(BTreeSet::new()),
             merging_cards: signal(BTreeSet::new()),
+            runtime_clock: signal(now()),
             refreshing: signal(false),
             snapshot_epoch: signal(0),
             output: signal(String::new()),
@@ -679,6 +682,7 @@ pub fn refresh(ui: Ui) {
                     serde_json::to_value(old).ok() != serde_json::to_value(&snapshot).ok()
                 });
                 if different {
+                    ui.runtime_clock.set(now());
                     ui.snapshot.set(snapshot);
                 }
                 ui.snapshot_ready.set(true);
@@ -761,6 +765,7 @@ pub fn dispatch_complete(
             Ok(Ok((value, snapshot, config))) => {
                 ui.snapshot_epoch.update(|v| *v += 1);
                 ui.apply_config(&config);
+                ui.runtime_clock.set(now());
                 ui.snapshot.set(snapshot);
                 let failed = matches!(value["state"].as_str(), Some("failed" | "unknown"));
                 if failed {

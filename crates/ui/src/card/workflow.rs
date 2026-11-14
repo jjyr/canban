@@ -98,12 +98,16 @@ pub fn render(ui: Ui) -> impl IntoElement {
             att_profiles,
             queue_info,
         ) = ui.snapshot.with(|s| {
-            let att_profiles: std::collections::BTreeMap<String, String> = s
+            let att_profiles: std::collections::BTreeMap<String, (String, Option<u64>)> = s
                 .terminals
                 .iter()
                 .filter_map(|t| {
                     let a = t.agent.as_ref()?;
-                    (a.card_id == card_id).then(|| (t.id.clone(), a.profile.id.clone()))
+                    if a.card_id != card_id {
+                        return None;
+                    }
+                    let started_at = crate::components::activity::agent_started_at(s, t);
+                    Some((t.id.clone(), (a.profile.id.clone(), started_at)))
                 })
                 .collect();
             let card_runs: Vec<_> = s
@@ -299,11 +303,12 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         )
                     });
 
-                    let active_profile = run
+                    let active_agent_meta = run
                         .terminal_id
                         .as_ref()
-                        .and_then(|tid| att_profiles.get(tid))
-                        .map(String::as_str);
+                        .and_then(|tid| att_profiles.get(tid));
+                    let active_profile = active_agent_meta.map(|(p, _)| p.as_str());
+                    let active_agent_started_at = active_agent_meta.and_then(|(_, ts)| *ts);
                     let mut stepper = view().flex_row().flex_wrap().items_center().gap_1();
                     for (idx, step_id) in steps.iter().enumerate() {
                         if idx > 0 {
@@ -332,7 +337,6 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         {
                             badge_label = format!("{badge_label} (@{prof})");
                         }
-                        let text_label = format!("{marker} {badge_label}");
                         let tone = if is_current {
                             if run.state == "waiting_approval" || run.state == "stale" {
                                 Tone::Attention
@@ -344,7 +348,44 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         } else {
                             Tone::Neutral
                         };
-                        stepper = stepper.child(status(text_label, tone));
+                        if is_current
+                            && matches!(run.state.as_str(), "waiting_agent" | "running")
+                            && let Some(elapsed_base) = crate::components::activity::workflow_step_elapsed(
+                                &run,
+                                step_id,
+                                ui.runtime_clock.get_untracked(),
+                                active_agent_started_at,
+                            )
+                        {
+                            let start_ts = ui
+                                .runtime_clock
+                                .get_untracked()
+                                .saturating_sub(elapsed_base);
+                            let base_prefix = format!("{marker} {badge_label}");
+                            stepper = stepper.child(status(
+                                move || {
+                                    let dur = crate::components::activity::compact_duration(
+                                        ui.runtime_clock.get().saturating_sub(start_ts),
+                                    );
+                                    format!("{base_prefix} · {dur}")
+                                },
+                                tone,
+                            ));
+                        } else if (is_done || is_current)
+                            && let Some(elapsed_ms) =
+                                crate::components::activity::workflow_step_elapsed(
+                                    &run,
+                                    step_id,
+                                    ui.runtime_clock.get_untracked(),
+                                    active_agent_started_at,
+                                )
+                        {
+                            let dur = crate::components::activity::compact_duration(elapsed_ms);
+                            stepper =
+                                stepper.child(status(format!("{marker} {badge_label} · {dur}"), tone));
+                        } else {
+                            stepper = stepper.child(status(format!("{marker} {badge_label}"), tone));
+                        }
                     }
 
                     let pending_action = ui.is_method_pending("workflow.decide")
@@ -556,6 +597,39 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         }
                         _ => "Review required".to_owned(),
                     };
+                    let active_step_start = matches!(
+                        run.state.as_str(),
+                        "waiting_agent" | "running"
+                    )
+                    .then(|| {
+                        let now_ms = ui.runtime_clock.get_untracked();
+                        if let Some(step_id) = &run.step
+                            && let Some(elapsed) =
+                                crate::components::activity::workflow_step_elapsed(
+                                    &run,
+                                    step_id,
+                                    now_ms,
+                                    active_agent_started_at,
+                                )
+                        {
+                            Some(now_ms.saturating_sub(elapsed))
+                        } else {
+                            active_agent_started_at.filter(|&t| t > 1_000_000_000_000)
+                        }
+                    })
+                    .flatten();
+                    let wf_title_prefix = format!("{} · {state_label}", run.definition.name);
+                    let header_label = if let Some(start_ts) = active_step_start {
+                        label(move || {
+                            let dur = crate::components::activity::compact_duration(
+                                ui.runtime_clock.get().saturating_sub(start_ts),
+                            );
+                            format!("{wf_title_prefix} · {dur}")
+                        })
+                    } else {
+                        label(wf_title_prefix)
+                    }
+                    .font_weight(FontWeight::MEDIUM);
                     let mut body = view()
                         .p_2()
                         .gap_2()
@@ -569,10 +643,7 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                 .items_center()
                                 .justify_between()
                                 .gap_2()
-                                .child(
-                                    label(format!("{} · {state_label}", run.definition.name))
-                                        .font_weight(FontWeight::MEDIUM),
-                                )
+                                .child(header_label)
                                 .child(actions),
                         )
                         .child(stepper);

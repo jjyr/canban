@@ -310,6 +310,7 @@ impl AppServer {
             let run = promoted_entry.agent.as_mut().unwrap();
             run.promote_pending();
             run.number = next_number;
+            run.started_at = Some(now());
             run.state = "running".into();
             run.output_path = None;
             run.response_path = None;
