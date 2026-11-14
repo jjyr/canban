@@ -12,7 +12,10 @@ pub fn new_project(ui: Ui) -> impl IntoElement {
     let machine = signal("local".to_owned());
     let expanded = signal(false);
     let agents_expanded = signal(false);
-    let agent_overrides = signal(std::collections::BTreeMap::<String, String>::new());
+    let agent_overrides = signal(std::collections::BTreeMap::<
+        String,
+        canban_types::ProjectAgentOverride,
+    >::new());
     effect(move || {
         let path = directory.get();
         if !custom_name.get_untracked() {
@@ -98,7 +101,8 @@ pub fn new_project(ui: Ui) -> impl IntoElement {
                             action(
                                 move || {
                                     let arrow = if agents_expanded.get() { "▾" } else { "▸" };
-                                    let count = agent_overrides.with(|m| m.len());
+                                    let count = agent_overrides
+                                        .with(|m| m.values().filter(|ov| !ov.is_empty()).count());
                                     if count == 0 {
                                         format!("{arrow} Project Agents · Global defaults")
                                     } else {

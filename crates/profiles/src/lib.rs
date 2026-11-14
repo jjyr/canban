@@ -177,7 +177,44 @@ pub fn resolve_engine(config: &Config, engine_id: &str, home: Option<&Path>) -> 
         .iter()
         .find(|p| p.id == engine_id && !p.is_identity())
     {
-        return Ok(peer.clone());
+        let mut resolved = peer.clone();
+        if resolved.argv.is_none()
+            && let Some(preset_name) = resolved.preset.as_deref()
+        {
+            if let Some(tpl) = preset_name.strip_prefix("herdr:") {
+                ensure!(!tpl.trim().is_empty(), "Empty Herdr template");
+                let p = herdr_template_profile(tpl);
+                resolved.argv = p.argv;
+            } else if let Some(entry) = builtin_catalog().into_iter().find(|e| e.id == preset_name)
+            {
+                let p = entry.to_preset_profile();
+                resolved.argv = p.argv;
+                if resolved.resume_argv.is_none() {
+                    resolved.resume_argv = p.resume_argv;
+                }
+                if resolved.exit.is_none() {
+                    resolved.exit = p.exit;
+                }
+                if resolved.session_instruction.is_none() {
+                    resolved.session_instruction = p.session_instruction;
+                }
+            } else if let Some(home) = home
+                && let Ok(map) = presets(home)
+                && let Some(p) = map.get(preset_name)
+            {
+                resolved.argv = p.argv.clone();
+                if resolved.resume_argv.is_none() {
+                    resolved.resume_argv = p.resume_argv.clone();
+                }
+                if resolved.exit.is_none() {
+                    resolved.exit = p.exit.clone();
+                }
+                if resolved.session_instruction.is_none() {
+                    resolved.session_instruction = p.session_instruction.clone();
+                }
+            }
+        }
+        return Ok(resolved);
     }
     if let Some(tpl) = engine_id.strip_prefix("herdr:") {
         ensure!(!tpl.trim().is_empty(), "Empty Herdr template");
@@ -195,55 +232,66 @@ pub fn resolve_engine(config: &Config, engine_id: &str, home: Option<&Path>) -> 
     bail!("Unknown Agent backend '{engine_id}'")
 }
 
-/// Apply optional Project-level identity backend override (`project.agent_overrides`)
+/// Apply optional Project-level identity override (`project.agent_overrides`)
 /// while preserving the identity's `id` and `role_instruction`.
 pub fn apply_project_override(
     config: &Config,
     project: Option<&Project>,
     profile: &Profile,
 ) -> Profile {
+    if !profile.is_identity() {
+        return profile.clone();
+    }
     let Some(project) = project else {
         return profile.clone();
     };
-    let Some(target) = project
+    let Some(ov) = project
         .agent_overrides
         .get(&profile.id)
-        .map(String::as_str)
-        .filter(|s| !s.trim().is_empty())
+        .map(canban_types::ProjectAgentOverride::normalized)
+        .filter(|ov| !ov.is_empty())
     else {
         return profile.clone();
     };
-    // Only apply an override if the target backend isn't explicitly disabled in global config.
-    if config
-        .profiles
-        .iter()
-        .any(|p| p.id == target && !p.is_identity() && !p.enabled)
-    {
-        return profile.clone();
-    }
-    let Ok(engine) = resolve_engine(config, target, None) else {
-        return profile.clone();
-    };
-    let next_preset = engine.preset.clone().or_else(|| Some(target.to_owned()));
-    let same_engine = profile.preset.as_deref() == next_preset.as_deref()
-        || profile.preset.as_deref() == Some(target)
-        || profile.command_name() == engine.command_name();
     let mut out = profile.clone();
-    out.preset = next_preset;
-    out.argv = engine.argv;
-    out.resume_argv = engine.resume_argv;
-    out.exit = Some(engine.exit.unwrap_or(ExitAction::Manual));
-    out.session_instruction = engine.session_instruction;
-    if same_engine {
-        if out.model.is_none() {
-            out.model = engine.model;
+    if let Some(target) = ov.agent.as_deref() {
+        // Only apply an override if the target backend isn't explicitly disabled in global config.
+        if config
+            .profiles
+            .iter()
+            .any(|p| p.id == target && !p.is_identity() && !p.enabled)
+        {
+            return profile.clone();
         }
-        if out.effort.is_none() {
+        let Ok(engine) = resolve_engine(config, target, None) else {
+            return profile.clone();
+        };
+        let next_preset = engine.preset.clone().or_else(|| Some(target.to_owned()));
+        let same_engine = profile.preset.as_deref() == next_preset.as_deref()
+            || profile.preset.as_deref() == Some(target)
+            || profile.command_name() == engine.command_name();
+        out.preset = next_preset;
+        out.argv = engine.argv;
+        out.resume_argv = engine.resume_argv;
+        out.exit = Some(engine.exit.unwrap_or(ExitAction::Manual));
+        out.session_instruction = engine.session_instruction;
+        if same_engine {
+            if out.model.is_none() {
+                out.model = engine.model;
+            }
+            if out.effort.is_none() {
+                out.effort = engine.effort;
+            }
+        } else {
+            out.model = engine.model;
             out.effort = engine.effort;
         }
-    } else {
-        out.model = engine.model;
-        out.effort = engine.effort;
+    }
+    if let Some(m) = ov.model {
+        out.model = Some(m);
+    }
+    if let Some(e) = ov.effort {
+        out.effort = Some(e);
     }
     out
 }
@@ -797,8 +845,14 @@ mod tests {
             github: None,
             delivery_mode: Default::default(),
             agent_overrides: BTreeMap::from([
-                ("developer".into(), "agy".into()),
-                ("reviewer".into(), "gemini".into()), // disabled globally -> ignored!
+                (
+                    "developer".into(),
+                    canban_types::ProjectAgentOverride::from_agent("agy"),
+                ),
+                (
+                    "reviewer".into(),
+                    canban_types::ProjectAgentOverride::from_agent("gemini"),
+                ), // disabled globally -> ignored!
             ]),
             tags: Default::default(),
             id: "p1".into(),
@@ -819,8 +873,10 @@ mod tests {
         let disabled_ignored = apply_project_override(&c, Some(&proj), rev);
         assert_eq!(disabled_ignored.command()[0], "codex");
 
-        proj.agent_overrides
-            .insert("developer".into(), "herdr:my-tpl".into());
+        proj.agent_overrides.insert(
+            "developer".into(),
+            canban_types::ProjectAgentOverride::from_agent("herdr:my-tpl"),
+        );
         let tpl_override = apply_project_override(&c, Some(&proj), dev);
         assert_eq!(tpl_override.command()[0], "my-tpl");
     }
@@ -978,10 +1034,13 @@ mod tests {
             effort: Some("high".into()),
             ..Default::default()
         });
-        let proj = Project {
+        let mut proj = Project {
             github: None,
             delivery_mode: Default::default(),
-            agent_overrides: BTreeMap::from([("developer".into(), "agy".into())]),
+            agent_overrides: BTreeMap::from([(
+                "developer".into(),
+                canban_types::ProjectAgentOverride::from_agent("agy"),
+            )]),
             tags: Default::default(),
             id: "p1".into(),
             name: "Demo".into(),
@@ -994,6 +1053,52 @@ mod tests {
         let dev_on_agy = apply_project_override(&cfg_with_agy, Some(&proj), dev);
         assert_eq!(dev_on_agy.model.as_deref(), Some("gemini-4-carbon-high"));
         assert_eq!(dev_on_agy.effort.as_deref(), Some("high"));
+
+        // Explicit Project model & effort overrides take precedence over global identity/engine defaults
+        proj.agent_overrides.insert(
+            "developer".into(),
+            canban_types::ProjectAgentOverride {
+                agent: Some("agy".into()),
+                model: Some("gemini-4-carbon-low".into()),
+                effort: Some("low".into()),
+            },
+        );
+        let dev_custom_agy = apply_project_override(&cfg_with_agy, Some(&proj), dev);
+        assert_eq!(dev_custom_agy.command()[0], "agy");
+        assert_eq!(dev_custom_agy.model.as_deref(), Some("gemini-4-carbon-low"));
+        assert_eq!(dev_custom_agy.effort.as_deref(), Some("low"));
+
+        // Model/effort-only Project override keeps global backing Agent (codex)
+        proj.agent_overrides.insert(
+            "reviewer".into(),
+            canban_types::ProjectAgentOverride {
+                agent: None,
+                model: Some("gpt-5.4-mini".into()),
+                effort: Some("low".into()),
+            },
+        );
+        let rev_model_only = apply_project_override(&cfg_with_agy, Some(&proj), rev);
+        assert_eq!(rev_model_only.command()[0], "codex");
+        assert_eq!(rev_model_only.model.as_deref(), Some("gpt-5.4-mini"));
+        assert_eq!(rev_model_only.effort.as_deref(), Some("low"));
+
+        // Legacy string format in stored Project JSON still deserializes cleanly
+        let legacy_proj: Project = serde_json::from_value(json!({
+            "id": "p-legacy",
+            "name": "Legacy",
+            "directory": "/tmp",
+            "workflow": canban_types::Workflow::default(),
+            "created_at": 0,
+            "agent_overrides": {
+                "developer": "agy"
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            legacy_proj.agent_overrides["developer"].agent.as_deref(),
+            Some("agy")
+        );
+        assert!(legacy_proj.agent_overrides["developer"].model.is_none());
     }
     #[test]
     fn interactive_command_strips_prompt_flags_and_never_resumes() {

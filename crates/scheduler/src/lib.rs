@@ -357,7 +357,14 @@ mod tests {
         let mut proj = Project {
             github: None,
             delivery_mode: Default::default(),
-            agent_overrides: std::collections::BTreeMap::from([("developer".into(), "agy".into())]),
+            agent_overrides: std::collections::BTreeMap::from([(
+                "developer".into(),
+                canban_types::ProjectAgentOverride {
+                    agent: Some("agy".into()),
+                    model: Some("gemini-4-carbon-low".into()),
+                    effort: Some("low".into()),
+                },
+            )]),
             tags: Default::default(),
             id: "p".into(),
             name: "P".into(),
@@ -370,6 +377,8 @@ mod tests {
         let selected = select_in_project(&resolved, Some(&proj), Some("developer")).unwrap();
         assert_eq!(selected.id, "developer");
         assert_eq!(selected.command()[0], "agy");
+        assert_eq!(selected.model.as_deref(), Some("gemini-4-carbon-low"));
+        assert_eq!(selected.effort.as_deref(), Some("low"));
         proj.agent_overrides.clear();
         let fallback = select_in_project(&resolved, Some(&proj), Some("developer")).unwrap();
         assert_eq!(fallback.command()[0], "codex");

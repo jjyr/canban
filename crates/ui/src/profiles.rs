@@ -244,18 +244,24 @@ pub fn effective_provider(
     profile: &Profile,
     project: Option<&canban_types::Project>,
 ) -> (Icon, String, bool) {
-    if let Some(proj) = project
-        && let Some(override_id) = proj
+    if profile.is_identity()
+        && let Some(proj) = project
+        && let Some(ov) = proj
             .agent_overrides
             .get(&profile.id)
-            .filter(|s| !s.trim().is_empty())
+            .map(canban_types::ProjectAgentOverride::normalized)
+            .filter(|ov| !ov.is_empty())
     {
-        let label = override_id
-            .strip_prefix("herdr:")
-            .map(|t| format!("Herdr · {t}"))
-            .or_else(|| canban_profiles::display_name(override_id).map(str::to_owned))
-            .unwrap_or_else(|| override_id.clone());
-        return (agent_icon(override_id), label, true);
+        if let Some(override_id) = ov.agent.as_deref() {
+            let label = override_id
+                .strip_prefix("herdr:")
+                .map(|t| format!("Herdr · {t}"))
+                .or_else(|| canban_profiles::display_name(override_id).map(str::to_owned))
+                .unwrap_or_else(|| override_id.to_owned());
+            return (agent_icon(override_id), label, true);
+        }
+        let (mark, label) = provider(profile);
+        return (mark, label, true);
     }
     let (mark, label) = provider(profile);
     (mark, label, false)

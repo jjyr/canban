@@ -858,36 +858,50 @@ impl AppServer {
         &self,
         config: &Config,
         value: Option<&Value>,
-    ) -> Result<BTreeMap<String, String>> {
+    ) -> Result<BTreeMap<String, ProjectAgentOverride>> {
         let mut overrides = BTreeMap::new();
         let Some(obj) = value.and_then(Value::as_object) else {
             return Ok(overrides);
         };
         for (role_id, target_val) in obj {
             let role_id = role_id.trim();
-            let Some(target) = target_val
-                .as_str()
-                .map(str::trim)
-                .filter(|s| !s.is_empty() && *s != "inherit")
-            else {
+            if target_val.is_null() {
                 continue;
+            }
+            let parsed: ProjectAgentOverride = if let Some(s) = target_val.as_str() {
+                ProjectAgentOverride::from_agent(s).normalized()
+            } else if target_val.is_object() {
+                serde_json::from_value(target_val.clone())
+                    .with_context(|| format!("Invalid Project override for @{role_id}"))?
+            } else {
+                bail!("Invalid Project override value for @{role_id}");
             };
-            ensure!(
-                config.profiles.iter().any(|p| p.id == role_id),
-                "Unknown identity @{role_id}"
-            );
-            let _ = canban_profiles::resolve_engine(config, target, Some(&self.home))?;
-            if let Some(direct) = config
+            if parsed.is_empty() {
+                continue;
+            }
+            let role_prof = config
                 .profiles
                 .iter()
-                .find(|p| p.id == target && !p.is_identity())
-            {
-                ensure!(
-                    direct.enabled,
-                    "Agent '{target}' is disabled globally; enable it in Settings first"
-                );
+                .find(|p| p.id == role_id)
+                .with_context(|| format!("Unknown identity @{role_id}"))?;
+            ensure!(
+                role_prof.is_identity(),
+                "Project overrides only apply to role @identities (got direct CLI Agent @{role_id})"
+            );
+            if let Some(target) = parsed.agent.as_deref() {
+                let _ = canban_profiles::resolve_engine(config, target, Some(&self.home))?;
+                if let Some(direct) = config
+                    .profiles
+                    .iter()
+                    .find(|p| p.id == target && !p.is_identity())
+                {
+                    ensure!(
+                        direct.enabled,
+                        "Agent '{target}' is disabled globally; enable it in Settings first"
+                    );
+                }
             }
-            overrides.insert(role_id.to_owned(), target.to_owned());
+            overrides.insert(role_id.to_owned(), parsed);
         }
         Ok(overrides)
     }

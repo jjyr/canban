@@ -2331,14 +2331,36 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
     assert_eq!(qa.role_instruction, "Run edge-case QA checks thoroughly.");
     assert_eq!(qa.command()[0], "codex");
 
-    // 5. Project-level identity override: override `@developer` -> `codex` ONLY for `project`,
-    // while global `@developer` remains `agy`!
+    // 5. Project-level identity override: override `@developer` -> `codex` (with project model/effort)
+    // and `@reviewer` model/effort-only override ONLY for `project`, while global `@developer` remains `agy`,
+    // and reject direct CLI agent keys in `project.agents`!
+    assert!(
+        app.call(
+            "project.agents",
+            json!({
+                "project_id": project.id,
+                "agent_overrides": {
+                    "codex": {"model": "gpt-6.1-sol"}
+                }
+            }),
+        )
+        .is_err(),
+        "Direct CLI Agents must be rejected in Project-level overrides"
+    );
     app.call(
         "project.agents",
         json!({
             "project_id": project.id,
             "agent_overrides": {
-                "developer": "codex"
+                "developer": {
+                    "agent": "codex",
+                    "model": "gpt-5.4",
+                    "effort": "high"
+                },
+                "reviewer": {
+                    "model": "gemini-4-carbon-low",
+                    "effort": "low"
+                }
             }
         }),
     )
@@ -2347,8 +2369,8 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
         "comment.add",
         json!({
             "card_id": card.id,
-            "body": "@developer check project override",
-            "mentions": ["developer"],
+            "body": "@developer @reviewer check project override",
+            "mentions": ["developer", "reviewer"],
         }),
     )
     .unwrap();
@@ -2364,10 +2386,28 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
         "codex",
         "Project override must route @developer to codex without altering global agy"
     );
+    assert_eq!(req.profile.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(req.profile.effort.as_deref(), Some("high"));
     assert!(
         req.profile.role_instruction.contains("development Agent"),
         "Project override must preserve @developer's role instruction"
     );
+    let rev_req = snap
+        .terminals
+        .iter()
+        .filter_map(|r| r.agent.as_ref())
+        .rfind(|r| r.card_id == card.id && r.profile.id == "reviewer")
+        .expect("reviewer request queued");
+    assert_eq!(
+        rev_req.profile.command()[0],
+        "agy",
+        "Model/effort-only project override preserves global backing Agent"
+    );
+    assert_eq!(
+        rev_req.profile.model.as_deref(),
+        Some("gemini-4-carbon-low")
+    );
+    assert_eq!(rev_req.profile.effort.as_deref(), Some("low"));
     assert_eq!(
         app.config()
             .profiles

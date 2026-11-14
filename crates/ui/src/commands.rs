@@ -220,7 +220,7 @@ pub const CATALOG: &[Command] = &[
         key: "",
         display: "Project",
         context: "Preferences",
-        keywords: "project-agents setup agent identity override roles",
+        keywords: "project-agents setup agent identity override roles model effort",
     },
     Command {
         id: "go-drafts",

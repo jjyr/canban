@@ -1896,13 +1896,308 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
     )
 }
 
-/// Reusable Project-level Identity -> Agent Override editor, used both on the
+#[allow(clippy::too_many_arguments)]
+fn project_model_effort_buttons(
+    ui: Ui,
+    role_id: String,
+    inherited_model: Option<String>,
+    explicit_model: Option<String>,
+    inherited_effort: Option<String>,
+    explicit_effort: Option<String>,
+    caps: EngineCatalogCaps,
+    overrides: Signal<BTreeMap<String, ProjectAgentOverride>>,
+    custom_model_target: Signal<Option<String>>,
+    custom_model_draft: Signal<String>,
+) -> AnyElement {
+    if !caps.supports_model && !caps.supports_effort {
+        return view().into_element();
+    }
+
+    let model_btn = if caps.supports_model {
+        let btn_label = match (&explicit_model, &inherited_model) {
+            (Some(m), _) => format!("{} ▾", short_model_badge(m)),
+            (None, Some(inherited)) => format!("{} (auto) ▾", short_model_badge(inherited)),
+            _ => "Model: Default ▾".into(),
+        };
+        let pid_m = role_id.clone();
+        let models_list = caps.models.clone();
+        let cur_explicit_m = explicit_model.clone();
+        let cur_inherited_m = inherited_model.clone();
+        compact_action(
+            btn_label,
+            if explicit_model.is_some() {
+                Variant::Secondary
+            } else {
+                Variant::Quiet
+            },
+            move |_| {
+                if models_list.is_empty() {
+                    let seed = cur_explicit_m
+                        .clone()
+                        .or_else(|| cur_inherited_m.clone())
+                        .unwrap_or_default();
+                    if custom_model_target.get_untracked().as_deref() == Some(pid_m.as_str()) {
+                        custom_model_target.set(None);
+                    } else {
+                        custom_model_draft.set(seed);
+                        custom_model_target.set(Some(pid_m.clone()));
+                    }
+                    return;
+                }
+                use nsh_core::element::desktop::{MenuItem, popup_menu};
+                let opts = models_list.clone();
+                let p_id = pid_m.clone();
+                let exp_m = cur_explicit_m.clone();
+                let inh_m = cur_inherited_m.clone();
+                ui.spawn(async move {
+                    let mut items = Vec::new();
+                    let def_base = match inh_m.as_deref() {
+                        Some(m) => format!("Default (Inherit: {})", short_model_badge(m)),
+                        None => "Default (Inherit Global)".into(),
+                    };
+                    let def_label = if exp_m.is_none() {
+                        format!("✓ {def_base}")
+                    } else {
+                        def_base
+                    };
+                    let clear_id = p_id.clone();
+                    items.push(MenuItem::new(def_label).on_select(move || {
+                        custom_model_target.set(None);
+                        let k = clear_id.clone();
+                        overrides.update(|m| {
+                            if let Some(ov) = m.get_mut(&k) {
+                                ov.model = None;
+                                if ov.is_empty() {
+                                    m.remove(&k);
+                                }
+                            }
+                        });
+                    }));
+                    items.push(MenuItem::separator());
+                    for (mid, mlabel) in opts {
+                        let checked = exp_m.as_deref() == Some(mid.as_str());
+                        let prefix = if checked { "✓ " } else { "" };
+                        let title = if mlabel == mid {
+                            format!("{prefix}{mid}")
+                        } else {
+                            format!("{prefix}{mlabel} ({mid})")
+                        };
+                        let set_id = p_id.clone();
+                        let chosen = mid.clone();
+                        items.push(MenuItem::new(title).on_select(move || {
+                            custom_model_target.set(None);
+                            let k = set_id.clone();
+                            let v = chosen.clone();
+                            overrides.update(|m| {
+                                m.entry(k).or_default().model = Some(v);
+                            });
+                        }));
+                    }
+                    items.push(MenuItem::separator());
+                    let custom_id = p_id.clone();
+                    let seed = exp_m.or(inh_m).unwrap_or_default();
+                    items.push(MenuItem::new("Custom model ID…").on_select(move || {
+                        custom_model_draft.set(seed.clone());
+                        custom_model_target.set(Some(custom_id.clone()));
+                    }));
+                    popup_menu(items).await;
+                });
+            },
+        )
+        .into_element()
+    } else {
+        view().into_element()
+    };
+
+    let effort_btn = if caps.supports_effort {
+        let eff_label = match (&explicit_effort, &inherited_effort) {
+            (Some(e), _) => format!("Effort: {e} ▾"),
+            (None, Some(inherited)) => format!("Effort: {inherited} (auto) ▾"),
+            _ => "Effort: Default ▾".into(),
+        };
+        let pid_e = role_id;
+        let efforts_list = if caps.efforts.is_empty() {
+            vec!["low".into(), "medium".into(), "high".into()]
+        } else {
+            caps.efforts
+        };
+        let cur_explicit_e = explicit_effort.clone();
+        let cur_inherited_e = inherited_effort.clone();
+        compact_action(
+            eff_label,
+            if explicit_effort.is_some() {
+                Variant::Secondary
+            } else {
+                Variant::Quiet
+            },
+            move |_| {
+                use nsh_core::element::desktop::{MenuItem, popup_menu};
+                let opts = efforts_list.clone();
+                let p_id = pid_e.clone();
+                let exp_e = cur_explicit_e.clone();
+                let inh_e = cur_inherited_e.clone();
+                ui.spawn(async move {
+                    let mut items = Vec::new();
+                    let def_base = match inh_e.as_deref() {
+                        Some(e) => format!("Default (Inherit: {e})"),
+                        None => "Default (Inherit Global)".into(),
+                    };
+                    let def_label = if exp_e.is_none() {
+                        format!("✓ {def_base}")
+                    } else {
+                        def_base
+                    };
+                    let clear_id = p_id.clone();
+                    items.push(MenuItem::new(def_label).on_select(move || {
+                        let k = clear_id.clone();
+                        overrides.update(|m| {
+                            if let Some(ov) = m.get_mut(&k) {
+                                ov.effort = None;
+                                if ov.is_empty() {
+                                    m.remove(&k);
+                                }
+                            }
+                        });
+                    }));
+                    items.push(MenuItem::separator());
+                    for eff in opts {
+                        let checked = exp_e.as_deref() == Some(eff.as_str());
+                        let title = if checked {
+                            format!("✓ {eff}")
+                        } else {
+                            eff.clone()
+                        };
+                        let set_id = p_id.clone();
+                        let chosen = eff.clone();
+                        items.push(MenuItem::new(title).on_select(move || {
+                            let k = set_id.clone();
+                            let v = chosen.clone();
+                            overrides.update(|m| {
+                                m.entry(k).or_default().effort = Some(v);
+                            });
+                        }));
+                    }
+                    popup_menu(items).await;
+                });
+            },
+        )
+        .into_element()
+    } else {
+        view().into_element()
+    };
+
+    view()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .child(model_btn)
+        .child(effort_btn)
+        .into_element()
+}
+
+fn project_custom_model_inline_editor(
+    role_id: String,
+    overrides: Signal<BTreeMap<String, ProjectAgentOverride>>,
+    custom_model_target: Signal<Option<String>>,
+    custom_model_draft: Signal<String>,
+) -> AnyElement {
+    let apply_id = role_id.clone();
+    let clear_id = role_id;
+    view()
+        .flex_row()
+        .flex_wrap()
+        .items_end()
+        .gap_2()
+        .pt_1()
+        .child(
+            view().flex_1().min_w(px(220.)).child(
+                bound_field(
+                    move || custom_model_draft.get(),
+                    move |v| custom_model_draft.set(v.to_owned()),
+                    "e.g. gemini-4-carbon-high, gpt-6.1-sol, claude-opus-4-6…",
+                )
+                .label("Custom model ID"),
+            ),
+        )
+        .child(compact_action("Apply", Variant::Primary, move |_| {
+            let val = custom_model_draft.get_untracked();
+            let trimmed = val.trim().to_owned();
+            let k = apply_id.clone();
+            overrides.update(|m| {
+                if trimmed.is_empty() {
+                    if let Some(ov) = m.get_mut(&k) {
+                        ov.model = None;
+                        if ov.is_empty() {
+                            m.remove(&k);
+                        }
+                    }
+                } else {
+                    m.entry(k).or_default().model = Some(trimmed);
+                }
+            });
+            custom_model_target.set(None);
+        }))
+        .child(compact_action("Reset default", Variant::Quiet, move |_| {
+            let k = clear_id.clone();
+            overrides.update(|m| {
+                if let Some(ov) = m.get_mut(&k) {
+                    ov.model = None;
+                    if ov.is_empty() {
+                        m.remove(&k);
+                    }
+                }
+            });
+            custom_model_target.set(None);
+        }))
+        .child(compact_action("Cancel", Variant::Quiet, move |_| {
+            custom_model_target.set(None);
+        }))
+        .into_element()
+}
+
+fn inherited_project_options(
+    all_profiles: &[Profile],
+    prof: &Profile,
+    override_agent: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let global_eng = engine_key_for_profile(prof);
+    let Some(target) = override_agent.filter(|s| !s.trim().is_empty()) else {
+        return (prof.model.clone(), prof.effort.clone());
+    };
+    let same_engine = target == global_eng
+        || prof.preset.as_deref() == Some(target)
+        || prof.command_name() == target;
+    let peer = all_profiles
+        .iter()
+        .find(|p| p.id == target && !p.is_identity());
+    let peer_model = peer
+        .and_then(|p| p.model.as_deref().map(str::trim))
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let peer_effort = peer
+        .and_then(|p| p.effort.as_deref().map(str::trim))
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    if same_engine {
+        (
+            prof.model.clone().or(peer_model),
+            prof.effort.clone().or(peer_effort),
+        )
+    } else {
+        (peer_model, peer_effort)
+    }
+}
+
+/// Reusable Project-level Identity -> Agent / Model / Effort Override editor, used both on the
 /// dedicated `Project / Agents` screen and inside `New Project`.
 pub fn project_overrides_editor(
     ui: Ui,
-    overrides: Signal<BTreeMap<String, String>>,
+    overrides: Signal<BTreeMap<String, ProjectAgentOverride>>,
     machine: Signal<String>,
 ) -> impl IntoElement {
+    let custom_model_target = signal(Option::<String>::None);
+    let custom_model_draft = signal(String::new());
+
     effect(move || {
         let m = machine.get();
         refresh_catalog(ui, &m);
@@ -1910,6 +2205,7 @@ pub fn project_overrides_editor(
 
     dynamic(move || {
         let all = ui.all_profiles.get();
+        let cat_rows = catalog_agents(ui);
         let identities: Vec<Profile> = all
             .iter()
             .filter(|p| p.is_identity() && p.enabled)
@@ -1917,15 +2213,23 @@ pub fn project_overrides_editor(
             .collect();
         let engines = enabled_engine_options(ui);
         let cur_map = overrides.get();
+        let active_custom_model = custom_model_target.get();
 
+        let has_any_override = cur_map.values().any(|ov| !ov.is_empty());
         let uniform_override = if !identities.is_empty() {
-            let first = cur_map.get(&identities[0].id);
+            let first = cur_map
+                .get(&identities[0].id)
+                .and_then(|ov| ov.normalized().agent);
             if let Some(target) = first
-                && identities
-                    .iter()
-                    .all(|id| cur_map.get(&id.id) == Some(target))
+                && identities.iter().all(|id| {
+                    cur_map
+                        .get(&id.id)
+                        .and_then(|ov| ov.normalized().agent)
+                        .as_deref()
+                        == Some(target.as_str())
+                })
             {
-                Some(target.clone())
+                Some(target)
             } else {
                 None
             }
@@ -1934,6 +2238,7 @@ pub fn project_overrides_editor(
         };
 
         let ids_for_all: Vec<String> = identities.iter().map(|p| p.id.clone()).collect();
+        let all_for_all = all.clone();
 
         view()
             .gap_3()
@@ -1951,27 +2256,46 @@ pub fn project_overrides_editor(
                                 "Follow Global",
                                 None,
                                 {
-                                    let is_empty = cur_map.is_empty();
+                                    let is_empty = !has_any_override;
                                     move || is_empty
                                 },
-                                move |_| overrides.set(BTreeMap::new()),
+                                move |_| {
+                                    custom_model_target.set(None);
+                                    overrides.set(BTreeMap::new());
+                                },
                             ))
                             .children(engines.iter().map(|(eid, ename)| {
                                 let target_id = eid.clone();
                                 let check_id = eid.clone();
                                 let uni = uniform_override.clone();
                                 let role_ids = ids_for_all.clone();
+                                let all_c = all_for_all.clone();
                                 let mark = engine_icon(eid);
                                 compact_segment(
                                     ename.clone(),
                                     Some(mark),
                                     move || uni.as_deref() == Some(check_id.as_str()),
                                     move |_| {
-                                        let mut next = BTreeMap::new();
-                                        for r in &role_ids {
-                                            next.insert(r.clone(), target_id.clone());
-                                        }
-                                        overrides.set(next);
+                                        custom_model_target.set(None);
+                                        overrides.update(|m| {
+                                            for r in &role_ids {
+                                                let prev_eff = m
+                                                    .get(r)
+                                                    .and_then(|ov| ov.normalized().agent)
+                                                    .or_else(|| {
+                                                        all_c
+                                                            .iter()
+                                                            .find(|p| p.id == *r)
+                                                            .map(engine_key_for_profile)
+                                                    });
+                                                let entry = m.entry(r.clone()).or_default();
+                                                if prev_eff.as_deref() != Some(target_id.as_str()) {
+                                                    entry.model = None;
+                                                    entry.effort = None;
+                                                }
+                                                entry.agent = Some(target_id.clone());
+                                            }
+                                        });
                                     },
                                 )
                                 .into_element()
@@ -1985,39 +2309,45 @@ pub fn project_overrides_editor(
                     .children(identities.into_iter().map(|prof| {
                         let role_id = prof.id.clone();
                         let (global_icon, global_prov) = crate::profiles::provider(&prof);
-                        let current_override = cur_map.get(&role_id).cloned();
-                        let effective_mark = current_override
+                        let global_eng_key = engine_key_for_profile(&prof);
+                        let current_ov = cur_map
+                            .get(&role_id)
+                            .map(ProjectAgentOverride::normalized)
+                            .unwrap_or_default();
+                        let is_overridden = !current_ov.is_empty();
+                        let current_agent_ov = current_ov.agent.clone();
+                        let effective_eng_key = current_agent_ov
+                            .clone()
+                            .unwrap_or_else(|| global_eng_key.clone());
+                        let effective_mark = current_agent_ov
                             .as_deref()
                             .map(engine_icon)
                             .unwrap_or(global_icon);
+                        let caps = catalog_caps_for_engine(&cat_rows, &effective_eng_key);
+                        let (inherited_model, inherited_effort) =
+                            inherited_project_options(&all, &prof, current_agent_ov.as_deref());
+                        let is_editing_custom_model =
+                            active_custom_model.as_deref() == Some(role_id.as_str());
                         let engines_row = engines.clone();
                         let clear_role = role_id.clone();
+                        let global_eng_for_clear = global_eng_key.clone();
                         let short_desc = builtin_role_summary(&role_id, &prof.role_instruction);
 
                         view()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .flex_wrap()
-                            .gap_3()
                             .py_2p5()
                             .border_b_1()
                             .border_color(BORDER)
+                            .gap_2()
                             .child(
                                 view()
                                     .flex_row()
                                     .items_center()
                                     .gap_2p5()
-                                    .min_w(px(180.))
-                                    .flex_1()
+                                    .min_w(px(0.))
                                     .child(
                                         icon_tinted(
                                             effective_mark,
-                                            if current_override.is_some() {
-                                                ACCENT
-                                            } else {
-                                                MUTED
-                                            },
+                                            if is_overridden { ACCENT } else { MUTED },
                                         )
                                         .w(px(16.))
                                         .h(px(16.)),
@@ -2036,7 +2366,7 @@ pub fn project_overrides_editor(
                                                         label(format!("@{role_id}"))
                                                             .font_weight(FontWeight::MEDIUM),
                                                     )
-                                                    .child(if current_override.is_some() {
+                                                    .child(if is_overridden {
                                                         status("Override", Tone::Info)
                                                             .into_element()
                                                     } else {
@@ -2047,42 +2377,122 @@ pub fn project_overrides_editor(
                                     ),
                             )
                             .child(
-                                segmented()
-                                    .child(compact_segment(
-                                        format!("Global ({global_prov})"),
-                                        Some(global_icon),
-                                        {
-                                            let is_none = current_override.is_none();
-                                            move || is_none
-                                        },
-                                        move |_| {
-                                            let k = clear_role.clone();
-                                            overrides.update(|m| {
-                                                m.remove(&k);
-                                            });
-                                        },
-                                    ))
-                                    .children(engines_row.into_iter().map(|(eid, ename)| {
-                                        let set_eid = eid.clone();
-                                        let check_eid = eid.clone();
-                                        let cur_ov = current_override.clone();
-                                        let rk = role_id.clone();
-                                        let mark = engine_icon(&eid);
-                                        compact_segment(
-                                            ename,
-                                            Some(mark),
-                                            move || cur_ov.as_deref() == Some(check_eid.as_str()),
-                                            move |_| {
-                                                let k = rk.clone();
-                                                let v = set_eid.clone();
-                                                overrides.update(|m| {
-                                                    m.insert(k, v);
-                                                });
-                                            },
-                                        )
-                                        .into_element()
-                                    })),
+                                view()
+                                    .flex_row()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .pl(px(26.))
+                                    .child(
+                                        segmented()
+                                            .child(compact_segment(
+                                                format!("Global ({global_prov})"),
+                                                Some(global_icon),
+                                                {
+                                                    let is_none = current_agent_ov.is_none();
+                                                    move || is_none
+                                                },
+                                                move |_| {
+                                                    let k = clear_role.clone();
+                                                    let g_eng = global_eng_for_clear.clone();
+                                                    if custom_model_target
+                                                        .get_untracked()
+                                                        .as_deref()
+                                                        == Some(k.as_str())
+                                                    {
+                                                        custom_model_target.set(None);
+                                                    }
+                                                    overrides.update(|m| {
+                                                        if let Some(ov) = m.get_mut(&k) {
+                                                            let prev_eng = ov.normalized().agent;
+                                                            ov.agent = None;
+                                                            if prev_eng
+                                                                .is_some_and(|pe| pe != g_eng)
+                                                            {
+                                                                ov.model = None;
+                                                                ov.effort = None;
+                                                            }
+                                                            if ov.is_empty() {
+                                                                m.remove(&k);
+                                                            }
+                                                        }
+                                                    });
+                                                },
+                                            ))
+                                            .children(engines_row.into_iter().map(
+                                                |(eid, ename)| {
+                                                    let set_eid = eid.clone();
+                                                    let check_eid = eid.clone();
+                                                    let cur_ov = current_agent_ov.clone();
+                                                    let rk = role_id.clone();
+                                                    let g_eng = global_eng_key.clone();
+                                                    let mark = engine_icon(&eid);
+                                                    compact_segment(
+                                                        ename,
+                                                        Some(mark),
+                                                        move || {
+                                                            cur_ov.as_deref()
+                                                                == Some(check_eid.as_str())
+                                                        },
+                                                        move |_| {
+                                                            let k = rk.clone();
+                                                            let v = set_eid.clone();
+                                                            if custom_model_target
+                                                                .get_untracked()
+                                                                .as_deref()
+                                                                == Some(k.as_str())
+                                                            {
+                                                                custom_model_target.set(None);
+                                                            }
+                                                            overrides.update(|m| {
+                                                                let prev_eff = m
+                                                                    .get(&k)
+                                                                    .and_then(|ov| {
+                                                                        ov.normalized().agent
+                                                                    })
+                                                                    .unwrap_or_else(|| {
+                                                                        g_eng.clone()
+                                                                    });
+                                                                let entry = m.entry(k).or_default();
+                                                                if prev_eff != v {
+                                                                    entry.model = None;
+                                                                    entry.effort = None;
+                                                                }
+                                                                entry.agent = Some(v);
+                                                            });
+                                                        },
+                                                    )
+                                                    .into_element()
+                                                },
+                                            )),
+                                    )
+                                    .child(project_model_effort_buttons(
+                                        ui,
+                                        role_id.clone(),
+                                        inherited_model,
+                                        current_ov.model,
+                                        inherited_effort,
+                                        current_ov.effort,
+                                        caps,
+                                        overrides,
+                                        custom_model_target,
+                                        custom_model_draft,
+                                    )),
                             )
+                            .child(if is_editing_custom_model {
+                                view()
+                                    .pl(px(26.))
+                                    .child(project_custom_model_inline_editor(
+                                        role_id,
+                                        overrides,
+                                        custom_model_target,
+                                        custom_model_draft,
+                                    ))
+                                    .into_element()
+                            } else {
+                                view().into_element()
+                            })
                             .into_element()
                     })),
             )
@@ -2113,12 +2523,12 @@ pub fn project_agents_screen(ui: Ui) -> impl IntoElement {
             scroll().flex_1().min_h(px(0.)).child(
                 view()
                     .w_full()
-                    .max_w(px(680.))
+                    .max_w(px(760.))
                     .gap_5()
                     .pb_6()
                     .child(muted(move || {
                         format!(
-                            "Choose which Agent runs each @identity in this Project ({}) without editing Workflow YAML.",
+                            "Choose which Agent, model, and effort run each @identity in this Project ({}) without editing Workflow YAML.",
                             machines::name(ui, &machine.get())
                         )
                     }))

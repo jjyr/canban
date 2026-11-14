@@ -1195,9 +1195,22 @@ pub fn Gallery() -> impl IntoElement {
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("project-agents") {
         let mut snapshot = fixtures::workspace();
-        snapshot.projects[0]
-            .agent_overrides
-            .insert("developer".into(), "agy".into());
+        snapshot.projects[0].agent_overrides.insert(
+            "developer".into(),
+            canban_types::ProjectAgentOverride {
+                agent: Some("agy".into()),
+                model: Some("gemini-4-carbon-high".into()),
+                effort: Some("high".into()),
+            },
+        );
+        snapshot.projects[0].agent_overrides.insert(
+            "merger".into(),
+            canban_types::ProjectAgentOverride {
+                agent: None,
+                model: Some("gpt-5.4".into()),
+                effort: Some("low".into()),
+            },
+        );
         ui.snapshot.set(snapshot);
         ui.page.set("project-agents".into());
         return canban_ui::frame::screen(ui).into_element();
@@ -1522,9 +1535,22 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Project Agents", Variant::Quiet, move |_| {
                     scene.set("workspace".into());
                     let mut snapshot = fixtures::workspace();
-                    snapshot.projects[0]
-                        .agent_overrides
-                        .insert("developer".into(), "agy".into());
+                    snapshot.projects[0].agent_overrides.insert(
+                        "developer".into(),
+                        canban_types::ProjectAgentOverride {
+                            agent: Some("agy".into()),
+                            model: Some("gemini-4-carbon-high".into()),
+                            effort: Some("high".into()),
+                        },
+                    );
+                    snapshot.projects[0].agent_overrides.insert(
+                        "merger".into(),
+                        canban_types::ProjectAgentOverride {
+                            agent: None,
+                            model: Some("gpt-5.4".into()),
+                            effort: Some("low".into()),
+                        },
+                    );
                     ui.snapshot.set(snapshot);
                     ui.select_project("gallery-project".into());
                     ui.navigate("project-agents");

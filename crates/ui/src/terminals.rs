@@ -242,7 +242,12 @@ fn gallery_create_entry(
                         let (_, _, _) = crate::profiles::effective_provider(p, project.as_ref());
                         project
                             .as_ref()
-                            .and_then(|proj| proj.agent_overrides.get(&p.id).cloned())
+                            .filter(|_| p.is_identity())
+                            .and_then(|proj| {
+                                proj.agent_overrides
+                                    .get(&p.id)
+                                    .and_then(|ov| ov.normalized().agent)
+                            })
                             .or_else(|| p.preset.clone())
                             .unwrap_or_else(|| p.command_name())
                     })

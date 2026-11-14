@@ -649,9 +649,10 @@ mod tests {
                 target_branch: None,
                 created_at: 0,
             };
-            project
-                .agent_overrides
-                .insert("developer".into(), "agy".into());
+            project.agent_overrides.insert(
+                "developer".into(),
+                canban_types::ProjectAgentOverride::from_agent("agy"),
+            );
             let mut snap = Snapshot::default();
             snap.projects.push(project);
             ui.snapshot.set(snap);

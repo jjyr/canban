@@ -62,7 +62,15 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                     move || {
                         compact_action(
                             move || {
-                                let n = project.get().map(|p| p.agent_overrides.len()).unwrap_or(0);
+                                let n = project
+                                    .get()
+                                    .map(|p| {
+                                        p.agent_overrides
+                                            .values()
+                                            .filter(|ov| !ov.is_empty())
+                                            .count()
+                                    })
+                                    .unwrap_or(0);
                                 if n == 0 {
                                     "Agents".into()
                                 } else {

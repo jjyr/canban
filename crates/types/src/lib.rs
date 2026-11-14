@@ -292,6 +292,97 @@ impl Default for Config {
         }
     }
 }
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProjectAgentOverride {
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+impl ProjectAgentOverride {
+    pub fn from_agent(agent: impl Into<String>) -> Self {
+        let agent = agent.into();
+        let agent = agent.trim();
+        Self {
+            agent: (!agent.is_empty()).then(|| agent.to_owned()),
+            model: None,
+            effort: None,
+        }
+    }
+    pub fn normalized(&self) -> Self {
+        let clean = |v: &Option<String>| {
+            v.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && *s != "inherit")
+                .map(str::to_owned)
+        };
+        Self {
+            agent: clean(&self.agent),
+            model: clean(&self.model),
+            effort: clean(&self.effort),
+        }
+    }
+    pub fn is_empty(&self) -> bool {
+        let n = self.normalized();
+        n.agent.is_none() && n.model.is_none() && n.effort.is_none()
+    }
+}
+impl Serialize for ProjectAgentOverride {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let n = self.normalized();
+        let mut count = 0;
+        if n.agent.is_some() {
+            count += 1;
+        }
+        if n.model.is_some() {
+            count += 1;
+        }
+        if n.effort.is_some() {
+            count += 1;
+        }
+        let mut map = serializer.serialize_map(Some(count))?;
+        if let Some(agent) = &n.agent {
+            map.serialize_entry("agent", agent)?;
+        }
+        if let Some(model) = &n.model {
+            map.serialize_entry("model", model)?;
+        }
+        if let Some(effort) = &n.effort {
+            map.serialize_entry("effort", effort)?;
+        }
+        map.end()
+    }
+}
+impl<'de> Deserialize<'de> for ProjectAgentOverride {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Agent(String),
+            Full {
+                #[serde(default)]
+                agent: Option<String>,
+                #[serde(default)]
+                model: Option<String>,
+                #[serde(default)]
+                effort: Option<String>,
+            },
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Agent(s) => Ok(Self::from_agent(s).normalized()),
+            Raw::Full {
+                agent,
+                model,
+                effort,
+            } => Ok(Self {
+                agent,
+                model,
+                effort,
+            }
+            .normalized()),
+        }
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Project {
     #[serde(default)]
@@ -299,7 +390,7 @@ pub struct Project {
     #[serde(default)]
     pub delivery_mode: DeliveryMode,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub agent_overrides: BTreeMap<String, String>,
+    pub agent_overrides: BTreeMap<String, ProjectAgentOverride>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     pub id: String,
