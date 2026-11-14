@@ -37,11 +37,14 @@ pub fn watch(ui: Ui) {
         }
     });
     let listed = computed(move || {
-        entries(&ui.snapshot.get())
-            .into_iter()
-            .filter(Entry::listed)
-            .map(|e| e.saved.id)
-            .collect::<Vec<_>>()
+        ui.closing_terminals.with(|closing| {
+            ui.terminal_entries.with(|rows| {
+                rows.iter()
+                    .filter(|e| e.listed() && !closing.contains(&e.saved.id))
+                    .map(|e| e.saved.id.clone())
+                    .collect::<Vec<_>>()
+            })
+        })
     });
     effect(move || {
         if crate::APP.get().is_some() && !ui.snapshot_ready.get() {
@@ -57,7 +60,7 @@ pub fn watch(ui: Ui) {
         if !active_card_tab.is_empty() && !ids.contains(&active_card_tab) {
             let cid = ui.card.get_untracked();
             let recent = ui.terminal_recent.with(|m| m.get(&cid).cloned());
-            let next = default_card_terminal(&ui.snapshot.get_untracked(), &cid, recent.as_deref())
+            let next = untracked(|| default_card_terminal_for_ui(ui, &cid, recent.as_deref()))
                 .unwrap_or_default();
             if next.is_empty() {
                 ui.card_tab.set(String::new());
@@ -87,30 +90,40 @@ pub fn watch(ui: Ui) {
     });
 }
 pub fn selected(ui: Ui) -> Option<OverviewRow> {
+    let sel = ui.terminal_selection.get();
     model::conversations(&ui.snapshot.get())
         .into_iter()
-        .find(|r| r.id == ui.terminal_selection.get())
+        .find(|r| r.id == sel)
 }
 pub fn current(ui: Ui) -> Option<Entry> {
-    entries(&ui.snapshot.get())
-        .into_iter()
-        .find(|r| r.saved.id == ui.terminal_selection.get())
+    let sel = ui.terminal_selection.get();
+    if sel.is_empty() || ui.closing_terminals.with(|c| c.contains(&sel)) {
+        return None;
+    }
+    ui.terminal_entries
+        .with(|rows| rows.iter().find(|r| r.saved.id == sel).cloned())
 }
 pub fn restore_selection(ui: Ui) {
     if !ui.terminal_selection.get_untracked().is_empty() {
         return;
     }
-    let rows = entries(&ui.snapshot.get_untracked());
-    if let Some(entry) = ui
-        .terminal_tabs
-        .with_untracked(|ts| {
-            ts.last()
-                .and_then(|id| rows.iter().find(|e| &e.saved.id == id))
-                .cloned()
+    let entry = ui.closing_terminals.with_untracked(|closing| {
+        ui.terminal_entries.with_untracked(|rows| {
+            ui.terminal_tabs
+                .with_untracked(|ts| {
+                    ts.last()
+                        .and_then(|id| rows.iter().find(|e| &e.saved.id == id))
+                        .cloned()
+                })
+                .filter(|e| e.listed() && !closing.contains(&e.saved.id))
+                .or_else(|| {
+                    rows.iter()
+                        .find(|e| e.listed() && !closing.contains(&e.saved.id))
+                        .cloned()
+                })
         })
-        .filter(Entry::listed)
-        .or_else(|| rows.into_iter().find(Entry::listed))
-    {
+    });
+    if let Some(entry) = entry {
         ui.terminal_selection.set(entry.saved.id.clone());
         ui.terminal_tabs.update(|tabs| {
             if !tabs.contains(&entry.saved.id) {
@@ -126,9 +139,9 @@ pub fn reveal(ui: Ui, id: &str) {
     }
 }
 pub fn reveal_group(ui: Ui, id: &str) {
-    if let Some(row) = entries(&ui.snapshot.get_untracked())
-        .into_iter()
-        .find(|r| r.saved.id == id)
+    if let Some(row) = ui
+        .terminal_entries
+        .with_untracked(|rows| rows.iter().find(|r| r.saved.id == id).cloned())
     {
         ui.terminal_folds.update(|folds| {
             folds.remove(&format!("project:{}", row.project_id.unwrap_or_default()));
@@ -138,20 +151,36 @@ pub fn reveal_group(ui: Ui, id: &str) {
         });
     }
 }
+fn is_card_live_entry(e: &Entry, card_id: &str) -> bool {
+    e.card.as_ref().is_some_and(|c| c.id == card_id)
+        && e.listed()
+        && (e.agent.is_none()
+            || e.binding().is_some()
+            || matches!(e.status().as_str(), "queued" | "starting"))
+}
+
 pub fn card_live_entries(snapshot: &canban_types::Snapshot, card_id: &str) -> Vec<Entry> {
     if card_id.is_empty() {
         return Vec::new();
     }
     entries(snapshot)
         .into_iter()
-        .filter(|e| {
-            e.card.as_ref().is_some_and(|c| c.id == card_id)
-                && e.listed()
-                && (e.agent.is_none()
-                    || e.binding().is_some()
-                    || matches!(e.status().as_str(), "queued" | "starting"))
-        })
+        .filter(|e| is_card_live_entry(e, card_id))
         .collect()
+}
+
+pub fn card_live_entries_for_ui(ui: Ui, card_id: &str) -> Vec<Entry> {
+    if card_id.is_empty() {
+        return Vec::new();
+    }
+    ui.closing_terminals.with(|closing| {
+        ui.terminal_entries.with(|rows| {
+            rows.iter()
+                .filter(|e| is_card_live_entry(e, card_id) && !closing.contains(&e.saved.id))
+                .cloned()
+                .collect()
+        })
+    })
 }
 
 /// Resolve the active Terminal/Agent tab for a Card: prefer the Card's last-selected
@@ -162,6 +191,14 @@ pub fn default_card_terminal(
     recent: Option<&str>,
 ) -> Option<String> {
     let live = card_live_entries(snapshot, card_id);
+    recent
+        .filter(|rid| live.iter().any(|e| e.saved.id.as_str() == *rid))
+        .map(str::to_owned)
+        .or_else(|| live.first().map(|e| e.saved.id.clone()))
+}
+
+pub fn default_card_terminal_for_ui(ui: Ui, card_id: &str, recent: Option<&str>) -> Option<String> {
+    let live = card_live_entries_for_ui(ui, card_id);
     recent
         .filter(|rid| live.iter().any(|e| e.saved.id.as_str() == *rid))
         .map(str::to_owned)
@@ -366,8 +403,7 @@ pub fn open_card_agent(ui: Ui, card_id: &str) {
             .set("Restore this Card before opening an Agent.".into());
         return;
     }
-    let s = ui.snapshot.get_untracked();
-    let live = card_live_entries(&s, &c.id);
+    let live = untracked(|| card_live_entries_for_ui(ui, &c.id));
     let recent = ui.terminal_recent.with(|m| m.get(&c.id).cloned());
     let existing_agent = recent
         .as_deref()
@@ -542,15 +578,16 @@ pub fn reopen(ui: Ui, id: String) {
     launch(ui, json!({"inherit_terminal_id":id}));
 }
 pub fn close_entry(ui: Ui, id: &str) {
-    if id.is_empty() {
+    if id.is_empty() || ui.closing_terminals.with_untracked(|c| c.contains(id)) {
         return;
     }
     let needs_confirm = ui.snapshot.with_untracked(|s| {
-        entries(s)
-            .into_iter()
-            .find(|e| e.saved.id == id)
-            .and_then(|e| e.close_confirm_reason(s))
-            .is_some()
+        ui.terminal_entries.with_untracked(|rows| {
+            rows.iter()
+                .find(|e| e.saved.id == id)
+                .and_then(|e| e.close_confirm_reason(s))
+                .is_some()
+        })
     });
     if needs_confirm {
         ui.terminal_close_confirm.set(Some(id.to_owned()));
@@ -559,42 +596,205 @@ pub fn close_entry(ui: Ui, id: &str) {
     close_entry_confirmed(ui, id);
 }
 
+fn mark_entry_finished_in_snapshot(
+    s: &mut canban_types::Snapshot,
+    id: &str,
+    attempt_id: Option<&str>,
+) {
+    if let Some(t) = s.terminals.iter_mut().find(|t| t.id == id)
+        && let Some(runtime) = &mut t.runtime
+    {
+        runtime.state = "finished".into();
+    }
+    if let Some(aid) = attempt_id
+        && let Some(run) = s.attempts.iter_mut().find(|a| a.id == aid)
+    {
+        run.observed = Some(json!({"state":"finished"}));
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OptimisticCloseContext {
+    pub id: String,
+    pub attempt_id: Option<String>,
+    pub prev_tab_index: Option<usize>,
+    pub was_selected_tab: bool,
+    pub was_card_tab_for: Option<String>,
+}
+
+pub(crate) fn begin_optimistic_close(ui: Ui, id: &str) -> Option<OptimisticCloseContext> {
+    if id.is_empty() || ui.closing_terminals.with_untracked(|c| c.contains(id)) {
+        return None;
+    }
+    ui.terminal_close_confirm.set(None);
+    let entry = ui
+        .terminal_entries
+        .with_untracked(|rows| rows.iter().find(|e| e.saved.id == id).cloned());
+    if let Some(ref e) = entry
+        && let Some(b) = e.binding()
+    {
+        let core_id = b["core_id"].as_str().unwrap_or("");
+        let terminal = b["terminal"].as_str().unwrap_or("");
+        if !core_id.is_empty() && !terminal.is_empty() {
+            canban_terminal::evict_session(core_id, terminal);
+        }
+    }
+    let attempt_id = entry
+        .as_ref()
+        .and_then(|e| e.agent.as_ref())
+        .and_then(|r| r.attempt.as_ref())
+        .map(|a| a.id.clone());
+    let prev_tab_index = ui
+        .terminal_tabs
+        .with_untracked(|tabs| tabs.iter().position(|t| t == id));
+    let was_selected_tab = ui.terminal_selection.get_untracked() == id;
+    let was_card_tab_for = (ui.page.get_untracked() == "card" && ui.card_tab.get_untracked() == id)
+        .then(|| ui.card.get_untracked())
+        .filter(|cid| !cid.is_empty());
+
+    batch(|| {
+        ui.closing_terminals.update(|c| {
+            c.insert(id.to_owned());
+        });
+        remove_tab(ui, id);
+        if let Some(ref cid) = was_card_tab_for {
+            let recent = ui.terminal_recent.with(|m| m.get(cid).cloned());
+            let next = untracked(|| default_card_terminal_for_ui(ui, cid, recent.as_deref()))
+                .unwrap_or_default();
+            if next.is_empty() {
+                ui.card_tab.set(String::new());
+                if !ui.is_method_pending("terminal.create") && !ui.is_method_pending("agent.open") {
+                    ui.card_terminal_open.set(false);
+                    ui.card_terminal_focused.set(false);
+                }
+            } else {
+                select_card_tab(ui, cid, next);
+            }
+        }
+    });
+
+    Some(OptimisticCloseContext {
+        id: id.to_owned(),
+        attempt_id,
+        prev_tab_index,
+        was_selected_tab,
+        was_card_tab_for,
+    })
+}
+
+pub(crate) fn finish_optimistic_close(
+    ui: Ui,
+    ctx: &OptimisticCloseContext,
+    outcome: Result<serde_json::Value, String>,
+) {
+    match outcome {
+        Ok(value) if value["state"] == "closed" => {
+            batch(|| {
+                ui.snapshot.update(|s| {
+                    mark_entry_finished_in_snapshot(s, &ctx.id, ctx.attempt_id.as_deref());
+                });
+                ui.closing_terminals.update(|c| {
+                    c.remove(&ctx.id);
+                });
+            });
+        }
+        Ok(value) => {
+            let msg = format!(
+                "terminal.close: {}",
+                value["message"]
+                    .as_str()
+                    .unwrap_or("Inspect before retrying")
+            );
+            rollback_optimistic_close(ui, ctx, msg);
+        }
+        Err(error) => {
+            rollback_optimistic_close(ui, ctx, error);
+        }
+    }
+}
+
+fn rollback_optimistic_close(ui: Ui, ctx: &OptimisticCloseContext, message: String) {
+    batch(|| {
+        ui.closing_terminals.update(|c| {
+            c.remove(&ctx.id);
+        });
+        if let Some(idx) = ctx.prev_tab_index {
+            ui.terminal_tabs.update(|tabs| {
+                if !tabs.contains(&ctx.id) {
+                    let insert_at = idx.min(tabs.len());
+                    tabs.insert(insert_at, ctx.id.clone());
+                }
+            });
+            if ctx.was_selected_tab && ui.terminal_selection.get_untracked().is_empty() {
+                ui.terminal_selection.set(ctx.id.clone());
+            }
+        }
+        if let Some(ref cid) = ctx.was_card_tab_for
+            && ui.page.get_untracked() == "card"
+            && ui.card.get_untracked() == *cid
+            && ui.card_tab.get_untracked().is_empty()
+        {
+            select_card_tab(ui, cid, ctx.id.clone());
+            ui.card_terminal_open.set(true);
+        }
+        ui.status.set(message.clone());
+        ui.operation_error.set(message);
+    });
+}
+
 pub fn close_entry_confirmed(ui: Ui, id: &str) {
     if id.is_empty() {
         return;
     }
-    ui.terminal_close_confirm.set(None);
-    if crate::APP.get().is_none() {
+    let Some(app) = crate::APP.get().cloned() else {
         // A static Gallery has no runtime; simulate the same closed outcome.
-        let entry = entries(&ui.snapshot.get_untracked())
-            .into_iter()
-            .find(|e| e.saved.id == id);
+        ui.terminal_close_confirm.set(None);
+        let attempt_id = ui.terminal_entries.with_untracked(|rows| {
+            rows.iter()
+                .find(|e| e.saved.id == id)
+                .and_then(|e| e.agent.as_ref())
+                .and_then(|r| r.attempt.as_ref())
+                .map(|a| a.id.clone())
+        });
         ui.snapshot.update(|s| {
-            if let Some(t) = s.terminals.iter_mut().find(|t| t.id == id)
-                && let Some(runtime) = &mut t.runtime
-            {
-                runtime.state = "finished".into();
-            }
-            if let Some(attempt) = entry.and_then(|e| e.agent).and_then(|r| r.attempt)
-                && let Some(run) = s.attempts.iter_mut().find(|a| a.id == attempt.id)
-            {
-                run.observed = Some(json!({"state":"finished"}));
-            }
+            mark_entry_finished_in_snapshot(s, id, attempt_id.as_deref());
         });
         remove_tab(ui, id);
         return;
-    }
-    let id = id.to_owned();
-    dispatch_complete(
-        ui,
-        "terminal.close",
-        json!({"terminal_id":id}),
-        move |result| {
-            if result.is_ok_and(|value| value["state"] == "closed") {
-                remove_tab(ui, &id);
+    };
+    let Some(ctx) = begin_optimistic_close(ui, id) else {
+        return;
+    };
+    let rpc_id = ctx.id.clone();
+    let request_key = canban_types::id();
+    ui.spawn(async move {
+        let result = blocking(move || {
+            let value = app.call(
+                "terminal.close",
+                json!({"terminal_id": rpc_id, "request_key": request_key}),
+            )?;
+            let snapshot = app.snapshot().ok();
+            Ok::<_, anyhow::Error>((value, snapshot))
+        })
+        .await;
+        match result {
+            Ok(Ok((value, snapshot))) => {
+                if let Some(s) = snapshot {
+                    ui.snapshot_epoch.update(|v| *v += 1);
+                    ui.snapshot.set(s);
+                }
+                finish_optimistic_close(ui, &ctx, Ok(value));
             }
-        },
-    );
+            Ok(Err(e)) => {
+                finish_optimistic_close(ui, &ctx, Err(format!("{e:#}")));
+                refresh(ui);
+            }
+            Err(e) => {
+                finish_optimistic_close(ui, &ctx, Err(e.to_string()));
+                refresh(ui);
+            }
+        }
+    });
 }
 
 pub fn close_tab(ui: Ui, id: &str) {
@@ -629,7 +829,7 @@ pub fn cycle(ui: Ui, forward: bool) {
         && ui.card_terminal_open.get_untracked()
         && let Some(c) = ui.current_card()
     {
-        let slots: Vec<_> = card_live_entries(&ui.snapshot.get_untracked(), &c.id)
+        let slots: Vec<_> = untracked(|| card_live_entries_for_ui(ui, &c.id))
             .into_iter()
             .map(|e| e.saved.id)
             .collect();

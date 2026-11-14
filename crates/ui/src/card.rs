@@ -167,13 +167,11 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             reading.unread.update(|n| *n += 1);
         }
     });
-    let had_live_terminal = stored(
-        !crate::terminals::card_live_entries(&ui.snapshot.get_untracked(), &card.id).is_empty(),
-    );
+    let had_live_terminal =
+        stored(!untracked(|| crate::terminals::card_live_entries_for_ui(ui, &card.id)).is_empty());
     let live_watch_card = card.id.clone();
     effect(move || {
-        let s = ui.snapshot.get();
-        let live = crate::terminals::card_live_entries(&s, &live_watch_card);
+        let live = crate::terminals::card_live_entries_for_ui(ui, &live_watch_card);
         let was_live = had_live_terminal.replace(!live.is_empty());
         if !was_live
             && !live.is_empty()
@@ -183,9 +181,13 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             let recent = ui
                 .terminal_recent
                 .with(|m| m.get(&live_watch_card).cloned());
-            if let Some(first) =
-                crate::terminals::default_card_terminal(&s, &live_watch_card, recent.as_deref())
-            {
+            if let Some(first) = untracked(|| {
+                crate::terminals::default_card_terminal_for_ui(
+                    ui,
+                    &live_watch_card,
+                    recent.as_deref(),
+                )
+            }) {
                 crate::terminals::select_card_tab(ui, &live_watch_card, first);
                 ui.card_terminal_open.set(true);
             }

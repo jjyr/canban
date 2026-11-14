@@ -1,6 +1,6 @@
 //! Selected conversation controls, retained context and one native attachment.
 use super::*;
-use serde_json::json;
+use serde_json::{Value, json};
 fn context(ui: Ui) -> impl IntoElement {
     dynamic(move || {
         let Some(row) = selected(ui) else {
@@ -69,50 +69,38 @@ fn context(ui: Ui) -> impl IntoElement {
 pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
     let target = computed(move || {
         let id = selected_id.get();
-        if id.is_empty() {
+        if id.is_empty() || ui.closing_terminals.with(|c| c.contains(&id)) {
             return None;
         }
-        entries(&ui.snapshot.get())
-            .into_iter()
-            .find(|e| e.saved.id == id)
+        ui.terminal_entries
+            .with(|rows| rows.iter().find(|e| e.saved.id == id).cloned())
             .and_then(|e| {
                 let b = e.binding()?;
                 Some((
                     b["id"].as_str().unwrap_or("").to_owned(),
                     b["core_id"].as_str().unwrap_or("").to_owned(),
                     b["terminal"].as_str().unwrap_or("").to_owned(),
+                    b["read_only"] == true,
+                    b["input_status"].as_str().unwrap_or("").to_owned(),
                 ))
             })
     });
-    let read_only = computed(move || {
-        let id = selected_id.get();
-        entries(&ui.snapshot.get())
-            .into_iter()
-            .find(|e| e.saved.id == id)
-            .and_then(|e| e.binding())
-            .is_none_or(|b| b["read_only"] == true)
-    });
-    let input_status = computed(move || {
-        let id = selected_id.get();
-        entries(&ui.snapshot.get())
-            .into_iter()
-            .find(|e| e.saved.id == id)
-            .and_then(|e| e.binding())
-            .and_then(|b| b["input_status"].as_str().map(str::to_owned))
-            .unwrap_or_default()
-    });
+    let has_live_target = computed(move || target.with(|t| t.is_some()));
     dynamic(move || {
-        let Some((id, core_id, terminal)) = target.get() else {
+        if !has_live_target.get() {
             let sel = selected_id.get();
-            let entry = entries(&ui.snapshot.get())
-                .into_iter()
-                .find(|e| e.saved.id == sel);
+            let has_entry = !sel.is_empty()
+                && !ui.closing_terminals.with(|c| c.contains(&sel))
+                && ui
+                    .terminal_entries
+                    .with(|rows| rows.iter().any(|e| e.saved.id == sel));
             return view()
                 .flex_1()
                 .min_h(px(0.))
+                .bg(crate::utilities::terminal_bg_color)
                 .p_5()
                 .gap_3()
-                .child(if entry.is_some() {
+                .child(if has_entry {
                     view().gap_2().child(muted(move || {
                         let sel = selected_id.get();
                         ui.snapshot.with(|s| {
@@ -130,12 +118,15 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                     )
                 })
                 .into_element();
-        };
+        }
         let Some(app) = crate::APP.get() else {
             return native("canban/terminal")
                 .prop("theme", crate::utilities::terminal_theme)
                 .prop("font", move || crate::utilities::terminal_font(ui))
-                .prop("ui_command_keys", json!(["o","n","/","i","j","t","w","[","]","{","}"]))
+                .prop(
+                    "ui_command_keys",
+                    json!(["o", "n", "/", "i", "j", "t", "w", "[", "]", "{", "}"]),
+                )
                 .prop("focus", move || {
                     json!({
                         "ticket": ui.terminal_focus.get(),
@@ -148,17 +139,20 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                             && ui.worktree_remove_confirm.get().is_none()
                     })
                 })
-                .key(id)
-                .prop("content", json!(concat!(
-                    "\x1b[1;36mCanban native Terminal\x1b[0m · Gallery preview (no Core connection)\r\n",
-                    "Styles: \x1b[1mBold\x1b[0m · \x1b[3mItalic\x1b[0m · \x1b[4:3;58;2;255;105;97mCurly underline\x1b[0m · 世界 · ░▒▓█\r\n",
-                    "Links : https://canban.dev · \x1b]8;;https://ghostty.org\x07libghostty-vt\x1b]8;;\x07\r\n",
-                )))
+                .prop(
+                    "content",
+                    json!(concat!(
+                        "\x1b[1;36mCanban native Terminal\x1b[0m · Gallery preview (no Core connection)\r\n",
+                        "Styles: \x1b[1mBold\x1b[0m · \x1b[3mItalic\x1b[0m · \x1b[4:3;58;2;255;105;97mCurly underline\x1b[0m · 世界 · ░▒▓█\r\n",
+                        "Links : https://canban.dev · \x1b]8;;https://ghostty.org\x07libghostty-vt\x1b]8;;\x07\r\n",
+                    )),
+                )
                 .prop("read_only", json!(true))
                 .flex_1()
                 .min_h(px(0.))
                 .into_element();
         };
+        let app_for_binding = app.clone();
         native("canban/terminal")
             .prop("theme", crate::utilities::terminal_theme)
             .prop("font", move || crate::utilities::terminal_font(ui))
@@ -178,13 +172,28 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                         && ui.worktree_remove_confirm.get().is_none()
                 })
             })
-            .key(id)
-            .prop(
-                "binding",
-                json!({"config":app.config(),"terminal":terminal,"core_id":core_id}),
-            )
-            .prop("read_only", move || json!(read_only.get()))
-            .prop("input_status", move || json!(input_status.get()))
+            .prop("binding", move || {
+                target.with(|t| match t {
+                    Some((_, core_id, terminal, _, _)) => json!({
+                        "config": app_for_binding.config(),
+                        "terminal": terminal,
+                        "core_id": core_id,
+                    }),
+                    None => Value::Null,
+                })
+            })
+            .prop("read_only", move || {
+                target.with(|t| json!(t.as_ref().is_none_or(|(_, _, _, ro, _)| *ro)))
+            })
+            .prop("input_status", move || {
+                target.with(|t| {
+                    json!(
+                        t.as_ref()
+                            .map(|(_, _, _, _, status)| status.as_str())
+                            .unwrap_or("")
+                    )
+                })
+            })
             .flex_1()
             .min_h(px(0.))
             .into_element()
@@ -202,14 +211,17 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     let has_target = computed(move || {
         let id = selected_id.get();
         !id.is_empty()
-            && entries(&ui.snapshot.get())
-                .into_iter()
-                .any(|e| e.saved.id == id && e.binding().is_some())
+            && !ui.closing_terminals.with(|c| c.contains(&id))
+            && ui.terminal_entries.with(|rows| {
+                rows.iter()
+                    .any(|e| e.saved.id == id && e.binding().is_some())
+            })
     });
     view()
         .flex_1()
         .min_h(px(0.))
         .min_w(px(0.))
+        .bg(crate::utilities::terminal_bg_color)
         .gap_0()
         .child(when(
             move || {

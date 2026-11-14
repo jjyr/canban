@@ -49,65 +49,7 @@ impl Client {
     /// hc connect speaks the public JSON-RPC protocol and resolves the installed
     /// core's socket/config without linking Herdr's private implementation.
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
-        let mut transport = transport::connect(&self.config)?;
-        let mut input = transport.writer.take().unwrap();
-        writeln!(
-            input,
-            "{}",
-            json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"generation":1}})
-        )?;
-        writeln!(
-            input,
-            "{}",
-            json!({"jsonrpc":"2.0","id":2,"method":method,"params":params})
-        )?;
-        input.flush()?;
-        let output = transport.reader.take().unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(output);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match reader.read_line(&mut line) {
-                    Ok(0) => {
-                        let _ = tx.send(Err(anyhow::anyhow!("Herdr disconnected before replying")));
-                        break;
-                    }
-                    Ok(_) => {
-                        if let Ok(value) = serde_json::from_str::<Value>(&line)
-                            && value["id"] == 2
-                        {
-                            let _ = tx.send(Ok(value));
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(e.into()));
-                        break;
-                    }
-                }
-            }
-        });
-        let reply = rx.recv_timeout(Duration::from_secs(if method == "terminal.run" {
-            45
-        } else if method == "machine.exec" {
-            75
-        } else {
-            12
-        }));
-        drop(input);
-        drop(transport);
-        let reply = reply.context("Herdr reply timed out; launch effects may be unknown")??;
-        ensure!(
-            reply.get("error").is_none(),
-            "Herdr {method}: {}",
-            reply["error"]
-        );
-        reply
-            .get("result")
-            .cloned()
-            .context("Herdr reply has no result")
+        pool::call(&self.config, method, params)
     }
     pub fn status(&self) -> Result<Value> {
         self.call("server.status", json!({}))
@@ -173,11 +115,9 @@ impl Client {
     }
 }
 
-pub mod stream;
-
 pub mod activity;
-
-pub mod host;
-pub mod transport;
-
 pub mod events;
+pub mod host;
+mod pool;
+pub mod stream;
+pub mod transport;

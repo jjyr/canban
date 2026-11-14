@@ -666,6 +666,19 @@ static bool cb_is_ascii_monospaced(CTFontRef font) {
 
 static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
                                        CTFontSymbolicTraits traits) {
+  static NSMutableDictionary<NSString *, id> *sFontCache = nil;
+  static dispatch_once_t cacheOnce;
+  dispatch_once(&cacheOnce, ^{
+    sFontCache = [NSMutableDictionary dictionaryWithCapacity:32];
+  });
+  NSString *cacheKey = [NSString
+      stringWithFormat:@"%@|%.2f|%u", family ?: @"<system>", size, (unsigned)traits];
+  @synchronized(sFontCache) {
+    id cached = sFontCache[cacheKey];
+    if (cached) {
+      return (CTFontRef)CFRetain((__bridge CTFontRef)cached);
+    }
+  }
   cb_register_user_font_subdirs_once();
   NSFont *base = nil;
   if (family && family.length > 0) {
@@ -691,21 +704,33 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
     }
   }
   CTFontRef ctBase = (__bridge CTFontRef)base;
+  CTFontRef result = NULL;
   if (traits == 0) {
-    return (CTFontRef)CFRetain(ctBase);
+    result = (CTFontRef)CFRetain(ctBase);
+  } else {
+    CTFontRef styled =
+        CTFontCreateCopyWithSymbolicTraits(ctBase, size, NULL, traits, traits);
+    if (styled) {
+      result = styled;
+    } else if (traits == (kCTFontBoldTrait | kCTFontItalicTrait)) {
+      CTFontRef boldOnly = CTFontCreateCopyWithSymbolicTraits(
+          ctBase, size, NULL, kCTFontBoldTrait, kCTFontBoldTrait);
+      if (boldOnly)
+        result = boldOnly;
+    }
+    if (!result) {
+      result = (CTFontRef)CFRetain(ctBase);
+    }
   }
-  CTFontRef styled =
-      CTFontCreateCopyWithSymbolicTraits(ctBase, size, NULL, traits, traits);
-  if (styled) {
-    return styled;
+  if (result) {
+    @synchronized(sFontCache) {
+      if (sFontCache.count > 64) {
+        [sFontCache removeAllObjects];
+      }
+      sFontCache[cacheKey] = (__bridge id)result;
+    }
   }
-  if (traits == (kCTFontBoldTrait | kCTFontItalicTrait)) {
-    CTFontRef boldOnly = CTFontCreateCopyWithSymbolicTraits(
-        ctBase, size, NULL, kCTFontBoldTrait, kCTFontBoldTrait);
-    if (boldOnly)
-      return boldOnly;
-  }
-  return (CTFontRef)CFRetain(ctBase);
+  return result;
 }
 
 @interface CanbanTerminal : NSView <NSTextInputClient> {
@@ -720,6 +745,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   CFMutableDictionaryRef _fallbackCache;
   uint64_t _physicalKeyDownLo;
   uint64_t _physicalKeyDownHi;
+  uint8_t _themeBg[3];
 }
 @property(nonatomic, copy) NSString *fontFamily;
 @property(nonatomic) CGFloat fontSize;
@@ -786,10 +812,59 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   _lastBlinkTime = [NSProcessInfo processInfo].systemUptime;
   _fallbackCache = CFDictionaryCreateMutable(
       kCFAllocatorDefault, 0, NULL, &kCFTypeDictionaryValueCallBacks);
+  _themeBg[0] = 25;
+  _themeBg[1] = 30;
+  _themeBg[2] = 38;
   self.wantsLayer = YES;
   self.layer.masksToBounds = YES;
+  self.layer.opaque = YES;
+  [self applyThemeBgLayerColor];
   [self rebuildFonts];
   return self;
+}
+
+- (void)applyThemeBgLayerColor {
+  if (!self.layer)
+    return;
+  CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+  CGFloat comp[4] = {_themeBg[0] / 255.0, _themeBg[1] / 255.0,
+                     _themeBg[2] / 255.0, 1.0};
+  CGColorRef c = CGColorCreate(cs, comp);
+  self.layer.backgroundColor = c;
+  CFRelease(c);
+  CGColorSpaceRelease(cs);
+}
+
+- (void)setThemeBgR:(uint8_t)r g:(uint8_t)g b:(uint8_t)b {
+  if (_themeBg[0] == r && _themeBg[1] == g && _themeBg[2] == b)
+    return;
+  _themeBg[0] = r;
+  _themeBg[1] = g;
+  _themeBg[2] = b;
+  [self applyThemeBgLayerColor];
+  [self setNeedsDisplay:YES];
+}
+
+- (void)syncRebind {
+  _physicalKeyDownLo = 0;
+  _physicalKeyDownHi = 0;
+  [self.inputContext discardMarkedText];
+  [self unmarkText];
+  _selectingLocally = NO;
+  _autoscrollDir = 0;
+  _hoverLinkValid = NO;
+  _hoverLinkUri = nil;
+  _scrollbarVisibleUntil = 0;
+  _prevScrollOffset = 0;
+  _prevScrollTotal = 0;
+  _cursorBlinkVisible = YES;
+  _lastBlinkTime = [NSProcessInfo processInfo].systemUptime;
+  _snap = NULL;
+  [self pollSnapshotForceFull:YES];
+  [self setNeedsDisplay:YES];
+  if (_autoFocus) {
+    [self requestAutoFocusIfEligible];
+  }
 }
 
 - (void)releaseFonts {
@@ -1188,7 +1263,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
         [weakSelf requestAutoFocusIfEligible];
       });
     }
-    _pendingLayoutRedraws = 3;
+    _pendingLayoutRedraws = 0;
     [self pollSnapshotForceFull:YES];
   } else {
     [self.animTimer invalidate];
@@ -1221,7 +1296,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
 
 - (void)setFrameSize:(NSSize)newSize {
   [super setFrameSize:newSize];
-  _pendingLayoutRedraws = 2;
+  _pendingLayoutRedraws = 0;
   [self pollSnapshotForceFull:YES];
 }
 
@@ -1371,9 +1446,9 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
     return;
 
   const CbSnapshot *snap = _snap;
-  uint8_t bgR = snap ? snap->background[0] : 20;
-  uint8_t bgG = snap ? snap->background[1] : 22;
-  uint8_t bgB = snap ? snap->background[2] : 26;
+  uint8_t bgR = snap ? snap->background[0] : _themeBg[0];
+  uint8_t bgG = snap ? snap->background[1] : _themeBg[1];
+  uint8_t bgB = snap ? snap->background[2] : _themeBg[2];
   CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
 
   CGFloat defaultBgComp[4] = {bgR / 255.0, bgG / 255.0, bgB / 255.0, 1.0};
@@ -2873,6 +2948,20 @@ void cb_terminal_set_font(void *view, const char *family, double size) {
   [term rebuildFonts];
   [term pollSnapshotForceFull:YES];
   [term setNeedsDisplay:YES];
+}
+
+void cb_terminal_set_theme_bg(void *view, uint8_t r, uint8_t g, uint8_t b) {
+  if (!view)
+    return;
+  CanbanTerminal *term = (__bridge CanbanTerminal *)view;
+  [term setThemeBgR:r g:g b:b];
+}
+
+void cb_terminal_sync_rebind(void *view) {
+  if (!view)
+    return;
+  CanbanTerminal *term = (__bridge CanbanTerminal *)view;
+  [term syncRebind];
 }
 
 char *cb_terminal_list_fonts_json(void) {

@@ -21,6 +21,18 @@ pub struct InstalledFonts {
     pub others: Vec<String>,
 }
 
+/// Evicts any cached live PTY attachment session for the given `(core_id, terminal)` pair.
+pub fn evict_session(core_id: &str, terminal: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        native::evict_session(core_id, terminal);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (core_id, terminal);
+    }
+}
+
 /// Returns the installed font families on the current host OS, separated into
 /// verified ASCII-monospaced families and other families.
 pub fn installed_fonts() -> InstalledFonts {

@@ -48,7 +48,7 @@ impl AppServer {
         };
         let result = (|| -> Result<Value> {
             ensure!(
-                client.status()?["core"]["id"] == core,
+                self.verified_core_id()? == core,
                 "Original Herdr core is unavailable"
             );
             client.call("terminal.kill", json!({"terminal":terminal}))
@@ -413,12 +413,7 @@ impl AppServer {
             config: self.config(),
         };
         let result = (|| -> Result<()> {
-            runtime.core_id = Some(
-                client.status()?["core"]["id"]
-                    .as_str()
-                    .context("Core has no identity")?
-                    .into(),
-            );
+            runtime.core_id = Some(self.verified_core_id()?);
             let host = canban_herdr::host::Host::new(self.config(), &runtime.machine);
             let exec_home = self.execution_home(&runtime.machine)?;
             let remote = runtime.machine != "local";
@@ -655,7 +650,7 @@ impl AppServer {
             config: self.config(),
         };
         ensure!(
-            client.status()?["core"]["id"] == *core,
+            self.verified_core_id()? == *core,
             "Original Herdr core is unavailable"
         );
         let method = if end {

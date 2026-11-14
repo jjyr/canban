@@ -173,6 +173,28 @@ impl AppServer {
             state.records.values().cloned().collect(),
         ))
     }
+    /// Returns the currently verified Herdr Core ID from the active event subscription
+    /// without a round-trip when fresh, falling back to `Client::status()`.
+    pub(super) fn verified_core_id(&self) -> Result<String> {
+        if self.observer_running.load(Ordering::SeqCst) {
+            let state = self.inventory.lock().unwrap();
+            if state.error.is_none()
+                && !state.core.is_empty()
+                && state.last_at > 0
+                && now().saturating_sub(state.last_at) < 45_000
+            {
+                return Ok(state.core.clone());
+            }
+        }
+        let status = canban_herdr::Client {
+            config: self.config(),
+        }
+        .status()?;
+        Ok(status["core"]["id"]
+            .as_str()
+            .context("Core identity unavailable")?
+            .to_owned())
+    }
     pub(super) fn start_observer(self: &Arc<Self>) {
         self.observer_running.store(true, Ordering::SeqCst);
         let weak = Arc::downgrade(self);

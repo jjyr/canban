@@ -594,6 +594,15 @@ pub fn settings(ui: Ui) -> impl IntoElement {
     )
 }
 
+/// Exact terminal theme background as an `AdaptiveColor` for seamless placeholder/viewer mounts.
+pub fn terminal_bg_color() -> AdaptiveColor {
+    let color = rgb(current_theme().background).to_hsla();
+    AdaptiveColor {
+        light: color,
+        dark: color,
+    }
+}
+
 /// Use the exact Terminal palette; App chrome derives separate semantic colors.
 pub fn terminal_theme() -> Value {
     let theme = current_theme();

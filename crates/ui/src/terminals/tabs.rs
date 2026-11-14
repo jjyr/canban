@@ -36,9 +36,9 @@ pub fn context_updates(ui: Ui) {
     });
 }
 pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
-    let Some(e) = entries(&ui.snapshot.get_untracked())
-        .into_iter()
-        .find(|e| e.saved.id == id)
+    let Some(e) = ui
+        .terminal_entries
+        .with_untracked(|rows| rows.iter().find(|e| e.saved.id == id).cloned())
     else {
         return;
     };
@@ -115,93 +115,103 @@ fn anchored(ui: Ui, id: String, anchor: ElementRef) {
         }
     });
 }
-fn tab(ui: Ui, e: Entry, capacity: f32) -> impl IntoElement {
+fn tab(ui: Ui, e: Entry, capacity: Memo<f32>) -> impl IntoElement {
     let id = e.saved.id.clone();
-    let close = id.clone();
-    let context = id.clone();
-    let rename = id.clone();
-    let selected = ui.terminal_selection.get() == id;
-    let hint = e.hint();
-    let attention = e.attention_reason();
-    let mut tab_button = view()
-        .h_full()
-        .focusable(true)
-        .flex_1()
-        .min_w(px(0.))
-        .overflow_hidden()
-        .px_2()
-        .bg(CLEAR)
-        .items_center()
-        .justify_center()
-        .role(AccessibilityRole::Tab)
-        .cursor_pointer()
-        .accessibility_state(move || nsh_core::AccessibilityState {
-            selected,
-            ..Default::default()
-        })
-        .label(format!("Tab {hint}"))
-        .flex_row()
-        .gap_2();
-    if attention.is_some() {
-        tab_button = tab_button.child(
-            icon_tinted(Icon::Info, ATTENTION)
-                .w(px(13.))
-                .h(px(13.))
-                .flex_shrink_0(),
-        );
-    } else if e.agent.is_some() {
-        tab_button = tab_button.child(
-            view()
-                .w(px(5.))
-                .h(px(5.))
-                .rounded(px(3.))
-                .bg(if e.ended() || e.inactive() {
-                    MUTED
-                } else {
-                    SUCCESS
-                })
-                .flex_shrink_0()
-                .pointer_events(PointerEvents::None),
-        );
-    }
-    tab_button = tab_button
-        .child(super::labels::tab(&e))
-        .on_press_down(move |event: &nsh_core::PressEvent| {
-            if event.clicks >= 2 {
-                ui.terminal_rename.set(Some(rename.clone()));
-            }
-        })
-        .on_context_menu(move |event: &nsh_core::ContextMenuEvent| {
-            ui.spawn(menu(ui, context.clone(), Some(event.page_position)));
-        })
-        .on_press(move |_: &nsh_core::PressEvent| ui.open_terminal(id.clone()));
-    view()
-        .w(px(super::labels::tab_width(&e).min(capacity)))
-        .h_full()
-        .flex_shrink_0()
-        .window_drag(false)
-        .flex_row()
-        .items_center()
-        .gap_0()
-        .px_1()
-        .bg(if selected { SELECTED } else { CLEAR })
-        .hover(move |s| s.bg(if selected { SELECTED } else { CARD_HOVER }))
-        .border_r_1()
-        .border_color(BORDER)
-        .tooltip(hint_tooltip(hint.clone()).placement(Placement::Bottom))
-        .child(tab_button)
-        .child(chrome_button(
-            Icon::Close,
-            format!("Close terminal {}", e.title()),
-            move |_| close_tab(ui, &close),
-        ))
+    let id_sel = id.clone();
+    let is_selected = computed(move || ui.terminal_selection.get() == id_sel);
+    let base_width = super::labels::tab_width(&e);
+    dynamic(move || {
+        let selected = is_selected.get();
+        let id = id.clone();
+        let close = id.clone();
+        let context = id.clone();
+        let rename = id.clone();
+        let hint = e.hint();
+        let attention = e.attention_reason();
+        let mut tab_button = view()
+            .h_full()
+            .focusable(true)
+            .flex_1()
+            .min_w(px(0.))
+            .overflow_hidden()
+            .px_2()
+            .bg(CLEAR)
+            .items_center()
+            .justify_center()
+            .role(AccessibilityRole::Tab)
+            .cursor_pointer()
+            .accessibility_state(move || nsh_core::AccessibilityState {
+                selected,
+                ..Default::default()
+            })
+            .label(format!("Tab {hint}"))
+            .flex_row()
+            .gap_2();
+        if attention.is_some() {
+            tab_button = tab_button.child(
+                icon_tinted(Icon::Info, ATTENTION)
+                    .w(px(13.))
+                    .h(px(13.))
+                    .flex_shrink_0(),
+            );
+        } else if e.agent.is_some() {
+            tab_button = tab_button.child(
+                view()
+                    .w(px(5.))
+                    .h(px(5.))
+                    .rounded(px(3.))
+                    .bg(if e.ended() || e.inactive() {
+                        MUTED
+                    } else {
+                        SUCCESS
+                    })
+                    .flex_shrink_0()
+                    .pointer_events(PointerEvents::None),
+            );
+        }
+        tab_button = tab_button
+            .child(super::labels::tab(&e))
+            .on_press_down(move |event: &nsh_core::PressEvent| {
+                if event.clicks >= 2 {
+                    ui.terminal_rename.set(Some(rename.clone()));
+                }
+            })
+            .on_context_menu(move |event: &nsh_core::ContextMenuEvent| {
+                ui.spawn(menu(ui, context.clone(), Some(event.page_position)));
+            })
+            .on_press(move |_: &nsh_core::PressEvent| ui.open_terminal(id.clone()));
+        view()
+            .w(move || px(base_width.min(capacity.get())))
+            .h_full()
+            .flex_shrink_0()
+            .window_drag(false)
+            .flex_row()
+            .items_center()
+            .gap_0()
+            .px_1()
+            .bg(if selected { SELECTED } else { CLEAR })
+            .hover(move |s| s.bg(if selected { SELECTED } else { CARD_HOVER }))
+            .border_r_1()
+            .border_color(BORDER)
+            .tooltip(hint_tooltip(hint.clone()).placement(Placement::Bottom))
+            .child(tab_button)
+            .child(chrome_button(
+                Icon::Close,
+                format!("Close terminal {}", e.title()),
+                move |_| close_tab(ui, &close),
+            ))
+    })
 }
 pub fn header(ui: Ui) -> impl IntoElement {
     let inventory = computed(move || {
-        entries(&ui.snapshot.get())
-            .into_iter()
-            .map(|e| (e.saved.id.clone(), e.title(), e.hint()))
-            .collect::<Vec<_>>()
+        ui.closing_terminals.with(|closing| {
+            ui.terminal_entries.with(|rows| {
+                rows.iter()
+                    .filter(|e| !closing.contains(&e.saved.id))
+                    .map(|e| (e.saved.id.clone(), e.title(), e.hint()))
+                    .collect::<Vec<_>>()
+            })
+        })
     });
     let context = computed(move || {
         current(ui).map(|e| {
@@ -227,20 +237,21 @@ pub fn header(ui: Ui) -> impl IntoElement {
     let active = computed(move || ui.terminal_selection.get());
     effect(move || {
         let selected = active.get();
-        let snapshot = ui.snapshot.get_untracked();
-        let entries = entries(&snapshot);
         let tabs = ui.terminal_tabs.get();
         let cap = capacity.get();
         let _ = inventory.get();
-        let mut offset = 0.;
-        for id in tabs {
-            if id == selected {
-                break;
+        let offset = ui.terminal_entries.with_untracked(|entries| {
+            let mut offset = 0.;
+            for id in tabs {
+                if id == selected {
+                    break;
+                }
+                if let Some(e) = entries.iter().find(|e| e.saved.id == id) {
+                    offset += super::labels::tab_width(e).min(cap);
+                }
             }
-            if let Some(e) = entries.iter().find(|e| e.saved.id == id) {
-                offset += super::labels::tab_width(e).min(cap);
-            }
-        }
+            offset
+        });
         strip.scroll_to(
             Point {
                 x: px(offset),
@@ -278,30 +289,32 @@ pub fn header(ui: Ui) -> impl IntoElement {
                 .scrollbar(false)
                 .element_ref(&strip)
                 .w(move || {
-                    px({
-                        let rows = entries(&ui.snapshot.get());
+                    px(ui.terminal_entries.with(|rows| {
+                        let cap = capacity.get();
                         let total = ui
                             .terminal_tabs
                             .get()
                             .iter()
                             .filter_map(|id| rows.iter().find(|e| &e.saved.id == id))
-                            .map(|e| super::labels::tab_width(e).min(capacity.get()))
+                            .map(|e| super::labels::tab_width(e).min(cap))
                             .sum::<f32>();
-                        total.min(capacity.get()).max(0.)
-                    })
+                        total.min(cap).max(0.)
+                    }))
                 })
                 .min_w(px(0.))
                 .h_full()
                 .child(dynamic(move || {
                     let _ = inventory.get();
-                    let rows = entries(&ui.snapshot.get_untracked());
-                    let mut strip = view().h_full().flex_row().items_center().window_drag(true);
-                    for id in ui.terminal_tabs.get() {
-                        if let Some(e) = rows.iter().find(|e| e.saved.id == id) {
-                            strip = strip.child(tab(ui, e.clone(), capacity.get()));
+                    let tabs = ui.terminal_tabs.get();
+                    ui.terminal_entries.with_untracked(|rows| {
+                        let mut strip = view().h_full().flex_row().items_center().window_drag(true);
+                        for id in tabs {
+                            if let Some(e) = rows.iter().find(|e| e.saved.id == id) {
+                                strip = strip.child(tab(ui, e.clone(), capacity));
+                            }
                         }
-                    }
-                    strip
+                        strip
+                    })
                 })),
         )
         .child(chrome_button_disabled(
@@ -479,10 +492,13 @@ pub fn rename_dialog(ui: Ui) -> impl IntoElement {
         move || ui.terminal_rename.get().is_some(),
         move || {
             let id = ui.terminal_rename.get_untracked().unwrap();
-            let initial = entries(&ui.snapshot.get_untracked())
-                .into_iter()
-                .find(|e| e.saved.id == id)
-                .and_then(|e| e.saved.name)
+            let initial = ui
+                .terminal_entries
+                .with_untracked(|rows| {
+                    rows.iter()
+                        .find(|e| e.saved.id == id)
+                        .and_then(|e| e.saved.name.clone())
+                })
                 .unwrap_or_default();
             let name = signal(initial);
             let input = element_ref();
@@ -602,7 +618,9 @@ pub fn close_confirm_dialog(ui: Ui) -> impl IntoElement {
                 .get_untracked()
                 .unwrap_or_default();
             let (title, subtitle, reason) = ui.snapshot.with_untracked(|s| {
-                let entry = entries(s).into_iter().find(|e| e.saved.id == id);
+                let entry = ui
+                    .terminal_entries
+                    .with_untracked(|rows| rows.iter().find(|e| e.saved.id == id).cloned());
                 let title = entry
                     .as_ref()
                     .map(|e| format!("Close {}?", e.title()))
@@ -635,6 +653,7 @@ pub fn close_confirm_dialog(ui: Ui) -> impl IntoElement {
                 ui.terminal_focus.update(|n| *n += 1);
             };
             let confirm_id = id.clone();
+            let confirm_id_pending = id.clone();
             let mut body = panel()
                 .w(px(420.))
                 .max_w(Percentage(0.95))
@@ -673,7 +692,10 @@ pub fn close_confirm_dialog(ui: Ui) -> impl IntoElement {
                         action("Close terminal", Variant::Danger, move |_| {
                             close_entry_confirmed(ui, &confirm_id)
                         })
-                        .disabled(move || ui.is_method_pending("terminal.close")),
+                        .disabled(move || {
+                            ui.closing_terminals
+                                .with(|c| c.contains(&confirm_id_pending))
+                        }),
                     ),
             );
             nsh_base::dialog()

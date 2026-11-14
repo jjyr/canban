@@ -1,11 +1,63 @@
 //! UI-side access to the single authoritative service. No database is opened here.
 use super::*;
+struct RpcConn {
+    writer: UnixStream,
+    reader: BufReader<UnixStream>,
+    next_id: u64,
+}
+
+impl RpcConn {
+    fn connect(endpoint: &Path) -> Result<Self> {
+        let writer = UnixStream::connect(endpoint)
+            .with_context(|| format!("Canban is not running at {}", endpoint.display()))?;
+        writer.set_read_timeout(Some(Duration::from_secs(90)))?;
+        writer.set_write_timeout(Some(Duration::from_secs(90)))?;
+        let reader = BufReader::new(writer.try_clone()?);
+        Ok(Self {
+            writer,
+            reader,
+            next_id: 1,
+        })
+    }
+
+    fn call(&mut self, method: &str, params: &Value) -> Result<Value> {
+        let req_id = self.next_id;
+        self.next_id += 1;
+        writeln!(
+            self.writer,
+            "{}",
+            json!({"jsonrpc":"2.0","id":req_id,"method":method,"params":params})
+        )?;
+        self.writer.flush()?;
+        let mut line = String::new();
+        let n = self.reader.read_line(&mut line)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "AppServer closed RPC socket",
+            )
+            .into());
+        }
+        let reply: Value = serde_json::from_str(&line)?;
+        ensure!(
+            reply.get("error").is_none(),
+            "{}",
+            reply["error"]["message"]
+        );
+        reply
+            .get("result")
+            .cloned()
+            .context("Invalid Canban response")
+    }
+}
+
 pub struct AppClient {
     pub home: PathBuf,
     endpoint: PathBuf,
     cli: PathBuf,
     explicit_endpoint: bool,
     respawn_lock: Mutex<()>,
+    rpc_pool: Mutex<Vec<RpcConn>>,
     config: RwLock<Config>,
     server_notice: Option<String>,
 }
@@ -92,6 +144,7 @@ impl AppClient {
             cli: cli.to_path_buf(),
             explicit_endpoint: explicit.is_some(),
             respawn_lock: Mutex::new(()),
+            rpc_pool: Mutex::new(Vec::new()),
             config: RwLock::new(serde_json::from_value(state["config"].clone())?),
             server_notice,
         }))
@@ -116,8 +169,35 @@ impl AppClient {
             .spawn()?;
         Ok(())
     }
+    fn pooled_rpc(&self, method: &str, params: &Value) -> Result<Value> {
+        let pooled = self.rpc_pool.lock().unwrap().pop();
+        let (mut conn, reused) = match pooled {
+            Some(c) => (c, true),
+            None => (RpcConn::connect(&self.endpoint)?, false),
+        };
+        match conn.call(method, params) {
+            Ok(v) => {
+                let mut pool = self.rpc_pool.lock().unwrap();
+                if pool.len() < 4 {
+                    pool.push(conn);
+                }
+                Ok(v)
+            }
+            Err(err) if reused && err.downcast_ref::<std::io::Error>().is_some() => {
+                let mut fresh = RpcConn::connect(&self.endpoint)?;
+                let v = fresh.call(method, params)?;
+                let mut pool = self.rpc_pool.lock().unwrap();
+                if pool.len() < 4 {
+                    pool.push(fresh);
+                }
+                Ok(v)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
-        match rpc(&self.endpoint, method, params.clone()) {
+        match self.pooled_rpc(method, &params) {
             Ok(v) => Ok(v),
             Err(first_err) => {
                 let connect_failed = first_err
@@ -140,6 +220,7 @@ impl AppClient {
                     return Err(first_err);
                 }
                 let _guard = self.respawn_lock.lock().unwrap();
+                self.rpc_pool.lock().unwrap().clear();
                 if rpc(&self.endpoint, "app.ping", json!({})).is_err()
                     && !canban_updater::handoff::active(&self.home)
                 {
@@ -151,7 +232,7 @@ impl AppClient {
                         std::thread::sleep(Duration::from_millis(100));
                     }
                 }
-                rpc(&self.endpoint, method, params)
+                self.pooled_rpc(method, &params)
             }
         }
     }
@@ -214,20 +295,44 @@ fn change_topic(connected: bool, previous: &Value, next: &Value) -> &'static str
 impl AppServer {
     pub(super) fn relay(&self, mut stream: UnixStream, params: &Value) -> Result<()> {
         let mut target = None;
-        let _viewer = if let Some(terminal) = params["terminal"].as_str() {
-            let core = canban_herdr::Client {
-                config: self.config(),
+        let viewer_setup = (|| -> Result<Option<canban_herdr::activity::Viewer>> {
+            if let Some(terminal) = params["terminal"].as_str() {
+                let core_id = self.verified_core_id()?;
+                if let Some(expected) = params["expected_core_id"].as_str() {
+                    ensure!(core_id == expected, "Original core identity changed");
+                }
+                target = Some((core_id.clone(), terminal.to_owned()));
+                Ok(Some(canban_herdr::activity::Viewer::new(
+                    &core_id, terminal,
+                )))
+            } else {
+                Ok(None)
             }
-            .status()?;
-            target = Some((strp(&core["core"], "id")?.to_owned(), terminal.to_owned()));
-            Some(canban_herdr::activity::Viewer::new(
-                strp(&core["core"], "id")?,
-                terminal,
-            ))
-        } else {
-            None
+        })();
+        let _viewer = match viewer_setup {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    json!({"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":format!("{e:#}")}})
+                );
+                return Err(e);
+            }
         };
-        let (mut child, mut input, mut output) = canban_herdr::transport::child(&self.config())?;
+        let (mut child, mut input, mut output) = match canban_herdr::transport::child(
+            &self.config(),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    json!({"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":format!("{e:#}")}})
+                );
+                return Err(e);
+            }
+        };
         writeln!(stream, "{}", json!({"result":{"ready":true}}))?;
         stream.set_read_timeout(None)?;
         stream.set_write_timeout(None)?;

@@ -54,6 +54,8 @@ pub struct Ui {
     pub terminal_focus: Signal<u64>,
     pub terminal_rename: Signal<Option<String>>,
     pub terminal_close_confirm: Signal<Option<String>>,
+    pub closing_terminals: Signal<BTreeSet<String>>,
+    pub terminal_entries: Memo<Vec<crate::terminals::Entry>>,
     pub operation_error: Signal<String>,
     pub backend_notice: Signal<String>,
     pub history: Signal<crate::navigation::History>,
@@ -252,6 +254,7 @@ impl Ui {
             canban_notifications::sound_items_with_reminders(&snapshot.get(), &reminders.get())
         });
         let reminder_counts = computed(move || canban_notifications::counts(&reminders.get()));
+        let terminal_entries = computed(move || crate::terminals::entries(&snapshot.get()));
         Self {
             owner: Owner::current(),
             github: crate::github::Browser::new(),
@@ -288,6 +291,8 @@ impl Ui {
             terminal_focus: signal(0),
             terminal_rename: signal(None),
             terminal_close_confirm: signal(None),
+            closing_terminals: signal(BTreeSet::new()),
+            terminal_entries,
             operation_error: signal(String::new()),
             backend_notice: signal(String::new()),
             history: signal(crate::navigation::History::default()),
@@ -414,9 +419,15 @@ impl Ui {
         }
     }
     pub fn open_terminal(self, conversation: String) {
-        let Some(entry) = crate::terminals::entries(&self.snapshot.get_untracked())
-            .into_iter()
-            .find(|e| e.saved.id == conversation)
+        if self
+            .closing_terminals
+            .with_untracked(|c| c.contains(&conversation))
+        {
+            return;
+        }
+        let Some(entry) = self
+            .terminal_entries
+            .with_untracked(|rows| rows.iter().find(|e| e.saved.id == conversation).cloned())
         else {
             self.operation_error
                 .set("This Terminal is no longer available".into());
@@ -529,11 +540,9 @@ impl Ui {
             self.project.set(project);
         }
         let recent = self.terminal_recent.with(|m| m.get(&id).cloned());
-        let default_tab = crate::terminals::default_card_terminal(
-            &self.snapshot.get_untracked(),
-            &id,
-            recent.as_deref(),
-        )
+        let default_tab = untracked(|| {
+            crate::terminals::default_card_terminal_for_ui(self, &id, recent.as_deref())
+        })
         .unwrap_or_default();
         let has_live = !default_tab.is_empty();
         if has_live {
@@ -565,10 +574,9 @@ impl Ui {
         }
         self.open_card(card_id.clone());
         if let Some(conv) = conversation {
-            let is_live =
-                crate::terminals::card_live_entries(&self.snapshot.get_untracked(), &card_id)
-                    .iter()
-                    .any(|e| e.saved.id == conv);
+            let is_live = untracked(|| crate::terminals::card_live_entries_for_ui(self, &card_id))
+                .iter()
+                .any(|e| e.saved.id == conv);
             if is_live {
                 self.card_tab.set(conv);
             }
