@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Focus on Human Context.</strong><br />
-  用 Kanban 组织人类上下文，借助声明式 Workflow 编排多 Agent 协作，并通过 Herdr 无干预驱动原生 Agent CLI。
+  Canban = Kanban + Workflow + Herdr
 </p>
 
 <p align="center">

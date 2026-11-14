@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Focus on Human Context.</strong><br />
-  Organize human intent, reviews, and multi-agent workflows on Kanban — while driving native Agent CLIs directly through Herdr.
+  Canban = Kanban + Workflow + Herdr
 </p>
 
 <p align="center">
