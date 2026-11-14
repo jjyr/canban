@@ -134,10 +134,25 @@ together. Desktop API compatibility remains a separate contract; the generic
 attached client orders published releases or falls back to API levels. It does
 not negotiate a compatibility range.
 
-Startup failures now open a standalone native error window with the selected
-home and the actual connection/configuration error. This works before AppServer
-connection and does not require opening SQLite. The Gallery has a
-`CANBAN_GALLERY_SCENE=startup-error` scene using the production surface.
+Startup launches a unified desktop bootstrap gate (`ui::startup::Bootstrap`) in the
+main window before mounting `<Canban />`:
+1. **AppServer check**: Connects to or starts `AppServer` (`AppClient::connect_or_start`).
+   Connection or binding errors open the startup error panel (with **Retry** and
+   **Quit**) without requiring SQLite access, while older local daemons trigger the
+   **Update backend** handoff.
+2. **Herdr Core (`hc`) check**: Calls `herdr.check` on `AppServer` to verify that
+   `hc` (or `herdr-core` / custom `config.hc`) exists on disk and responds to a
+   `server.status` JSON-RPC handshake. When `herdr-core` is missing or unreachable,
+   the bootstrap gate prompts the user with **Install Herdr Core** (invoking
+   `herdr.install` to run the official `https://releases.herdr.dev/core/install.sh`
+   installer with live log output and automatic verification), a copyable manual
+   install command, and **Check** (re-probing `hc` and refreshing `AppServer`'s
+   resolved `config.hc`). Once `herdr.check` reports `ready: true`, the window
+   transitions directly into the `<Canban />` workspace without restarting the App.
+
+The standalone Gallery includes `CANBAN_GALLERY_SCENE=startup-error`,
+`backend-older`, `herdr-missing`, `herdr-installing` and `herdr-error` scenes
+using the exact production startup surfaces.
 
 Starting an isolated dev instance does not upgrade or repair an older service
 already running for installed `~/.canban`. Ordinary local Apps now offer

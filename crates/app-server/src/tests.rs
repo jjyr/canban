@@ -2771,3 +2771,118 @@ fn project_tags_register_deduplicate_and_reject_invalid_or_numeric_names() {
         );
     }
 }
+
+#[test]
+fn herdr_check_and_install_support_isolated_missing_failure_and_ready_progression() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let bin_dir = dir.path().join("isolated-bin");
+    std::fs::create_dir_all(home.join("config")).unwrap();
+    std::fs::create_dir_all(&bin_dir).unwrap();
+
+    let fail_script = dir.path().join("install-fail.sh");
+    std::fs::write(
+        &fail_script,
+        "#!/bin/sh\necho 'network unreachable' >&2\nexit 22\n",
+    )
+    .unwrap();
+
+    let ok_script = dir.path().join("install-ok.sh");
+    let mock_hc = r#"#!/bin/sh
+if [ "$1" = "connect" ]; then
+  while IFS= read -r line; do
+    id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+    [ -z "$id" ] && id=1
+    printf '{"jsonrpc":"2.0","id":%s,"result":{"core":{"id":"isolated-core-54","version":"0.1.99"}}}\n' "$id"
+  done
+  exit 0
+fi
+exit 0
+"#;
+    std::fs::write(
+        &ok_script,
+        format!(
+            "#!/bin/sh\nset -eu\necho 'detected macos/aarch64'\ncat > \"$HC_INSTALL_DIR/hc\" <<'EOF'\n{mock_hc}EOF\nchmod 755 \"$HC_INSTALL_DIR/hc\"\necho 'installed hc 0.1.99'\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ok_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut cfg = Config::default();
+    cfg.hc_env.insert(
+        "CANBAN_HERDR_SEARCH_PATHS".into(),
+        bin_dir.display().to_string(),
+    );
+    cfg.hc_env
+        .insert("HC_INSTALL_DIR".into(), bin_dir.display().to_string());
+    cfg.hc_env.insert(
+        "CANBAN_HERDR_INSTALL_URL".into(),
+        format!("file://{}", fail_script.display()),
+    );
+    canban_context::atomic(
+        &home.join("config/agents.json"),
+        &serde_json::to_vec_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
+
+    let app = AppServer::open(home.clone(), PathBuf::from("/bin/echo")).unwrap();
+    let _running = app.start().unwrap();
+
+    // 1. Missing binary detection.
+    let missing = app.call("herdr.check", json!({})).unwrap();
+    assert_eq!(missing["installed"], false);
+    assert_eq!(missing["ready"], false);
+    assert_eq!(missing["default_hc"], true);
+    assert!(missing["error"].as_str().unwrap().contains("not found"));
+
+    // 2. Agent-bound invocations cannot trigger host installation.
+    assert!(
+        app.call("herdr.install", json!({"execution": {"attempt_id": "a1"}}))
+            .is_err()
+    );
+
+    // 3. Failed installer surfaces logs + failure state and stays not-ready.
+    let failed_check = app.call("herdr.install", json!({"wait": true})).unwrap();
+    assert_eq!(failed_check["ready"], false);
+    assert_eq!(failed_check["install"]["phase"], "failed");
+    assert!(
+        failed_check["install"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("network unreachable")
+    );
+
+    // 4. Point to working isolated installer and install -> automatically verifies & updates config.hc.
+    cfg.hc_env.insert(
+        "CANBAN_HERDR_INSTALL_URL".into(),
+        format!("file://{}", ok_script.display()),
+    );
+    canban_context::atomic(
+        &home.join("config/agents.json"),
+        &serde_json::to_vec_pretty(&cfg).unwrap(),
+    )
+    .unwrap();
+
+    let ready_check = app.call("herdr.install", json!({"wait": true})).unwrap();
+    assert_eq!(ready_check["installed"], true);
+    assert_eq!(ready_check["ready"], true);
+    assert_eq!(ready_check["core_id"], "isolated-core-54");
+    assert_eq!(ready_check["version"], "0.1.99");
+    assert_eq!(ready_check["install"]["phase"], "succeeded");
+    assert_eq!(app.config().hc, bin_dir.join("hc").display().to_string());
+
+    // 5. External manual removal & re-install verified via `herdr.check`.
+    std::fs::remove_file(bin_dir.join("hc")).unwrap();
+    let recheck_missing = app.call("herdr.check", json!({})).unwrap();
+    assert_eq!(recheck_missing["installed"], false);
+    assert_eq!(recheck_missing["ready"], false);
+
+    std::fs::write(bin_dir.join("hc"), mock_hc).unwrap();
+    std::fs::set_permissions(bin_dir.join("hc"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let recheck_ready = app.call("herdr.check", json!({})).unwrap();
+    assert_eq!(recheck_ready["installed"], true);
+    assert_eq!(recheck_ready["ready"], true);
+    assert_eq!(recheck_ready["core_id"], "isolated-core-54");
+}

@@ -43,6 +43,8 @@ pub struct AppServer {
     terminal_contexts: Mutex<Vec<TerminalContext>>,
     inventory: Mutex<observation::Inventory>,
     observer_running: AtomicBool,
+    herdr_wake: AtomicBool,
+    herdr_install: Arc<Mutex<herdr_setup::HerdrInstallState>>,
     remote_health_due: AtomicBool,
     check_slots: Mutex<std::collections::BTreeSet<String>>,
     check_signal: std::sync::Condvar,
@@ -495,6 +497,8 @@ impl AppServer {
             terminal_contexts: Mutex::new(Vec::new()),
             inventory: Mutex::new(Default::default()),
             observer_running: AtomicBool::new(false),
+            herdr_wake: AtomicBool::new(false),
+            herdr_install: Arc::new(Mutex::new(Default::default())),
             remote_health_due: AtomicBool::new(false),
             check_slots: Mutex::new(Default::default()),
             check_signal: std::sync::Condvar::new(),
@@ -723,6 +727,7 @@ mod agents;
 mod authoring;
 mod configuration;
 mod events;
+mod herdr_setup;
 mod machines;
 mod remote;
 mod workflow;

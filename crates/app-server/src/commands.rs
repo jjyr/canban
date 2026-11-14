@@ -17,6 +17,7 @@ impl AppServer {
                     | "profile.presets"
                     | "agent.catalog"
                     | "draft.list"
+                    | "herdr.check"
             )
         {
             bail!("Canban is upgrading; retry after the service handoff");
@@ -245,6 +246,8 @@ impl AppServer {
                 Ok(json!({"reloaded":true}))
             }
             "herdr.status" => canban_herdr::Client { config }.status(),
+            "herdr.check" => self.herdr_check(p),
+            "herdr.install" => self.herdr_install(p),
             "herdr.templates" => canban_herdr::Client { config }.call("templates.list", json!({})),
             "project.create" => {
                 ensure!(

@@ -5,6 +5,92 @@ use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::json;
 
+fn gallery_herdr_setup_fixture(ui: Ui, mode: &str) -> impl IntoElement {
+    let initial = match mode {
+        "herdr-installing" => canban_ui::startup::HerdrSetupView {
+            home: "/preview/.canban".into(),
+            installing: true,
+            logs: vec![
+                "Downloading installer from https://releases.herdr.dev/core/install.sh".into(),
+                "detected macos/aarch64".into(),
+                "downloading herdr-core 0.1.18…".into(),
+            ],
+            ..Default::default()
+        },
+        "herdr-error" => canban_ui::startup::HerdrSetupView {
+            home: "/preview/.canban".into(),
+            error: Some(
+                "Herdr Core installer failed (exit code 22): curl: (6) Could not resolve host: releases.herdr.dev".into(),
+            ),
+            logs: vec![
+                "Downloading installer from https://releases.herdr.dev/core/install.sh".into(),
+                "curl: (6) Could not resolve host: releases.herdr.dev".into(),
+            ],
+            ..Default::default()
+        },
+        _ => canban_ui::startup::HerdrSetupView {
+            home: "/preview/.canban".into(),
+            error: Some(
+                "Herdr Core (`hc`) was not found in ~/.local/bin, /opt/homebrew/bin, /usr/local/bin, or PATH.".into(),
+            ),
+            ..Default::default()
+        },
+    };
+    let fixture_owner = Owner::current();
+    let state = signal(initial);
+    let installed_in_fixture = signal(false);
+    let entered_workspace = signal(false);
+    let copy_status = signal(String::new());
+    view()
+        .flex_1()
+        .min_h(px(0.))
+        .bg(BACKGROUND)
+        .child(dynamic(move || {
+            if entered_workspace.get() {
+                return canban_ui::frame::screen(ui).into_element();
+            }
+            let current = state.get();
+            canban_ui::startup::herdr_setup_screen(
+                current,
+                copy_status,
+                move || {
+                    copy_status.set(String::new());
+                    state.update(|s| {
+                        s.installing = true;
+                        s.error = None;
+                        s.logs = vec![
+                            "Starting Herdr Core installer…".into(),
+                            "detected macos/aarch64".into(),
+                            "installed ~/.local/bin/hc (0.1.18)".into(),
+                        ];
+                    });
+                    installed_in_fixture.set(true);
+                    fixture_owner.run(move || {
+                        set_timeout(std::time::Duration::from_millis(350), move || {
+                            entered_workspace.set(true);
+                        });
+                    });
+                },
+                move || {
+                    copy_status.set(String::new());
+                    if installed_in_fixture.get_untracked() {
+                        entered_workspace.set(true);
+                    } else {
+                        state.update(|s| {
+                            s.error = Some(
+                                "Herdr Core (`hc`) is still missing in this fixture. Click Install Herdr Core to simulate installation and enter the workspace.".into(),
+                            );
+                        });
+                    }
+                },
+                move || {
+                    copy_status.set("Copied".into());
+                },
+            )
+            .into_element()
+        }))
+}
+
 fn controls() -> impl IntoElement {
     let ui = Ui::new();
     ui.apply_config(&fixtures::agent_config());
@@ -518,15 +604,23 @@ pub fn Gallery() -> impl IntoElement {
     }
     ui.machines.set(json!({"machines":[{"id":"gallery-remote","name":"Build machine","state":"connected","target":"ssh-host"},{"id":"gallery-offline","name":"Offline machine","state":"unreachable","target":"another-host"}]}));
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("startup-error") {
+        canban_ui::frame::configure_window_chrome();
         return canban_ui::startup::error_screen("/preview/development-home".into(), "AppServer API 4 is incompatible with this UI (API 8). Start the matching instance or update the service on its owning host.".into()).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("backend-older") {
+        canban_ui::frame::configure_window_chrome();
         return canban_ui::startup::backend_update_screen(
             "/preview/.canban".into(),
             "The backend is older than this App (backend API 4, App API 8).".into(),
             || async { anyhow::bail!("Fixture: the real action uses the installed backend") },
         )
         .into_element();
+    }
+    if let Ok(scene @ ("herdr-missing" | "herdr-installing" | "herdr-error")) =
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref()
+    {
+        canban_ui::frame::configure_window_chrome();
+        return gallery_herdr_setup_fixture(ui, scene).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("backend-newer") {
         ui.backend_notice
@@ -1432,6 +1526,9 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Controls", Variant::Quiet, move |_| {
                     scene.set("controls".into())
                 }))
+                .child(action("Herdr setup", Variant::Quiet, move |_| {
+                    scene.set("herdr-missing".into())
+                }))
                 .child(action("Narrow viewport", Variant::Quiet, move |_| {
                     constrained.set(true)
                 }))
@@ -1449,6 +1546,9 @@ pub fn Gallery() -> impl IntoElement {
             }
             if scene.get() == "controls" {
                 return controls().into_element();
+            }
+            if scene.get() == "herdr-missing" {
+                return gallery_herdr_setup_fixture(ui, "herdr-missing").into_element();
             }
             let narrow_preview = constrained.get();
             view()
