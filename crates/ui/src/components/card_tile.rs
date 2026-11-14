@@ -24,6 +24,7 @@ pub(crate) struct CardTileModel {
     pub status_specs: Vec<(String, Tone, bool)>,
     pub running: Vec<(TerminalEntry, Option<u64>)>,
     pub ephemeral_agents: Vec<(crate::terminals::Entry, Option<u64>)>,
+    pub replies: usize,
 }
 
 impl CardTileModel {
@@ -116,6 +117,7 @@ impl CardTileModel {
                 (entry, started_at)
             })
             .collect();
+        let replies = crate::card::timeline::reply_count(&snapshot.events, &card.id);
         Self {
             card,
             live_entries,
@@ -127,6 +129,7 @@ impl CardTileModel {
             status_specs,
             running,
             ephemeral_agents,
+            replies,
         }
     }
 }
@@ -146,6 +149,7 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
         status_specs,
         running,
         ephemeral_agents,
+        replies,
         ..
     } = model;
     let reminder_id = card.id.clone();
@@ -325,7 +329,6 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
         })
         .collect();
     let branch = card.branch.clone().filter(|b| !b.is_empty());
-    let replies = crate::card::timeline::reply_count(&snapshot.events, &card.id);
     if !chips.is_empty()
         || !running.is_empty()
         || !ephemeral_agents.is_empty()
@@ -367,6 +370,7 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
             };
             left = left.child(
                 view()
+                    .key("footer-replies")
                     .flex_row()
                     .flex_shrink_0()
                     .items_center()
