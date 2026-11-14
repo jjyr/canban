@@ -79,7 +79,6 @@ Canban builds directly on these open-source projects and assets (full attributio
 - **[Sheprd](https://github.com/sheprd-labs/sheprd)** — Terminal VT/frame/input and subscription utility patterns referenced during integration (Apache-2.0)
 - **[NSH (`longbridge/nsh`)](https://github.com/longbridge/nsh)** — Native macOS AppKit/Metal Rust UI framework (Apache-2.0)
 - **[Ghostty (`libghostty-vt`)](https://github.com/ghostty-org/ghostty)** — Commit-pinned VT parser and terminal emulation engine (MIT)
-- **Native Agent CLIs** — Compatible with [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [OpenAI Codex CLI](https://github.com/openai/codex), Antigravity (`agy`), Cursor CLI, and custom CLI profiles
 - **[iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes)** (MIT) — 16 classic terminal color palettes including Monokai, Dracula, Nord, Tokyo Night, and Catppuccin Mocha
 - **[Lucide](https://lucide.dev)** (ISC), **[Lobe Icons](https://github.com/lobehub/lobe-icons)** (MIT), and **[Primer Octicons](https://github.com/primer/octicons)** (MIT) — UI and provider icons
 

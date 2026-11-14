@@ -79,7 +79,6 @@ Canban 的实现离不开以下优秀开源项目与资源（完整的第三方�
 - **[Sheprd](https://github.com/sheprd-labs/sheprd)** — 在终端 VT/输入封装与订阅工具契约中参考了其工程实践（Apache-2.0）
 - **[NSH (`longbridge/nsh`)](https://github.com/longbridge/nsh)** — 原生 macOS AppKit / Metal Rust 桌面 UI 框架（Apache-2.0）
 - **[Ghostty (`libghostty-vt`)](https://github.com/ghostty-org/ghostty)** — 按固定提交锁定的高性能 VT 终端解析内核（MIT）
-- **原生 Agent CLIs** — 兼容并直接调度 [Claude Code](https://docs.anthropic.com/en/docs/claude-code)、[OpenAI Codex CLI](https://github.com/openai/codex)、Antigravity (`agy`)、Cursor CLI 及自定义 Agent CLI
 - **[iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes)** (MIT) — 16 套经典暗色终端配色方案（含 Monokai、Dracula、Nord、Tokyo Night、Catppuccin Mocha 等）
 - **[Lucide](https://lucide.dev)** (ISC)、**[Lobe Icons](https://github.com/lobehub/lobe-icons)** (MIT)、**[Primer Octicons](https://github.com/primer/octicons)** (MIT) — UI 图标与模型/服务商标识
 
