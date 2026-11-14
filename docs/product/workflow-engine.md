@@ -1,6 +1,6 @@
 # Unified workflow engine, Studio and implementation
 
-Status: implemented and active (reconciled 2026-11-14; SQLite schema 15, desktop API 34). This is the canonical product and engineering contract for Canban Workflows, consolidating the unified engine rules, Project/Board workflow ownership, Visual Studio UX, YAML schema, RPC/CLI operations, workspace lifecycle, and acceptance evidence. [Events and subscriptions](events-and-notifications.md) owns the durable journal envelope and trigger delivery.
+Status: implemented and active (reconciled 2026-11-14; SQLite schema 15, desktop API 35). This is the canonical product and engineering contract for Canban Workflows, consolidating the unified engine rules, Project/Board workflow ownership, Visual Studio UX, YAML schema, RPC/CLI operations, workspace lifecycle, and acceptance evidence. [Events and subscriptions](events-and-notifications.md) owns the durable journal envelope and trigger delivery.
 
 ## Core design principles
 

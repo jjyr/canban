@@ -14,14 +14,15 @@ use nsh_platform_macos::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::VecDeque,
     ffi::{CString, c_void},
     rc::Rc,
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[repr(C)]
@@ -113,6 +114,8 @@ unsafe extern "C" {
     fn cb_terminal_auto_focus(view: *mut c_void, enabled: bool);
     fn cb_terminal_ui_command_keys(view: *mut c_void, json: *const i8);
     fn cb_terminal_set_font(view: *mut c_void, family: *const i8, size: f64);
+    fn cb_terminal_set_theme_bg(view: *mut c_void, r: u8, g: u8, b: u8);
+    fn cb_terminal_sync_rebind(view: *mut c_void);
     fn cb_terminal_list_fonts_json() -> *mut i8;
     fn cb_terminal_free_cstring(ptr: *mut i8);
     #[cfg(test)]
@@ -151,34 +154,57 @@ pub fn installed_fonts() -> crate::InstalledFonts {
         .clone()
 }
 
+const CONNECTING_GRACE: Duration = Duration::from_millis(180);
+const MAX_POOLED_SESSIONS: usize = 8;
+
 struct WakeHandle {
-    view: Mutex<usize>,
+    views: Mutex<Vec<usize>>,
     pending: AtomicBool,
 }
 
 impl WakeHandle {
     fn new() -> Self {
         Self {
-            view: Mutex::new(0),
+            views: Mutex::new(Vec::new()),
             pending: AtomicBool::new(false),
         }
     }
 
     fn attach(&self, ptr: *mut NSView) {
-        *self.view.lock().unwrap() = ptr as usize;
+        let p = ptr as usize;
+        if p == 0 {
+            return;
+        }
+        let mut views = self.views.lock().unwrap();
+        if !views.contains(&p) {
+            views.push(p);
+        }
     }
 
-    fn detach(&self) {
-        *self.view.lock().unwrap() = 0;
-        self.pending.store(false, Ordering::SeqCst);
+    fn detach(&self, ptr: *mut NSView) {
+        let p = ptr as usize;
+        if p == 0 {
+            return;
+        }
+        let mut views = self.views.lock().unwrap();
+        views.retain(|&v| v != p);
+        if views.is_empty() {
+            self.pending.store(false, Ordering::SeqCst);
+        }
     }
 
     fn notify(&self) {
-        let ptr = *self.view.lock().unwrap();
-        if ptr == 0 {
+        let snapshot: Vec<usize> = self.views.lock().unwrap().clone();
+        if snapshot.is_empty() {
             return;
         }
-        if !self.pending.swap(true, Ordering::SeqCst) {
+        if snapshot.len() == 1 {
+            if !self.pending.swap(true, Ordering::SeqCst) {
+                unsafe { cb_terminal_wake(snapshot[0] as *mut c_void) };
+            }
+            return;
+        }
+        for ptr in snapshot {
             unsafe { cb_terminal_wake(ptr as *mut c_void) };
         }
     }
@@ -192,6 +218,8 @@ struct State {
     model: Model,
     status: String,
     connected: bool,
+    exited: bool,
+    connecting_since: Option<Instant>,
     size_ready: bool,
     focused: bool,
     theme: Option<Value>,
@@ -204,11 +232,355 @@ enum Input {
     Focus(bool),
 }
 
+struct LiveSession {
+    key: (String, String),
+    state: Arc<Mutex<State>>,
+    size_cv: Arc<Condvar>,
+    wake: Arc<WakeHandle>,
+    input: mpsc::Sender<Input>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for LiveSession {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.size_cv.notify_all();
+    }
+}
+
+fn session_pool() -> &'static Mutex<VecDeque<Arc<LiveSession>>> {
+    static POOL: OnceLock<Mutex<VecDeque<Arc<LiveSession>>>> = OnceLock::new();
+    POOL.get_or_init(Default::default)
+}
+
+pub fn evict_session(core_id: &str, terminal: &str) {
+    let mut pool = session_pool().lock().unwrap();
+    pool.retain(|s| {
+        let keep = !(s.key.0 == core_id && s.key.1 == terminal);
+        if !keep {
+            s.stop.store(true, Ordering::SeqCst);
+            s.size_cv.notify_all();
+        }
+        keep
+    });
+}
+
+struct SessionInit {
+    config: Config,
+    core: String,
+    terminal: String,
+    initial_cols: u16,
+    initial_rows: u16,
+    size_ready: bool,
+    focused: bool,
+    theme: Option<Value>,
+}
+
+fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
+    let SessionInit {
+        config,
+        core,
+        terminal,
+        initial_cols,
+        initial_rows,
+        size_ready,
+        focused,
+        theme,
+    } = init;
+    let mut model = Model::new(initial_cols.max(2), initial_rows.max(1));
+    if let Some(ref t) = theme {
+        model.theme(t);
+    }
+    let state = Arc::new(Mutex::new(State {
+        model,
+        status: "Connecting…".into(),
+        connected: false,
+        exited: false,
+        connecting_since: Some(Instant::now()),
+        size_ready,
+        focused,
+        theme,
+    }));
+    let size_cv = Arc::new(Condvar::new());
+    let wake = Arc::new(WakeHandle::new());
+    let stop = Arc::new(AtomicBool::new(false));
+    let (tx, rx) = mpsc::channel();
+    let rx = Arc::new(Mutex::new(rx));
+
+    // Delayed wake so slow/remote connects reveal the "Connecting…" pill cleanly after grace.
+    {
+        let state_grace = state.clone();
+        let wake_grace = wake.clone();
+        let stop_grace = stop.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(CONNECTING_GRACE);
+            if stop_grace.load(Ordering::SeqCst) {
+                return;
+            }
+            let still_connecting = {
+                let s = state_grace.lock().unwrap();
+                !s.connected && s.status == "Connecting…"
+            };
+            if still_connecting {
+                wake_grace.notify();
+            }
+        });
+    }
+
+    let session = Arc::new(LiveSession {
+        key: (core.clone(), terminal.clone()),
+        state: state.clone(),
+        size_cv: size_cv.clone(),
+        wake: wake.clone(),
+        input: tx,
+        stop: stop.clone(),
+    });
+
+    std::thread::spawn(move || {
+        let relay_fenced = config.relay_endpoint.is_some();
+        let client = Client { config };
+        {
+            let mut guard = state.lock().unwrap();
+            while !guard.size_ready {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                let (next, _) = size_cv
+                    .wait_timeout(guard, Duration::from_millis(50))
+                    .unwrap();
+                guard = next;
+            }
+        }
+        let mut first_attach = true;
+        while !stop.load(Ordering::SeqCst) {
+            let attempt = (|| -> anyhow::Result<Attachment> {
+                if !relay_fenced {
+                    anyhow::ensure!(
+                        client.status()?["core"]["id"] == core,
+                        "Original core identity changed"
+                    );
+                }
+                let size = {
+                    let s = state.lock().unwrap();
+                    (s.model.cols, s.model.height)
+                };
+                let mut attachment =
+                    client.attach_fenced(&terminal, size.0, size.1, Some(&core))?;
+                if !relay_fenced {
+                    attachment.track_view(&core, &terminal);
+                }
+                Ok(attachment)
+            })();
+            let attach = match attempt {
+                Ok(v) => v,
+                Err(e) => {
+                    {
+                        let mut s = state.lock().unwrap();
+                        s.connected = false;
+                        s.connecting_since = None;
+                        s.status = format!("Disconnected · {e:#} · reconnecting");
+                    }
+                    wake.notify();
+                    for _ in rx.lock().unwrap().try_iter() {}
+                    for _ in 0..10 {
+                        if stop.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    continue;
+                }
+            };
+            let was_first_attach = first_attach;
+            if !was_first_attach {
+                for _ in rx.lock().unwrap().try_iter() {}
+            }
+            first_attach = false;
+            {
+                let mut s = state.lock().unwrap();
+                let size = (s.model.cols, s.model.height);
+                if !was_first_attach {
+                    s.model = Model::new(size.0, size.1);
+                    if let Some(theme) = s.theme.clone() {
+                        s.model.theme(&theme);
+                    }
+                }
+                s.status = String::new();
+                s.connecting_since = None;
+                let setup_res = if s.focused {
+                    attach.focus(true)
+                } else {
+                    Ok(())
+                };
+                if let Err(e) = setup_res {
+                    s.status = format!("Attach setup failed: {e} · reconnecting");
+                    drop(s);
+                    wake.notify();
+                    continue;
+                }
+                s.connected = true;
+            }
+            wake.notify();
+
+            let input_stop = Arc::new(AtomicBool::new(false));
+            let failed = Arc::new(AtomicBool::new(false));
+            let input_worker = {
+                let writer = attach.input_writer();
+                let rx = rx.clone();
+                let stopped = input_stop.clone();
+                let failed = failed.clone();
+                let state = state.clone();
+                let wake = wake.clone();
+                std::thread::spawn(move || {
+                    while !stopped.load(Ordering::SeqCst) {
+                        let message = rx.lock().unwrap().recv_timeout(Duration::from_millis(20));
+                        let result = match message {
+                            Ok(Input::Bytes(bytes)) => writer.input(&bytes),
+                            Ok(Input::Resize(c, r)) => writer.resize(c, r),
+                            Ok(Input::Focus(on)) => writer.focus(on),
+                            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(_) => break,
+                        };
+                        if let Err(e) = result {
+                            state.lock().unwrap().status = format!("Input disconnected: {e:#}");
+                            failed.store(true, Ordering::SeqCst);
+                            wake.notify();
+                            break;
+                        }
+                    }
+                })
+            };
+            let mut reconnect = false;
+            while !stop.load(Ordering::SeqCst) && !failed.load(Ordering::SeqCst) {
+                match attach.recv(Duration::from_millis(15)) {
+                    Ok(Some(Event::Data(data))) => {
+                        let replies = {
+                            let mut s = state.lock().unwrap();
+                            s.model.write(&data);
+                            s.model.replies()
+                        };
+                        wake.notify();
+                        let result = attach.consumed(data.len()).and_then(|_| {
+                            if replies.is_empty() {
+                                Ok(())
+                            } else {
+                                attach.input(&replies, true)
+                            }
+                        });
+                        if result.is_err() {
+                            reconnect = true;
+                            break;
+                        }
+                    }
+                    Ok(Some(Event::Resize(c, r))) => {
+                        state.lock().unwrap().model.resize(c, r);
+                        wake.notify();
+                    }
+                    Ok(Some(Event::Closed(reason))) => {
+                        {
+                            let mut s = state.lock().unwrap();
+                            s.connected = false;
+                            s.exited = true;
+                            s.connecting_since = None;
+                            s.status = format!(
+                                "Terminal exited · {}",
+                                reason["reason"].as_str().unwrap_or("closed")
+                            );
+                        }
+                        wake.notify();
+                        input_stop.store(true, Ordering::SeqCst);
+                        let _ = input_worker.join();
+                        evict_session(&core, &terminal);
+                        return;
+                    }
+                    Ok(Some(Event::Lost(error))) => {
+                        state.lock().unwrap().status =
+                            format!("Disconnected · {error} · reconnecting");
+                        wake.notify();
+                        reconnect = true;
+                        break;
+                    }
+                    Err(e) => {
+                        state.lock().unwrap().status = format!("Disconnected · {e}");
+                        wake.notify();
+                        reconnect = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            input_stop.store(true, Ordering::SeqCst);
+            let _ = input_worker.join();
+            reconnect |= failed.load(Ordering::SeqCst);
+            state.lock().unwrap().connected = false;
+            wake.notify();
+            drop(attach);
+            if !reconnect {
+                break;
+            }
+            for _ in 0..10 {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    });
+
+    session
+}
+
+fn get_or_spawn_session(init: SessionInit) -> Arc<LiveSession> {
+    let mut pool = session_pool().lock().unwrap();
+    pool.retain(|s| !s.stop.load(Ordering::SeqCst) && !s.state.lock().unwrap().exited);
+    if let Some(idx) = pool
+        .iter()
+        .position(|s| s.key.0 == init.core && s.key.1 == init.terminal)
+    {
+        let existing = pool.remove(idx).unwrap();
+        {
+            let mut s = existing.state.lock().unwrap();
+            if let Some(ref t) = init.theme
+                && s.theme.as_ref() != Some(t)
+            {
+                s.model.theme(t);
+                s.theme = Some(t.clone());
+            }
+            if init.size_ready && !s.size_ready {
+                s.size_ready = true;
+                existing.size_cv.notify_all();
+            }
+        }
+        pool.push_back(existing.clone());
+        return existing;
+    }
+    let created = spawn_session(init);
+    while pool.len() >= MAX_POOLED_SESSIONS {
+        // Prefer evicting a background session that currently has no attached NSView.
+        if let Some(idle_idx) = pool
+            .iter()
+            .position(|s| s.wake.views.lock().unwrap().is_empty())
+        {
+            if let Some(evicted) = pool.remove(idle_idx) {
+                evicted.stop.store(true, Ordering::SeqCst);
+                evicted.size_cv.notify_all();
+            }
+        } else {
+            break;
+        }
+    }
+    pool.push_back(created.clone());
+    created
+}
+
 struct Host {
     state: Arc<Mutex<State>>,
+    size_cv: Arc<Condvar>,
     wake: Arc<WakeHandle>,
     input: Option<mpsc::Sender<Input>>,
-    stop: Arc<AtomicBool>,
+    session: Option<Arc<LiveSession>>,
+    view_ptr: *mut NSView,
+    theme: Option<Value>,
     seen: u64,
     seen_status: String,
     status_scratch: String,
@@ -232,13 +604,18 @@ impl Host {
                 model: Model::new(80, 24),
                 status: String::new(),
                 connected: false,
+                exited: false,
+                connecting_since: None,
                 size_ready: false,
                 focused: false,
                 theme: None,
             })),
+            size_cv: Arc::new(Condvar::new()),
             wake: Arc::new(WakeHandle::new()),
             input: None,
-            stop: Arc::new(AtomicBool::new(false)),
+            session: None,
+            view_ptr: std::ptr::null_mut(),
+            theme: None,
             seen: u64::MAX,
             seen_status: String::new(),
             status_scratch: String::new(),
@@ -297,236 +674,115 @@ impl Host {
             } else {
                 "Disconnected"
             };
-            if state.status.is_empty() || reason == "Closing" {
+            if state.status.is_empty()
+                || reason == "Closing"
+                || (reason == "Connecting" && state.status == "Connecting…")
+            {
                 reason.to_owned()
             } else if state.status.starts_with(reason) {
                 state.status.clone()
             } else {
                 format!("{reason} · {}", state.status)
             }
+        } else if !state.connected
+            && state.status == "Connecting…"
+            && state
+                .connecting_since
+                .is_some_and(|t| t.elapsed() < CONNECTING_GRACE)
+        {
+            String::new()
         } else {
             state.status.clone()
         }
     }
 
-    fn bind(&mut self, value: &Value) {
+    fn detach_current_session(&mut self) {
+        if let Some(old_session) = self.session.take() {
+            old_session.wake.detach(self.view_ptr);
+            if old_session.wake.views.lock().unwrap().is_empty() {
+                let was_focused = {
+                    let mut s = old_session.state.lock().unwrap();
+                    let was = s.focused;
+                    s.focused = false;
+                    was
+                };
+                if was_focused {
+                    let _ = old_session.input.send(Input::Focus(false));
+                }
+            }
+        }
+    }
+
+    fn bind(&mut self, value: &Value) -> bool {
         let key = value.to_string();
         if self.binding == key {
-            return;
+            return false;
         }
+        let prev_focused = self.state.lock().unwrap().focused;
+        let (prev_cols, prev_rows, prev_ready) = {
+            let s = self.state.lock().unwrap();
+            (s.model.cols, s.model.height, s.size_ready)
+        };
+        let theme = self
+            .theme
+            .clone()
+            .or_else(|| self.state.lock().unwrap().theme.clone());
+        self.detach_current_session();
         self.binding = key;
         self.content = None;
-        self.stop.store(true, Ordering::SeqCst);
-        self.stop = Arc::new(AtomicBool::new(false));
-        let (theme, prev_cols, prev_rows, prev_ready, prev_focused) = {
-            let s = self.state.lock().unwrap();
-            (
-                s.theme.clone(),
-                s.model.cols,
-                s.model.height,
-                s.size_ready,
-                s.focused,
-            )
+
+        let Ok(config) = serde_json::from_value::<Config>(value["config"].clone()) else {
+            return true;
         };
-        let mut model = Model::new(prev_cols.max(2), prev_rows.max(1));
-        if let Some(ref t) = theme {
-            model.theme(t);
-        }
-        self.state = Arc::new(Mutex::new(State {
-            model,
-            status: "Connecting…".into(),
-            connected: false,
+        let Some(terminal) = value["terminal"].as_str().map(str::to_owned) else {
+            return true;
+        };
+        let Some(core) = value["core_id"].as_str().map(str::to_owned) else {
+            return true;
+        };
+
+        let session = get_or_spawn_session(SessionInit {
+            config,
+            core,
+            terminal,
+            initial_cols: prev_cols.max(2),
+            initial_rows: prev_rows.max(1),
             size_ready: prev_ready,
             focused: prev_focused,
             theme,
-        }));
-        self.seen = u64::MAX;
-        self.wake.notify();
-
-        let Ok(config) = serde_json::from_value::<Config>(value["config"].clone()) else {
-            return;
-        };
-        let Some(terminal) = value["terminal"].as_str().map(str::to_owned) else {
-            return;
-        };
-        let Some(core) = value["core_id"].as_str().map(str::to_owned) else {
-            return;
-        };
-        let state = self.state.clone();
-        let wake = self.wake.clone();
-        let stop = self.stop.clone();
-        let (tx, rx) = mpsc::channel();
-        let rx = Arc::new(Mutex::new(rx));
-        self.input = Some(tx);
-
-        std::thread::spawn(move || {
-            let client = Client { config };
-            while !state.lock().unwrap().size_ready {
-                if stop.load(Ordering::SeqCst) {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            let mut first_attach = true;
-            while !stop.load(Ordering::SeqCst) {
-                let attempt = (|| -> anyhow::Result<Attachment> {
-                    anyhow::ensure!(
-                        client.status()?["core"]["id"] == core,
-                        "Original core identity changed"
-                    );
-                    let s = state.lock().unwrap();
-                    let size = (s.model.cols, s.model.height);
-                    drop(s);
-                    let mut attachment = client.attach(&terminal, size.0, size.1)?;
-                    attachment.track_view(&core, &terminal);
-                    Ok(attachment)
-                })();
-                let attach = match attempt {
-                    Ok(v) => v,
-                    Err(e) => {
-                        {
-                            let mut s = state.lock().unwrap();
-                            s.connected = false;
-                            s.status = format!("Disconnected · {e:#} · reconnecting");
-                        }
-                        wake.notify();
-                        for _ in rx.lock().unwrap().try_iter() {}
-                        for _ in 0..10 {
-                            if stop.load(Ordering::SeqCst) {
-                                return;
-                            }
-                            std::thread::sleep(Duration::from_millis(50));
-                        }
-                        continue;
-                    }
-                };
-                if !first_attach {
-                    for _ in rx.lock().unwrap().try_iter() {}
-                }
-                first_attach = false;
-                {
-                    let mut s = state.lock().unwrap();
-                    let size = (s.model.cols, s.model.height);
-                    s.model = Model::new(size.0, size.1);
-                    if let Some(theme) = s.theme.clone() {
-                        s.model.theme(&theme);
-                    }
-                    s.status = String::new();
-                    if let Err(e) = attach
-                        .resize(size.0, size.1)
-                        .and_then(|_| attach.focus(s.focused))
-                    {
-                        s.status = format!("Attach setup failed: {e} · reconnecting");
-                        drop(s);
-                        wake.notify();
-                        continue;
-                    }
-                    s.connected = true;
-                }
-                wake.notify();
-
-                let input_stop = Arc::new(AtomicBool::new(false));
-                let failed = Arc::new(AtomicBool::new(false));
-                let input_worker = {
-                    let writer = attach.input_writer();
-                    let rx = rx.clone();
-                    let stopped = input_stop.clone();
-                    let failed = failed.clone();
-                    let state = state.clone();
-                    let wake = wake.clone();
-                    std::thread::spawn(move || {
-                        while !stopped.load(Ordering::SeqCst) {
-                            let message =
-                                rx.lock().unwrap().recv_timeout(Duration::from_millis(20));
-                            let result = match message {
-                                Ok(Input::Bytes(bytes)) => writer.input(&bytes),
-                                Ok(Input::Resize(c, r)) => writer.resize(c, r),
-                                Ok(Input::Focus(on)) => writer.focus(on),
-                                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                                Err(_) => break,
-                            };
-                            if let Err(e) = result {
-                                state.lock().unwrap().status = format!("Input disconnected: {e:#}");
-                                failed.store(true, Ordering::SeqCst);
-                                wake.notify();
-                                break;
-                            }
-                        }
-                    })
-                };
-                let mut reconnect = false;
-                while !stop.load(Ordering::SeqCst) && !failed.load(Ordering::SeqCst) {
-                    match attach.recv(Duration::from_millis(15)) {
-                        Ok(Some(Event::Data(data))) => {
-                            let replies = {
-                                let mut s = state.lock().unwrap();
-                                s.model.write(&data);
-                                s.model.replies()
-                            };
-                            wake.notify();
-                            let result = attach.consumed(data.len()).and_then(|_| {
-                                if replies.is_empty() {
-                                    Ok(())
-                                } else {
-                                    attach.input(&replies, true)
-                                }
-                            });
-                            if result.is_err() {
-                                reconnect = true;
-                                break;
-                            }
-                        }
-                        Ok(Some(Event::Resize(c, r))) => {
-                            state.lock().unwrap().model.resize(c, r);
-                            wake.notify();
-                        }
-                        Ok(Some(Event::Closed(reason))) => {
-                            {
-                                let mut s = state.lock().unwrap();
-                                s.connected = false;
-                                s.status = format!(
-                                    "Terminal exited · {}",
-                                    reason["reason"].as_str().unwrap_or("closed")
-                                );
-                            }
-                            wake.notify();
-                            input_stop.store(true, Ordering::SeqCst);
-                            let _ = input_worker.join();
-                            return;
-                        }
-                        Ok(Some(Event::Lost(error))) => {
-                            state.lock().unwrap().status =
-                                format!("Disconnected · {error} · reconnecting");
-                            wake.notify();
-                            reconnect = true;
-                            break;
-                        }
-                        Err(e) => {
-                            state.lock().unwrap().status = format!("Disconnected · {e}");
-                            wake.notify();
-                            reconnect = true;
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-                input_stop.store(true, Ordering::SeqCst);
-                let _ = input_worker.join();
-                reconnect |= failed.load(Ordering::SeqCst);
-                state.lock().unwrap().connected = false;
-                wake.notify();
-                drop(attach);
-                if !reconnect {
-                    break;
-                }
-                for _ in 0..10 {
-                    if stop.load(Ordering::SeqCst) {
-                        return;
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-            }
         });
+        if !self.view_ptr.is_null() {
+            session.wake.attach(self.view_ptr);
+        }
+        let focus_seq = {
+            let mut s = session.state.lock().unwrap();
+            if s.focused != prev_focused {
+                s.focused = prev_focused;
+                let seq = if !self.read_only && (s.connected || s.status.starts_with("Connecting"))
+                {
+                    s.model.focus_sequence(prev_focused)
+                } else {
+                    Vec::new()
+                };
+                Some((prev_focused, seq))
+            } else {
+                None
+            }
+        };
+        if let Some((focused, seq)) = focus_seq {
+            let _ = session.input.send(Input::Focus(focused));
+            if !seq.is_empty() {
+                let _ = session.input.send(Input::Bytes(seq));
+            }
+        }
+        self.state = session.state.clone();
+        self.size_cv = session.size_cv.clone();
+        self.wake = session.wake.clone();
+        self.input = Some(session.input.clone());
+        self.session = Some(session);
+        self.seen = u64::MAX;
+        self.seen_status.clear();
+        true
     }
 }
 
@@ -668,6 +924,7 @@ extern "C" fn cb_snapshot(
     let cols = geom.cols.clamp(2, 500);
     let rows = geom.rows.clamp(1, 200);
     let mut state = host.state.lock().unwrap();
+    let became_ready = !state.size_ready;
     state.size_ready = true;
     let grid_changed = state.model.resize_with_metrics(
         cols,
@@ -681,6 +938,9 @@ extern "C" fn cb_snapshot(
     );
     if grid_changed && let Some(tx) = &host.input {
         let _ = tx.send(Input::Resize(cols, rows));
+    }
+    if became_ready {
+        host.size_cv.notify_all();
     }
     let replies = state.model.replies();
     let status = host.effective_status(&state);
@@ -1033,7 +1293,9 @@ impl Terminal {
         let mut host = Box::new(Host::new());
         let ptr = unsafe { cb_terminal_new(&mut *host as *mut _ as *mut c_void, callbacks()) };
         let view = unsafe { Retained::from_raw(ptr) }.expect("Native terminal allocation failed");
-        host.wake.attach(Retained::as_ptr(&view) as *mut NSView);
+        let raw_view = Retained::as_ptr(&view) as *mut NSView;
+        host.view_ptr = raw_view;
+        host.wake.attach(raw_view);
         Self { view, host }
     }
 }
@@ -1078,6 +1340,14 @@ impl NativeComponent for Terminal {
         if name == "theme"
             && let Some(theme) = value
         {
+            self.host.theme = Some(theme.clone());
+            if let Some(bg) = theme["background"].as_array()
+                && bg.len() == 3
+                && let (Some(r), Some(g), Some(b)) =
+                    (bg[0].as_u64(), bg[1].as_u64(), bg[2].as_u64())
+            {
+                unsafe { cb_terminal_set_theme_bg(view_ptr, r as u8, g as u8, b as u8) };
+            }
             let mut changed = false;
             {
                 let mut state = self.host.state.lock().unwrap();
@@ -1108,8 +1378,9 @@ impl NativeComponent for Terminal {
         }
         if name == "binding"
             && let Some(value) = value
+            && self.host.bind(value)
         {
-            self.host.bind(value);
+            unsafe { cb_terminal_sync_rebind(view_ptr) };
         }
         if name == "content" && self.host.binding.is_empty() {
             let content = value.and_then(Value::as_str);
@@ -1132,9 +1403,10 @@ impl NativeComponent for Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        self.host.wake.detach();
-        unsafe { cb_terminal_detach(Retained::as_ptr(&self.view) as *mut c_void) };
-        self.host.stop.store(true, Ordering::SeqCst);
+        let raw_view = Retained::as_ptr(&self.view) as *mut NSView;
+        self.host.detach_current_session();
+        self.host.wake.detach(raw_view);
+        unsafe { cb_terminal_detach(raw_view as *mut c_void) };
     }
 }
 
@@ -1325,6 +1597,97 @@ mod tests {
             rx.try_recv(),
             Ok(Input::Bytes(bytes)) if bytes == "你好！".as_bytes()
         ));
+    }
+
+    #[test]
+    fn initial_connecting_grace_hides_status_pill_then_reveals_on_slow_connect() {
+        let mut host = Host::new();
+        {
+            let mut s = host.state.lock().unwrap();
+            s.status = "Connecting…".into();
+            s.connecting_since = Some(Instant::now());
+        }
+        // During initial grace window, non-read-only pill is suppressed while early input still buffers.
+        assert_eq!(host.effective_status(&host.state.lock().unwrap()), "");
+        assert!(host.accepts_pty_input(&host.state.lock().unwrap()));
+
+        // Read-only explicit status remains immediate even during grace.
+        host.read_only = true;
+        host.input_status = "Connecting".into();
+        assert_eq!(
+            host.effective_status(&host.state.lock().unwrap()),
+            "Connecting"
+        );
+        host.read_only = false;
+
+        // Once grace window elapses and still not connected, "Connecting…" is displayed.
+        host.state.lock().unwrap().connecting_since =
+            Some(Instant::now() - CONNECTING_GRACE - Duration::from_millis(10));
+        assert_eq!(
+            host.effective_status(&host.state.lock().unwrap()),
+            "Connecting…"
+        );
+    }
+
+    #[test]
+    fn lru_session_pool_preserves_model_across_rebinds_and_evicts_cleanly() {
+        let config = Config {
+            hc: "/usr/bin/false".into(),
+            hc_session: "unit-lru".into(),
+            ..Default::default()
+        };
+        let mut host = Host::new();
+        let bind_a = json!({"config": config, "core_id": "core-lru", "terminal": "tty-a"});
+        let bind_b = json!({"config": config, "core_id": "core-lru", "terminal": "tty-b"});
+
+        assert!(host.bind(&bind_a));
+        host.state
+            .lock()
+            .unwrap()
+            .model
+            .write(b"retained-buffer-a\r\n");
+
+        // Switch to terminal B on the same Host (tab switch), then switch back to A.
+        assert!(host.bind(&bind_b));
+        assert!(
+            !host
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("retained-buffer-a")
+        );
+
+        assert!(host.bind(&bind_a));
+        assert!(
+            host.state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("retained-buffer-a"),
+            "Rebinding to a pooled terminal must immediately retain its parsed VT screen"
+        );
+
+        // Explicit eviction clears the pooled session.
+        host.detach_current_session();
+        evict_session("core-lru", "tty-a");
+        evict_session("core-lru", "tty-b");
+        host.binding.clear();
+        assert!(host.bind(&bind_a));
+        assert!(
+            !host
+                .state
+                .lock()
+                .unwrap()
+                .model
+                .viewport_text()
+                .contains("retained-buffer-a"),
+            "Evicted terminal session must not retain stale state"
+        );
+        host.detach_current_session();
+        evict_session("core-lru", "tty-a");
     }
 
     #[test]

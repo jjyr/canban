@@ -10,114 +10,143 @@ fn toggle(ui: Ui, key: String) {
 }
 fn row(ui: Ui, e: Entry) -> impl IntoElement {
     let id = e.saved.id.clone();
-    let selected = ui.terminal_selection.get() == id;
-    let attention = e.attention_reason();
-    let machine = if e.machine() == "local" {
-        "Local".into()
-    } else {
-        crate::machines::name(ui, e.machine())
-    };
-    let hint = super::labels::sidebar_hint(&e, &machine);
-    let context_id = id.clone();
-    let title = label(e.title()).flex_1().min_w(px(0.));
-    let title = if selected { title } else { title.truncate() };
-    let mut content = view().w_full().min_w(px(0.)).gap_1();
-    let mut first = view()
-        .w_full()
-        .min_w(px(0.))
-        .flex_row()
-        .items_center()
-        .gap_2()
-        .child(
-            if e.agent.is_none()
-                && let Some((mark, _)) = e.provider()
-            {
+    let id_sel = id.clone();
+    let is_selected = computed(move || ui.terminal_selection.get() == id_sel);
+    dynamic(move || {
+        let selected = is_selected.get();
+        let id = id.clone();
+        let context_id = id.clone();
+        let attention = e.attention_reason();
+        let machine = if e.machine() == "local" {
+            "Local".into()
+        } else {
+            crate::machines::name(ui, e.machine())
+        };
+        let hint = super::labels::sidebar_hint(&e, &machine);
+        let title = label(e.title()).flex_1().min_w(px(0.));
+        let title = if selected { title } else { title.truncate() };
+        let mut content = view().w_full().min_w(px(0.)).gap_1();
+        let mut first = view()
+            .w_full()
+            .min_w(px(0.))
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .child(
+                if e.agent.is_none()
+                    && let Some((mark, _)) = e.provider()
+                {
+                    view()
+                        .flex_1()
+                        .min_w(px(0.))
+                        .flex_row()
+                        .items_center()
+                        .gap_1p5()
+                        .child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0())
+                        .child(title)
+                        .into_element()
+                } else {
+                    title.into_element()
+                },
+            );
+        if e.agent.is_some() {
+            let stage = muted(e.stage.clone().unwrap_or_default())
+                .w(px(super::labels::stage_width(&e)))
+                .flex_shrink_0();
+            first = first.child(if selected { stage } else { stage.truncate() });
+        }
+        if let Some(reason) = &attention {
+            first = first.child(
                 view()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .flex_row()
-                    .items_center()
-                    .gap_1p5()
-                    .child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0())
-                    .child(title)
-                    .into_element()
-            } else {
-                title.into_element()
-            },
-        );
-    if e.agent.is_some() {
-        let stage = muted(e.stage.clone().unwrap_or_default())
-            .w(px(super::labels::stage_width(&e)))
-            .flex_shrink_0();
-        first = first.child(if selected { stage } else { stage.truncate() });
-    }
-    if let Some(reason) = &attention {
-        first = first.child(
-            view()
-                .flex_shrink_0()
-                .tooltip(hint_tooltip(reason.clone()).placement(Placement::Right))
-                .child(icon_tinted(Icon::Info, ATTENTION).w(px(14.)).h(px(14.))),
-        );
-    }
-    content = content.child(first);
-    if e.agent.is_some() {
-        if selected
-            && e.saved.name.is_some()
-            && let Some(card) = &e.card
-        {
-            content = content.child(
-                muted(format!("#{} {}", card.number, card.title))
-                    .w_full()
-                    .min_w(px(0.)),
+                    .flex_shrink_0()
+                    .tooltip(hint_tooltip(reason.clone()).placement(Placement::Right))
+                    .child(icon_tinted(Icon::Info, ATTENTION).w(px(14.)).h(px(14.))),
             );
         }
-        content = content.child(
-            view()
-                .w_full()
-                .min_w(px(0.))
-                .flex_row()
-                .items_start()
-                .gap_2()
-                .child(super::labels::sidebar_provider(&e, selected).flex_1()),
-        );
-    }
-    let machine = muted(machine).w_full().min_w(px(0.));
-    content = content.child(if selected {
-        machine
-    } else {
-        machine.truncate()
-    });
-    view()
-        .on_context_menu(move |event: &nsh_core::ContextMenuEvent| {
-            ui.spawn(super::tabs::menu(
-                ui,
-                context_id.clone(),
-                Some(event.page_position),
-            ));
-        })
-        .child(
-            canban_ui_kit::press_target()
-                .w_full()
-                .min_h(px(if e.agent.is_some() { 72. } else { 48. }))
-                .px_2()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .rounded(px(5.))
-                .bg(if selected { SELECTED } else { CLEAR })
-                .hover(move |s| s.bg(if selected { SELECTED } else { INSET }))
-                .focus(|s| s.border_1().border_color(ACCENT))
-                .selected(move || selected)
-                .accessibility_label(move || Some(hint.clone().into()))
-                .py_2()
-                .child(content)
-                .on_press(move |_: &()| ui.open_terminal(id.clone())),
-        )
+        content = content.child(first);
+        if e.agent.is_some() {
+            if selected
+                && e.saved.name.is_some()
+                && let Some(card) = &e.card
+            {
+                content = content.child(
+                    muted(format!("#{} {}", card.number, card.title))
+                        .w_full()
+                        .min_w(px(0.)),
+                );
+            }
+            content = content.child(
+                view()
+                    .w_full()
+                    .min_w(px(0.))
+                    .flex_row()
+                    .items_start()
+                    .gap_2()
+                    .child(super::labels::sidebar_provider(&e, selected).flex_1()),
+            );
+        }
+        let machine = muted(machine).w_full().min_w(px(0.));
+        content = content.child(if selected {
+            machine
+        } else {
+            machine.truncate()
+        });
+        view()
+            .on_context_menu(move |event: &nsh_core::ContextMenuEvent| {
+                ui.spawn(super::tabs::menu(
+                    ui,
+                    context_id.clone(),
+                    Some(event.page_position),
+                ));
+            })
+            .child(
+                canban_ui_kit::press_target()
+                    .w_full()
+                    .min_h(px(if e.agent.is_some() { 72. } else { 48. }))
+                    .px_2()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(5.))
+                    .bg(if selected { SELECTED } else { CLEAR })
+                    .hover(move |s| s.bg(if selected { SELECTED } else { INSET }))
+                    .focus(|s| s.border_1().border_color(ACCENT))
+                    .selected(move || selected)
+                    .accessibility_label(move || Some(hint.clone().into()))
+                    .py_2()
+                    .child(content)
+                    .on_press(move |_: &()| ui.open_terminal(id.clone())),
+            )
+    })
 }
 pub fn sidebar(ui: Ui) -> impl IntoElement {
     // Runtime observation timestamps must not recreate pointer/focus targets.
     let inventory = computed(move || {
         let s = ui.snapshot.get();
+        let entry_rows = ui.closing_terminals.with(|closing| {
+            ui.terminal_entries.with(|rows| {
+                rows.iter()
+                    .filter(|e| e.listed() && !closing.contains(&e.saved.id))
+                    .map(|e| {
+                        (
+                            e.saved.id.clone(),
+                            e.project_id.clone(),
+                            super::labels::sidebar_hint(
+                                e,
+                                &if e.machine() == "local" {
+                                    "Local".into()
+                                } else {
+                                    crate::machines::name(ui, e.machine())
+                                },
+                            ),
+                            e.ended(),
+                            e.inactive(),
+                            e.needs_attention(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+        });
         (
             s.projects
                 .iter()
@@ -138,26 +167,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                     )
                 })
                 .collect::<Vec<_>>(),
-            entries(&s)
-                .into_iter()
-                .map(|e| {
-                    (
-                        e.saved.id.clone(),
-                        e.project_id.clone(),
-                        super::labels::sidebar_hint(
-                            &e,
-                            &if e.machine() == "local" {
-                                "Local".into()
-                            } else {
-                                crate::machines::name(ui, e.machine())
-                            },
-                        ),
-                        e.ended(),
-                        e.inactive(),
-                        e.needs_attention(),
-                    )
-                })
-                .collect::<Vec<_>>(),
+            entry_rows,
         )
     });
     view()
@@ -185,10 +195,14 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                 .child(dynamic(move || {
                     let _ = inventory.get();
                     let snapshot = ui.snapshot.get_untracked();
-                    let rows: Vec<_> = entries(&snapshot)
-                        .into_iter()
-                        .filter(Entry::listed)
-                        .collect();
+                    let rows: Vec<_> = ui.closing_terminals.with_untracked(|closing| {
+                        ui.terminal_entries.with_untracked(|all| {
+                            all.iter()
+                                .filter(|e| e.listed() && !closing.contains(&e.saved.id))
+                                .cloned()
+                                .collect()
+                        })
+                    });
                     let folds = ui.terminal_folds.get();
                     let mut body = view().gap_2();
                     let mut groups: Vec<_> = snapshot

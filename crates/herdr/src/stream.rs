@@ -63,7 +63,18 @@ fn read_frame(reader: &mut impl Read) -> Result<(u32, u8, Vec<u8>)> {
 }
 impl Client {
     pub fn attach(&self, terminal: &str, cols: u16, rows: u16) -> Result<Attachment> {
-        let mut transport = super::transport::connect_view(&self.config, Some(terminal))?;
+        self.attach_fenced(terminal, cols, rows, None)
+    }
+
+    pub fn attach_fenced(
+        &self,
+        terminal: &str,
+        cols: u16,
+        rows: u16,
+        expected_core_id: Option<&str>,
+    ) -> Result<Attachment> {
+        let mut transport =
+            super::transport::connect_view_fenced(&self.config, Some(terminal), expected_core_id)?;
         let setup = (|| -> Result<_> {
             let mut stdin = transport.writer.take().unwrap();
             let mut reader = BufReader::new(transport.reader.take().unwrap());

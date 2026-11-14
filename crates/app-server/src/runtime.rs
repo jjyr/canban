@@ -115,6 +115,18 @@ impl AppServer {
         })?;
         let weak = Arc::downgrade(self);
         std::thread::spawn(move || {
+            use std::os::fd::AsRawFd;
+            unsafe extern "C" {
+                fn poll(fds: *mut PollFd, nfds: u32, timeout: i32) -> i32;
+            }
+            #[repr(C)]
+            struct PollFd {
+                fd: i32,
+                events: i16,
+                revents: i16,
+            }
+            const POLLIN: i16 = 0x0001;
+            let raw_fd = listener.as_raw_fd();
             while let Some(server) = weak.upgrade() {
                 if server.stop.load(Ordering::SeqCst) {
                     break;
@@ -127,7 +139,15 @@ impl AppServer {
                         });
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(50))
+                        drop(server);
+                        let mut pfd = PollFd {
+                            fd: raw_fd,
+                            events: POLLIN,
+                            revents: 0,
+                        };
+                        unsafe {
+                            let _ = poll(&mut pfd, 1, 50);
+                        }
                     }
                     Err(_) => break,
                 }
@@ -195,23 +215,39 @@ impl AppServer {
         stream.set_nonblocking(false)?;
         stream.set_read_timeout(Some(Duration::from_secs(20)))?;
         stream.set_write_timeout(Some(Duration::from_secs(90)))?;
-        let mut line = String::new();
-        BufReader::new(stream.try_clone()?)
-            .take(48 * 1024 * 1024)
-            .read_line(&mut line)?;
-        let input: Value = serde_json::from_str(&line)?;
-        if input["method"] == "herdr.connect" {
-            return self.relay(stream, &input["params"]);
-        }
-        let id = input["id"].clone();
-        let reply = match self.call(strp(&input, "method")?, input["params"].clone()) {
-            Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
-            Err(e) => {
-                json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":format!("{e:#}")}})
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut first = true;
+        loop {
+            let mut line = String::new();
+            let n = (&mut reader).take(48 * 1024 * 1024).read_line(&mut line)?;
+            if n == 0 {
+                return Ok(());
             }
-        };
-        writeln!(stream, "{reply}")?;
-        Ok(())
+            let input: Value = serde_json::from_str(&line)?;
+            if input["method"] == "herdr.connect" {
+                ensure!(
+                    first,
+                    "herdr.connect must be the first frame on a relay socket"
+                );
+                drop(reader);
+                return self.relay(stream, &input["params"]);
+            }
+            first = false;
+            let id = input["id"].clone();
+            let reply = match self.call(strp(&input, "method")?, input["params"].clone()) {
+                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                Err(e) => {
+                    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":format!("{e:#}")}})
+                }
+            };
+            writeln!(stream, "{reply}")?;
+            stream.flush()?;
+            if self.stopped() {
+                return Ok(());
+            }
+            // Keep-alive idle timeout allows AppClient to reuse sockets across rapid RPCs.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+        }
     }
     pub(super) fn tick(&self) -> Result<()> {
         if canban_updater::handoff::active(&self.home) {

@@ -507,6 +507,7 @@ dependencies = [
  "canban-types",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

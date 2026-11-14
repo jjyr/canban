@@ -1067,3 +1067,124 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
         );
     });
 }
+
+#[test]
+fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error() {
+    let runtime = nsh_core::element::Runtime::default();
+    let _entered = runtime.enter();
+    let (_owner, ()) = nsh_core::element::create_root(|| {
+        let mut s = fixture();
+        s.terminals.extend([
+            TerminalEntry {
+                id: "term-1".into(),
+                conversation_id: None,
+                number: 21,
+                name: None,
+                manual_number: Some(1),
+                origin_card_id: Some("c1".into()),
+                agent_engine: None,
+                runtime: Some(TerminalRuntime {
+                    machine: "local".into(),
+                    owner_core_id: Some("core-1".into()),
+                    core_id: Some("core-1".into()),
+                    terminal: Some("pty-1".into()),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: None,
+                    agent_turn: None,
+                }),
+                agent: None,
+                created_at: 21,
+            },
+            TerminalEntry {
+                id: "term-2".into(),
+                conversation_id: None,
+                number: 22,
+                name: None,
+                manual_number: Some(2),
+                origin_card_id: Some("c1".into()),
+                agent_engine: None,
+                runtime: Some(TerminalRuntime {
+                    machine: "local".into(),
+                    owner_core_id: Some("core-1".into()),
+                    core_id: Some("core-1".into()),
+                    terminal: Some("pty-2".into()),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: None,
+                    agent_turn: None,
+                }),
+                agent: None,
+                created_at: 22,
+            },
+        ]);
+        s.terminals = crate::terminals::entries(&s)
+            .into_iter()
+            .map(|e| e.saved)
+            .collect();
+
+        let ui = crate::presenter::Ui::new();
+        ui.snapshot.set(s);
+        ui.snapshot_ready.set(true);
+        ui.terminal_tabs.set(vec!["term-1".into(), "term-2".into()]);
+        ui.terminal_selection.set("term-1".into());
+        ui.page.set("terminals".into());
+
+        // 1. Optimistic close removes the tab and switches selection in 0ms without blocking `ui.pending`.
+        let ctx1 = crate::terminals::begin_optimistic_close(ui, "term-1").unwrap();
+        assert!(!ui.pending.get_untracked());
+        assert!(
+            ui.closing_terminals
+                .with_untracked(|c| c.contains("term-1"))
+        );
+        assert_eq!(ui.terminal_tabs.get_untracked(), vec!["term-2"]);
+        assert_eq!(ui.terminal_selection.get_untracked(), "term-2");
+        assert!(
+            !crate::terminals::card_live_entries_for_ui(ui, "c1")
+                .iter()
+                .any(|e| e.saved.id == "term-1")
+        );
+        assert!(
+            crate::terminals::card_live_entries_for_ui(ui, "c1")
+                .iter()
+                .any(|e| e.saved.id == "term-2")
+        );
+
+        // 2. If backend reports `"unknown"` (e.g. Core unavailable/replaced), tab rolls back & shows error!
+        crate::terminals::finish_optimistic_close(
+            ui,
+            &ctx1,
+            Ok(json!({"state":"unknown","message":"Core replaced"})),
+        );
+        assert!(
+            !ui.closing_terminals
+                .with_untracked(|c| c.contains("term-1"))
+        );
+        assert_eq!(
+            ui.terminal_tabs.get_untracked(),
+            vec!["term-1", "term-2"],
+            "rolled-back tab must return to its original tab position"
+        );
+        assert!(ui.operation_error.get_untracked().contains("Core replaced"));
+
+        // 3. Successful background close marks entry finished and clears `closing_terminals`.
+        ui.operation_error.set(String::new());
+        let ctx2 = crate::terminals::begin_optimistic_close(ui, "term-1").unwrap();
+        assert_eq!(ui.terminal_tabs.get_untracked(), vec!["term-2"]);
+        crate::terminals::finish_optimistic_close(ui, &ctx2, Ok(json!({"state":"closed"})));
+        assert!(
+            !ui.closing_terminals
+                .with_untracked(|c| c.contains("term-1"))
+        );
+        assert_eq!(ui.terminal_tabs.get_untracked(), vec!["term-2"]);
+        assert!(crate::terminals::current(ui).is_some_and(|e| e.saved.id == "term-2"));
+        assert!(ui.terminal_entries.with_untracked(|rows| {
+            rows.iter()
+                .find(|e| e.saved.id == "term-1")
+                .unwrap()
+                .ended()
+        }));
+    });
+}

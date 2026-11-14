@@ -48,7 +48,6 @@ impl Drop for Viewer {
     fn drop(&mut self) {
         if let Some(a) = registry().lock().unwrap().get_mut(&self.key) {
             a.viewers = a.viewers.saturating_sub(1);
-            a.last_at = canban_types::now();
         }
         changed();
     }

@@ -12,6 +12,13 @@ pub struct Transport {
     child: Option<Child>,
     socket: Option<UnixStream>,
 }
+impl Transport {
+    pub fn child_exited(&mut self) -> bool {
+        self.child
+            .as_mut()
+            .is_some_and(|c| !matches!(c.try_wait(), Ok(None)))
+    }
+}
 impl Drop for Transport {
     fn drop(&mut self) {
         if let Some(socket) = &self.socket {
@@ -43,17 +50,28 @@ pub fn child(config: &Config) -> Result<(Child, ChildStdin, ChildStdout)> {
     Ok((child, input, output))
 }
 pub fn connect(config: &Config) -> Result<Transport> {
-    connect_view(config, None)
+    connect_view_fenced(config, None, None)
 }
 pub fn connect_view(config: &Config, terminal: Option<&str>) -> Result<Transport> {
+    connect_view_fenced(config, terminal, None)
+}
+pub fn connect_view_fenced(
+    config: &Config,
+    terminal: Option<&str>,
+    expected_core_id: Option<&str>,
+) -> Result<Transport> {
     if let Some(endpoint) = &config.relay_endpoint {
         let mut socket =
             UnixStream::connect(endpoint).context("AppServer Terminal relay unavailable")?;
         socket.set_read_timeout(Some(Duration::from_secs(90)))?;
+        let mut params = json!({"terminal":terminal});
+        if let Some(core_id) = expected_core_id {
+            params["expected_core_id"] = json!(core_id);
+        }
         writeln!(
             socket,
             "{}",
-            json!({"jsonrpc":"2.0","id":0,"method":"herdr.connect","params":{"terminal":terminal}})
+            json!({"jsonrpc":"2.0","id":0,"method":"herdr.connect","params":params})
         )?;
         // Consume precisely one line; no buffered reader may eat Core bytes.
         let mut bytes = Vec::new();
