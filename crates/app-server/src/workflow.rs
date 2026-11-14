@@ -325,6 +325,45 @@ impl AppServer {
                             db.save(&card)?;
                             return Ok(json!(run));
                         }
+                        if is_deliver && matches!(run.state.as_str(), "failed" | "blocked") {
+                            if let Some(tid) = &run.terminal_id
+                                && let Ok(entry) = db.get::<TerminalEntry>(tid)
+                                && let Some(prev) = &entry.agent
+                            {
+                                ensure!(
+                                    prev.terminal.is_none()
+                                        || prev
+                                            .observed
+                                            .as_ref()
+                                            .is_some_and(|v| v["state"] == "finished"),
+                                    "End the running Agent before retrying auto-merge"
+                                );
+                                if prev.terminal.is_none() && prev.state == "failed" {
+                                    let attempts =
+                                        run.inputs["conflict_attempts"].as_u64().unwrap_or(0);
+                                    if attempts > 0 {
+                                        run.inputs["conflict_attempts"] = json!(attempts - 1);
+                                    }
+                                }
+                            }
+                            card.hold_auto_merge = false;
+                            card.human_gate = None;
+                            card.attention = None;
+                            card.revision += 1;
+                            db.save(&card)?;
+                            if run.inputs["queued_at"].as_u64().is_none() {
+                                run.inputs["queued_at"] = json!(now());
+                            }
+                            if let Some(obj) = run.inputs.as_object_mut() {
+                                obj.remove("queue_pause_reason");
+                            }
+                            run.terminal_id = None;
+                            run.error = None;
+                            run.state = "waiting_delivery".into();
+                            run.updated_at = now();
+                            db.save(&run)?;
+                            return Ok(json!(run));
+                        }
                         bail!("Card workflow is currently active at another step");
                     }
                     // No active workflow run: find the latest enabled workflow on this Project

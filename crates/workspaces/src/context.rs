@@ -162,7 +162,7 @@ print(json.dumps({'paths':rows,'branch':branch}))"#,&[&serde_json::to_string(&mi
                     };
                     rows.insert(p.clone(), row);
                 }
-                json!({"paths":rows,"branch":if branch_missing {self.current_branch(cwd)} else {None}})
+                json!({"paths":rows,"branch":if branch_missing {self.current_branch(cwd).or_else(|| self.rebase_branch(Path::new(cwd)))} else {None}})
             };
             for p in missing {
                 cache.paths.insert(p.clone(), probe["paths"][&p].clone());

@@ -31,7 +31,10 @@ pub fn compact_duration(elapsed_ms: u64) -> String {
 }
 
 /// Start timestamp (ms) of a running Card-role Agent execution, returning `None` if unavailable/sentinel.
-pub fn agent_started_at(snapshot: &canban_types::Snapshot, entry: &canban_types::TerminalEntry) -> Option<u64> {
+pub fn agent_started_at(
+    snapshot: &canban_types::Snapshot,
+    entry: &canban_types::TerminalEntry,
+) -> Option<u64> {
     let agent = entry.agent.as_ref()?;
     if let Some(ts) = agent.started_at.filter(|&t| t > 1_000_000_000_000) {
         return Some(ts);
@@ -116,9 +119,7 @@ pub fn workflow_step_elapsed(
             .flatten()
             .filter(|&t| t > 1_000_000_000_000)
     })
-    .or_else(|| {
-        (is_current && run.updated_at > 1_000_000_000_000).then_some(run.updated_at)
-    })?;
+    .or_else(|| (is_current && run.updated_at > 1_000_000_000_000).then_some(run.updated_at))?;
 
     if is_current {
         Some(now_ms.saturating_sub(start_ts))
@@ -643,7 +644,10 @@ mod tests {
             workflow_step_elapsed(&run, "agent:develop", now_ms, Some(t0 + 4 * 60_000)),
             Some(70 * 60_000)
         );
-        assert_eq!(workflow_step_elapsed(&run, "deliver:review", now_ms, None), None);
+        assert_eq!(
+            workflow_step_elapsed(&run, "deliver:review", now_ms, None),
+            None
+        );
 
         // Merge-conflict round on `deliver` uses the `merge_conflict` dispatch timestamp rather than initial queue entry.
         run.step = Some("deliver:review".into());

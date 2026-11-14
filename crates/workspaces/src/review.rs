@@ -83,6 +83,15 @@ impl Ops {
             || self.host.exists(&self.git_path(cwd, "rebase-apply")?))
     }
 
+    pub(crate) fn rebase_branch(&self, cwd: &Path) -> Option<String> {
+        let raw = self
+            .read_git_file(cwd, "rebase-merge/head-name")
+            .or_else(|| self.read_git_file(cwd, "rebase-apply/head-name"))?;
+        raw.strip_prefix("refs/heads/")
+            .filter(|b| !b.is_empty())
+            .map(str::to_owned)
+    }
+
     fn rebase_onto_head(&self, cwd: &Path) -> Option<String> {
         self.read_git_file(cwd, "rebase-merge/onto")
             .or_else(|| self.read_git_file(cwd, "rebase-apply/onto"))

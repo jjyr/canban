@@ -236,7 +236,15 @@ impl Ops {
             let p = PathBuf::from(path);
             if self.host.is_dir(&p) {
                 if self.host.canonical(&p)? != self.host.canonical(source)?
+                    && !self.in_merge_or_rebase(&p)?
                     && self.current_branch(path).is_none()
+                    && !self
+                        .git(
+                            source,
+                            &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+                        )?
+                        .status
+                        .success()
                 {
                     // Adopt legacy detached checkouts at their current HEAD, preserving edits.
                     self.checked(&p, &["switch", "-c", &branch])?;
@@ -368,7 +376,9 @@ impl Ops {
             }
             .into();
             if value.state == "available" {
-                value.branch = self.current_branch(path);
+                value.branch = self
+                    .current_branch(path)
+                    .or_else(|| self.rebase_branch(cwd));
                 value.base_commit = card
                     .base_commit
                     .clone()
@@ -476,7 +486,9 @@ impl Ops {
         {
             return Ok(("directory".into(), false, None));
         }
-        let branch = self.current_branch(path.to_str().unwrap_or_default());
+        let branch = self
+            .current_branch(path.to_str().unwrap_or_default())
+            .or_else(|| self.rebase_branch(path));
         let dirty = !self
             .checked(path, &["status", "--porcelain", "--untracked-files=all"])?
             .is_empty();
@@ -1128,6 +1140,40 @@ mod sync_tests {
         );
         assert_eq!(fs::read_to_string(cwd.join("draft")).unwrap(), "preserve");
         assert!(info(&f.project, &f.card).unwrap().dirty);
+    }
+    #[test]
+    fn mid_rebase_worktree_preserves_conflict_and_branch_identity() {
+        let mut f = Fixture::new();
+        f.project.workflow.workspace.sync_base = false;
+        let cwd = f.prepare().unwrap();
+        let ops = Ops::local();
+        let branch = review::current_branch(cwd.to_str().unwrap()).unwrap();
+        assert_eq!(branch, "source-p/42");
+        fs::write(cwd.join("seed"), "card edit\n").unwrap();
+        checked(&cwd, &["add", "seed"]).unwrap();
+        checked(&cwd, &["commit", "-m", "card edit"]).unwrap();
+
+        fs::write(f.source.join("seed"), "main edit\n").unwrap();
+        checked(&f.source, &["add", "seed"]).unwrap();
+        checked(&f.source, &["commit", "-m", "main edit"]).unwrap();
+
+        let rebase = git(&cwd, &["rebase", "main"]).unwrap();
+        assert!(!rebase.status.success());
+        assert!(ops.in_rebase(&cwd).unwrap());
+        assert_eq!(review::current_branch(cwd.to_str().unwrap()), None);
+
+        f.card.worktree = Some(cwd.to_string_lossy().into());
+        f.card.branch = Some(branch.clone());
+        assert_eq!(f.prepare().unwrap(), cwd);
+        assert!(ops.in_rebase(&cwd).unwrap());
+
+        let ws = info(&f.project, &f.card).unwrap();
+        assert_eq!(ws.branch.as_deref(), Some(branch.as_str()));
+        assert_eq!(ws.state, "conflict");
+        assert_eq!(
+            ops.worktree_status(&cwd).unwrap().2.as_deref(),
+            Some(branch.as_str())
+        );
     }
 }
 

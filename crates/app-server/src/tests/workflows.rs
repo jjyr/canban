@@ -4119,7 +4119,7 @@ fn queue_merge_supports_rebase_squash_and_merge_strategies_and_routes_conflicts_
             .write(|db| {
                 let mut card: Card = db.get(&c2.id)?;
                 card.worktree = Some(wt2.to_str().unwrap().into());
-                card.branch = Some(br2);
+                card.branch = Some(br2.clone());
                 db.save(&card)
             })
             .unwrap();
@@ -4157,6 +4157,12 @@ fn queue_merge_supports_rebase_squash_and_merge_strategies_and_routes_conflicts_
             .expect("@merger terminal queued")
             .clone();
         let merger = admit(&app, &merger);
+        let card_for_merger = snap.cards.iter().find(|c| c.id == c2.id).unwrap().clone();
+        assert_eq!(ops.prepare(&app.home, &p, &card_for_merger).unwrap(), wt2);
+        assert_eq!(
+            ops.info(&p, &card_for_merger).unwrap().branch.as_deref(),
+            Some(br2.as_str())
+        );
 
         // Simulate `@merger` resolving conflict according to strategy instructions.
         std::fs::write(wt2.join("shared.txt"), "main + card2 resolved\n").unwrap();
@@ -4213,4 +4219,176 @@ fn snap_latest_card_terminal(app: &AppServer, card_id: &str) -> TerminalEntry {
         .into_iter()
         .rfind(|t| t.agent.as_ref().is_some_and(|a| a.card_id == card_id))
         .unwrap()
+}
+
+#[test]
+fn failed_rebase_conflict_delivery_retries_via_workflow_deliver_without_burning_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    std::fs::write(source.join("shared.txt"), "base\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "init"]);
+
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "Rebase Retry",
+                "directory": source,
+                "workspace": {"create_worktree": true, "sync_base": false}
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let wf = collection(&app, &p);
+    let fname = wf["sources"][0]["filename"].as_str().unwrap();
+    let mut doc =
+        canban_workflow_engine::source::parse(wf["sources"][0]["source"].as_str().unwrap())
+            .unwrap();
+    canban_workflow_engine::source::set_sync_upstream(&mut doc, false);
+    canban_workflow_engine::source::set_merge_strategy(
+        &mut doc,
+        canban_types::MergeStrategy::Rebase,
+    );
+    let raw = canban_workflow_engine::source::encode(&doc).unwrap();
+    app.call(
+        "workflow.apply",
+        json!({
+            "project_id": p.id,
+            "revision": wf["revision"],
+            "sources": [{"filename": fname, "source": raw}]
+        }),
+    )
+    .unwrap();
+
+    let c: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({"project_id": p.id, "title": "Conflicting rebase"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id": c.id, "revision": c.revision, "stage": "develop"}),
+    )
+    .unwrap();
+    let dev = admit(&app, &snap_latest_card_terminal(&app, &c.id));
+    let ops = canban_workspaces::Ops::local();
+    let wt = ops.prepare(&app.home, &p, &c).unwrap();
+    let br = ops.current_branch(wt.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut card: Card = db.get(&c.id)?;
+            card.worktree = Some(wt.to_str().unwrap().into());
+            card.branch = Some(br.clone());
+            db.save(&card)
+        })
+        .unwrap();
+    git_identity(&wt);
+    std::fs::write(wt.join("shared.txt"), "card change\n").unwrap();
+    git_in(&wt, &["add", "."]);
+    git_in(&wt, &["commit", "-m", "feat: card change"]);
+
+    std::fs::write(source.join("shared.txt"), "main change\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "fix: main change"]);
+    let main_before = git_in(&source, &["rev-parse", "HEAD"]);
+
+    finish_closed(&app, &dev, "dev-done");
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let run = snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.card_id == c.id && r.active())
+        .unwrap();
+    assert_eq!(run.state, "waiting_agent");
+    assert_eq!(run.inputs["conflict_attempts"], 1);
+    assert_eq!(ops.current_branch(wt.to_str().unwrap()), None);
+    let merger = snap
+        .terminals
+        .iter()
+        .rfind(|t| {
+            t.agent
+                .as_ref()
+                .is_some_and(|a| a.card_id == c.id && a.profile.id == "merger")
+        })
+        .unwrap()
+        .clone();
+
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut entry: TerminalEntry = db.get(&merger.id)?;
+            let agent = entry.agent.as_mut().unwrap();
+            agent.state = "failed".into();
+            agent.pending = None;
+            agent.terminal = None;
+            agent.error = Some("git switch: simulated branch exists".into());
+            db.save(&entry)?;
+            crate::workflow::reconcile(db)?;
+            Ok(())
+        })
+        .unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let failed_run = snap.workflow_runs.iter().find(|r| r.id == run.id).unwrap();
+    assert_eq!(failed_run.state, "failed");
+    assert!(failed_run.error.is_some());
+    let card_rev = snap.cards.iter().find(|x| x.id == c.id).unwrap().revision;
+
+    let retried = app
+        .call(
+            "workflow.deliver",
+            json!({"card_id": c.id, "revision": card_rev}),
+        )
+        .unwrap();
+    assert_eq!(retried["state"], "waiting_agent");
+    assert_eq!(retried["inputs"]["conflict_attempts"], 1);
+    assert!(retried["error"].is_null());
+
+    let snap = app.snapshot().unwrap();
+    let card_for_merger = snap.cards.iter().find(|x| x.id == c.id).unwrap().clone();
+    assert_eq!(ops.prepare(&app.home, &p, &card_for_merger).unwrap(), wt);
+    let info = ops.info(&p, &card_for_merger).unwrap();
+    assert_eq!(info.branch.as_deref(), Some(br.as_str()));
+    assert_eq!(info.state, "conflict");
+
+    let merger2 = snap
+        .terminals
+        .iter()
+        .rfind(|t| {
+            t.agent
+                .as_ref()
+                .is_some_and(|a| a.card_id == c.id && a.profile.id == "merger")
+        })
+        .unwrap()
+        .clone();
+    let merger2 = admit(&app, &merger2);
+    std::fs::write(wt.join("shared.txt"), "resolved\n").unwrap();
+    git_in(&wt, &["add", "shared.txt"]);
+    git_in(&wt, &["commit", "--no-edit"]);
+    git_in(&wt, &["rebase", "--skip"]);
+    finish_closed(&app, &merger2, "merger-done");
+    app.pump_deliveries().unwrap();
+
+    let snap = app.snapshot().unwrap();
+    let delivered = snap.cards.iter().find(|x| x.id == c.id).unwrap();
+    assert!(delivered.delivery.is_some());
+    assert_eq!(
+        std::fs::read_to_string(source.join("shared.txt")).unwrap(),
+        "resolved\n"
+    );
+    assert_eq!(git_in(&source, &["rev-parse", "HEAD^"]), main_before);
 }

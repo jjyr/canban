@@ -338,7 +338,10 @@ pub fn render(ui: Ui) -> impl IntoElement {
                             badge_label = format!("{badge_label} (@{prof})");
                         }
                         let tone = if is_current {
-                            if run.state == "waiting_approval" || run.state == "stale" {
+                            if matches!(
+                                run.state.as_str(),
+                                "waiting_approval" | "stale" | "failed" | "blocked"
+                            ) {
                                 Tone::Attention
                             } else {
                                 Tone::Info
@@ -509,11 +512,19 @@ pub fn render(ui: Ui) -> impl IntoElement {
                                     move |_| rework_open.update(|v| *v = !*v),
                                 ));
                             }
-                        } else if run.state == "waiting_delivery" && is_deliver_step {
+                        } else if matches!(
+                            run.state.as_str(),
+                            "waiting_delivery" | "failed" | "blocked"
+                        ) && is_deliver_step
+                        {
                             actions = actions.child(
                                 compact_action(
                                     "Retry auto-merge",
-                                    Variant::Secondary,
+                                    if matches!(run.state.as_str(), "failed" | "blocked") {
+                                        Variant::Primary
+                                    } else {
+                                        Variant::Secondary
+                                    },
                                     move |_| {
                                         if let Some(card) = ui.current_card() {
                                             dispatch(
@@ -591,6 +602,8 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         _ if is_deliver_step => {
                             if card_opt.as_ref().is_some_and(|c| c.hold_auto_merge) {
                                 "Auto-merge held".to_owned()
+                            } else if run.state == "failed" {
+                                "Auto-merge failed".to_owned()
                             } else {
                                 "Auto-merge paused".to_owned()
                             }
@@ -656,16 +669,19 @@ pub fn render(ui: Ui) -> impl IntoElement {
                         {
                             body = body.child(notice(head_pause.clone(), Tone::Attention));
                         }
-                    } else if (run.state == "waiting_approval" || run.state == "stale")
-                        && let Some(reason) = card_opt
-                            .as_ref()
-                            .and_then(|c| {
-                                c.human_gate
-                                    .as_ref()
-                                    .map(|g| g.reason.clone())
-                                    .or_else(|| c.attention.clone())
-                            })
-                            .filter(|r| !r.trim().is_empty())
+                    } else if matches!(
+                        run.state.as_str(),
+                        "waiting_approval" | "stale" | "failed" | "blocked"
+                    ) && let Some(reason) = card_opt
+                        .as_ref()
+                        .and_then(|c| {
+                            c.human_gate
+                                .as_ref()
+                                .map(|g| g.reason.clone())
+                                .or_else(|| c.attention.clone())
+                        })
+                        .filter(|r| !r.trim().is_empty())
+                        .or_else(|| run.error.clone().filter(|r| !r.trim().is_empty()))
                     {
                         body = body.child(notice(reason, Tone::Attention));
                     }
