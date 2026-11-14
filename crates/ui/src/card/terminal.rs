@@ -320,19 +320,6 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                                 }
                             },
                         ))
-                        .child(chrome_button_disabled(
-                            Icon::Agent,
-                            "New Agent",
-                            move || {
-                                ui.pending.get()
-                                    || ui.current_card().is_none_or(|c| c.archived_at.is_some())
-                            },
-                            move |_| {
-                                if let Some(c) = ui.current_card() {
-                                    crate::terminals::create_in_card(ui, c.project_id, c.id, true);
-                                }
-                            },
-                        ))
                         .child(dynamic(move || {
                             let Some(e) = active_entry.get() else {
                                 return view().into_element();

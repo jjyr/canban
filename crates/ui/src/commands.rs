@@ -303,14 +303,6 @@ pub const CATALOG: &[Command] = &[
         keywords: "choose project",
     },
     Command {
-        id: "open-card-agent",
-        title: "Open Card Agent",
-        key: "",
-        display: "Card",
-        context: "Card",
-        keywords: "agent cli interactive open spawn",
-    },
-    Command {
         id: "popout-card-terminal",
         title: "Pop Out Card Terminal to Terminals",
         key: "",
@@ -357,14 +349,6 @@ pub const CATALOG: &[Command] = &[
         display: "Card",
         context: "Card",
         keywords: "files images upload",
-    },
-    Command {
-        id: "send-card-default",
-        title: "Send Card to Default Profile",
-        key: "",
-        display: "Card",
-        context: "Card",
-        keywords: "start run dispatch card",
     },
     Command {
         id: "archive-card",
@@ -589,16 +573,9 @@ pub fn execute(ui: Ui, id: &str) {
             if ui.page.get_untracked() == "card" && !ui.card.get_untracked().is_empty() {
                 crate::card::terminal::toggle(ui);
             } else if let Some(c) = ui.current_card() {
-                ui.open_card_with_terminal(c.id, None);
+                crate::terminals::open_card_quick(ui, &c.id);
             } else {
                 ui.notify("Open a Card first to toggle its Live Terminal");
-            }
-        }
-        "open-card-agent" => {
-            if let Some(c) = ui.current_card().filter(|c| c.archived_at.is_none()) {
-                crate::terminals::open_card_agent(ui, &c.id);
-            } else {
-                ui.notify("Select an active Card first");
             }
         }
         "popout-card-terminal" => {
@@ -658,13 +635,6 @@ pub fn execute(ui: Ui, id: &str) {
                     .unwrap_or_else(|| crate::drafts::Draft::card(&c));
                 d.details = !d.details;
                 crate::drafts::put(ui, key, d);
-            }
-        }
-        "send-card-default" => {
-            if let Some(c) = ui.current_card().filter(|c| c.active()) {
-                crate::sessions::send_card(ui, &c.id);
-            } else {
-                ui.notify("Select an active Card first");
             }
         }
         "archive-card" => {

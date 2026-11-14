@@ -3,14 +3,15 @@ use super::*;
 ///
 /// Layout (rows appear only when they have content):
 /// ```text
-/// #16  Title wraps beside the number       (3) [bot] [>_]
+/// #16  Title wraps beside the number            (3) [>_]
 /// GitHub Issue #12 · open · by author
 /// First body line, truncated
 /// [#search] [#ux] [#agent] +1
 /// Needs review  ⎇ branch            [((●)) ✦ @developer]
 /// ```
-/// The hover buttons open this Card's Agent or quick terminal split directly on the
-/// Card page; active Agent pills pulse (or flag attention) and open that Agent tab on the Card.
+/// The `[>_]` button opens this Card's quick terminal split directly on the Card page
+/// (pinned with an active dot when a session is running, or revealed on hover); active
+/// Agent pills pulse (or flag attention) and open that Agent tab on the Card.
 pub fn card_tile(ui: Ui, card: Card) -> View {
     let reminder_id = card.id.clone();
     let count = computed(move || {
@@ -18,13 +19,19 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
             .with(|all| all.get(&reminder_id).copied().unwrap_or_default())
     });
     let selected_id = card.id.clone();
-    let agent_card = card.id.clone();
     let terminal_card = card.id.clone();
     let card_number = card.number;
     let archive_card = card.clone();
     let snapshot = ui.snapshot.get_untracked();
     let live_entries = crate::terminals::card_live_entries(&snapshot, &card.id);
     let has_terminal = !live_entries.is_empty();
+    let dot_tone = if !has_terminal {
+        None
+    } else if live_entries.iter().any(|e| e.needs_attention()) {
+        Some(ATTENTION)
+    } else {
+        Some(ACCENT)
+    };
     let hovered = signal(false);
     let active = card.active();
     let merged = card.merged();
@@ -91,24 +98,16 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
                     ))
                     // Space stays reserved so hovering never rewraps the title.
                     .child(when(
-                        move || active,
-                        move || {
-                            agent_button(ui, agent_card.clone(), card_number)
-                                .opacity(move || if hovered.get() { 1.0_f32 } else { 0.0_f32 })
-                        },
-                    ))
-                    .child(when(
                         move || active || has_terminal,
                         move || {
-                            terminal_button(ui, terminal_card.clone(), card_number).opacity(
-                                move || {
+                            terminal_button(ui, terminal_card.clone(), card_number, dot_tone)
+                                .opacity(move || {
                                     if has_terminal || hovered.get() {
                                         1.0_f32
                                     } else {
                                         0.0_f32
                                     }
-                                },
-                            )
+                                })
                         },
                     )),
             ),
@@ -302,26 +301,43 @@ fn archive_button(ui: Ui, card: Card) -> View {
     .h(px(22.))
 }
 
-/// Hover entry: open this Card with its Agent terminal split expanded.
-fn agent_button(ui: Ui, card: String, number: u64) -> View {
-    chrome_button(
-        Icon::Agent,
-        format!("Open Agent for Card #{number}"),
-        move |_| crate::terminals::open_card_agent(ui, &card),
-    )
-    .w(px(22.))
-    .h(px(22.))
-}
-
-/// Hover entry: open this Card's quick terminal view directly.
-fn terminal_button(ui: Ui, card: String, number: u64) -> View {
-    chrome_button(
-        Icon::Terminal,
-        format!("Open Terminal for Card #{number}"),
-        move |_| crate::terminals::open_card_quick(ui, &card),
-    )
-    .w(px(22.))
-    .h(px(22.))
+/// Quick or live Terminal entry: open this Card's side-by-side terminal split directly.
+fn terminal_button(ui: Ui, card: String, number: u64, dot_tone: Option<ThemeColor>) -> View {
+    let title = format!("Open Terminal for Card #{number}");
+    let hint = title.clone();
+    let mut btn = press_target()
+        .relative()
+        .w(px(22.))
+        .h(px(22.))
+        .items_center()
+        .justify_center()
+        .rounded(px(5.))
+        .bg(CLEAR)
+        .hover(|s| s.bg(INSET))
+        .focus(|s| s.border_1().border_color(ACCENT))
+        .accessibility_label(move || Some(title.clone().into()))
+        .child(icon(Icon::Terminal).w(px(15.)).h(px(15.)))
+        .on_press(move |_: &()| crate::terminals::open_card_quick(ui, &card));
+    if let Some(color) = dot_tone {
+        btn = btn.child(
+            view()
+                .absolute()
+                .top(px(2.))
+                .right(px(2.))
+                .w(px(5.))
+                .h(px(5.))
+                .rounded_full()
+                .bg(color)
+                .pointer_events(PointerEvents::None),
+        );
+    }
+    view()
+        .flex_shrink_0()
+        .w(px(22.))
+        .h(px(22.))
+        .window_drag(false)
+        .tooltip(hint_tooltip(hint).placement(Placement::Bottom))
+        .child(btn)
 }
 
 /// A running workflow/profile Agent: pulsing mark + provider icon + profile. Opens Card + Agent terminal.

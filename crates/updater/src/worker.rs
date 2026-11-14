@@ -211,6 +211,7 @@ fn environment(cmd: &mut Command, j: &Journal) {
         .env("CANBAN_APP_ID", &j.app_id)
         .env_remove("CANBAN_ENDPOINT")
         .env_remove("CANBAN_CARD")
+        .env_remove("CARD_ID")
         .env_remove("CANBAN_PROJECT")
         .env_remove("CANBAN_PROFILE_ID");
 }

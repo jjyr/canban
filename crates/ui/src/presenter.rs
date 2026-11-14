@@ -544,14 +544,13 @@ impl Ui {
             crate::terminals::default_card_terminal_for_ui(self, &id, recent.as_deref())
         })
         .unwrap_or_default();
-        let has_live = !default_tab.is_empty();
-        if has_live {
+        if !default_tab.is_empty() {
             self.terminal_recent.with(|m| {
                 m.insert(id.clone(), default_tab.clone());
             });
         }
         self.card_tab.set(default_tab);
-        self.card_terminal_open.set(has_live);
+        self.card_terminal_open.set(false);
         self.card.set(id);
         self.expanded.set(false);
         self.focused_card.set(false);
@@ -592,7 +591,7 @@ impl Ui {
             .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned())
             .filter(|c| c.archived_at.is_none())
         {
-            crate::terminals::create_in_card(self, c.project_id, c.id, true);
+            crate::terminals::create_in_card(self, c.project_id, c.id, false);
         }
     }
     pub fn back(self) {

@@ -4,6 +4,86 @@ use serde_json::json;
 fn close(ui: Ui) {
     ui.close_card();
 }
+fn terminal_button(ui: Ui) -> View {
+    let dot_state = computed(move || {
+        let cid = ui.card_id();
+        if cid.is_empty() {
+            return 0u8;
+        }
+        let live = crate::terminals::card_live_entries_for_ui(ui, &cid);
+        if live.is_empty() {
+            0
+        } else if live.iter().any(|e| e.needs_attention()) {
+            2
+        } else {
+            1
+        }
+    });
+    let selected = computed(move || ui.page.get() == "card" && ui.card_terminal_open.get());
+    view()
+        .flex_shrink_0()
+        .window_drag(false)
+        .tooltip(hint_tooltip("Toggle Terminal · ⌘J").placement(Placement::Bottom))
+        .child(
+            canban_ui_kit::press_target()
+                .relative()
+                .disabled_style(|s| s.opacity(0.4))
+                .w(px(30.))
+                .h(px(30.))
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .bg(move || if selected.get() { SELECTED } else { CLEAR })
+                .hover(|s| s.bg(INSET))
+                .focus(|s| s.border_1().border_color(ACCENT))
+                .selected(move || selected.get())
+                .disabled(move || {
+                    ui.pending.get()
+                        || ui.current_card().is_none_or(|c| {
+                            c.archived_at.is_some()
+                                && !ui.card_terminal_open.get()
+                                && dot_state.get() == 0
+                        })
+                })
+                .accessibility_label(|| Some("Toggle Terminal · ⌘J".into()))
+                .child(
+                    icon_tinted(
+                        Icon::Terminal,
+                        move || {
+                            if selected.get() { ACCENT } else { MUTED }
+                        },
+                    )
+                    .w(px(16.))
+                    .h(px(16.)),
+                )
+                .child(dynamic(move || match dot_state.get() {
+                    1 | 2 => view()
+                        .absolute()
+                        .top(px(4.))
+                        .right(px(4.))
+                        .w(px(6.))
+                        .h(px(6.))
+                        .rounded_full()
+                        .bg(if dot_state.get() == 2 {
+                            ATTENTION
+                        } else {
+                            ACCENT
+                        })
+                        .pointer_events(PointerEvents::None)
+                        .into_element(),
+                    _ => view().into_element(),
+                }))
+                .on_press(move |_: &()| {
+                    if let Some(c) = ui.current_card() {
+                        if ui.page.get_untracked() != "card" {
+                            crate::terminals::open_card_quick(ui, &c.id);
+                            return;
+                        }
+                        crate::card::terminal::toggle(ui);
+                    }
+                }),
+        )
+}
 fn review(ui: Ui) {
     if let Some(c) = ui.current_card() {
         crate::review::open_card(ui, &c.id);
@@ -262,51 +342,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         )
                     },
                 ))
-                .child(chrome_button_disabled(
-                    Icon::Agent,
-                    "Open Agent",
-                    move || {
-                        ui.pending.get()
-                            || ui.current_card().is_none_or(|c| c.archived_at.is_some())
-                    },
-                    move |_| {
-                        let Some(c) = ui.current_card() else {
-                            return;
-                        };
-                        if ui.page.get_untracked() != "card" || !ui.card_terminal_open.get_untracked()
-                        {
-                            crate::terminals::open_card_agent(ui, &c.id);
-                            return;
-                        }
-                        let cid = ui.card_id();
-                        let on_agent_tab = crate::card::terminal::select_entry_for_card(ui, &cid)
-                            .is_some_and(|e| e.agent.is_some() || e.saved.agent_engine.is_some());
-                        if !on_agent_tab {
-                            crate::terminals::open_card_agent(ui, &c.id);
-                            return;
-                        }
-                        crate::terminals::create_in_card(ui, c.project_id, c.id, true);
-                    },
-                ))
-                .child(chrome_button_disabled(
-                    Icon::Terminal,
-                    "Toggle Terminal · ⌘J",
-                    move || {
-                        ui.pending.get()
-                            || ui.current_card().is_none_or(|c| {
-                                c.archived_at.is_some() && !ui.card_terminal_open.get()
-                            })
-                    },
-                    move |_| {
-                        if let Some(c) = ui.current_card() {
-                            if ui.page.get_untracked() != "card" {
-                                crate::terminals::open_card_quick(ui, &c.id);
-                                return;
-                            }
-                            crate::card::terminal::toggle(ui);
-                        }
-                    },
-                ))
+                .child(terminal_button(ui))
                 .child(chrome_button(Icon::More, "Card actions", move |_| {
                     menu(ui, draft, reading)
                 }))

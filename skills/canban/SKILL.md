@@ -26,6 +26,7 @@ Canban injects `CANBAN_CLI` and task environment variables when launching an Age
 | `CANBAN_ENDPOINT` | AppServer Unix socket path (or `spool:...` on remote execution hosts). |
 | `CANBAN_HOME` | Active Canban application home directory. |
 | `CANBAN_CARD` | Short Card number (for example `42`), injected into both scheduled Agent runs and manual Card Terminals. |
+| `CARD_ID` | Internal Card ID, injected alongside `CANBAN_CARD` in both scheduled Agent runs and manual Card Terminals. |
 | `CANBAN_PROJECT` | Active Project ID (CLI commands also infer the Project from a git repository or Card worktree CWD when omitted). |
 | `CANBAN_RUN_DIR` | Scratch directory outside the repository worktree for Markdown payloads. |
 | `CANBAN_PROFILE_ID` | Active `@identity` or Agent profile ID (when applicable). |

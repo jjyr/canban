@@ -109,7 +109,7 @@ See [Agent profile configuration](product/agent-profiles.md) for loadable JSON e
 
 Public operations include update.state/check/install, app.ping/snapshot, project.create/list, card.create/get/list/update/adopt/move/archive/restore/attention.clear/continue/workspace, comment.add, timeline.list, execution.get/report/retry/output, attachment.add, resource.read/materialize, config.get/reload, scheduler.status/configure, herdr.status/check/install/templates, profile.presets, review.preview/merge, terminal.create/rename/context/interrupt/end/close and agent.open/bind/reply/interrupt/end. Note RPCs, card.context.update and the hidden canban note command remain legacy compatibility paths, outside the current product scope. agent.turn_ended is a deprecated ignored compatibility endpoint. For timeline.list supply card_id, optional after_sequence and limit; next_cursor provides pagination. Current code and shared types are authoritative for exact payloads; the [interface design](interfaces/mvp-contract.md) remains a broader contract reference.
 
-The launcher injects CANBAN_CLI, CANBAN_HOME, CANBAN_ENDPOINT, CANBAN_PROJECT, CANBAN_CARD, CANBAN_SESSION_ID, CANBAN_PROFILE_ID and CANBAN_RUN_DIR across scheduled Agent terminals and Card terminals, and supplies reporting instructions in the actual prompt.
+The launcher injects CANBAN_CLI, CANBAN_HOME, CANBAN_ENDPOINT, CANBAN_PROJECT, CANBAN_CARD, CARD_ID, CANBAN_SESSION_ID, CANBAN_PROFILE_ID and CANBAN_RUN_DIR across scheduled Agent terminals and Card terminals, and supplies reporting instructions in the actual prompt.
 
 ```sh
 "$CANBAN_CLI" card show

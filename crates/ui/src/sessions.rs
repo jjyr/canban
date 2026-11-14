@@ -55,18 +55,3 @@ pub fn default_profile(ui: Ui) -> String {
             }
         })
 }
-
-/// Open a clean ephemeral interactive Agent CLI on this Card without injecting
-/// a workflow prompt or resuming a historical session.
-pub fn send_card(ui: Ui, card: &str) {
-    let Some(c) = ui
-        .snapshot
-        .with_untracked(|s| s.cards.iter().find(|c| c.id == card).cloned())
-    else {
-        return;
-    };
-    if ui.page.get_untracked() != "card" || ui.card.get_untracked() != c.id {
-        ui.open_card(c.id.clone());
-    }
-    crate::terminals::create_in_card(ui, c.project_id, c.id, true);
-}

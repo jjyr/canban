@@ -396,40 +396,6 @@ pub fn create_in_card(ui: Ui, project_id: String, card_id: String, agent: bool) 
     });
 }
 
-/// Open the Card workspace with an existing active Agent tab expanded, or spawn a clean Agent on it.
-pub fn open_card_agent(ui: Ui, card_id: &str) {
-    let Some(c) = ui
-        .snapshot
-        .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned())
-    else {
-        return;
-    };
-    if c.archived_at.is_some() {
-        ui.operation_error
-            .set("Restore this Card before opening an Agent.".into());
-        return;
-    }
-    let live = untracked(|| card_live_entries_for_ui(ui, &c.id));
-    let recent = ui.terminal_recent.with(|m| m.get(&c.id).cloned());
-    let existing_agent = recent
-        .as_deref()
-        .and_then(|rid| {
-            live.iter().find(|e| {
-                e.saved.id == rid && (e.agent.is_some() || e.saved.agent_engine.is_some())
-            })
-        })
-        .or_else(|| {
-            live.iter()
-                .find(|e| e.agent.is_some() || e.saved.agent_engine.is_some())
-        })
-        .map(|e| e.saved.id.clone());
-    if let Some(id) = existing_agent {
-        ui.open_card_with_terminal(c.id, Some(id));
-    } else {
-        create_in_card(ui, c.project_id, c.id, true);
-    }
-}
-
 /// Open Card terminal from global/menu surfaces without intermediate prompts.
 pub fn open_card(ui: Ui, card_id: &str) {
     navigation::open_card(ui, card_id);

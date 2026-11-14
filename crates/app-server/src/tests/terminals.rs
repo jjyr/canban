@@ -157,6 +157,7 @@ fn manual_launch_is_idempotent_and_preserves_workflow_budget_names_and_runtime_o
     assert_eq!(launch["cwd"], p.directory);
     assert_eq!(launch["labels"]["canban.terminal"], item.id);
     assert_eq!(launch["env"]["CANBAN_CARD"], c.number.to_string());
+    assert_eq!(launch["env"]["CARD_ID"], c.id);
     assert_eq!(launch["env"]["CANBAN_PROJECT"], p.id);
     let s = app.snapshot().unwrap();
     assert!(s.terminals.iter().all(|t| t.agent.is_none()));
@@ -612,6 +613,7 @@ fn ephemeral_agent_terminal_launches_without_prompt_or_resume_and_records_origin
     let launch: Value = serde_json::from_str(launches.lines().last().unwrap()).unwrap();
     assert_eq!(launch["cwd"], p.directory);
     assert_eq!(launch["env"]["CANBAN_CARD"], c.number.to_string());
+    assert_eq!(launch["env"]["CARD_ID"], c.id);
     assert_eq!(launch["env"]["CANBAN_PROJECT"], p.id);
     let argv: Vec<String> = serde_json::from_value(launch["argv"].clone()).unwrap();
     assert!(argv[0].ends_with("agy"));
@@ -840,6 +842,7 @@ fn opening_card_shell_and_agent_terminals_immediately_creates_card_worktree_and_
     assert_eq!(shell_launch["cwd"], wt_path);
     assert_eq!(shell_launch["labels"]["canban.terminal"], shell_entry.id);
     assert_eq!(shell_launch["env"]["CANBAN_CARD"], c.number.to_string());
+    assert_eq!(shell_launch["env"]["CARD_ID"], c.id);
     assert_eq!(shell_launch["env"]["CANBAN_PROJECT"], p.id);
     assert!(shell_launch["env"]["CANBAN_CLI"].as_str().is_some());
     assert!(shell_launch["env"]["CANBAN_ENDPOINT"].as_str().is_some());
@@ -863,6 +866,7 @@ fn opening_card_shell_and_agent_terminals_immediately_creates_card_worktree_and_
     let agent_launch: Value = serde_json::from_str(launches.lines().last().unwrap()).unwrap();
     assert_eq!(agent_launch["cwd"], wt_path);
     assert_eq!(agent_launch["env"]["CANBAN_CARD"], c.number.to_string());
+    assert_eq!(agent_launch["env"]["CARD_ID"], c.id);
     assert_eq!(agent_launch["env"]["CANBAN_PROJECT"], p.id);
     assert!(agent_launch["env"].get("CANBAN_REQUEST_ID").is_none());
     assert!(agent_launch["env"].get("CANBAN_ATTEMPT").is_none());

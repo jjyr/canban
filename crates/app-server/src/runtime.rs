@@ -1043,6 +1043,7 @@ impl AppServer {
             ("CANBAN_ENDPOINT".into(), endpoint.clone()),
             ("CANBAN_PROJECT".into(), att.project_id.clone()),
             ("CANBAN_CARD".into(), card.number.to_string()),
+            ("CARD_ID".into(), card.id.clone()),
             (
                 "CANBAN_RUN_DIR".into(),
                 canban_context::run_dir(&home, &updated_entry)

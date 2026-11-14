@@ -728,7 +728,7 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
 }
 
 #[test]
-fn card_agent_actions_open_card_with_expanded_agent_terminal_instead_of_terminals_page() {
+fn card_open_collapses_terminal_by_default_while_terminal_and_pill_entries_expand_split() {
     let runtime = nsh_core::element::Runtime::default();
     let _entered = runtime.enter();
     let (_owner, ()) = nsh_core::element::create_root(|| {
@@ -765,7 +765,26 @@ fn card_agent_actions_open_card_with_expanded_agent_terminal_instead_of_terminal
         ui.snapshot.set(s);
         ui.page.set("board".into());
 
+        // 0. Clicking the Card body (`open_card`) keeps the Terminal split collapsed (`false`),
+        // even when active terminals/agents exist, while pre-selecting the default live tab.
+        ui.open_card("c1".into());
+        assert_eq!(ui.page.get_untracked(), "card");
+        assert_eq!(ui.card.get_untracked(), "c1");
+        assert_eq!(ui.card_tab.get_untracked(), "c1-shell");
+        assert!(!ui.card_terminal_open.get_untracked());
+        assert!(!ui.card_terminal_focused.get_untracked());
+
+        // Toggling (`[>_ Terminal]` / ⌘J) expands and collapses; reopening the Card resets to collapsed (`false`).
+        crate::card::terminal::toggle(ui);
+        assert!(ui.card_terminal_open.get_untracked());
+        assert!(ui.card_terminal_focused.get_untracked());
+        ui.close_card();
+        assert!(!ui.card_terminal_open.get_untracked());
+        ui.open_card("c1".into());
+        assert!(!ui.card_terminal_open.get_untracked());
+
         // 1. Clicking a running Agent pill (`open_request`) from Board jumps to Card + expanded Agent tab.
+        ui.page.set("board".into());
         crate::terminals::open_request(ui, &att_id);
         assert_eq!(ui.page.get_untracked(), "card");
         assert_eq!(ui.card.get_untracked(), "c1");
@@ -773,33 +792,47 @@ fn card_agent_actions_open_card_with_expanded_agent_terminal_instead_of_terminal
         assert!(ui.card_terminal_open.get_untracked());
         assert!(ui.card_terminal_focused.get_untracked());
 
-        // 2. Clicking the Card Agent action from Diff & Review (`page == "review"`) navigates to Card + Agent tab, never `"terminals"`.
+        // 2. Back/Forward history navigation (`navigation::go`) also keeps the Card Terminal split collapsed.
+        ui.history.update(|h| {
+            h.entries.clear();
+            h.index = 0;
+            h.visit(ui.location());
+        });
+        ui.navigate("board");
+        ui.history.update(|h| h.visit(ui.location()));
+        crate::navigation::go(ui, false);
+        assert_eq!(ui.page.get_untracked(), "card");
+        assert_eq!(ui.card.get_untracked(), "c1");
+        assert!(!ui.card_terminal_open.get_untracked());
+        assert!(!ui.card_terminal_focused.get_untracked());
+
+        // 3. Clicking the Card `[>_ Terminal]` action from Board or Diff & Review (`open_card_quick`) navigates to Card + expanded Terminal split, never `"terminals"`.
         ui.page.set("review".into());
         ui.card_terminal_open.set(false);
         ui.card_terminal_focused.set(false);
         ui.terminal_recent.with(|m| {
             m.insert("c1".into(), "c1-shell".into());
         });
-        crate::terminals::open_card_agent(ui, "c1");
+        crate::terminals::open_card_quick(ui, "c1");
         assert_eq!(ui.page.get_untracked(), "card");
         assert_eq!(ui.card.get_untracked(), "c1");
-        assert_eq!(ui.card_tab.get_untracked(), conv_id);
+        assert_eq!(ui.card_tab.get_untracked(), "c1-shell");
         assert!(ui.card_terminal_open.get_untracked());
         assert!(ui.card_terminal_focused.get_untracked());
 
-        // 3. Clicking the Card Agent action on a Card with no existing Agent spawns a clean Agent inside the Card split (never jumping to `"terminals"`).
+        // 4. Clicking `[>_ Terminal]` on a Card with no existing Terminal spawns a Card Shell Terminal inside the Card split (never jumping to `"terminals"`).
         ui.snapshot
             .update(|s| s.cards.push(serde_json::from_value(json!({"id":"c3","project_id":"p1","number":3,"title":"Fresh card","body":"","stage":"backlog","revision":1,"created_at":3})).unwrap()));
         ui.page.set("board".into());
-        crate::terminals::open_card_agent(ui, "c3");
+        crate::terminals::open_card_quick(ui, "c3");
         assert_eq!(ui.page.get_untracked(), "card");
         assert_eq!(ui.card.get_untracked(), "c3");
         assert!(ui.card_terminal_open.get_untracked());
         assert!(ui.card_terminal_focused.get_untracked());
         let spawned_tab = ui.card_tab.get_untracked();
-        assert!(spawned_tab.starts_with("gallery-agent-"));
+        assert!(spawned_tab.starts_with("gallery-shell-"));
 
-        // 4. Stale/ended conversation IDs passed to `open_card_with_terminal` do not overwrite a valid fallback or leave a dead tab open.
+        // 5. Stale/ended conversation IDs passed to `open_card_with_terminal` do not overwrite a valid fallback or leave a dead tab open.
         ui.open_card_with_terminal("c1".into(), Some("ended-nonexistent-tab".into()));
         assert_eq!(ui.page.get_untracked(), "card");
         assert_eq!(ui.card.get_untracked(), "c1");

@@ -1185,7 +1185,7 @@ pub fn Gallery() -> impl IntoElement {
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("card-terminals") {
         canban_ui::frame::configure_window_chrome();
         ui.snapshot.set(fixtures::workspace_with_card_terminals());
-        ui.open_card("card-2".into());
+        ui.open_card_with_terminal("card-2".into(), None);
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("agent-setup") {
@@ -1322,7 +1322,7 @@ pub fn Gallery() -> impl IntoElement {
                 .child(action("Card Terminals", Variant::Secondary, move |_| {
                     scene.set("workspace".into());
                     ui.snapshot.set(fixtures::workspace_with_card_terminals());
-                    ui.open_card("card-2".into());
+                    ui.open_card_with_terminal("card-2".into(), None);
                 }))
                 .child(action("Card + Live Terminal", Variant::Secondary, move |_| {
                     scene.set("workspace".into());

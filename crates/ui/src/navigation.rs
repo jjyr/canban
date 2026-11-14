@@ -148,9 +148,8 @@ pub fn go(ui: Ui, forward: bool) {
         } else {
             String::new()
         };
-        let has_card_terminal = !default_card_tab.is_empty();
         ui.card_tab.set(default_card_tab);
-        ui.card_terminal_open.set(has_card_terminal);
+        ui.card_terminal_open.set(false);
         ui.card_terminal_focused.set(false);
         ui.card.set(target.card);
         ui.request.set(target.request);

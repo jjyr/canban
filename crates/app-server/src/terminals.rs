@@ -456,6 +456,7 @@ impl AppServer {
                         .entry("canban.project".into())
                         .or_insert_with(|| c.project_id.clone());
                     env.insert("CANBAN_CARD".into(), c.number.to_string());
+                    env.insert("CARD_ID".into(), c.id.clone());
                     labels.insert("canban.card".into(), c.number.to_string());
                     labels.insert("canban.card_id".into(), c.id.clone());
                     let scratch = canban_context::scratch_dir(&exec_home, &c.project_id, &c.id);
