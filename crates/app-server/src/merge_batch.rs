@@ -720,7 +720,11 @@ impl AppServer {
 
         let offending_num = offending.0.number;
         let step_key_fallback = "deliver".to_owned();
-        let entry_name = format!("Merge batch (@{})", batch.profile_id);
+        let entry_name = if batch.profile_id == "merger" {
+            "@merger".to_owned()
+        } else {
+            format!("Merger · @{}", batch.profile_id)
+        };
         let agent_engine = profile_res.as_ref().ok().map(profile_agent_engine);
         let failure_kind = batch.failure_kind.clone().unwrap_or_default();
         self.store.lock().unwrap().write(|db| {

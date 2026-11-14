@@ -169,6 +169,11 @@ pub fn scope_git_summary(
     children: &[Entry],
 ) -> ScopeGitSummary {
     for child in children {
+        if matches!(scope, WorktreeScope::ProjectRoot(_))
+            && s.merge_batches.iter().any(|b| b.id == child.saved.id)
+        {
+            continue;
+        }
         if let Some(loc) = &child.location
             && (loc.branch.is_some() || loc.dirty || loc.ahead > 0 || loc.behind > 0)
         {

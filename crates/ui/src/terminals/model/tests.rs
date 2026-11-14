@@ -1619,3 +1619,84 @@ fn global_new_terminal_opens_in_project_root_while_in_page_new_tab_inherits_curr
         );
     });
 }
+
+#[test]
+fn merge_batch_terminal_lives_directly_in_project_root_without_polluting_root_git_summary() {
+    use crate::terminals::worktrees::{WorktreeScope, entry_scope, scope_git_summary};
+
+    let mut s = fixture();
+    s.projects[0].directory = "/repo/p1".into();
+    s.projects[0].target_branch = Some("main".into());
+
+    let batch_id = "merge-queue:p1:abcd1234".to_owned();
+    s.merge_batches.push(canban_types::MergeBatch {
+        id: batch_id.clone(),
+        project_id: "p1".into(),
+        profile_id: "merger".into(),
+        provider_session_id: None,
+        target_branch: "main".into(),
+        target_head: "deadbeef".into(),
+        strategy: canban_types::MergeStrategy::Rebase,
+        sync_upstream: true,
+        test_command: None,
+        worktree: "/home/worktrees/p1/_merge_queue".into(),
+        state: "running".into(),
+        failure_kind: Some("conflict".into()),
+        conflict_card_number: Some(1),
+        conflict_files: vec!["shared.txt".into()],
+        test_output: None,
+        items: vec![],
+        prompt: String::new(),
+        error: None,
+        created_at: 1,
+        updated_at: 2,
+    });
+    s.terminals.push(TerminalEntry {
+        id: batch_id.clone(),
+        conversation_id: None,
+        number: 10,
+        name: Some("@merger".into()),
+        manual_number: None,
+        origin_card_id: None,
+        agent_engine: Some("agy".into()),
+        runtime: Some(canban_types::TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: Some("core".into()),
+            core_id: Some("core".into()),
+            terminal: Some("pty-merger".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("running".into()),
+            agent_turn: Some(1),
+        }),
+        agent: None,
+        created_at: 2,
+    });
+    s.terminal_contexts.push(TerminalContext {
+        machine: "local".into(),
+        terminal_id: batch_id.clone(),
+        core_id: "core".into(),
+        terminal: "pty-merger".into(),
+        cwd: Some("/home/worktrees/p1/_merge_queue".into()),
+        project_id: Some("p1".into()),
+        dirty: true,
+        branch: None,
+        ..Default::default()
+    });
+
+    let rows = crate::terminals::entries(&s);
+    let merger_entry = rows
+        .iter()
+        .find(|e| e.saved.id == batch_id)
+        .expect("merger entry must appear in terminal entries");
+    assert_eq!(merger_entry.title(), "@merger");
+    let scope = entry_scope(&s, merger_entry);
+    assert_eq!(scope, WorktreeScope::ProjectRoot("p1".into()));
+
+    let summary = scope_git_summary(&s, &scope, std::slice::from_ref(merger_entry));
+    assert_eq!(summary.branch.as_deref(), Some("main"));
+    assert!(!summary.dirty);
+    assert_eq!(summary.ahead, 0);
+    assert_eq!(summary.behind, 0);
+}

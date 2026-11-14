@@ -227,37 +227,20 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .child(when(
             move || {
                 let sel = ui.terminal_selection.get();
-                ui.snapshot.with(|s| {
-                    s.configuration_sessions.iter().any(|c| c.id == sel)
-                        || s.merge_batches.iter().any(|b| b.id == sel)
-                })
+                ui.snapshot
+                    .with(|s| s.configuration_sessions.iter().any(|c| c.id == sel))
             },
             move || {
-                let is_config = ui.snapshot.with(|s| {
-                    let sel = ui.terminal_selection.get();
-                    s.configuration_sessions.iter().any(|c| c.id == sel)
-                });
-                let label_text = if is_config {
-                    "← Back to Workflows"
-                } else {
-                    "← Back to Board"
-                };
-                action(label_text, Variant::Quiet, move |_| {
+                action("← Back to Workflows", Variant::Quiet, move |_| {
                     let sel = ui.terminal_selection.get_untracked();
-                    if let Some((project, route)) = ui.snapshot.with_untracked(|s| {
+                    if let Some(project) = ui.snapshot.with_untracked(|s| {
                         s.configuration_sessions
                             .iter()
                             .find(|c| c.id == sel)
-                            .map(|c| (c.project_id.clone(), "workflows"))
-                            .or_else(|| {
-                                s.merge_batches
-                                    .iter()
-                                    .find(|b| b.id == sel)
-                                    .map(|b| (b.project_id.clone(), "board"))
-                            })
+                            .map(|c| c.project_id.clone())
                     }) {
                         ui.project.set(project);
-                        ui.navigate(route);
+                        ui.navigate("workflows");
                     }
                 })
             },
