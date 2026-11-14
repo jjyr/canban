@@ -12,7 +12,142 @@ use super::*;
 /// The `[>_]` button opens this Card's quick terminal split directly on the Card page
 /// (pinned with a highlighted icon when a session is running, or revealed on hover); active
 /// Agent pills pulse (or flag attention) and open that Agent tab on the Card.
+#[derive(Clone, PartialEq)]
+pub(crate) struct CardTileModel {
+    pub card: Card,
+    pub live_entries: Vec<crate::terminals::Entry>,
+    pub has_terminal: bool,
+    pub terminal_tint: ThemeColor,
+    pub github_cached: Option<(String, String)>,
+    pub tags: Vec<String>,
+    pub active_tags: Vec<String>,
+    pub status_specs: Vec<(String, Tone, bool)>,
+    pub running: Vec<(TerminalEntry, Option<u64>)>,
+    pub ephemeral_agents: Vec<(crate::terminals::Entry, Option<u64>)>,
+}
+
+impl CardTileModel {
+    pub fn build(ui: Ui, card: Card) -> Self {
+        let snapshot = ui.snapshot.get();
+        let local_tags = ui.local_tags.get();
+        let active_tags = ui.github.filters.with(|all| {
+            all.get(&card.project_id)
+                .map(|f| f.tags.clone())
+                .unwrap_or_default()
+        });
+        let ui_merging = ui.merging_cards.with(|ids| ids.contains(&card.id));
+        let live_entries = ui.terminal_entries.with(|rows| {
+            rows.iter()
+                .filter(|e| crate::terminals::is_card_live_entry(e, &card.id))
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        Self::from_parts(
+            &snapshot,
+            &local_tags,
+            active_tags,
+            ui_merging,
+            live_entries,
+            card,
+        )
+    }
+
+    pub fn from_snapshot(ui: Ui, card: Card) -> Self {
+        let snapshot = ui.snapshot.get_untracked();
+        let local_tags = ui.local_tags.get_untracked();
+        let active_tags = ui.github.filters.with_untracked(|all| {
+            all.get(&card.project_id)
+                .map(|f| f.tags.clone())
+                .unwrap_or_default()
+        });
+        let ui_merging = ui
+            .merging_cards
+            .with_untracked(|ids| ids.contains(&card.id));
+        let live_entries = crate::terminals::card_live_entries(&snapshot, &card.id);
+        Self::from_parts(
+            &snapshot,
+            &local_tags,
+            active_tags,
+            ui_merging,
+            live_entries,
+            card,
+        )
+    }
+
+    fn from_parts(
+        snapshot: &Snapshot,
+        local_tags: &std::collections::BTreeSet<String>,
+        active_tags: Vec<String>,
+        ui_merging: bool,
+        live_entries: Vec<crate::terminals::Entry>,
+        card: Card,
+    ) -> Self {
+        let has_terminal = !live_entries.is_empty();
+        let terminal_tint = card_terminal_icon_tint(&live_entries, false);
+        let github_cached = card.github_issue().and_then(|source| {
+            snapshot
+                .github_issues
+                .iter()
+                .find(|v| {
+                    v.project_id == card.project_id
+                        && v.source.repository_id == source.repository_id
+                        && v.source.issue_id == source.issue_id
+                })
+                .map(|v| (v.state.clone(), v.author_login.clone()))
+        });
+        let known_tags = crate::tags::known_map(snapshot, local_tags, Some(&card.project_id));
+        let tags = crate::tags::card_tags(&card, &known_tags);
+        let status_specs =
+            crate::components::activity::card_status_specs(snapshot, &card, ui_merging);
+        let running = crate::components::activity::running_agents(snapshot, &card)
+            .into_iter()
+            .map(|req| {
+                let started = crate::components::activity::agent_started_at(snapshot, &req);
+                (req, started)
+            })
+            .collect();
+        let ephemeral_agents = live_entries
+            .iter()
+            .filter(|e| e.agent.is_none() && e.saved.agent_engine.is_some())
+            .cloned()
+            .map(|entry| {
+                let started_at =
+                    (entry.saved.created_at > 1_000_000_000_000).then_some(entry.saved.created_at);
+                (entry, started_at)
+            })
+            .collect();
+        Self {
+            card,
+            live_entries,
+            has_terminal,
+            terminal_tint,
+            github_cached,
+            tags,
+            active_tags,
+            status_specs,
+            running,
+            ephemeral_agents,
+        }
+    }
+}
+
 pub fn card_tile(ui: Ui, card: Card) -> View {
+    card_tile_from_model(ui, CardTileModel::from_snapshot(ui, card))
+}
+
+pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
+    let CardTileModel {
+        card,
+        has_terminal,
+        terminal_tint,
+        github_cached,
+        tags,
+        active_tags,
+        status_specs,
+        running,
+        ephemeral_agents,
+        ..
+    } = model;
     let reminder_id = card.id.clone();
     let count = computed(move || {
         ui.reminder_counts
@@ -22,10 +157,6 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
     let terminal_card = card.id.clone();
     let card_number = card.number;
     let archive_card = card.clone();
-    let snapshot = ui.snapshot.get_untracked();
-    let live_entries = crate::terminals::card_live_entries(&snapshot, &card.id);
-    let has_terminal = !live_entries.is_empty();
-    let terminal_tint = card_terminal_icon_tint(&live_entries, false);
     let hovered = signal(false);
     let active = card.active();
     let merged = card.merged();
@@ -53,6 +184,7 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
     }
     tile = tile.child(
         view()
+            .key("header")
             .flex_row()
             .items_start()
             .gap_2()
@@ -107,12 +239,8 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
             ),
     );
     if let Some(source) = card.github_issue() {
-        let cached = snapshot.github_issues.iter().find(|v| {
-            v.project_id == card.project_id
-                && v.source.repository_id == source.repository_id
-                && v.source.issue_id == source.issue_id
-        });
         let mut meta = view()
+            .key("github-meta")
             .flex_row()
             .flex_wrap()
             .items_center()
@@ -128,10 +256,10 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
                 if card.is_github_pr() { "PR" } else { "Issue" },
                 source.number
             )));
-        if let Some(cached) = cached {
+        if let Some((state, author_login)) = github_cached {
             meta = meta
-                .child(badge(cached.state.clone()))
-                .child(muted(format!("by {}", cached.author_login)).truncate());
+                .child(badge(state))
+                .child(muted(format!("by {author_login}")).truncate());
         }
         tile = tile.child(meta);
     }
@@ -142,18 +270,16 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
         .find(|line| !line.is_empty() && !line.starts_with('#'))
         .unwrap_or("");
     if !excerpt.is_empty() {
-        tile = tile.child(muted(excerpt.to_owned()).truncate().min_w(px(0.)));
+        tile = tile.child(
+            muted(excerpt.to_owned())
+                .key("excerpt")
+                .truncate()
+                .min_w(px(0.)),
+        );
     }
-    let local_tags = ui.local_tags.get_untracked();
-    let known_tags = crate::tags::known_map(&snapshot, &local_tags, Some(&card.project_id));
-    let tags = crate::tags::card_tags(&card, &known_tags);
     if !tags.is_empty() {
-        let active_tags = ui.github.filters.with_untracked(|all| {
-            all.get(&card.project_id)
-                .map(|f| f.tags.clone())
-                .unwrap_or_default()
-        });
         let mut tag_row = view()
+            .key("tags")
             .flex_row()
             .flex_wrap()
             .items_center()
@@ -174,6 +300,7 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
                 .join(" ");
             tag_row = tag_row.child(
                 view()
+                    .key("tags-extra")
                     .h(px(20.))
                     .px_1p5()
                     .flex_row()
@@ -186,14 +313,16 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
         }
         tile = tile.child(tag_row);
     }
-    let ui_merging = ui
-        .merging_cards
-        .with_untracked(|ids| ids.contains(&card.id));
-    let chips = crate::components::activity::card_status_with_merging(&snapshot, &card, ui_merging);
-    let running = crate::components::activity::running_agents(&snapshot, &card);
-    let ephemeral_agents: Vec<_> = live_entries
+    let chips: Vec<AnyElement> = status_specs
         .into_iter()
-        .filter(|e| e.agent.is_none() && e.saved.agent_engine.is_some())
+        .map(|(text, tone, live)| {
+            let key = format!("status:{live}:{text}");
+            if live {
+                live_status(text, tone).key(key).into_element()
+            } else {
+                status(text, tone).key(key).into_element()
+            }
+        })
         .collect();
     let branch = card.branch.clone().filter(|b| !b.is_empty());
     let replies = crate::card::timeline::reply_count(&snapshot.events, &card.id);
@@ -204,6 +333,7 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
         || replies > 0
     {
         let mut left = view()
+            .key("footer-left")
             .flex_row()
             .flex_wrap()
             .flex_1()
@@ -214,6 +344,7 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
         if let Some(branch) = branch {
             left = left.child(
                 view()
+                    .key("footer-branch")
                     .flex_row()
                     .flex_shrink(1.)
                     .items_center()
@@ -247,18 +378,22 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
         }
         let mut pills: Vec<AnyElement> = running
             .into_iter()
-            .map(|request| {
-                let started_at = crate::components::activity::agent_started_at(&snapshot, &request);
-                agent_pill(ui, request, started_at).into_element()
+            .map(|(request, started_at)| {
+                let pill_key = format!("agent:{}", request.id);
+                agent_pill(ui, request, started_at)
+                    .key(pill_key)
+                    .into_element()
             })
             .collect();
-        pills.extend(ephemeral_agents.into_iter().map(|entry| {
-            let started_at =
-                (entry.saved.created_at > 1_000_000_000_000).then_some(entry.saved.created_at);
-            ephemeral_agent_pill(ui, &card.id, entry, started_at).into_element()
+        pills.extend(ephemeral_agents.into_iter().map(|(entry, started_at)| {
+            let pill_key = format!("ephemeral:{}", entry.saved.id);
+            ephemeral_agent_pill(ui, &card.id, entry, started_at)
+                .key(pill_key)
+                .into_element()
         }));
         tile = tile.child(
             view()
+                .key("footer")
                 .flex_row()
                 .flex_wrap()
                 .items_center()
@@ -276,6 +411,7 @@ pub fn card_tile(ui: Ui, card: Card) -> View {
 fn tag_pill(ui: Ui, project_id: &str, tag: &str, is_active: bool) -> impl IntoElement {
     let pid = project_id.to_owned();
     let tag_value = tag.to_owned();
+    let pill_key = format!("tag:{tag}");
     let label_text = format!("#{tag}");
     let hint = if is_active {
         format!("Clear #{tag} Board filter")
@@ -283,29 +419,33 @@ fn tag_pill(ui: Ui, project_id: &str, tag: &str, is_active: bool) -> impl IntoEl
         format!("Filter Board by #{tag}")
     };
     let a11y = hint.clone();
-    view().flex_shrink_0().tooltip(hint_tooltip(hint)).child(
-        press_target()
-            .h(px(20.))
-            .px_1p5()
-            .max_w(px(140.))
-            .flex_row()
-            .items_center()
-            .rounded(px(5.))
-            .bg(if is_active { SELECTED } else { INSET })
-            .border_1()
-            .border_color(if is_active { ACCENT } else { BORDER })
-            .hover(|s| s.bg(CARD_HOVER).border_color(ACCENT))
-            .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
-            .accessibility_label(move || Some(a11y.clone().into()))
-            .child(
-                text(label_text)
-                    .text_size(px(11.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(if is_active { ACCENT } else { MUTED })
-                    .truncate(),
-            )
-            .on_press(move |_: &()| crate::tags::toggle_board_filter(ui, &pid, &tag_value)),
-    )
+    view()
+        .key(pill_key)
+        .flex_shrink_0()
+        .tooltip(hint_tooltip(hint))
+        .child(
+            press_target()
+                .h(px(20.))
+                .px_1p5()
+                .max_w(px(140.))
+                .flex_row()
+                .items_center()
+                .rounded(px(5.))
+                .bg(if is_active { SELECTED } else { INSET })
+                .border_1()
+                .border_color(if is_active { ACCENT } else { BORDER })
+                .hover(|s| s.bg(CARD_HOVER).border_color(ACCENT))
+                .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
+                .accessibility_label(move || Some(a11y.clone().into()))
+                .child(
+                    text(label_text)
+                        .text_size(px(11.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(if is_active { ACCENT } else { MUTED })
+                        .truncate(),
+                )
+                .on_press(move |_: &()| crate::tags::toggle_board_filter(ui, &pid, &tag_value)),
+        )
 }
 
 /// Quick action on merged Cards: archive immediately without waiting for tomorrow.
@@ -361,7 +501,7 @@ fn terminal_button(ui: Ui, card: String, number: u64, tint: ThemeColor) -> View 
 }
 
 /// A running workflow/profile Agent: pulsing mark + provider icon + profile + compact elapsed runtime. Opens Card + Agent terminal.
-fn agent_pill(ui: Ui, entry: TerminalEntry, started_at: Option<u64>) -> impl IntoElement {
+fn agent_pill(ui: Ui, entry: TerminalEntry, started_at: Option<u64>) -> View {
     let agent = entry
         .agent
         .as_ref()
@@ -413,7 +553,7 @@ fn ephemeral_agent_pill(
     card_id: &str,
     entry: crate::terminals::Entry,
     started_at: Option<u64>,
-) -> impl IntoElement {
+) -> View {
     let (mark, provider) = entry
         .provider()
         .unwrap_or_else(|| (Icon::Agent, "Agent".into()));

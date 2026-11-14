@@ -2,7 +2,7 @@ pub mod activity;
 pub mod git_workspace;
 pub mod scheduling;
 pub use activity::{activity_header, empty};
-mod card_tile;
+pub(crate) mod card_tile;
 pub mod timeline_item;
 use crate::presenter::*;
 use canban_types::Event;

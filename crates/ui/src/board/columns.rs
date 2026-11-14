@@ -1,6 +1,10 @@
 //! Stable column and Card owners; only animated offsets change during a drag.
 use super::drag::{BoardDrag, settle};
-use crate::{components::card_tile, drafts::*, presenter::*};
+use crate::{
+    components::card_tile::{CardTileModel, card_tile_from_model},
+    drafts::*,
+    presenter::*,
+};
 use canban_types::{Card, Stage};
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
@@ -114,9 +118,6 @@ pub(super) fn column(ui: Ui, state: BoardDrag, stage: Stage, compact: bool) -> i
                             .w_full()
                             .on_layout(move |_: &Bounds<Points>| {
                                 if !restored.replace(true) && position.y.0 > 0. {
-                                    // Rows start at zero and receive measured transforms.
-                                    // Restore only after their first native layout: mounting
-                                    // already scrolled can leave their text layers empty.
                                     spawn(async move {
                                         next_frame().await;
                                         scroll_ref.scroll_to(position, false);
@@ -217,35 +218,49 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
     let y = animated_value(0.);
     let id = card.get_untracked().id;
     let position_id = id.clone();
+    let top_id = id.clone();
     let hidden_id = id.clone();
     let press_id = id.clone();
     let layout_id = id.clone();
     let pan_id = id.clone();
     let cleanup_id = id.clone();
     cleanup(move || state.row_unmounted(&cleanup_id));
-    let last_target = stored(None::<f32>);
+    let resting_y = computed(move || {
+        state
+            .layout
+            .with(|l| l.resting.get(&top_id).copied().unwrap_or(0.))
+    });
+    let tile_model = computed(move || CardTileModel::build(ui, card.get()));
+    let last_delta = stored(None::<f32>);
     effect(move || {
-        let target = state.layout.with(|l| l.rows.get(&position_id).copied());
+        let phase = state.phase.get();
         let lifted = state.lifted.get();
         if lifted == position_id {
             return;
         }
-        if let Some(target) = target {
-            let old = last_target.replace(Some(target));
-            if old.is_some_and(|old| (old - target).abs() < 0.1) {
-                return;
-            }
-            if old.is_some() && state.phase.get_untracked() != 0 {
-                let _ = settle(y, target);
-            } else {
-                y.set(target);
-            }
+        let delta = state.layout.with(|l| {
+            let rest = l.resting.get(&position_id).copied().unwrap_or(0.);
+            let target = l.rows.get(&position_id).copied().unwrap_or(rest);
+            target - rest
+        });
+        let old = last_delta.replace(Some(delta));
+        if phase == 0 {
+            y.set(0.);
+            return;
+        }
+        if old.is_some_and(|old| (old - delta).abs() < 0.1) {
+            return;
+        }
+        if old.is_some() {
+            let _ = settle(y, delta);
+        } else {
+            y.set(delta);
         }
     });
     view()
         .absolute()
         .left(px(0.))
-        .top(px(0.))
+        .top(move || px(resting_y.get()))
         .w_full()
         .element_ref(&reference)
         .bind_translate_y(&y)
@@ -311,8 +326,5 @@ fn row(ui: Ui, state: BoardDrag, card: ReadSignal<Card>) -> impl IntoElement {
         .on_context_menu(move |e: &nsh_core::ContextMenuEvent| {
             crate::card_actions::menu(ui, card.get_untracked(), e.page_position)
         })
-        .child(dynamic(move || {
-            let _ = state.epoch.get();
-            card_tile(ui, card.get())
-        }))
+        .child(dynamic(move || card_tile_from_model(ui, tile_model.get())))
 }

@@ -54,7 +54,6 @@ pub(super) struct BoardDrag {
     ui: Ui,
     trace: bool,
     pub cards: Signal<Vec<Card>>,
-    pub epoch: Signal<u64>,
     pub layout: Signal<Layout>,
     pub phase: Signal<u8>,
     pub lifted: Signal<String>,
@@ -134,7 +133,6 @@ impl BoardDrag {
             ui,
             trace: std::env::var_os("CANBAN_BOARD_TRACE").is_some(),
             cards: signal(Vec::new()),
-            epoch: signal(0),
             layout: signal(Layout::default()),
             phase: signal(0),
             lifted: signal(String::new()),
@@ -193,7 +191,6 @@ impl BoardDrag {
                 .cloned()
                 .collect()
         }));
-        self.epoch.update(|n| *n += 1);
         self.reflow();
     }
     pub fn height(self, id: &str, height: f32) {
@@ -365,7 +362,7 @@ impl BoardDrag {
         let original_y = *self
             .layout
             .get_untracked()
-            .rows
+            .resting
             .get(&card.id)
             .unwrap_or(&0.);
         self.session.replace(Some(Session {
@@ -381,7 +378,7 @@ impl BoardDrag {
             end: None,
         }));
         self.spawn_owned(async move {
-            let Some(mut source) = reference.measure().await else {
+            let Some(source) = reference.measure().await else {
                 self.clear();
                 return;
             };
@@ -391,11 +388,8 @@ impl BoardDrag {
             }
             let root = self.metrics.with(|m| m.root);
             let mut session = self.session.get().unwrap();
-            // NSH Measurement::page includes scrolling but excludes transforms.
-            // Rows are laid out at top: 0 and positioned by bind_translate_y;
-            // include that resting offset exactly once before lifting the row.
-            // phase 0 sets row positions directly, and lifted freezes this row.
-            source.page.y.0 += session.original_y;
+            // Rows are laid out at `top: resting_y` with `translate_y == 0` while idle,
+            // so NSH `Measurement::page` already includes both `resting_y` and scrolling.
             session.source = Rect {
                 x: source.page.x.0,
                 y: source.page.y.0,

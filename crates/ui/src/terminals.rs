@@ -251,7 +251,7 @@ pub fn reveal_group(ui: Ui, id: &str) {
         });
     }
 }
-fn is_card_live_entry(e: &Entry, card_id: &str) -> bool {
+pub(crate) fn is_card_live_entry(e: &Entry, card_id: &str) -> bool {
     e.card.as_ref().is_some_and(|c| c.id == card_id)
         && e.listed()
         && (e.agent.is_none()

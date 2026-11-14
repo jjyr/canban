@@ -341,10 +341,11 @@ pub fn card_status_with_merging(
     card_status_specs(snapshot, card, ui_merging)
         .into_iter()
         .map(|(text, tone, live)| {
+            let key = format!("status:{live}:{text}");
             if live {
-                live_status(text, tone).into_element()
+                live_status(text, tone).key(key).into_element()
             } else {
-                status(text, tone).into_element()
+                status(text, tone).key(key).into_element()
             }
         })
         .collect()

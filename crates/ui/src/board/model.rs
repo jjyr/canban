@@ -10,6 +10,12 @@ pub struct Slot {
 }
 #[derive(Clone, Default, PartialEq)]
 pub struct Layout {
+    /// Resting top offsets (when idle, with no Card lifted).
+    /// Used directly as layout `top` so NSH scroll culling and measurements
+    /// operate on real row coordinates rather than stacking all rows at `y = 0`.
+    pub resting: BTreeMap<String, f32>,
+    /// Target visual Y positions (equals `resting` when idle; includes peer
+    /// displacement and gap spacing while dragging).
     pub rows: BTreeMap<String, f32>,
     pub heights: BTreeMap<String, f32>,
     pub gap: Option<(String, f32, f32)>,
@@ -33,6 +39,11 @@ pub fn layout(
     let drag_height = *heights.get(dragged).unwrap_or(&DEFAULT_HEIGHT);
     let mut result = Layout::default();
     for stage in stages {
+        let mut rest_y = 0.;
+        for c in cards(all, stage, "") {
+            result.resting.insert(c.id.clone(), rest_y);
+            rest_y += height(c) + GAP;
+        }
         let list = cards(all, stage, dragged);
         let mut y = 0.;
         for i in 0..=list.len() {
@@ -127,6 +138,42 @@ mod tests {
             }),
         );
         assert_eq!(empty.gap, Some(("empty".into(), 0., 80.)));
+        assert_eq!(l.resting["a"], 0.);
+        assert_eq!(l.resting["b"], 0.);
+        assert_eq!(l.resting["c"], 112.);
+    }
+    #[test]
+    fn resting_coordinates_match_idle_rows_and_remain_monotonic_for_large_columns() {
+        let all: Vec<_> = (1..=35)
+            .map(|n| card(&format!("r-{n}"), "review", n))
+            .collect();
+        let mut h = BTreeMap::new();
+        for n in 1..=35 {
+            h.insert(format!("r-{n}"), if n % 3 == 0 { 138. } else { 96. });
+        }
+        let idle = layout(&all, &["review".into()], &h, "", None);
+        assert_eq!(idle.resting, idle.rows);
+        let mut prev = -1.0_f32;
+        for n in 1..=35 {
+            let y = idle.resting[&format!("r-{n}")];
+            assert!(y > prev, "row {n} resting y={y} must follow {prev}");
+            prev = y;
+        }
+        // Dragging row 1 to index 30 shifts rows 2..=31 up by (h1 + GAP) relative to resting,
+        // while keeping `resting` anchored to pre-drag layout coordinates.
+        let dragged = layout(
+            &all,
+            &["review".into()],
+            &h,
+            "r-1",
+            Some(&Slot {
+                stage: "review".into(),
+                index: 30,
+            }),
+        );
+        assert_eq!(dragged.resting, idle.resting);
+        assert_eq!(dragged.rows["r-2"] - dragged.resting["r-2"], -(96. + GAP));
+        assert_eq!(dragged.rows["r-35"] - dragged.resting["r-35"], 0.);
     }
     #[test]
     fn midpoint_hysteresis_and_scrolled_coordinates_are_stable() {

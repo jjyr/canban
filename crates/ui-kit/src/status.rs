@@ -97,13 +97,13 @@ pub fn reminder_count(
         },
     )
 }
-pub fn status(value: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoElement {
+pub fn status(value: impl IntoReactive<SharedString>, tone: Tone) -> View {
     status_chip(value, tone, false)
 }
-pub fn live_status(value: impl IntoReactive<SharedString>, tone: Tone) -> impl IntoElement {
+pub fn live_status(value: impl IntoReactive<SharedString>, tone: Tone) -> View {
     status_chip(value, tone, true)
 }
-fn status_chip(value: impl IntoReactive<SharedString>, tone: Tone, live: bool) -> impl IntoElement {
+fn status_chip(value: impl IntoReactive<SharedString>, tone: Tone, live: bool) -> View {
     let (bg, fg) = tone_colors(tone);
     let mut chip = view()
         .self_start()

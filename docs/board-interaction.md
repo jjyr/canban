@@ -43,8 +43,8 @@ The pointer is tested against measured column regions and resting Card midpoints
 ## Motion and update ownership
 
 - `ui/board/drag.rs` owns the gesture, measured viewport geometry, lifted overlay, edge scrolling and final placement intent.
-- `ui/board/model.rs` computes insertion/placeholder/peer positions without changing saved Cards or dispatching work.
-- `ui/board/columns.rs` keeps keyed native row owners and measured variable heights. Only changed position targets receive a new native spring; new targets interrupt from the current position/velocity.
+- `ui/board/model.rs` computes resting row coordinates (`Layout::resting`) alongside insertion/placeholder/peer target positions without changing saved Cards or dispatching work.
+- `ui/board/columns.rs` keeps keyed native row owners positioned at their real layout `top` (`resting_y`), uses `bind_translate_y` only for transient drag displacement (`target_y - resting_y`, reset to `0` when idle), and renders each row through a per-Card `computed` `CardTileModel` with keyed tile subviews so unrelated `Snapshot` updates do not re-reconcile unchanged Cards. Only changed position targets receive a new native spring; new targets interrupt from the current position/velocity.
 - `ui/components/card_tile.rs` owns Card content and surface presentation. UI Kit owns shared hover color, controls and NSH adaptation.
 
 Card movement itself uses NSH's native animated graph. A display-frame task reads the current pan values for hit-testing/edge scrolling; it does not rebuild the Board for every pointer pixel or contact AppServer. Placeholder/row targets change only when the insertion slot or measured layout changes. Background snapshots are deferred while the gesture/placement settles, preserving pointer capture and the original revision. They are reconciled afterward. Navigation/disposal ends the local gesture owner without replaying a placement.
@@ -82,15 +82,16 @@ The final production-component Gallery used the 72-Card overflow scene at 1200 �
 
 Automation supplies an atomic drag and cannot hold the pointer while observing intermediate frames. Sustained vertical/horizontal edge-hold scrolling, Escape during a held gesture, reduced-motion system settings and hover across Themes still need manual native checks. Placeholder geometry and motion ownership were checked in source/tests; synthetic drag timings do not establish display frame rate or end-to-end input latency. The isolated app and Gallery were closed after checks, and their test Core was stopped.
 
-### Bottom-Card lift regression — 2026-11-12
+### Bottom-Card lift regression — 2026-11-12 (superseded row-offset mechanics in Card #76, 2026-11-15)
 
+*(Historical 2026-11-12 mechanics — superseded below by `top: resting_y` + delta-only `bind_translate_y` in Card #76)*:
 NSH `Measurement::page` includes ancestor scrolling but excludes transforms.
-Board rows have layout `top: 0` and receive their resting Y position through
-`bind_translate_y`. The lifted overlay must add the captured resting row offset
+Board rows originally had layout `top: 0` and received their resting Y position through
+`bind_translate_y`. The lifted overlay had to add the captured resting row offset
 once to the measured page Y before deriving both its Board-local origin and
-its landing/cancellation displacement. Using the measured page Y alone makes
+its landing/cancellation displacement. Using the measured page Y alone made
 lower Cards jump upward by their row offset (including in scrolled columns).
-The row is frozen while lifted; idle layout sets its transform directly.
+The row was frozen while lifted; idle layout set its transform directly.
 
 Run `CANBAN_GALLERY_SCENE=board-bottom-drag mise run gallery` for four Cards with
 uneven heights. Drag the last Card by its body and grip, first a small distance,
@@ -133,3 +134,25 @@ gesture phases (`1` and `2`) so `EventKind::PanEnd` fires on mouse release while
 disabling pan on peer rows and during landing (`3`), runs its spawned tasks and
 receipt signals under `BoardDrag`'s Board-scoped reactive `Owner`, bounds spring
 settlement waits, and aborts an active gesture if the lifted row unmounts.
+
+### Deep-column scroll culling and keyed Card tile reconciliation — 2026-11-15 (Card #76)
+
+NSH's scroll offscreen culling (`Core::sync_culled_in`, `RECLAIM = 3.0` viewports) and
+macOS `Sights::shows` evaluate layout `frame.origin` rather than animated `translate_y`.
+When a column exceeded ~28 Cards (`scroll_y > 3 * viewport_h`), keeping every row at
+layout `top: 0` caused NSH to traverse into row children at `cy ≈ 0..112` and reclaim
+pure `View`/`Text` subtrees in Cards #29+, leaving blank Card shells (with only `Canvas`
+icons surviving) and causing deferred/fallback row-height overlap or duplicate text
+during `Snapshot` updates across unkeyed conditional tile children.
+
+Board rows now bind layout `.top(resting_y)` (`Layout::resting`) so offscreen culling,
+AppKit layer visibility, and `Measurement::page` all see true vertical coordinates, while
+`bind_translate_y` carries only the active drag displacement `target_y - resting_y`
+(`0` at rest; `BoardDrag::start` uses `reference.measure()` directly without re-adding
+`original_y`). Each row derives a `computed` `CardTileModel` (`PartialEq`) and keys all
+conditional/list subviews in `card_tile` (`header`, `github-meta`, `excerpt`, `tags`,
+`footer`, status chips, and Agent pills) so unrelated `Snapshot` mutations skip unchanged
+tiles cleanly. Verified with NSH `Core` deep-scroll tests (`deep_review_column_retains_bottom_card_texts_after_scrolling_past_reclaim_threshold`),
+`CANBAN_GALLERY_SCENE=board-deep-review` (36 Review Cards), and an isolated packaged
+`Canban.app` instance with 33 Review Cards + live `Backlog` mutations and bottom-Card
+drag reordering.

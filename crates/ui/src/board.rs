@@ -482,4 +482,262 @@ mod tests {
             "Board chrome bar must not append override count in parentheses, got {texts:?}"
         );
     }
+
+    #[test]
+    fn deep_review_column_retains_bottom_card_texts_after_scrolling_past_reclaim_threshold() {
+        use nsh_core::{
+            EventKind, EventPayload, NodeId, ViewKind, element::JsEvent, geometry::point,
+        };
+        use std::collections::{HashMap, HashSet};
+
+        #[component]
+        fn DeepReviewBoard() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut snapshot = Snapshot::default();
+            snapshot.projects.push(Project {
+                id: "proj-1".into(),
+                name: "Canban".into(),
+                directory: "/tmp/canban".into(),
+                location: None,
+                github: None,
+                delivery_mode: Default::default(),
+                agent_overrides: BTreeMap::new(),
+                tags: vec!["bug".into(), "ui".into()],
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: 1,
+            });
+            for n in 1..=35u64 {
+                let mut card: canban_types::Card = serde_json::from_value(serde_json::json!({
+                    "id": format!("rev-{n}"),
+                    "project_id": "proj-1",
+                    "number": n,
+                    "title": format!("Review Card Title #{n}"),
+                    "body": if n % 2 == 0 {
+                        format!("Summary body line for review card #{n} #bug")
+                    } else {
+                        String::new()
+                    },
+                    "stage": "review",
+                    "revision": 1,
+                    "created_at": n
+                }))
+                .unwrap();
+                card.branch = Some(format!("canban-0afd/{n}"));
+                if n > 15 {
+                    card.delivery = Some(canban_types::Delivery {
+                        target_branch: "main".into(),
+                        commit: format!("deadbeef{n:02x}"),
+                        request_key: format!("req-{n}"),
+                        merged_at: 1_700_000_000_000u64 + n,
+                    });
+                }
+                snapshot.cards.push(card);
+            }
+            ui.snapshot.set(snapshot);
+            ui.project.set("proj-1".into());
+            ui.onboarded.set(true);
+            view()
+                .w(px(1200.))
+                .h(px(760.))
+                .child(
+                    press_target()
+                        .accessibility_label(Some("Trigger Unrelated Snapshot Refresh".into()))
+                        .on_press(move |_: &()| {
+                            ui.snapshot.update(|s| {
+                                s.cards.push(
+                                    serde_json::from_value(serde_json::json!({
+                                        "id": "backlog-extra",
+                                        "project_id": "proj-1",
+                                        "number": 100,
+                                        "title": "Unrelated Backlog Card",
+                                        "body": "",
+                                        "stage": "backlog",
+                                        "revision": 1,
+                                        "created_at": 100
+                                    }))
+                                    .unwrap(),
+                                );
+                            });
+                        }),
+                )
+                .child(screen(ui))
+        }
+
+        struct TreeState {
+            kinds: HashMap<NodeId, ViewKind>,
+            parents: HashMap<NodeId, NodeId>,
+            texts: HashMap<NodeId, String>,
+            frames: HashMap<NodeId, Bounds<Points>>,
+            labels: HashMap<String, NodeId>,
+        }
+        impl TreeState {
+            fn new() -> Self {
+                Self {
+                    kinds: HashMap::new(),
+                    parents: HashMap::new(),
+                    texts: HashMap::new(),
+                    frames: HashMap::new(),
+                    labels: HashMap::new(),
+                }
+            }
+            fn apply(&mut self, batch: &nsh_core::MountBatch) {
+                for item in &batch.items {
+                    match item {
+                        MountItem::Create { id, kind } => {
+                            self.kinds.insert(*id, *kind);
+                        }
+                        MountItem::Insert { parent, child, .. } => {
+                            self.parents.insert(*child, *parent);
+                        }
+                        MountItem::Remove { id } => {
+                            self.parents.remove(id);
+                        }
+                        MountItem::Delete { id } => {
+                            self.kinds.remove(id);
+                            self.parents.remove(id);
+                            self.texts.remove(id);
+                            self.frames.remove(id);
+                        }
+                        MountItem::Text { id, text, .. } => {
+                            self.texts.insert(*id, text.text.to_string());
+                        }
+                        MountItem::Frame { id, frame } => {
+                            self.frames.insert(*id, *frame);
+                        }
+                        MountItem::ViewProps { id, props } => {
+                            if let Some(label) = &props.accessibility.label {
+                                self.labels.insert(label.to_string(), *id);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            fn is_mounted(&self, mut id: NodeId) -> bool {
+                let mut guard = 0;
+                while id != nsh_core::ROOT_ID {
+                    let Some(&parent) = self.parents.get(&id) else {
+                        return false;
+                    };
+                    id = parent;
+                    guard += 1;
+                    if guard > 256 {
+                        return false;
+                    }
+                }
+                true
+            }
+            fn mounted_texts(&self) -> HashSet<String> {
+                self.texts
+                    .iter()
+                    .filter(|(id, _)| self.kinds.contains_key(id) && self.is_mounted(**id))
+                    .map(|(_, t)| t.clone())
+                    .collect()
+            }
+        }
+
+        fn pump(core: &mut Core<ApproxTextEngine>, tree: &mut TreeState) {
+            for _ in 0..8 {
+                let had_batch = if let Some(batch) = core.commit() {
+                    tree.apply(&batch);
+                    true
+                } else {
+                    false
+                };
+                let mut events = Vec::new();
+                core.take_events(&mut events);
+                let mut dispatched = false;
+                for ev in events {
+                    match ev {
+                        JsEvent::Event(id, kind, payload) => {
+                            core.component_event(id, kind, &payload);
+                            dispatched = true;
+                        }
+                        JsEvent::LayoutListener {
+                            host,
+                            id,
+                            listener,
+                            frame,
+                        } => {
+                            core.component_layout(host, id, &listener, frame);
+                            dispatched = true;
+                        }
+                        _ => {}
+                    }
+                }
+                if !had_batch && !dispatched {
+                    break;
+                }
+            }
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(760.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<DeepReviewBoard>());
+        let mut tree = TreeState::new();
+        pump(&mut core, &mut tree);
+
+        // Locate the vertical scroll view of the Review column (rightmost column scroll view).
+        let review_scroll = tree
+            .kinds
+            .iter()
+            .filter(|(_, kind)| **kind == ViewKind::Scroll)
+            .filter_map(|(id, _)| core.measure(*id).map(|m| (*id, m)))
+            // Column scroll views sit inside the 3 stage columns (width <= 420pt).
+            .filter(|(_, m)| m.frame.size.width.0 > 100. && m.frame.size.width.0 <= 450.)
+            .max_by(|a, b| a.1.page.x.0.total_cmp(&b.1.page.x.0))
+            .map(|(id, _)| id)
+            .expect("Review column scroll view");
+
+        // Scroll deep to the bottom (past 3x viewport height = ~2200pt where Card #29..#35 live).
+        let scroll_measure = core.measure(review_scroll).unwrap();
+        let viewport_h = scroll_measure.frame.size.height.0;
+        let deep_y = viewport_h * 3.6;
+        assert!(
+            deep_y > 2300.,
+            "deep scroll offset {deep_y} must exceed 3x viewport reclaim threshold"
+        );
+        core.set_scroll_offset(review_scroll, point(px(0.), px(deep_y)), 0);
+        pump(&mut core, &mut tree);
+
+        let mounted = tree.mounted_texts();
+        for n in 29..=35 {
+            let expected_title = format!("Review Card Title #{n}");
+            assert!(
+                mounted.contains(&expected_title),
+                "Card #{n} title `{expected_title}` must remain mounted and visible at bottom of 35-card Review column; mounted sample={:?}",
+                mounted
+                    .iter()
+                    .filter(|s| s.starts_with("Review Card Title"))
+                    .collect::<Vec<_>>()
+            );
+        }
+
+        // Trigger an unrelated snapshot update while scrolled to the bottom and verify bottom
+        // Card text layers remain intact and non-duplicated, and rows have distinct `top` frames.
+        let trigger = *tree
+            .labels
+            .get("Trigger Unrelated Snapshot Refresh")
+            .expect("refresh trigger button");
+        assert!(core.component_event(trigger, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+
+        let mounted_after = tree.mounted_texts();
+        for n in 29..=35 {
+            let expected_title = format!("Review Card Title #{n}");
+            let occurrences = tree
+                .texts
+                .iter()
+                .filter(|(id, t)| {
+                    *t == &expected_title && tree.kinds.contains_key(id) && tree.is_mounted(**id)
+                })
+                .count();
+            assert_eq!(
+                occurrences, 1,
+                "Card #{n} title `{expected_title}` must appear once (no blanking or duplicate mount), got {occurrences}; mounted_after={mounted_after:?}"
+            );
+        }
+    }
 }

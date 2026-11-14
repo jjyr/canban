@@ -680,6 +680,57 @@ pub fn bottom_card_drag() -> canban_types::Snapshot {
     s
 }
 
+/// Deep Review column (36 Cards, mixed heights, tags, branches, and merged state)
+/// exceeding 3x viewport scroll height to guard against content-culling reclaim blanking
+/// and row coordinate/reconciliation overlap.
+pub fn deep_review_board() -> canban_types::Snapshot {
+    let mut s = workspace();
+    let base = s.cards[2].clone();
+    s.cards.clear();
+    for (i, stage) in [(1u64, "backlog"), (2, "backlog"), (3, "develop")] {
+        let mut card = base.clone();
+        card.number = i;
+        card.id = format!("deep-seed-{i}");
+        card.stage = stage.into();
+        card.title = format!("Card #{i} · Active work in {stage}");
+        card.human_gate = None;
+        card.attention = None;
+        s.cards.push(card);
+    }
+    for idx in 1..=36u64 {
+        let n = 10 + idx;
+        let mut card = base.clone();
+        card.number = n;
+        card.id = format!("deep-review-{idx}");
+        card.stage = "review".into();
+        card.branch = Some(format!("canban-0afd/{n}"));
+        card.title = if idx % 3 == 0 {
+            format!(
+                "Review #{idx} · Multi-line title checking variable row height and deep scroll culling stability"
+            )
+        } else {
+            format!("Review #{idx} · Verify bottom Card content stays visible")
+        };
+        card.body = if idx % 2 == 0 {
+            format!("Excerpt for Review #{idx} with #search and #ux tags.")
+        } else {
+            String::new()
+        };
+        if idx > 12 {
+            card.human_gate = None;
+            card.attention = None;
+            card.delivery = Some(canban_types::Delivery {
+                target_branch: "main".into(),
+                commit: format!("deadbeef{idx:02x}"),
+                request_key: format!("deep-req-{idx}"),
+                merged_at: 1_700_000_000_000 + idx,
+            });
+        }
+        s.cards.push(card);
+    }
+    s
+}
+
 /// Board-only project switching: human gates, unbadged work and quiet projects,
 /// long Unicode names and overflow. Uses the production Overview classification.
 pub fn project_activity() -> canban_types::Snapshot {
