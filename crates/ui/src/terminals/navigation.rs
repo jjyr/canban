@@ -3,13 +3,18 @@ use super::*;
 
 pub fn history(ui: Ui, row: &OverviewRow) {
     ui.open_card(row.card.id.clone());
-    if let Some(att) = &row.attempt {
-        ui.request.set(att.id.clone());
+    if let Some(t) = &row.terminal {
+        ui.request.set(t.id.clone());
     }
 }
 pub fn open_request(ui: Ui, id: &str) {
     let snapshot = ui.snapshot.get_untracked();
-    let Some(att) = snapshot.attempts.iter().find(|a| a.id == id) else {
+    let Some(entry) = snapshot.terminals.iter().find(|t| t.id == id) else {
+        ui.operation_error
+            .set("This execution is no longer available".into());
+        return;
+    };
+    let Some(att) = entry.agent.as_ref() else {
         ui.operation_error
             .set("This execution is no longer available".into());
         return;
@@ -17,7 +22,7 @@ pub fn open_request(ui: Ui, id: &str) {
     let conversation = canban_types::Conversation::key(&att.card_id, &att.profile.id);
     if let Some(terminal) = live_request(&snapshot, id) {
         ui.open_card_with_terminal(att.card_id.clone(), Some(terminal));
-    } else if matches!(att.state.as_str(), "queued" | "starting")
+    } else if (matches!(att.state.as_str(), "queued" | "starting") || att.pending.is_some())
         && super::card_live_entries(&snapshot, &att.card_id)
             .iter()
             .any(|e| e.saved.id == conversation)
@@ -25,14 +30,14 @@ pub fn open_request(ui: Ui, id: &str) {
         ui.open_card_with_terminal(att.card_id.clone(), Some(conversation));
     } else {
         ui.open_card(att.card_id.clone());
-        ui.request.set(att.id.clone());
+        ui.request.set(entry.id.clone());
     }
 }
-/// A historical attempt must never attach to its profile's newer invocation.
+/// Only a live Agent terminal attaches directly to its interactive viewer.
 pub fn live_request(snapshot: &canban_types::Snapshot, id: &str) -> Option<String> {
     model::conversations(snapshot)
         .into_iter()
-        .find(|r| r.attempt.as_ref().is_some_and(|a| a.id == id) && model::binding(r).is_some())
+        .find(|r| r.id == id && model::binding(r).is_some())
         .map(|r| r.id)
 }
 pub fn label(row: &OverviewRow) -> &'static str {
@@ -61,13 +66,13 @@ pub fn resume(ui: Ui, id: &str) {
     }
     let origin = ui.location();
     let card_for_open = row.card.id.clone();
-    let att = row.attempt.as_ref().unwrap();
+    let att = row.agent().unwrap();
     dispatch_then(
         ui,
         "agent.open",
-        json!({"card_id":row.card.id,"profile_id":att.profile.id,"expected_attempt_id":&att.id}),
+        json!({"card_id":row.card.id,"profile_id":att.profile.id,"expected_terminal_id":&row.id}),
         move |value| {
-            if ui.location() == origin && value["attempt_id"].as_str().is_some() {
+            if ui.location() == origin && value["terminal_id"].as_str().is_some() {
                 ui.open_card_with_terminal(card_for_open, Some(row.id.clone()));
             }
         },
@@ -147,14 +152,15 @@ pub fn watch(ui: Ui) {
                 .update(|history| restore_launch_origin(history, &pending));
             ui.open_terminal(id);
         } else if snapshot
-            .attempts
+            .terminals
             .iter()
-            .find(|a| a.id == pending.request)
+            .find(|t| t.id == pending.request)
+            .and_then(|t| t.agent.as_ref())
             .is_none_or(|a| {
                 !matches!(
                     a.state.as_str(),
                     "queued" | "starting" | "running" | "unknown"
-                )
+                ) && a.pending.is_none()
             })
         {
             ui.terminal_pending_open.set(None);

@@ -274,8 +274,15 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                     let counts = ui.reminder_counts.get();
                                     let active_slots = canban_scheduler::active_count(&s);
                                     let max_slots = ui.max_agents.get();
-                                    let queued_count =
-                                        s.attempts.iter().filter(|a| a.state == "queued").count();
+                                    let queued_count = s
+                                        .terminals
+                                        .iter()
+                                        .filter(|t| {
+                                            t.agent.as_ref().is_some_and(|a| {
+                                                a.state == "queued" || a.pending.is_some()
+                                            })
+                                        })
+                                        .count();
                                     let scope = project_scope.get();
                                     let valid_scope = if !scope.is_empty()
                                         && s.projects.iter().any(|p| p.id == scope)
@@ -418,7 +425,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
 fn destination(ui: Ui, row: &OverviewRow, review: bool) {
     close(ui);
     ui.open_card(row.card.id.clone());
-    if let Some(id) = row.outcome_attempt_id() {
+    if let Some(id) = row.outcome_terminal_id() {
         ui.request.set(id.into());
     }
     if review {
@@ -468,7 +475,7 @@ pub fn show_card_attention(ui: Ui, card: &str) {
 
 fn runtime_blocked_with_terminal(row: &OverviewRow) -> bool {
     row.reasons.iter().any(|r| r.source == "runtime")
-        && row.attempt.as_ref().map(|a| a.runtime_status()) == Some("blocked")
+        && row.agent().map(|a| a.runtime_status()) == Some("blocked")
         && crate::terminals::model::binding(row).is_some()
 }
 
@@ -586,13 +593,9 @@ fn classify_reason(
 ) -> (Icon, Tone, &'static str, Option<String>) {
     match reason.source.as_str() {
         "runtime" => {
-            let runtime = row.attempt.as_ref().map(|a| a.runtime_status());
+            let runtime = row.agent().map(|a| a.runtime_status());
             if runtime == Some("blocked") {
-                if let Some(w) = row
-                    .attempt
-                    .as_ref()
-                    .and_then(|a| a.lifecycle.waiting.as_ref())
-                {
+                if let Some(w) = row.agent().and_then(|a| a.lifecycle.waiting.as_ref()) {
                     let detail = clean_wait_detail(&w.title, &w.message);
                     match w.kind.as_str() {
                         "permission" | "approval" | "command" | "tool" | "bash" | "file" => (
@@ -627,11 +630,7 @@ fn classify_reason(
                     "Terminal error",
                     Some("Inspect live terminal".into()),
                 )
-            } else if row
-                .attempt
-                .as_ref()
-                .is_some_and(|a| a.trigger.is_automatic())
-            {
+            } else if row.agent().is_some_and(|a| a.trigger.is_automatic()) {
                 (
                     Icon::TriangleAlert,
                     Tone::Danger,
@@ -648,15 +647,15 @@ fn classify_reason(
             }
         }
         "review" => {
-            let outcome_id = row.outcome_attempt_id();
+            let outcome_id = row.outcome_terminal_id();
             let report_detail = outcome_id
-                .and_then(|aid| {
+                .and_then(|tid| {
                     snapshot
                         .reports
                         .iter()
                         .rev()
                         .find(|r| {
-                            r.attempt_id.as_deref() == Some(aid) && !r.message.trim().is_empty()
+                            r.terminal_id.as_deref() == Some(tid) && !r.message.trim().is_empty()
                         })
                         .map(|r| strip_machine_prefix(&r.message))
                 })
@@ -692,8 +691,9 @@ fn classify_reason(
         "task" => {
             let msg = strip_machine_prefix(&reason.message);
             let outcome_state = row
-                .outcome_attempt_id()
-                .and_then(|aid| snapshot.attempts.iter().find(|a| a.id == aid))
+                .outcome_terminal_id()
+                .and_then(|tid| snapshot.terminals.iter().find(|t| t.id == tid))
+                .and_then(|t| t.agent.as_ref())
                 .map(|a| a.state.as_str());
             if is_merge_gate_reason(&msg) || (row.card.hold_auto_merge && !row.card.merged()) {
                 let is_fail = msg.to_lowercase().contains("fail");
@@ -737,7 +737,7 @@ fn classify_reason(
         }
         "recovery" => {
             let msg = single_line(&reason.message);
-            if let Some(a) = &row.attempt
+            if let Some(a) = row.agent()
                 && a.connection_state != "connected"
             {
                 let detail = a
@@ -795,7 +795,7 @@ fn classify_reason(
 fn reason_priority(source: &str, row: &OverviewRow) -> u8 {
     match source {
         "runtime" => {
-            if row.attempt.as_ref().map(|a| a.runtime_status()) == Some("blocked") {
+            if row.agent().map(|a| a.runtime_status()) == Some("blocked") {
                 0
             } else {
                 1
@@ -841,17 +841,15 @@ fn describe_row(snapshot: &canban_types::Snapshot, row: &OverviewRow) -> RowEven
     }
 
     let profile_icon = row
-        .attempt
-        .as_ref()
+        .agent()
         .map(|a| crate::profiles::provider(&a.profile).0)
         .unwrap_or(Icon::Agent);
     let stage_detail = row
-        .attempt
-        .as_ref()
+        .agent()
         .filter(|a| !a.stage.is_empty())
         .map(|a| format!("Stage: {}", a.stage));
 
-    if let Some(a) = &row.attempt {
+    if let Some(a) = row.agent() {
         if a.finished() {
             let failed = matches!(a.state.as_str(), "failed" | "needs_report");
             return RowEvent {
@@ -1109,7 +1107,15 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     .count();
             let active_slots = canban_scheduler::active_count(&s);
             let max_slots = ui.max_agents.get();
-            let queued_count = s.attempts.iter().filter(|a| a.state == "queued").count();
+            let queued_count = s
+                .terminals
+                .iter()
+                .filter(|t| {
+                    t.agent
+                        .as_ref()
+                        .is_some_and(|a| a.state == "queued" || a.pending.is_some())
+                })
+                .count();
             let scope = project_scope.get();
             let valid_scope = if !scope.is_empty() && !s.projects.iter().any(|p| p.id == scope) {
                 String::new()
@@ -1496,17 +1502,15 @@ fn row_view(
     let reference = element_ref();
     let activate_row = row.clone();
     let event = ui.snapshot.with(|s| describe_row(s, &row));
-    let profile_tag = row.attempt.as_ref().map(|a| format!("@{}", a.profile.id));
+    let profile_tag = row.agent().map(|a| format!("@{}", a.profile.id));
     let remote_machine = row
-        .attempt
-        .as_ref()
+        .agent()
         .and_then(|a| a.location.as_ref())
         .map(|l| l.machine.as_str())
         .filter(|m| !m.is_empty() && *m != "local")
         .map(str::to_owned);
     let waiting_age = row
-        .attempt
-        .as_ref()
+        .agent()
         .and_then(|a| a.lifecycle.waiting.as_ref().map(|w| w.since))
         .map(|since| {
             crate::components::activity::age(since)
@@ -1817,8 +1821,7 @@ mod tests {
     fn describe_row_promotes_permission_and_cleans_redundant_prefixes() {
         let mut s = canban_types::Snapshot::default();
         let card = base_card();
-        let mut attempt: canban_types::Attempt = serde_json::from_value(json!({
-            "id": "r1:1",
+        let mut attempt: canban_types::AgentRun = serde_json::from_value(json!({
             "project_id": "p1",
             "card_id": "c1",
             "number": 1,
@@ -1840,7 +1843,7 @@ mod tests {
                     "msg": "cargo test --workspace"
                 }
             },
-            "created_at": 1
+            "updated_at": 1
         }))
         .unwrap();
         attempt.lifecycle.observed_at = Some(u64::MAX);
@@ -1852,7 +1855,18 @@ mod tests {
             since: 1,
         });
         s.cards.push(card);
-        s.attempts.push(attempt);
+        s.terminals.push(canban_types::TerminalEntry {
+            id: "c1:codex".into(),
+            conversation_id: Some("c1:codex".into()),
+            number: 1,
+            name: None,
+            manual_number: None,
+            origin_card_id: Some("c1".into()),
+            agent_engine: None,
+            runtime: None,
+            agent: Some(attempt),
+            created_at: 1,
+        });
 
         let rows = overview(&s);
         let ev = describe_row(&s, &rows[0]);
@@ -1870,7 +1884,7 @@ mod tests {
         let mut s = canban_types::Snapshot::default();
         let mut card = base_card();
         card.stage = "review".into();
-        let mut att = canban_scheduler::attempt(
+        let mut att = canban_scheduler::agent_run(
             "p1",
             "c1",
             1,
@@ -1880,16 +1894,16 @@ mod tests {
             "review".into(),
             None,
         );
-        att.id = "att-rev".into();
         att.state = "completed".into();
+        let tid = "c1:codex".to_owned();
         card.human_gate = Some(canban_types::HumanGate {
             reason: "Agent report ready; human review required".into(),
-            attempt_id: Some("att-rev".into()),
+            terminal_id: Some(tid.clone()),
             next_stage: None,
         });
         s.reports.push(canban_types::Report {
             id: "rep-1".into(),
-            attempt_id: Some("att-rev".into()),
+            terminal_id: Some(tid.clone()),
             workflow_run_id: None,
             actor: "agent:developer".into(),
             project_id: "p1".into(),
@@ -1902,7 +1916,18 @@ mod tests {
             created_at: 2,
         });
         s.cards.push(card);
-        s.attempts.push(att);
+        s.terminals.push(canban_types::TerminalEntry {
+            id: tid.clone(),
+            conversation_id: Some(tid),
+            number: 1,
+            name: None,
+            manual_number: None,
+            origin_card_id: Some("c1".into()),
+            agent_engine: None,
+            runtime: None,
+            agent: Some(att),
+            created_at: 1,
+        });
 
         let rows = overview(&s);
         let ev = describe_row(&s, &rows[0]);
@@ -1926,8 +1951,8 @@ mod tests {
             Some("Merge conflict with main after 2 attempts")
         );
 
-        // Failed attempt gate surfaces Danger TriangleAlert + Agent failed.
-        s.attempts[0].state = "failed".into();
+        // Failed Agent run gate surfaces Danger TriangleAlert + Agent failed.
+        s.terminals[0].agent.as_mut().unwrap().state = "failed".into();
         s.cards[0].human_gate.as_mut().unwrap().reason =
             "failed: Build failed due to missing symbol".into();
         let rows = overview(&s);

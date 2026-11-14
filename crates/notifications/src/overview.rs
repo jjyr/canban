@@ -1,7 +1,6 @@
 //! Pure cross-Project projection. Reading/acknowledging notices never resolves a reason.
 use canban_types::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct OverviewRow {
@@ -9,9 +8,8 @@ pub struct OverviewRow {
     pub group: String,
     pub card: Card,
     pub project_name: String,
-    pub attempt: Option<Attempt>,
+    pub terminal: Option<TerminalEntry>,
     pub reasons: Vec<OverviewReason>,
-    pub history: Vec<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct OverviewReason {
@@ -22,8 +20,11 @@ impl OverviewRow {
     pub fn actionable(&self) -> bool {
         !self.reasons.is_empty()
     }
+    pub fn agent(&self) -> Option<&AgentRun> {
+        self.terminal.as_ref().and_then(|t| t.agent.as_ref())
+    }
     /// A follow-up invocation must not hide the result awaiting human handling.
-    pub fn outcome_attempt_id(&self) -> Option<&str> {
+    pub fn outcome_terminal_id(&self) -> Option<&str> {
         if self
             .reasons
             .iter()
@@ -32,11 +33,11 @@ impl OverviewRow {
                 .card
                 .human_gate
                 .as_ref()
-                .and_then(|g| g.attempt_id.as_deref())
+                .and_then(|g| g.terminal_id.as_deref())
         {
             return Some(id);
         }
-        self.attempt.as_ref().map(|a| a.id.as_str())
+        self.terminal.as_ref().map(|t| t.id.as_str())
     }
 }
 
@@ -50,42 +51,20 @@ pub const GROUPS: [&str; 6] = [
 ];
 
 pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
-    let mut attempts: BTreeMap<String, Vec<&Attempt>> = BTreeMap::new();
-    for a in &snapshot.attempts {
-        attempts
-            .entry(Conversation::key(&a.card_id, &a.profile.id))
-            .or_default()
-            .push(a);
-    }
     let mut rows = Vec::new();
-    for (key, mut rs) in attempts {
-        rs.sort_by_key(|a| (a.created_at, a.number));
-        // Retained live/uncertain invocations take precedence over queued followups.
-        let run = *rs
-            .iter()
-            .rev()
-            .find(|a| !a.finished() && (a.terminal.is_some() || a.state == "unknown"))
-            .or_else(|| {
-                rs.iter()
-                    .rev()
-                    .find(|a| matches!(a.state.as_str(), "queued" | "starting" | "unknown"))
-            })
-            .unwrap_or_else(|| rs.last().unwrap());
+    for entry in &snapshot.terminals {
+        let Some(run) = entry.agent.as_ref() else {
+            continue;
+        };
         let Some(card) = snapshot.cards.iter().find(|c| c.id == run.card_id) else {
             continue;
         };
         let mut reasons = Vec::new();
-        let gate = card.human_gate.as_ref().filter(|g| {
-            g.attempt_id
-                .as_ref()
-                .is_some_and(|id| rs.iter().any(|a| &a.id == id))
-        });
-        let review = gate.is_some_and(|g| {
-            snapshot
-                .attempts
-                .iter()
-                .any(|a| Some(&a.id) == g.attempt_id.as_ref() && a.state == "completed")
-        }) && card.archived_at.is_none();
+        let gate = card
+            .human_gate
+            .as_ref()
+            .filter(|g| g.terminal_id.as_deref() == Some(entry.id.as_str()));
+        let review = gate.is_some() && run.state == "completed" && card.archived_at.is_none();
         if card.archived_at.is_none()
             && let Some(g) = gate
         {
@@ -117,7 +96,7 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                     .observed
                     .as_ref()
                     .is_some_and(|v| v["status"]["state"].as_str().is_none())
-                && now().saturating_sub(run.created_at) < 3_000;
+                && now().saturating_sub(run.updated_at) < 3_000;
             if !run.finished()
                 && (runtime == "unknown" && run.state != "starting" && !awaiting_first_status
                     || run.close_state == "error")
@@ -169,15 +148,14 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                     .unwrap_or_else(|| "Question delivery uncertain".into()),
             });
         }
+        let has_live_pty = (run.terminal.is_some() || run.observed.is_some()) && !run.finished();
         let group = if reasons.iter().any(|r| r.source != "review") {
             "Needs attention"
         } else if review {
             "Ready for review"
-        } else if run.state == "queued" {
+        } else if run.state == "queued" || (run.pending.is_some() && !has_live_pty) {
             "Queued"
-        } else if matches!(runtime, "working" | "unknown")
-            && (run.terminal.is_some() || run.observed.is_some())
-            && !run.finished()
+        } else if matches!(runtime, "working" | "unknown") && has_live_pty
             || run.state == "starting"
         {
             "Working"
@@ -187,7 +165,7 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
             "Closed"
         };
         rows.push(OverviewRow {
-            id: key,
+            id: entry.id.clone(),
             group: group.into(),
             card: card.clone(),
             project_name: snapshot
@@ -196,9 +174,8 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                 .find(|p| p.id == card.project_id)
                 .map(|p| p.name.clone())
                 .unwrap_or_else(|| card.project_id.clone()),
-            attempt: Some(run.clone()),
+            terminal: Some(entry.clone()),
             reasons,
-            history: rs.iter().map(|a| a.id.clone()).collect(),
         });
     }
     // Configuration/routing/recovery can fail before there is an invocation.
@@ -225,8 +202,7 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
                 .find(|p| p.id == card.project_id)
                 .map(|p| p.name.clone())
                 .unwrap_or_default(),
-            attempt: None,
-            history: vec![],
+            terminal: None,
             reasons: vec![OverviewReason {
                 source: "task".into(),
                 message: card
@@ -241,12 +217,7 @@ pub fn overview(snapshot: &Snapshot) -> Vec<OverviewRow> {
     rows.sort_by_key(|r| {
         (
             GROUPS.iter().position(|g| *g == r.group).unwrap_or(6),
-            std::cmp::Reverse(
-                r.attempt
-                    .as_ref()
-                    .map(|a| a.created_at)
-                    .unwrap_or(r.card.created_at),
-            ),
+            std::cmp::Reverse(r.agent().map(|a| a.updated_at).unwrap_or(r.card.created_at)),
             r.id.clone(),
         )
     });

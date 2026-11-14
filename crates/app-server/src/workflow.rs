@@ -14,18 +14,18 @@ pub(super) fn reported(
     db: Db<'_>,
     config: &Config,
     card: &mut Card,
-    attempt: Option<&Attempt>,
+    terminal: Option<&TerminalEntry>,
     report: &Report,
 ) -> Result<()> {
-    engine::reported(db, config, card, attempt, report, enqueue)
+    engine::reported(db, config, card, terminal, report, enqueue)
 }
 pub(super) fn advance(
     db: Db<'_>,
     config: &Config,
     card: &mut Card,
-    attempt: Option<&Attempt>,
+    terminal: Option<&TerminalEntry>,
 ) -> Result<()> {
-    engine::advance(db, config, card, attempt, enqueue)
+    engine::advance(db, config, card, terminal, enqueue)
 }
 fn approve(
     db: Db<'_>,
@@ -59,7 +59,7 @@ pub(super) fn adopt_stage(
     db: Db<'_>,
     config: &Config,
     card: &mut Card,
-    attempt: Option<&mut Attempt>,
+    terminal: Option<&mut TerminalEntry>,
     stage: &str,
     event: Option<String>,
 ) -> Result<Option<WorkflowRun>> {
@@ -106,7 +106,7 @@ pub(super) fn adopt_stage(
                 &entry,
                 event,
                 w.workflow_id.starts_with("delivery:"),
-                attempt,
+                terminal,
                 enqueue,
             )?;
             return Ok(Some(run));
@@ -427,12 +427,16 @@ impl AppServer {
                 let mut run = run;
                 if run.state == "waiting_approval" {
                     approve(db, &config, &mut card, &mut run, false, None)?;
-                } else if let Some(aid) = gate.attempt_id {
-                    let prev: Attempt = db.get(&aid)?;
+                } else if let Some(tid) = gate.terminal_id {
+                    let mut prev_entry: TerminalEntry = db.get(&tid)?;
+                    let prev = prev_entry
+                        .agent
+                        .as_ref()
+                        .context("Terminal has no Agent assignment")?;
                     if prev.state == "completed" {
                         card.human_gate = None;
                         card.attention = None;
-                        advance(db, &config, &mut card, Some(&prev))?;
+                        advance(db, &config, &mut card, Some(&prev_entry))?;
                     } else {
                         ensure!(
                             prev.terminal.is_none()
@@ -449,8 +453,8 @@ impl AppServer {
                             ),
                             "Inspect the uncertain execution before retrying"
                         );
-                        let retry = crate::sessions::retry_attempt(db, &card, &prev)?;
-                        run.attempt_id = Some(retry.id);
+                        crate::sessions::retry_agent(db, &card, &mut prev_entry)?;
+                        run.terminal_id = Some(prev_entry.id);
                         run.state = "waiting_agent".into();
                         db.save(&run)?;
                         card.human_gate = None;
@@ -480,25 +484,27 @@ impl AppServer {
             } else {
                 card.human_gate = None;
                 card.attention = None;
-                if let Some(aid) = gate.attempt_id {
-                    let prev: Attempt = db.get(&aid)?;
-                    ensure!(
-                        prev.state != "unknown",
-                        "Inspect uncertain launch before retrying"
-                    );
-                    if matches!(
-                        prev.state.as_str(),
-                        "blocked" | "failed" | "needs_report" | "missing"
-                    ) {
+                if let Some(tid) = gate.terminal_id {
+                    let mut prev_entry: TerminalEntry = db.get(&tid)?;
+                    if let Some(prev) = &prev_entry.agent {
                         ensure!(
-                            prev.terminal.is_none()
-                                || prev
-                                    .observed
-                                    .as_ref()
-                                    .is_some_and(|v| v["state"] == "finished"),
-                            "Answer the live Agent first, or end it before retrying"
+                            prev.state != "unknown",
+                            "Inspect uncertain launch before retrying"
                         );
-                        crate::sessions::retry_attempt(db, &card, &prev)?;
+                        if matches!(
+                            prev.state.as_str(),
+                            "blocked" | "failed" | "needs_report" | "missing"
+                        ) {
+                            ensure!(
+                                prev.terminal.is_none()
+                                    || prev
+                                        .observed
+                                        .as_ref()
+                                        .is_some_and(|v| v["state"] == "finished"),
+                                "Answer the live Agent first, or end it before retrying"
+                            );
+                            crate::sessions::retry_agent(db, &card, &mut prev_entry)?;
+                        }
                     }
                 }
             }

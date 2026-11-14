@@ -167,9 +167,15 @@ print(json.dumps({'path':p,'parent':os.path.dirname(p),'directories':[{'name':n,
             .iter()
             .filter(|v| v.work_location().machine == machine)
             .count()
-            + s.attempts
+            + s.terminals
                 .iter()
-                .filter(|v| v.location.as_ref().is_some_and(|l| l.machine == machine))
+                .filter(|v| {
+                    v.agent
+                        .as_ref()
+                        .and_then(|a| a.location.as_ref())
+                        .is_some_and(|l| l.machine == machine)
+                        || v.runtime.as_ref().is_some_and(|r| r.machine == machine)
+                })
                 .count();
         ensure!(
             p["confirmed"] == true || affected == 0,

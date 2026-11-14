@@ -300,11 +300,11 @@ fn render_milestone(
                 .children(fold.map(fold_pill)),
         );
 
-    if let Some(attempt_id) = event.data["attempt_id"].as_str().map(str::to_owned)
+    if let Some(terminal_id) = event.data["terminal_id"].as_str().map(str::to_owned)
         && matches!(style, MilestoneStyle::Danger | MilestoneStyle::Attention)
     {
         line = line.child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
-            crate::terminals::open_request(ui, &attempt_id)
+            crate::terminals::open_request(ui, &terminal_id)
         }));
     }
     line = line.child(
@@ -411,14 +411,14 @@ fn render_narrative(
         .child(label(actor).font_weight(FontWeight::MEDIUM))
         .child(muted(crate::components::activity::age(event.created_at)))
         .child(view().flex_1());
-    if let Some(attempt_id) = event.data["attempt_id"].as_str().map(str::to_owned) {
-        let details = attempt_id.clone();
+    if let Some(terminal_id) = event.data["terminal_id"].as_str().map(str::to_owned) {
+        let details = terminal_id.clone();
         heading = heading
             .child(compact_action("Details", Variant::Quiet, move |_| {
                 ui.request.set(details.clone())
             }))
             .child(compact_action("Terminal ↗", Variant::Quiet, move |_| {
-                crate::terminals::open_request(ui, &attempt_id)
+                crate::terminals::open_request(ui, &terminal_id)
             }));
     }
     let measured = signal(0f32);
@@ -512,9 +512,10 @@ fn github_login(ui: Ui) -> Option<String> {
 
 fn agent_avatar_icon(ui: Ui, event: &Event, profile: &str) -> Icon {
     if let Some(mark) = ui.snapshot.with_untracked(|s| {
-        event.data["attempt_id"]
+        event.data["terminal_id"]
             .as_str()
-            .and_then(|id| s.attempts.iter().find(|a| a.id == id))
+            .and_then(|id| s.terminals.iter().find(|t| t.id == id))
+            .and_then(|t| t.agent.as_ref())
             .map(|a| crate::profiles::provider(&a.profile).0)
     }) {
         return mark;
@@ -595,7 +596,7 @@ mod tests {
     use super::*;
     use nsh_core::{ApproxTextEngine, Core, geometry::size};
 
-    fn sample_event(actor: &str, attempt_id: Option<&str>) -> Event {
+    fn sample_event(actor: &str, terminal_id: Option<&str>) -> Event {
         Event {
             id: "ev-1".into(),
             project_id: "proj-1".into(),
@@ -604,8 +605,8 @@ mod tests {
             kind: "comment.replied".into(),
             actor: actor.into(),
             message: "Done".into(),
-            data: match attempt_id {
-                Some(id) => json!({"attempt_id": id}),
+            data: match terminal_id {
+                Some(id) => json!({"terminal_id": id}),
                 None => json!({}),
             },
             created_at: 0,
@@ -613,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_avatar_icon_resolves_attempt_override_disabled_and_direct_engine() {
+    fn agent_avatar_icon_resolves_terminal_override_disabled_and_direct_engine() {
         #[component]
         fn ProbeRoot() -> impl IntoElement {
             canban_ui_kit::tokens::install_theme();
@@ -659,7 +660,7 @@ mod tests {
                 Icon::Agy
             );
 
-            // Explicit Attempt snapshot takes precedence over later Project overrides.
+            // Explicit Agent terminal snapshot takes precedence over later Project overrides.
             let mut gemini_profile = cfg
                 .profiles
                 .iter()
@@ -667,7 +668,7 @@ mod tests {
                 .unwrap()
                 .clone();
             gemini_profile.preset = Some("gemini".into());
-            let mut att = canban_scheduler::attempt(
+            let att = canban_scheduler::agent_run(
                 "proj-1",
                 "card-1",
                 1,
@@ -677,12 +678,24 @@ mod tests {
                 "Reply".into(),
                 None,
             );
-            att.id = "att-gemini".into();
-            ui.snapshot.update(|s| s.attempts.push(att));
+            ui.snapshot.update(|s| {
+                s.terminals.push(TerminalEntry {
+                    id: "card-1:developer".into(),
+                    conversation_id: Some("card-1:developer".into()),
+                    number: 1,
+                    name: None,
+                    manual_number: None,
+                    origin_card_id: Some("card-1".into()),
+                    agent_engine: None,
+                    runtime: None,
+                    agent: Some(att),
+                    created_at: 0,
+                });
+            });
             assert_eq!(
                 agent_avatar_icon(
                     ui,
-                    &sample_event("agent:developer", Some("att-gemini")),
+                    &sample_event("agent:developer", Some("card-1:developer")),
                     "developer"
                 ),
                 Icon::Gemini

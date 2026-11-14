@@ -8,7 +8,7 @@ Workflow/event contract (reconciled 2026-11-12): [Unified workflow engine, Studi
 
 [Unified Card reminders](reminders.md) (2026-11-10) defines the current unread /
 pending counts, persistent visible-read positions, Overview updates and local
-notification sounds. Current builds use SQLite schema 12 and desktop API version 10 (the earlier merged GitHub/editor/updater contract used schema 10/API 8). Upgrade
+notification sounds. Current builds use SQLite schema 15 and desktop API version 35 (earlier Workflow/GitHub milestones used schema 12/API 10 and schema 10/API 8). Upgrade
 the installed AppServer together with its UI. `mise run dev` (also `mise run run`)
 now manages a separate checkout/branch instance; it does not upgrade installed
 `~/.canban`. Existing history is baselined quietly during migration.
@@ -107,9 +107,9 @@ target/debug/canban call card.move '{"card_id":"CARD_ID","revision":1,"stage":"d
 
 See [Agent profile configuration](product/agent-profiles.md) for loadable JSON examples, schema, routing precedence and backward compatibility. Settings displays the shared registry and roles, Board header tooltips display stage profile references, and the Card composer offers Ask @profile actions.
 
-Public operations include update.state/check/install, app.ping/snapshot, project.create/list, card.create/get/list/update/adopt/move/archive/restore/attention.clear/continue/workspace, comment.add, timeline.list, execution.get/report/retry/output, attachment.add, resource.read/materialize, config.get/reload, scheduler.status/configure, herdr.status/templates, profile.presets, review.preview/merge and agent.open/bind/reply/interrupt/end. Note RPCs, card.context.update and the hidden canban note command remain legacy compatibility paths, outside the current product scope. agent.turn_ended is a deprecated ignored compatibility endpoint. For timeline.list supply card_id, optional after_sequence and limit; next_cursor provides pagination. Current code and shared types are authoritative for exact payloads; the [interface design](interfaces/mvp-contract.md) remains a broader contract reference.
+Public operations include update.state/check/install, app.ping/snapshot, project.create/list, card.create/get/list/update/adopt/move/archive/restore/attention.clear/continue/workspace, comment.add, timeline.list, execution.get/report/retry/output, attachment.add, resource.read/materialize, config.get/reload, scheduler.status/configure, herdr.status/templates, profile.presets, review.preview/merge, terminal.create/rename/context/interrupt/end/close and agent.open/bind/reply/interrupt/end. Note RPCs, card.context.update and the hidden canban note command remain legacy compatibility paths, outside the current product scope. agent.turn_ended is a deprecated ignored compatibility endpoint. For timeline.list supply card_id, optional after_sequence and limit; next_cursor provides pagination. Current code and shared types are authoritative for exact payloads; the [interface design](interfaces/mvp-contract.md) remains a broader contract reference.
 
-The launcher injects CANBAN_CLI, CANBAN_HOME, CANBAN_ENDPOINT, CANBAN_PROJECT, CANBAN_CARD, CANBAN_SESSION_ID, CANBAN_PROFILE_ID and CANBAN_RUN_DIR across scheduled Agent attempts and Card terminals, and supplies reporting instructions in the actual prompt.
+The launcher injects CANBAN_CLI, CANBAN_HOME, CANBAN_ENDPOINT, CANBAN_PROJECT, CANBAN_CARD, CANBAN_SESSION_ID, CANBAN_PROFILE_ID and CANBAN_RUN_DIR across scheduled Agent terminals and Card terminals, and supplies reporting instructions in the actual prompt.
 
 ```sh
 "$CANBAN_CLI" card show

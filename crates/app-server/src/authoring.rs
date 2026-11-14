@@ -172,7 +172,7 @@ fn publish(
                 "workflow.stop_scheduled",
                 "system",
                 "Current step was removed; the run stops after it finishes",
-                run.attempt_id.clone(),
+                run.terminal_id.clone(),
                 json!({"workflow_run_id":run.id,"step":run.step}),
             )?;
         }

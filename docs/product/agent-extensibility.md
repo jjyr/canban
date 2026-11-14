@@ -18,7 +18,7 @@ The CLI and native UI call the same AppServer operations through a same-user soc
 
 `agent.turn_ended` is a deprecated ignored compatibility operation; hidden `agent-notify` is a no-op for old invocations. Neither closes or binds a conversation. No lifecycle callback is required by the new profile interface.
 
-Launch supplies `CANBAN_CLI`, `CANBAN_HOME`, `CANBAN_ENDPOINT`, `CANBAN_PROJECT`, `CANBAN_CARD` (short Card number), `CANBAN_PROFILE_ID`, `CANBAN_SESSION_ID` and `CANBAN_RUN_DIR` across both scheduled Agent attempts and Card-opened terminals. Reports/replies belong in the run or Card scratch directory, outside delivered source. The CLI sends file bytes to AppServer. Mutations use `request_key` for retry receipts; human Card edits also use revision checks, while Agent and Card-terminal CLI commands (`card show`, `card update`, `card adopt`, `report`, `reply`, `bind-session`) resolve the target Card via `CANBAN_CARD` + `CANBAN_PROJECT` (or working-directory inference). See [Review delivery](review-delivery.md) for concrete delivery payloads and uncertain-result handling.
+Launch supplies `CANBAN_CLI`, `CANBAN_HOME`, `CANBAN_ENDPOINT`, `CANBAN_PROJECT`, `CANBAN_CARD` (short Card number), `CANBAN_PROFILE_ID`, `CANBAN_SESSION_ID` and `CANBAN_RUN_DIR` across both scheduled Agent terminals and Card-opened terminals. Reports/replies belong in the run or Card scratch directory, outside delivered source. The CLI sends file bytes to AppServer. Mutations use `request_key` for retry receipts; human Card edits also use revision checks, while Agent and Card-terminal CLI commands (`card show`, `card update`, `card adopt`, `report`, `reply`, `bind-session`) resolve the target Card via `CANBAN_CARD` + `CANBAN_PROJECT` (or working-directory inference). See [Review delivery](review-delivery.md) for concrete delivery payloads and uncertain-result handling.
 
 ## Built-in Canban CLI Skill
 
@@ -33,12 +33,12 @@ The socket has application-wide authority, including other Cards and Agent contr
 ## Multi-Agent architecture
 
 ```text
-Workflow JSON: stage/task/transition/profile --+
+Workflow YAML: stage/step/transition/profile --+
                                              v
 Profile + preset defaults/overrides -> Scheduler / AppServer
                                              |
-Card + profile ID -> Conversation -> Request -> Attempt
-                    opaque history  task       core ID + terminal
+Card + profile ID -> Conversation + TerminalEntry (`{card_id}:{profile_id}`)
+                     opaque history  AgentRun (task + core ID + terminal + pending)
                                                    |
                                              Herdr -> Agent PTY
                                                    |
@@ -54,7 +54,7 @@ A live mention against an already running non-comment task is additional input a
 | Capability | Requirement |
 | --- | --- |
 | Launch and interact | A Herdr-runnable interactive command |
-| Advance workflow | Explicit Canban report with current request/attempt |
+| Advance workflow | Explicit Canban report from the active Card/profile Agent terminal (`CANBAN_CARD` + `CANBAN_PROFILE_ID`) |
 | Durable question answer | Canban reply with Question ID |
 | Exact history Resume | Known/preallocated provider ID, bind-session where needed, resume_argv |
 | Automatic idle exit | Verified idle/done, exact resumable history, configured exit action, elapsed inactivity timeout and no protected pending work |

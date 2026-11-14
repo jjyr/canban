@@ -14,23 +14,35 @@ fn fixture() -> Snapshot {
     }
     s
 }
-fn attempt(s: &mut Snapshot, card: &str, profile: usize, state: &str) -> String {
-    let mut a = canban_scheduler::attempt(
+fn agent_terminal(s: &mut Snapshot, card: &str, profile: usize, state: &str) -> String {
+    let prof = Config::default().profiles[profile].clone();
+    let tid = Conversation::key(card, &prof.id);
+    let mut a = canban_scheduler::agent_run(
         card,
         card,
         1,
         "develop",
         "stage_entry",
-        Config::default().profiles[profile].clone(),
+        prof,
         "Task".into(),
         None,
     );
-    a.id = format!("{card}-{profile}");
-    a.created_at = 10;
+    a.updated_at = 10;
     a.state = state.into();
-    let id = a.id.clone();
-    s.attempts.push(a);
-    id
+    let number = s.terminals.len() as u64 + 1;
+    s.terminals.push(TerminalEntry {
+        id: tid.clone(),
+        conversation_id: Some(tid.clone()),
+        number,
+        name: None,
+        manual_number: None,
+        origin_card_id: Some(card.into()),
+        agent_engine: None,
+        runtime: None,
+        agent: Some(a),
+        created_at: 10,
+    });
+    tid
 }
 fn event(s: &mut Snapshot, project: &str, kind: &str, time: u64) {
     s.events.push(Event {
@@ -49,23 +61,23 @@ fn event(s: &mut Snapshot, project: &str, kind: &str, time: u64) {
 #[test]
 fn attention_unifies_review_and_input_by_card_and_ignores_working_and_archived() {
     let mut s = fixture();
-    let blocked = attempt(&mut s, "attention", 0, "blocked");
-    attempt(&mut s, "attention", 1, "blocked");
+    let blocked = agent_terminal(&mut s, "attention", 0, "blocked");
+    agent_terminal(&mut s, "attention", 1, "blocked");
     s.cards[0].human_gate = Some(HumanGate {
         reason: "Answer needed".into(),
-        attempt_id: Some(blocked),
+        terminal_id: Some(blocked),
         next_stage: None,
     });
-    let review = attempt(&mut s, "review", 0, "completed");
+    let review = agent_terminal(&mut s, "review", 0, "completed");
     // Same Card has a Review gate and another Profile requiring input: still one.
-    attempt(&mut s, "review", 1, "blocked");
+    agent_terminal(&mut s, "review", 1, "blocked");
     s.cards[1].human_gate = Some(HumanGate {
         reason: "Review needed".into(),
-        attempt_id: Some(review),
+        terminal_id: Some(review),
         next_stage: None,
     });
-    attempt(&mut s, "working", 0, "starting");
-    attempt(&mut s, "working", 1, "queued");
+    agent_terminal(&mut s, "working", 0, "starting");
+    agent_terminal(&mut s, "working", 1, "queued");
     let rows = projects(&s, &[]);
     assert_eq!(
         rows.iter().find(|r| r.id == "attention").unwrap().attention,

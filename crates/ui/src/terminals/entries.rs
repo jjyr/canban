@@ -28,13 +28,13 @@ impl Entry {
         })
     }
     pub fn profile(&self) -> Option<&str> {
-        Some(&self.agent.as_ref()?.attempt.as_ref()?.profile.id)
+        Some(&self.agent.as_ref()?.agent()?.profile.id)
     }
     pub fn provider(&self) -> Option<(Icon, String)> {
         if let Some(profile) = self
             .agent
             .as_ref()
-            .and_then(|r| r.attempt.as_ref())
+            .and_then(|r| r.agent())
             .map(|a| &a.profile)
         {
             return Some(crate::profiles::provider(profile));
@@ -134,7 +134,7 @@ impl Entry {
             return None;
         }
         if let Some(row) = &self.agent {
-            let attempt = row.attempt.as_ref()?;
+            let attempt = row.agent()?;
             if attempt.finished() || attempt.terminal.is_none() || !attempt.close_state.is_empty() {
                 return None;
             }
@@ -230,8 +230,8 @@ impl Entry {
             .card
             .human_gate
             .as_ref()
-            .and_then(|g| g.attempt_id.as_ref())
-            .is_some_and(|a| Some(a.as_str()) == row.attempt.as_ref().map(|a| a.id.as_str()));
+            .and_then(|g| g.terminal_id.as_ref())
+            .is_some_and(|tid| Some(tid.as_str()) == row.terminal.as_ref().map(|t| t.id.as_str()));
         !waiting && matches!(self.status().as_str(), "idle" | "done")
     }
     pub fn listed(&self) -> bool {
@@ -239,8 +239,7 @@ impl Entry {
     }
     pub fn status(&self) -> String {
         if let Some(row) = &self.agent {
-            row.attempt
-                .as_ref()
+            row.agent()
                 .map(|a| a.runtime_status())
                 .unwrap_or("unknown")
                 .into()
@@ -279,7 +278,7 @@ impl Entry {
     pub fn machine(&self) -> &str {
         self.agent
             .as_ref()
-            .and_then(|r| r.attempt.as_ref())
+            .and_then(|r| r.agent())
             .and_then(|a| a.location.as_ref())
             .map(|l| l.machine.as_str())
             .or_else(|| self.saved.runtime.as_ref().map(|r| r.machine.as_str()))
@@ -334,6 +333,7 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                 origin_card_id: None,
                 agent_engine: None,
                 runtime: None,
+                agent: None,
                 created_at: 0,
             });
         }
@@ -389,7 +389,7 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                 .or_else(|| card.as_ref().map(|c| c.project_id.clone()))
         });
         let inferred_card = agent.is_none() && t.origin_card_id.is_none() && card.is_some();
-        let stage = agent.as_ref().and_then(|a| a.attempt.as_ref()).map(|att| {
+        let stage = agent.as_ref().and_then(|a| a.agent()).map(|att| {
             s.projects
                 .iter()
                 .find(|p| p.id == att.project_id)

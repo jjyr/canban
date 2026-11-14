@@ -126,12 +126,13 @@ pub fn card_status_specs(
     }
     let mut latest = std::collections::BTreeMap::new();
     for attempt in snapshot
-        .attempts
+        .terminals
         .iter()
+        .filter_map(|t| t.agent.as_ref())
         .filter(|a| a.card_id == card.id && a.stage == card.stage)
     {
-        let previous: Option<&&canban_types::Attempt> = latest.get(&attempt.profile.id);
-        if previous.is_none_or(|a| a.created_at <= attempt.created_at) {
+        let previous: Option<&&canban_types::AgentRun> = latest.get(&attempt.profile.id);
+        if previous.is_none_or(|a| a.updated_at <= attempt.updated_at) {
             latest.insert(attempt.profile.id.clone(), attempt);
         }
     }
@@ -171,23 +172,30 @@ pub fn card_status_with_merging(
         .collect()
 }
 
-/// Agents currently executing for this Card: newest attempt per profile.
+/// Agents currently executing for this Card: newest live terminal per profile.
 pub fn running_agents(
     snapshot: &canban_types::Snapshot,
     card: &canban_types::Card,
-) -> Vec<canban_types::Attempt> {
+) -> Vec<canban_types::TerminalEntry> {
     let mut profiles = std::collections::BTreeSet::new();
     let mut running: Vec<_> = snapshot
-        .attempts
+        .terminals
         .iter()
-        .filter(|a| {
-            a.card_id == card.id && matches!(a.state.as_str(), "starting" | "running" | "working")
+        .filter(|t| {
+            t.agent.as_ref().is_some_and(|a| {
+                a.card_id == card.id
+                    && matches!(a.state.as_str(), "starting" | "running" | "working")
+            })
         })
         .collect();
-    running.sort_by_key(|a| std::cmp::Reverse(a.created_at));
+    running.sort_by_key(|t| std::cmp::Reverse(t.agent.as_ref().map(|a| a.updated_at).unwrap_or(0)));
     running
         .into_iter()
-        .filter(|a| profiles.insert(a.profile.id.clone()))
+        .filter(|t| {
+            t.agent
+                .as_ref()
+                .is_some_and(|a| profiles.insert(a.profile.id.clone()))
+        })
         .cloned()
         .collect()
 }
@@ -199,10 +207,10 @@ mod tests {
     fn running_agents_keep_the_newest_live_request_per_profile() {
         let mut snapshot = canban_types::Snapshot::default();
         let card: canban_types::Card = serde_json::from_value(serde_json::json!({"id":"c","project_id":"p","number":1,"title":"T","body":"","stage":"develop","revision":1,"created_at":1})).unwrap();
-        let make = |id: &str, profile: &str, state: &str, at: u64| {
-            let mut a = canban_scheduler::attempt(
+        let make = |num: u64, id: &str, card_id: &str, profile: &str, state: &str, at: u64| {
+            let mut a = canban_scheduler::agent_run(
                 "p",
-                "c",
+                card_id,
                 1,
                 "develop",
                 "interactive",
@@ -210,23 +218,32 @@ mod tests {
                 "task".into(),
                 None,
             );
-            a.id = id.into();
             a.state = state.into();
-            a.created_at = at;
+            a.updated_at = at;
             a.profile.id = profile.into();
-            a
+            canban_types::TerminalEntry {
+                id: id.into(),
+                conversation_id: Some(id.into()),
+                number: num,
+                name: None,
+                manual_number: None,
+                origin_card_id: Some(card_id.into()),
+                agent_engine: None,
+                runtime: None,
+                agent: Some(a),
+                created_at: at,
+            }
         };
-        snapshot.attempts = vec![
-            make("old", "developer", "running", 1),
-            make("new", "developer", "working", 2),
-            make("done", "reviewer", "completed", 3),
-            make("rev", "reviewer", "starting", 1),
-            make("other", "tester", "running", 5),
+        snapshot.terminals = vec![
+            make(1, "old", "c", "developer", "running", 1),
+            make(2, "new", "c", "developer", "working", 2),
+            make(3, "done", "c", "reviewer", "completed", 3),
+            make(4, "rev", "c", "reviewer", "starting", 1),
+            make(5, "other", "elsewhere", "tester", "running", 5),
         ];
-        snapshot.attempts[4].card_id = "elsewhere".into();
         let ids: Vec<_> = running_agents(&snapshot, &card)
             .into_iter()
-            .map(|a| a.id)
+            .map(|t| t.id)
             .collect();
         assert_eq!(ids, vec!["new", "rev"]);
     }
@@ -288,7 +305,7 @@ mod tests {
             "state": "waiting_delivery",
             "step": "deliver",
             "visit": 1,
-            "attempt_id": null,
+            "terminal_id": null,
             "trigger_event_id": null,
             "input_digest": "d",
             "inputs": {},
