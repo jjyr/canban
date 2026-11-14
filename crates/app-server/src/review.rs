@@ -2,7 +2,7 @@ use super::*;
 pub(super) fn activity_warning(db: Db<'_>, card: &Card) -> Result<Option<String>> {
     Ok(canban_types::agent_activity_warning(
         &card.id,
-        &db.list::<Attempt>()?,
+        &db.list::<TerminalEntry>()?,
     ))
 }
 impl AppServer {
@@ -95,10 +95,10 @@ impl AppServer {
                     }
                     if !completed_deliver
                         && let Some(gate) = gate
-                        && let Some(aid) = gate.attempt_id
+                        && let Some(tid) = gate.terminal_id
                     {
-                        let att: Attempt = db.get(&aid)?;
-                        if att.state == "completed" {
+                        let att: TerminalEntry = db.get(&tid)?;
+                        if att.agent.as_ref().is_some_and(|a| a.state == "completed") {
                             crate::workflow::advance(db, &self.config(), &mut current, Some(&att))?;
                         }
                     }
@@ -387,16 +387,20 @@ impl AppServer {
             }
             let project: Project = db.get(&card.project_id)?;
             let project = self.bound_project(&project, &card);
-            let attempts = db.list::<Attempt>()?;
-            let has_pending_attempts = attempts.iter().any(|a| {
+            let terminals = db.list::<TerminalEntry>()?;
+            let has_pending_attempts = terminals.iter().filter_map(|t| t.agent.as_ref()).any(|a| {
                 a.card_id == card.id
-                    && matches!(
-                        a.state.as_str(),
-                        "queued" | "starting" | "running" | "working" | "unknown"
-                    )
+                    && (a.pending.is_some()
+                        || matches!(
+                            a.state.as_str(),
+                            "queued" | "starting" | "running" | "working" | "unknown"
+                        ))
             });
             let now_ms = now();
-            let settling_agent = attempts.into_iter().any(|a| {
+            let settling_agent = terminals.into_iter().any(|t| {
+                let Some(a) = &t.agent else {
+                    return false;
+                };
                 if a.card_id != card.id || a.terminal.is_none() || a.agent_stopped() {
                     return false;
                 }
@@ -406,7 +410,7 @@ impl AppServer {
                 let anchor = a
                     .completed_at
                     .max(Some(run.updated_at))
-                    .unwrap_or(a.created_at);
+                    .unwrap_or(t.created_at);
                 now_ms.saturating_sub(anchor) < Self::DELIVERY_AGENT_SETTLE_MS
             });
             (card, project, run, has_pending_attempts, settling_agent)
@@ -1139,6 +1143,7 @@ impl AppServer {
                     agent_status: None,
                     agent_turn: None,
                 }),
+                agent: None,
             };
             db.save(&item)?;
             launch = Some((item.clone(), cwd, session_id));

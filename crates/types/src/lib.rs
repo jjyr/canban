@@ -63,7 +63,7 @@ impl Default for WorkspaceSettings {
 pub struct HumanGate {
     pub reason: String,
     #[serde(default)]
-    pub attempt_id: Option<String>,
+    pub terminal_id: Option<String>,
     pub next_stage: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -529,13 +529,34 @@ impl<'de> Deserialize<'de> for ExecutionTrigger {
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct Attempt {
+pub struct QueuedAssignment {
+    #[serde(default)]
+    pub stage: String,
+    #[serde(default)]
+    pub trigger: ExecutionTrigger,
+    #[serde(default)]
+    pub profile: Profile,
+    #[serde(default)]
+    pub instruction: String,
+    #[serde(default)]
+    pub on_completed: Option<String>,
+    #[serde(default)]
+    pub require_human_review: bool,
     #[serde(default)]
     pub workflow_run_id: Option<String>,
     #[serde(default)]
     pub workflow_step: Option<String>,
     #[serde(default)]
-    pub resume_from: Option<String>,
+    pub queued_at: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct AgentRun {
+    #[serde(default)]
+    pub workflow_run_id: Option<String>,
+    #[serde(default)]
+    pub workflow_step: Option<String>,
+    #[serde(default)]
+    pub resume_session: bool,
     #[serde(default)]
     pub trigger: ExecutionTrigger,
     #[serde(default)]
@@ -558,7 +579,6 @@ pub struct Attempt {
     pub owner_core_id: Option<String>,
     #[serde(default)]
     pub lifecycle: Lifecycle,
-    pub id: String,
     pub project_id: String,
     pub card_id: String,
     #[serde(default)]
@@ -578,9 +598,8 @@ pub struct Attempt {
     pub observed: Option<Value>,
     #[serde(default)]
     pub error: Option<String>,
-    pub created_at: u64,
     #[serde(default)]
-    pub conversation_id: Option<String>,
+    pub updated_at: u64,
     #[serde(default)]
     pub provider_session_id: Option<String>,
     #[serde(default)]
@@ -597,6 +616,8 @@ pub struct Attempt {
     pub close_requested_at: Option<u64>,
     #[serde(default)]
     pub connection_state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<QueuedAssignment>,
 }
 /// Durable policy facts; runtime input waits never become workflow approvals.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -616,12 +637,10 @@ pub struct RuntimeWait {
     pub message: String,
     pub since: u64,
 }
-impl Attempt {
+impl AgentRun {
     pub fn finished(&self) -> bool {
-        matches!(
-            self.state.as_str(),
-            "continued" | "cancelled" | "superseded"
-        ) || self.connection_state == "missing"
+        matches!(self.state.as_str(), "cancelled" | "superseded")
+            || self.connection_state == "missing"
             || self.terminal.is_none()
                 && matches!(self.state.as_str(), "failed" | "completed" | "backlog")
             || self
@@ -668,17 +687,53 @@ impl Attempt {
             .and_then(|v| v["status"]["state"].as_str())
             .unwrap_or("unknown")
     }
+    pub fn promote_pending(&mut self) -> Option<QueuedAssignment> {
+        let pending = self.pending.take()?;
+        let stopped = self.finished();
+        self.workflow_run_id = pending.workflow_run_id.clone();
+        self.workflow_step = pending.workflow_step.clone();
+        self.trigger = pending.trigger.clone();
+        self.stage = pending.stage.clone();
+        self.profile = pending.profile.clone();
+        self.instruction = pending.instruction.clone();
+        self.on_completed = pending.on_completed.clone();
+        self.require_human_review = pending.require_human_review;
+        self.state = "queued".into();
+        self.error = None;
+        self.completed_at = None;
+        self.completion_turn = None;
+        self.turn_ended_at = None;
+        self.close_requested_at = None;
+        if stopped {
+            self.core_id = None;
+            self.owner_core_id = None;
+            self.terminal = None;
+            self.observed = None;
+            self.output_path = None;
+            self.response_path = None;
+            self.close_state.clear();
+            self.connection_state.clear();
+            self.lifecycle = Lifecycle::default();
+        }
+        self.updated_at = pending.queued_at.max(now());
+        Some(pending)
+    }
 }
 
 /// Merge-time caution about Agent work on a Card, or `None` when every Agent has
 /// stopped its turn. Shared by AppServer previews and the live UI (which must
 /// re-evaluate it as Herdr status changes; a preview snapshot goes stale once an
 /// Agent that reported while finishing its turn becomes idle).
-pub fn agent_activity_warning(card_id: &str, attempts: &[Attempt]) -> Option<String> {
-    // Continued assignments are `finished()`: runtime ownership moved to the next one.
-    let live = attempts
+pub fn agent_activity_warning(card_id: &str, terminals: &[TerminalEntry]) -> Option<String> {
+    let agents: Vec<&AgentRun> = terminals
         .iter()
-        .filter(|a| a.card_id == card_id && a.terminal.is_some() && !a.agent_stopped());
+        .filter_map(|t| t.agent.as_ref())
+        .filter(|a| a.card_id == card_id)
+        .collect();
+    let live = agents
+        .iter()
+        .copied()
+        .filter(|a| a.terminal.is_some() && !a.agent_stopped());
     let mut uncertain = false;
     for a in live {
         if a.connection_state == "connected" {
@@ -695,23 +750,21 @@ pub fn agent_activity_warning(card_id: &str, attempts: &[Attempt]) -> Option<Str
                 .into(),
         );
     }
-    let pending: Vec<_> = attempts
-        .iter()
-        .filter(|a| {
-            a.card_id == card_id
-                && a.terminal.is_none()
-                && matches!(a.state.as_str(), "queued" | "starting" | "unknown")
-        })
-        .collect();
-    if pending.is_empty() {
+    let mut pending_labels = Vec::new();
+    for a in agents {
+        if a.terminal.is_none() && matches!(a.state.as_str(), "queued" | "starting" | "unknown") {
+            pending_labels.push(format!("@{} {}", a.profile.id, a.state));
+        } else if let Some(p) = &a.pending {
+            pending_labels.push(format!("@{} queued", p.profile.id));
+        }
+    }
+    if pending_labels.is_empty() {
         return None;
     }
-    let what = pending
-        .iter()
-        .map(|a| format!("@{} {}", a.profile.id, a.state))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!("Card still has pending Agent work ({what})"))
+    Some(format!(
+        "Card still has pending Agent work ({})",
+        pending_labels.join(", ")
+    ))
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Conversation {
@@ -721,8 +774,6 @@ pub struct Conversation {
     pub profile_id: String,
     pub provider: String,
     pub provider_session_id: Option<String>,
-    #[serde(default)]
-    pub last_attempt_id: Option<String>,
     pub created_at: u64,
 }
 impl Conversation {
@@ -739,7 +790,7 @@ pub struct Question {
     pub comment_id: String,
     pub body: String,
     #[serde(default)]
-    pub attempt_id: Option<String>,
+    pub terminal_id: Option<String>,
     pub state: String,
     pub error: Option<String>,
     pub reply_path: Option<String>,
@@ -749,7 +800,7 @@ pub struct Question {
 pub struct Report {
     pub id: String,
     #[serde(default)]
-    pub attempt_id: Option<String>,
+    pub terminal_id: Option<String>,
     #[serde(default)]
     pub workflow_run_id: Option<String>,
     #[serde(default)]
@@ -861,7 +912,6 @@ pub struct Snapshot {
     pub projects: Vec<Project>,
     pub cards: Vec<Card>,
     pub events: Vec<Event>,
-    pub attempts: Vec<Attempt>,
     pub reports: Vec<Report>,
     pub notes: Vec<Note>,
     pub notices: Vec<Notice>,
@@ -873,7 +923,7 @@ pub struct Snapshot {
     #[serde(default)]
     pub note_events: Vec<NoteEvent>,
 }
-/// Durable navigation identity. Agent runtime bindings remain on Attempts.
+/// Durable terminal and Card-role Agent execution record.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TerminalEntry {
     pub id: String,
@@ -888,8 +938,10 @@ pub struct TerminalEntry {
     /// Optional interactive CLI engine identifier for ephemeral Agent terminals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_engine: Option<String>,
-    /// Independent terminals own a binding; Agent bindings remain on Attempts.
+    /// Independent terminals own `runtime`; Card-role Agent terminals own `agent`.
     pub runtime: Option<TerminalRuntime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentRun>,
     pub created_at: u64,
 }
 impl TerminalEntry {
@@ -1173,32 +1225,40 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn sample_attempt(
+    fn sample_terminal(
         card_id: &str,
         state: &str,
         connection: &str,
         observed: Option<Value>,
-    ) -> Attempt {
+    ) -> TerminalEntry {
         serde_json::from_value(json!({
-            "id": "run-1",
-            "project_id": "proj-1",
-            "card_id": card_id,
+            "id": format!("{card_id}:developer"),
+            "conversation_id": format!("{card_id}:developer"),
             "number": 1,
-            "state": state,
-            "core_id": "core-1",
-            "terminal": "t1",
-            "cwd": "/tmp",
-            "input_path": "in.md",
+            "name": null,
+            "manual_number": null,
+            "runtime": null,
             "created_at": 1,
-            "connection_state": connection,
-            "observed": observed,
+            "agent": {
+                "project_id": "proj-1",
+                "card_id": card_id,
+                "number": 1,
+                "state": state,
+                "core_id": "core-1",
+                "terminal": "t1",
+                "cwd": "/tmp",
+                "input_path": "in.md",
+                "updated_at": 1,
+                "connection_state": connection,
+                "observed": observed,
+            }
         }))
         .unwrap()
     }
 
     #[test]
     fn agent_activity_warning_clears_as_soon_as_live_snapshot_becomes_idle() {
-        let mut attempts = vec![sample_attempt(
+        let mut terminals = vec![sample_terminal(
             "card-1",
             "completed",
             "connected",
@@ -1206,22 +1266,24 @@ mod tests {
         )];
         // Right at `execution.report`, Herdr can still report `"working"` mid-turn.
         assert!(
-            agent_activity_warning("card-1", &attempts)
+            agent_activity_warning("card-1", &terminals)
                 .unwrap()
                 .contains("still running")
         );
 
         // Once Herdr transitions to any non-running turn state, live evaluation clears it.
         for stopped in ["idle", "done", "blocked", "error"] {
-            attempts[0].observed = Some(json!({"state": "live", "status": {"state": stopped}}));
-            assert_eq!(agent_activity_warning("card-1", &attempts), None);
+            terminals[0].agent.as_mut().unwrap().observed =
+                Some(json!({"state": "live", "status": {"state": stopped}}));
+            assert_eq!(agent_activity_warning("card-1", &terminals), None);
         }
 
         // Providers without deep status hooks also clear once the execution reported an outcome.
         for outcome in ["completed", "blocked", "failed"] {
-            attempts[0].state = outcome.into();
-            attempts[0].observed = Some(json!({"state": "live"}));
-            assert_eq!(agent_activity_warning("card-1", &attempts), None);
+            let a = terminals[0].agent.as_mut().unwrap();
+            a.state = outcome.into();
+            a.observed = Some(json!({"state": "live"}));
+            assert_eq!(agent_activity_warning("card-1", &terminals), None);
         }
     }
 

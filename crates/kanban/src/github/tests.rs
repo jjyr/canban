@@ -79,7 +79,7 @@ fn intake_uses_local_numbering_without_dispatch_or_routing_labels() {
     assert_eq!(c.number, 2);
     assert_eq!(c.github_issue().unwrap().number, 80);
     assert_eq!(c.stage, "backlog");
-    assert!(snapshot.attempts.is_empty());
+    assert!(snapshot.terminals.is_empty());
     assert!(snapshot.conversations.is_empty());
     assert!(!snapshot.events.iter().any(|e| e.kind == "github.comment"));
     assert!(snapshot.github_issues.is_empty());

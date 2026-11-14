@@ -82,6 +82,21 @@ impl Record for TerminalEntry {
     fn id(&self) -> &str {
         &self.id
     }
+    fn project(&self) -> Option<&str> {
+        self.agent.as_ref().map(|a| a.project_id.as_str())
+    }
+    fn card(&self) -> Option<&str> {
+        self.agent.as_ref().map(|a| a.card_id.as_str())
+    }
+    fn state(&self) -> &str {
+        if let Some(a) = &self.agent {
+            &a.state
+        } else if let Some(r) = &self.runtime {
+            &r.state
+        } else {
+            ""
+        }
+    }
     fn number(&self) -> u64 {
         self.number
     }
@@ -144,24 +159,6 @@ impl Record for Event {
     }
     fn number(&self) -> u64 {
         self.sequence
-    }
-}
-impl Record for Attempt {
-    const TABLE: &'static str = "attempts";
-    fn id(&self) -> &str {
-        &self.id
-    }
-    fn project(&self) -> Option<&str> {
-        Some(&self.project_id)
-    }
-    fn card(&self) -> Option<&str> {
-        Some(&self.card_id)
-    }
-    fn state(&self) -> &str {
-        &self.state
-    }
-    fn number(&self) -> u64 {
-        u64::from(self.number)
     }
 }
 
@@ -336,6 +333,7 @@ impl Db<'_> {
                 origin_card_id: None,
                 agent_engine: None,
                 runtime: None,
+                agent: None,
                 created_at: c.created_at,
             })?;
         }
@@ -410,13 +408,14 @@ impl Db<'_> {
             });
         }
         if event.data.get("workflow_run_id").is_none()
-            && let Some(attempt) = event.data["attempt_id"]
+            && let Some(entry) = event.data["terminal_id"]
                 .as_str()
-                .and_then(|id| self.get::<Attempt>(id).ok())
-            && let Some(run) = attempt.workflow_run_id
+                .and_then(|id| self.get::<TerminalEntry>(id).ok())
+            && let Some(agent) = entry.agent
+            && let Some(run) = agent.workflow_run_id
         {
             event.data["workflow_run_id"] = serde_json::json!(run);
-            event.data["workflow_step"] = serde_json::json!(attempt.workflow_step);
+            event.data["workflow_step"] = serde_json::json!(agent.workflow_step);
         }
         if event.data.get("workflow_run_id").is_some() && event.data["origin"] == "local" {
             event.data["origin"] = serde_json::json!("workflow");
@@ -458,7 +457,6 @@ impl Db<'_> {
                 .filter(|c| c.removed_at.is_none())
                 .collect(),
             events: self.list()?,
-            attempts: self.list()?,
             reports: self.list()?,
             notes: self.list()?,
             notices: self.list()?,

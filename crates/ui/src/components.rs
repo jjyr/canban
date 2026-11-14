@@ -12,7 +12,9 @@ pub use card_tile::card_tile;
 use nsh_core::prelude::*;
 use serde_json::json;
 pub use timeline_item::timeline_item;
-pub fn run_panel(ui: Ui, run: Attempt) -> impl IntoElement {
+pub fn run_panel(ui: Ui, entry: TerminalEntry) -> impl IntoElement {
+    let run = entry.agent.expect("run_panel requires an Agent terminal");
+    let id = entry.id;
     let mut panel = panel()
         .child(label(format!("@{} · {}", run.profile.id, run.state)))
         .child(muted(format!("{} · {}", run.stage, run.trigger)));
@@ -20,10 +22,7 @@ pub fn run_panel(ui: Ui, run: Attempt) -> impl IntoElement {
     let current = crate::terminals::model::conversations(&ui.snapshot.get_untracked())
         .into_iter()
         .find(|r| {
-            r.card.id == run.card_id
-                && r.attempt
-                    .as_ref()
-                    .is_some_and(|a| a.profile.id == run.profile.id)
+            r.card.id == run.card_id && r.agent().is_some_and(|a| a.profile.id == run.profile.id)
         });
     let can_retry = current.as_ref().is_none_or(crate::terminals::model::closed)
         && ui
@@ -31,33 +30,33 @@ pub fn run_panel(ui: Ui, run: Attempt) -> impl IntoElement {
             .with_untracked(|s| s.cards.iter().any(|c| c.id == run.card_id && c.active()));
     if let Some(row) = current {
         if crate::terminals::model::binding(&row).is_some() {
-            let id = row.id.clone();
+            let row_id = row.id.clone();
             let card_id = run.card_id.clone();
             panel = panel.child(action(
-                if row.attempt.as_ref().is_some_and(|a| a.id == run.id) {
+                if row.id == id {
                     "Open Terminal"
                 } else {
                     "Open current conversation"
                 },
                 Variant::Secondary,
                 move |_| {
-                    ui.open_card_with_terminal(card_id.clone(), Some(id.clone()));
+                    ui.open_card_with_terminal(card_id.clone(), Some(row_id.clone()));
                 },
             ));
         } else if crate::terminals::model::can_resume(&row, &ui.profiles.get_untracked()) {
-            let id = row.id.clone();
+            let row_id = row.id.clone();
             panel = panel.child(
                 action("Resume Agent", Variant::Secondary, move |_| {
-                    crate::terminals::navigation::resume(ui, &id)
+                    crate::terminals::navigation::resume(ui, &row_id)
                 })
                 .disabled(move || ui.pending.get()),
             );
         }
     }
-    let id = run.id.clone();
+    let output_id = id.clone();
     panel = panel
         .child(muted(format!(
-            "Attempt {} · {} · {}",
+            "Run {} · {} · {}",
             run.number,
             run.terminal.as_deref().unwrap_or("no terminal"),
             run.cwd
@@ -75,18 +74,18 @@ pub fn run_panel(ui: Ui, run: Attempt) -> impl IntoElement {
         .child(action(
             "Read terminal output",
             Variant::Secondary,
-            move |_| load_text(ui, "execution.output", json!({"attempt_id":id})),
+            move |_| load_text(ui, "execution.output", json!({"terminal_id":output_id})),
         ));
     if let Some(error) = run.error {
         panel = panel.child(label(error).text_color(DANGER));
     }
     if can_retry && matches!(run.state.as_str(), "failed" | "blocked" | "needs_report") {
-        let id = run.id.clone();
+        let retry_id = id.clone();
         panel = panel.child(
             action(
                 "Retry with a fresh Session",
                 Variant::Secondary,
-                move |_| dispatch(ui, "execution.retry", json!({"attempt_id":id})),
+                move |_| dispatch(ui, "execution.retry", json!({"terminal_id":retry_id})),
             )
             .disabled(move || ui.pending.get()),
         );

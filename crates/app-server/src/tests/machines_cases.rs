@@ -7,7 +7,7 @@ fn remote_reports_wait_through_handoff_without_consuming_or_duplicating_completi
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let _run = admit(&app, &app.snapshot().unwrap().attempts[0]);
+    let _run = admit(&app, &app.snapshot().unwrap().terminals[0]);
     let report = json!({"request_key":"remote-upgrade-report","project_id":p.id,"card":c.number,"state":"completed","message":"done"});
     std::fs::write(app.home.join("updates/install.json"), b"interrupted").unwrap();
     assert!(
@@ -55,10 +55,18 @@ fn location_edits_retarget_queued_work_but_not_existing_attempts_or_resumes() {
         json!({"project_id":p.id,"location":{"directory":next,"machine":"local"}}),
     )
     .unwrap();
-    assert!(app.snapshot().unwrap().attempts[0].location.is_none());
+    assert!(
+        app.snapshot().unwrap().terminals[0]
+            .agent
+            .as_ref()
+            .unwrap()
+            .location
+            .is_none()
+    );
     app.tick().unwrap();
     let s = app.snapshot().unwrap();
-    let run = s.attempts[0].clone();
+    let entry = s.terminals[0].clone();
+    let run = entry.agent.as_ref().unwrap().clone();
     assert_eq!(
         run.location.as_ref().unwrap().directory,
         next.canonicalize().unwrap().to_str().unwrap()
@@ -79,20 +87,30 @@ fn location_edits_retarget_queued_work_but_not_existing_attempts_or_resumes() {
     .unwrap();
     app.call(
         "agent.open",
-        json!({"card_id":c.id,"profile_id":"developer","expected_attempt_id":run.id}),
+        json!({"card_id":c.id,"profile_id":"developer","expected_terminal_id":entry.id}),
     )
     .unwrap();
     let s = app.snapshot().unwrap();
     let resume = s
-        .attempts
+        .terminals
         .iter()
-        .find(|r| r.resume_from.as_deref() == Some(&run.id))
+        .find(|t| t.id == entry.id)
+        .unwrap()
+        .agent
+        .as_ref()
         .unwrap();
+    assert!(resume.resume_session);
     assert!(resume.location.is_none());
-    let resume_id = resume.id.clone();
     app.tick().unwrap();
     let s = app.snapshot().unwrap();
-    let a = s.attempts.iter().find(|a| a.id == resume_id).unwrap();
+    let a = s
+        .terminals
+        .iter()
+        .find(|t| t.id == entry.id)
+        .unwrap()
+        .agent
+        .as_ref()
+        .unwrap();
     assert_eq!(a.location, run.location);
     assert_eq!(a.cwd, run.cwd);
     assert_eq!(a.provider_session_id.as_deref(), Some("provider-1"));
@@ -120,8 +138,6 @@ fn changed_environment_never_reviews_an_unrelated_checkout() {
     )
     .unwrap();
     app.tick().unwrap();
-    let s = app.snapshot().unwrap();
-    let _run = s.attempts[0].clone();
     app.call(
         "project.location",
         json!({"project_id":p.id,"directory":dir.path().join("other")}),
@@ -137,10 +153,11 @@ fn changed_environment_never_reviews_an_unrelated_checkout() {
         c.workspace.as_ref().unwrap().location.directory,
         p.directory
     );
-    assert_eq!(s.attempts.len(), 2); // 1 completed developer + 1 failed reviewer (never launched in unrelated directory)
+    assert_eq!(s.terminals.iter().filter(|t| t.agent.is_some()).count(), 2); // 1 completed developer + 1 failed reviewer (never launched in unrelated directory)
     assert!(
-        s.attempts
+        s.terminals
             .iter()
+            .filter_map(|t| t.agent.as_ref())
             .all(|a| a.terminal.as_deref() != Some("t2"))
     );
     assert_eq!(
@@ -174,14 +191,18 @@ fn remote_completion_keeps_terminal_without_an_exit_intent_or_clock_comparison()
     )
     .unwrap();
     let s = app.snapshot().unwrap();
-    let a = admit(&app, &s.attempts[0]);
+    let entry = admit(&app, &s.terminals[0]);
     app.call("execution.report",json!({"project_id":c.project_id,"card":c.number,"state":"completed","message":"Done","request_key":"remote-retain"})).unwrap();
     app.observe_lifecycle(
-        &a,
+        &entry,
         &json!({"state":"live","status":{"state":"done"},"turn":6,"status_ms":100}),
     )
     .unwrap();
-    let a = &app.snapshot().unwrap().attempts[0];
+    let a = app.snapshot().unwrap().terminals[0]
+        .agent
+        .as_ref()
+        .unwrap()
+        .clone();
     assert!(a.close_state.is_empty());
     assert!(!a.finished());
 }
@@ -218,11 +239,21 @@ fn offline_work_does_not_starve_local_boards_or_fall_back_for_terminals() {
     .unwrap();
     app.tick().unwrap();
     let s = app.snapshot().unwrap();
-    let remote = s.attempts.iter().find(|r| r.card_id == c.id).unwrap();
+    let remote = s
+        .terminals
+        .iter()
+        .filter_map(|t| t.agent.as_ref())
+        .find(|r| r.card_id == c.id)
+        .unwrap();
     assert_eq!(remote.state, "queued");
     assert!(remote.location.is_none());
-    assert!(s.attempts.iter().any(|a| json!(a.card_id) == c2["id"]
-        && a.location.as_ref().is_some_and(|l| l.machine == "local")));
+    assert!(
+        s.terminals
+            .iter()
+            .filter_map(|t| t.agent.as_ref())
+            .any(|a| json!(a.card_id) == c2["id"]
+                && a.location.as_ref().is_some_and(|l| l.machine == "local"))
+    );
     assert!(
         app.call("terminal.create", json!({"machine":"remote-owner"}))
             .is_err()
@@ -271,20 +302,20 @@ fn provider_session_ids_are_scoped_to_the_owning_machine() {
             .unwrap();
     }
     let s = app.snapshot().unwrap();
-    let _first = admit(&app, &s.attempts[0]);
-    let other = admit(&app, &s.attempts[1]);
+    let _first = admit(&app, &s.terminals[0]);
+    let other = admit(&app, &s.terminals[1]);
     app.call("agent.bind",json!({"project_id":p.id,"card":c.number,"profile_id":"codex","session_id":"short-provider-id"})).unwrap();
     assert!(app.call("agent.bind",json!({"project_id":p.id,"card":second["number"],"profile_id":"codex","session_id":"short-provider-id"})).is_err());
     app.store
         .lock()
         .unwrap()
         .write(|db| {
-            let mut a: Attempt = db.get(&other.id)?;
-            a.location = Some(WorkLocation {
+            let mut t: TerminalEntry = db.get(&other.id)?;
+            t.agent.as_mut().unwrap().location = Some(WorkLocation {
                 machine: "remote-owner".into(),
                 directory: "/repo".into(),
             });
-            db.save(&a)
+            db.save(&t)
         })
         .unwrap();
     app.call("agent.bind",json!({"project_id":p.id,"card":second["number"],"profile_id":"codex","session_id":"short-provider-id"})).unwrap();

@@ -268,6 +268,7 @@ fn gallery_create_entry(
         ),
         origin_card_id: card_id.clone(),
         agent_engine,
+        agent: None,
         created_at: 0,
         runtime: Some(canban_types::TerminalRuntime {
             machine: "local".into(),
@@ -596,27 +597,20 @@ pub fn close_entry(ui: Ui, id: &str) {
     close_entry_confirmed(ui, id);
 }
 
-fn mark_entry_finished_in_snapshot(
-    s: &mut canban_types::Snapshot,
-    id: &str,
-    attempt_id: Option<&str>,
-) {
-    if let Some(t) = s.terminals.iter_mut().find(|t| t.id == id)
-        && let Some(runtime) = &mut t.runtime
-    {
-        runtime.state = "finished".into();
-    }
-    if let Some(aid) = attempt_id
-        && let Some(run) = s.attempts.iter_mut().find(|a| a.id == aid)
-    {
-        run.observed = Some(json!({"state":"finished"}));
+fn mark_entry_finished_in_snapshot(s: &mut canban_types::Snapshot, id: &str) {
+    if let Some(t) = s.terminals.iter_mut().find(|t| t.id == id) {
+        if let Some(runtime) = &mut t.runtime {
+            runtime.state = "finished".into();
+        }
+        if let Some(run) = &mut t.agent {
+            run.observed = Some(json!({"state":"finished"}));
+        }
     }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct OptimisticCloseContext {
     pub id: String,
-    pub attempt_id: Option<String>,
     pub prev_tab_index: Option<usize>,
     pub was_selected_tab: bool,
     pub was_card_tab_for: Option<String>,
@@ -639,11 +633,6 @@ pub(crate) fn begin_optimistic_close(ui: Ui, id: &str) -> Option<OptimisticClose
             canban_terminal::evict_session(core_id, terminal);
         }
     }
-    let attempt_id = entry
-        .as_ref()
-        .and_then(|e| e.agent.as_ref())
-        .and_then(|r| r.attempt.as_ref())
-        .map(|a| a.id.clone());
     let prev_tab_index = ui
         .terminal_tabs
         .with_untracked(|tabs| tabs.iter().position(|t| t == id));
@@ -675,7 +664,6 @@ pub(crate) fn begin_optimistic_close(ui: Ui, id: &str) -> Option<OptimisticClose
 
     Some(OptimisticCloseContext {
         id: id.to_owned(),
-        attempt_id,
         prev_tab_index,
         was_selected_tab,
         was_card_tab_for,
@@ -691,7 +679,7 @@ pub(crate) fn finish_optimistic_close(
         Ok(value) if value["state"] == "closed" => {
             batch(|| {
                 ui.snapshot.update(|s| {
-                    mark_entry_finished_in_snapshot(s, &ctx.id, ctx.attempt_id.as_deref());
+                    mark_entry_finished_in_snapshot(s, &ctx.id);
                 });
                 ui.closing_terminals.update(|c| {
                     c.remove(&ctx.id);
@@ -749,15 +737,8 @@ pub fn close_entry_confirmed(ui: Ui, id: &str) {
     let Some(app) = crate::APP.get().cloned() else {
         // A static Gallery has no runtime; simulate the same closed outcome.
         ui.terminal_close_confirm.set(None);
-        let attempt_id = ui.terminal_entries.with_untracked(|rows| {
-            rows.iter()
-                .find(|e| e.saved.id == id)
-                .and_then(|e| e.agent.as_ref())
-                .and_then(|r| r.attempt.as_ref())
-                .map(|a| a.id.clone())
-        });
         ui.snapshot.update(|s| {
-            mark_entry_finished_in_snapshot(s, id, attempt_id.as_deref());
+            mark_entry_finished_in_snapshot(s, id);
         });
         remove_tab(ui, id);
         return;

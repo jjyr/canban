@@ -50,8 +50,8 @@ pub fn message_id(s: &Snapshot, e: &Event) -> Option<String> {
             if let Some(report) = s.events.iter().find(|r| {
                 r.card_id == e.card_id
                     && r.kind == "execution.reported"
-                    && (r.data["attempt_id"].as_str().is_some()
-                        && r.data["attempt_id"] == e.data["attempt_id"]
+                    && (r.data["terminal_id"].as_str().is_some()
+                        && r.data["terminal_id"] == e.data["terminal_id"]
                         || r.data["path"].as_str().is_some() && r.data["path"] == e.data["path"])
                     && r.data["path"].as_str().is_some()
                     && r.data["path"] == e.data["path"]
@@ -104,13 +104,13 @@ pub fn reminders(s: &Snapshot) -> Vec<Reminder> {
                 .card
                 .human_gate
                 .as_ref()
-                .and_then(|g| g.attempt_id.as_ref())
-                .and_then(|att| {
+                .and_then(|g| g.terminal_id.as_ref())
+                .and_then(|tid| {
                     s.events
                         .iter()
                         .filter(|e| {
                             e.card_id == row.card.id
-                                && e.data["attempt_id"].as_str() == Some(att.as_str())
+                                && e.data["terminal_id"].as_str() == Some(tid.as_str())
                                 && e.kind == "execution.reported"
                                 && message_id(s, e).is_some()
                         })
@@ -130,30 +130,23 @@ pub fn reminders(s: &Snapshot) -> Vec<Reminder> {
                         None
                     }
                 });
+            let agent = row.agent();
+            let target = row
+                .terminal
+                .as_ref()
+                .map(|t| t.id.as_str())
+                .unwrap_or(&row.id);
             let id = match reason.source.as_str() {
                 "task" | "review" => report
                     .and_then(|e| message_id(s, e))
                     .unwrap_or_else(|| format!("gate:{}", row.card.id)),
-                "runtime" => row
-                    .attempt
-                    .as_ref()
+                "runtime" => agent
                     .and_then(|a| a.lifecycle.waiting.as_ref())
                     .map(|w| format!("wait:{}", w.id))
                     .unwrap_or_else(|| {
-                        let runtime = row
-                            .attempt
-                            .as_ref()
-                            .map(|a| a.runtime_status())
-                            .unwrap_or("unknown");
-                        let target = row
-                            .attempt
-                            .as_ref()
-                            .map(|a| a.id.as_str())
-                            .unwrap_or(&row.id);
+                        let runtime = agent.map(|a| a.runtime_status()).unwrap_or("unknown");
                         if matches!(runtime, "idle" | "done") {
-                            let turn = row
-                                .attempt
-                                .as_ref()
+                            let turn = agent
                                 .and_then(|a| a.observed.as_ref())
                                 .and_then(|v| v["turn"].as_u64())
                                 .unwrap_or(0);
@@ -162,20 +155,12 @@ pub fn reminders(s: &Snapshot) -> Vec<Reminder> {
                             format!("runtime:{target}")
                         }
                     }),
-                _ => format!(
-                    "recovery:{}",
-                    row.attempt
-                        .as_ref()
-                        .map(|a| a.id.as_str())
-                        .unwrap_or(&row.id)
-                ),
+                _ => format!("recovery:{target}"),
             };
-            let created_at = row
-                .attempt
-                .as_ref()
+            let created_at = agent
                 .and_then(|a| a.lifecycle.waiting.as_ref())
                 .map(|w| w.since)
-                .or_else(|| row.attempt.as_ref().and_then(|a| a.lifecycle.idle_since))
+                .or_else(|| agent.and_then(|a| a.lifecycle.idle_since))
                 .or_else(|| report.map(|e| e.created_at))
                 .unwrap_or(row.card.created_at);
             items

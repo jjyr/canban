@@ -91,13 +91,22 @@ impl AppServer {
                 )?;
                 db.save(&c)?;
             }
-            for mut a in db
-                .list::<Attempt>()?
-                .into_iter()
-                .filter(|a| a.card_id == c.id && a.state == "queued")
-            {
-                a.state = "cancelled".into();
-                db.save(&a)?;
+            for mut entry in db.list::<TerminalEntry>()? {
+                if let Some(a) = &mut entry.agent
+                    && a.card_id == c.id
+                {
+                    let mut changed = false;
+                    if a.state == "queued" {
+                        a.state = "cancelled".into();
+                        changed = true;
+                    }
+                    if a.pending.take().is_some() {
+                        changed = true;
+                    }
+                    if changed {
+                        db.save(&entry)?;
+                    }
+                }
             }
             Ok(json!({"ok":true}))
         })?;
@@ -120,13 +129,12 @@ impl AppServer {
         {
             return Ok(json!({"archived":true,"path":path}));
         }
-        for run in self
-            .snapshot()?
-            .attempts
-            .iter()
-            .filter(|a| a.card_id == card_id && a.terminal.is_some())
-        {
-            let _ = self.capture_output(run);
+        for entry in self.snapshot()?.terminals.iter().filter(|t| {
+            t.agent
+                .as_ref()
+                .is_some_and(|a| a.card_id == card_id && a.terminal.is_some())
+        }) {
+            let _ = self.capture_output(entry);
         }
         let snapshot = self.snapshot()?;
         let card = snapshot
@@ -172,12 +180,14 @@ impl AppServer {
                 .terminals
                 .iter()
                 .filter(|v| {
-                    v.conversation_id.as_ref().is_some_and(|id| {
-                        snapshot
-                            .conversations
-                            .iter()
-                            .any(|c| &c.id == id && c.card_id == card_id)
-                    })
+                    v.agent.as_ref().is_some_and(|a| a.card_id == card_id)
+                        || v.origin_card_id.as_deref() == Some(card_id)
+                        || v.conversation_id.as_ref().is_some_and(|id| {
+                            snapshot
+                                .conversations
+                                .iter()
+                                .any(|c| &c.id == id && c.card_id == card_id)
+                        })
                 })
                 .cloned()
                 .collect(),
@@ -203,11 +213,6 @@ impl AppServer {
             cards: vec![card.clone()],
             events: snapshot
                 .events
-                .into_iter()
-                .filter(|v| v.card_id == card_id)
-                .collect(),
-            attempts: snapshot
-                .attempts
                 .into_iter()
                 .filter(|v| v.card_id == card_id)
                 .collect(),
@@ -272,11 +277,13 @@ impl AppServer {
         let client = canban_herdr::Client {
             config: self.config(),
         };
-        let attempts = self.snapshot()?.attempts;
-        for run in attempts
-            .iter()
-            .filter(|a| a.card_id == card_id && a.terminal.is_some() && !a.finished())
-        {
+        let terminals = self.snapshot()?.terminals;
+        for entry in terminals.iter().filter(|t| {
+            t.agent
+                .as_ref()
+                .is_some_and(|a| a.card_id == card_id && a.terminal.is_some() && !a.finished())
+        }) {
+            let run = entry.agent.as_ref().unwrap();
             let terminal = run.terminal.as_ref().unwrap();
             ensure!(
                 client.status()?["core"]["id"].as_str() == run.core_id.as_deref(),
@@ -291,27 +298,32 @@ impl AppServer {
                 actual["state"] == "finished",
                 "Terminal close is not confirmed; retry Archive"
             );
-            self.capture_output(run)?;
+            self.capture_output(entry)?;
             self.store.lock().unwrap().write(|db| {
-                let mut a: Attempt = db.get(&run.id)?;
-                a.observed = Some(canban_herdr::observation(&actual));
-                a.close_state = "closed".into();
-                a.close_requested_at = Some(now());
-                a.lifecycle.close_reason = "archive".into();
-                a.connection_state = "connected".into();
-                if !matches!(a.state.as_str(), "completed" | "backlog") {
-                    a.state = "cancelled".into();
+                let mut current: TerminalEntry = db.get(&entry.id)?;
+                if let Some(a) = &mut current.agent {
+                    a.observed = Some(canban_herdr::observation(&actual));
+                    a.close_state = "closed".into();
+                    a.close_requested_at = Some(now());
+                    a.lifecycle.close_reason = "archive".into();
+                    a.connection_state = "connected".into();
+                    a.pending = None;
+                    if !matches!(a.state.as_str(), "completed" | "backlog") {
+                        a.state = "cancelled".into();
+                    }
+                    let run_number = a.number;
+                    db.save(&current)?;
+                    log(
+                        db,
+                        &db.get::<Card>(card_id)?,
+                        "execution.archived",
+                        "system",
+                        "Closed Card Agent after saving its terminal history",
+                        Some(entry.id.clone()),
+                        json!({"run_number":run_number}),
+                    )?;
                 }
-                db.save(&a)?;
-                log(
-                    db,
-                    &db.get::<Card>(card_id)?,
-                    "execution.archived",
-                    "system",
-                    "Closed Card Agent after saving its terminal history",
-                    Some(run.id.clone()),
-                    json!({"attempt":run.number}),
-                )
+                Ok(())
             })?;
         }
         Ok(())
@@ -345,15 +357,20 @@ impl AppServer {
             c.base_commit = w.base_commit.clone();
             c.workspace = Some(w.clone());
             let result = (|| -> Result<Option<String>> {
-                if snapshot.attempts.iter().any(|a| {
-                    a.card_id == card.id
-                        && a.cwd == w.path
-                        && a.location
-                            .as_ref()
-                            .is_some_and(|l| l.machine == w.location.machine)
-                        && a.terminal.is_some()
-                        && a.observed.as_ref().is_none_or(|v| v["state"] != "finished")
-                }) || self.terminal_retains_worktree(&c)?
+                if snapshot
+                    .terminals
+                    .iter()
+                    .filter_map(|t| t.agent.as_ref())
+                    .any(|a| {
+                        a.card_id == card.id
+                            && a.cwd == w.path
+                            && a.location
+                                .as_ref()
+                                .is_some_and(|l| l.machine == w.location.machine)
+                            && a.terminal.is_some()
+                            && a.observed.as_ref().is_none_or(|v| v["state"] != "finished")
+                    })
+                    || self.terminal_retains_worktree(&c)?
                 {
                     return Ok(Some("A terminal may still be using this worktree".into()));
                 }
@@ -401,40 +418,63 @@ impl AppServer {
         })
     }
     pub(super) fn output(&self, id: &str) -> Result<Value> {
-        let run: Attempt = self.store.lock().unwrap().db().get(id)?;
-        let c: Card = self.store.lock().unwrap().db().get(&run.card_id)?;
-        if (c.archived_at.is_some() || run.finished())
-            && let Some(path) = &run.output_path
-        {
-            return self.read_resource(&c.id, path);
-        }
-        let terminal = run
-            .terminal
-            .as_ref()
-            .context("Execution has no terminal binding")?;
-        let client = canban_herdr::Client {
-            config: self.config(),
-        };
-        let live = (|| {
+        let entry: TerminalEntry = self.store.lock().unwrap().db().get(id)?;
+        if let Some(run) = &entry.agent {
+            let c: Card = self.store.lock().unwrap().db().get(&run.card_id)?;
+            if (c.archived_at.is_some() || run.finished())
+                && let Some(path) = &run.output_path
+            {
+                return self.read_resource(&c.id, path);
+            }
+            let terminal = run
+                .terminal
+                .as_ref()
+                .context("Execution has no terminal binding")?;
+            let client = canban_herdr::Client {
+                config: self.config(),
+            };
+            let live = (|| {
+                let status = client.status()?;
+                ensure!(
+                    run.core_id.as_deref() == status["core"]["id"].as_str(),
+                    "Core identity changed; original terminal cannot be resolved"
+                );
+                client.read(terminal)
+            })();
+            match live {
+                Ok(value) => Ok(value),
+                Err(e) => {
+                    if let Some(path) = &run.output_path {
+                        self.read_resource(&c.id, path)
+                    } else {
+                        Err(e)
+                    }
+                }
+            }
+        } else {
+            let runtime = entry
+                .runtime
+                .as_ref()
+                .context("Terminal has no runtime binding")?;
+            let terminal = runtime
+                .terminal
+                .as_ref()
+                .context("Terminal has no Herdr address")?;
+            let client = canban_herdr::Client {
+                config: self.config(),
+            };
             let status = client.status()?;
             ensure!(
-                run.core_id.as_deref() == status["core"]["id"].as_str(),
+                runtime.core_id.as_deref() == status["core"]["id"].as_str(),
                 "Core identity changed; original terminal cannot be resolved"
             );
             client.read(terminal)
-        })();
-        match live {
-            Ok(value) => Ok(value),
-            Err(e) => {
-                if let Some(path) = &run.output_path {
-                    self.read_resource(&c.id, path)
-                } else {
-                    Err(e)
-                }
-            }
         }
     }
-    pub(super) fn capture_output(&self, run: &Attempt) -> Result<()> {
+    pub(super) fn capture_output(&self, entry: &TerminalEntry) -> Result<()> {
+        let Some(run) = &entry.agent else {
+            return Ok(());
+        };
         let Some(terminal) = &run.terminal else {
             return Ok(());
         };
@@ -448,13 +488,16 @@ impl AppServer {
         );
         let value = client.read(terminal)?;
         let text = value["text"].as_str().context("No terminal text")?;
-        let path = canban_context::run_dir(&self.home, run).join(format!("output-{}.txt", id()));
+        let path = canban_context::run_dir(&self.home, entry).join(format!("output-{}.txt", id()));
         canban_context::atomic(&path, text.as_bytes())?;
         let relative = canban_context::relative(&self.home, &path)?;
         self.store.lock().unwrap().write(|db| {
-            let mut current: Attempt = db.get(&run.id)?;
-            current.output_path = Some(relative);
-            db.save(&current)
+            let mut current: TerminalEntry = db.get(&entry.id)?;
+            if let Some(a) = &mut current.agent {
+                a.output_path = Some(relative);
+                db.save(&current)?;
+            }
+            Ok(())
         })?;
         Ok(())
     }

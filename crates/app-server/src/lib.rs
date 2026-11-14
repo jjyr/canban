@@ -116,14 +116,14 @@ fn log(
     kind: &str,
     actor: &str,
     message: &str,
-    attempt_id: Option<String>,
+    terminal_id: Option<String>,
     mut data: Value,
 ) -> Result<()> {
-    if let Some(aid) = attempt_id
+    if let Some(tid) = terminal_id
         && let Some(obj) = data.as_object_mut()
     {
-        obj.entry("attempt_id".to_owned())
-            .or_insert_with(|| json!(aid));
+        obj.entry("terminal_id".to_owned())
+            .or_insert_with(|| json!(tid));
     }
     db.append(canban_timeline::event(
         &c.project_id,
@@ -140,7 +140,7 @@ fn attention(db: Db<'_>, card: &mut Card, message: &str) -> Result<()> {
     if card.human_gate.is_none() {
         card.human_gate = Some(HumanGate {
             reason: message.into(),
-            attempt_id: None,
+            terminal_id: None,
             next_stage: None,
         });
     }
@@ -257,7 +257,7 @@ fn enqueue(
     trigger: ExecutionTrigger,
     explicit: Option<&str>,
     instruction: Option<String>,
-) -> Result<Option<Attempt>> {
+) -> Result<Option<TerminalEntry>> {
     ensure!(
         card.removed_at.is_none(),
         "Restore the removed Card before scheduling"
@@ -286,51 +286,81 @@ fn enqueue(
             return Ok(None);
         }
     };
-    let number = u32::try_from(db.counter(&format!("card-attempt:{}", card.id))?)?;
-    let mut att = canban_scheduler::attempt(
-        &project.id,
-        &card.id,
-        number,
-        &stage.id,
-        trigger.clone(),
-        profile,
-        instruction.unwrap_or_else(|| stage.instruction.clone()),
-        if explicit.is_some() {
-            None
-        } else {
-            stage.on_completed.clone()
-        },
-    );
-    att.require_human_review = explicit.is_none() && stage.require_human_review;
-    let mut context = crate::sessions::conversation(db, card, &att.profile)?;
-    att.conversation_id = Some(context.id.clone());
-    if explicit.is_some() && context.provider_session_id.is_some() {
-        att.resume_from = db
-            .list::<Attempt>()?
-            .into_iter()
-            .rev()
-            .find(|a| {
-                a.conversation_id.as_deref() == Some(&context.id)
-                    && a.provider_session_id == context.provider_session_id
-            })
-            .map(|a| a.id);
-    }
-    db.save(&att)?;
-    // Queued work does not replace the pointer to an invocation that is still live.
-    if context.last_attempt_id.is_none() {
-        context.last_attempt_id = Some(att.id.clone());
-        db.save(&context)?;
-    }
+    let context = crate::sessions::conversation(db, card, &profile)?;
+    let mut entry: TerminalEntry = db.get(&context.id)?;
+    let instruction_str = instruction.unwrap_or_else(|| stage.instruction.clone());
+    let on_completed = if explicit.is_some() {
+        None
+    } else {
+        stage.on_completed.clone()
+    };
+    let require_human_review = explicit.is_none() && stage.require_human_review;
+    let has_live_pty = entry
+        .agent
+        .as_ref()
+        .is_some_and(|a| a.terminal.is_some() && !a.finished());
+    let profile_id = profile.id.clone();
+    let run_number = if has_live_pty {
+        let agent = entry.agent.as_mut().unwrap();
+        agent.pending = Some(QueuedAssignment {
+            stage: stage.id.clone(),
+            trigger: trigger.clone(),
+            profile,
+            instruction: instruction_str,
+            on_completed,
+            require_human_review,
+            workflow_run_id: None,
+            workflow_step: None,
+            queued_at: now(),
+        });
+        agent.number.saturating_add(1)
+    } else {
+        let number = u32::try_from(db.counter(&format!("card-attempt:{}", card.id))?)?;
+        let prior_agent = entry.agent.clone();
+        let mut run = canban_scheduler::agent_run(
+            &project.id,
+            &card.id,
+            number,
+            &stage.id,
+            trigger.clone(),
+            profile,
+            instruction_str,
+            on_completed,
+        );
+        run.require_human_review = require_human_review;
+        if let Some(prev) = prior_agent
+            && explicit.is_some()
+            && context.provider_session_id.is_some()
+            && prev.provider_session_id == context.provider_session_id
+        {
+            run.resume_session = true;
+            run.runtime_home = prev.runtime_home;
+            run.workspace = prev.workspace.or_else(|| {
+                prev.location.map(|location| WorkspaceBinding {
+                    location,
+                    path: prev.cwd.clone(),
+                    branch: None,
+                    base_commit: None,
+                    target_branch: None,
+                })
+            });
+            run.cwd = prev.cwd;
+            run.provider_session_id = prev.provider_session_id;
+        }
+        entry.agent = Some(run);
+        number
+    };
+    db.save(&entry)?;
     log(
         db,
         card,
         "execution.queued",
         "system",
-        &format!("Queued @{}", att.profile.id),
-        Some(att.id.clone()),
-        json!({"trigger":trigger,"stage":stage.id,"attempt":att.number}),
+        &format!("Queued @{profile_id}"),
+        Some(entry.id.clone()),
+        json!({"trigger":trigger,"stage":stage.id,"run_number":run_number}),
     )?;
-    Ok(Some(att))
+    Ok(Some(entry))
 }
 impl AppServer {
     pub fn open(home: PathBuf, cli: PathBuf) -> Result<Arc<Self>> {
@@ -383,8 +413,11 @@ impl AppServer {
                     db.save(&card)?;
                 }
             }
-            for mut a in db.list::<Attempt>()? {
-                if a.location.is_none() && a.state != "queued" {
+            for mut t in db.list::<TerminalEntry>()? {
+                if let Some(a) = &mut t.agent
+                    && a.location.is_none()
+                    && a.state != "queued"
+                {
                     let p: Project = db.get(&a.project_id)?;
                     let location = WorkLocation {
                         machine: "local".into(),
@@ -399,28 +432,30 @@ impl AppServer {
                         base_commit: None,
                         target_branch: p.target_branch.clone(),
                     });
-                    db.save(&a)?;
+                    db.save(&t)?;
                 }
             }
-            let attempts = db.list::<Attempt>()?;
+            let terminals = db.list::<TerminalEntry>()?;
             for mut card in db.list::<Card>()? {
                 if let Some(reason) = card.attention.clone()
                     && card.human_gate.is_none()
                 {
-                    let attempt_id = attempts
+                    let terminal_id = terminals
                         .iter()
                         .rev()
-                        .find(|a| {
-                            a.card_id == card.id
-                                && matches!(
-                                    a.state.as_str(),
-                                    "blocked" | "failed" | "needs_report" | "unknown"
-                                )
+                        .find(|t| {
+                            t.agent.as_ref().is_some_and(|a| {
+                                a.card_id == card.id
+                                    && matches!(
+                                        a.state.as_str(),
+                                        "blocked" | "failed" | "needs_report" | "unknown"
+                                    )
+                            })
                         })
-                        .map(|a| a.id.clone());
+                        .map(|t| t.id.clone());
                     card.human_gate = Some(HumanGate {
                         reason,
-                        attempt_id,
+                        terminal_id,
                         next_stage: None,
                     });
                     db.save(&card)?;
@@ -664,8 +699,11 @@ impl AppServer {
             .collect();
         let inv = self.inventory.lock().unwrap();
         if inv.error.is_none() && inv.last_at > 0 {
-            for a in &mut snapshot.attempts {
-                if a.connection_state == "connected" && a.core_id.as_deref() == Some(&inv.core) {
+            for t in &mut snapshot.terminals {
+                if let Some(a) = &mut t.agent
+                    && a.connection_state == "connected"
+                    && a.core_id.as_deref() == Some(&inv.core)
+                {
                     a.lifecycle.observed_at = Some(inv.last_at);
                 }
             }

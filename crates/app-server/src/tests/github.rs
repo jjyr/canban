@@ -60,7 +60,13 @@ fn references_keep_local_identity_and_require_current_revision() {
         )
         .is_err()
     );
-    assert!(app.snapshot().unwrap().attempts.is_empty());
+    assert!(
+        app.snapshot()
+            .unwrap()
+            .terminals
+            .iter()
+            .all(|t| t.agent.is_none())
+    );
     assert_eq!(app.snapshot().unwrap().projects[0].id, p.id);
     let removed: Card = serde_json::from_value(
         app.call(

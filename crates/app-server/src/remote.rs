@@ -8,8 +8,9 @@ impl AppServer {
             return;
         };
         let machines: std::collections::HashSet<_> = snapshot
-            .attempts
+            .terminals
             .iter()
+            .filter_map(|t| t.agent.as_ref())
             .filter(|a| !a.finished())
             .filter_map(|a| a.location.as_ref().map(|l| l.machine.clone()))
             .filter(|m| m != "local")
@@ -25,10 +26,13 @@ impl AppServer {
                         break;
                     }
                     let active = server.snapshot().is_ok_and(|s| {
-                        s.attempts.iter().any(|a| {
-                            !a.finished()
-                                && a.location.as_ref().is_some_and(|l| l.machine == machine)
-                        })
+                        s.terminals
+                            .iter()
+                            .filter_map(|t| t.agent.as_ref())
+                            .any(|a| {
+                                !a.finished()
+                                    && a.location.as_ref().is_some_and(|l| l.machine == machine)
+                            })
                     });
                     if !active {
                         break;

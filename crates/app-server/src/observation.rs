@@ -254,17 +254,17 @@ impl AppServer {
                                         .is_some_and(|t| t.contains('/'));
                                     if remote || message["method"] == "heartbeat" {
                                         let s = server.snapshot().unwrap_or_default();
-                                        if s.attempts.iter().any(|a| {
-                                            !a.finished()
-                                                && a.terminal
-                                                    .as_deref()
-                                                    .is_some_and(|t| t.contains('/'))
-                                        }) || s.terminals.iter().any(|t| {
-                                            t.runtime.as_ref().is_some_and(|r| {
+                                        if s.terminals.iter().any(|t| {
+                                            t.agent.as_ref().is_some_and(|a| {
+                                                !a.finished()
+                                                    && a.terminal
+                                                        .as_deref()
+                                                        .is_some_and(|addr| addr.contains('/'))
+                                            }) || t.runtime.as_ref().is_some_and(|r| {
                                                 r.state != "finished"
                                                     && r.terminal
                                                         .as_deref()
-                                                        .is_some_and(|t| t.contains('/'))
+                                                        .is_some_and(|addr| addr.contains('/'))
                                             })
                                         }) {
                                             server.remote_health_due.store(true, Ordering::SeqCst);
@@ -334,18 +334,25 @@ impl AppServer {
             "Agent exited without an explicit outcome",
         ];
         self.store.lock().unwrap().write(|db| {
-            for mut a in db.list::<Attempt>()?.into_iter().filter(|a| {
-                a.state == "needs_report"
+            for mut t in db.list::<TerminalEntry>()? {
+                let Some(a) = &mut t.agent else {
+                    continue;
+                };
+                if !(a.state == "needs_report"
                     && a.observed
                         .as_ref()
-                        .is_some_and(|v| v["state"] == "finished")
-            }) {
+                        .is_some_and(|v| v["state"] == "finished"))
+                {
+                    continue;
+                }
                 a.state = "failed".into();
                 a.error = Some("Agent exited without reporting an outcome".into());
-                db.save(&a)?;
-                let mut c: Card = db.get(&a.card_id)?;
+                let card_id = a.card_id.clone();
+                let run_num = a.number;
+                db.save(&t)?;
+                let mut c: Card = db.get(&card_id)?;
                 if c.human_gate.as_ref().is_some_and(|g| {
-                    g.attempt_id.as_deref() == Some(&a.id) && REASONS.contains(&g.reason.as_str())
+                    g.terminal_id.as_deref() == Some(&t.id) && REASONS.contains(&g.reason.as_str())
                 }) {
                     c.human_gate = None;
                     if c.attention
@@ -369,27 +376,34 @@ impl AppServer {
                     "execution.failed",
                     "system",
                     "Migrated the automatic missing-report gate to a failed execution",
-                    Some(a.id.clone()),
-                    json!({"attempt":a.number,"migration":true}),
+                    Some(t.id.clone()),
+                    json!({"run_number":run_num,"migration":true}),
                 )?;
             }
             Ok(())
         })
     }
-    pub(super) fn runtime_missing(&self, run: &Attempt) -> Result<()> {
+    pub(super) fn runtime_missing(&self, entry: &TerminalEntry) -> Result<()> {
+        let Some(run) = &entry.agent else {
+            return Ok(());
+        };
         if run.finished() {
             return Ok(());
         } // Retention cannot erase an already confirmed exit.
         if run.terminal.as_deref().is_some_and(|t| t.contains('/')) {
             return self.connection_lost(
-                run,
+                entry,
                 "unavailable",
                 "Remote terminal is not in the current mirror; its exit is unconfirmed",
             );
         }
-        self.observe_lifecycle(run, &json!({"state":"missing"}))?;
+        self.observe_lifecycle(entry, &json!({"state":"missing"}))?;
+        let card_id = run.card_id.clone();
         self.store.lock().unwrap().write(|db| {
-            let mut a: Attempt = db.get(&run.id)?;
+            let mut current_entry: TerminalEntry = db.get(&entry.id)?;
+            let Some(a) = &mut current_entry.agent else {
+                return Ok(());
+            };
             if a.state == "missing" {
                 return Ok(());
             }
@@ -402,20 +416,22 @@ impl AppServer {
             );
             a.close_state = "closed".into();
             a.observed = Some(json!({"state":"missing"}));
+            let err_msg = a.error.clone().unwrap();
+            let run_num = a.number;
             log(
                 db,
-                &db.get::<Card>(&a.card_id)?,
+                &db.get::<Card>(&card_id)?,
                 "execution.missing",
                 "herdr",
-                a.error.as_deref().unwrap(),
-                Some(a.id.clone()),
-                json!({"attempt":a.number}),
+                &err_msg,
+                Some(entry.id.clone()),
+                json!({"run_number":run_num}),
             )?;
-            db.save(&a)
+            db.save(&current_entry)
         })?;
         self.request_deliveries();
-        let _ = self.try_auto_archive_merged(&run.card_id);
-        self.emit("runtime", Some(run.card_id.clone()));
+        let _ = self.try_auto_archive_merged(&card_id);
+        self.emit("runtime", Some(card_id));
         Ok(())
     }
     fn start_delivery_worker(self: &Arc<Self>, drx: mpsc::Receiver<()>) {
@@ -437,7 +453,11 @@ impl AppServer {
                     }
                     let _ = server.pump_admissions();
                     let s = server.snapshot().unwrap_or_default();
-                    if s.attempts.iter().any(|a| a.state == "queued") {
+                    if s.terminals.iter().any(|t| {
+                        t.agent
+                            .as_ref()
+                            .is_some_and(|a| a.state == "queued" || a.pending.is_some())
+                    }) {
                         server.wake_runtime();
                     }
                     let mut due = |at: u64| {
@@ -450,7 +470,10 @@ impl AppServer {
                     {
                         due(now().saturating_add(2_000));
                     }
-                    for a in &s.attempts {
+                    for t in &s.terminals {
+                        let Some(a) = &t.agent else {
+                            continue;
+                        };
                         if a.terminal.is_some()
                             && a.connection_state == "connected"
                             && !a.agent_stopped()
@@ -462,7 +485,7 @@ impl AppServer {
                             let anchor = a
                                 .completed_at
                                 .max(Some(run.updated_at))
-                                .unwrap_or(a.created_at);
+                                .unwrap_or(t.created_at);
                             due(anchor.saturating_add(Self::DELIVERY_AGENT_SETTLE_MS + 1));
                         }
                     }
@@ -523,7 +546,10 @@ impl AppServer {
                     // so the FIFO merge queue automatically drains once the checkout is clean.
                     due(now().saturating_add(2_000));
                 }
-                for a in &s.attempts {
+                for t in &s.terminals {
+                    let Some(a) = &t.agent else {
+                        continue;
+                    };
                     if a.close_state == "closing"
                         && let Some(at) = a.close_requested_at
                     {
@@ -540,7 +566,7 @@ impl AppServer {
                         let anchor = a
                             .completed_at
                             .max(Some(run.updated_at))
-                            .unwrap_or(a.created_at);
+                            .unwrap_or(t.created_at);
                         due(anchor.saturating_add(Self::DELIVERY_AGENT_SETTLE_MS + 1));
                     }
                     if lifecycle::idle_candidate(
@@ -574,10 +600,14 @@ impl AppServer {
                     canban_scheduler::next(&s, server.config().scheduler.max_agents).is_some();
                 if retry_needed {
                     let current = s
-                        .attempts
+                        .terminals
                         .iter()
-                        .filter(|a| a.state == "queued")
-                        .map(|a| a.id.clone())
+                        .filter(|t| {
+                            t.agent
+                                .as_ref()
+                                .is_some_and(|a| a.state == "queued" || a.pending.is_some())
+                        })
+                        .map(|t| t.id.clone())
                         .collect::<Vec<_>>();
                     if current != queued {
                         queued = current;

@@ -159,35 +159,35 @@ impl AppServer {
             }
             "execution.get" => {
                 let s = self.snapshot()?;
-                if let Some(aid) = p["attempt_id"].as_str().filter(|v| !v.is_empty()) {
-                    let attempt = s
-                        .attempts
+                if let Some(tid) = p["terminal_id"].as_str().filter(|v| !v.is_empty()) {
+                    let terminal = s
+                        .terminals
                         .iter()
-                        .find(|a| a.id == aid)
+                        .find(|t| t.id == tid)
                         .cloned()
-                        .context("Attempt not found")?;
+                        .context("Terminal not found")?;
                     let reports = s
                         .reports
                         .into_iter()
-                        .filter(|r| r.attempt_id.as_deref() == Some(aid))
+                        .filter(|r| r.terminal_id.as_deref() == Some(tid))
                         .collect::<Vec<_>>();
-                    Ok(json!({"attempt":attempt,"attempts":[attempt],"reports":reports}))
+                    Ok(json!({"terminal":terminal,"terminals":[terminal],"reports":reports}))
                 } else {
                     let card = {
                         let store = self.store.lock().unwrap();
                         super::resolve_card(store.db(), &p)?
                     };
-                    let attempts = s
-                        .attempts
+                    let terminals = s
+                        .terminals
                         .into_iter()
-                        .filter(|a| a.card_id == card.id)
+                        .filter(|t| t.agent.as_ref().is_some_and(|a| a.card_id == card.id))
                         .collect::<Vec<_>>();
                     let reports = s
                         .reports
                         .into_iter()
                         .filter(|r| r.card_id == card.id)
                         .collect::<Vec<_>>();
-                    Ok(json!({"attempt":attempts.last(),"attempts":attempts,"reports":reports}))
+                    Ok(json!({"terminal":terminals.last(),"terminals":terminals,"reports":reports}))
                 }
             }
             "config.get" => Ok(serde_json::to_value(config)?),
@@ -197,8 +197,14 @@ impl AppServer {
             "overview.preview" => self.overview_preview(p),
             "scheduler.status" => {
                 let snapshot = self.snapshot()?;
+                let queued = snapshot
+                    .terminals
+                    .iter()
+                    .filter_map(|t| t.agent.as_ref())
+                    .filter(|a| a.state == "queued" || a.pending.is_some())
+                    .count();
                 Ok(
-                    json!({"active":canban_scheduler::active_count(&snapshot),"max_agents":config.scheduler.max_agents,"queued":snapshot.attempts.iter().filter(|a| a.state=="queued").count()}),
+                    json!({"active":canban_scheduler::active_count(&snapshot),"max_agents":config.scheduler.max_agents,"queued":queued}),
                 )
             }
             "scheduler.configure" => {
@@ -388,19 +394,21 @@ impl AppServer {
                         .map(str::trim)
                         .filter(|s| !s.is_empty());
                     let is_agent = p["agent"] == true || profile_opt.is_some() || !has_revision;
-                    let active_att = if is_agent {
-                        db.list::<Attempt>()?.into_iter().rev().find(|a| {
-                            a.card_id == c.id
-                                && a.state != "continued"
-                                && !a.finished()
-                                && profile_opt.is_none_or(|pid| a.profile.id == pid)
+                    let active_entry = if is_agent {
+                        db.list::<TerminalEntry>()?.into_iter().rev().find(|t| {
+                            t.agent.as_ref().is_some_and(|a| {
+                                a.card_id == c.id
+                                    && !a.finished()
+                                    && profile_opt.is_none_or(|pid| a.profile.id == pid)
+                            })
                         })
                     } else {
                         None
                     };
                     let actor = if is_agent {
-                        let pid = active_att
+                        let pid = active_entry
                             .as_ref()
+                            .and_then(|t| t.agent.as_ref())
                             .map(|a| a.profile.id.as_str())
                             .or(profile_opt)
                             .unwrap_or(&config.default_agent);
@@ -434,7 +442,7 @@ impl AppServer {
                         "card.updated",
                         &actor,
                         "Card updated",
-                        active_att.as_ref().map(|a| a.id.clone()),
+                        active_entry.as_ref().map(|t| t.id.clone()),
                         json!({"title":c.title,"body":c.body,"changed_fields": ([if c.title!=before.title {Some("title")}else{None},if c.body!=before.body {Some("body")}else{None}].into_iter().flatten().collect::<Vec<_>>()),"before_revision":before.revision,"after_revision":c.revision}),
                     )?;
                     db.save(&c)?;
@@ -443,9 +451,9 @@ impl AppServer {
                             r.card_id == c.id
                                 && r.active()
                                 && (r.state == "waiting_agent"
-                                    || active_att
+                                    || active_entry
                                         .as_ref()
-                                        .is_some_and(|a| r.attempt_id.as_deref() == Some(&a.id)))
+                                        .is_some_and(|t| r.terminal_id.as_deref() == Some(&t.id)))
                         }) {
                             wf_run.inputs["title"] = json!(c.title);
                             wf_run.inputs["body"] = json!(c.body);
@@ -493,18 +501,45 @@ impl AppServer {
                         .as_str()
                         .map(str::trim)
                         .filter(|s| !s.is_empty());
-                    let mut live_attempt = db.list::<Attempt>()?.into_iter().rev().find(|a| {
-                        a.card_id == c.id
-                            && a.state != "continued"
-                            && !a.finished()
-                            && requested_prof.is_none_or(|pid| a.profile.id == pid)
+                    let mut live_entry = db.list::<TerminalEntry>()?.into_iter().rev().find(|t| {
+                        t.agent.as_ref().is_some_and(|a| {
+                            a.card_id == c.id
+                                && !a.finished()
+                                && requested_prof.is_none_or(|pid| a.profile.id == pid)
+                        })
                     });
-                    let profile_label = live_attempt
+                    let profile_label = live_entry
                         .as_ref()
+                        .and_then(|t| t.agent.as_ref())
                         .map(|a| a.profile.id.clone())
                         .or_else(|| requested_prof.map(str::to_owned))
                         .unwrap_or_else(|| config.default_agent.clone());
-                    let live_id = live_attempt.as_ref().map(|a| a.id.clone());
+                    let live_id = live_entry.as_ref().map(|t| t.id.clone());
+
+                    let cancel_other_pending = |db: Db<'_>| -> Result<()> {
+                        for mut pending in db.list::<TerminalEntry>()? {
+                            if Some(pending.id.as_str()) == live_id.as_deref() {
+                                continue;
+                            }
+                            if let Some(a) = &mut pending.agent
+                                && a.card_id == c.id
+                            {
+                                let mut changed = false;
+                                if a.state == "queued" && canban_scheduler::automatic(a) {
+                                    a.state = "cancelled".into();
+                                    changed = true;
+                                }
+                                if a.pending.as_ref().is_some_and(|q| q.trigger.is_automatic()) {
+                                    a.pending = None;
+                                    changed = true;
+                                }
+                                if changed {
+                                    db.save(&pending)?;
+                                }
+                            }
+                        }
+                        Ok(())
+                    };
 
                     if c.stage == target {
                         if let Some(existing) = db
@@ -527,20 +562,12 @@ impl AppServer {
                         {
                             workflow::stop_card(db, &c.id, "superseded")?;
                         }
-                        for mut pending in db.list::<Attempt>()?.into_iter().filter(|a| {
-                            a.card_id == c.id
-                                && Some(a.id.as_str()) != live_id.as_deref()
-                                && a.state == "queued"
-                                && canban_scheduler::automatic(a)
-                        }) {
-                            pending.state = "cancelled".into();
-                            db.save(&pending)?;
-                        }
+                        cancel_other_pending(db)?;
                         let wf_run = workflow::adopt_stage(
                             db,
                             &config,
                             &mut c,
-                            live_attempt.as_mut(),
+                            live_entry.as_mut(),
                             target,
                             None,
                         )?;
@@ -555,15 +582,7 @@ impl AppServer {
                     }
 
                     let from = c.stage.clone();
-                    for mut pending in db.list::<Attempt>()?.into_iter().filter(|a| {
-                        a.card_id == c.id
-                            && Some(a.id.as_str()) != live_id.as_deref()
-                            && a.state == "queued"
-                            && canban_scheduler::automatic(a)
-                    }) {
-                        pending.state = "cancelled".into();
-                        db.save(&pending)?;
-                    }
+                    cancel_other_pending(db)?;
                     workflow::stop_card(db, &c.id, "superseded")?;
                     c.stage = target.into();
                     c.board_order = None;
@@ -577,8 +596,8 @@ impl AppServer {
                         "to": target,
                         "reason": "agent_adopted_stage",
                     });
-                    if let Some(aid) = &live_id {
-                        event_data["attempt_id"] = json!(aid);
+                    if let Some(tid) = &live_id {
+                        event_data["terminal_id"] = json!(tid);
                     }
                     let event = db.append(canban_timeline::event(
                         &c.project_id,
@@ -592,7 +611,7 @@ impl AppServer {
                         db,
                         &config,
                         &mut c,
-                        live_attempt.as_mut(),
+                        live_entry.as_mut(),
                         target,
                         Some(event.id),
                     )?;
@@ -649,13 +668,26 @@ impl AppServer {
                 }
                 // Ordinary queued work from a stage the user has left must not
                 // start later. Already-running executions are deliberately not drained.
-                for mut attempt in db.list::<Attempt>()?.into_iter().filter(|a| {
-                    a.card_id == c.id
-                        && a.state == "queued"
-                        && a.trigger == ExecutionTrigger::StageEntry
-                }) {
-                    attempt.state = "cancelled".into();
-                    db.save(&attempt)?;
+                for mut entry in db.list::<TerminalEntry>()? {
+                    if let Some(a) = &mut entry.agent
+                        && a.card_id == c.id
+                    {
+                        let mut changed = false;
+                        if a.state == "queued" && a.trigger == ExecutionTrigger::StageEntry {
+                            a.state = "cancelled".into();
+                            changed = true;
+                        }
+                        if a.pending
+                            .as_ref()
+                            .is_some_and(|q| q.trigger == ExecutionTrigger::StageEntry)
+                        {
+                            a.pending = None;
+                            changed = true;
+                        }
+                        if changed {
+                            db.save(&entry)?;
+                        }
+                    }
                 }
                 c.stage = target.into();
                 c.board_order = None;
@@ -814,25 +846,26 @@ impl AppServer {
                 for agent in mentions {
                     let profile =
                         canban_scheduler::select_in_project(&config, Some(&project), Some(&agent))?;
-                    let _context = crate::sessions::conversation(db, &c, &profile)?;
-                    let active = db.list::<Attempt>()?.into_iter().rev().find(|a| {
-                        a.card_id == c.id
-                            && a.state != "continued"
-                            && a.profile.id == agent
-                            && (!(c.human_gate.is_some()
-                                && a.state == "queued"
-                                && canban_scheduler::automatic(a))
-                                && matches!(
-                                    a.state.as_str(),
-                                    "queued" | "starting" | "running" | "working" | "blocked"
-                                )
-                                || matches!(a.state.as_str(), "completed" | "backlog")
-                                    && a.profile == profile
-                                    && a.terminal.is_some()
-                                    && !a.finished())
+                    let context = crate::sessions::conversation(db, &c, &profile)?;
+                    let active = db.get::<TerminalEntry>(&context.id).ok().filter(|t| {
+                        t.agent.as_ref().is_some_and(|a| {
+                            a.card_id == c.id
+                                && a.profile.id == agent
+                                && (!(c.human_gate.is_some()
+                                    && a.state == "queued"
+                                    && canban_scheduler::automatic(a))
+                                    && matches!(
+                                        a.state.as_str(),
+                                        "queued" | "starting" | "running" | "working" | "blocked"
+                                    )
+                                    || matches!(a.state.as_str(), "completed" | "backlog")
+                                        && a.profile == profile
+                                        && a.terminal.is_some()
+                                        && !a.finished())
+                        })
                     });
-                    let att = if let Some(att) = active {
-                        att
+                    let entry = if let Some(entry) = active {
+                        entry
                     } else {
                         let instruction = canban_context::render_template(
                             include_str!(concat!(
@@ -863,7 +896,7 @@ impl AppServer {
                         profile_id: agent,
                         comment_id: event.id.clone(),
                         body: body.into(),
-                        attempt_id: Some(att.id.clone()),
+                        terminal_id: Some(entry.id.clone()),
                         state: "pending".into(),
                         error: None,
                         reply_path: None,
@@ -921,7 +954,11 @@ impl AppServer {
             "agent.end" => self.control_agent(p, true),
             "execution.report" => self.report(p),
             "execution.retry" => self.mutate(method, &p, |db| {
-                let prev: Attempt = db.get(strp(&p, "attempt_id")?)?;
+                let mut entry: TerminalEntry = db.get(strp(&p, "terminal_id")?)?;
+                let prev = entry
+                    .agent
+                    .as_ref()
+                    .context("Terminal has no Agent assignment")?;
                 let mut c: Card = db.get(&prev.card_id)?;
                 ensure!(
                     p["execution"].is_null(),
@@ -943,7 +980,8 @@ impl AppServer {
                             .is_some_and(|v| v["state"] == "finished"),
                     "End the previous Agent before retrying"
                 );
-                let next = crate::sessions::retry_attempt(db, &c, &prev)?;
+                crate::sessions::retry_agent(db, &c, &mut entry)?;
+                let run_number = entry.agent.as_ref().map(|a| a.number).unwrap_or(1);
                 c.human_gate = None;
                 c.attention = None;
                 c.revision += 1;
@@ -953,13 +991,13 @@ impl AppServer {
                     &c,
                     "execution.retry_queued",
                     "user",
-                    "Fresh attempt queued",
-                    Some(next.id.clone()),
-                    json!({"previous_attempt":prev.id,"attempt":next.number}),
+                    "Fresh Agent run queued",
+                    Some(entry.id.clone()),
+                    json!({"terminal_id":entry.id,"run_number":run_number}),
                 )?;
-                Ok(serde_json::to_value(next)?)
+                Ok(serde_json::to_value(entry)?)
             }),
-            "execution.output" => self.output(strp(&p, "attempt_id")?),
+            "execution.output" | "terminal.output" => self.output(strp(&p, "terminal_id")?),
             "resource.read" => self.read_resource(strp(&p, "card_id")?, strp(&p, "path")?),
             "resource.materialize" => {
                 let card: Card = self.store.lock().unwrap().db().get(strp(&p, "card_id")?)?;

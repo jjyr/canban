@@ -21,12 +21,17 @@ fn setup() -> (tempfile::TempDir, Arc<AppServer>, Project, Card) {
     .unwrap();
     (dir, app, p, c)
 }
-fn admit(app: &AppServer, queued: &Attempt) -> Attempt {
+fn admit(app: &AppServer, queued: &TerminalEntry) -> TerminalEntry {
     app.store
         .lock()
         .unwrap()
         .write(|db| {
-            let mut run: Attempt = db.get(&queued.id)?;
+            let mut entry: TerminalEntry = db.get(&queued.id)?;
+            let run = entry.agent.as_mut().unwrap();
+            if run.pending.is_some() {
+                run.promote_pending();
+                run.number += 1;
+            }
             if run.number == 0 {
                 run.number = 1;
             }
@@ -34,8 +39,8 @@ fn admit(app: &AppServer, queued: &Attempt) -> Attempt {
             run.core_id = Some("core-test".into());
             run.terminal = Some("t1".into());
             run.cwd = "/tmp".into();
-            db.save(&run)?;
-            Ok(run)
+            db.save(&entry)?;
+            Ok(entry)
         })
         .unwrap()
 }
@@ -46,15 +51,15 @@ fn state_history_and_queue_are_atomic_and_retries_do_not_dispatch_twice() {
     app.call("card.move", move_p.clone()).unwrap();
     app.call("card.move", move_p).unwrap();
     let snap = app.snapshot().unwrap();
-    assert_eq!(snap.attempts.len(), 1);
+    assert_eq!(snap.terminals.len(), 1);
     assert_eq!(snap.cards[0].stage, "develop");
-    let _run = admit(&app, &snap.attempts[0]);
+    let _run = admit(&app, &snap.terminals[0]);
     let report = json!({"request_key":"finish-once","project_id":p.id,"card":c.number,"state":"completed","message":"done","body":"# Full report\nVerified change"});
     app.call("execution.report", report.clone()).unwrap();
     app.call("execution.report", report).unwrap();
     let snap = app.snapshot().unwrap();
     assert_eq!(snap.cards[0].stage, "review");
-    assert_eq!(snap.attempts.len(), 1);
+    assert_eq!(snap.terminals.len(), 1);
     assert_eq!(snap.reports.len(), 1);
     assert!(
         snap.events
@@ -92,7 +97,7 @@ fn failed_revision_leaves_no_event_or_request() {
     );
     let s = app.snapshot().unwrap();
     assert_eq!(s.events.len(), 1);
-    assert!(s.attempts.is_empty());
+    assert!(s.terminals.is_empty());
     assert_eq!(s.cards[0].stage, "backlog");
 }
 #[test]
@@ -109,11 +114,15 @@ fn mentions_coalesce_in_the_card_profile_queue_without_stage_callback() {
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
-    assert_eq!(snap.attempts.len(), 1);
+    assert_eq!(snap.terminals.len(), 1);
     assert_eq!(snap.questions.len(), 2);
-    assert_eq!(snap.questions[0].attempt_id, snap.questions[1].attempt_id);
-    assert!(snap.attempts.iter().all(|r| r.on_completed.is_none()));
-    let _run = admit(&app, &snap.attempts[0]);
+    assert_eq!(snap.questions[0].terminal_id, snap.questions[1].terminal_id);
+    assert!(
+        snap.terminals
+            .iter()
+            .all(|r| r.agent.as_ref().unwrap().on_completed.is_none())
+    );
+    let _run = admit(&app, &snap.terminals[0]);
     app.call("execution.report",json!({"project_id":p.id,"card":c.number,"profile_id":"codex","state":"completed","message":"answer","request_key":"answer1"})).unwrap();
     assert_eq!(app.snapshot().unwrap().cards[0].stage, "backlog");
 }
@@ -125,7 +134,7 @@ fn blocked_produces_attention_and_durable_notice() {
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let _run = admit(&app, &app.snapshot().unwrap().attempts[0]);
+    let _run = admit(&app, &app.snapshot().unwrap().terminals[0]);
     app.call("execution.report",json!({"project_id":p.id,"card":c.number,"state":"blocked","message":"Need clarification","request_key":"blocked1"})).unwrap();
     let s = app.snapshot().unwrap();
     assert!(s.cards[0].attention.is_some());
@@ -164,8 +173,11 @@ fn legacy_tags_are_ignored_and_unassigned_stages_use_the_global_default() {
     .unwrap();
     let snapshot = app.snapshot().unwrap();
     assert!(snapshot.cards[0].human_gate.is_none());
-    assert_eq!(snapshot.attempts.len(), 1);
-    assert_eq!(snapshot.attempts[0].profile.id, app.config().default_agent);
+    assert_eq!(snapshot.terminals.len(), 1);
+    assert_eq!(
+        snapshot.terminals[0].agent.as_ref().unwrap().profile.id,
+        app.config().default_agent
+    );
 }
 #[test]
 fn archive_compresses_owned_files_and_remains_readable_after_restore() {
@@ -204,7 +216,7 @@ fn archive_compresses_owned_files_and_remains_readable_after_restore() {
         std::fs::read(app.home.join(artifact.path)).unwrap(),
         b"hello"
     );
-    assert!(app.snapshot().unwrap().attempts.is_empty());
+    assert!(app.snapshot().unwrap().terminals.is_empty());
 }
 #[test]
 fn resource_cannot_escape_card_directory() {
@@ -228,28 +240,44 @@ fn workflow_cycles_are_rejected() {
 fn ipc_preserves_large_context_and_report_frames() {
     let (_dir, app, project, initial_card) = setup();
     let body = "large context 中文\n".repeat(12000);
-    let queued = canban_scheduler::attempt(
+    let profile = app.config().profiles[0].clone();
+    let run = canban_scheduler::agent_run(
         &project.id,
         &initial_card.id,
         1,
         "backlog",
         "comment:test",
-        app.config().profiles[0].clone(),
+        profile.clone(),
         "Report only".into(),
         None,
     );
+    let cid = Conversation::key(&initial_card.id, &profile.id);
+    let queued = TerminalEntry {
+        id: cid.clone(),
+        conversation_id: Some(cid),
+        number: 1,
+        name: None,
+        manual_number: None,
+        origin_card_id: Some(initial_card.id.clone()),
+        agent_engine: None,
+        runtime: None,
+        created_at: run.updated_at,
+        agent: Some(run),
+    };
     app.store
         .lock()
         .unwrap()
         .write(|db| db.save(&queued))
         .unwrap();
-    let mut attempt = admit(&app, &queued);
-    attempt.terminal = None;
-    attempt.core_id = None;
+    let mut admitted = admit(&app, &queued);
+    if let Some(a) = admitted.agent.as_mut() {
+        a.terminal = None;
+        a.core_id = None;
+    }
     app.store
         .lock()
         .unwrap()
-        .write(|db| db.save(&attempt))
+        .write(|db| db.save(&admitted))
         .unwrap();
     let running = app.start().unwrap();
     let card = rpc(
@@ -304,7 +332,7 @@ fn deferred_notes_preserve_legacy_data_without_injecting_it_into_new_executions(
     )
     .unwrap();
     let snapshot = app.snapshot().unwrap();
-    let req = &snapshot.attempts[0];
+    let req = &snapshot.terminals[0];
     let card = &snapshot.cards[0];
     let path = canban_context::capture(
         &app.home,
@@ -359,9 +387,10 @@ fn legacy_capacity_fields_do_not_survive_config_or_request_loading() {
         json!({"card_id":card.id,"body":"@codex task"}),
     )
     .unwrap();
-    let mut request = serde_json::to_value(&app.snapshot().unwrap().attempts[0]).unwrap();
+    let mut request =
+        serde_json::to_value(app.snapshot().unwrap().terminals[0].agent.as_ref().unwrap()).unwrap();
     request["profile"]["capacity"] = json!(1);
-    let loaded: Attempt = serde_json::from_value(request).unwrap();
+    let loaded: AgentRun = serde_json::from_value(request).unwrap();
     assert!(
         serde_json::to_value(loaded).unwrap()["profile"]
             .get("capacity")
@@ -382,8 +411,8 @@ fn template_profiles_and_mentions_select_independent_roles_and_callbacks() {
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let developer = app.snapshot().unwrap().attempts[0].clone();
-    assert_eq!(developer.profile.id, "developer");
+    let developer = app.snapshot().unwrap().terminals[0].clone();
+    assert_eq!(developer.agent.as_ref().unwrap().profile.id, "developer");
     app.call(
         "comment.add",
         json!({"card_id":card.id,"body":"@reviewer assess the approach"}),
@@ -392,24 +421,37 @@ fn template_profiles_and_mentions_select_independent_roles_and_callbacks() {
     let mention = app
         .snapshot()
         .unwrap()
-        .attempts
+        .terminals
         .into_iter()
-        .find(|r| r.trigger.is_comment())
+        .find(|r| r.agent.as_ref().is_some_and(|a| a.trigger.is_comment()))
         .unwrap();
-    assert_eq!(mention.profile.id, "reviewer");
-    assert!(mention.on_completed.is_none());
+    assert_eq!(mention.agent.as_ref().unwrap().profile.id, "reviewer");
+    assert!(mention.agent.as_ref().unwrap().on_completed.is_none());
     let _run = admit(&app, &developer);
     app.call("execution.report",json!({"project_id":project.id,"card":card.number,"profile_id":"developer","state":"completed","request_key":"roles-completed"})).unwrap();
     let snapshot = app.snapshot().unwrap();
-    let review = snapshot
-        .attempts
+    let review_entry = snapshot
+        .terminals
         .iter()
-        .find(|r| r.trigger == ExecutionTrigger::StageEntry && r.stage == "review")
+        .find(|r| r.agent.as_ref().is_some_and(|a| a.profile.id == "reviewer"))
         .unwrap();
-    assert_eq!(review.profile.id, "reviewer");
+    let review_agent = review_entry.agent.as_ref().unwrap();
+    // Either `review_agent` itself (if promoted) or `review_agent.pending` holds the `review` StageEntry task!
+    let (review_profile, review_stage, review_trigger) = if let Some(p) = &review_agent.pending {
+        (&p.profile, p.stage.as_str(), &p.trigger)
+    } else {
+        (
+            &review_agent.profile,
+            review_agent.stage.as_str(),
+            &review_agent.trigger,
+        )
+    };
+    assert_eq!(*review_trigger, ExecutionTrigger::StageEntry);
+    assert_eq!(review_stage, "review");
+    assert_eq!(review_profile.id, "reviewer");
     assert_ne!(
-        review.profile.role_instruction,
-        developer.profile.role_instruction
+        review_profile.role_instruction,
+        developer.agent.as_ref().unwrap().profile.role_instruction
     );
     assert!(
         serde_json::to_value(&snapshot.cards[0])
@@ -479,7 +521,7 @@ fn queued_role_and_stage_task_are_immutable_after_config_reload() {
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let before = app.snapshot().unwrap().attempts[0].clone();
+    let before = app.snapshot().unwrap().terminals[0].clone();
     let mut config = app.config();
     config
         .profiles
@@ -493,7 +535,7 @@ fn queued_role_and_stage_task_are_immutable_after_config_reload() {
     )
     .unwrap();
     app.call("config.reload", json!({})).unwrap();
-    assert_eq!(app.snapshot().unwrap().attempts[0], before);
+    assert_eq!(app.snapshot().unwrap().terminals[0], before);
     let snapshot = app.snapshot().unwrap();
     let path = canban_context::capture(
         &app.home,
@@ -506,8 +548,9 @@ fn queued_role_and_stage_task_are_immutable_after_config_reload() {
     )
     .unwrap();
     let prompt = std::fs::read_to_string(app.home.join(path)).unwrap();
-    assert!(prompt.contains(&before.profile.role_instruction));
-    assert!(prompt.contains(&before.instruction));
+    let before_agent = before.agent.as_ref().unwrap();
+    assert!(prompt.contains(&before_agent.profile.role_instruction));
+    assert!(prompt.contains(&before_agent.instruction));
     assert!(!prompt.contains("New role"));
     app.call(
         "comment.add",
@@ -515,7 +558,7 @@ fn queued_role_and_stage_task_are_immutable_after_config_reload() {
     )
     .unwrap();
     // Input appended to the existing invocation retains its loaded profile.
-    assert_eq!(app.snapshot().unwrap().attempts.len(), 1);
+    assert_eq!(app.snapshot().unwrap().terminals.len(), 1);
     let _run = admit(&app, &before);
     app.call("execution.report",json!({"project_id":project.id,"card":card.number,"profile_id":"developer","state":"completed","request_key":"finish-old-role"})).unwrap();
     app.call(
@@ -526,9 +569,14 @@ fn queued_role_and_stage_task_are_immutable_after_config_reload() {
     assert!(
         app.snapshot()
             .unwrap()
-            .attempts
+            .terminals
             .iter()
-            .any(|r| r.profile.role_instruction == "New role")
+            .any(|r| r.agent.as_ref().is_some_and(|a| {
+                a.profile.role_instruction == "New role"
+                    || a.pending
+                        .as_ref()
+                        .is_some_and(|p| p.profile.role_instruction == "New role")
+            }))
     );
 }
 
@@ -588,7 +636,7 @@ fn live_replies_preserve_task_callback_and_require_current_invocation() {
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let run = admit(&app, &app.snapshot().unwrap().attempts[0]);
+    let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
     let binding = json!({"project_id":project.id,"card":card.number,"profile_id":"developer","session_id":"exact-thread"});
     app.call("agent.bind", binding).unwrap();
     app.call("agent.turn_ended", json!({"project_id":project.id,"card":card.number,"profile_id":"developer","session_id":"exact-thread","body":"Ready"})).unwrap();
@@ -598,7 +646,7 @@ fn live_replies_preserve_task_callback_and_require_current_invocation() {
     )
     .unwrap();
     let snap = app.snapshot().unwrap();
-    assert_eq!(snap.attempts.len(), 1);
+    assert_eq!(snap.terminals.len(), 1);
     let q = &snap.questions[0];
     let mut reply = json!({"request_key":"answer-once","project_id":project.id,"card":card.number,"profile_id":"developer","question_id":q.id,"body":"Still working"});
     reply["question_id"] = json!("missing-question");
@@ -619,9 +667,10 @@ fn live_replies_preserve_task_callback_and_require_current_invocation() {
     app.call("execution.report",json!({"project_id":project.id,"card":card.number,"profile_id":"developer","state":"completed","body":"Done","request_key":"finish-live"})).unwrap();
     let snap = app.snapshot().unwrap();
     assert_eq!(snap.cards[0].stage, "review");
-    assert!(snap.attempts[0].close_state.is_empty());
+    let dev_agent = snap.terminals[0].agent.as_ref().unwrap();
+    assert!(dev_agent.close_state.is_empty());
     assert!(
-        snap.attempts[0].turn_ended_at.is_none(),
+        dev_agent.turn_ended_at.is_none(),
         "Earlier ready turn must not close a later task"
     );
     let repeated = app
@@ -630,9 +679,14 @@ fn live_replies_preserve_task_callback_and_require_current_invocation() {
             json!({"card_id":card.id,"profile_id":"developer"}),
         )
         .unwrap();
-    assert_eq!(repeated["attempt_id"], run.id);
-    assert_eq!(app.snapshot().unwrap().attempts.len(), 2);
-    let _reviewer = admit(&app, &snap.attempts[1]);
+    assert_eq!(repeated["terminal_id"], run.id);
+    assert_eq!(app.snapshot().unwrap().terminals.len(), 2);
+    let reviewer_entry = snap
+        .terminals
+        .iter()
+        .find(|t| t.agent.as_ref().is_some_and(|a| a.profile.id == "reviewer"))
+        .unwrap();
+    let _reviewer = admit(&app, reviewer_entry);
     assert!(app.call("agent.bind",json!({"project_id":project.id,"card":card.number,"profile_id":"reviewer","session_id":"exact-thread"})).is_err());
     assert!(
         app.call(
@@ -681,7 +735,7 @@ fn completion_retains_interactive_terminal_until_idle_timeout_or_explicit_close(
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let run = admit(&app, &app.snapshot().unwrap().attempts[0]);
+    let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
     app.call("execution.report",json!({"project_id":project.id,"card":card.number,"state":"completed","message":"Done","request_key":"retained-completion"})).unwrap();
     for state in ["done", "idle", "blocked", "working"] {
         app.observe_lifecycle(
@@ -689,10 +743,11 @@ fn completion_retains_interactive_terminal_until_idle_timeout_or_explicit_close(
             &json!({"state":"live","status":{"state":state},"turn":8,"status_ms":now()}),
         )
         .unwrap();
-        let current = app.snapshot().unwrap().attempts[0].clone();
-        assert!(current.close_state.is_empty());
-        assert!(!current.finished());
-        assert_eq!(current.terminal, run.terminal);
+        let current = app.snapshot().unwrap().terminals[0].clone();
+        let current_agent = current.agent.as_ref().unwrap();
+        assert!(current_agent.close_state.is_empty());
+        assert!(!current_agent.finished());
+        assert_eq!(current_agent.terminal, run.agent.as_ref().unwrap().terminal);
     }
     assert_eq!(app.snapshot().unwrap().cards[0].stage, "review");
     app.call(
@@ -701,11 +756,14 @@ fn completion_retains_interactive_terminal_until_idle_timeout_or_explicit_close(
     )
     .unwrap();
     let s = app.snapshot().unwrap();
-    assert_eq!(s.questions[0].attempt_id.as_deref(), Some(run.id.as_str()));
+    assert_eq!(s.questions[0].terminal_id.as_deref(), Some(run.id.as_str()));
     assert_eq!(
-        s.attempts
+        s.terminals
             .iter()
-            .filter(|r| r.profile.id == "developer")
+            .filter(|r| r
+                .agent
+                .as_ref()
+                .is_some_and(|a| a.profile.id == "developer"))
             .count(),
         1
     );
@@ -812,20 +870,16 @@ fn review_delivery_receipt_survives_retry_restart_and_archive_is_separate() {
         json!({"card_id":card.id,"body":"@codex review"}),
     )
     .unwrap();
-    let run = admit(&app, &app.snapshot().unwrap().attempts[0]);
+    let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
     app.store
         .lock()
         .unwrap()
         .write(|db| {
-            let mut previous = run.clone();
-            previous.state = "continued".into();
-            previous.observed = Some(json!({"state":"live","status":{"state":"done"}}));
-            db.save(&previous)?;
             let mut current = run.clone();
-            current.id = format!("{}:2", run.id);
-            current.number = 2;
-            current.state = "completed".into();
-            current.observed = Some(json!({"state":"finished","exit_code":0}));
+            let agent = current.agent.as_mut().unwrap();
+            agent.number = 2;
+            agent.state = "completed".into();
+            agent.observed = Some(json!({"state":"finished","exit_code":0}));
             db.save(&current)
         })
         .unwrap();
@@ -915,7 +969,7 @@ fn remote_pr_merge_defers_archive_while_agent_live_then_archives_and_handles_pr_
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let req = app.snapshot().unwrap().attempts[0].clone();
+    let req = app.snapshot().unwrap().terminals[0].clone();
     let run = admit(&app, &req);
     app.store
         .lock()
@@ -937,16 +991,17 @@ fn remote_pr_merge_defers_archive_while_agent_live_then_archives_and_handles_pr_
                 review_summary: "approved".into(),
                 workspace: WorkspaceBinding {
                     location: project.work_location(),
-                    path: run.cwd.clone(),
+                    path: run.agent.as_ref().unwrap().cwd.clone(),
                     branch: Some("canban/1".into()),
                     base_commit: None,
                     target_branch: Some("main".into()),
                 },
             });
             db.save(&c)?;
-            let mut a: Attempt = db.get(&run.id)?;
-            a.observed = Some(json!({"state":"live","status":{"state":"working"}}));
-            db.save(&a)
+            let mut entry: TerminalEntry = db.get(&run.id)?;
+            entry.agent.as_mut().unwrap().observed =
+                Some(json!({"state":"live","status":{"state":"working"}}));
+            db.save(&entry)
         })
         .unwrap();
     app.reconcile_remote_pr_merge(
@@ -967,10 +1022,11 @@ fn remote_pr_merge_defers_archive_while_agent_live_then_archives_and_handles_pr_
         .lock()
         .unwrap()
         .write(|db| {
-            let mut a: Attempt = db.get(&run.id)?;
-            a.state = "completed".into();
-            a.observed = Some(json!({"state":"finished","exit_code":0}));
-            db.save(&a)
+            let mut entry: TerminalEntry = db.get(&run.id)?;
+            let agent = entry.agent.as_mut().unwrap();
+            agent.state = "completed".into();
+            agent.observed = Some(json!({"state":"finished","exit_code":0}));
+            db.save(&entry)
         })
         .unwrap();
     // Same-day remains visible; next-day archives once the Agent has finished.
@@ -1094,24 +1150,23 @@ fn review_clears_warning_when_herdr_reports_agent_stopped_and_never_blocks_merge
         json!({"card_id":card.id,"body":"@codex review"}),
     )
     .unwrap();
-    let run = admit(&app, &app.snapshot().unwrap().attempts[0]);
-    let current_id = format!("{}:2", run.id);
+    let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
+    let current_id = run.id.clone();
     app.store
         .lock()
         .unwrap()
         .write(|db| {
-            let mut previous = run.clone();
-            previous.state = "continued".into();
-            previous.observed = Some(json!({"state":"live"}));
-            db.save(&previous)?;
             let mut current = run.clone();
-            current.id = current_id.clone();
-            current.number = 2;
-            current.state = "completed".into();
+            {
+                let a = current.agent.as_mut().unwrap();
+                a.number = 2;
+                a.state = "completed".into();
+                a.connection_state = "connected".into();
+            }
             // Connected terminals whose Agent turn stopped (idle/done/blocked/error) emit no warning at all.
-            current.connection_state = "connected".into();
             for stopped_state in ["idle", "done", "blocked", "error"] {
-                current.observed = Some(json!({"state":"live","status":{"state":stopped_state}}));
+                let obs = Some(json!({"state":"live","status":{"state":stopped_state}}));
+                current.agent.as_mut().unwrap().observed = obs;
                 db.save(&current)?;
                 assert!(
                     super::review::activity_warning(db, &card)?.is_none(),
@@ -1120,8 +1175,10 @@ fn review_clears_warning_when_herdr_reports_agent_stopped_and_never_blocks_merge
             }
             // Disconnected or actively working terminals surface an advisory warning.
             for connection in ["unavailable", "replaced"] {
-                current.connection_state = connection.into();
-                current.observed = Some(json!({"state":"live","status":{"state":"done"}}));
+                let obs = Some(json!({"state":"live","status":{"state":"done"}}));
+                let a = current.agent.as_mut().unwrap();
+                a.connection_state = connection.into();
+                a.observed = obs;
                 db.save(&current)?;
                 assert!(
                     super::review::activity_warning(db, &card)?
@@ -1129,8 +1186,10 @@ fn review_clears_warning_when_herdr_reports_agent_stopped_and_never_blocks_merge
                         .contains("status is unavailable")
                 );
             }
-            current.connection_state = "connected".into();
-            current.observed = Some(json!({"state":"live","status":{"state":"working"}}));
+            let obs = Some(json!({"state":"live","status":{"state":"working"}}));
+            let a = current.agent.as_mut().unwrap();
+            a.connection_state = "connected".into();
+            a.observed = obs;
             db.save(&current)?;
             assert!(
                 super::review::activity_warning(db, &card)?
@@ -1161,8 +1220,9 @@ fn review_clears_warning_when_herdr_reports_agent_stopped_and_never_blocks_merge
         .lock()
         .unwrap()
         .write(|db| {
-            let mut current: Attempt = db.get(&current_id)?;
-            current.observed = Some(json!({"state":"live","status":{"state":"idle"}}));
+            let mut current: TerminalEntry = db.get(&current_id)?;
+            let obs = Some(json!({"state":"live","status":{"state":"idle"}}));
+            current.agent.as_mut().unwrap().observed = obs;
             db.save(&current)
         })
         .unwrap();
@@ -1173,18 +1233,23 @@ fn review_clears_warning_when_herdr_reports_agent_stopped_and_never_blocks_merge
     assert!(idle_preview["reason"].is_null(), "{idle_preview}");
     assert!(idle_preview["warning"].is_null(), "{idle_preview}");
 
-    // Queued/starting/unknown attempts without a terminal also only warn and never block human merge.
+    // Queued/starting/unknown runs without a terminal also only warn and never block human merge.
     app.store
         .lock()
         .unwrap()
         .write(|db| {
             let mut pending = run.clone();
-            pending.id = "pending-attempt".into();
-            pending.terminal = None;
-            pending.core_id = None;
-            pending.observed = None;
+            pending.id = format!("{}:developer", card.id);
+            pending.conversation_id = Some(pending.id.clone());
+            pending.number = 99;
+            {
+                let a = pending.agent.as_mut().unwrap();
+                a.terminal = None;
+                a.core_id = None;
+                a.observed = None;
+            }
             for state in ["queued", "starting", "unknown"] {
-                pending.state = state.into();
+                pending.agent.as_mut().unwrap().state = state.into();
                 db.save(&pending)?;
                 assert!(
                     super::review::activity_warning(db, &card)?
@@ -1235,15 +1300,16 @@ fn core_loss_during_question_delivery_becomes_unknown_without_replay() {
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let run = admit(&app, &app.snapshot().unwrap().attempts[0]);
+    let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
     app.store
         .lock()
         .unwrap()
         .write(|db| {
-            let mut a: Attempt = db.get(&run.id)?;
+            let mut entry: TerminalEntry = db.get(&run.id)?;
+            let a = entry.agent.as_mut().unwrap();
             a.connection_state = "connected".into();
             a.lifecycle.observed_at = Some(now());
-            db.save(&a)
+            db.save(&entry)
         })
         .unwrap();
     app.call(
@@ -1312,9 +1378,9 @@ fn notes_keep_revisions_links_and_provenance_atomically() {
         json!({"card_id":card.id,"revision":card.revision,"stage":"develop"}),
     )
     .unwrap();
-    let req = app.snapshot().unwrap().attempts[0].clone();
+    let req = app.snapshot().unwrap().terminals[0].clone();
     let run = admit(&app, &req);
-    let payload = json!({"note_id":b.id,"revision":renamed.revision,"body":"Updated by Agent","execution":{"attempt_id":run.id},"request_key":"note-agent-once"});
+    let payload = json!({"note_id":b.id,"revision":renamed.revision,"body":"Updated by Agent","execution":{"terminal_id":run.id},"request_key":"note-agent-once"});
     let saved = app.call("note.write", payload.clone()).unwrap();
     assert_eq!(app.call("note.write", payload).unwrap(), saved);
     let history: Vec<NoteEvent> =
@@ -1345,7 +1411,7 @@ fn notes_keep_revisions_links_and_provenance_atomically() {
         )
         .is_err()
     );
-    assert!(app.call("note.write",json!({"note_id":b.id,"revision":saved["revision"],"body":"Bad invocation","execution":{"attempt_id":"missing-attempt"}})).is_err());
+    assert!(app.call("note.write",json!({"note_id":b.id,"revision":saved["revision"],"body":"Bad invocation","execution":{"terminal_id":"missing-terminal"}})).is_err());
     assert_eq!(before, app.snapshot().unwrap());
 }
 
@@ -1389,7 +1455,7 @@ fn note_links_and_card_creation_roll_back_on_invalid_scope() {
     let card:Card=serde_json::from_value(app.call("card.create",json!({"project_id":project.id,"title":"Scoped work","body":"Implement scope","source_note_id":note.id})).unwrap()).unwrap();
     assert_eq!(card.stage, "backlog");
     assert_eq!(card.context_notes, Some(vec![note.id.clone()]));
-    assert!(app.snapshot().unwrap().attempts.is_empty());
+    assert!(app.snapshot().unwrap().terminals.is_empty());
     let saved: Note =
         serde_json::from_value(app.call("note.get", json!({"note_id":note.id})).unwrap()).unwrap();
     assert_eq!(saved.card_ids, vec![card.id.clone()]);
@@ -1452,28 +1518,34 @@ fn global_slots_include_closing_and_unknown_agents_and_resume_after_exit() {
         )
         .unwrap();
         if i < 8 {
-            let req = app.snapshot().unwrap().attempts.last().unwrap().clone();
+            let req = app.snapshot().unwrap().terminals.last().unwrap().clone();
             admit(&app, &req);
         }
     }
     let mut snapshot = app.snapshot().unwrap();
     assert_eq!(canban_scheduler::active_count(&snapshot), 8);
     assert!(canban_scheduler::next(&snapshot, 8).is_none());
-    snapshot.attempts[0].state = "completed".into();
-    snapshot.attempts[0].close_state = "closing".into();
+    {
+        let a = snapshot.terminals[0].agent.as_mut().unwrap();
+        a.state = "completed".into();
+        a.close_state = "closing".into();
+    }
     assert!(canban_scheduler::next(&snapshot, 8).is_none());
-    snapshot.attempts[0].observed = Some(json!({"state":"finished"}));
+    snapshot.terminals[0].agent.as_mut().unwrap().observed = Some(json!({"state":"finished"}));
     assert!(canban_scheduler::next(&snapshot, 8).is_some());
-    snapshot.attempts[0].observed = None;
-    snapshot.attempts[0].terminal = None;
-    snapshot.attempts[0].state = "unknown".into();
+    {
+        let a = snapshot.terminals[0].agent.as_mut().unwrap();
+        a.observed = None;
+        a.terminal = None;
+        a.state = "unknown".into();
+    }
     assert!(canban_scheduler::next(&snapshot, 8).is_none());
     let path = app.home.join("config/agents.json");
     let before: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     app.call("scheduler.configure", json!({"max_agents":2}))
         .unwrap();
     assert_eq!(app.config().scheduler.max_agents, 2);
-    assert_eq!(app.snapshot().unwrap().attempts.len(), 9);
+    assert_eq!(app.snapshot().unwrap().terminals.len(), 9);
     assert!(
         app.call("scheduler.configure", json!({"max_agents":0}))
             .is_err()
@@ -1559,7 +1631,11 @@ steps:
     .unwrap();
     let mut snapshot = app.snapshot().unwrap();
     assert_eq!(
-        canban_scheduler::next(&snapshot, 8).unwrap().card_id,
+        canban_scheduler::next(&snapshot, 8)
+            .unwrap()
+            .agent
+            .unwrap()
+            .card_id,
         second.id
     );
     snapshot
@@ -1569,20 +1645,24 @@ steps:
         .unwrap()
         .human_gate = Some(HumanGate {
         reason: "Pause".into(),
-        attempt_id: None,
+        terminal_id: None,
         next_stage: None,
     });
     assert_eq!(
-        canban_scheduler::next(&snapshot, 8).unwrap().card_id,
+        canban_scheduler::next(&snapshot, 8)
+            .unwrap()
+            .agent
+            .unwrap()
+            .card_id,
         card.id
     );
-    let mut manual = snapshot.attempts[1].clone();
+    let mut manual = snapshot.terminals[1].clone();
     manual.id = "manual".into();
-    manual.trigger = "interactive".into();
-    snapshot.attempts.push(manual);
+    manual.agent.as_mut().unwrap().trigger = "interactive".into();
+    snapshot.terminals.push(manual);
     assert_eq!(canban_scheduler::next(&snapshot, 8).unwrap().id, "manual");
-    snapshot.attempts.pop();
-    snapshot.attempts[1].stage = "develop".into();
+    snapshot.terminals.pop();
+    snapshot.terminals[1].agent.as_mut().unwrap().stage = "develop".into();
     snapshot
         .cards
         .iter_mut()
@@ -1595,10 +1675,14 @@ steps:
         .find(|c| c.id == second.id)
         .unwrap()
         .human_gate = None;
-    snapshot.attempts[0].created_at = 1;
-    snapshot.attempts[1].created_at = 1;
+    snapshot.terminals[0].agent.as_mut().unwrap().updated_at = 1;
+    snapshot.terminals[1].agent.as_mut().unwrap().updated_at = 1;
     assert_eq!(
-        canban_scheduler::next(&snapshot, 8).unwrap().card_id,
+        canban_scheduler::next(&snapshot, 8)
+            .unwrap()
+            .agent
+            .unwrap()
+            .card_id,
         card.id
     );
 }
@@ -1616,7 +1700,7 @@ fn human_review_gate_survives_reports_acknowledgement_restart_and_requires_expli
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let request = app.snapshot().unwrap().attempts[0].clone();
+    let request = app.snapshot().unwrap().terminals[0].clone();
     let _run = admit(&app, &request);
     let report = json!({"project_id":project.id,"card":card.number,"profile_id":"developer","state":"completed","request_key":"human-gate-complete"});
     app.call("execution.report", report.clone()).unwrap();
@@ -1632,7 +1716,7 @@ fn human_review_gate_survives_reports_acknowledgement_restart_and_requires_expli
             .as_deref(),
         Some("review")
     );
-    assert_eq!(snapshot.attempts.len(), 1);
+    assert_eq!(snapshot.terminals.len(), 1);
     app.call("card.attention.clear", json!({"card_id":card.id}))
         .unwrap();
     assert!(app.snapshot().unwrap().cards[0].human_gate.is_some());
@@ -1642,7 +1726,7 @@ fn human_review_gate_survives_reports_acknowledgement_restart_and_requires_expli
         json!({"card_id":card.id,"body":"@reviewer help me inspect"}),
     )
     .unwrap();
-    let manual = app.snapshot().unwrap().attempts.last().unwrap().clone();
+    let manual = app.snapshot().unwrap().terminals.last().unwrap().clone();
     let _manual_run = admit(&app, &manual);
     app.call("execution.report",json!({"project_id":project.id,"card":card.number,"profile_id":"reviewer","state":"completed","request_key":"human-gate-manual"})).unwrap();
     assert!(app.snapshot().unwrap().cards[0].human_gate.is_some());
@@ -1661,9 +1745,14 @@ fn human_review_gate_survives_reports_acknowledgement_restart_and_requires_expli
     assert!(after.cards[0].human_gate.is_none());
     assert_eq!(
         after
-            .attempts
+            .terminals
             .iter()
-            .filter(|r| r.trigger == ExecutionTrigger::StageEntry && r.stage == "review")
+            .filter(|r| r.agent.as_ref().is_some_and(|a| {
+                (a.trigger == ExecutionTrigger::StageEntry && a.stage == "review")
+                    || a.pending.as_ref().is_some_and(|p| {
+                        p.trigger == ExecutionTrigger::StageEntry && p.stage == "review"
+                    })
+            }))
             .count(),
         1
     );
@@ -1677,7 +1766,7 @@ fn blocked_completion_does_not_advance_until_human_continues() {
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let request = app.snapshot().unwrap().attempts[0].clone();
+    let request = app.snapshot().unwrap().terminals[0].clone();
     let _run = admit(&app, &request);
     for state in ["blocked", "completed"] {
         app.call("execution.report",json!({"project_id":project.id,"card":card.number,"state":state,"request_key":format!("blocked-{state}")})).unwrap();
@@ -1701,7 +1790,7 @@ fn recovery_gate_retains_completion_callback_until_human_approval() {
         json!({"card_id":card.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let request = app.snapshot().unwrap().attempts[0].clone();
+    let request = app.snapshot().unwrap().terminals[0].clone();
     let _run = admit(&app, &request);
     app.store
         .lock()
@@ -1757,7 +1846,7 @@ fn removed_routing_fields_are_rejected_without_mutating_cards() {
     let snapshot = app.snapshot().unwrap();
     assert_eq!(snapshot.cards.len(), 1);
     assert_eq!(snapshot.cards[0], card);
-    assert!(snapshot.attempts.is_empty());
+    assert!(snapshot.terminals.is_empty());
 }
 
 #[path = "tests/lifecycle.rs"]
@@ -1775,15 +1864,15 @@ fn explicit_comment_recipients_override_prose_scanning() {
         json!({"card_id":c.id,"body":"The UI shows Ask @claude", "mentions":[]}),
     )
     .unwrap();
-    assert!(app.snapshot().unwrap().attempts.is_empty());
+    assert!(app.snapshot().unwrap().terminals.is_empty());
     app.call(
         "comment.add",
         json!({"card_id":c.id,"body":"Compare @claude and @codex", "mentions":["codex"]}),
     )
     .unwrap();
     let s = app.snapshot().unwrap();
-    assert_eq!(s.attempts.len(), 1);
-    assert_eq!(s.attempts[0].profile.id, "codex");
+    assert_eq!(s.terminals.len(), 1);
+    assert_eq!(s.terminals[0].agent.as_ref().unwrap().profile.id, "codex");
     assert_eq!(s.questions.len(), 1);
     assert_eq!(
         s.events
@@ -1810,7 +1899,11 @@ fn local_card_removal_is_reversible_cancels_queue_and_retains_history() {
     .unwrap();
     let s = app.snapshot().unwrap();
     assert!(s.cards.is_empty());
-    assert!(s.attempts.iter().all(|r| r.state == "cancelled"));
+    assert!(
+        s.terminals
+            .iter()
+            .all(|r| r.agent.as_ref().unwrap().state == "cancelled")
+    );
     assert!(s.events.iter().any(|e| e.kind == "card.removed"));
     let removed: Card =
         serde_json::from_value(app.call("card.get", json!({"card_id":c.id})).unwrap()).unwrap();
@@ -1829,8 +1922,8 @@ fn local_card_removal_is_reversible_cancels_queue_and_retains_history() {
     assert_eq!(s.cards[0].number, c.number);
     assert!(s.cards[0].active());
     assert_eq!(s.cards[0].body, c.body);
-    assert_eq!(s.attempts.len(), 1);
-    assert_eq!(s.attempts[0].state, "cancelled");
+    assert_eq!(s.terminals.len(), 1);
+    assert_eq!(s.terminals[0].agent.as_ref().unwrap().state, "cancelled");
 }
 #[test]
 fn local_card_removal_cannot_orphan_a_live_agent() {
@@ -1840,7 +1933,7 @@ fn local_card_removal_cannot_orphan_a_live_agent() {
         json!({"card_id":c.id,"revision":c.revision,"stage":"develop"}),
     )
     .unwrap();
-    let run = admit(&app, &app.snapshot().unwrap().attempts[0]);
+    let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
     let current = app.snapshot().unwrap().cards[0].clone();
     let error = app
         .call(
@@ -1851,7 +1944,7 @@ fn local_card_removal_cannot_orphan_a_live_agent() {
     assert!(error.to_string().contains("End active Card Agents"));
     let s = app.snapshot().unwrap();
     assert!(s.cards[0].active());
-    assert_eq!(s.attempts[0].id, run.id);
+    assert_eq!(s.terminals[0].id, run.id);
     assert!(!s.events.iter().any(|e| e.kind == "card.removed"));
 }
 
@@ -1863,16 +1956,16 @@ fn continued_assignment_rejects_new_stale_reports_but_preserves_completion_recei
         json!({"card_id":c.id,"revision":1,"stage":"develop"}),
     )
     .unwrap();
-    let run = admit(&app, &app.snapshot().unwrap().attempts[0]);
+    let run = admit(&app, &app.snapshot().unwrap().terminals[0]);
     let report = json!({"request_key":"completed-before-continuation","project_id":p.id,"card":c.number,"state":"completed","message":"Done"});
     app.call("execution.report", report.clone()).unwrap();
     app.store
         .lock()
         .unwrap()
         .write(|db| {
-            let mut a: Attempt = db.get(&run.id)?;
-            a.state = "continued".into();
-            db.save(&a)
+            let mut entry: TerminalEntry = db.get(&run.id)?;
+            entry.agent.as_mut().unwrap().state = "continued".into();
+            db.save(&entry)
         })
         .unwrap();
     assert_eq!(
@@ -1880,11 +1973,14 @@ fn continued_assignment_rejects_new_stale_reports_but_preserves_completion_recei
         true
     );
     let before = app.snapshot().unwrap();
-    let result=app.call("execution.report",json!({"request_key":"obsolete-progress","attempt_id":run.id,"state":"working","body":"Stale"}));
+    let result=app.call("execution.report",json!({"request_key":"obsolete-progress","terminal_id":run.id,"state":"working","body":"Stale"}));
     assert!(result.is_err());
     let after = app.snapshot().unwrap();
     assert_eq!(before.reports, after.reports);
-    assert_eq!(after.attempts[0].state, "continued");
+    assert_eq!(
+        after.terminals[0].agent.as_ref().unwrap().state,
+        "continued"
+    );
 }
 
 #[path = "tests/board.rs"]
@@ -1900,7 +1996,7 @@ fn read_positions_are_monotonic_durable_and_never_approve_a_gate() {
             let mut c: Card = db.get(&card.id)?;
             c.human_gate = Some(HumanGate {
                 reason: "Review required".into(),
-                attempt_id: None,
+                terminal_id: None,
                 next_stage: None,
             });
             db.save(&c)?;
@@ -1942,7 +2038,7 @@ fn read_positions_are_monotonic_durable_and_never_approve_a_gate() {
     assert_eq!(canban_notifications::read_sequence(&after, &card.id), last);
     assert_eq!(before.cards, after.cards);
     assert_eq!(before.events, after.events);
-    assert_eq!(before.attempts, after.attempts);
+    assert_eq!(before.terminals, after.terminals);
     assert!(
         app.call(
             "notifications.read",
@@ -2258,8 +2354,9 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
     .unwrap();
     let snap = app.snapshot().unwrap();
     let req = snap
-        .attempts
+        .terminals
         .iter()
+        .filter_map(|r| r.agent.as_ref())
         .rfind(|r| r.card_id == card.id && r.profile.id == "developer")
         .expect("developer request queued");
     assert_eq!(
@@ -2335,8 +2432,9 @@ fn agent_onboarding_enabled_gating_custom_identities_and_project_overrides_work_
     let null_prof_req = app
         .snapshot()
         .unwrap()
-        .attempts
+        .terminals
         .into_iter()
+        .filter_map(|r| r.agent)
         .rfind(|r| r.card_id == second_card.id)
         .expect("workflow request queued on drag to develop");
     assert_eq!(null_prof_req.profile.id, "developer");
@@ -2559,23 +2657,28 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     .unwrap();
     let snap = app.snapshot().unwrap();
     let comment_req = snap
-        .attempts
+        .terminals
         .iter()
-        .find(|r| r.card_id == card.id && r.trigger.is_comment())
-        .expect("comment attempt queued")
+        .find(|r| {
+            r.agent
+                .as_ref()
+                .is_some_and(|a| a.card_id == card.id && a.trigger.is_comment())
+        })
+        .expect("comment terminal queued")
         .clone();
+    let comment_agent = comment_req.agent.as_ref().unwrap();
     assert_eq!(
-        comment_req.trigger,
+        comment_agent.trigger,
         ExecutionTrigger::Comment {
             comment_id: comment_ev.id.clone()
         }
     );
     assert_eq!(
-        serde_json::to_value(&comment_req.trigger).unwrap(),
+        serde_json::to_value(&comment_agent.trigger).unwrap(),
         json!(format!("comment:{}", comment_ev.id))
     );
 
-    let capture_prompt = |card: &Card, att: &Attempt| -> String {
+    let capture_prompt = |card: &Card, att: &TerminalEntry| -> String {
         let s = app.snapshot().unwrap();
         let rel = canban_context::capture(
             &app.home,
@@ -2608,7 +2711,7 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     let q = snap
         .questions
         .iter()
-        .find(|q| q.attempt_id.as_deref() == Some(&comment_req.id))
+        .find(|q| q.terminal_id.as_deref() == Some(&comment_req.id))
         .unwrap();
     app.call(
         "agent.reply",
@@ -2638,7 +2741,7 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     assert_eq!(
         snap.events
             .iter()
-            .filter(|e| e.data["attempt_id"].as_str() == Some(&comment_req.id)
+            .filter(|e| e.data["terminal_id"].as_str() == Some(&comment_req.id)
                 && e.kind == "comment.replied")
             .count(),
         1
@@ -2647,7 +2750,8 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
         .events
         .iter()
         .find(|e| {
-            e.data["attempt_id"].as_str() == Some(&comment_req.id) && e.kind == "execution.reported"
+            e.data["terminal_id"].as_str() == Some(&comment_req.id)
+                && e.kind == "execution.reported"
         })
         .unwrap();
     assert_eq!(reported_ev.data["comment_replied"], json!(true));
@@ -2674,11 +2778,14 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     let interactive_req = app
         .snapshot()
         .unwrap()
-        .attempts
+        .terminals
         .into_iter()
-        .find(|r| r.card_id == c2.id)
+        .find(|r| r.agent.as_ref().is_some_and(|a| a.card_id == c2.id))
         .unwrap();
-    assert_eq!(interactive_req.trigger, ExecutionTrigger::Interactive);
+    assert_eq!(
+        interactive_req.agent.as_ref().unwrap().trigger,
+        ExecutionTrigger::Interactive
+    );
     let interactive_attempt = admit(&app, &interactive_req);
     let interactive_prompt = capture_prompt(&c2, &interactive_attempt);
     assert!(
@@ -2708,9 +2815,13 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     let task_req = app
         .snapshot()
         .unwrap()
-        .attempts
+        .terminals
         .into_iter()
-        .find(|r| r.card_id == c3.id && r.trigger.is_automatic())
+        .find(|r| {
+            r.agent
+                .as_ref()
+                .is_some_and(|a| a.card_id == c3.id && a.trigger.is_automatic())
+        })
         .unwrap();
     let task_attempt = admit(&app, &task_req);
     let task_prompt = capture_prompt(&c3, &task_attempt);

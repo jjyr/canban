@@ -6,24 +6,26 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) struct Origin {
     actor: String,
     card: Option<String>,
-    attempt_id: Option<String>,
+    terminal_id: Option<String>,
 }
 fn origin(db: Db<'_>, p: &Value, project: &str) -> Result<Origin> {
-    if let Some(aid) = p["attempt_id"]
+    if let Some(tid) = p["terminal_id"]
         .as_str()
-        .or_else(|| p["execution"]["attempt_id"].as_str())
+        .or_else(|| p["execution"]["terminal_id"].as_str())
         .filter(|s| !s.is_empty())
     {
-        let att: Attempt = db.get(aid)?;
-        ensure!(
-            att.project_id == project,
-            "Agent execution belongs to a different Project"
-        );
-        return Ok(Origin {
-            actor: format!("@{}", att.profile.id),
-            card: Some(att.card_id),
-            attempt_id: Some(att.id),
-        });
+        let entry: TerminalEntry = db.get(tid)?;
+        if let Some(att) = entry.agent {
+            ensure!(
+                att.project_id == project,
+                "Agent execution belongs to a different Project"
+            );
+            return Ok(Origin {
+                actor: format!("@{}", att.profile.id),
+                card: Some(att.card_id),
+                terminal_id: Some(entry.id),
+            });
+        }
     }
     let Some(execution) = p.get("execution").filter(|v| !v.is_null()) else {
         if let Some(profile) = p["profile_id"].as_str().filter(|s| !s.is_empty()) {
@@ -37,7 +39,7 @@ fn origin(db: Db<'_>, p: &Value, project: &str) -> Result<Origin> {
             return Ok(Origin {
                 actor: format!("@{profile}"),
                 card: card.map(|c| c.id),
-                attempt_id: None,
+                terminal_id: None,
             });
         }
         return Ok(Origin {
@@ -58,27 +60,32 @@ fn origin(db: Db<'_>, p: &Value, project: &str) -> Result<Origin> {
             "Agent execution belongs to a different Project"
         );
     }
-    let active_attempt = card.as_ref().and_then(|c| {
-        db.list::<Attempt>().ok().and_then(|mut list| {
-            list.retain(|a| {
-                a.card_id == c.id && !a.finished() && profile.is_none_or(|pid| a.profile.id == pid)
+    let active_entry = card.as_ref().and_then(|c| {
+        db.list::<TerminalEntry>().ok().and_then(|mut list| {
+            list.retain(|t| {
+                t.agent.as_ref().is_some_and(|a| {
+                    a.card_id == c.id
+                        && !a.finished()
+                        && profile.is_none_or(|pid| a.profile.id == pid)
+                })
             });
-            list.sort_by_key(|a| a.created_at);
+            list.sort_by_key(|t| t.created_at);
             list.pop()
         })
     });
     let actor = profile
         .map(|pid| format!("@{pid}"))
         .or_else(|| {
-            active_attempt
+            active_entry
                 .as_ref()
+                .and_then(|t| t.agent.as_ref())
                 .map(|a| format!("@{}", a.profile.id))
         })
         .unwrap_or_else(|| "agent".into());
     Ok(Origin {
         actor,
         card: card.map(|c| c.id),
-        attempt_id: active_attempt.map(|a| a.id),
+        terminal_id: active_entry.map(|t| t.id),
     })
 }
 fn emit(
@@ -265,7 +272,7 @@ impl AppServer {
                 if before==after {continue}
                 if let Ok(other)=db.get::<Note>(target) {emit(db,&other,if after{"note.referenced"}else{"note.unreferenced"},format!("{} {}",if after{"Referenced by"}else{"Reference removed from"},n.title),&source,json!({"source_note_id":n.id}))?;}
             }
-            if let Some(card)=&source.card {let card:Card=db.get(card)?;log(db,&card,kind,&source.actor,&format!("Updated Note · {}",n.title),source.attempt_id.clone(),json!({"note_id":n.id,"revision":n.revision}))?;}
+            if let Some(card)=&source.card {let card:Card=db.get(card)?;log(db,&card,kind,&source.actor,&format!("Updated Note · {}",n.title),source.terminal_id.clone(),json!({"note_id":n.id,"revision":n.revision}))?;}
             Ok(serde_json::to_value(n)?)
         })
     }

@@ -7,12 +7,16 @@ impl AppServer {
             .iter()
             .find(|r| r.id == p["row_id"].as_str().unwrap_or(""))
             .context("Overview context no longer exists")?;
-        let run = row
-            .attempt
+        let entry = row
+            .terminal
             .as_ref()
             .context("No terminal for this context")?;
+        let run = entry
+            .agent
+            .as_ref()
+            .context("No Agent assignment for this context")?;
         ensure!(
-            Some(run.id.as_str()) == p["attempt_id"].as_str(),
+            Some(entry.id.as_str()) == p["terminal_id"].as_str(),
             "Overview invocation changed; select the current row again"
         );
         // A finished invocation is durable task context, not a live Terminal.
@@ -55,11 +59,11 @@ impl AppServer {
         ensure!(
             current
                 .iter()
-                .any(|r| r.id == row.id && r.attempt.as_ref().is_some_and(|a| a.id == run.id)),
+                .any(|r| r.id == row.id && r.terminal.as_ref().is_some_and(|t| t.id == entry.id)),
             "Overview invocation changed while reading"
         );
         Ok(
-            json!({"text":text,"source":source,"observed_at":observed_at,"attempt_id":run.id,"terminal":run.terminal,"core_id":run.core_id}),
+            json!({"text":text,"source":source,"observed_at":observed_at,"terminal_id":entry.id,"terminal":run.terminal,"core_id":run.core_id}),
         )
     }
 }

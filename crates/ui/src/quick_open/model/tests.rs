@@ -35,18 +35,30 @@ fn fixture() -> Snapshot {
         links: vec![],
         card_ids: vec![],
     });
-    let mut att = canban_scheduler::attempt(
+    let profile = Config::default().profiles[0].clone();
+    let tid = Conversation::key("c1", &profile.id);
+    let att = canban_scheduler::agent_run(
         "p1",
         "c1",
         1,
         "develop",
         "interactive",
-        Config::default().profiles[0].clone(),
+        profile,
         "Discuss".into(),
         None,
     );
-    att.id = "attempt-1".into();
-    s.attempts.push(att);
+    s.terminals.push(TerminalEntry {
+        id: tid.clone(),
+        conversation_id: Some(tid),
+        number: 1,
+        name: None,
+        manual_number: None,
+        origin_card_id: Some("c1".into()),
+        agent_engine: None,
+        runtime: None,
+        agent: Some(att),
+        created_at: 1,
+    });
     s
 }
 #[test]
@@ -69,11 +81,9 @@ fn fuzzy_search_matches_subsequences_multiple_terms_and_unicode() {
 #[test]
 fn candidates_distinguish_duplicate_numbers_and_keep_one_agent_conversation() {
     let mut s = fixture();
-    let mut next = s.attempts[0].clone();
-    next.id = "follow-up".into();
-    next.number = 2;
-    next.created_at += 1;
-    s.attempts.push(next);
+    let run = s.terminals[0].agent.as_mut().unwrap();
+    run.number = 2;
+    run.updated_at += 1;
     let rows = candidates(&s);
     let cards = rows
         .iter()
@@ -87,7 +97,10 @@ fn candidates_distinguish_duplicate_numbers_and_keep_one_agent_conversation() {
         .filter(|r| r.kind == "Agent")
         .collect::<Vec<_>>();
     assert_eq!(agents.len(), 1);
-    assert_eq!(agents[0].target, Target::Agent("c1:codex".into()));
+    assert_eq!(
+        agents[0].target,
+        Target::Agent(Conversation::key("c1", &Config::default().profiles[0].id))
+    );
     assert!(agents[0].detail.contains("Canban"));
 }
 #[test]
@@ -242,7 +255,8 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
         .into_iter()
         .enumerate()
     {
-        let mut att = canban_scheduler::attempt(
+        let tid = Conversation::key(&card.id, &profile.id);
+        let att = canban_scheduler::agent_run(
             "p1",
             &card.id,
             1,
@@ -252,8 +266,18 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
             "Inspect".into(),
             None,
         );
-        att.id = format!("req-hidden-{idx}");
-        s.attempts.push(att);
+        s.terminals.push(TerminalEntry {
+            id: tid.clone(),
+            conversation_id: Some(tid),
+            number: 40 + idx as u64,
+            name: None,
+            manual_number: None,
+            origin_card_id: Some(card.id.clone()),
+            agent_engine: None,
+            runtime: None,
+            agent: Some(att),
+            created_at: 1,
+        });
         s.terminals.push(TerminalEntry {
             id: format!("term-hidden-{idx}"),
             conversation_id: None,
@@ -273,6 +297,7 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
                 agent_status: None,
                 agent_turn: None,
             }),
+            agent: None,
             created_at: 1,
         });
     }
@@ -296,6 +321,7 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
             agent_status: None,
             agent_turn: None,
         }),
+        agent: None,
         created_at: 1,
     });
     // Whereas a live standalone terminal on an active unmerged card remains searchable.
@@ -318,6 +344,7 @@ fn quick_open_excludes_archived_removed_and_merged_cards_and_their_sessions() {
             agent_status: None,
             agent_turn: None,
         }),
+        agent: None,
         created_at: 1,
     });
 

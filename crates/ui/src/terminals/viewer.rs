@@ -16,44 +16,37 @@ fn context(ui: Ui) -> impl IntoElement {
                 Tone::Info,
             ));
         }
-        let att = row.attempt.as_ref().unwrap();
+        let att = row.agent().unwrap();
+        let id = row.id.clone();
         body = body
             .child(label("Assignment"))
-            .child(read_text(att.instruction.clone()));
+            .child(read_text(att.instruction.clone()))
+            .child(label(format!(
+                "Run {} · {} · {}",
+                att.number,
+                att.state,
+                att.terminal.as_deref().unwrap_or("No terminal")
+            )))
+            .child(muted(format!(
+                "{} · {}",
+                crate::machines::name(
+                    ui,
+                    att.location
+                        .as_ref()
+                        .map(|l| l.machine.as_str())
+                        .unwrap_or("local")
+                ),
+                att.cwd
+            )))
+            .child(action("Read saved output", Variant::Quiet, move |_| {
+                load_text(ui, "execution.output", json!({"terminal_id":id}))
+            }));
         let snapshot = ui.snapshot.get();
-        for a in snapshot
-            .attempts
-            .iter()
-            .filter(|a| row.history.contains(&a.id))
-        {
-            let id = a.id.clone();
-            body = body
-                .child(label(format!(
-                    "Attempt {} · {} · {}",
-                    a.number,
-                    a.state,
-                    a.terminal.as_deref().unwrap_or("No terminal")
-                )))
-                .child(muted(format!(
-                    "{} · {}",
-                    crate::machines::name(
-                        ui,
-                        a.location
-                            .as_ref()
-                            .map(|l| l.machine.as_str())
-                            .unwrap_or("local")
-                    ),
-                    a.cwd
-                )))
-                .child(action("Read saved output", Variant::Quiet, move |_| {
-                    load_text(ui, "execution.output", json!({"attempt_id":id}))
-                }));
-        }
         if let Some(report) = snapshot
             .reports
             .iter()
             .rev()
-            .find(|r| r.attempt_id.as_deref() == row.outcome_attempt_id())
+            .find(|r| r.terminal_id.as_deref() == row.outcome_terminal_id())
         {
             body = body
                 .child(label("Saved outcome"))

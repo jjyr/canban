@@ -72,23 +72,35 @@ fn close_owns_agent_termination_preserves_session_and_never_reports_completion()
     )
     .unwrap();
     let before = app.snapshot().unwrap();
-    let mut run = admit(&app, &before.attempts[0]);
-    run.core_id = Some("original".into());
-    run.provider_session_id = Some("saved-session".into());
-    app.store.lock().unwrap().write(|db| db.save(&run)).unwrap();
+    let mut entry = admit(&app, &before.terminals[0]);
+    entry.agent.as_mut().unwrap().core_id = Some("original".into());
+    entry.agent.as_mut().unwrap().provider_session_id = Some("saved-session".into());
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&entry))
+        .unwrap();
     let params = json!({"terminal_id":before.terminals[0].id,"request_key":"close-agent"});
     let closed = app.call("terminal.close", params.clone()).unwrap();
     assert_eq!(closed["state"], "closed");
     assert_eq!(app.call("terminal.close", params).unwrap(), closed);
     let after = app.snapshot().unwrap();
-    assert_eq!(after.attempts.len(), before.attempts.len());
+    assert_eq!(after.terminals.len(), before.terminals.len());
     assert_eq!(after.cards[0].stage, before.cards[0].stage);
     assert!(after.reports.is_empty());
     assert_eq!(
-        after.attempts[0].provider_session_id.as_deref(),
+        after.terminals[0]
+            .agent
+            .as_ref()
+            .unwrap()
+            .provider_session_id
+            .as_deref(),
         Some("saved-session")
     );
-    assert_eq!(after.attempts[0].close_state, "closing");
+    assert_eq!(
+        after.terminals[0].agent.as_ref().unwrap().close_state,
+        "closing"
+    );
     assert_eq!(
         std::fs::read_to_string(dir.path().join("controls")).unwrap(),
         "terminal.kill\n"
@@ -147,7 +159,7 @@ fn manual_launch_is_idempotent_and_preserves_workflow_budget_names_and_runtime_o
     assert_eq!(launch["env"]["CANBAN_CARD"], c.number.to_string());
     assert_eq!(launch["env"]["CANBAN_PROJECT"], p.id);
     let s = app.snapshot().unwrap();
-    assert!(s.attempts.is_empty());
+    assert!(s.terminals.iter().all(|t| t.agent.is_none()));
     assert_eq!(s.events, before);
     assert_eq!(s.cards[0].stage, "backlog");
     assert_eq!(s.cards[0].revision, c.revision);
@@ -260,7 +272,6 @@ fn upgrading_conversations_allocates_stable_numbers_without_runtime_changes() {
     drop(app);
     let upgraded = reopen(dir.path().join("home"));
     let s = upgraded.snapshot().unwrap();
-    assert_eq!(s.attempts, before.attempts);
     assert_eq!(s.conversations, before.conversations);
     assert_eq!(s.terminals[0].id, s.conversations[0].id);
     assert_eq!(s.terminals[0].title(), "1");
@@ -321,7 +332,13 @@ fn independent_terminals_inherit_observed_cwd_and_only_derive_project_context() 
         .unwrap();
     assert!(context["cwd"].is_null());
     assert!(context["project_id"].is_null());
-    assert!(app.snapshot().unwrap().attempts.is_empty());
+    assert!(
+        app.snapshot()
+            .unwrap()
+            .terminals
+            .iter()
+            .all(|t| t.agent.is_none())
+    );
 }
 
 #[test]
@@ -337,9 +354,13 @@ fn agent_directory_context_cannot_reassign_its_card_or_follow_a_stale_binding() 
     std::fs::write(dir.path().join("cwd"), other["directory"].as_str().unwrap()).unwrap();
     app.call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
         .unwrap();
-    let mut run = admit(&app, &app.snapshot().unwrap().attempts[0]);
-    run.core_id = Some("original".into());
-    app.store.lock().unwrap().write(|db| db.save(&run)).unwrap();
+    let mut entry = admit(&app, &app.snapshot().unwrap().terminals[0]);
+    entry.agent.as_mut().unwrap().core_id = Some("original".into());
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&entry))
+        .unwrap();
     app.observe_terminals().unwrap();
     let s = app.snapshot().unwrap();
     assert_eq!(
@@ -348,8 +369,12 @@ fn agent_directory_context_cannot_reassign_its_card_or_follow_a_stale_binding() 
     );
     assert_eq!(s.conversations[0].project_id, p.id);
     assert_eq!(s.conversations[0].card_id, c.id);
-    run.terminal = Some("new-pty".into());
-    app.store.lock().unwrap().write(|db| db.save(&run)).unwrap();
+    entry.agent.as_mut().unwrap().terminal = Some("new-pty".into());
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&entry))
+        .unwrap();
     assert!(app.snapshot().unwrap().terminal_contexts.is_empty());
 }
 
@@ -494,7 +519,18 @@ fn manual_labels_have_their_own_durable_sequence_and_v5_migration_keeps_runtime_
     let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
     core(&app, dir.path());
     let migrated = app.snapshot().unwrap();
-    assert_eq!(before.attempts, migrated.attempts);
+    assert_eq!(
+        before
+            .terminals
+            .iter()
+            .map(|t| &t.agent)
+            .collect::<Vec<_>>(),
+        migrated
+            .terminals
+            .iter()
+            .map(|t| &t.agent)
+            .collect::<Vec<_>>()
+    );
     let one = migrated
         .terminals
         .iter()
@@ -535,7 +571,7 @@ fn first_terminal_accepts_empty_inheritance_without_a_project_or_conversation() 
     assert!(first["runtime"]["terminal"].is_string());
     let s = app.snapshot().unwrap();
     assert!(s.projects.is_empty() && s.conversations.is_empty());
-    assert!(s.attempts.is_empty());
+    assert!(s.terminals.iter().all(|t| t.agent.is_none()));
     assert_eq!(s.terminals.len(), 1);
 }
 #[test]
@@ -589,7 +625,7 @@ fn ephemeral_agent_terminal_launches_without_prompt_or_resume_and_records_origin
     );
 
     let s = app.snapshot().unwrap();
-    assert!(s.attempts.is_empty());
+    assert!(s.terminals.iter().all(|t| t.agent.is_none()));
     assert!(s.conversations.is_empty());
 }
 
@@ -840,5 +876,11 @@ fn opening_card_shell_and_agent_terminals_immediately_creates_card_worktree_and_
         1,
         "Reusing the prepared Card worktree must not log duplicate workspace.prepared events"
     );
-    assert!(app.snapshot().unwrap().attempts.is_empty());
+    assert!(
+        app.snapshot()
+            .unwrap()
+            .terminals
+            .iter()
+            .all(|t| t.agent.is_none())
+    );
 }

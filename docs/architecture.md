@@ -74,17 +74,16 @@ Git worktree/branch operations execute where the saved workspace lives.
 ## Execution identity
 
 A Project has one mutable current machine/directory. Starting admission snapshots
-that location; an Attempt also saves its cwd, workspace and runtime/provider
+that location onto the Card/profile `TerminalEntry` (`AgentRun`); it also saves its cwd, workspace and runtime/provider
 identity. Existing Resume and Review use their saved location. A changed Project
 setting affects future work and never silently moves an old result. Machine
 aliases are presentation/routes; stored remote Terminal addresses use owner IDs.
 
 ```text
 Project.current_location -> new queued execution admission
-Card + Profile           -> Conversation (provider session)
-Request                  -> trigger + frozen profile/task/callback
-Attempt                  -> location + workspace + Core/Terminal binding
-Report                   -> declared outcome + durable content
+Card + Profile           -> Conversation (provider session) + TerminalEntry (`{card_id}:{profile_id}`)
+TerminalEntry.agent      -> AgentRun (trigger + frozen profile/task/callback + location/workspace + Core/PTY binding + optional pending QueuedAssignment)
+Report                   -> declared outcome + durable content + terminal_id / workflow_run_id
 human gate               -> explicit disposition before workflow continues
 ```
 

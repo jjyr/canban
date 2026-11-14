@@ -317,7 +317,7 @@ mod tests {
             reopened.call("utilities.state", json!({})).unwrap()["preferences"],
             json!({"theme":"dracula","last_project":project["id"]})
         );
-        assert!(reopened.snapshot().unwrap().attempts.is_empty());
+        assert!(reopened.snapshot().unwrap().terminals.is_empty());
         reopened
             .call("utilities.configure", json!({"last_project":null}))
             .unwrap();
