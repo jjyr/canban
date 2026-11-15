@@ -51,7 +51,7 @@ pub fn settings(ui: Ui) -> impl IntoElement {
         .child(summary(ui))
         .child(settings_field("Maximum executing Agents", "Lowering the limit leaves running Agents alone. Later workflow stages run first; human review gates stay paused.",
             field(value, "8").label("Maximum executing Agents").max_w(px(160.))))
-        .child(settings_field("Idle timeout (minutes)", "Idle Agents remain interactive during this interval; human input restarts the timer. Closed sessions leave Terminals and can be resumed from their Card. Use 0 to disable.",
+        .child(settings_field("Idle timeout (minutes)", "Interactive Agents remain open during this interval; completed tasks reclaim after 30s of verified idle, and human input restarts the timer. Closed sessions can be resumed from their Card. Use 0 to disable.",
             field(idle, "15").label("Idle timeout (minutes)").max_w(px(160.))))
         .child(view().items_start()
         .child(action("Save scheduling settings", Variant::Primary, move |_| {

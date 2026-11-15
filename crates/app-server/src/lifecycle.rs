@@ -1,6 +1,45 @@
 //! Runtime status, user activity and idle Agent terminal reclamation.
 use super::*;
 
+/// Completed (`completed` / `backlog`) Agent runs reclaim their idle PTY after 30s
+/// instead of waiting for the full interactive `scheduler.idle_minutes` window.
+pub(super) const COMPLETED_IDLE_RECLAIM_MS: u64 = 30_000;
+
+pub(super) fn idle_reclaim_delay_ms(run: &AgentRun, minutes: u64) -> Option<u64> {
+    if minutes == 0 {
+        return None;
+    }
+    if matches!(run.state.as_str(), "completed" | "backlog") {
+        Some(COMPLETED_IDLE_RECLAIM_MS)
+    } else {
+        Some(minutes.saturating_mul(60_000))
+    }
+}
+
+pub(super) fn idle_reclaim_anchor(run: &AgentRun) -> Option<u64> {
+    let since = run.lifecycle.idle_since?;
+    let mut anchor = since.max(run.lifecycle.last_interaction_at.unwrap_or(0));
+    if matches!(run.state.as_str(), "completed" | "backlog") {
+        anchor = anchor.max(run.completed_at.unwrap_or(0));
+    }
+    Some(anchor)
+}
+
+pub(super) fn idle_reclaim_deadline(
+    run: &AgentRun,
+    minutes: u64,
+    extra_activity_at: u64,
+) -> Option<u64> {
+    let delay = idle_reclaim_delay_ms(run, minutes)?;
+    let anchor = idle_reclaim_anchor(run)?.max(extra_activity_at);
+    Some(anchor.saturating_add(delay))
+}
+
+fn is_non_idle_send_skip(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}");
+    msg.contains("\"kind\":\"status_mismatch\"") || msg.contains("\"kind\":\"blocked\"")
+}
+
 pub(super) fn idle_candidate(
     snapshot: &Snapshot,
     run: &AgentRun,
@@ -8,18 +47,19 @@ pub(super) fn idle_candidate(
     at: u64,
     _viewed: bool,
 ) -> bool {
-    if minutes == 0
-        || !matches!(run.runtime_status(), "idle" | "done")
+    let Some(delay_ms) = idle_reclaim_delay_ms(run, minutes) else {
+        return false;
+    };
+    if !matches!(run.runtime_status(), "idle" | "done")
         || !run.close_state.is_empty()
+        || run.pending.is_some()
     {
         return false;
     }
-    let Some(since) = run.lifecycle.idle_since else {
+    let Some(anchor) = idle_reclaim_anchor(run) else {
         return false;
     };
-    if at.saturating_sub(since.max(run.lifecycle.last_interaction_at.unwrap_or(0)))
-        < minutes.saturating_mul(60_000)
-    {
+    if at.saturating_sub(anchor) < delay_ms {
         return false;
     }
     if (canban_scheduler::automatic(run) || run.workflow_run_id.is_some())
@@ -261,16 +301,28 @@ impl AppServer {
                 continue;
             }
             let _ = self.capture_output(entry);
-            let result = (|| -> Result<Value> {
-                let actual = client.get(terminal)?;
+            enum CloseAttempt {
+                Sent,
+                SkippedNonIdle,
+                AlreadyFinished,
+                Failed(anyhow::Error),
+            }
+            let attempt = (|| -> CloseAttempt {
+                let actual = match client.get(terminal) {
+                    Ok(v) => v,
+                    Err(e) => return CloseAttempt::Failed(e),
+                };
+                if actual["state"] == "finished" {
+                    return CloseAttempt::AlreadyFinished;
+                }
                 let state = actual["status"]["state"].as_str().unwrap_or("");
-                ensure!(
-                    actual["state"] == "live"
-                        && matches!(state, "idle" | "done")
-                        && !self.is_refined_working_now(client, entry, &actual),
-                    "Agent is no longer idle"
-                );
-                if let Some(ExitAction::Input { text }) = &exit_action {
+                if actual["state"] != "live"
+                    || !matches!(state, "idle" | "done")
+                    || self.is_refined_working_now(client, entry, &actual)
+                {
+                    return CloseAttempt::SkippedNonIdle;
+                }
+                let res = if let Some(ExitAction::Input { text }) = &exit_action {
                     let mut params = json!({"terminal":terminal,"text":text});
                     if state == "idle" {
                         params["if"] = json!("idle");
@@ -278,24 +330,49 @@ impl AppServer {
                     client.call("terminal.send", params)
                 } else {
                     client.call("terminal.kill", json!({"terminal":terminal}))
+                };
+                match res {
+                    Ok(_) => CloseAttempt::Sent,
+                    Err(e) if is_non_idle_send_skip(&e) => CloseAttempt::SkippedNonIdle,
+                    Err(e) => CloseAttempt::Failed(e),
                 }
             })();
-            if let Err(e) = result {
-                self.store.lock().unwrap().write(|db| {
-                    let mut current_entry: TerminalEntry = db.get(&entry.id)?;
-                    if let Some(a) = &mut current_entry.agent {
-                        a.close_state = "error".into();
-                        a.error = Some(format!("Idle exit was not confirmed: {e:#}. Inspect before retrying; no forced kill was sent."));
-                        let err_msg = a.error.clone().unwrap();
-                        let card_id = a.card_id.clone();
-                        let proj_id = a.project_id.clone();
-                        let run_num = a.number;
-                        let card: Card = db.get(&card_id)?;
-                        db.save(&canban_notifications::attention(&proj_id, &card_id, &err_msg))?;
-                        log(db, &card, "execution.idle_close_failed", "system", &err_msg, Some(entry.id.clone()), json!({"run_number":run_num}))?;
-                    }
-                    db.save(&current_entry)
-                })?;
+            match attempt {
+                CloseAttempt::Sent | CloseAttempt::AlreadyFinished => {}
+                CloseAttempt::SkippedNonIdle => {
+                    // Runtime left `idle`/`done` right before sending exit; roll back cleanly
+                    // without capping retries so the next `idle`/`done` window reclaims normally.
+                    self.store.lock().unwrap().write(|db| {
+                        let mut current_entry: TerminalEntry = db.get(&entry.id)?;
+                        if let Some(a) = &mut current_entry.agent
+                            && a.close_state == "closing"
+                            && a.lifecycle.close_reason == "idle"
+                        {
+                            a.close_state.clear();
+                            a.close_requested_at = None;
+                            a.lifecycle.close_reason.clear();
+                            db.save(&current_entry)?;
+                        }
+                        Ok(())
+                    })?;
+                }
+                CloseAttempt::Failed(e) => {
+                    self.store.lock().unwrap().write(|db| {
+                        let mut current_entry: TerminalEntry = db.get(&entry.id)?;
+                        if let Some(a) = &mut current_entry.agent {
+                            a.close_state = "error".into();
+                            a.error = Some(format!("Idle exit was not confirmed: {e:#}. Inspect before retrying; no forced kill was sent."));
+                            let err_msg = a.error.clone().unwrap();
+                            let card_id = a.card_id.clone();
+                            let proj_id = a.project_id.clone();
+                            let run_num = a.number;
+                            let card: Card = db.get(&card_id)?;
+                            db.save(&canban_notifications::attention(&proj_id, &card_id, &err_msg))?;
+                            log(db, &card, "execution.idle_close_failed", "system", &err_msg, Some(entry.id.clone()), json!({"run_number":run_num}))?;
+                        }
+                        db.save(&current_entry)
+                    })?;
+                }
             }
             self.emit("runtime", Some(run.card_id.clone()));
         }

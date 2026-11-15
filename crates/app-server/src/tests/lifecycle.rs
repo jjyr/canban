@@ -1,5 +1,5 @@
 use super::*;
-use crate::lifecycle::idle_candidate;
+use crate::lifecycle::{COMPLETED_IDLE_RECLAIM_MS, idle_candidate, idle_reclaim_deadline};
 
 fn observed(entry: &mut TerminalEntry, status: &str) {
     let run = entry.agent.as_mut().unwrap();
@@ -832,10 +832,7 @@ for line in sys.stdin:
     assert_eq!(a1.runtime_status(), "working");
     assert!(!a1.agent_stopped());
     assert_eq!(t1.herdr_status(), HerdrStatus::Working);
-    assert_eq!(
-        a1.observed.as_ref().unwrap()["status"]["raw_state"],
-        "idle"
-    );
+    assert_eq!(a1.observed.as_ref().unwrap()["status"]["raw_state"], "idle");
     assert_eq!(
         a1.observed.as_ref().unwrap()["status"]["refined"],
         "agy.swarm"
@@ -933,7 +930,11 @@ for line in sys.stdin:
     assert!(t1_done.agent.as_ref().unwrap().agent_stopped());
     assert_eq!(canban_scheduler::active_count(&s_done), 0);
 
-    let t2_done = s_done.terminals.iter().find(|t| t.id == "shell-agy").unwrap();
+    let t2_done = s_done
+        .terminals
+        .iter()
+        .find(|t| t.id == "shell-agy")
+        .unwrap();
     assert_eq!(t2_done.herdr_status(), HerdrStatus::Done);
     assert_eq!(app.refine_deadline(), None);
     assert_eq!(app.refined_working_count(), 0);
@@ -943,4 +944,243 @@ for line in sys.stdin:
     app.tick().unwrap();
     app.tick().unwrap();
     assert_eq!(app.refine_probes(), probes_when_settled);
+}
+
+#[test]
+fn completed_runs_reclaim_after_30s_and_repeatedly_skip_non_idle_transitions_without_limit() {
+    let (dir, app, _p, c) = setup();
+    let hc_script = dir.path().join("reclaim-hc");
+    std::fs::write(
+        &hc_script,
+        r#"#!/usr/bin/python3
+import sys, json, os
+base = os.path.dirname(__file__)
+for line in sys.stdin:
+    req = json.loads(line)
+    m = req['method']
+    params = req.get('params', {})
+    state = open(base + '/mode.txt').read().strip() if os.path.exists(base + '/mode.txt') else 'idle'
+    if m == 'hello':
+        res = {'generation': 1}
+    elif m == 'server.status':
+        res = {'core': {'id': 'core-reclaim'}}
+    elif m == 'terminal.get':
+        get_count = int(open(base + '/gets.txt').read()) if os.path.exists(base + '/gets.txt') else 0
+        get_count += 1
+        open(base + '/gets.txt', 'w').write(str(get_count))
+        effective = state
+        if state == 'flip_working_on_second_get' and get_count % 2 == 0:
+            effective = 'working'
+        elif state == 'idle_then_mismatch':
+            effective = 'idle'
+        res = {'address': params.get('terminal', 't1'), 'state': 'live', 'status': {'state': effective}}
+    elif m == 'terminal.send':
+        with open(base + '/sends.jsonl', 'a') as f:
+            f.write(json.dumps(params) + '\n')
+        if state == 'idle_then_mismatch':
+            print(json.dumps({
+                'jsonrpc': '2.0',
+                'id': req['id'],
+                'error': {
+                    'code': -32000,
+                    'message': 't1 is working, not idle',
+                    'data': {'kind': 'status_mismatch', 'hint': 'nothing was typed'}
+                }
+            }), flush=True)
+            continue
+        res = {'started': True}
+    elif m == 'terminal.kill':
+        with open(base + '/kills.jsonl', 'a') as f:
+            f.write(json.dumps(params) + '\n')
+        res = {'sent': True}
+    else:
+        res = {'ok': True}
+    print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': res}), flush=True)
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&hc_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    app.config.write().unwrap().hc = hc_script.to_string_lossy().into_owned();
+    let client = canban_herdr::Client {
+        config: app.config(),
+    };
+
+    app.call(
+        "agent.open",
+        json!({"card_id": c.id, "profile_id": "codex"}),
+    )
+    .unwrap();
+    let req = app.snapshot().unwrap().terminals[0].clone();
+    let mut entry = admit(&app, &req);
+    let base_now = now();
+    observed(&mut entry, "done");
+    {
+        let run = entry.agent.as_mut().unwrap();
+        run.core_id = Some("core-reclaim".into());
+        run.terminal = Some("t1".into());
+        run.profile.exit = Some(ExitAction::Input {
+            text: "/exit".into(),
+        });
+        // Interactive running session still uses `idle_minutes` (15m), not 30s!
+        run.state = "running".into();
+        run.trigger = ExecutionTrigger::Interactive;
+        run.lifecycle.idle_since = Some(base_now.saturating_sub(35_000));
+    }
+    let mut s = app.snapshot().unwrap();
+    s.terminals = vec![entry.clone()];
+    assert!(!idle_candidate(
+        &s,
+        entry.agent.as_ref().unwrap(),
+        15,
+        base_now,
+        false
+    ));
+    assert_eq!(
+        idle_reclaim_deadline(entry.agent.as_ref().unwrap(), 15, 0),
+        Some(base_now.saturating_sub(35_000) + 15 * 60_000)
+    );
+
+    // Once completed (`completed` or `backlog`), unified 30s (`COMPLETED_IDLE_RECLAIM_MS`) applies,
+    // anchored on `max(idle_since, completed_at, last_interaction_at)`.
+    {
+        let run = entry.agent.as_mut().unwrap();
+        run.state = "completed".into();
+        run.trigger = ExecutionTrigger::StageEntry;
+        run.lifecycle.idle_since = Some(base_now.saturating_sub(60_000));
+        run.completed_at = Some(base_now.saturating_sub(10_000));
+    }
+    s.terminals = vec![entry.clone()];
+    assert!(
+        !idle_candidate(&s, entry.agent.as_ref().unwrap(), 15, base_now, false),
+        "Must wait full 30s after completed_at even if idle_since was earlier"
+    );
+    assert!(idle_candidate(
+        &s,
+        entry.agent.as_ref().unwrap(),
+        15,
+        base_now + 20_000,
+        false
+    ));
+    assert!(!idle_candidate(
+        &s,
+        entry.agent.as_ref().unwrap(),
+        0,
+        base_now + 20_000,
+        false
+    ));
+    assert_eq!(COMPLETED_IDLE_RECLAIM_MS, 30_000);
+
+    // Queued `pending` follow-up assignment blocks premature idle reclamation.
+    {
+        let mut with_pending = entry.clone();
+        with_pending.agent.as_mut().unwrap().completed_at = Some(base_now.saturating_sub(35_000));
+        with_pending.agent.as_mut().unwrap().pending = Some(QueuedAssignment {
+            stage: "review".into(),
+            trigger: ExecutionTrigger::StageEntry,
+            profile: with_pending.agent.as_ref().unwrap().profile.clone(),
+            instruction: "next stage".into(),
+            on_completed: None,
+            require_human_review: false,
+            workflow_run_id: None,
+            workflow_step: None,
+            queued_at: base_now,
+        });
+        s.terminals = vec![with_pending.clone()];
+        assert!(!idle_candidate(
+            &s,
+            with_pending.agent.as_ref().unwrap(),
+            15,
+            base_now,
+            false
+        ));
+    }
+
+    // Persist a completed, 35s-idle candidate and exercise repeated non-idle races (> 5 cycles)
+    // without ever tripping `close_state = "error"` or exhausting a retry cap.
+    entry.agent.as_mut().unwrap().completed_at = Some(base_now.saturating_sub(35_000));
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| db.save(&entry))
+        .unwrap();
+
+    for mode in [
+        "flip_working_on_second_get",
+        "idle_then_mismatch",
+        "flip_working_on_second_get",
+        "idle_then_mismatch",
+        "flip_working_on_second_get",
+        "idle_then_mismatch",
+    ] {
+        std::fs::write(dir.path().join("mode.txt"), mode).unwrap();
+        let _ = std::fs::remove_file(dir.path().join("gets.txt"));
+        app.close_idle(&client).unwrap();
+        let after = app.snapshot().unwrap();
+        let run = after.terminals[0].agent.as_ref().unwrap();
+        assert_eq!(
+            run.close_state, "",
+            "Non-idle race ({mode}) must roll back close_state cleanly"
+        );
+        assert!(run.close_requested_at.is_none());
+        assert_eq!(run.lifecycle.close_reason, "");
+        assert!(run.error.is_none());
+        assert!(
+            !after
+                .events
+                .iter()
+                .any(|e| e.kind == "execution.idle_close_failed"),
+            "Non-idle race ({mode}) must not emit idle_close_failed"
+        );
+    }
+
+    // Also verify `observe_lifecycle` clears `idle_since` when transitioning to `working`,
+    // then re-arms a fresh 30s window on the next `done` transition and closes cleanly once elapsed.
+    app.observe_lifecycle(
+        &app.snapshot().unwrap().terminals[0],
+        &json!({"state": "live", "status": {"state": "working"}, "turn": 2}),
+    )
+    .unwrap();
+    assert!(
+        app.snapshot().unwrap().terminals[0]
+            .agent
+            .as_ref()
+            .unwrap()
+            .lifecycle
+            .idle_since
+            .is_none()
+    );
+    app.observe_lifecycle(
+        &app.snapshot().unwrap().terminals[0],
+        &json!({"state": "live", "status": {"state": "done"}, "turn": 2}),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("mode.txt"), "done").unwrap();
+    // Freshly re-entered `done` (< 30s) is not reclaimed yet.
+    app.close_idle(&client).unwrap();
+    assert_eq!(
+        app.snapshot().unwrap().terminals[0]
+            .agent
+            .as_ref()
+            .unwrap()
+            .close_state,
+        ""
+    );
+
+    // Once 30s elapse in `done`, `close_idle` dispatches normal exit and enters `closing`.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut cur: TerminalEntry = db.get(&entry.id)?;
+            cur.agent.as_mut().unwrap().lifecycle.idle_since = Some(now().saturating_sub(31_000));
+            db.save(&cur)
+        })
+        .unwrap();
+    app.close_idle(&client).unwrap();
+    let final_snap = app.snapshot().unwrap();
+    let final_run = final_snap.terminals[0].agent.as_ref().unwrap();
+    assert_eq!(final_run.close_state, "closing");
+    assert_eq!(final_run.lifecycle.close_reason, "idle");
+    assert!(final_run.error.is_none());
 }

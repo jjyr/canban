@@ -45,7 +45,7 @@ Canban completion and runtime status are separate. A `done` status cannot produc
 
 ## Idle reclamation
 
-Configuration and Settings expose `scheduler.idle_minutes`, default **15**, with **0** disabling reclamation. Existing JSON files get the default without migration. Scheduler configuration preserves other settings and profile commands.
+Configuration and Settings expose `scheduler.idle_minutes`, default **15**, with **0** disabling reclamation. Ongoing interactive sessions use `idle_minutes`, while completed runs (`completed` / `backlog`) reclaim after **30 seconds** of verified `idle`/`done` inactivity (`COMPLETED_IDLE_RECLAIM_MS`). Existing JSON files get the default without migration. Scheduler configuration preserves other settings and profile commands.
 
 A candidate needs verified live root idle/done, a bound provider session ID, a resume command and a normal-exit input action. The timeout uses the later of the observed idle boundary and actual human interaction. A renewed working state stops idle candidacy; reconnect/restart requires fresh observations and a new idle interval. Opening/viewing alone does not indefinitely protect the process.
 

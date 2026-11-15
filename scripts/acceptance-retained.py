@@ -121,13 +121,21 @@ steps:
  for i in range(20):
   marker=('LATENCY_'+str(i)).encode();start=time.monotonic();frame(channel,0,marker+b'\r');output_until(b'INPUT '+marker);samples.append((time.monotonic()-start)*1000)
  frame(channel,0,b'idle\r');output_until(b'IDLE_READY')
+ idle_started=time.monotonic()
  s=wait(lambda s:agent(s)['lifecycle'].get('last_interaction_at') and agent(s)['lifecycle'].get('idle_since'),'human activity observed')
  old=round(time.time()*1000)-120000
- db=sqlite3.connect(home/'canban.sqlite');row=json.loads(db.execute('select data from terminals where id=?',(current['id'],)).fetchone()[0]);row['agent']['lifecycle']['idle_since']=old;row['agent']['lifecycle']['last_interaction_at']=old;db.execute('update terminals set data=? where id=?',(json.dumps(row),current['id']));db.commit();db.close()
+ db=sqlite3.connect(home/'canban.sqlite');row=json.loads(db.execute('select data from terminals where id=?',(current['id'],)).fetchone()[0]);row['agent']['lifecycle']['idle_since']=old;row['agent']['lifecycle']['last_interaction_at']=old;row['agent']['completed_at']=old;db.execute('update terminals set data=? where id=?',(json.dumps(row),current['id']));db.commit();db.close()
  time.sleep(1.2);s=call('app.snapshot');assert agent(s)['observed']['state']=='live'
  print('HUMAN_INPUT_RESETS_IDLE_OK; RELAY_ROUNDTRIP_MS median=%.2f p95=%.2f'%(statistics.median(samples),sorted(samples)[18]),flush=True)
- print('WAITING_FOR_ONE_MINUTE_IDLE_EXIT',flush=True)
- s=wait(lambda s:(agent(s).get('observed') or {}).get('state')=='finished','idle exit while viewer open',timeout=75)
+ # Resume working before the 30s completed-idle window expires, then re-enter idle; reclamation must skip cleanly and run on the next idle window.
+ frame(channel,0,b'working\r');output_until(b'WORKING_READY')
+ wait(lambda s:(agent(s).get('observed') or {}).get('status',{}).get('state')=='working' and agent(s)['lifecycle'].get('idle_since') is None,'working skips completed idle reclamation')
+ frame(channel,0,b'idle\r');output_until(b'IDLE_READY')
+ idle_started=time.monotonic()
+ print('WAITING_FOR_30S_COMPLETED_IDLE_EXIT',flush=True)
+ s=wait(lambda s:(agent(s).get('observed') or {}).get('state')=='finished','completed 30s idle exit while viewer open',timeout=45)
+ elapsed=time.monotonic()-idle_started
+ assert 28<=elapsed<50,f'Expected ~30s completed idle reclamation (with idle_minutes=1), got {elapsed:.2f}s'
  assert agent(s)['state']=='idle_closed';viewer.close();viewer=None
  print('IDLE_EXIT_WITH_OPEN_VIEWER_OK',flush=True)
  opened=call('agent.open',{'card_id':card['id'],'profile_id':'developer','expected_terminal_id':current['id']})

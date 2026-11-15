@@ -659,19 +659,13 @@ impl AppServer {
                             a.core_id.as_deref().unwrap_or(""),
                             a.terminal.as_deref().unwrap_or(""),
                         );
-                        due(a
-                            .lifecycle
-                            .idle_since
-                            .unwrap_or(now())
-                            .max(a.lifecycle.last_interaction_at.unwrap_or(0))
-                            .max(activity.last_at)
-                            .saturating_add(
-                                server
-                                    .config()
-                                    .scheduler
-                                    .idle_minutes
-                                    .saturating_mul(60_000),
-                            ));
+                        if let Some(deadline) = lifecycle::idle_reclaim_deadline(
+                            a,
+                            server.config().scheduler.idle_minutes,
+                            activity.last_at,
+                        ) {
+                            due(deadline);
+                        }
                     }
                 }
                 // Only queued work awaiting an unavailable machine needs retry admission.
