@@ -136,6 +136,8 @@ unsafe extern "C" {
     fn cb_terminal_test_verify_post_echo_cursor(view: *mut c_void, expected_x: u16) -> bool;
     #[cfg(test)]
     fn cb_terminal_test_drag_and_file_paste(view: *mut c_void) -> bool;
+    #[cfg(test)]
+    fn cb_terminal_test_nerd_font_fallback(view: *mut c_void) -> bool;
 }
 
 pub fn installed_fonts() -> crate::InstalledFonts {
@@ -2023,6 +2025,32 @@ mod tests {
             "disconnected terminal must reject NSDraggingDestination drops"
         );
         assert!(rx.try_recv().is_err());
+
+        unsafe {
+            cb_terminal_detach(raw_view as *mut c_void);
+            drop(Retained::from_raw(raw_view));
+        }
+    }
+
+    #[test]
+    fn nerd_font_pua_symbols_avoid_last_resort_tofu_and_render_scaled_glyphs() {
+        let mut host = Box::new(Host::new());
+        {
+            let mut s = host.state.lock().unwrap();
+            s.connected = true;
+            // Write bright foreground PUA Nerd Font glyphs: Powerline U+E0B0, Folder U+F07B,
+            // Codicon U+EA60, Powerline left U+E0B2, and Supplementary PUA-A U+F0001.
+            s.model
+                .write("\x1b[97m\u{E0B0}\u{F07B}\u{EA60}\u{E0B2}\u{F0001}\x1b[0m".as_bytes());
+        }
+        let raw_view = unsafe { cb_terminal_new(&mut *host as *mut _ as *mut c_void, callbacks()) };
+        assert!(!raw_view.is_null());
+
+        let ok = unsafe { cb_terminal_test_nerd_font_fallback(raw_view as *mut c_void) };
+        assert!(
+            ok,
+            "Nerd Font / PUA fallback resolution and offscreen glyph drawing must succeed without .LastResort tofu"
+        );
 
         unsafe {
             cb_terminal_detach(raw_view as *mut c_void);

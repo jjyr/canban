@@ -781,6 +781,126 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   return result;
 }
 
+static bool cb_font_is_last_resort(CTFontRef font) {
+  if (!font)
+    return true;
+  CFStringRef ps = CTFontCopyPostScriptName(font);
+  if (ps) {
+    bool isLR = (CFStringCompare(ps, CFSTR("LastResort"), 0) == kCFCompareEqualTo) ||
+                (CFStringCompare(ps, CFSTR(".LastResort"), 0) == kCFCompareEqualTo);
+    CFRelease(ps);
+    if (isLR)
+      return true;
+  }
+  CFStringRef fam = CTFontCopyFamilyName(font);
+  if (fam) {
+    bool isLR = (CFStringCompare(fam, CFSTR(".LastResort"), 0) == kCFCompareEqualTo) ||
+                (CFStringCompare(fam, CFSTR("LastResort"), 0) == kCFCompareEqualTo);
+    CFRelease(fam);
+    if (isLR)
+      return true;
+  }
+  return false;
+}
+
+static bool cb_font_covers_utf16(CTFontRef font, const UniChar *chars,
+                                 CFIndex len, CGGlyph *outFirstGlyph) {
+  if (!font || !chars || len <= 0 || len > 8)
+    return false;
+  CGGlyph glyphs[8] = {0};
+  if (!CTFontGetGlyphsForCharacters(font, chars, glyphs, len))
+    return false;
+  CFIndex i = 0;
+  while (i < len) {
+    if (glyphs[i] == 0)
+      return false;
+    if (CFStringIsSurrogateHighCharacter(chars[i]) && (i + 1) < len &&
+        CFStringIsSurrogateLowCharacter(chars[i + 1])) {
+      // CoreText maps UTF-16 surrogate pairs to [glyph, 0].
+      i += 2;
+    } else {
+      i += 1;
+    }
+  }
+  if (outFirstGlyph)
+    *outFirstGlyph = glyphs[0];
+  return true;
+}
+
+static bool cb_is_nerd_or_pua_codepoint(uint32_t cp) {
+  return (cp >= 0xE000 && cp <= 0xF8FF) ||
+         (cp >= 0xF0000 && cp <= 0xFFFFD) ||
+         (cp >= 0x100000 && cp <= 0x10FFFD) ||
+         (cp >= 0x23FB && cp <= 0x23FE) ||
+         cp == 0x2665 || cp == 0x26A1 || cp == 0x2B58;
+}
+
+static bool cb_is_powerline_divider(uint32_t cp) {
+  return (cp >= 0xE0B0 && cp <= 0xE0BF) || (cp >= 0xE0C0 && cp <= 0xE0D7);
+}
+
+static NSArray<NSString *> *cb_nerd_fallback_families(void) {
+  static NSArray<NSString *> *sFamilies = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    cb_register_user_font_subdirs_once();
+    NSMutableArray<NSString *> *ordered = [NSMutableArray array];
+    NSMutableSet<NSString *> *seen = [NSMutableSet set];
+    NSFontManager *fm = [NSFontManager sharedFontManager];
+    NSArray<NSString *> *avail = fm.availableFontFamilies ?: @[];
+    NSSet<NSString *> *availSet = [NSSet setWithArray:avail];
+
+    NSArray<NSString *> *preferred = @[
+      @"Symbols Nerd Font Mono",
+      @"Symbols Nerd Font",
+      @"Nerd Fonts Symbols Only",
+    ];
+    for (NSString *cand in preferred) {
+      if ([availSet containsObject:cand] && ![seen containsObject:cand]) {
+        [ordered addObject:cand];
+        [seen addObject:cand];
+      }
+    }
+
+    NSMutableArray<NSString *> *others = [NSMutableArray array];
+    for (NSString *fam in avail) {
+      if (!fam || fam.length == 0 || [fam hasPrefix:@"."] ||
+          [seen containsObject:fam]) {
+        continue;
+      }
+      if ([fam rangeOfString:@"Nerd Font" options:NSCaseInsensitiveSearch]
+                  .location != NSNotFound ||
+          [fam rangeOfString:@"NerdFont" options:NSCaseInsensitiveSearch]
+                  .location != NSNotFound ||
+          [fam hasSuffix:@" NF"] || [fam hasSuffix:@" NFM"]) {
+        [others addObject:fam];
+        [seen addObject:fam];
+      }
+    }
+    [others sortUsingSelector:@selector(localizedCaseInsensitiveCompare:)];
+    [ordered addObjectsFromArray:others];
+    sFamilies = [ordered copy];
+  });
+  return sFamilies;
+}
+
+static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
+                                                   CFIndex len,
+                                                   CGFloat size,
+                                                   CTFontSymbolicTraits traits) {
+  for (NSString *fam in cb_nerd_fallback_families()) {
+    CTFontRef cand = cb_create_styled_font(fam, size, traits);
+    if (!cand)
+      continue;
+    if (!cb_font_is_last_resort(cand) &&
+        cb_font_covers_utf16(cand, chars, len, NULL)) {
+      return cand;
+    }
+    CFRelease(cand);
+  }
+  return NULL;
+}
+
 @interface CanbanTerminal : NSView <NSTextInputClient, NSDraggingDestination> {
 @public
   void *_host;
@@ -1042,18 +1162,9 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   CTFontRef primary = [self fontForStyleFlags:flags];
   if (len <= 0 || !primary)
     return primary;
-  CGGlyph testGlyphs[8];
-  if (len <= 8 && CTFontGetGlyphsForCharacters(primary, chars, testGlyphs, len)) {
-    BOOL allFound = YES;
-    for (CFIndex i = 0; i < len; i++) {
-      if (testGlyphs[i] == 0) {
-        allFound = NO;
-        break;
-      }
-    }
-    if (allFound)
-      return primary;
-  }
+  if (cb_font_covers_utf16(primary, chars, len, NULL))
+    return primary;
+
   uintptr_t key =
       ((uintptr_t)cp << 2) | (uintptr_t)(flags & (CB_STYLE_BOLD | CB_STYLE_ITALIC));
   if (_fallbackCache && key != 0) {
@@ -1062,14 +1173,36 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
     if (cached)
       return cached;
   }
-  CFStringRef str =
-      CFStringCreateWithCharactersNoCopy(kCFAllocatorDefault, chars, len,
-                                         kCFAllocatorNull);
-  if (!str)
-    return primary;
-  CTFontRef fb =
-      CTFontCreateForString(primary, str, CFRangeMake(0, CFStringGetLength(str)));
-  CFRelease(str);
+
+  CGFloat sz = fmax(9.0, fmin(32.0, _fontSize > 0.0 ? _fontSize : 13.0));
+  CTFontSymbolicTraits traits = 0;
+  if (flags & CB_STYLE_BOLD)
+    traits |= kCTFontBoldTrait;
+  if (flags & CB_STYLE_ITALIC)
+    traits |= kCTFontItalicTrait;
+
+  CTFontRef fb = NULL;
+  if (cb_is_nerd_or_pua_codepoint(cp)) {
+    fb = cb_resolve_nerd_fallback_retained(chars, len, sz, traits);
+  }
+  if (!fb) {
+    CFStringRef str = CFStringCreateWithCharactersNoCopy(
+        kCFAllocatorDefault, chars, len, kCFAllocatorNull);
+    if (str) {
+      fb = CTFontCreateForString(primary, str,
+                                 CFRangeMake(0, CFStringGetLength(str)));
+      CFRelease(str);
+    }
+    if (!fb || cb_font_is_last_resort(fb)) {
+      CTFontRef nerdFb =
+          cb_resolve_nerd_fallback_retained(chars, len, sz, traits);
+      if (nerdFb) {
+        if (fb)
+          CFRelease(fb);
+        fb = nerdFb;
+      }
+    }
+  }
   if (!fb)
     return primary;
   if (_fallbackCache && key != 0) {
@@ -1810,13 +1943,67 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
                                               length:charLen
                                            codepoint:cp
                                                flags:flags];
+          CTFontRef primary = [self fontForStyleFlags:flags];
+          BOOL isSingleScalar =
+              (charLen == 1) ||
+              (charLen == 2 && CFStringIsSurrogateHighCharacter(chars[0]) &&
+               CFStringIsSurrogateLowCharacter(chars[1]));
+          BOOL isColorFont =
+              (CTFontGetSymbolicTraits(font) & kCTFontColorGlyphsTrait) != 0;
           CGGlyph singleGlyph = 0;
-          if (charLen == 1 &&
-              CTFontGetGlyphsForCharacters(font, chars, &singleGlyph, 1) &&
+          if (isSingleScalar && !isColorFont &&
+              cb_font_covers_utf16(font, chars, charLen, &singleGlyph) &&
               singleGlyph != 0) {
+            CGFloat scaleX = 1.0;
+            CGFloat scaleY = 1.0;
+            CGFloat dx = 0.0;
+            CGFloat dy = 0.0;
+            if (font != primary && cb_is_nerd_or_pua_codepoint(cp)) {
+              CGRect bbox = CGRectZero;
+              CTFontGetBoundingRectsForGlyphs(
+                  font, kCTFontOrientationHorizontal, &singleGlyph, &bbox, 1);
+              if (bbox.size.width > 0.05 && bbox.size.height > 0.05) {
+                if (cb_is_powerline_divider(cp)) {
+                  // Powerline dividers span exact full cell height (ch) so ribbon
+                  // backgrounds meet seamlessly with zero top/bottom gaps.
+                  scaleY = ch / bbox.size.height;
+                  scaleX = fmin(scaleY, cellW / bbox.size.width);
+                  CGFloat scaledW = bbox.size.width * scaleX;
+                  if (cp == 0xE0B2 || cp == 0xE0B3 || cp == 0xE0B6 ||
+                      cp == 0xE0B7 || cp == 0xE0C2 || cp == 0xE0C3 ||
+                      cp == 0xE0C6 || cp == 0xE0C7) {
+                    // Right-anchored left-pointing dividers
+                    dx = (cellW - scaledW) - bbox.origin.x * scaleX;
+                  } else {
+                    // Left-anchored right-pointing dividers
+                    dx = -bbox.origin.x * scaleX;
+                  }
+                  CGFloat cellMidY = _baselineOffset - ch * 0.5;
+                  CGFloat glyphMidY =
+                      (bbox.origin.y + bbox.size.height * 0.5) * scaleY;
+                  dy = cellMidY - glyphMidY;
+                } else {
+                  // Scale symbol icons proportionally up to ~1.25x so square/wide
+                  // PUA glyphs match primary cap/ascent legibility without clipping.
+                  CGFloat availW = fmax(1.0, cellW - 0.5);
+                  CGFloat availH = fmax(1.0, ch - 2.0);
+                  CGFloat s = fmin(1.25, fmin(availW / bbox.size.width,
+                                              availH / bbox.size.height));
+                  scaleX = s;
+                  scaleY = s;
+                  CGFloat scaledW = bbox.size.width * scaleX;
+                  dx = (cellW - scaledW) * 0.5 - bbox.origin.x * scaleX;
+                  CGFloat primaryCapMid = CTFontGetCapHeight(primary) * 0.5;
+                  CGFloat glyphMidY =
+                      (bbox.origin.y + bbox.size.height * 0.5) * scaleY;
+                  dy = primaryCapMid - glyphMidY;
+                }
+              }
+            }
             CGContextSaveGState(ctx);
-            CGContextTranslateCTM(ctx, cellX, rowY + _baselineOffset);
-            CGContextScaleCTM(ctx, 1.0, -1.0);
+            CGContextTranslateCTM(ctx, cellX + dx,
+                                  rowY + _baselineOffset - dy);
+            CGContextScaleCTM(ctx, scaleX, -scaleY);
             CGContextSetTextMatrix(ctx, CGAffineTransformIdentity);
             CGPoint pos = CGPointZero;
             CGContextSetFillColorWithColor(ctx, fgColor);
@@ -3763,5 +3950,134 @@ bool cb_terminal_test_drag_and_file_paste(void *view) {
     [webPb releaseGlobally];
     [emptyPb releaseGlobally];
     return emptyRejected;
+  }
+}
+
+bool cb_terminal_test_nerd_font_fallback(void *view) {
+  if (!view)
+    return false;
+  @autoreleasepool {
+    CanbanTerminal *term = (__bridge CanbanTerminal *)view;
+    [term setFrame:NSMakeRect(0.0, 0.0, 720.0, 320.0)];
+
+    // Verify helper checks first: ASCII works on System Mono, and .LastResort
+    // detection accurately identifies CoreText's tofu font.
+    UniChar asciiA = 'A';
+    CGGlyph gA = 0;
+    CTFontRef sysFont = cb_create_styled_font(nil, 13.0, 0);
+    if (!sysFont || !cb_font_covers_utf16(sysFont, &asciiA, 1, &gA) || gA == 0) {
+      if (sysFont)
+        CFRelease(sysFont);
+      return false;
+    }
+    if (cb_font_is_last_resort(sysFont)) {
+      CFRelease(sysFont);
+      return false;
+    }
+
+    UniChar puaArrow = 0xE0B0;
+    CFStringRef puaStr =
+        CFStringCreateWithCharacters(kCFAllocatorDefault, &puaArrow, 1);
+    CTFontRef rawCoreTextFb =
+        CTFontCreateForString(sysFont, puaStr, CFRangeMake(0, 1));
+    CFRelease(puaStr);
+    CFRelease(sysFont);
+    if (!rawCoreTextFb)
+      return false;
+    bool coreTextReturnedLastResort = cb_font_is_last_resort(rawCoreTextFb);
+    CFRelease(rawCoreTextFb);
+
+    NSArray<NSString *> *nerdFams = cb_nerd_fallback_families();
+    if (nerdFams.count > 0) {
+      // With System Mono (nil) and Menlo, BMP PUA (U+E0B0, U+F07B, U+EA60) and
+      // Supplementary PUA-A (U+F0001) must resolve to an installed Nerd Font
+      // rather than .LastResort, and cover the codepoints cleanly.
+      NSArray *primaries = @[ [NSNull null], @"Menlo" ];
+      uint32_t testCps[4] = {0xE0B0, 0xF07B, 0xEA60, 0xF0001};
+      for (id famObj in primaries) {
+        NSString *fam = (famObj == [NSNull null]) ? nil : (NSString *)famObj;
+        term.fontFamily = fam;
+        term.fontSize = 13.0;
+        [term rebuildFonts];
+
+        for (int i = 0; i < 4; i++) {
+          uint32_t cp = testCps[i];
+          UniChar u16[2];
+          CFIndex u16Len = 0;
+          if (cp <= 0xFFFF) {
+            u16[0] = (UniChar)cp;
+            u16Len = 1;
+          } else {
+            uint32_t u = cp - 0x10000;
+            u16[0] = (UniChar)(0xD800 + (u >> 10));
+            u16[1] = (UniChar)(0xDC00 + (u & 0x3FF));
+            u16Len = 2;
+          }
+          for (uint16_t fl = 0; fl <= (CB_STYLE_BOLD | CB_STYLE_ITALIC); fl++) {
+            CTFontRef resolved = [term resolveFontForUTF16:u16
+                                                    length:u16Len
+                                                 codepoint:cp
+                                                     flags:fl];
+            CGGlyph g = 0;
+            if (!resolved || cb_font_is_last_resort(resolved) ||
+                !cb_font_covers_utf16(resolved, u16, u16Len, &g) || g == 0) {
+              return false;
+            }
+          }
+        }
+      }
+      // Also confirm CoreText alone would have produced .LastResort on macOS.
+      (void)coreTextReturnedLastResort;
+    }
+
+    // Exercise full offscreen drawRect: pass with PUA glyphs in the VT buffer
+    // to verify scaling/centering paths render cleanly without crashes or NaNs.
+    term.fontFamily = nil;
+    term.fontSize = 13.0;
+    [term rebuildFonts];
+    [term pollSnapshotForceFull:YES];
+
+    NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
+        initWithBitmapDataPlanes:NULL
+                      pixelsWide:720
+                      pixelsHigh:320
+                   bitsPerSample:8
+                 samplesPerPixel:4
+                        hasAlpha:YES
+                        isPlanar:NO
+                  colorSpaceName:NSDeviceRGBColorSpace
+                     bytesPerRow:0
+                    bitsPerPixel:0];
+    NSGraphicsContext *bmpCtx =
+        rep ? [NSGraphicsContext graphicsContextWithBitmapImageRep:rep] : nil;
+    if (!bmpCtx)
+      return false;
+    [term displayRectIgnoringOpacity:term.bounds inContext:bmpCtx];
+
+    // If Nerd Fonts are installed, verify that the rendered cells containing PUA
+    // glyphs actually painted non-background foreground pixels inside cell 0.
+    if (nerdFams.count > 0) {
+      int xStart = (int)kPadX;
+      int xEnd = xStart + (int)ceil(term.cellWidth * 6.0);
+      int yStart = (int)kPadY;
+      int yEnd = yStart + (int)ceil(term.cellHeight);
+      bool foundInk = false;
+      for (int y = yStart; y < yEnd && !foundInk; y++) {
+        for (int x = xStart; x < xEnd; x++) {
+          NSUInteger px[4] = {0, 0, 0, 0};
+          [rep getPixel:px atX:x y:y];
+          // Default theme background is ~(25, 30, 38) or VT background; bright
+          // white/cyan foreground ink exceeds channel value 120.
+          if (px[0] > 120 || px[1] > 120 || px[2] > 120) {
+            foundInk = true;
+            break;
+          }
+        }
+      }
+      if (!foundInk)
+        return false;
+    }
+
+    return true;
   }
 }
