@@ -120,7 +120,7 @@ steps:
  control={'terminal_id':first['id'],'request_key':'interrupt-once'}
  receipt=call('agent.interrupt',control);assert call('agent.interrupt',control)==receipt
  assert len([e for e in call('app.snapshot')['events'] if e['kind']=='execution.control_requested'])==1
- wait(lambda s:agent_for(s,'developer')['observed'].get('status',{}).get('state')=='idle','interrupt observation')
+ wait(lambda s:((agent_for(s,'developer').get('observed') or {}).get('status') or {}).get('state')=='idle','interrupt observation')
  send(terminal,'continue');send(terminal,'finish')
  s=wait(lambda s:len(s['reports'])==2 and len(agents(s))==2 and all(((a.get('observed') or {}).get('status') or {}).get('state')=='done' for a in agents(s)),'Develop/Review retained terminals')
  assert s['cards'][0]['stage']=='review';assert len(s['conversations'])==2
@@ -129,13 +129,13 @@ steps:
  s=wait(lambda s:all(q['state']=='replied' for q in s['questions']) and len(s['questions'])==2,'live completed-session followup')
  assert len(agents(s))==2 and len(s['reports'])==2 and agent_for(s,'developer')['number']==1
  call('terminal.close',{'terminal_id':card['id']+':developer'})
- wait(lambda s:agent_for(s,'developer')['observed']['state']=='finished','explicit close before Resume')
+ wait(lambda s:(agent_for(s,'developer').get('observed') or {}).get('state')=='finished','explicit close before Resume')
  call('comment.add',{'card_id':card['id'],'body':'@developer resume and recall'})
  s=wait(lambda s:agent_for(s,'developer')['number']==3 and len(s['reports'])==3 and all(q['state']=='replied' for q in s['questions']),'exact session Resume')
  resumed=agent_for(s,'developer');assert resumed['provider_session_id']==sid and resumed['terminal']!=terminal
  assert s['cards'][0]['stage']=='review'
  call('terminal.close',{'terminal_id':card['id']+':developer'})
- wait(lambda s:agent_for(s,'developer')['observed']['state']=='finished','close resumed terminal')
+ wait(lambda s:(agent_for(s,'developer').get('observed') or {}).get('state')=='finished','close resumed terminal')
  server.terminate();server.wait(timeout=10);server=subprocess.Popen([str(cli),'serve'],env=env,stdout=log,stderr=log)
  s=wait(lambda s:len(s['conversations'])==2,'restart bindings')
  # A provider must reject a missing saved conversation, never silently create

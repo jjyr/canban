@@ -127,7 +127,7 @@ steps:
  time.sleep(1.2);s=call('app.snapshot');assert agent(s)['observed']['state']=='live'
  print('HUMAN_INPUT_RESETS_IDLE_OK; RELAY_ROUNDTRIP_MS median=%.2f p95=%.2f'%(statistics.median(samples),sorted(samples)[18]),flush=True)
  print('WAITING_FOR_ONE_MINUTE_IDLE_EXIT',flush=True)
- s=wait(lambda s:agent(s)['observed']['state']=='finished','idle exit while viewer open',timeout=75)
+ s=wait(lambda s:(agent(s).get('observed') or {}).get('state')=='finished','idle exit while viewer open',timeout=75)
  assert agent(s)['state']=='idle_closed';viewer.close();viewer=None
  print('IDLE_EXIT_WITH_OPEN_VIEWER_OK',flush=True)
  opened=call('agent.open',{'card_id':card['id'],'profile_id':'developer','expected_terminal_id':current['id']})

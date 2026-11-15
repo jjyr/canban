@@ -153,7 +153,7 @@ steps:
     call('card.move',{'card_id':extra['id'],'revision':1,'stage':'develop'})
     snapshot=call('app.snapshot');assert not any(a['card_id']==extra['id'] for a in bound_agents(snapshot))
     assert 2 <= call('scheduler.status')['active'] <= active
-    assert all(a['observed']['state']!='finished' for a in agents(snapshot) if a['id'] in working_ids)
+    assert all((a.get('observed') or {}).get('state')!='finished' for a in agents(snapshot) if a['id'] in working_ids)
     call('scheduler.configure',{'max_agents':8})
     snapshot=wait(lambda s:any(a['card_id']==extra['id'] for a in bound_agents(s)),'limit increase drains queue')
     (base/'evidence.json').write_text(json.dumps({'snapshot':snapshot,'latest_base':latest,'review_before_develop':[review['id'],ninth['id']],'status':call('scheduler.status')},indent=2))
