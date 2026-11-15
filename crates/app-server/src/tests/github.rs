@@ -328,8 +328,7 @@ fn project_auto_detects_github_remote_links_with_intake_off_and_respects_manual_
 
 #[test]
 fn delivery_review_gate_does_not_block_github_remote_actions() {
-    let dir = tempfile::tempdir().unwrap();
-    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let (_dir, app, _p) = github_setup();
 
     // Holding `review_gate` (as `pump_deliveries` or `git.commit` does) must never reject
     // `github.remote.*` or `github.notification.*` with "Another GitHub action is pending".

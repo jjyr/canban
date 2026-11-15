@@ -122,25 +122,7 @@ pub fn prepare(
 
 fn restore_data(j: &Journal) -> Result<()> {
     let local = j.local.as_ref().context("Missing local handoff")?;
-    if !local.backup.exists() {
-        return Ok(());
-    }
-    let _service = service_lock(&j.home)?;
-    let staged = local.backup.with_extension("restore");
-    std::fs::copy(&local.backup, &staged)?;
-    File::open(&staged)?.sync_all()?;
-    for suffix in ["-wal", "-shm"] {
-        let path = j.home.join(format!("canban.sqlite{suffix}"));
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
-    }
-    std::fs::rename(staged, j.home.join("canban.sqlite"))?;
-    File::open(&j.home)?.sync_all()?;
-    ensure!(
-        canban_storage::migrations::database_version(&j.home)? == j.schema_before,
-        "Database snapshot restoration failed"
-    );
+    let _ = super::restore_snapshot(&j.home, &local.backup, j.schema_before)?;
     Ok(())
 }
 
@@ -179,18 +161,12 @@ fn install(j: &mut Journal) -> Result<()> {
     if schema < j.build.schema {
         j.phase = "migrating".into();
         j.save()?;
-        let backup = &j.local.as_ref().unwrap().backup;
-        if !backup.exists() {
-            let temporary = backup.with_extension("pending");
-            if temporary.exists() {
-                std::fs::remove_file(&temporary)?;
-            }
-            let _service = service_lock(&j.home)?;
-            canban_storage::migrations::backup(&j.home, &temporary)?;
-            std::fs::rename(temporary, backup)?;
-            File::open(backup.parent().unwrap())?.sync_all()?;
-        }
+        let backup = j.local.as_ref().unwrap().backup.clone();
+        super::capture_snapshot(&j.home, &backup)?;
         database(j, &cli(j), j.build.schema)?;
+    } else {
+        let backup = j.local.as_ref().unwrap().backup.clone();
+        super::capture_snapshot(&j.home, &backup)?;
     }
     j.phase = "starting".into();
     j.save()?;
@@ -203,6 +179,7 @@ fn install(j: &mut Journal) -> Result<()> {
     saved.error = None;
     saved.available = None;
     save_state(&j.home, &saved)?;
+    super::prune_update_artifacts(j);
     let _ = handoff::flush(&j.home);
     Ok(())
 }
@@ -238,6 +215,7 @@ pub(super) fn run(j: &mut Journal, recover: bool) -> Result<()> {
             j.phase = "rolled_back".into();
             j.save()?;
             state(j, "error")?;
+            super::prune_update_artifacts(j);
             // Reopen the startup prompt; no database or installed files changed.
             if j.ui.is_none() || j.ui.as_ref().is_some_and(|ui| process(ui.pid).is_err()) {
                 show_recovery(j);

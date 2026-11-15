@@ -2,7 +2,7 @@
 """Offline release-number reservation and immutable publication regressions."""
 import sys
 sys.dont_write_bytecode=True
-import importlib.util, json, pathlib, tarfile, tempfile, unittest, urllib.error, os, hashlib
+import importlib.util, json, pathlib, tarfile, tempfile, unittest, urllib.error, urllib.request, os, hashlib
 from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('release',pathlib.Path(__file__).with_name('release.py'));release=importlib.util.module_from_spec(spec);spec.loader.exec_module(release)
 class Releases(unittest.TestCase):
@@ -184,13 +184,40 @@ class Releases(unittest.TestCase):
         self.assertNotIn('get.nexte.st/latest',content)
         self.assertIn('cargo-nextest',mise_content)
         self.assertIn('cargo nextest run --workspace --locked',mise_content)
+        self.assertIn('CANBAN_GH_BIN = "/usr/bin/false"',mise_content)
+        self.assertNotIn('\n      GH_TOKEN:',content.split('steps:')[0])
         self.assertIn('mise run test-integration',content)
         self.assertIn('scripts/test-install.py',content)
+        self.assertIn('scripts/test-release-upgrade.py',content)
+        self.assertIn('scripts/test-release-upgrade.py --dist dist',content)
         self.assertLess(content.index('mise run test-integration'),content.index('scripts/release.py reserve'))
         self.assertLess(content.index('scripts/test-install.py'),content.index('scripts/release.py reserve'))
+        self.assertLess(content.index('scripts/test-release-upgrade.py\n'),content.index('scripts/release.py reserve'))
         self.assertLess(content.index('scripts/release.py reserve'),content.index('mise run build-release'))
         self.assertLess(content.index('mise run build-release'),content.index('scripts/release.py package'))
-        self.assertLess(content.index('scripts/release.py package'),content.index('scripts/release.py publish'))
+        self.assertLess(content.index('scripts/release.py package'),content.index('scripts/test-release-upgrade.py --dist dist'))
+        self.assertLess(content.index('scripts/test-release-upgrade.py --dist dist'),content.index('scripts/release.py publish'))
+    def test_upgrade_gate_baseline_selection_and_redirect_auth_stripping(self):
+        gate_spec=importlib.util.spec_from_file_location('test_release_upgrade',pathlib.Path(__file__).with_name('test-release-upgrade.py'))
+        gate=importlib.util.module_from_spec(gate_spec);gate_spec.loader.exec_module(gate)
+        releases=[
+            {'tag_name':'20261115-10','draft':True,'assets':[{'name':'Canban-macos-aarch64.tar.gz'},{'name':'manifest-macos-aarch64.json'}]},
+            {'tag_name':'20261115-9','draft':False,'assets':[{'name':'Canban-macos-aarch64.tar.gz','url':'https://api.github.com/assets/9'},{'name':'manifest-macos-aarch64.json'}]},
+            {'tag_name':'20261115-10','draft':False,'assets':[{'name':'Canban-macos-aarch64.tar.zst','url':'https://api.github.com/assets/10'},{'name':'manifest-macos-aarch64.json'}]},
+            {'tag_name':'20261115-11','draft':False,'assets':[{'name':'Canban-macos-aarch64.tar.zst'}]},  # missing manifest
+        ]
+        pick=gate.select_latest_published_release(releases,'macos-aarch64')
+        self.assertEqual(pick['version'],'20261115-10')
+        bounded=gate.select_latest_published_release(releases,'macos-aarch64',before_version='20261115-10')
+        self.assertEqual(bounded['version'],'20261115-9')
+        self.assertIsNone(gate.select_latest_published_release([],'macos-aarch64'))
+
+        handler=gate._NoAuthRedirectHandler()
+        orig=urllib.request.Request('https://api.github.com/repos/jjyr/canban/releases/assets/1',headers={'Authorization':'Bearer secret-token','User-Agent':'Canban'})
+        cross=handler.redirect_request(orig,None,302,'Found',{},'https://objects.githubusercontent.com/signed-blob')
+        self.assertFalse(cross.has_header('Authorization'))
+        same=handler.redirect_request(orig,None,302,'Found',{},'https://api.github.com/repos/jjyr/canban/releases/assets/2')
+        self.assertEqual(same.get_header('Authorization'),'Bearer secret-token')
     def test_dispatch_triggers_workflow_discovers_run_and_supports_watch(self):
         calls=[];subproc=[]
         now=release.datetime.datetime.now(release.datetime.timezone.utc).isoformat().replace('+00:00','Z')

@@ -171,6 +171,7 @@ os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_n
   old.wait(timeout=15)
   if not native:helper.wait(timeout=15)
   if expected=='manual_recovery':
+   assert (home/'updates/jobs'/journal()['token']/'database-before.sqlite').exists()
    db=sqlite3.connect(home/'canban.sqlite');assert db.execute('PRAGMA user_version').fetchone()[0]==schema;assert db.execute('SELECT * FROM keep').fetchall()==[('preserved',)];db.close()
    assert run([cli,'serve'],environment,False).returncode!=0
    (home/'fail-up').unlink(missing_ok=True);(home/'fail-boot').unlink(missing_ok=True)
@@ -183,7 +184,7 @@ os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_n
   assert hashes=={str(p.relative_to(bundle)):hashlib.sha256(p.read_bytes()).hexdigest() for p in bundle.rglob('*') if p.is_file()}
   calls=(home/'migration-calls').read_text().splitlines() if (home/'migration-calls').exists() else []
   assert len(calls)==(0 if schema==current_schema else 2 if expected=='manual_recovery' else 1),calls
-  assert (home/'updates/jobs'/journal()['token']/'database-before.sqlite').exists()==(schema<current_schema)
+  assert not (home/'updates/jobs'/journal()['token']/'database-before.sqlite').exists()
   db=sqlite3.connect(home/'canban.sqlite');assert db.execute('PRAGMA user_version').fetchone()[0]==current_schema;assert db.execute('SELECT * FROM keep').fetchall()==[('preserved',)];db.close()
   assert json.loads(run([shutil.which('hc'),'get',terminal['runtime']['terminal'],'--json'],{**env,**core}).stdout)['pid']==terminal_pid
   (root/'result.json').write_text(json.dumps(dict(schema_before=schema,migration_calls=len(calls),downloads=0,bundle_unchanged=True,pty_preserved=True,journal=journal()),indent=2))

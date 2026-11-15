@@ -173,6 +173,130 @@ fn copy_bundle(source: &Path, target: &Path) -> Result<()> {
 fn cli(j: &Journal) -> PathBuf {
     j.target.join("Contents/MacOS/canban")
 }
+pub(super) fn snapshot_path(j: &Journal) -> PathBuf {
+    if let Some(local) = &j.local {
+        local.backup.clone()
+    } else {
+        j.home
+            .join("updates/jobs")
+            .join(&j.token)
+            .join("database-before.sqlite")
+    }
+}
+pub(super) fn capture_snapshot(home: &Path, backup: &Path) -> Result<()> {
+    if !home.join("canban.sqlite").exists() || backup.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = backup.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temporary = backup.with_extension("pending");
+    if temporary.exists() {
+        std::fs::remove_file(&temporary)?;
+    }
+    let _service = service_lock(home)?;
+    canban_storage::migrations::backup(home, &temporary)?;
+    std::fs::rename(&temporary, backup)?;
+    if let Some(parent) = backup.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+pub(super) fn restore_snapshot(home: &Path, backup: &Path, expected_schema: u32) -> Result<bool> {
+    if !backup.exists() {
+        return Ok(false);
+    }
+    let _service = service_lock(home)?;
+    let staged = backup.with_extension("restore");
+    if staged.exists() {
+        std::fs::remove_file(&staged)?;
+    }
+    std::fs::copy(backup, &staged)?;
+    File::open(&staged)?.sync_all()?;
+    for suffix in ["-wal", "-shm"] {
+        let path = home.join(format!("canban.sqlite{suffix}"));
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+    }
+    std::fs::rename(staged, home.join("canban.sqlite"))?;
+    File::open(home)?.sync_all()?;
+    ensure!(
+        canban_storage::migrations::database_version(home)? == expected_schema,
+        "Database snapshot restoration failed"
+    );
+    Ok(true)
+}
+/// Removes transient staging/session files, deletes the committed pre-upgrade SQLite
+/// snapshot, and prunes historical updater job/bundle directories so disk usage stays O(1).
+pub(super) fn prune_update_artifacts(j: &Journal) {
+    let backup = snapshot_path(j);
+    let _ = std::fs::remove_file(&backup);
+    let _ = std::fs::remove_file(backup.with_extension("pending"));
+    let _ = std::fs::remove_file(backup.with_extension("restore"));
+
+    let updates = j.home.join("updates");
+    if let Ok(entries) = std::fs::read_dir(&updates) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name.starts_with("ui-ready-") || name.starts_with("ui-saved-") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let staging = updates.join("staging");
+    if let Ok(entries) = std::fs::read_dir(&staging) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(path);
+            } else {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    let jobs = updates.join("jobs");
+    if let Ok(entries) = std::fs::read_dir(&jobs) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_str() != Some(j.token.as_str()) {
+                let path = entry.path();
+                if path.is_dir() {
+                    let _ = std::fs::remove_dir_all(path);
+                } else {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+    if j.local.is_none()
+        && let Some(parent) = j.target.parent()
+        && let Ok(entries) = std::fs::read_dir(parent)
+    {
+        let keep_prev = format!(".Canban-previous-{}.app", j.token);
+        let keep_failed = format!(".Canban-failed-{}.app", j.token);
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let is_managed_backup = (name.starts_with(".Canban-previous-")
+                || name.starts_with(".Canban-failed-")
+                || name.starts_with(".Canban-next-"))
+                && name.ends_with(".app");
+            if is_managed_backup && name != keep_prev && name != keep_failed {
+                let path = entry.path();
+                if path.is_dir() {
+                    let _ = std::fs::remove_dir_all(path);
+                } else {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+}
 fn database(j: &Journal, binary: &Path, target: u32) -> Result<()> {
     let out = Command::new(binary)
         .arg("--home")
@@ -302,10 +426,12 @@ pub fn run(home: &Path, recover: bool) -> Result<()> {
         return local::run(&mut j, recover);
     }
     if recover && matches!(j.phase.as_str(), "prepared" | "stopping") {
+        let _ = std::fs::remove_dir_all(&j.staged);
         j.phase = "rolled_back".into();
         j.error = Some("Interrupted upgrade cancelled before database migration".into());
         j.save()?;
         state(&j, "error")?;
+        prune_update_artifacts(&j);
         return Ok(());
     }
     if recover && j.phase == "manual_recovery" {
@@ -326,9 +452,11 @@ pub fn run(home: &Path, recover: bool) -> Result<()> {
         if !recover && j.phase == "stopping" {
             // No migration/bundle switch has begun. Keep a responsive old UI
             // and service in place instead of creating a second authority.
+            let _ = std::fs::remove_dir_all(&j.staged);
             j.phase = "rolled_back".into();
             j.save()?;
             state(&j, "error")?;
+            prune_update_artifacts(&j);
             if j.ui.as_ref().is_some_and(|ui| process(ui.pid).is_err()) {
                 let _ = spawn_ui(&j);
             }
@@ -388,8 +516,12 @@ fn install(j: &mut Journal) -> Result<()> {
     }
     handoff::rpc(&j.home.join("app.sock"), "app.shutdown", json!({}))?;
     wait_unlock(&j.home)?;
+    if j.home.join("canban.sqlite").exists() {
+        j.schema_before = canban_storage::migrations::database_version(&j.home)?;
+    }
     j.phase = "migrating".into();
     j.save()?;
+    capture_snapshot(&j.home, &snapshot_path(j))?;
     database(j, &j.staged.join("Contents/MacOS/canban"), j.build.schema)?;
     j.phase = "swapping".into();
     j.save()?;
@@ -409,6 +541,7 @@ fn install(j: &mut Journal) -> Result<()> {
     s.available = None;
     s.progress = 0;
     save_state(&j.home, &s)?;
+    prune_update_artifacts(j);
     // Journal commit opens normal business operations before flushing durable reports.
     let _ = std::fs::remove_file(j.home.join("updates/ui-session.json"));
     if let Err(e) = handoff::flush(&j.home) {
@@ -472,8 +605,30 @@ fn rollback(j: &mut Journal) -> Result<()> {
     } else {
         j.staged.join("Contents/MacOS/canban")
     };
-    if canban_storage::migrations::database_version(&j.home)? != j.schema_before {
-        database(j, &candidate, j.schema_before)?;
+    if j.home.join("canban.sqlite").exists() {
+        let current_schema = canban_storage::migrations::database_version(&j.home)?;
+        // If schema 16+ short-ID path rewrites already ran, run candidate down first so
+        // sync_paths_down restores on-disk Card/archive directories before restoring SQLite.
+        if current_schema != j.schema_before && (j.schema_before < 16 && current_schema >= 16) {
+            let _ = database(j, &candidate, j.schema_before);
+        }
+        let backup = snapshot_path(j);
+        if backup.exists() {
+            match restore_snapshot(&j.home, &backup, j.schema_before) {
+                Ok(_) => {}
+                Err(snapshot_err) => {
+                    if canban_storage::migrations::database_version(&j.home)? != j.schema_before {
+                        database(j, &candidate, j.schema_before).with_context(|| {
+                            format!("snapshot restore failed ({snapshot_err:#}) and fallback down migration failed")
+                        })?;
+                    } else {
+                        return Err(snapshot_err);
+                    }
+                }
+            }
+        } else if canban_storage::migrations::database_version(&j.home)? != j.schema_before {
+            database(j, &candidate, j.schema_before)?;
+        }
     }
     if j.previous.exists() {
         if j.target.exists() {
@@ -507,6 +662,7 @@ fn rollback(j: &mut Journal) -> Result<()> {
     j.phase = "rolled_back".into();
     j.save()?;
     state(j, "error")?;
+    prune_update_artifacts(j);
     let _ = std::fs::remove_file(j.home.join("updates/ui-session.json"));
     if let Err(e) = handoff::flush(&j.home) {
         eprintln!("Queued Agent reports await retry: {e:#}");
@@ -593,5 +749,129 @@ mod recovery_tests {
             std::fs::read(home.join("canban.sqlite")).unwrap(),
             b"must not open this file"
         );
+    }
+
+    #[test]
+    fn snapshot_capture_restores_same_schema_or_migrated_data_and_cleans_wal() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        drop(canban_storage::Store::open(home).unwrap());
+        let schema = canban_storage::migrations::database_version(home).unwrap();
+        {
+            let conn = rusqlite::Connection::open(home.join("canban.sqlite")).unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE sentinel(value TEXT);
+                 INSERT INTO sentinel VALUES('before-upgrade');",
+            )
+            .unwrap();
+        }
+        let backup = home.join("updates/jobs/tok-1/database-before.sqlite");
+        capture_snapshot(home, &backup).unwrap();
+        assert!(backup.is_file());
+
+        // Simulate destructive candidate migration / same-schema data mutation + WAL residue.
+        {
+            let conn = rusqlite::Connection::open(home.join("canban.sqlite")).unwrap();
+            conn.execute_batch(
+                "DELETE FROM sentinel;
+                 INSERT INTO sentinel VALUES('corrupted-by-candidate');
+                 PRAGMA user_version = 999;",
+            )
+            .unwrap();
+            // Keep uncheckpointed WAL pages around before closing.
+        }
+        std::fs::write(home.join("canban.sqlite-wal"), b"stale-wal-bytes").unwrap();
+        std::fs::write(home.join("canban.sqlite-shm"), b"stale-shm-bytes").unwrap();
+
+        assert!(restore_snapshot(home, &backup, schema).unwrap());
+        assert!(!home.join("canban.sqlite-wal").exists());
+        assert!(!home.join("canban.sqlite-shm").exists());
+        assert_eq!(
+            canban_storage::migrations::database_version(home).unwrap(),
+            schema
+        );
+        let conn = rusqlite::Connection::open(home.join("canban.sqlite")).unwrap();
+        let val: String = conn
+            .query_row("SELECT value FROM sentinel", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(val, "before-upgrade");
+    }
+
+    #[test]
+    fn prune_update_artifacts_bounds_snapshots_jobs_staging_and_bundle_backups() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let home = root.join("home");
+        let apps = root.join("apps");
+        std::fs::create_dir_all(home.join("updates/jobs/old-tok")).unwrap();
+        std::fs::create_dir_all(home.join("updates/jobs/cur-tok")).unwrap();
+        std::fs::create_dir_all(home.join("updates/staging/dl-1")).unwrap();
+        std::fs::create_dir_all(apps.join("Canban.app")).unwrap();
+        std::fs::create_dir_all(apps.join(".Canban-previous-old-tok.app")).unwrap();
+        std::fs::create_dir_all(apps.join(".Canban-failed-old-tok.app")).unwrap();
+        std::fs::create_dir_all(apps.join(".Canban-next-old-tok.app")).unwrap();
+        std::fs::create_dir_all(apps.join(".Canban-previous-cur-tok.app")).unwrap();
+        std::fs::create_dir_all(apps.join("Unrelated.app")).unwrap();
+
+        std::fs::write(home.join("updates/jobs/old-tok/canban-updater"), b"old").unwrap();
+        std::fs::write(
+            home.join("updates/jobs/old-tok/database-before.sqlite"),
+            b"old-db",
+        )
+        .unwrap();
+        std::fs::write(home.join("updates/jobs/cur-tok/canban-updater"), b"cur").unwrap();
+        std::fs::write(
+            home.join("updates/jobs/cur-tok/database-before.sqlite"),
+            b"cur-db",
+        )
+        .unwrap();
+        std::fs::write(home.join("updates/ui-ready-old-tok"), b"{}").unwrap();
+        std::fs::write(home.join("updates/ui-ready-cur-tok"), b"{}").unwrap();
+        std::fs::write(home.join("updates/ui-saved-cur-tok"), b"ready").unwrap();
+        std::fs::write(home.join("updates/staging/dl-1/download.tar.zst"), b"zst").unwrap();
+
+        let j = Journal {
+            local: None,
+            token: "cur-tok".into(),
+            phase: "complete".into(),
+            home: home.clone(),
+            target: apps.join("Canban.app"),
+            staged: apps.join(".Canban-next-cur-tok.app"),
+            previous: apps.join(".Canban-previous-cur-tok.app"),
+            build: Build::current(),
+            schema_before: 19,
+            before: None,
+            ui: None,
+            app_id: "com.canban.test".into(),
+            error: None,
+            server: None,
+            candidate_ui: None,
+            recovery_ui: None,
+        };
+        prune_update_artifacts(&j);
+
+        assert!(
+            !home
+                .join("updates/jobs/cur-tok/database-before.sqlite")
+                .exists()
+        );
+        assert!(home.join("updates/jobs/cur-tok/canban-updater").is_file());
+        assert!(!home.join("updates/jobs/old-tok").exists());
+        assert!(!home.join("updates/ui-ready-old-tok").exists());
+        assert!(!home.join("updates/ui-ready-cur-tok").exists());
+        assert!(!home.join("updates/ui-saved-cur-tok").exists());
+        assert!(
+            std::fs::read_dir(home.join("updates/staging"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert!(!apps.join(".Canban-previous-old-tok.app").exists());
+        assert!(!apps.join(".Canban-failed-old-tok.app").exists());
+        assert!(!apps.join(".Canban-next-old-tok.app").exists());
+        assert!(apps.join(".Canban-previous-cur-tok.app").is_dir());
+        assert!(apps.join("Canban.app").is_dir());
+        assert!(apps.join("Unrelated.app").is_dir());
     }
 }

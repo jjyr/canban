@@ -1,6 +1,6 @@
 # Releases and desktop updates
 
-Status: implemented on macOS arm64, updated 2026-11-14. Local fixture and native acceptance are recorded below; GitHub publication uses manual workflow dispatch.
+Status: implemented on macOS arm64, updated 2026-11-15. Local fixture, real baseline-release upgrade gate and native acceptance are recorded below; GitHub publication uses manual workflow dispatch.
 
 ## Product boundary
 
@@ -37,9 +37,9 @@ On macOS, after SHA-256 verification and safe extraction, inspect the candidate 
 
 Download/validation finishes before stopping the current App. A detached updater owns a durable journal and exclusive upgrade lock. Service startup checks that lock before opening/migrating the database. The updater stops only the identified UI and owning AppServer, waits for service-lock release and switches the entire staged App bundle on the same filesystem. Herdr Core, existing PTYs, provider sessions and Git worktrees stay alive. No automatic-task drain is required.
 
-Candidate startup must report the exact version/commit and UI readiness. Until that handshake commits the upgrade, business writes, new scheduling and GitHub effects are held. A failed start returns the database to its pre-upgrade schema using the new version's down migrations, restores the old bundle and restarts it. This is automatic recovery only for the installation/startup transaction, not arbitrary crashes after the new version has accepted writes. CLI report/reply operations with stable idempotency keys persist during handoff and retry after success or recovery. Arbitrary Git/user mutations are never blindly replayed.
+Candidate startup must report the exact version/commit, pass an initial `app.state` deserialization check on `AppServer::open` and updater health probe, and acknowledge UI readiness. Until that handshake commits the upgrade, business writes, new scheduling and GitHub effects are held. Before migrating or starting the candidate, both remote release installation and local backend activation capture a consistent pre-upgrade SQLite snapshot (`updates/jobs/<token>/database-before.sqlite`, via `VACUUM INTO` while holding `server.lock`). A failed migration or candidate start restores `canban.sqlite` from that pre-upgrade snapshot (falling back to the candidate CLI's `down` migrations only if the snapshot is unavailable or unreadable, and running `sync_paths_down` first if crossing the schema-16 path boundary), restores the old bundle and restarts it. This is automatic recovery only for the installation/startup transaction, not arbitrary crashes after the new version has accepted writes. CLI report/reply operations with stable idempotency keys persist during handoff and retry after success or recovery. Arbitrary Git/user mutations are never blindly replayed.
 
-If down/restore fails, preserve the current database, bundle copies, pending reports and journal/log; stop with a manual-recovery error. Do not open it with an incompatible old server or repeatedly retry migration. Release installation does not make an automatic database backup or whole-home snapshot. The local backend activation described below takes a database snapshot only when a schema upgrade is needed. In-progress Agent-created files and worktrees are not rolled back.
+If snapshot restoration and down/restore both fail, preserve the current database, bundle copies, pending reports and journal/log; stop with a manual-recovery error. Do not open it with an incompatible old server or repeatedly retry migration. Once an upgrade commits (`complete`) or cleanly rolls back (`rolled_back`), `prune_update_artifacts` deletes `database-before.sqlite`, `updates/staging/*`, `ui-ready-*` / `ui-saved-*` markers, prior `updates/jobs/<old-token>` directories and older `.Canban-previous-*` / `.Canban-failed-*` / `.Canban-next-*` bundle siblings so snapshot and backup storage stays strictly bounded (`O(1)`, zero steady-state SQLite backup files). In-progress Agent-created files and worktrees are not rolled back.
 
 ## Migration authoring rules
 
@@ -55,18 +55,18 @@ The implementation lives in `crates/storage/src/migrations.rs`. Append a `Migrat
 
 ```text
 GitHub Actions (`Release`) / scripts/release.py
-  unit & packaging tests -> test-integration & test-install -> reserve tag -> build-release -> package -> publish release
+  unit & packaging tests -> test-integration, test-install & test-release-upgrade -> reserve tag -> build-release -> package -> test-release-upgrade --dist -> publish release
                                      |
 canban-github -> authenticated release/asset requests
                                      |
 AppServer update.* -> canban-updater library -> detached updater binary
        ^                   |                         |
-       |              feed + staging          journal + bundle switch
+       |              feed + staging          journal + SQLite snapshot + bundle switch
 UI rail / Settings         |                         |
        |             SHA-256 / manifest        candidate CLI database
-       +--- session save / ready ack --------> server + UI health check
+       +--- session save / ready ack --------> server (`app.ping` + `app.state`) + UI health check
                                                    |
-                                     failure -> down + old bundle
+                                     failure -> restore snapshot + old bundle
                                                    |
                                      failed recovery -> Recovery UI
 ```
@@ -76,9 +76,9 @@ UI rail / Settings         |                         |
 - `update.state {}` returns build, discovery/progress/error state and the current install token/phase.
 - `update.check {}` starts a background check. Concurrent check/install operations share an operation lock.
 - `update.install { version, ui_pid, app_id }` requires the exact currently offered version and the owning packaged UI process. Agent-bound requests cannot install. The manifest/candidate API is allowed to advance; the new App's matching UI and CLI are verified together.
-- `canban build-info` returns `{ version, commit, schema, api, platform }`. The current desktop API is 11 and schema is 12. Local unversioned builds identify themselves as `development` / `unknown`.
+- `canban build-info` returns `{ version, commit, schema, api, platform }`. The current desktop API is 52 and schema is 19. Local unversioned builds identify themselves as `development` / `unknown`.
 
-Update state is under `~/.canban/updates/`: `state.json`, `install.json`, `updater.log`, `operation.lock`, `upgrade.lock`, `jobs/<token>/canban-updater`, `outbox/` and temporary staging/session files. Successful replacement retains the previous whole App bundle beside the installed App. There is no automatic cleanup of previous bundles in this first version.
+Update state is under `~/.canban/updates/`: `state.json`, `install.json`, `updater.log`, `operation.lock`, `upgrade.lock`, `jobs/<token>/canban-updater`, `outbox/` and temporary staging/session files (`database-before.sqlite` exists only while an upgrade is active or awaiting `manual_recovery`). Successful replacement retains only the current job's `.Canban-previous-<token>.app` beside the installed App and prunes older managed backup bundles automatically.
 
 Local reports/replies carry their original request key through the file outbox. Remote reporting uses its existing durable machine spool; the bridge leaves report/reply requests unanswered during handoff so the restored service can consume them. The remote bridge also rejects update installation. Delivery resumes only after the install commits or rollback succeeds; permanent application rejection preserves a `.pending-manual` payload and `.rejected` explanation. Other operations are rejected during handoff instead of queued. The initiating UI captures its route, Card drafts (including pasted attachment bytes), Terminal tabs and Archive query before shutdown. Interrupted uploads become explicitly retryable. UI readiness requires the first applied snapshot and a rendered frame; this prevents a restored Card route from opening before its data exists. Other concurrently open UI clients are not automatically restarted by the initiating client's update.
 
@@ -88,7 +88,7 @@ The in-app updater remains the release installation path. A newer App installed
 externally can also activate its bundled backend through the explicit startup
 action below. Opening an App never silently replaces an answering backend.
 
-`mise run build` packages UI, CLI and updater together. `mise run build-release` produces optimized, ad-hoc-signed binaries; it does not publish. `mise run install-app` builds the release bundle and atomically installs it into `/Applications/Canban.app`. `mise run release` dispatches `.github/workflows/release.yml` (`Release`) via `workflow_dispatch` (defaulting to `--ref main`, with optional `-- --ref <branch>` and `-- --watch`, authenticating through `GH_TOKEN`/`GITHUB_TOKEN` or `gh auth token`). `.github/workflows/release.yml` runs only on `workflow_dispatch` with serialized `release` concurrency, caches Cargo/Rust and `~/Library/Caches/canban` (`libghostty-vt` sources and Zig artifacts), installs `librsvg` and version-pinned Herdr Core (`hc`), runs locked unit/packaging tests, the deterministic headless integration suite (`mise run test-integration`) and `scripts/test-install.py`, and only then reserves `YYYYMMDD-N`, builds the triggering SHA on a macOS arm64 runner, uploads `Canban-macos-aarch64.tar.zst`, `Canban-macos-aarch64.tar.gz` and `manifest-macos-aarch64.json`, and publishes the completed draft as an official GitHub Release (`prerelease: false`). Packaging includes existing third-party notices. Developer ID signing/notarization is not implemented.
+`mise run build` packages UI, CLI and updater together. `mise run build-release` produces optimized, ad-hoc-signed binaries; it does not publish. `mise run install-app` builds the release bundle and atomically installs it into `/Applications/Canban.app`. `mise run release` dispatches `.github/workflows/release.yml` (`Release`) via `workflow_dispatch` (defaulting to `--ref main`, with optional `-- --ref <branch>` and `-- --watch`, authenticating through `GH_TOKEN`/`GITHUB_TOKEN` or `gh auth token`). `.github/workflows/release.yml` runs only on `workflow_dispatch` with serialized `release` concurrency, caches Cargo/Rust and `~/Library/Caches/canban` (`libghostty-vt` sources and Zig artifacts), installs `librsvg` and version-pinned Herdr Core (`hc`), runs locked unit/packaging tests, the deterministic headless integration suite (`mise run test-integration`), `scripts/test-install.py` and `scripts/test-release-upgrade.py` (dynamically downloading the latest published GitHub Release as baseline with zero binary fixtures in Git, seeding workspace data and running a real `canban-updater` upgrade), and only then reserves `YYYYMMDD-N`, builds the triggering SHA on a macOS arm64 runner, packages `dist/`, re-verifies the packaged release archive with `scripts/test-release-upgrade.py --dist dist`, uploads `Canban-macos-aarch64.tar.zst`, `Canban-macos-aarch64.tar.gz` and `manifest-macos-aarch64.json`, and publishes the completed draft as an official GitHub Release (`prerelease: false`). Packaging includes existing third-party notices. Developer ID signing/notarization is not implemented.
 
 Development uses `mise run dev`, which derives an isolated checkout/branch home
 and disables channel updates; it does not replace the installed `~/.canban`
@@ -112,16 +112,7 @@ readiness. It quits the startup prompt, stops only the identified backend and
 starts the installed matching pair. It performs no release check, asset download
 or App-bundle replacement. Herdr Core and existing PTYs stay alive.
 
-The worker reads the actual database schema after service shutdown. Equal schema
-skips the migration CLI and snapshot entirely, even if the old service binary
-was left behind after a newer App was installed. A pending schema upgrade first
-captures a SQLite snapshot including committed WAL data, then runs the installed
-CLI's database-only migration. Pre-schema-8 initialization uses the existing
-legacy Store path to the current schema; a newer database is refused. A failed
-migration or candidate boot restores that snapshot and stops at manual Recovery;
-the saved worker's explicit `--recover` retries activation after the cause is
-fixed. A failure before database work reopens the startup prompt. It never
-restores or downloads an older App bundle.
+The worker reads the actual database schema after service shutdown and captures a consistent SQLite snapshot (`database-before.sqlite`, including committed WAL data) before running migrations or starting the new backend, so both schema upgrades and same-schema startup mutations remain revertible. Equal schema skips the migration CLI, while a pending schema upgrade runs the installed CLI's database-only migration. Pre-schema-8 initialization uses the existing legacy Store path to the current schema; a newer database is refused. A failed migration or candidate boot restores that snapshot (preserving `database-before.sqlite` while in `manual_recovery`) and stops at manual Recovery; the saved worker's explicit `--recover` retries activation after the cause is fixed, and successful completion deletes the temporary snapshot. A failure before database work reopens the startup prompt. It never restores or downloads an older App bundle.
 
 Subsequent installed releases use the sidebar action. Access to the private release repository requires existing Canban GitHub sign-in and installation access to that repository; check failures are inspectable in Settings. No credentials are included in artifacts or diagnostics.
 

@@ -12,7 +12,7 @@ run = "cargo check --workspace"
 
 [tasks.test]
 depends = ["terminal-deps"]
-env = { CANBAN_UPDATES_DISABLED = "1" }
+env = { CANBAN_UPDATES_DISABLED = "1", CANBAN_GH_BIN = "/usr/bin/false" }
 run = "cargo nextest run --workspace --locked"
 
 [tasks.run]
@@ -132,6 +132,10 @@ run = "/usr/bin/python3 scripts/test-dev.py"
 [tasks.test-install]
 depends = ["build"]
 run = "/usr/bin/python3 scripts/test-install.py"
+
+[tasks.test-release-upgrade]
+depends = ["build"]
+run = "/usr/bin/python3 scripts/test-release-upgrade.py"
 
 [tasks.test-integration]
 depends = ["build"]

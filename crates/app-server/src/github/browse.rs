@@ -502,10 +502,10 @@ impl AppServer {
         let key = strp(p, "request_key")?;
         let r = reference(p)?;
         ensure!(r.kind != "commit", "Commit discussion is read-only");
-        let client = self.github_client()?.refreshing();
         let number = r.number.unwrap();
         let body = p["body"].as_str().unwrap_or("");
-        let (http_method, path, payload) = if method == "github.remote.comment.update" {
+        let (http_method, path, payload, review_head) = if method == "github.remote.comment.update"
+        {
             ensure!(!body.trim().is_empty(), "Comment is empty");
             let id = p["comment_id"]
                 .as_u64()
@@ -517,6 +517,7 @@ impl AppServer {
                     "PATCH",
                     format!("/repos/{}/issues/comments/{id}", r.repository),
                     json!({"body": body}),
+                    None,
                 ),
                 "threads" => {
                     ensure!(r.kind == "pr", "Only PRs support review thread comments");
@@ -524,6 +525,7 @@ impl AppServer {
                         "PATCH",
                         format!("/repos/{}/pulls/comments/{id}", r.repository),
                         json!({"body": body}),
+                        None,
                     )
                 }
                 "reviews" => {
@@ -532,6 +534,7 @@ impl AppServer {
                         "PUT",
                         format!("/repos/{}/pulls/{number}/reviews/{id}", r.repository),
                         json!({"body": body}),
+                        None,
                     )
                 }
                 _ => bail!("Unsupported GitHub comment section"),
@@ -547,6 +550,7 @@ impl AppServer {
                     "DELETE",
                     format!("/repos/{}/issues/comments/{id}", r.repository),
                     json!({}),
+                    None,
                 ),
                 "threads" => {
                     ensure!(r.kind == "pr", "Only PRs support review thread comments");
@@ -554,6 +558,7 @@ impl AppServer {
                         "DELETE",
                         format!("/repos/{}/pulls/comments/{id}", r.repository),
                         json!({}),
+                        None,
                     )
                 }
                 "reviews" => {
@@ -564,11 +569,6 @@ impl AppServer {
         } else if method == "github.remote.review" {
             ensure!(r.kind == "pr", "Only PRs support Review");
             let head = strp(p, "head")?;
-            let live: Value = client.get(&item_path(&r))?;
-            ensure!(
-                live["head"]["sha"] == head && live["state"] == "open",
-                "PR changed; review the latest version before submitting"
-            );
             let event = strp(p, "event")?;
             ensure!(
                 matches!(event, "COMMENT" | "APPROVE" | "REQUEST_CHANGES"),
@@ -596,6 +596,7 @@ impl AppServer {
                 "POST",
                 format!("/repos/{}/pulls/{number}/reviews", r.repository),
                 json!({"body":body,"event":event,"commit_id":head,"comments":comments}),
+                Some(head.to_owned()),
             )
         } else if method == "github.remote.reply" {
             ensure!(
@@ -612,6 +613,7 @@ impl AppServer {
                     r.repository
                 ),
                 json!({"body":body}),
+                None,
             )
         } else {
             ensure!(!body.trim().is_empty(), "Comment is empty");
@@ -619,8 +621,17 @@ impl AppServer {
                 "POST",
                 format!("/repos/{}/issues/{number}/comments", r.repository),
                 json!({"body":body}),
+                None,
             )
         };
+        let client = self.github_client()?.refreshing();
+        if let Some(head) = review_head {
+            let live: Value = client.get(&item_path(&r))?;
+            ensure!(
+                live["head"]["sha"] == head && live["state"] == "open",
+                "PR changed; review the latest version before submitting"
+            );
+        }
         self.mutate(method,p,|_db|Ok(json!({"state":"unknown","message":"Action recorded; reconcile on GitHub before retrying","request_key":key})))?;
         let result = match client.write(http_method, &path, &payload) {
             Ok(value) => {

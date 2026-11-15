@@ -45,9 +45,11 @@ if CASE in ['down-failure','schema-rollback'] and args==['build-info']:
 if 'database' in args:
  home=Path(args[args.index('--home')+1]);marker=home/'updates/migration-probe'
  number=int(marker.read_text())+1 if marker.exists() else 1;marker.write_text(str(number))
- if (CASE=='up-failure' and number==1) or (CASE=='down-failure' and number>1):
+ if (CASE=='up-failure' and number==1) or (CASE in ['schema-rollback','down-failure'] and number>1):
   print('Injected migration failure',file=sys.stderr);sys.exit(31)
  if CASE in ['schema-rollback','down-failure']:
+  if CASE=='down-failure':
+   for snap in (home/'updates/jobs').glob('*/database-before.sqlite'):snap.unlink()
   target=int(args[args.index('--target')+1]);db=sqlite3.connect(home/'canban.sqlite');db.execute('BEGIN IMMEDIATE')
   db.execute('CREATE TABLE future_schema_fixture(id INTEGER)' if target==FUTURE_SCHEMA else 'DROP TABLE future_schema_fixture');db.execute('PRAGMA user_version='+str(target));db.commit();db.close();print(json.dumps({'schema':target}));sys.exit(0)
 os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_name('canban-real')),*args])
@@ -145,6 +147,7 @@ os.execv(str(Path(__file__).with_name('canban-real')),[str(Path(__file__).with_n
                 assert len([r for r in state['reports'] if r['terminal_id']==attempt['id'] and r['state']=='completed'])==1
                 if expected=='complete':assert call('app.ping')['build']==candidate_info
                 else:assert call('app.ping')['build']['version']!=candidate_info['version']
+                assert not (home/'updates/jobs'/journal()['token']/'database-before.sqlite').exists()
             else:
                 assert list((home/'updates/outbox').glob('*.json'))
                 probe=subprocess.run([str(cli),'serve'],env=env,capture_output=True,text=True,timeout=10);assert probe.returncode!=0 and 'pending' in probe.stderr
