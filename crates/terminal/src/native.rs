@@ -89,11 +89,20 @@ pub struct CbLinkSpan {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct CbByteSlice {
+    pub ptr: *const u8,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct CbCallbacks {
     pub snapshot: extern "C" fn(*mut c_void, CbGeometry, bool) -> *const RenderSnapshot,
     pub key: extern "C" fn(*mut c_void, CbKeyEvent) -> bool,
     pub text: extern "C" fn(*mut c_void, *const u8, usize),
     pub paste: extern "C" fn(*mut c_void, *const u8, usize),
+    pub paste_paths: extern "C" fn(*mut c_void, *const CbByteSlice, usize) -> bool,
+    pub can_accept_input: extern "C" fn(*mut c_void) -> bool,
     pub mouse: extern "C" fn(*mut c_void, CbMouseEvent) -> bool,
     pub wheel: extern "C" fn(*mut c_void, i32, i32, f32, f32, u16, bool),
     pub select: extern "C" fn(*mut c_void, CbSelectEvent) -> i8,
@@ -125,6 +134,8 @@ unsafe extern "C" {
     fn cb_terminal_test_ime_commit_cursor_hold(view: *mut c_void) -> bool;
     #[cfg(test)]
     fn cb_terminal_test_verify_post_echo_cursor(view: *mut c_void, expected_x: u16) -> bool;
+    #[cfg(test)]
+    fn cb_terminal_test_drag_and_file_paste(view: *mut c_void) -> bool;
 }
 
 pub fn installed_fonts() -> crate::InstalledFonts {
@@ -1065,6 +1076,55 @@ extern "C" fn cb_paste(host_ptr: *mut c_void, ptr: *const u8, len: usize) {
     host.send_bytes(bytes);
 }
 
+extern "C" fn cb_paste_paths(
+    host_ptr: *mut c_void,
+    slices_ptr: *const CbByteSlice,
+    count: usize,
+) -> bool {
+    if host_ptr.is_null() || slices_ptr.is_null() || count == 0 {
+        return false;
+    }
+    let host = unsafe { &mut *(host_ptr as *mut Host) };
+    let raw = unsafe { std::slice::from_raw_parts(slices_ptr, count) };
+    let mut paths = Vec::with_capacity(count);
+    for item in raw {
+        if item.ptr.is_null() || item.len == 0 {
+            continue;
+        }
+        if let Ok(s) =
+            std::str::from_utf8(unsafe { std::slice::from_raw_parts(item.ptr, item.len) })
+            && !s.is_empty()
+        {
+            paths.push(s);
+        }
+    }
+    let formatted = crate::shell_escape_paths(paths);
+    if formatted.is_empty() {
+        return false;
+    }
+    let bytes = {
+        let mut state = host.state.lock().unwrap();
+        if !host.accepts_pty_input(&state) {
+            return false;
+        }
+        state.model.paste(&formatted)
+    };
+    if bytes.is_empty() {
+        return false;
+    }
+    host.send_bytes(bytes);
+    true
+}
+
+extern "C" fn cb_can_accept_input(host_ptr: *mut c_void) -> bool {
+    if host_ptr.is_null() {
+        return false;
+    }
+    let host = unsafe { &*(host_ptr as *const Host) };
+    let state = host.state.lock().unwrap();
+    host.accepts_pty_input(&state)
+}
+
 extern "C" fn cb_mouse(host_ptr: *mut c_void, ev: CbMouseEvent) -> bool {
     if ev.alt_override != 0 {
         return false;
@@ -1303,6 +1363,8 @@ fn callbacks() -> CbCallbacks {
         key: cb_key,
         text: cb_text,
         paste: cb_paste,
+        paste_paths: cb_paste_paths,
+        can_accept_input: cb_can_accept_input,
         mouse: cb_mouse,
         wheel: cb_wheel,
         select: cb_select,
@@ -1890,6 +1952,78 @@ mod tests {
         }
         mounted_host.detach_current_session();
         evict_session("core-zero", "tty-zero");
+        unsafe {
+            cb_terminal_detach(raw_view as *mut c_void);
+            drop(Retained::from_raw(raw_view));
+        }
+    }
+
+    #[test]
+    fn finder_drag_drop_and_file_paste_encode_escaped_paths_and_respect_read_only() {
+        let mut host = Box::new(Host::new());
+        {
+            let mut s = host.state.lock().unwrap();
+            s.connected = true;
+            // Enable DEC mode 2004 (Bracketed Paste) as modern shells and Agent CLIs do.
+            s.model.write(b"\x1b[?2004h");
+        }
+        let (tx, rx) = mpsc::channel();
+        host.input = Some(tx);
+
+        let raw_view = unsafe { cb_terminal_new(&mut *host as *mut _ as *mut c_void, callbacks()) };
+        assert!(!raw_view.is_null());
+
+        let ok = unsafe { cb_terminal_test_drag_and_file_paste(raw_view as *mut c_void) };
+        assert!(
+            ok,
+            "NSDraggingDestination and Finder file pasteboard handling must succeed"
+        );
+
+        let mut payloads = Vec::new();
+        while let Ok(Input::Bytes(bytes)) = rx.try_recv() {
+            payloads.push(String::from_utf8(bytes).expect("valid UTF-8 paste payload"));
+        }
+        assert_eq!(payloads.len(), 4);
+        assert_eq!(
+            payloads[0],
+            "\x1b[200~/Users/jjy/foo/bar.rs '/Users/jjy/My Docs/it'\\''s 截图 (1).png' \x1b[201~"
+        );
+        assert_eq!(
+            payloads[1],
+            "\x1b[200~'/tmp/hello world/$HOME.txt' \x1b[201~"
+        );
+        assert_eq!(payloads[2], "\x1b[200~echo hi\x1b[201~");
+        assert_eq!(
+            payloads[3],
+            "\x1b[200~https://canban.dev/docs?a=1&b=2\x1b[201~"
+        );
+
+        // Read-only or disconnected terminals must reject drag-and-drop and file paste.
+        host.read_only = true;
+        assert!(!cb_can_accept_input(&*host as *const Host as *mut c_void));
+        let rejected_while_read_only =
+            unsafe { cb_terminal_test_drag_and_file_paste(raw_view as *mut c_void) };
+        assert!(
+            !rejected_while_read_only,
+            "read-only terminal must reject NSDraggingDestination drops"
+        );
+        assert!(rx.try_recv().is_err());
+
+        host.read_only = false;
+        {
+            let mut s = host.state.lock().unwrap();
+            s.connected = false;
+            s.status = "Disconnected".into();
+        }
+        assert!(!cb_can_accept_input(&*host as *const Host as *mut c_void));
+        let rejected_while_disconnected =
+            unsafe { cb_terminal_test_drag_and_file_paste(raw_view as *mut c_void) };
+        assert!(
+            !rejected_while_disconnected,
+            "disconnected terminal must reject NSDraggingDestination drops"
+        );
+        assert!(rx.try_recv().is_err());
+
         unsafe {
             cb_terminal_detach(raw_view as *mut c_void);
             drop(Retained::from_raw(raw_view));

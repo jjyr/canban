@@ -108,10 +108,17 @@ typedef struct {
 } CbLinkSpan;
 
 typedef struct {
+  const uint8_t *ptr;
+  size_t len;
+} CbByteSlice;
+
+typedef struct {
   const CbSnapshot *(*snapshot)(void *, CbGeometry, bool);
   bool (*key)(void *, CbKeyEvent);
   void (*text)(void *, const uint8_t *, size_t);
   void (*paste)(void *, const uint8_t *, size_t);
+  bool (*paste_paths)(void *, const CbByteSlice *, size_t);
+  bool (*can_accept_input)(void *);
   bool (*mouse)(void *, CbMouseEvent);
   void (*wheel)(void *, int32_t, int32_t, float, float, uint16_t, bool);
   int8_t (*select)(void *, CbSelectEvent);
@@ -774,7 +781,7 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   return result;
 }
 
-@interface CanbanTerminal : NSView <NSTextInputClient> {
+@interface CanbanTerminal : NSView <NSTextInputClient, NSDraggingDestination> {
 @public
   void *_host;
   CbCallbacks _cb;
@@ -868,6 +875,11 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   self.layer.opaque = YES;
   [self applyThemeBgLayerColor];
   [self rebuildFonts];
+  [self registerForDraggedTypes:@[
+    NSPasteboardTypeFileURL,
+    NSPasteboardTypeURL,
+    NSPasteboardTypeString,
+  ]];
   return self;
 }
 
@@ -2156,20 +2168,143 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
   [pb setString:text forType:NSPasteboardTypeString];
 }
 
-- (IBAction)paste:(id)sender {
-  (void)sender;
-  if (!_host || !_cb.paste)
-    return;
-  NSString *text =
-      [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
+- (NSArray<NSString *> *)filePathsFromPasteboard:(NSPasteboard *)pb {
+  if (!pb)
+    return @[];
+  NSArray<NSURL *> *urls =
+      [pb readObjectsForClasses:@[ [NSURL class] ]
+                        options:@{NSPasteboardURLReadingFileURLsOnlyKey : @YES}];
+  if (!urls || urls.count == 0)
+    return @[];
+  NSMutableArray<NSString *> *paths =
+      [NSMutableArray arrayWithCapacity:urls.count];
+  for (NSURL *url in urls) {
+    NSString *path = url.path;
+    if (path && path.length > 0) {
+      [paths addObject:path];
+    }
+  }
+  return paths;
+}
+
+- (NSString *)nonFileTextFromPasteboard:(NSPasteboard *)pb {
+  if (!pb)
+    return nil;
+  NSString *text = [pb stringForType:NSPasteboardTypeString];
+  if (text && text.length > 0)
+    return text;
+  NSArray<NSURL *> *urls = [pb readObjectsForClasses:@[ [NSURL class] ]
+                                             options:nil];
+  if (!urls || urls.count == 0)
+    return nil;
+  NSMutableArray<NSString *> *items =
+      [NSMutableArray arrayWithCapacity:urls.count];
+  for (NSURL *url in urls) {
+    if (url.isFileURL)
+      continue;
+    NSString *s = url.absoluteString;
+    if (s && s.length > 0) {
+      [items addObject:s];
+    }
+  }
+  if (items.count == 0)
+    return nil;
+  return [items componentsJoinedByString:@" "];
+}
+
+- (BOOL)hasPasteableContentInPasteboard:(NSPasteboard *)pb {
+  if ([self filePathsFromPasteboard:pb].count > 0)
+    return YES;
+  NSString *text = [self nonFileTextFromPasteboard:pb];
+  return text && text.length > 0;
+}
+
+- (BOOL)pasteFromPasteboard:(NSPasteboard *)pb {
+  if (!_host || !pb)
+    return NO;
+  if (_cb.can_accept_input && !_cb.can_accept_input(_host))
+    return NO;
+
+  NSArray<NSString *> *paths = [self filePathsFromPasteboard:pb];
+  if (paths.count > 0 && _cb.paste_paths) {
+    NSMutableArray<NSData *> *utf8Items =
+        [NSMutableArray arrayWithCapacity:paths.count];
+    for (NSString *path in paths) {
+      NSData *utf8 = [path dataUsingEncoding:NSUTF8StringEncoding];
+      if (utf8 && utf8.length > 0) {
+        [utf8Items addObject:utf8];
+      }
+    }
+    if (utf8Items.count > 0) {
+      CbByteSlice *slices =
+          (CbByteSlice *)calloc(utf8Items.count, sizeof(CbByteSlice));
+      if (!slices)
+        return NO;
+      for (NSUInteger i = 0; i < utf8Items.count; i++) {
+        NSData *d = utf8Items[i];
+        slices[i].ptr = (const uint8_t *)d.bytes;
+        slices[i].len = d.length;
+      }
+      [self clearCommitCursorHold];
+      bool ok = _cb.paste_paths(_host, slices, utf8Items.count);
+      free(slices);
+      if (ok) {
+        [self pollSnapshotForceFull:NO];
+        return YES;
+      }
+    }
+  }
+
+  if (!_cb.paste)
+    return NO;
+  NSString *text = [self nonFileTextFromPasteboard:pb];
   if (!text || text.length == 0)
-    return;
+    return NO;
   NSData *utf8 = [text dataUsingEncoding:NSUTF8StringEncoding];
   if (!utf8 || utf8.length == 0)
-    return;
+    return NO;
   [self clearCommitCursorHold];
   _cb.paste(_host, (const uint8_t *)utf8.bytes, utf8.length);
   [self pollSnapshotForceFull:NO];
+  return YES;
+}
+
+- (IBAction)paste:(id)sender {
+  (void)sender;
+  [self pasteFromPasteboard:[NSPasteboard generalPasteboard]];
+}
+
+- (NSDragOperation)dragOperationForInfo:(id<NSDraggingInfo>)sender {
+  if (!_host || !sender)
+    return NSDragOperationNone;
+  if (_cb.can_accept_input && !_cb.can_accept_input(_host))
+    return NSDragOperationNone;
+  if (![self hasPasteableContentInPasteboard:sender.draggingPasteboard])
+    return NSDragOperationNone;
+  return NSDragOperationCopy;
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+  return [self dragOperationForInfo:sender];
+}
+
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender {
+  return [self dragOperationForInfo:sender];
+}
+
+- (BOOL)prepareForDragOperation:(id<NSDraggingInfo>)sender {
+  return [self dragOperationForInfo:sender] != NSDragOperationNone;
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+  if ([self dragOperationForInfo:sender] == NSDragOperationNone)
+    return NO;
+  if (![self pasteFromPasteboard:sender.draggingPasteboard])
+    return NO;
+  if (self.window && self.window.firstResponder != self) {
+    [self.window makeFirstResponder:self];
+  }
+  return YES;
 }
 
 - (void)selectAll:(id)sender {
@@ -2197,9 +2332,11 @@ static CTFontRef cb_create_styled_font(NSString *family, CGFloat size,
     return _host && _cb.has_selection && _cb.has_selection(_host);
   }
   if (action == @selector(paste:)) {
-    NSString *s = [[NSPasteboard generalPasteboard]
-        stringForType:NSPasteboardTypeString];
-    return s.length > 0;
+    if (!_host)
+      return NO;
+    if (_cb.can_accept_input && !_cb.can_accept_input(_host))
+      return NO;
+    return [self hasPasteableContentInPasteboard:[NSPasteboard generalPasteboard]];
   }
   if (action == @selector(selectAll:) || action == @selector(clearTerminal:)) {
     return _host != NULL;
@@ -3476,5 +3613,155 @@ bool cb_terminal_test_verify_post_echo_cursor(void *view, uint16_t expectedX) {
     BOOL optimistic = [term effectiveCursorX:&cx y:&cy];
     return (!term.commitCursorActive && !optimistic && cx == expectedX &&
             cy == 0);
+  }
+}
+
+@interface CbFakeDraggingInfo : NSObject <NSDraggingInfo>
+@property(nonatomic, strong) NSPasteboard *mockPasteboard;
+@property(nonatomic, weak) NSWindow *mockWindow;
+@end
+
+@implementation CbFakeDraggingInfo
+- (NSWindow *)draggingDestinationWindow {
+  return self.mockWindow;
+}
+- (NSDragOperation)draggingSourceOperationMask {
+  return NSDragOperationEvery;
+}
+- (NSPoint)draggingLocation {
+  return NSMakePoint(20.0, 20.0);
+}
+- (NSPoint)draggedImageLocation {
+  return NSMakePoint(20.0, 20.0);
+}
+- (NSImage *)draggedImage {
+  return nil;
+}
+- (NSPasteboard *)draggingPasteboard {
+  return self.mockPasteboard;
+}
+- (id)draggingSource {
+  return nil;
+}
+- (NSInteger)draggingSequenceNumber {
+  return 1;
+}
+- (void)slideDraggedImageTo:(NSPoint)screenPoint {
+  (void)screenPoint;
+}
+- (NSArray<NSString *> *)namesOfPromisedFilesDroppedAtDestination:
+    (NSURL *)dropDestination {
+  (void)dropDestination;
+  return @[];
+}
+- (void)enumerateDraggingItemsWithOptions:(NSDraggingItemEnumerationOptions)enumOpts
+                                  forView:(NSView *)view
+                                  classes:(NSArray<Class> *)classArray
+                            searchOptions:
+                                (NSDictionary<NSPasteboardReadingOptionKey, id> *)
+                                    searchOptions
+                               usingBlock:
+                                   (void (^)(NSDraggingItem *, NSInteger, BOOL *))
+                                       block {
+  (void)enumOpts;
+  (void)view;
+  (void)classArray;
+  (void)searchOptions;
+  (void)block;
+}
+@synthesize animatesToDestination;
+@synthesize draggingFormation;
+@synthesize numberOfValidItemsForDrop;
+@synthesize springLoadingHighlight;
+- (void)resetSpringLoading {
+}
+@end
+
+bool cb_terminal_test_drag_and_file_paste(void *view) {
+  if (!view)
+    return false;
+  @autoreleasepool {
+    CanbanTerminal *term = (__bridge CanbanTerminal *)view;
+    NSArray<NSPasteboardType> *registered = term.registeredDraggedTypes;
+    if (![registered containsObject:NSPasteboardTypeFileURL] ||
+        ![registered containsObject:NSPasteboardTypeURL] ||
+        ![registered containsObject:NSPasteboardTypeString]) {
+      return false;
+    }
+
+    // 1. Multi-file Finder drag (including spaces, single quotes, and CJK characters;
+    //    Finder also writes filename NSPasteboardTypeString alongside file URLs).
+    NSPasteboard *filePb = [NSPasteboard pasteboardWithUniqueName];
+    [filePb clearContents];
+    NSURL *u1 = [NSURL fileURLWithPath:@"/Users/jjy/foo/bar.rs"];
+    NSURL *u2 = [NSURL fileURLWithPath:@"/Users/jjy/My Docs/it's 截图 (1).png"];
+    [filePb writeObjects:@[ u1, u2 ]];
+    [filePb setString:@"bar.rs\nit's 截图 (1).png"
+              forType:NSPasteboardTypeString];
+
+    CbFakeDraggingInfo *drag = [[CbFakeDraggingInfo alloc] init];
+    drag.mockPasteboard = filePb;
+    if ([term draggingEntered:drag] != NSDragOperationCopy ||
+        [term draggingUpdated:drag] != NSDragOperationCopy ||
+        ![term prepareForDragOperation:drag] ||
+        ![term performDragOperation:drag]) {
+      [filePb releaseGlobally];
+      return false;
+    }
+
+    // 2. Finder Cmd+C -> pasteFromPasteboard: must prefer full escaped file paths
+    //    over Finder's bare filename string representation.
+    NSPasteboard *copyPb = [NSPasteboard pasteboardWithUniqueName];
+    [copyPb clearContents];
+    NSURL *u3 = [NSURL fileURLWithPath:@"/tmp/hello world/$HOME.txt"];
+    [copyPb writeObjects:@[ u3 ]];
+    [copyPb setString:@"$HOME.txt" forType:NSPasteboardTypeString];
+    if (![term pasteFromPasteboard:copyPb]) {
+      [filePb releaseGlobally];
+      [copyPb releaseGlobally];
+      return false;
+    }
+
+    // 3. Plain text drag & non-file URL drag pass through verbatim without trailing-space escaping.
+    NSPasteboard *textPb = [NSPasteboard pasteboardWithUniqueName];
+    [textPb clearContents];
+    [textPb setString:@"echo hi" forType:NSPasteboardTypeString];
+    drag.mockPasteboard = textPb;
+    if ([term draggingEntered:drag] != NSDragOperationCopy ||
+        ![term performDragOperation:drag]) {
+      [filePb releaseGlobally];
+      [copyPb releaseGlobally];
+      [textPb releaseGlobally];
+      return false;
+    }
+
+    NSPasteboard *webPb = [NSPasteboard pasteboardWithUniqueName];
+    [webPb clearContents];
+    NSURL *webUrl = [NSURL URLWithString:@"https://canban.dev/docs?a=1&b=2"];
+    [webPb writeObjects:@[ webUrl ]];
+    drag.mockPasteboard = webPb;
+    if ([term draggingEntered:drag] != NSDragOperationCopy ||
+        ![term performDragOperation:drag]) {
+      [filePb releaseGlobally];
+      [copyPb releaseGlobally];
+      [textPb releaseGlobally];
+      [webPb releaseGlobally];
+      return false;
+    }
+
+    // 4. Empty pasteboard is rejected cleanly.
+    NSPasteboard *emptyPb = [NSPasteboard pasteboardWithUniqueName];
+    [emptyPb clearContents];
+    drag.mockPasteboard = emptyPb;
+    bool emptyRejected = ([term draggingEntered:drag] == NSDragOperationNone &&
+                          ![term prepareForDragOperation:drag] &&
+                          ![term performDragOperation:drag]);
+
+    [filePb releaseGlobally];
+    [copyPb releaseGlobally];
+    [textPb releaseGlobally];
+    [webPb releaseGlobally];
+    [emptyPb releaseGlobally];
+    return emptyRejected;
   }
 }
