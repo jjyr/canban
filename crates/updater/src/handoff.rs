@@ -76,7 +76,7 @@ struct Pending {
 }
 pub fn enqueue(home: &Path, method: &str, params: &Value) -> Result<PathBuf> {
     ensure!(
-        matches!(method, "execution.report" | "agent.reply"),
+        matches!(method, "execution.report" | "batch.report" | "agent.reply"),
         "Only idempotent Agent reports/replies can be queued"
     );
     ensure!(
@@ -289,6 +289,23 @@ mod journal_tests {
         assert!(active(dir.path()));
         assert!(startup_guard(dir.path()).is_err());
         assert!(!dir.path().join("canban.sqlite").exists());
+    }
+
+    #[test]
+    fn enqueue_accepts_batch_report_alongside_execution_report_and_agent_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = enqueue(
+            dir.path(),
+            "batch.report",
+            &serde_json::json!({
+                "batch_id": "merge-queue:proj:1234",
+                "state": "completed",
+                "message": "Resolved conflicts",
+                "request_key": "req-batch-1",
+            }),
+        )
+        .unwrap();
+        assert!(path.is_file());
     }
 
     #[test]
