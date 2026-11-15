@@ -170,10 +170,6 @@ fn route_chrome(ui: Ui) -> impl IntoElement {
                     .child(view().flex_1().h_full().window_drag(true))
                     .into_element(),
                 "settings" => subpage_chrome(ui, None, "Settings").into_element(),
-                "machines" => {
-                    subpage_chrome(ui, Some(("← Settings", "settings")), "Settings / Machines")
-                        .into_element()
-                }
                 "archive" => subpage_chrome(ui, Some(("← Board", "board")), move || {
                     ui.current_project()
                         .map(|pr| format!("{} / Archive", pr.name))
@@ -228,7 +224,6 @@ fn is_workspace_page(page: &str) -> bool {
             "agent-setup"
                 | "project-agents"
                 | "workflows"
-                | "machines"
                 | "project-location"
                 | "new-project"
                 | "terminals"

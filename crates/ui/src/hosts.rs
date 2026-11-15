@@ -69,6 +69,21 @@ pub fn effective_hosts(ui: Ui) -> Vec<HostSummary> {
     }]
 }
 
+/// Human-readable display name for a `canband` host (`"This Mac"` for `"local"`).
+pub fn host_name(ui: Ui, host_id: &str) -> String {
+    if host_id.is_empty() || host_id == "local" {
+        return "This Mac".into();
+    }
+    if let Some(found) = ui
+        .hosts
+        .with(|hs| hs.iter().find(|h| h.id == host_id).map(|h| h.name.clone()))
+    {
+        return found;
+    }
+    ui.snapshot
+        .with(|s| s.host_display_name(host_id).to_owned())
+}
+
 pub fn toggle_popover(ui: Ui) {
     crate::utilities::open(ui, "hosts");
 }
@@ -122,6 +137,90 @@ pub fn reconnect_host(ui: Ui, host_id: Option<String>) {
         });
     } else {
         ui.notify("Gallery preview: simulated host reconnect");
+    }
+}
+
+fn infer_ssh_target_for_host(summary: &HostSummary) -> Option<String> {
+    if let Some(t) = summary
+        .ssh_target
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(t.to_owned());
+    }
+    let host_part = summary
+        .endpoint_label
+        .split(':')
+        .next()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "~/.canban/app.sock")?;
+    let user = std::env::var("USER").unwrap_or_default();
+    if user.trim().is_empty() || host_part.contains('@') {
+        Some(host_part.to_owned())
+    } else {
+        Some(format!("{}@{host_part}", user.trim()))
+    }
+}
+
+pub fn update_host_daemon(ui: Ui, summary: HostSummary) {
+    let host_id = summary.id.clone();
+    let host_name = summary.name.clone();
+    let ssh_fallback = infer_ssh_target_for_host(&summary);
+    let prefer_tailscale = !summary.transport_label.contains("SSH");
+    if let Some(reg) = crate::HOSTS.get().cloned() {
+        ui.notify(format!("Updating Canban daemon on {host_name}…"));
+        ui.spawn(async move {
+            let hid = host_id.clone();
+            let res = blocking(move || {
+                let rpc_res = reg.update_remote_daemon(&hid);
+                let sums = reg.summaries();
+                let snap = reg.merged_snapshot();
+                (rpc_res, sums, snap)
+            })
+            .await;
+            match res {
+                Ok((Ok(val), sums, snap_res)) => {
+                    let _ = ui.hosts.try_set(sums);
+                    if let Ok(snap) = snap_res {
+                        let _ = ui.snapshot.try_set(snap);
+                    }
+                    if val["updated"] == true {
+                        let ver = val["version"].as_str().unwrap_or("latest");
+                        ui.notify(format!("Updated {host_name} daemon to {ver}"));
+                    } else if let Some(msg) = val["message"].as_str() {
+                        ui.operation_error.set(msg.to_owned());
+                    }
+                }
+                Ok((Err(err), sums, snap_res)) => {
+                    let _ = ui.hosts.try_set(sums);
+                    if let Ok(snap) = snap_res {
+                        let _ = ui.snapshot.try_set(snap);
+                    }
+                    let msg = format!("{err:#}");
+                    if msg.contains("Unknown update operation: update.daemon")
+                        && let Some(ssh_target) = ssh_fallback
+                    {
+                        spawn_ssh_bootstrap_terminal(
+                            ui,
+                            &ssh_target,
+                            prefer_tailscale,
+                            DEFAULT_DAEMON_PORT,
+                        );
+                    } else {
+                        ui.operation_error
+                            .set(format!("Could not update daemon on {host_name}: {msg}"));
+                    }
+                }
+                Err(e) => {
+                    ui.operation_error.set(e.to_string());
+                }
+            }
+        });
+    } else {
+        ui.notify(format!(
+            "Gallery preview: simulated daemon update on {host_name}"
+        ));
     }
 }
 
@@ -389,6 +488,17 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                 let mut actions =
                                     view().flex_row().flex_wrap().items_center().gap_1();
                                 if !is_local {
+                                    if matches!(
+                                        h.connection,
+                                        HostConnectionState::ApiMismatch { .. }
+                                    ) {
+                                        let h_upd = h.clone();
+                                        actions = actions.child(compact_action(
+                                            "Update Daemon",
+                                            Variant::Primary,
+                                            move |_| update_host_daemon(ui, h_upd.clone()),
+                                        ));
+                                    }
                                     actions = actions.child(compact_action(
                                         "Reconnect",
                                         if is_conn {
@@ -607,16 +717,35 @@ pub fn offline_banner(ui: Ui) -> impl IntoElement {
         move || {
             dynamic(move || {
                 let host_id = ui.active_project_host();
-                let (host_name, detail) = ui.snapshot.with(|s| {
+                let (host_name, detail, mismatch_sum) = ui.snapshot.with(|s| {
                     let name = s.host_display_name(&host_id).to_owned();
-                    let status = s
-                        .host_summary(&host_id)
+                    let sum = s.host_summary(&host_id).cloned();
+                    let status = sum
+                        .as_ref()
                         .map(|h| h.connection.short_status())
                         .unwrap_or_else(|| "Offline · Cached".into());
-                    (name, status)
+                    let mm = sum.filter(|h| {
+                        matches!(h.connection, HostConnectionState::ApiMismatch { .. })
+                    });
+                    (name, status, mm)
                 });
                 let hid_rec = host_id.clone();
                 let hid_diag = host_id;
+                let mut trailing = view().flex_row().items_center().gap_1p5();
+                if let Some(h_upd) = mismatch_sum {
+                    trailing = trailing.child(compact_action(
+                        "Update Daemon",
+                        Variant::Primary,
+                        move |_| update_host_daemon(ui, h_upd.clone()),
+                    ));
+                }
+                trailing = trailing
+                    .child(compact_action("Reconnect", Variant::Secondary, move |_| {
+                        reconnect_host(ui, Some(hid_rec.clone()));
+                    }))
+                    .child(compact_action("Diagnostics", Variant::Quiet, move |_| {
+                        open_host_settings(ui, hid_diag.clone(), "diagnostics");
+                    }));
                 view()
                     .px_4()
                     .py_2()
@@ -642,18 +771,7 @@ pub fn offline_banner(ui: Ui) -> impl IntoElement {
                                 .text_size(px(12.5)),
                             ),
                     )
-                    .child(
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .gap_1p5()
-                            .child(compact_action("Reconnect", Variant::Secondary, move |_| {
-                                reconnect_host(ui, Some(hid_rec.clone()));
-                            }))
-                            .child(compact_action("Diagnostics", Variant::Quiet, move |_| {
-                                open_host_settings(ui, hid_diag.clone(), "diagnostics");
-                            })),
-                    )
+                    .child(trailing)
             })
         },
     )
@@ -1571,6 +1689,14 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
             let mut controls = view().flex_row().flex_wrap().items_center().gap_1p5();
             if !h.is_local {
                 if is_enabled {
+                    if matches!(h.connection, HostConnectionState::ApiMismatch { .. }) {
+                        let h_upd = h.clone();
+                        controls = controls.child(compact_action(
+                            "Update Daemon",
+                            Variant::Primary,
+                            move |_| update_host_daemon(ui, h_upd.clone()),
+                        ));
+                    }
                     controls = controls.child(compact_action(
                         "Reconnect",
                         Variant::Quiet,
@@ -1883,6 +2009,72 @@ mod tests {
         assert!(
             texts.iter().any(|t| t == "home-box"),
             "expected discovered Tailscale peer `home-box`, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn api_mismatch_surfaces_update_daemon_action_in_popover_and_settings() {
+        #[component]
+        fn ProbeMismatchHosts() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let local_summary = HostSummary {
+                id: "local".into(),
+                name: "This Mac".into(),
+                is_local: true,
+                transport_label: "Local socket".into(),
+                endpoint_label: "~/.canban/app.sock".into(),
+                ssh_target: None,
+                server_id: None,
+                connection: HostConnectionState::Connected {
+                    rtt_ms: 0,
+                    api_version: canban_updater::DESKTOP_API,
+                    version: "0.4.2".into(),
+                    platform: "macos-aarch64".into(),
+                },
+                active_agents: 0,
+                max_agents: 5,
+                project_count: 0,
+                reconnect_count: 0,
+                last_synced_at: None,
+            };
+            let mismatch_summary = HostSummary {
+                id: "home-linux".into(),
+                name: "Home Linux".into(),
+                is_local: false,
+                transport_label: "Tailscale / TCP".into(),
+                endpoint_label: "100.64.0.10:7680".into(),
+                ssh_target: Some("jjy@100.64.0.10".into()),
+                server_id: Some("srv-home".into()),
+                connection: HostConnectionState::ApiMismatch {
+                    server_api: 54,
+                    app_api: canban_updater::DESKTOP_API,
+                    version: "20261115-2".into(),
+                },
+                active_agents: 0,
+                max_agents: 8,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: None,
+            };
+            ui.hosts.set(vec![local_summary, mismatch_summary]);
+            ui.utility_popup.set("hosts".into());
+            view()
+                .w(px(1200.))
+                .h(px(900.))
+                .child(settings_section_view(ui))
+                .child(popover(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(900.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeMismatchHosts>());
+        let texts = collect_mounted_texts(core.commit().expect("mount batch"));
+
+        let update_buttons = texts.iter().filter(|t| *t == "Update Daemon").count();
+        assert!(
+            update_buttons >= 2,
+            "expected `Update Daemon` action in both Settings -> Hosts and Connected Hosts popover, got {texts:?}"
         );
     }
 }

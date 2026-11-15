@@ -18,7 +18,6 @@ pub mod hosts;
 pub(crate) mod index;
 pub mod insights;
 pub mod links;
-pub mod machines;
 pub mod navigation;
 pub mod overview;
 pub mod presenter;
@@ -124,9 +123,7 @@ pub(crate) fn workspace_root() -> impl IntoElement {
     });
     frame::configure_window_chrome();
     refresh(ui);
-    machines::refresh_catalog(ui);
     set_interval(std::time::Duration::from_secs(5), move || {
-        machines::refresh_catalog(ui);
         let has_active_runtime = ui.snapshot.with_untracked(|s| {
             s.workflow_runs.iter().any(|r| {
                 r.active()
@@ -159,7 +156,7 @@ pub(crate) fn workspace_root() -> impl IntoElement {
                 last_cfg_host.set(target);
                 ui.agent_catalog.set(serde_json::Value::Null);
                 if page == "settings" || page == "agent-setup" {
-                    agents_setup::refresh_catalog(ui, "local");
+                    agents_setup::refresh_catalog(ui);
                 }
             }
         }

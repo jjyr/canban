@@ -131,6 +131,7 @@ print(json.dumps(rows))"#,
                     | "machine.add"
                     | "machine.remove"
                     | "update.install"
+                    | "update.daemon"
             ),
             "Operation is not available through the Agent reporting bridge"
         );

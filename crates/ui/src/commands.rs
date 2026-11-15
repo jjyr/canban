@@ -455,14 +455,6 @@ pub const CATALOG: &[Command] = &[
         keywords: "about credits open source licenses apache mit herdr sheprd herdr-gpui nsh ghostty",
     },
     Command {
-        id: "go-machines",
-        title: "Open Execution Machines",
-        key: "",
-        display: "Machines",
-        context: "Navigation",
-        keywords: "remote ssh host core",
-    },
-    Command {
         id: "go-project-location",
         title: "Configure Project Work Location",
         key: "",
@@ -914,7 +906,6 @@ pub fn execute(ui: Ui, id: &str) {
         "connect-machine" => crate::hosts::open_connect_modal(ui),
         "reconnect-hosts" => crate::hosts::reconnect_host(ui, None),
         "go-acknowledgements" => ui.open_settings_section("acknowledgements"),
-        "go-machines" => ui.navigate("machines"),
         "go-project-location" => {
             if ui.current_project().is_some() {
                 ui.navigate("project-location");
@@ -1404,7 +1395,7 @@ pub fn execute(ui: Ui, id: &str) {
         "choose-theme" => crate::utilities::open(ui, "theme"),
         "choose-terminal-font" => crate::utilities::open(ui, "terminal-font"),
         "toggle-awake" => crate::utilities::toggle_awake(ui),
-        "refresh-usage" => crate::utilities::usage(ui, crate::utilities::machine(ui), true),
+        "refresh-usage" => crate::utilities::usage(ui, crate::utilities::host(ui), true),
         "reload-config" => dispatch(ui, "config.reload", json!({})),
         "copy-skill-command" => crate::agents_setup::copy_skill_command(ui),
         "check-herdr" => dispatch(ui, "herdr.status", json!({})),

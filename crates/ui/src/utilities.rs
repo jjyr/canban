@@ -20,30 +20,28 @@ pub fn open(ui: Ui, name: &str) {
         });
     ui.terminal_focus.update(|n| *n += 1);
 }
-pub fn machine(ui: Ui) -> String {
-    let pinned = ui.usage_machine.get();
+pub fn host(ui: Ui) -> String {
+    let pinned = ui.usage_host.get();
     if !pinned.is_empty() {
         return pinned;
     }
     if ui.page.get() == "terminals"
         && let Some(e) = crate::terminals::current(ui)
     {
-        return e.machine().into();
+        return e.host_id;
     }
-    ui.current_project()
-        .map(|p| p.work_location().machine)
-        .unwrap_or_else(|| "local".into())
+    ui.active_project_host()
 }
 pub fn init(ui: Ui) {
     refresh(ui);
     set_interval(std::time::Duration::from_secs(5), move || refresh(ui));
-    let target = computed(move || machine(ui));
+    let target = computed(move || host(ui));
     effect(move || {
-        let machine = target.get();
-        untracked(|| usage(ui, machine, false));
+        let host_id = target.get();
+        untracked(|| usage(ui, host_id, false));
     });
     set_interval(std::time::Duration::from_secs(5), move || {
-        usage(ui, machine(ui), false)
+        usage(ui, host(ui), false)
     });
     set_interval(std::time::Duration::from_secs(60), move || {
         ui.utility_clock.set(canban_types::now() / 1000);
@@ -280,21 +278,21 @@ pub fn terminal_settings(ui: Ui) -> impl IntoElement {
             ),
     ))
 }
-pub fn usage(ui: Ui, machine: String, force: bool) {
-    let Some(app) = crate::APP.get().cloned() else {
+pub fn usage(ui: Ui, host_id: String, force: bool) {
+    if crate::APP.get().is_none() {
         if force {
             ui.notify("Subscription usage refreshed");
         }
         return;
-    };
+    }
     if !force
         && ui.usage_loading.get_untracked()
-        && ui.usage.with_untracked(|v| v["machine"] == machine)
+        && ui.usage.with_untracked(|v| v["host_id"] == host_id)
     {
         return;
     }
-    if ui.usage.with_untracked(|v| v["machine"] != machine) {
-        ui.usage.set(json!({"machine":machine,"readings":[]}));
+    if ui.usage.with_untracked(|v| v["host_id"] != host_id) {
+        ui.usage.set(json!({"host_id":host_id,"readings":[]}));
     }
     if force {
         ui.notify("Refreshing subscription usage…");
@@ -302,15 +300,17 @@ pub fn usage(ui: Ui, machine: String, force: bool) {
     ui.usage_loading.set(true);
     ui.usage_epoch.update(|n| *n += 1);
     let epoch = ui.usage_epoch.get_untracked();
+    let req_host = host_id.clone();
     ui.spawn(async move {
         let r = blocking(move || {
-            app.call(
+            crate::routed_call(
                 if force {
                     "usage.refresh"
                 } else {
                     "usage.status"
                 },
-                json!({"machine":machine}),
+                json!({"host_id":req_host,"machine":"local"}),
+                None,
             )
         })
         .await;
@@ -319,7 +319,8 @@ pub fn usage(ui: Ui, machine: String, force: bool) {
         }
         ui.usage_loading.set(false);
         match r {
-            Ok(Ok(v)) => {
+            Ok(Ok(mut v)) => {
+                v["host_id"] = json!(host_id);
                 if v != ui.usage.get_untracked() {
                     ui.usage.set(v);
                 }
@@ -497,7 +498,7 @@ fn usage_summary(ui: Ui, now: u64) -> View {
                             .h(px(14.)),
                         )
                         .child(muted(text))
-                        .on_press(move |_: &()| usage(ui, machine(ui), true)),
+                        .on_press(move |_: &()| usage(ui, host(ui), true)),
                 ),
         );
     }

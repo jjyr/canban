@@ -1511,8 +1511,8 @@ fn config_session_row(
     if let Some((_, prov_name)) = entry.provider() {
         context_parts.push(prov_name);
     }
-    let remote_machine = (entry.machine() != "local" && !entry.machine().is_empty())
-        .then(|| entry.machine().to_owned());
+    let remote_host = (entry.host_id != "local" && !entry.host_id.is_empty())
+        .then(|| crate::hosts::host_name(ui, &entry.host_id));
     let mut context_line = view()
         .flex_row()
         .w_full()
@@ -1526,8 +1526,8 @@ fn config_session_row(
                 .min_w(px(0.))
                 .truncate(),
         );
-    if let Some(machine) = remote_machine {
-        context_line = context_line.child(view().flex_shrink_0().child(badge(machine)));
+    if let Some(host_label) = remote_host {
+        context_line = context_line.child(view().flex_shrink_0().child(badge(host_label)));
     }
 
     let summary_detail = event.detail.as_deref().unwrap_or("");
@@ -1623,12 +1623,9 @@ fn row_view(
     let activate_row = row.clone();
     let event = ui.snapshot.with(|s| describe_row(s, &row));
     let profile_tag = row.agent().map(|a| format!("@{}", a.profile.id));
-    let remote_machine = row
-        .agent()
-        .and_then(|a| a.location.as_ref())
-        .map(|l| l.machine.as_str())
-        .filter(|m| !m.is_empty() && *m != "local")
-        .map(str::to_owned);
+    let card_host = ui.snapshot.with(|s| s.card_host(&row.card.id).to_owned());
+    let remote_host = (card_host != "local" && !card_host.is_empty())
+        .then(|| crate::hosts::host_name(ui, &card_host));
     let waiting_age = row
         .agent()
         .and_then(|a| a.lifecycle.waiting.as_ref().map(|w| w.since))
@@ -1656,8 +1653,8 @@ fn row_view(
 
     let top_trailing = waiting_age.map(|wait| status(wait, Tone::Attention).into_element());
     let mut context_pills = Vec::new();
-    if let Some(machine) = remote_machine {
-        context_pills.push(badge(machine).into_element());
+    if let Some(host_label) = remote_host {
+        context_pills.push(badge(host_label).into_element());
     }
     if unread > 0 && row.actionable() && top_trailing.is_none() {
         context_pills.push(badge(format!("{unread} unread")).into_element());

@@ -496,6 +496,59 @@ impl HostRegistry {
         self.wake();
     }
 
+    /// Upgrade a remote host's `canband` daemon over its authenticated transport (`update.daemon`),
+    /// even when the host is currently held in `ApiMismatch` (`BackendOlder`) state.
+    pub fn update_remote_daemon(&self, host_id: &str) -> Result<Value> {
+        ensure!(
+            host_id != "local",
+            "Use Settings -> Updates to update This Mac"
+        );
+        let saved = {
+            let guard = self.remotes.lock().unwrap();
+            guard
+                .get(host_id)
+                .map(|s| s.saved.clone())
+                .with_context(|| format!("Unknown Canban host '{host_id}'"))?
+        };
+        let params = json!({
+            "request_key": id(),
+        });
+        let res = match &saved.transport {
+            HostTransport::Local => bail!("Cannot remote-update Local transport"),
+            HostTransport::Tcp { addr, token } => client::rpc_endpoint(
+                &ClientEndpoint::Tcp {
+                    addr: addr.clone(),
+                    token: token.clone(),
+                },
+                "update.daemon",
+                params,
+            ),
+            HostTransport::Ssh {
+                target,
+                remote_home,
+            } => {
+                let tun = SshTunnel::start(
+                    &Self::tunnels_dir(&self.local_home),
+                    &format!("{host_id}-update"),
+                    target,
+                    remote_home.as_deref(),
+                )?;
+                client::rpc_endpoint(
+                    &ClientEndpoint::Unix(tun.socket_path.clone()),
+                    "update.daemon",
+                    params,
+                )
+            }
+        }?;
+        if res["updated"] == true {
+            // Wait briefly for the remote service restart before triggering reconnect.
+            std::thread::sleep(Duration::from_millis(600));
+            self.reconnect(Some(host_id));
+            self.poll_remotes_once();
+        }
+        Ok(res)
+    }
+
     fn establish_connection(
         &self,
         host_id: &str,
@@ -1064,12 +1117,16 @@ impl HostRegistry {
                 "app.ping"
                     | "app.state"
                     | "app.snapshot"
+                    | "agent.catalog"
                     | "diagnostics.status"
                     | "diagnostics.logs"
                     | "directory.list"
+                    | "project.detect_github"
                     | "review.preview"
                     | "execution.output"
                     | "resource.read"
+                    | "usage.status"
+                    | "usage.refresh"
             )
         {
             self.sync_host_now(&host_id);

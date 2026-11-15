@@ -70,6 +70,7 @@ pub fn run_panel(ui: Ui, entry: TerminalEntry) -> impl IntoElement {
         }
     }
     let output_id = id.clone();
+    let host_id = ui.snapshot.with(|s| s.card_host(&run.card_id).to_owned());
     panel = panel
         .child(muted(format!(
             "Run {} · {} · {}",
@@ -78,14 +79,8 @@ pub fn run_panel(ui: Ui, entry: TerminalEntry) -> impl IntoElement {
             run.cwd
         )))
         .child(muted(format!(
-            "Machine: {}",
-            crate::machines::name(
-                ui,
-                run.location
-                    .as_ref()
-                    .map(|l| l.machine.as_str())
-                    .unwrap_or("local")
-            )
+            "Host: {}",
+            crate::hosts::host_name(ui, &host_id)
         )))
         .child(action(
             "Read terminal output",

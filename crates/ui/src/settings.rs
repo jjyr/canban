@@ -5,7 +5,7 @@ use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::json;
 
-pub const SECTION_COUNT: usize = 11;
+pub const SECTION_COUNT: usize = 10;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SectionId {
@@ -15,7 +15,6 @@ pub enum SectionId {
     Diagnostics,
     Updates,
     Scheduling,
-    Machines,
     Agents,
     Herdr,
     Storage,
@@ -30,7 +29,6 @@ impl SectionId {
         Self::Diagnostics,
         Self::Updates,
         Self::Scheduling,
-        Self::Machines,
         Self::Agents,
         Self::Herdr,
         Self::Storage,
@@ -45,11 +43,10 @@ impl SectionId {
             Self::Diagnostics => 3,
             Self::Updates => 4,
             Self::Scheduling => 5,
-            Self::Machines => 6,
-            Self::Agents => 7,
-            Self::Herdr => 8,
-            Self::Storage => 9,
-            Self::Acknowledgements => 10,
+            Self::Agents => 6,
+            Self::Herdr => 7,
+            Self::Storage => 8,
+            Self::Acknowledgements => 9,
         }
     }
 
@@ -61,7 +58,6 @@ impl SectionId {
             Self::Diagnostics => "diagnostics",
             Self::Updates => "updates",
             Self::Scheduling => "scheduling",
-            Self::Machines => "machines",
             Self::Agents => "agents",
             Self::Herdr => "herdr",
             Self::Storage => "storage",
@@ -70,9 +66,10 @@ impl SectionId {
     }
 
     pub fn from_id(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
         Self::ALL
             .into_iter()
-            .find(|s| s.id().eq_ignore_ascii_case(raw.trim()))
+            .find(|s| s.id().eq_ignore_ascii_case(trimmed))
     }
 
     pub const fn nav_label(self) -> &'static str {
@@ -83,7 +80,6 @@ impl SectionId {
             Self::Diagnostics => "Diagnostics",
             Self::Updates => "Updates",
             Self::Scheduling => "Agent scheduling",
-            Self::Machines => "Machines",
             Self::Agents => "Agents & Identities",
             Self::Herdr => "Herdr",
             Self::Storage => "Storage",
@@ -869,10 +865,6 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                                 .into_element(),
                                         ))
                                         .child(wrap_section(
-                                            SectionId::Machines,
-                                            crate::machines::settings(ui).into_element(),
-                                        ))
-                                        .child(wrap_section(
                                             SectionId::Agents,
                                             crate::agents_setup::global_settings_section(
                                                 ui,
@@ -903,7 +895,7 @@ mod tests {
     use super::*;
 
     const SAMPLE_OFFSETS: [f32; SECTION_COUNT] = [
-        32.0, 220.0, 340.0, 480.0, 600.0, 720.0, 1050.0, 1380.0, 1820.0, 2060.0, 2280.0,
+        32.0, 220.0, 340.0, 480.0, 600.0, 720.0, 1380.0, 1820.0, 2060.0, 2280.0,
     ];
 
     #[test]

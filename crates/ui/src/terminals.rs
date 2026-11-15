@@ -430,10 +430,7 @@ fn gallery_create_entry(
         agent: None,
         created_at: 0,
         runtime: Some(canban_types::TerminalRuntime {
-            machine: inherited
-                .as_ref()
-                .map(|e| e.machine().to_owned())
-                .unwrap_or_else(|| "local".into()),
+            machine: "local".into(),
             owner_core_id: None,
             core_id: Some("gallery".into()),
             terminal: Some(id.clone()),
@@ -640,6 +637,14 @@ fn launch(ui: Ui, params: serde_json::Value) {
         let agent = params["agent"] == true;
         let inherit = params["inherit_terminal_id"].as_str().is_some();
         let id = gallery_create_entry(ui, project_id, card_id, agent, inherit);
+        if let Some(hid) = params["host_id"]
+            .as_str()
+            .filter(|h| !h.is_empty() && *h != "local")
+        {
+            ui.snapshot.update(|s| {
+                s.entity_hosts.insert(id.clone(), hid.to_owned());
+            });
+        }
         if let Some(name) = custom_name {
             ui.snapshot.update(|s| {
                 if let Some(t) = s.terminals.iter_mut().find(|t| t.id == id) {
@@ -792,24 +797,26 @@ pub fn machine_menu(ui: Ui) {
             }
         }
         items.push(MenuItem::separator());
-        items.push(
-            MenuItem::new("New Terminal ($HOME · Local)")
-                .on_select(move || launch(ui, json!({ "machine": "local" }))),
-        );
-        for m in ui
-            .machines
-            .with_untracked(|v| v["machines"].as_array().cloned().unwrap_or_default())
-        {
-            let id = m["id"].as_str().unwrap_or("").to_owned();
-            let title = format!(
-                "{} · {}",
-                m["name"].as_str().unwrap_or("Machine"),
-                m["state"].as_str().unwrap_or("unknown")
-            );
-            items.push(MenuItem::new(title).on_select(move || launch(ui, json!({"machine":id}))));
+        for h in crate::hosts::effective_hosts(ui) {
+            if h.is_local {
+                items.push(
+                    MenuItem::new("New Terminal ($HOME · This Mac)").on_select(move || {
+                        launch(ui, json!({ "host_id": "local", "machine": "local" }))
+                    }),
+                );
+            } else if h.is_connected() {
+                let hid = h.id.clone();
+                items.push(
+                    MenuItem::new(format!("New Terminal ($HOME · {})", h.name))
+                        .on_select(move || launch(ui, json!({ "host_id": hid }))),
+                );
+            }
         }
         items.push(MenuItem::separator());
-        items.push(MenuItem::new("Add machine…").on_select(move || ui.navigate("machines")));
+        items.push(
+            MenuItem::new("Connect Machine…")
+                .on_select(move || crate::hosts::open_connect_modal(ui)),
+        );
         popup_menu(items).await;
     });
 }

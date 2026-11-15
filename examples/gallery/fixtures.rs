@@ -1176,17 +1176,45 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     linked.runtime.as_mut().unwrap().terminal = Some("linked-shell".into());
     s.terminals.push(linked);
     s.terminals.push(remote);
-    for attempt in s
-        .terminals
-        .iter_mut()
-        .filter_map(|t| t.agent.as_mut())
-        .filter(|a| a.card_id == "overview-card-2" && a.terminal.is_some())
-    {
-        attempt.location = Some(canban_types::WorkLocation {
-            machine: "gallery-remote".into(),
-            directory: "/remote/workspaces/canban".into(),
-        });
-        attempt.terminal = Some("gallery-remote/t3".into());
+    s.entity_hosts
+        .insert("gallery-remote-shell".into(), "gallery-remote".into());
+    s.entity_hosts
+        .insert("overview-card-2".into(), "gallery-remote".into());
+    s.host_summaries.insert(
+        "gallery-remote".into(),
+        canban_types::HostSummary {
+            id: "gallery-remote".into(),
+            name: "Build machine".into(),
+            is_local: false,
+            transport_label: "SSH".into(),
+            endpoint_label: "ssh-host".into(),
+            ssh_target: Some("ssh-host".into()),
+            server_id: None,
+            connection: canban_types::HostConnectionState::Connected {
+                rtt_ms: 14,
+                api_version: canban_updater::DESKTOP_API,
+                version: env!("CARGO_PKG_VERSION").into(),
+                platform: "linux-x86_64".into(),
+            },
+            active_agents: 1,
+            max_agents: 4,
+            project_count: 1,
+            reconnect_count: 0,
+            last_synced_at: None,
+        },
+    );
+    for t in &mut s.terminals {
+        if let Some(attempt) = t.agent.as_mut()
+            && attempt.card_id == "overview-card-2"
+            && attempt.terminal.is_some()
+        {
+            attempt.location = Some(canban_types::WorkLocation {
+                machine: "local".into(),
+                directory: "/remote/workspaces/canban".into(),
+            });
+            attempt.terminal = Some("gallery-remote/t3".into());
+            s.entity_hosts.insert(t.id.clone(), "gallery-remote".into());
+        }
     }
     let card = s.cards.iter().find(|c| c.archived_at.is_none()).unwrap();
     let card_project_id = card.project_id.clone();

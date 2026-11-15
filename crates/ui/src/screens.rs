@@ -6,21 +6,7 @@ pub fn screen(ui: Ui, page: &str) -> AnyElement {
         "agent-setup" => crate::agents_setup::onboarding_screen(ui).into_element(),
         "project-agents" => crate::agents_setup::project_agents_screen(ui).into_element(),
         "workflows" => crate::workflows::screen(ui).into_element(),
-        "machines" => view()
-            .flex_1()
-            .min_h(px(0.))
-            .p_5()
-            .gap_4()
-            .child(
-                scroll().flex_1().min_h(px(0.)).child(
-                    view()
-                        .w_full()
-                        .max_w(px(880.))
-                        .child(crate::machines::settings(ui)),
-                ),
-            )
-            .into_element(),
-        "project-location" => crate::machines::project_location(ui).into_element(),
+        "project-location" => crate::projects::project_location(ui).into_element(),
         "new-project" => crate::projects::new_project(ui).into_element(),
         "terminals" | "terminal" => crate::terminals::screen(ui).into_element(),
         "overview" | "agents" => crate::overview::screen(ui).into_element(),

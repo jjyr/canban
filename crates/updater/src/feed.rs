@@ -56,6 +56,7 @@ pub struct Manifest {
     pub platform: String,
     pub api: u32,
     pub schema: u32,
+    #[serde(default)]
     pub rollback_floor: u32,
     pub asset: String,
     pub size: u64,
@@ -391,6 +392,229 @@ fn extract(archive: &Path, job: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+/// Discover the newest published headless CLI release archive (`canban-<platform>.tar.gz` +
+/// `manifest-cli-<platform>.json`) newer than `current` (or matching `target_version` when set).
+pub fn discover_cli(
+    current: &Build,
+    target_version: Option<&str>,
+    client: Option<&canban_github::Client>,
+) -> Result<Option<Available>> {
+    let fresh = client.cloned().map(canban_github::Client::refreshing);
+    let client = fresh.as_ref();
+    let api = api()?;
+    let repo = std::env::var("CANBAN_UPDATE_REPOSITORY").unwrap_or_else(|_| "jjyr/canban".into());
+    ensure!(
+        repo.split('/').count() == 2
+            && repo.split('/').all(|p| !p.is_empty()
+                && p != ".."
+                && p.bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))),
+        "Invalid release repository"
+    );
+    let mut candidates = Vec::new();
+    for page in 1..=5 {
+        let route = format!("/repos/{repo}/releases?per_page=100&page={page}");
+        let list: Vec<Value> = if let Some(c) = client.filter(|_| api == "https://api.github.com") {
+            c.get(&route)?
+        } else {
+            serde_json::from_slice(&bytes(&format!("{api}{route}"), 4 * 1024 * 1024, None)?)?
+        };
+        let count = list.len();
+        for r in list {
+            if r["draft"] == true {
+                continue;
+            }
+            let Some(tag) = r["tag_name"].as_str() else {
+                continue;
+            };
+            let Ok(version) = Version::parse(tag) else {
+                continue;
+            };
+            if let Some(target) = target_version.map(str::trim).filter(|s| !s.is_empty()) {
+                if tag != target {
+                    continue;
+                }
+            } else if Version::parse(&current.version)
+                .ok()
+                .is_some_and(|v| version <= v)
+            {
+                continue;
+            }
+            candidates.push((version, r));
+        }
+        if count < 100 {
+            break;
+        }
+    }
+    candidates.sort_by_key(|a| std::cmp::Reverse(a.0));
+    let asset = format!("canban-{}.tar.gz", current.platform);
+    let manifest_name = format!("manifest-cli-{}.json", current.platform);
+    for (_, release) in candidates {
+        let Some(assets) = release["assets"].as_array() else {
+            continue;
+        };
+        let Some(binary) = assets.iter().find(|a| a["name"] == asset) else {
+            continue;
+        };
+        let Some(meta) = assets.iter().find(|a| a["name"] == manifest_name) else {
+            continue;
+        };
+        let manifest: Manifest = serde_json::from_slice(&bytes(
+            meta[if client.is_some() && api == "https://api.github.com" {
+                "url"
+            } else {
+                "browser_download_url"
+            }]
+            .as_str()
+            .context("CLI manifest URL missing")?,
+            128 * 1024,
+            client,
+        )?)?;
+        ensure!(
+            manifest.version == release["tag_name"]
+                && manifest.platform == current.platform
+                && manifest.asset == asset,
+            "CLI release manifest identity mismatch"
+        );
+        ensure!(
+            manifest.commit.len() == 40 && manifest.commit.bytes().all(|b| b.is_ascii_hexdigit()),
+            "Invalid release commit"
+        );
+        ensure!(
+            manifest.schema >= current.schema,
+            "Release schema {} is older than current database schema {}",
+            manifest.schema,
+            current.schema
+        );
+        ensure!(
+            manifest.size > 0
+                && manifest.size <= 256 * 1024 * 1024
+                && binary["size"].as_u64() == Some(manifest.size),
+            "Invalid CLI update asset size"
+        );
+        ensure!(
+            manifest.sha256.len() == 64 && manifest.sha256.bytes().all(|b| b.is_ascii_hexdigit()),
+            "Invalid CLI update checksum"
+        );
+        let url = binary[if client.is_some() && api == "https://api.github.com" {
+            "url"
+        } else {
+            "browser_download_url"
+        }]
+        .as_str()
+        .context("CLI asset URL missing")?
+        .to_owned();
+        validate_url(&url)?;
+        return Ok(Some(Available {
+            manifest,
+            url,
+            notes: release["body"]
+                .as_str()
+                .unwrap_or("")
+                .chars()
+                .take(16000)
+                .collect(),
+        }));
+    }
+    Ok(None)
+}
+
+/// Download, SHA256-verify, and extract a headless CLI archive (`canban-<platform>.tar.gz`),
+/// returning the staged executable path after verifying `canban build-info`.
+pub fn stage_cli(
+    home: &Path,
+    release: &Available,
+    client: Option<&canban_github::Client>,
+) -> Result<PathBuf> {
+    validate_url(&release.url)?;
+    let job = home.join("updates/staging").join(canban_types::id());
+    std::fs::create_dir_all(&job)?;
+    let archive = job.join("canban.tar.gz");
+    let mut output = File::create(&archive)?;
+    let mut response = if let Some(c) =
+        client.filter(|_| release.url.starts_with("https://api.github.com/repos/"))
+    {
+        c.release_response(&release.url)?
+    } else {
+        agent()
+            .get(&release.url)
+            .header("User-Agent", "Canban updater")
+            .call()?
+    };
+    let mut reader = response.body_mut().as_reader();
+    let mut total = 0u64;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        ensure!(
+            total <= release.manifest.size,
+            "Downloaded CLI update exceeds declared size"
+        );
+        digest.update(&buffer[..n]);
+        output.write_all(&buffer[..n])?;
+    }
+    output.sync_all()?;
+    ensure!(
+        total == release.manifest.size
+            && format!("{:x}", digest.finalize()) == release.manifest.sha256.to_lowercase(),
+        "CLI update size/checksum mismatch"
+    );
+    let decoder = flate2::read::GzDecoder::new(File::open(&archive)?);
+    let mut tar = tar::Archive::new(decoder);
+    let mut expanded = 0u64;
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        ensure!(
+            path.components().count() == 1
+                && path
+                    .components()
+                    .next()
+                    .is_some_and(|c| c.as_os_str() == "canban"),
+            "Unsafe CLI update archive path"
+        );
+        ensure!(
+            entry.header().entry_type().is_file(),
+            "CLI update archive contains a non-file entry"
+        );
+        expanded = expanded
+            .checked_add(entry.size())
+            .context("CLI archive size overflow")?;
+        ensure!(
+            expanded <= 512 * 1024 * 1024,
+            "Expanded CLI binary exceeds limit"
+        );
+        ensure!(entry.unpack_in(&job)?, "CLI archive entry escaped staging");
+    }
+    let staged_bin = job.join("canban");
+    ensure!(staged_bin.is_file(), "CLI archive did not contain `canban`");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staged_bin, std::fs::Permissions::from_mode(0o755))?;
+    }
+    let out = std::process::Command::new(&staged_bin)
+        .arg("build-info")
+        .output()
+        .context("Failed to execute staged CLI `build-info`")?;
+    ensure!(out.status.success(), "Staged CLI `build-info` failed");
+    let build: Build = serde_json::from_slice(&out.stdout)?;
+    ensure!(
+        build.version == release.manifest.version
+            && build.commit == release.manifest.commit
+            && build.platform == release.manifest.platform
+            && build.schema == release.manifest.schema
+            && build.api == release.manifest.api,
+        "Staged CLI binary does not match manifest"
+    );
+    Ok(staged_bin)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,5 +711,79 @@ mod archive_tests {
             assert!(extract(&archive, &output).is_err());
             assert!(!dir.path().join("escape").exists());
         }
+    }
+
+    #[test]
+    fn stage_cli_verifies_sha256_and_build_info_and_rejects_tampered_archives() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = server.local_addr().unwrap();
+
+        let mut candidate = Build::current();
+        candidate.version = "20261116-9".into();
+        candidate.commit = "0123456789abcdef0123456789abcdef01234567".into();
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"build-info\" ]; then printf '%s\\n' '{}'; exit 0; fi\nexit 1\n",
+            serde_json::to_string(&candidate).unwrap()
+        );
+
+        let mut tar_buf = Vec::new();
+        {
+            let gz = flate2::write::GzEncoder::new(&mut tar_buf, flate2::Compression::default());
+            let mut archive = tar::Builder::new(gz);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(script.len() as u64);
+            header.set_mode(0o755);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "canban", script.as_bytes())
+                .unwrap();
+            archive.into_inner().unwrap().finish().unwrap();
+        }
+        let sha = format!("{:x}", Sha256::digest(&tar_buf));
+        let size = tar_buf.len() as u64;
+
+        let served_bytes = tar_buf.clone();
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                if let Ok((mut stream, _)) = server.accept() {
+                    let mut req = [0u8; 1024];
+                    let _ = stream.read(&mut req);
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+                        served_bytes.len()
+                    );
+                    let _ = stream.write_all(header.as_bytes());
+                    let _ = stream.write_all(&served_bytes);
+                }
+            }
+        });
+
+        let avail = Available {
+            manifest: Manifest {
+                version: candidate.version.clone(),
+                commit: candidate.commit.clone(),
+                platform: candidate.platform.clone(),
+                api: candidate.api,
+                schema: candidate.schema,
+                rollback_floor: 0,
+                asset: format!("canban-{}.tar.gz", candidate.platform),
+                size,
+                sha256: sha,
+            },
+            url: format!("http://{addr}/canban.tar.gz"),
+            notes: String::new(),
+        };
+
+        let staged = stage_cli(dir.path(), &avail, None).unwrap();
+        assert!(staged.is_file());
+
+        let mut bad = avail;
+        bad.manifest.sha256 = "0".repeat(64);
+        assert!(stage_cli(dir.path(), &bad, None).is_err());
+
+        let _ = handle.join();
     }
 }

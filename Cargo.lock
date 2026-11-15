@@ -650,6 +650,7 @@ dependencies = [
  "canban-github",
  "canban-storage",
  "canban-types",
+ "flate2",
  "rusqlite",
  "serde",
  "serde_json",

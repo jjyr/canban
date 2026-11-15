@@ -117,8 +117,13 @@ fn scope_header(
             }
             (Icon::Branch, None, tip)
         }
-        WorktreeScope::Unassigned(machine) => {
-            let tip = format!("External directory ({machine})");
+        WorktreeScope::Unassigned(host_id) => {
+            let host_label = if host_id == "local" {
+                "Local".into()
+            } else {
+                crate::hosts::host_name(ui, host_id)
+            };
+            let tip = format!("External directory ({host_label})");
             (Icon::Terminal, None, tip)
         }
     };
@@ -269,12 +274,12 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
         let selected = is_selected.get();
         let id = id.clone();
         let context_id = id.clone();
-        let machine = if e.machine() == "local" {
+        let host_label = if e.host_id == "local" {
             "Local".into()
         } else {
-            crate::machines::name(ui, e.machine())
+            crate::hosts::host_name(ui, &e.host_id)
         };
-        let hint = super::labels::sidebar_hint(&e, &machine);
+        let hint = super::labels::sidebar_hint(&e, &host_label);
         let short_title = super::labels::truncate_sidebar_title(&e.title());
         let first_line = view()
             .w_full()
@@ -298,7 +303,7 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
             .flex_row()
             .items_center()
             .gap_2()
-            .child(super::labels::sidebar_meta(&e, &machine));
+            .child(super::labels::sidebar_meta(&e, &host_label));
         if let Some(status_el) = super::labels::sidebar_status(&e) {
             second_line = second_line.child(status_el);
         }
@@ -360,10 +365,10 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                 ),
                                 super::labels::sidebar_hint(
                                     e,
-                                    &if e.machine() == "local" {
+                                    &if e.host_id == "local" {
                                         "Local".into()
                                     } else {
-                                        crate::machines::name(ui, e.machine())
+                                        crate::hosts::host_name(ui, &e.host_id)
                                     },
                                 ),
                                 (e.ended(), e.inactive(), e.needs_attention()),

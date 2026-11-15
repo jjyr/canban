@@ -559,8 +559,12 @@ case "$ARCH" in
 esac
 if [ "$OS" = "linux" ]; then
   ASSET="canban-linux-${{ARCH}}.tar.gz"
+  RELEASE_URL="https://github.com/{repo}/releases/latest/download/${{ASSET}}"
   TMP=$(mktemp -d)
-  if curl -fL "https://github.com/{repo}/releases/latest/download/${{ASSET}}" -o "$TMP/canban.tar.gz" 2>/dev/null; then
+  echo "    Checking latest release asset ${{ASSET}}..."
+  if curl -fsLI --connect-timeout 10 "$RELEASE_URL" >/dev/null 2>&1; then
+    echo "    Downloading ${{ASSET}}..."
+    curl -fL --progress-bar --retry 3 --retry-delay 2 --connect-timeout 15 "$RELEASE_URL" -o "$TMP/canban.tar.gz"
     tar -xzf "$TMP/canban.tar.gz" -C "$TMP"
     install -m 0755 "$TMP/canban" "$HOME/.local/bin/canban"
     rm -rf "$TMP"
@@ -901,6 +905,11 @@ mod tests {
         assert!(
             cmd.contains("exec \"${SHELL:-/bin/zsh}\" -l"),
             "bootstrap command must hand off to an interactive shell so the terminal does not auto-close"
+        );
+        assert!(
+            cmd.contains("--progress-bar")
+                && !cmd.contains("-o \"$TMP/canban.tar.gz\" 2>/dev/null"),
+            "bootstrap command must show visible curl download progress instead of silencing stderr:\n{cmd}"
         );
         for shell in ["/bin/sh", "/bin/zsh"] {
             if Path::new(shell).is_file() {

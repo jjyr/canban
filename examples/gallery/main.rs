@@ -734,7 +734,6 @@ pub fn Gallery() -> impl IntoElement {
         }
         return canban_ui::frame::screen(ui).into_element();
     }
-    ui.machines.set(json!({"machines":[{"id":"gallery-remote","name":"Build machine","state":"connected","target":"ssh-host"},{"id":"gallery-offline","name":"Offline machine","state":"unreachable","target":"another-host"}]}));
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("startup-error") {
         canban_ui::frame::configure_window_chrome();
         return canban_ui::startup::error_screen("/preview/development-home".into(), "AppServer API 4 is incompatible with this UI (API 8). Start the matching instance or update the service on its owning host.".into()).into_element();
@@ -2107,6 +2106,24 @@ pub fn Gallery() -> impl IntoElement {
                     scene.set("workspace".into());
                     canban_ui::hosts::close_overlays(ui);
                     ui.navigate("board");
+                }))
+                .child(action("Multi-host · API Mismatch", Variant::Quiet, move |_| {
+                    let (mut snap, mut hosts) = fixtures::multi_host_workspace(false);
+                    if let Some(h) = hosts.iter_mut().find(|h| h.id == "home-linux") {
+                        h.connection = canban_types::HostConnectionState::ApiMismatch {
+                            server_api: canban_updater::DESKTOP_API.saturating_sub(2),
+                            app_api: canban_updater::DESKTOP_API,
+                            version: "20261115-2".into(),
+                        };
+                        snap.host_summaries.insert(h.id.clone(), h.clone());
+                    }
+                    ui.discovery.set(fixtures::discovery_catalog());
+                    ui.hosts.set(hosts);
+                    ui.snapshot.set(snap);
+                    ui.select_project("remote-linux-core".into());
+                    scene.set("workspace".into());
+                    ui.navigate("board");
+                    canban_ui::hosts::toggle_popover(ui);
                 }))
                 .child(action("Connect Machine", Variant::Quiet, move |_| {
                     let (snap, hosts) = fixtures::multi_host_workspace(false);

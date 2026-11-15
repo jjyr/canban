@@ -117,20 +117,20 @@ impl WorktreeScope {
                         .map(|w| w.branch.clone())
                 })
                 .unwrap_or_else(|| "worktree".into()),
-            Self::Unassigned(machine) => {
-                if machine == "local" {
+            Self::Unassigned(host_id) => {
+                if host_id.is_empty() || host_id == "local" {
                     "Local".into()
                 } else if let Some(ui) = ui {
-                    crate::machines::name(ui, machine)
+                    crate::hosts::host_name(ui, host_id)
                 } else {
-                    machine.clone()
+                    s.host_display_name(host_id).to_owned()
                 }
             }
         }
     }
 }
 
-pub fn entry_in_worktree(e: &Entry, wt: &ManagedWorktree) -> bool {
+pub fn entry_in_worktree(s: &Snapshot, e: &Entry, wt: &ManagedWorktree) -> bool {
     if e.agent.is_some() {
         return false;
     }
@@ -143,7 +143,7 @@ pub fn entry_in_worktree(e: &Entry, wt: &ManagedWorktree) -> bool {
     let Some(cwd) = e.cwd() else {
         return false;
     };
-    if e.machine() != wt.location.machine {
+    if e.host_id != s.host_of(&wt.id) {
         return false;
     }
     cwd == wt.path || cwd.starts_with(&format!("{}/", wt.path.trim_end_matches('/')))
@@ -170,7 +170,7 @@ pub fn entry_scope(s: &Snapshot, e: &Entry) -> WorktreeScope {
     {
         return WorktreeScope::ManagedWorktree(wid.clone());
     }
-    if let Some(wt) = s.worktrees.iter().find(|wt| entry_in_worktree(e, wt)) {
+    if let Some(wt) = s.worktrees.iter().find(|wt| entry_in_worktree(s, e, wt)) {
         return WorktreeScope::ManagedWorktree(wt.id.clone());
     }
     if let Some(card) = &e.card {
@@ -179,7 +179,7 @@ pub fn entry_scope(s: &Snapshot, e: &Entry) -> WorktreeScope {
     if let Some(pid) = &e.project_id {
         return WorktreeScope::ProjectRoot(pid.clone());
     }
-    WorktreeScope::Unassigned(e.machine().to_owned())
+    WorktreeScope::Unassigned(e.host_id.clone())
 }
 
 pub fn scope_git_summary(
@@ -300,17 +300,17 @@ pub fn project_scopes_in_tree_order(
             }
         }
         None => {
-            let mut machines: Vec<String> = Vec::new();
+            let mut hosts: Vec<String> = Vec::new();
             for e in live_rows {
-                if let WorktreeScope::Unassigned(m) = entry_scope(s, e)
-                    && !machines.contains(&m)
+                if let WorktreeScope::Unassigned(h) = entry_scope(s, e)
+                    && !hosts.contains(&h)
                 {
-                    machines.push(m);
+                    hosts.push(h);
                 }
             }
-            machines.sort_by_key(|m| (m != "local", m.clone()));
-            for m in machines {
-                let scope = WorktreeScope::Unassigned(m);
+            hosts.sort_by_key(|h| (h != "local", h.clone()));
+            for h in hosts {
+                let scope = WorktreeScope::Unassigned(h);
                 let children: Vec<Entry> = live_rows
                     .iter()
                     .filter(|e| entry_scope(s, e) == scope)
@@ -344,8 +344,8 @@ pub fn create_in_scope(ui: Ui, scope: &WorktreeScope) {
                 open_shell(ui, &wt);
             }
         }
-        WorktreeScope::Unassigned(machine) => {
-            super::launch_custom(ui, json!({ "machine": machine }));
+        WorktreeScope::Unassigned(host_id) => {
+            super::launch_custom(ui, json!({ "host_id": host_id, "machine": "local" }));
         }
     }
 }

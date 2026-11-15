@@ -18,6 +18,7 @@ fn context(ui: Ui) -> impl IntoElement {
         }
         let att = row.agent().unwrap();
         let id = row.id.clone();
+        let host_id = ui.snapshot.with(|s| s.card_host(&row.card.id).to_owned());
         body = body
             .child(label("Assignment"))
             .child(read_text(att.instruction.clone()))
@@ -29,13 +30,7 @@ fn context(ui: Ui) -> impl IntoElement {
             )))
             .child(muted(format!(
                 "{} · {}",
-                crate::machines::name(
-                    ui,
-                    att.location
-                        .as_ref()
-                        .map(|l| l.machine.as_str())
-                        .unwrap_or("local")
-                ),
+                crate::hosts::host_name(ui, &host_id),
                 att.cwd
             )))
             .child(action("Read saved output", Variant::Quiet, move |_| {

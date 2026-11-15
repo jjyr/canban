@@ -886,6 +886,7 @@ fn run() -> Result<()> {
             | "review.merge"
             | "card.archive"
             | "update.install"
+            | "update.daemon"
             | "workflow.decide"
             | "workflow.deliver"
             | "workflow.stop"

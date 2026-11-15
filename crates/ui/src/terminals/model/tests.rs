@@ -2387,12 +2387,36 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
         renamed_run.stage = "review".into();
         renamed_run.terminal = Some("t-renamed".into());
         renamed_run.location = Some(WorkLocation {
-            machine: "gpu-box".into(),
+            machine: "local".into(),
             directory: "/remote/c1".into(),
         });
         renamed_run.observed = Some(json!({"state": "live", "status": {"state": "working"}}));
         renamed_run.lifecycle.waiting = None;
         let renamed_id = Conversation::key("c1", "reviewer");
+        s.entity_hosts.insert(renamed_id.clone(), "gpu-box".into());
+        s.host_summaries.insert(
+            "gpu-box".into(),
+            HostSummary {
+                id: "gpu-box".into(),
+                name: "gpu-box".into(),
+                is_local: false,
+                transport_label: "SSH".into(),
+                endpoint_label: "gpu-box".into(),
+                ssh_target: Some("gpu-box".into()),
+                server_id: None,
+                connection: HostConnectionState::Connected {
+                    rtt_ms: 4,
+                    api_version: canban_updater::DESKTOP_API,
+                    version: "test".into(),
+                    platform: "linux-x86_64".into(),
+                },
+                active_agents: 1,
+                max_agents: 4,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: None,
+            },
+        );
         s.terminals.push(TerminalEntry {
             id: renamed_id.clone(),
             conversation_id: Some(renamed_id.clone()),
@@ -2523,8 +2547,6 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
         assert_eq!(sidebar_meta_icon(plain), Icon::Terminal);
         assert_eq!(sidebar_meta_text(plain, "Local"), "Local");
 
-        ui.machines
-            .set(json!({"machines": [{"id": "gpu-box", "name": "gpu-box", "state": "connected"}]}));
         ui.snapshot.set(s);
         ui.snapshot_ready.set(true);
         ui.project.set("p1".into());

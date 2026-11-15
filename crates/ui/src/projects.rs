@@ -1,10 +1,288 @@
-//! Project creation: directory first, automatic name until explicitly edited.
+//! Project creation and work location settings: host-routed directory browser,
+//! automatic project naming until explicitly edited.
 pub(crate) mod selection;
-use crate::{machines, presenter::*};
-use canban_types::{DEFAULT_WORKFLOW_TEMPLATE_ID, DetectedGitHub, Snapshot, WorkflowTemplateFile};
+use crate::presenter::*;
+use canban_types::{
+    DEFAULT_WORKFLOW_TEMPLATE_ID, DetectedGitHub, Project, Snapshot, WorkLocation,
+    WorkflowTemplateFile,
+};
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::json;
+
+fn fixture_listing(host_id: &str, base_dir: &str) -> PathListing {
+    let home = if host_id.is_empty() || host_id == "local" {
+        "/Users/demo".to_owned()
+    } else {
+        "/home/builder".to_owned()
+    };
+    let resolved = if base_dir.is_empty() {
+        home.clone()
+    } else {
+        expand_tilde(base_dir, &home)
+    };
+    let clean = if resolved.len() > 1 {
+        resolved.trim_end_matches('/').to_owned()
+    } else {
+        resolved
+    };
+    let is_local = host_id.is_empty() || host_id == "local";
+    let subdirs: &[&str] = match (is_local, clean.as_str()) {
+        (true, "/") => &["Applications", "Users", "opt", "tmp"],
+        (true, "/Users") => &["Shared", "demo"],
+        (true, "/Users/demo") => &[".canban", ".config", "Desktop", "Documents", "Workspace"],
+        (true, "/Users/demo/Workspace") => &[
+            ".git",
+            "Machines",
+            "canban",
+            "canban-site",
+            "herdr",
+            "sheprd",
+        ],
+        (false, "/") => &["home", "opt", "srv", "tmp", "var"],
+        (false, "/home") => &["builder"],
+        (false, "/home/builder") => &[".cache", ".ssh", "projects", "workspaces"],
+        (false, "/home/builder/workspaces") => &["canban", "core-service", "infra"],
+        _ => &[],
+    };
+    let exists = !subdirs.is_empty()
+        || matches!(
+            clean.as_str(),
+            "/Users/demo/Workspace/canban"
+                | "/Users/demo/Workspace/canban-site"
+                | "/Users/demo/Workspace/herdr"
+                | "/Users/demo/Workspace/sheprd"
+                | "/Users/demo/Workspace/Machines"
+                | "/home/builder/workspaces/canban"
+                | "/home/builder/workspaces/core-service"
+                | "/home/builder/workspaces/infra"
+        );
+    let entries = subdirs
+        .iter()
+        .map(|name| {
+            let full = if clean == "/" {
+                format!("/{name}")
+            } else {
+                format!("{clean}/{name}")
+            };
+            PathEntry::new(*name, full)
+        })
+        .collect();
+    PathListing {
+        base_dir: clean,
+        home,
+        exists,
+        entries,
+        loading: false,
+        error: String::new(),
+    }
+}
+
+fn browse_directory(
+    ui: Ui,
+    host_id: Signal<String>,
+    path: String,
+    listing: Signal<PathListing>,
+    epoch: Signal<u64>,
+) {
+    let target_host = host_id.get_untracked();
+    if crate::APP.get().is_none() {
+        listing.set(fixture_listing(&target_host, &path));
+        return;
+    }
+    let generation = epoch.get_untracked() + 1;
+    epoch.set(generation);
+    listing.update(|l| {
+        l.loading = true;
+        l.error.clear();
+    });
+    let delay_ms = if target_host.is_empty() || target_host == "local" {
+        0
+    } else {
+        120
+    };
+    ui.spawn(async move {
+        if delay_ms > 0 {
+            timer(std::time::Duration::from_millis(delay_ms)).await;
+            if epoch.try_get() != Some(generation)
+                || host_id.try_get().as_deref() != Some(target_host.as_str())
+            {
+                return;
+            }
+        }
+        let req_host = target_host.clone();
+        let req_path = path.clone();
+        let value = blocking(move || {
+            crate::routed_call(
+                "directory.list",
+                json!({"host_id": req_host, "machine": "local", "path": req_path}),
+                None,
+            )
+        })
+        .await;
+        if epoch.try_get() != Some(generation)
+            || host_id.try_get().as_deref() != Some(target_host.as_str())
+        {
+            return;
+        }
+        match value {
+            Ok(Ok(v)) => {
+                let resolved_base = v["path"].as_str().unwrap_or(&path).to_owned();
+                let home = v["home"].as_str().unwrap_or("").to_owned();
+                let exists = v["exists"].as_bool().unwrap_or(true);
+                let entries = v["directories"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|row| {
+                                Some(PathEntry::new(row["name"].as_str()?, row["path"].as_str()?))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                listing.try_set(PathListing {
+                    base_dir: resolved_base,
+                    home,
+                    exists,
+                    entries,
+                    loading: false,
+                    error: String::new(),
+                });
+            }
+            Ok(Err(e)) => {
+                let msg = format!("{e:#}");
+                listing.update(|l| {
+                    l.loading = false;
+                    l.error = msg;
+                });
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                listing.update(|l| {
+                    l.loading = false;
+                    l.error = msg;
+                });
+            }
+        }
+    });
+}
+
+/// Inline editable path combobox with live host-routed directory filtering,
+/// shared by New Project and Work location settings.
+pub fn directory_picker_for_host(
+    ui: Ui,
+    host_id: Signal<String>,
+    directory: Signal<String>,
+) -> impl IntoElement {
+    let default_home = if host_id.get_untracked() == "local" || host_id.get_untracked().is_empty() {
+        if crate::APP.get().is_some() {
+            std::env::var("HOME").unwrap_or_default()
+        } else {
+            "/Users/demo".to_owned()
+        }
+    } else {
+        String::new()
+    };
+    let listing = signal(PathListing {
+        home: default_home,
+        ..Default::default()
+    });
+    let epoch = signal(0u64);
+    let prev_host = stored(host_id.get_untracked());
+    effect(move || {
+        let current_host = host_id.get();
+        if prev_host.replace(current_host.clone()) != current_host {
+            epoch.update(|n| *n += 1);
+            let next_home = if current_host == "local" || current_host.is_empty() {
+                if crate::APP.get().is_some() {
+                    std::env::var("HOME").unwrap_or_default()
+                } else {
+                    "/Users/demo".to_owned()
+                }
+            } else {
+                String::new()
+            };
+            listing.set(PathListing {
+                home: next_home,
+                ..Default::default()
+            });
+        }
+    });
+    path_combobox(
+        directory,
+        move || listing.get(),
+        move |base_dir| {
+            browse_directory(ui, host_id, base_dir, listing, epoch);
+        },
+        |_| {},
+    )
+}
+
+pub fn project_location(ui: Ui) -> impl IntoElement {
+    let p = ui.current_project();
+    let initial = p
+        .as_ref()
+        .map(Project::work_location)
+        .unwrap_or(WorkLocation {
+            machine: "local".into(),
+            directory: String::new(),
+        });
+    let host_id = signal(ui.active_project_host());
+    let directory = signal(initial.directory.clone());
+    let expected = initial.clone();
+    let id = p.map(|p| p.id).unwrap_or_default();
+    view()
+        .flex_1()
+        .min_h(px(0.))
+        .p_5()
+        .gap_4()
+        .child(
+            scroll().flex_1().min_h(px(0.)).child(
+                settings_section(
+                    "Work location",
+                    "Changes affect new executions on this host. Resume, Review and code delivery stay on the original directory.",
+                )
+                .trailing(badge(move || crate::hosts::host_name(ui, &host_id.get())))
+                .max_w(px(760.))
+                .child(settings_field(
+                    "Directory",
+                    "Filter and select subdirectories inline or type an absolute/`~/` path. New directories are created on save.",
+                    directory_picker_for_host(ui, host_id, directory),
+                ))
+                .child(
+                    view()
+                        .flex_row()
+                        .justify_end()
+                        .gap_2()
+                        .child(action("Cancel", Variant::Quiet, move |_| {
+                            ui.navigate("board")
+                        }))
+                        .child(
+                            action("Save work location", Variant::Primary, move |_| {
+                                let id = id.clone();
+                                dispatch_then(
+                                    ui,
+                                    "project.location",
+                                    json!({
+                                        "project_id": id,
+                                        "expected_location": expected,
+                                        "location": {
+                                            "machine": "local",
+                                            "directory": directory.get_untracked().trim()
+                                        }
+                                    }),
+                                    move |_| ui.navigate("board"),
+                                );
+                            })
+                            .disabled(move || {
+                                ui.is_method_pending("project.location")
+                                    || directory.get().trim().is_empty()
+                            }),
+                        ),
+                ),
+            ),
+        )
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum WorkflowChoice {
@@ -231,8 +509,6 @@ pub fn new_project_form(
     let custom_name = signal(false);
     let directory = signal(initial_directory);
     let target_host = signal("local".to_owned());
-    let machine = signal("local".to_owned());
-    let expanded = signal(false);
     let workflow_expanded = signal(false);
     let workflow_choice = signal(WorkflowChoice::Default);
     let agents_expanded = signal(false);
@@ -260,11 +536,6 @@ pub fn new_project_form(
     });
     effect(move || {
         let canban_host = target_host.get();
-        let host = if canban_host == "local" {
-            machine.get()
-        } else {
-            "local".to_owned()
-        };
         let path = directory.get();
         let trimmed = path.trim().to_owned();
         let generation = detect_epoch.get_untracked() + 1;
@@ -278,7 +549,6 @@ pub fn new_project_form(
         }
         ui.spawn(async move {
             let req_host = canban_host.clone();
-            let exec_machine = host.clone();
             let target_path = trimmed.clone();
             let result = blocking(move || {
                 crate::routed_call(
@@ -286,7 +556,7 @@ pub fn new_project_form(
                     json!({
                         "host_id": req_host,
                         "location": {
-                            "machine": exec_machine,
+                            "machine": "local",
                             "directory": target_path,
                         }
                     }),
@@ -321,9 +591,12 @@ pub fn new_project_form(
                     target_host,
                     directory,
                 ))
-                .child(view().gap_2().child(label("Directory")).child(
-                    machines::directory_picker_for_host(ui, target_host, machine, directory),
-                ))
+                .child(
+                    view()
+                        .gap_2()
+                        .child(label("Directory"))
+                        .child(directory_picker_for_host(ui, target_host, directory)),
+                )
                 .child(
                     view().gap_2().child(label("Name")).child(
                         bound_field(
@@ -370,48 +643,6 @@ pub fn new_project_form(
                         )
                         .into_element()
                 }))
-                .child(
-                    nsh_base::collapsible()
-                        .open(expanded)
-                        .reveal(true)
-                        .child(
-                            action(
-                                move || {
-                                    let arrow = if expanded.get() { "▾" } else { "▸" };
-                                    if machine.get() == "local" {
-                                        format!("{arrow} Execution machine")
-                                    } else {
-                                        format!(
-                                            "{arrow} Execution machine · {}",
-                                            machines::name(ui, &machine.get())
-                                        )
-                                    }
-                                },
-                                Variant::Quiet,
-                                move |_| expanded.update(|v| *v = !*v),
-                            )
-                            .self_start()
-                            .accessibility_label(move || {
-                                Some(
-                                    format!(
-                                        "{} execution machine{}",
-                                        if expanded.get() { "Collapse" } else { "Expand" },
-                                        if machine.get() == "local" {
-                                            String::new()
-                                        } else {
-                                            format!(" · {}", machines::name(ui, &machine.get()))
-                                        }
-                                    )
-                                    .into(),
-                                )
-                            }),
-                        )
-                        .content(
-                            view()
-                                .pt_2()
-                                .child(machines::picker(ui, machine, directory)),
-                        ),
-                )
                 .child(
                     nsh_base::collapsible()
                         .open(workflow_expanded)
@@ -488,7 +719,7 @@ pub fn new_project_form(
                             crate::agents_setup::project_overrides_editor(
                                 ui,
                                 agent_overrides,
-                                machine,
+                                target_host,
                             ),
                         )),
                 )
@@ -506,16 +737,11 @@ pub fn new_project_form(
                                     .get_untracked()
                                     .is_none_or(|_| link_github.get_untracked());
                                 let chosen_host = target_host.get_untracked();
-                                let exec_machine = if chosen_host == "local" {
-                                    machine.get_untracked()
-                                } else {
-                                    "local".to_owned()
-                                };
                                 let mut payload = json!({
                                     "host_id": chosen_host,
                                     "name": name.get_untracked().trim(),
                                     "location": {
-                                        "machine": exec_machine,
+                                        "machine": "local",
                                         "directory": directory.get_untracked().trim(),
                                     },
                                     "github_auto_link": auto_link,

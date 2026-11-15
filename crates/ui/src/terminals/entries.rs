@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 pub struct Entry {
     pub saved: TerminalEntry,
     pub agent: Option<OverviewRow>,
+    pub host_id: String,
     pub project_id: Option<String>,
     pub project_name: String,
     pub card: Option<Card>,
@@ -331,15 +332,6 @@ impl Entry {
     pub fn cwd(&self) -> Option<String> {
         self.location.as_ref()?.cwd.clone()
     }
-    pub fn machine(&self) -> &str {
-        self.agent
-            .as_ref()
-            .and_then(|r| r.agent())
-            .and_then(|a| a.location.as_ref())
-            .map(|l| l.machine.as_str())
-            .or_else(|| self.saved.runtime.as_ref().map(|r| r.machine.as_str()))
-            .unwrap_or("local")
-    }
     pub fn hint(&self) -> String {
         let context = self
             .card
@@ -368,7 +360,14 @@ impl Entry {
         if let Some(branch) = self.location.as_ref().and_then(|c| c.branch.as_ref()) {
             lines.push(format!("Branch: {branch}"));
         }
-        lines.push(format!("Machine: {}", self.machine()));
+        lines.push(format!(
+            "Host: {}",
+            if self.host_id == "local" {
+                "Local"
+            } else {
+                &self.host_id
+            }
+        ));
         lines.join("\n")
     }
 }
@@ -466,13 +465,19 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
             .as_ref()
             .and_then(|id| s.cards.iter().find(|c| &c.id == id))
             .cloned();
+        let direct_host = s
+            .entity_hosts
+            .get(&t.id)
+            .map(String::as_str)
+            .filter(|h| !h.is_empty());
         let in_managed_worktree = location.as_ref().is_some_and(|loc| {
             loc.worktree_id
                 .as_ref()
                 .is_some_and(|wid| s.worktrees.iter().any(|w| &w.id == wid))
                 || loc.cwd.as_deref().is_some_and(|cwd| {
+                    let th = direct_host.unwrap_or("local");
                     s.worktrees.iter().any(|w| {
-                        w.location.machine == loc.machine
+                        s.host_of(&w.id) == th
                             && (cwd == w.path
                                 || cwd.starts_with(&format!("{}/", w.path.trim_end_matches('/'))))
                     })
@@ -535,7 +540,22 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                 .map(|stage| stage.name.clone())
                 .unwrap_or_else(|| att.stage.clone())
         });
+        let host_id = direct_host
+            .or_else(|| {
+                card.as_ref()
+                    .map(|c| s.card_host(&c.id))
+                    .filter(|h| *h != "local")
+            })
+            .or_else(|| {
+                project_id
+                    .as_deref()
+                    .map(|pid| s.project_host(pid))
+                    .filter(|h| *h != "local")
+            })
+            .unwrap_or("local")
+            .to_owned();
         out.push(Entry {
+            host_id,
             project_name: project_id
                 .as_ref()
                 .and_then(|id| s.projects.iter().find(|p| &p.id == id))

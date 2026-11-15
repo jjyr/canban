@@ -20,6 +20,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 clap = { version = "4", features = ["derive", "env"] }
 tempfile = "3"
 sha2 = "0.10"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tar = "0.4"
 zstd = "0.13"
 nsh-core = { git = "https://github.com/longbridge/nsh", rev = "f4d68f7f9f31eb7b3ecc8a4cbc31096d5c6238a1" }

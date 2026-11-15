@@ -83,8 +83,12 @@ pub fn panel(ui: Ui) -> impl IntoElement {
     view()
         .gap_1()
         .child(dynamic(move || {
-            let location = ui
-                .current_card()
+            let current_card = ui.current_card();
+            let host_id = current_card
+                .as_ref()
+                .map(|c| ui.snapshot.with(|s| s.card_host(&c.id).to_owned()))
+                .unwrap_or_else(|| ui.active_project_host());
+            let location = current_card
                 .and_then(|c| c.workspace.map(|w| w.location))
                 .or_else(|| ui.current_project().map(|p| p.work_location()));
             view()
@@ -97,7 +101,7 @@ pub fn panel(ui: Ui) -> impl IntoElement {
                             .map(|l| {
                                 format!(
                                     "{} · {}",
-                                    crate::machines::name(ui, &l.machine),
+                                    crate::hosts::host_name(ui, &host_id),
                                     compact(&l.directory, 48)
                                 )
                             })

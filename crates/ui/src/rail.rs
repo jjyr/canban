@@ -93,7 +93,7 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
     .child(icon_action(
         Icon::Settings,
         "Settings".into(),
-        move || matches!(ui.page.get().as_str(), "settings" | "machines"),
+        move || ui.page.get() == "settings",
         || 0,
         move |_| {
             crate::utilities::close(ui);

@@ -87,7 +87,7 @@ def main():
     if m=='attachment.add' and 'source' in p:p['bytes']=list(pathlib.Path(p.pop('source')).read_bytes())
     if m not in ['app.snapshot','app.ping','config.get','herdr.status','herdr.templates','profile.presets','review.preview','resource.read','execution.output','card.show','card.get']:
         p.setdefault('request_key',uuid.uuid4().hex)
-    if m in ['note.save','note.write','note.rename','card.continue','card.move','execution.retry','review.merge','card.archive','update.install','workflow.decide','workflow.deliver','workflow.stop','card.hold_auto_merge'] and 'execution' not in p and os.environ.get('CANBAN_PROFILE_ID'):
+    if m in ['note.save','note.write','note.rename','card.continue','card.move','execution.retry','review.merge','card.archive','update.install','update.daemon','workflow.decide','workflow.deliver','workflow.stop','card.hold_auto_merge'] and 'execution' not in p and os.environ.get('CANBAN_PROFILE_ID'):
         ex={'agent':True,'profile_id':os.environ['CANBAN_PROFILE_ID'],'cwd':os.getcwd()}
         if os.environ.get('CANBAN_CARD'):ex['card']=int(os.environ['CANBAN_CARD'])
         if os.environ.get('CANBAN_PROJECT'):ex['project_id']=os.environ['CANBAN_PROJECT']

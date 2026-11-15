@@ -97,7 +97,7 @@ pub fn sidebar_hint(e: &Entry, machine: &str) -> String {
     if let Some(reason) = e.attention_reason() {
         lines.push(reason);
     }
-    lines.push(format!("Machine: {machine}"));
+    lines.push(format!("Host: {machine}"));
     lines.join("\n")
 }
 

@@ -16,12 +16,15 @@ Board                                     Board
 
 The Project-name selector still offers existing Projects and New Project in its footer. Clicking the entry opens the same creation form. Cancel returns to Board without creating anything.
 
-### Simplified New Project form (2026-11-09, updated 2026-11-15)
+### Simplified New Project form (2026-11-09, updated 2026-11-16)
 
-The creation form shows Directory first, then Name, a collapsed Execution machine disclosure, and Cancel / Create Project. The page subtitle, Project details section heading and routine field descriptions are removed. Fields retain accessible labels, shared focus/disabled styling and necessary error feedback.
+The creation form shows Host (`This Mac` or any connected remote `canband` host, when remote hosts are configured), Directory, Name, optional Workflow / Project Agents disclosures, and Cancel / Create Project. Legacy Core `Execution machine` pickers and `Settings -> Machines` have been removed in favor of unified `Hosts` routing (see [multi-host daemons](multi-host.md)). The page subtitle, Project details section heading and routine field descriptions are removed. Fields retain accessible labels, shared focus/disabled styling and necessary error feedback.
 
 ```text
 New Project
+
+Host
+[This Mac ▾]                                [+ Connect Machine…]
 
 Directory
 [/absolute/path/to/canban                          ]
@@ -33,12 +36,13 @@ Directory
 Name
 [canban                                            ]
 
-▸ Execution machine
+▸ Workflow · Default
+▸ Project Agents · Global defaults
 
                          [Cancel] [Create Project]
 ```
 
-The default execution machine is local (the AppServer host); users do not need to open or fill the machine setting. Expanding it reveals the existing machine picker. A selected remote machine remains named in the collapsed summary. Switching machines clears the previous directory, resets browser results and invalidates pending responses; a custom Project name is retained.
+The default host is `This Mac` (`local`). Switching hosts clears the previous directory, resets browser results, probes the target host's Agent catalog, and invalidates pending responses; a custom Project name is retained.
 
 Name follows the directory basename, including typed/pasted paths and candidate selection. It keeps following directory changes until the user explicitly edits Name; later directory changes preserve that custom text. Trailing directory separators and bare `~` / `/` roots are handled cleanly. Empty names/directories disable Create Project. New paths are created by the server operation (`mkdir -p`) on save, including `~` / `~/` expansion on the target machine.
 
@@ -68,12 +72,13 @@ Settings pairs a section jump column (208 points wide on desktop viewports, coll
 | --- | --- | --- |
 | Interface | Theme and support | Notification sound toggle, theme picker, shortcuts palette, issue reporting and diagnostics copy |
 | Interface | Terminal | Installed monospaced font family picker, point size controls (9–32 pt) and reset |
-| Interface | Updates | Current build version, channel check and install/restart |
-| Execution | Agent scheduling | Execution summary, global concurrency, idle timeout and Save scheduling settings; validation stays inside the group |
-| Execution | Machines | Local host and SSH-configured remote execution machines |
-| Execution | Agents & Identities | Enabled Herdr CLI Agents, `@identities`, default interactive Agent, Setup wizard and configuration reload |
-| Execution | Herdr | Runtime executable/session and explicit Check connection |
-| System | Storage | Application-home location and path copy |
+| App | Hosts | `This Mac` and connected remote `canband` hosts (Tailscale/SSH), pairing, reconnect, `Update Daemon`, and removal |
+| App | Diagnostics | Per-host connectivity, API compatibility, Herdr Core, toolchains, and live daemon logs |
+| App | Updates | Current build version, channel check and install/restart |
+| Host | Agent scheduling | Execution summary, global concurrency, idle timeout and Save scheduling settings; validation stays inside the group |
+| Host | Agents & Identities | Enabled Herdr CLI Agents, `@identities`, default interactive Agent, Setup wizard and configuration reload |
+| Host | Herdr | Runtime executable/session and explicit Check connection |
+| Host | Storage | Application-home location and path copy |
 | *(Bottom divider)* | Acknowledgements & Licenses | Canban Apache-2.0 attribution, core/runtime credits (`Herdr`, `sheprd` / formerly `herdr-gpui`, `NSH`, `Ghostty`), asset/upstream credits (`CodexBar`, `iTerm2-Color-Schemes`, `Lucide`, `Lobe Icons`, `Primer Octicons`) with license badges and repository links, plus a collapsible bundled-notices and full license viewer |
 
 Save scheduling settings persists both fields; concurrency must be positive, idle timeout nonnegative, and 0 disables idle reclamation.

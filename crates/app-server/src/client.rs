@@ -128,17 +128,29 @@ impl RpcConn {
     }
 }
 
+pub(crate) fn rpc_endpoint(
+    endpoint: &ClientEndpoint,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let mut conn = RpcConn::connect(endpoint)?;
+    conn.call(method, &params)
+}
+
 pub(crate) fn rpc_tcp(
     addr: &str,
     token: Option<&str>,
     method: &str,
     params: Value,
 ) -> Result<Value> {
-    let mut conn = RpcConn::connect(&ClientEndpoint::Tcp {
-        addr: addr.to_owned(),
-        token: token.unwrap_or_default().to_owned(),
-    })?;
-    conn.call(method, &params)
+    rpc_endpoint(
+        &ClientEndpoint::Tcp {
+            addr: addr.to_owned(),
+            token: token.unwrap_or_default().to_owned(),
+        },
+        method,
+        params,
+    )
 }
 
 pub struct AppClient {

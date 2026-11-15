@@ -131,7 +131,7 @@ Accessible from the `Hosts` popover, `Settings → Hosts`, `+ New Project` host 
 - **APP (THIS MAC):**
   - `Theme & support` (palette, shortcuts)
   - `Terminal` (local font family & size)
-  - `Hosts` (add, pair, reconnect, remove remote `canband` connections)
+  - `Hosts` (add, pair, reconnect, update remote `canband` daemons via `update.daemon` when in `ApiMismatch`, or remove remote `canband` connections; replaces the legacy `Settings → Machines` surface)
   - `Diagnostics` (end-to-end health checks & live logs across all hosts)
   - `Updates` (desktop app updates + remote host backend version status)
 - **HOST SETTINGS (`[ Target: This Mac ▾ ]` selector):**

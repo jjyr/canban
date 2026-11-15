@@ -1,6 +1,6 @@
 //! Herdr-backed Agent Setup Onboarding Wizard, Global Agents & Identities Settings,
 //! and Project-level Identity Overrides (`Project / Agents`).
-use crate::{machines, presenter::*};
+use crate::presenter::*;
 use canban_types::*;
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
@@ -128,23 +128,28 @@ fn canban_skill_settings_block(ui: Ui) -> View {
         .child(canban_skill_box(ui))
 }
 
-/// Refresh `ui.agent_catalog` for a given machine (`"local"` or remote Core ID).
-pub fn refresh_catalog(ui: Ui, machine: &str) {
+/// Refresh `ui.agent_catalog` on the effective configuration host.
+pub fn refresh_catalog(ui: Ui) {
+    let host_id = ui.effective_config_host();
+    refresh_catalog_for_host(ui, &host_id);
+}
+
+/// Refresh `ui.agent_catalog` for a specific `canband` host (`"local"` or remote `host_id`).
+pub fn refresh_catalog_for_host(ui: Ui, host_id: &str) {
     if ui.agent_catalog_loading.get_untracked() {
         return;
     }
     if crate::APP.get().is_none() {
         return;
     }
-    let target = machine.to_owned();
-    let host_id = ui.effective_config_host();
+    let target_host = host_id.to_owned();
     ui.agent_catalog_loading.set(true);
     ui.spawn(async move {
-        let m = target.clone();
+        let req_host = target_host.clone();
         let result = blocking(move || {
             crate::routed_call(
                 "agent.catalog",
-                json!({"machine": m, "host_id": host_id}),
+                json!({"machine": "local", "host_id": req_host}),
                 None,
             )
         })
@@ -579,7 +584,7 @@ fn agent_command_inline_editor(
                                     move |_| {
                                         command_error.set(String::new());
                                         command_target.set(None);
-                                        refresh_catalog(ui, "local");
+                                        refresh_catalog(ui);
                                     },
                                 );
                             })
@@ -636,7 +641,7 @@ fn agent_command_inline_editor(
                                 move |_| {
                                     command_error.set(String::new());
                                     command_target.set(None);
-                                    refresh_catalog(ui, "local");
+                                    refresh_catalog(ui);
                                 },
                             );
                         })),
@@ -738,7 +743,7 @@ fn profile_model_effort_buttons(
                                 "id": clear_id,
                                 "model": Value::Null,
                             }),
-                            move |_| refresh_catalog(ui, "local"),
+                            move |_| refresh_catalog(ui),
                         );
                     }));
                     items.push(MenuItem::separator());
@@ -767,7 +772,7 @@ fn profile_model_effort_buttons(
                                 payload["effort"] = clear_eff.clone();
                             }
                             dispatch_then(ui, "config.agents.save", payload, move |_| {
-                                refresh_catalog(ui, "local")
+                                refresh_catalog(ui)
                             });
                         }));
                     }
@@ -838,7 +843,7 @@ fn profile_model_effort_buttons(
                                 "id": clear_id,
                                 "effort": Value::Null,
                             }),
-                            move |_| refresh_catalog(ui, "local"),
+                            move |_| refresh_catalog(ui),
                         );
                     }));
                     items.push(MenuItem::separator());
@@ -860,7 +865,7 @@ fn profile_model_effort_buttons(
                                     "id": set_id,
                                     "effort": chosen,
                                 }),
-                                move |_| refresh_catalog(ui, "local"),
+                                move |_| refresh_catalog(ui),
                             );
                         }));
                     }
@@ -927,7 +932,7 @@ fn custom_model_inline_editor(
             }
             dispatch_then(ui, "config.agents.save", payload, move |_| {
                 custom_model_target.set(None);
-                refresh_catalog(ui, "local");
+                refresh_catalog(ui);
             });
         }))
         .child(compact_action("Reset default", Variant::Quiet, move |_| {
@@ -942,7 +947,7 @@ fn custom_model_inline_editor(
                 }),
                 move |_| {
                     custom_model_target.set(None);
-                    refresh_catalog(ui, "local");
+                    refresh_catalog(ui);
                 },
             );
         }))
@@ -1144,7 +1149,7 @@ pub fn onboarding_banner(ui: Ui) -> impl IntoElement {
 /// Dedicated Onboarding & Re-runnable Agent Setup screen (`page == "agent-setup"`).
 pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
     if ui.agent_catalog.with_untracked(Value::is_null) {
-        refresh_catalog(ui, "local");
+        refresh_catalog(ui);
     }
 
     let enabled_set = signal(BTreeSet::<String>::new());
@@ -1268,7 +1273,7 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                             Variant::Quiet,
                             move |_| {
                                 seeded.replace(false);
-                                refresh_catalog(ui, "local");
+                                refresh_catalog(ui);
                             },
                         ))
                         .child(dynamic(move || {
@@ -1514,7 +1519,7 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
                                             "identity_engines": roles,
                                         }),
                                         move |_| {
-                                            refresh_catalog(ui, "local");
+                                            refresh_catalog(ui);
                                             ui.navigate(back_target);
                                         },
                                     );
@@ -1531,7 +1536,7 @@ pub fn onboarding_screen(ui: Ui) -> impl IntoElement {
 /// Global Settings section for Agents, Custom CLI Agents, Default `@identity`, and Role Identities.
 pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement {
     if ui.agent_catalog.with_untracked(Value::is_null) {
-        refresh_catalog(ui, "local");
+        refresh_catalog(ui);
     }
 
     let show_all_catalog = signal(false);
@@ -1585,7 +1590,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                     "default_agent": local_cfg.default_agent,
                                 }),
                                 move |_| {
-                                    refresh_catalog(ui, "local");
+                                    refresh_catalog(ui);
                                     ui.notify("Copied Agent & @identity profiles from This Mac");
                                 },
                             );
@@ -1600,7 +1605,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
             ))
             .child(compact_action("Reload", Variant::Quiet, move |_| {
                 dispatch_then(ui, "config.reload", json!({}), move |_| {
-                    refresh_catalog(ui, "local");
+                    refresh_catalog(ui);
                 });
             })),
     )
@@ -1767,7 +1772,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                             }),
                                             move |_| {
                                                 adding_identity.set(false);
-                                                refresh_catalog(ui, "local");
+                                                refresh_catalog(ui);
                                             },
                                         );
                                     },
@@ -1894,9 +1899,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                                             "enabled": true,
                                                                         }),
                                                                         move |_| {
-                                                                            refresh_catalog(
-                                                                                ui, "local",
-                                                                            )
+                                                                            refresh_catalog(ui)
                                                                         },
                                                                     );
                                                                 })
@@ -1946,7 +1949,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                             "id": toggle_pid,
                                                             "enabled": !prof_enabled,
                                                         }),
-                                                        move |_| refresh_catalog(ui, "local"),
+                                                        move |_| refresh_catalog(ui),
                                                     );
                                                 },
                                             ))
@@ -1966,7 +1969,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                                     "id": d,
                                                                 }),
                                                                 move |_| {
-                                                                    refresh_catalog(ui, "local")
+                                                                    refresh_catalog(ui)
                                                                 },
                                                             );
                                                         },
@@ -2021,7 +2024,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                 }),
                                                 move |_| {
                                                     editing_role.set(None);
-                                                    refresh_catalog(ui, "local");
+                                                    refresh_catalog(ui);
                                                 },
                                             );
                                         },
@@ -2171,7 +2174,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                 custom_agent_cmd.set(String::new());
                                                 custom_agent_args.set(String::new());
                                                 custom_agent_error.set(String::new());
-                                                refresh_catalog(ui, "local");
+                                                refresh_catalog(ui);
                                             },
                                         );
                                     },
@@ -2216,7 +2219,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                 "id": toggle_id,
                                 "enabled": !enabled,
                             }),
-                            move |_| refresh_catalog(ui, "local"),
+                            move |_| refresh_catalog(ui),
                         );
                     })
                 };
@@ -2411,7 +2414,7 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
                                                                                 }),
                                                                                 move |_| {
                                                                                     refresh_catalog(
-                                                                                        ui, "local",
+                                                                                        ui,
                                                                                     )
                                                                                 },
                                                                             );
@@ -2792,14 +2795,14 @@ fn inherited_project_options(
 pub fn project_overrides_editor(
     ui: Ui,
     overrides: Signal<BTreeMap<String, ProjectAgentOverride>>,
-    machine: Signal<String>,
+    host_id: Signal<String>,
 ) -> impl IntoElement {
     let custom_model_target = signal(Option::<String>::None);
     let custom_model_draft = signal(String::new());
 
     effect(move || {
-        let m = machine.get();
-        refresh_catalog(ui, &m);
+        let h = host_id.get();
+        refresh_catalog_for_host(ui, &h);
     });
 
     dynamic(move || {
@@ -3106,13 +3109,9 @@ pub fn project_agents_screen(ui: Ui) -> impl IntoElement {
         .as_ref()
         .map(|p| p.agent_overrides.clone())
         .unwrap_or_default();
-    let machine_id = proj
-        .as_ref()
-        .map(|p| p.work_location().machine)
-        .unwrap_or_else(|| "local".into());
 
     let overrides = signal(initial_overrides);
-    let machine = signal(machine_id);
+    let host_id = signal(ui.active_project_host());
 
     view()
         .flex_1()
@@ -3129,14 +3128,14 @@ pub fn project_agents_screen(ui: Ui) -> impl IntoElement {
                     .child(muted(move || {
                         format!(
                             "Choose which Agent, model, and effort run each @identity in this Project ({}) without editing Workflow YAML.",
-                            machines::name(ui, &machine.get())
+                            crate::hosts::host_name(ui, &host_id.get())
                         )
                     }))
                     .child(when(
                         move || !ui.operation_error.get().is_empty(),
                         move || notice(move || ui.operation_error.get(), Tone::Attention),
                     ))
-                    .child(project_overrides_editor(ui, overrides, machine))
+                    .child(project_overrides_editor(ui, overrides, host_id))
                     .child(
                         view()
                             .flex_row()

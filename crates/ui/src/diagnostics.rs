@@ -379,6 +379,26 @@ pub fn section_view(ui: Ui) -> impl IntoElement {
                         format!("v{api_version} (Desktop v{})", canban_updater::DESKTOP_API),
                     ))
                     .child(kv_row("Daemon build", format!("{version} ({platform})")));
+            } else if let HostConnectionState::ApiMismatch {
+                server_api,
+                app_api,
+                version,
+            } = &h.connection
+            {
+                let h_upd = h.clone();
+                conn_rows = conn_rows
+                    .child(kv_row(
+                        "Protocol API",
+                        format!("Daemon v{server_api} · Desktop v{app_api}"),
+                    ))
+                    .child(kv_row("Daemon build", version.clone()))
+                    .child(
+                        view().pt_1p5().items_start().child(compact_action(
+                            "Update Daemon",
+                            Variant::Primary,
+                            move |_| crate::hosts::update_host_daemon(ui, h_upd.clone()),
+                        )),
+                    );
             }
             if !h.is_local {
                 conn_rows = conn_rows.child(kv_row(
