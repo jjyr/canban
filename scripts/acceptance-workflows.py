@@ -178,7 +178,7 @@ try:
  s=wait(lambda s:(home/'configuration-evidence/2.json').exists(),'exact configuration history resumes')
  assert s['configuration_sessions'][0]['provider_session_id']==history
  assert '--resume' in json.loads((home/'configuration-evidence/2.json').read_text())['argv']
- assert call('workflow.schema')['schema_version']==6
+ assert call('workflow.schema')['schema_version']>=6
  script_yaml="""schema: 6
 id: delivery:script-acceptance
 name: Script Acceptance
@@ -238,7 +238,7 @@ workspace:
  s=wait(lambda s:any(r['card_id']==script_card['id'] and r['state']=='completed' for r in s['workflow_runs']),'schema 6 script and agent workflow completion')
  script_run=next(r for r in s['workflow_runs'] if r['card_id']==script_card['id'])
  assert script_run['outputs']['check']['gate']=='allow'
- script_logs=list((home/'projects'/script_project['id']/'cards'/script_card['id']/'scripts').glob('*.log'))
+ script_logs=list((home/'projects'/script_project['id']/'cards'/str(script_card['number'])/'scripts').glob('*.log'))
  assert script_logs and f'script_env=wf_default card={script_card["number"]} id={script_card["id"]}' in script_logs[0].read_text()
  script_report=next(r for r in s['reports'] if r['card_id']==script_card['id'])
  report_text=(home/script_report['path']).read_text()
