@@ -1,6 +1,6 @@
 # Unified workflow engine, Studio and implementation
 
-Status: implemented and active (reconciled 2026-11-14; SQLite schema 17, workflow schema 7, desktop API 44). This is the canonical product and engineering contract for Canban Workflows, consolidating the unified engine rules, Project/Board workflow ownership, Visual Studio UX, YAML schema, RPC/CLI operations, workspace lifecycle, and acceptance evidence. [Events and subscriptions](events-and-notifications.md) owns the durable journal envelope and trigger delivery.
+Status: implemented and active (reconciled 2026-11-15; SQLite schema 18, workflow schema 7, desktop API 51). This is the canonical product and engineering contract for Canban Workflows, consolidating the unified engine rules, Project/Board workflow ownership, Visual Studio UX, YAML schema, RPC/CLI operations, workspace lifecycle, and acceptance evidence. [Events and subscriptions](events-and-notifications.md) owns the durable journal envelope and trigger delivery.
 
 ## Core design principles
 
@@ -66,7 +66,7 @@ Open **Workflows** in the Project header or **Project Workflows** in Settings. A
 
 ```text
 canban.sqlite
-  workflow_templates       SQL bootstrap for legacy compatibility
+  workflow_templates       saved global reusable workflow collections (e.g. `id = "default"` for new Projects)
   workflow_sources         Project + filename + active revision/hash/columns/rules
   workflow_revisions       immutable original YAML + compiled WorkflowDefinition
   workflow_runs            captured revision + visit checkpoints + inputs/outputs
@@ -76,6 +76,13 @@ canban.sqlite
 ```
 
 No Workflow YAML mirror or revision file is created under `~/.canban`; external `.yaml` paths are used only when explicitly importing/exporting via CLI.
+
+### Reusing workflows across new Projects
+
+To avoid repeating workflow adjustments on every new Project:
+
+- **Set as default (`workflow.default.set` / `workflow.default.reset`):** In `Project / Workflows`, once all changes are saved, clicking **Set as default** (or running `Set Current Project Workflow as Default` from the Command Palette / `canban workflow set-default --project-id <ID>`) validates and stores the Project's published YAML source collection in `workflow_templates` (`id = "default"`, exposed via `Snapshot.workflow_templates`). When the current Project's saved workflows already match the global default, Studio displays `Default for new Projects` with a **Reset default** action to revert to the built-in default.
+- **New Project workflow selector (`project.create`):** `New Project` provides a collapsible `▸ Workflow · ...` section (alongside `Execution machine` and `Project Agents`). By default (`workflow_mode: "default"` or omitted), `project.create` automatically instantiates the saved global default template if present, falling back to the built-in `development.yaml`. Users can also explicitly pick **Built-in default** (`workflow_mode: "builtin"`) or **Copy from `<Project>`** (`workflow_mode: "project"`, `workflow_source_project_id: "<pid>"`) to clone an existing Project's active workflow collection—automatically rewriting `doc.id` (`delivery:<new_pid>` / `<base>:<new_pid>`), clearing project-specific selectors, stripping deleted Profile references, and syncing custom Board columns and workspace settings (`sync_base`, `create_worktree`, `base_branch`, `remote`).
 
 ### Studio layout
 
@@ -270,6 +277,8 @@ All clients share the same AppServer validation and publication boundary (`canba
 | `workflow.sources` | `project_id` -> optimistic collection `revision`, `sources`, and active `WorkflowSource` rows |
 | `workflow.check` | `project_id`, `revision`, `sources` -> validate YAML/columns/Profiles/cycles without publishing |
 | `workflow.apply` | Same inputs -> atomically publish YAML revisions, sync `columns` to Project stages, and update subscriptions |
+| `workflow.default.get` / `set` / `reset` | Inspect, save (`project_id` or `sources`), or clear the global default `WorkflowTemplate` (`id = "default"`) for new Projects (`canban workflow set-default` / `reset-default`) |
+| `project.create` (workflow options) | Optional `workflow_mode` (`"default"` \| `"builtin"` \| `"project"`), `workflow_source_project_id`, or explicit `workflow_yaml` |
 | `workflow.list` / `workflow.get` | Inspect immutable `WorkflowRevision` history (including `source_yaml`) |
 | `workflow.prompt` / `configuration.open` | Generate Project-wide configuration Prompt and launch/resume configuration Terminal |
 | `workflow.start` | `card_id`, `workflow_id`, `entry` -> explicit manual run start |

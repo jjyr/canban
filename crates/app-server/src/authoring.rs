@@ -333,42 +333,226 @@ fn publish(
     }
     Ok(())
 }
-/// Initialize a newly created Project with either an explicit YAML source document
-/// or the native default `development.yaml` workflow.
+/// How a newly created Project initializes its workflow source collection.
+pub(super) enum NewProjectWorkflow<'a> {
+    /// Use saved global default template (`workflow_templates` `"default"`) if configured,
+    /// otherwise fall back to the built-in default `development.yaml`.
+    Default,
+    /// Always use the built-in default `development.yaml` even when a custom global default exists.
+    Builtin,
+    /// Explicit single-file `development.yaml` string (`project.create` `workflow_yaml`).
+    ExplicitYaml(&'a str),
+    /// Clone an existing Project's active `WorkflowSource` collection.
+    FromProject(String),
+}
+
+pub(super) fn project_template_files(
+    db: Db<'_>,
+    project_id: &str,
+) -> Result<Vec<WorkflowTemplateFile>> {
+    let mut active: Vec<_> = db
+        .list::<WorkflowSource>()?
+        .into_iter()
+        .filter(|s| s.project_id == project_id)
+        .collect();
+    active.sort_by(|a, b| a.filename.cmp(&b.filename));
+    ensure!(
+        !active.is_empty(),
+        "Source Project has no published workflow sources"
+    );
+    let mut out = Vec::with_capacity(active.len());
+    for item in active {
+        let rev: WorkflowRevision = db.get(&item.revision_id)?;
+        let raw = rev.source_yaml.context("Published YAML is missing")?;
+        let canonical = canban_workflow_engine::migrations::upgrade_yaml(&raw)?.unwrap_or(raw);
+        out.push(WorkflowTemplateFile {
+            filename: item.filename,
+            source: canonical,
+        });
+    }
+    Ok(out)
+}
+
+/// Inspects the primary workspace remote for a new Project before `Project` creation
+/// so `detect_project_github` uses the effective template/copied remote when `workspace` is not overridden.
+pub(super) fn effective_initial_remote(
+    db: Db<'_>,
+    mode: &NewProjectWorkflow<'_>,
+    explicit_workspace: Option<&WorkspaceSettings>,
+) -> Result<String> {
+    if let Some(ws) = explicit_workspace {
+        return Ok(ws.remote.clone());
+    }
+    let files = match mode {
+        NewProjectWorkflow::Default => db
+            .get::<WorkflowTemplate>(DEFAULT_WORKFLOW_TEMPLATE_ID)
+            .ok()
+            .map(|t| t.sources),
+        NewProjectWorkflow::Builtin => None,
+        NewProjectWorkflow::ExplicitYaml(raw) => Some(vec![WorkflowTemplateFile {
+            filename: "development.yaml".into(),
+            source: (*raw).to_owned(),
+        }]),
+        NewProjectWorkflow::FromProject(pid) => Some(project_template_files(db, pid)?),
+    };
+    if let Some(files) = files
+        && let Some(primary) = files
+            .iter()
+            .find(|f| f.filename == "development.yaml")
+            .or_else(|| files.first())
+    {
+        let doc = source::parse(&primary.source)?;
+        return Ok(doc.workspace.remote);
+    }
+    Ok(WorkspaceSettings::default().remote)
+}
+
+fn validate_template_files(config: &Config, inputs: &[Value]) -> Result<Vec<WorkflowTemplateFile>> {
+    ensure!(
+        !inputs.is_empty() && inputs.len() <= 64,
+        "A workflow template needs 1..64 Workflow sources"
+    );
+    let mut names = BTreeSet::new();
+    let mut raw_files = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let name = strp(input, "filename")?;
+        filename(name)?;
+        ensure!(names.insert(name.to_owned()), "Duplicate filename {name}");
+        let raw = strp(input, "source")?;
+        let canonical = canban_workflow_engine::migrations::upgrade_yaml(raw)
+            .with_context(|| name.to_owned())?
+            .unwrap_or_else(|| raw.to_owned());
+        raw_files.push(WorkflowTemplateFile {
+            filename: name.to_owned(),
+            source: canonical,
+        });
+    }
+    let profiles: Vec<String> = config.profiles.iter().map(|p| p.id.clone()).collect();
+    let instantiated =
+        source::instantiate_collection("templatecheck", &raw_files, &profiles, None)?;
+    let mut declared_columns: Option<Vec<WorkflowColumn>> = None;
+    let mut parsed_docs = Vec::with_capacity(instantiated.len());
+    for file in &instantiated {
+        let doc = source::parse(&file.source).with_context(|| file.filename.clone())?;
+        if !doc.columns.is_empty()
+            && (declared_columns.is_none() || file.filename == "development.yaml")
+        {
+            declared_columns = Some(doc.columns.clone());
+        }
+        parsed_docs.push((file.filename.clone(), doc));
+    }
+    let effective_columns: Vec<String> = declared_columns
+        .map(|cols| cols.into_iter().map(|c| c.id).collect())
+        .unwrap_or_else(|| {
+            Workflow::default()
+                .stages
+                .into_iter()
+                .map(|s| s.id)
+                .collect()
+        });
+    for (name, doc) in parsed_docs {
+        (|| -> Result<()> {
+            ensure!(
+                doc.id.len() <= 200 && !doc.id.contains('/') && !doc.id.contains(".."),
+                "Invalid workflow ID"
+            );
+            for rule in doc.on.values() {
+                ensure!(!rule.event.is_empty(), "Trigger event is required");
+                ensure!(
+                    rule.selector.types.is_empty(),
+                    "Use event rather than match.types"
+                );
+                if let Some(column) = &rule.selector.column {
+                    ensure!(
+                        effective_columns.contains(column),
+                        "Unknown trigger column {column}"
+                    );
+                }
+            }
+            let flow = doc.compile()?;
+            canban_workflow_engine::validate_definition(&flow, &effective_columns, &profiles)?;
+            Ok(())
+        })()
+        .with_context(|| name)?;
+    }
+    raw_files.sort_by(|a, b| a.filename.cmp(&b.filename));
+    Ok(raw_files)
+}
+
+/// Initialize a newly created Project from explicit YAML, a copied Project,
+/// the saved global default template, or the native built-in `development.yaml`.
 pub(super) fn initialize_new(
     home: &Path,
     db: Db<'_>,
     config: &Config,
     project: &Project,
-    workflow_yaml: Option<&str>,
+    mode: NewProjectWorkflow<'_>,
+    explicit_workspace: Option<&WorkspaceSettings>,
 ) -> Result<()> {
-    let raw = if let Some(yaml) = workflow_yaml {
-        yaml.to_owned()
-    } else {
-        let mut doc = source::default_document(
-            format!("delivery:{}", project.id),
-            project.workflow.workspace.clone(),
-        );
-        for step in &mut doc.steps {
-            if step.uses == "agent"
-                && step
-                    .with
-                    .get("profile")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|id| !config.profiles.iter().any(|p| p.id == id))
+    let profiles: Vec<String> = config.profiles.iter().map(|p| p.id.clone()).collect();
+    let inputs: Vec<Value> = match mode {
+        NewProjectWorkflow::ExplicitYaml(yaml) => {
+            vec![json!({"filename":"development.yaml","source":yaml})]
+        }
+        NewProjectWorkflow::FromProject(source_pid) => {
+            let raw_files = project_template_files(db, &source_pid)?;
+            source::instantiate_collection(&project.id, &raw_files, &profiles, explicit_workspace)?
+                .into_iter()
+                .map(|f| json!({"filename": f.filename, "source": f.source}))
+                .collect()
+        }
+        NewProjectWorkflow::Default => {
+            if let Ok(tpl) = db.get::<WorkflowTemplate>(DEFAULT_WORKFLOW_TEMPLATE_ID)
+                && !tpl.sources.is_empty()
             {
-                step.with.remove("profile");
+                source::instantiate_collection(
+                    &project.id,
+                    &tpl.sources,
+                    &profiles,
+                    explicit_workspace,
+                )?
+                .into_iter()
+                .map(|f| json!({"filename": f.filename, "source": f.source}))
+                .collect()
+            } else {
+                let mut doc = source::default_document(
+                    format!("delivery:{}", project.id),
+                    project.workflow.workspace.clone(),
+                );
+                for step in &mut doc.steps {
+                    if step.uses == "agent"
+                        && step
+                            .with
+                            .get("profile")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|id| !profiles.iter().any(|p| p == id))
+                    {
+                        step.with.remove("profile");
+                    }
+                }
+                vec![json!({"filename":"development.yaml","source":source::encode(&doc)?})]
             }
         }
-        source::encode(&doc)?
+        NewProjectWorkflow::Builtin => {
+            let mut doc = source::default_document(
+                format!("delivery:{}", project.id),
+                project.workflow.workspace.clone(),
+            );
+            for step in &mut doc.steps {
+                if step.uses == "agent"
+                    && step
+                        .with
+                        .get("profile")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|id| !profiles.iter().any(|p| p == id))
+                {
+                    step.with.remove("profile");
+                }
+            }
+            vec![json!({"filename":"development.yaml","source":source::encode(&doc)?})]
+        }
     };
-    publish(
-        home,
-        db,
-        project,
-        config,
-        &[json!({"filename":"development.yaml","source":raw})],
-    )
+    publish(home, db, project, config, &inputs)
 }
 
 /// Ensure every Project has an initialized SQL YAML workflow collection,
@@ -385,7 +569,7 @@ pub(super) fn initialize(
         .filter(|f| f.project_id == project.id)
         .collect();
     if existing.is_empty() {
-        return initialize_new(home, db, config, project, None);
+        return initialize_new(home, db, config, project, NewProjectWorkflow::Builtin, None);
     }
     existing.sort_by(|a, b| a.filename.cmp(&b.filename));
     let mut needs_upgrade = false;
@@ -407,6 +591,72 @@ pub(super) fn initialize(
 }
 impl AppServer {
     pub(super) fn authoring_call(&self, method: &str, p: Value) -> Result<Value> {
+        if method == "workflow.default.get" {
+            let store = self.store.lock().unwrap();
+            let template = store
+                .db()
+                .get::<WorkflowTemplate>(DEFAULT_WORKFLOW_TEMPLATE_ID)
+                .ok();
+            return Ok(json!({"template": template}));
+        }
+        if method == "workflow.default.set" {
+            ensure!(
+                p["execution"].is_null(),
+                "Card Agent executions cannot overwrite the global default workflow"
+            );
+            return self.mutate(method, &p, |db| {
+                let config = self.config();
+                let (sources, source_project_name) = if let Some(arr) = p["sources"].as_array() {
+                    let project_name = p["source_project_name"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
+                    (validate_template_files(&config, arr)?, project_name)
+                } else {
+                    let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+                    let project: Project = db.get(&pid)?;
+                    initialize(&self.home, db, &config, &project)?;
+                    let current = project_template_files(db, &project.id)?;
+                    let inputs: Vec<Value> = current
+                        .iter()
+                        .map(|f| json!({"filename": f.filename, "source": f.source}))
+                        .collect();
+                    (
+                        validate_template_files(&config, &inputs)?,
+                        Some(project.name),
+                    )
+                };
+                let name = p["name"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Default")
+                    .to_owned();
+                let template = WorkflowTemplate {
+                    id: DEFAULT_WORKFLOW_TEMPLATE_ID.into(),
+                    name,
+                    source_project_name,
+                    sources,
+                    updated_at: now(),
+                };
+                db.save(&template)?;
+                Ok(serde_json::to_value(template)?)
+            });
+        }
+        if method == "workflow.default.reset" {
+            ensure!(
+                p["execution"].is_null(),
+                "Card Agent executions cannot reset the global default workflow"
+            );
+            return self.mutate(method, &p, |db| {
+                let removed = db.conn.execute(
+                    "DELETE FROM workflow_templates WHERE id=?1",
+                    [DEFAULT_WORKFLOW_TEMPLATE_ID],
+                )?;
+                Ok(json!({"reset": removed > 0}))
+            });
+        }
         if method == "workflow.sources" {
             let mut store = self.store.lock().unwrap();
             return store.write(|db| {

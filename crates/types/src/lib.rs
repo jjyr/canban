@@ -1001,6 +1001,8 @@ pub struct Snapshot {
     pub workflow_runs: Vec<WorkflowRun>,
     #[serde(default)]
     pub workflow_sources: Vec<WorkflowSource>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workflow_templates: Vec<WorkflowTemplate>,
     #[serde(default)]
     pub event_subscriptions: Vec<EventSubscription>,
     #[serde(default)]

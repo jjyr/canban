@@ -279,6 +279,22 @@ pub const CATALOG: &[Command] = &[
         keywords: "edit with agent configuration assistant yaml terminal",
     },
     Command {
+        id: "set-default-workflow",
+        title: "Set Current Project Workflow as Default",
+        key: "",
+        display: "Workflows",
+        context: "Project",
+        keywords: "new project template global default workflow reuse save",
+    },
+    Command {
+        id: "reset-default-workflow",
+        title: "Reset Default Workflow to Built-in",
+        key: "",
+        display: "Workflows",
+        context: "Preferences",
+        keywords: "clear template global default workflow builtin new project",
+    },
+    Command {
         id: "go-agent-setup",
         title: "Agents · Setup & Enabled Providers",
         key: "",
@@ -732,6 +748,8 @@ pub fn execute(ui: Ui, id: &str) {
         "go-github" => ui.navigate("github"),
         "go-workflows" => ui.navigate("workflows"),
         "edit-workflow-agent" => crate::workflows::edit_agent(ui),
+        "set-default-workflow" => crate::workflows::set_default_workflow(ui),
+        "reset-default-workflow" => crate::workflows::reset_default_workflow(ui),
         "go-project-agents" => {
             if ui.current_project().is_some() {
                 ui.navigate("project-agents");

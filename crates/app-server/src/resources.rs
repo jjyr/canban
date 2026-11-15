@@ -153,6 +153,7 @@ impl AppServer {
         let filtered = Snapshot {
             worktrees: Vec::new(),
             workflow_sources: Vec::new(),
+            workflow_templates: Vec::new(),
             configuration_sessions: Vec::new(),
             merge_batches: Vec::new(),
             event_subscriptions: Vec::new(),

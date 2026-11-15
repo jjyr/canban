@@ -458,6 +458,23 @@ pub struct WorkflowSource {
     pub columns: Vec<WorkflowColumn>,
     pub rules: BTreeMap<String, WorkflowRule>,
 }
+/// One YAML file saved inside a reusable `WorkflowTemplate` collection.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowTemplateFile {
+    pub filename: String,
+    pub source: String,
+}
+/// Global reusable workflow source collection (for example `id = "default"` for new Projects).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowTemplate {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_project_name: Option<String>,
+    pub sources: Vec<WorkflowTemplateFile>,
+    pub updated_at: u64,
+}
+pub const DEFAULT_WORKFLOW_TEMPLATE_ID: &str = "default";
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowRule {

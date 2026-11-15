@@ -446,6 +446,12 @@ fn authoring_down(tx: &Transaction<'_>) -> Result<()> {
         count == 0,
         "Cannot downgrade while YAML workflow sources exist; preserve their configuration first"
     );
+    let templates: u64 =
+        tx.query_row("SELECT count(*) FROM workflow_templates", [], |r| r.get(0))?;
+    ensure!(
+        templates == 0,
+        "Cannot downgrade while saved workflow templates exist; reset or export them first"
+    );
     let live: u64 = tx.query_row("SELECT count(*) FROM configuration_sessions WHERE json_extract(data,'$.state') NOT IN ('finished','cancelled')", [], |r| r.get(0))?;
     ensure!(live == 0, "End configuration sessions before downgrading");
     tx.execute_batch("DROP TABLE configuration_sessions; DROP TABLE workflow_sources; DROP TABLE workflow_templates;")?;

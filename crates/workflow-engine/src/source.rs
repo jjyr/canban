@@ -829,6 +829,149 @@ pub fn default_document(workflow_id: impl Into<String>, workspace: WorkspaceSett
     }
 }
 
+fn is_project_id_suffix(s: &str) -> bool {
+    matches!(s.len(), 8 | 32) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+fn base_workflow_id(raw_id: &str, filename: &str) -> String {
+    let trimmed = raw_id.trim();
+    if let Some(rest) = trimmed.strip_prefix("delivery:")
+        && (rest.is_empty() || is_project_id_suffix(rest) || filename == "development.yaml")
+    {
+        return "delivery".into();
+    }
+    if filename == "development.yaml" && trimmed == "delivery" {
+        return "delivery".into();
+    }
+    let mut cur = trimmed;
+    while let Some((head, tail)) = cur.rsplit_once(':') {
+        if !head.is_empty() && is_project_id_suffix(tail) {
+            cur = head;
+        } else {
+            break;
+        }
+    }
+    if cur.is_empty() {
+        filename
+            .strip_suffix(".yaml")
+            .unwrap_or("workflow")
+            .to_owned()
+    } else {
+        cur.to_owned()
+    }
+}
+
+/// Rewrites `doc.id`, clears project-specific rule selectors, and strips missing Profile
+/// references so a reusable workflow collection can be published cleanly onto `project_id`.
+pub fn instantiate_collection(
+    project_id: &str,
+    files: &[WorkflowTemplateFile],
+    profiles: &[String],
+    explicit_workspace: Option<&WorkspaceSettings>,
+) -> Result<Vec<WorkflowTemplateFile>> {
+    ensure!(
+        !files.is_empty() && files.len() <= 64,
+        "A Project needs 1..64 Workflow sources"
+    );
+    let mut sorted: Vec<&WorkflowTemplateFile> = files.iter().collect();
+    sorted.sort_by(|a, b| a.filename.cmp(&b.filename));
+    let primary_idx = sorted
+        .iter()
+        .position(|f| f.filename == "development.yaml")
+        .unwrap_or(0);
+    let mut used_ids = BTreeSet::new();
+    let mut out = Vec::with_capacity(sorted.len());
+    for (idx, file) in sorted.into_iter().enumerate() {
+        let mut doc = parse(&file.source).with_context(|| file.filename.clone())?;
+        let base = base_workflow_id(&doc.id, &file.filename);
+        let candidate_prefix = if base == "delivery" {
+            format!("delivery:{project_id}")
+        } else {
+            let max_base = 200usize.saturating_sub(project_id.len() + 4);
+            let truncated = if base.len() > max_base {
+                &base[..max_base]
+            } else {
+                base.as_str()
+            };
+            format!("{truncated}:{project_id}")
+        };
+        let mut next_id = candidate_prefix.clone();
+        let mut suffix = 2usize;
+        while !used_ids.insert(next_id.clone()) {
+            next_id = format!("{candidate_prefix}-{suffix}");
+            suffix += 1;
+        }
+        doc.id = next_id;
+        for rule in doc.on.values_mut() {
+            rule.selector.project_id = None;
+        }
+        for step in &mut doc.steps {
+            if matches!(step.kind(), "agent" | "deliver")
+                && step
+                    .with
+                    .get("profile")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|id| !id.is_empty() && !profiles.iter().any(|p| p == id))
+            {
+                step.with.remove("profile");
+            }
+        }
+        if idx == primary_idx
+            && let Some(ws) = explicit_workspace
+        {
+            doc.workspace = ws.clone();
+        }
+        out.push(WorkflowTemplateFile {
+            filename: file.filename.clone(),
+            source: encode(&doc)?,
+        });
+    }
+    Ok(out)
+}
+
+/// Canonicalizes a collection of YAML files for project-agnostic equality comparison
+/// (normalizing `id` and clearing `rule.selector.project_id`).
+pub fn normalized_collection_signature(
+    files: &[WorkflowTemplateFile],
+) -> Option<Vec<(String, Document)>> {
+    if files.is_empty() {
+        return None;
+    }
+    let mut normalized = Vec::with_capacity(files.len());
+    for file in files {
+        let mut doc = parse(&file.source).ok()?;
+        doc.id = base_workflow_id(&doc.id, &file.filename);
+        for rule in doc.on.values_mut() {
+            rule.selector.project_id = None;
+        }
+        normalized.push((file.filename.clone(), doc));
+    }
+    normalized.sort_by(|a, b| a.0.cmp(&b.0));
+    Some(normalized)
+}
+
+/// Human-readable one-line summary of a workflow source collection (columns + file count).
+pub fn summarize_collection(files: &[WorkflowTemplateFile]) -> String {
+    let mut docs = Vec::new();
+    for f in files {
+        if let Ok(doc) = parse(&f.source) {
+            docs.push((f.filename.as_str(), doc));
+        }
+    }
+    let columns: Vec<String> = docs
+        .iter()
+        .find(|(name, doc)| *name == "development.yaml" && !doc.columns.is_empty())
+        .or_else(|| docs.iter().find(|(_, doc)| !doc.columns.is_empty()))
+        .map(|(_, doc)| doc.columns.iter().map(|c| c.name.clone()).collect())
+        .unwrap_or_else(|| vec!["Backlog".into(), "Develop".into(), "Review".into()]);
+    let stages = columns.join(" → ");
+    if files.len() > 1 {
+        format!("{stages} · {} workflows", files.len())
+    } else {
+        stages
+    }
+}
+
 /// UI-customizable workflow options derived locally from the YAML graph.
 /// Always derivable even when the user adds custom columns, custom steps, or custom prompts.
 #[derive(Clone, Debug, PartialEq, Eq)]

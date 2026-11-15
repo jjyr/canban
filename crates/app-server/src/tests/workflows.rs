@@ -5943,3 +5943,243 @@ fn batch_merge_queue_test_failure_supports_evicting_bad_card_and_delivering_rema
             .evicted
     );
 }
+
+#[test]
+fn global_default_workflow_and_project_copy_instantiate_isolated_revisions_for_new_projects() {
+    let (dir, app, p1, _c1) = setup();
+    let custom_dev = format!(
+        r#"schema: {}
+id: delivery:{}
+name: Tuned Delivery
+columns:
+  - id: backlog
+    name: Backlog
+  - id: design
+    name: Design
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+workspace:
+  create_worktree: false
+  sync_base: false
+  remote: upstream
+on:
+  develop:
+    event: card.column_entered
+    start_at: agent:develop
+    match:
+      column: develop
+  review:
+    event: card.column_entered
+    start_at: deliver:review
+    match:
+      column: review
+steps:
+  - id: agent:develop
+    name: Implement
+    uses: agent
+    with:
+      profile: developer
+      instruction: Custom tuned developer prompt
+    next: move:develop
+  - id: move:develop
+    uses: card.move
+    with:
+      column: review
+    next: deliver:review
+  - id: deliver:review
+    uses: deliver
+    with:
+      strategy: squash
+      sync_upstream: false
+    next: __end
+  - id: __end
+    uses: complete
+"#,
+        canban_workflow_engine::migrations::CURRENT,
+        p1.id
+    );
+    let secondary = format!(
+        r#"schema: {}
+id: helper
+name: Manual Helper
+on:
+  triage:
+    event: manual
+    start_at: explain
+steps:
+  - id: explain
+    uses: agent
+    with:
+      profile: planner
+      instruction: Explain tradeoffs
+    next: __end
+  - id: __end
+    uses: complete
+"#,
+        canban_workflow_engine::migrations::CURRENT
+    );
+    let cur = app
+        .call("workflow.sources", json!({"project_id": p1.id}))
+        .unwrap();
+    app.call(
+        "workflow.apply",
+        json!({
+            "project_id": p1.id,
+            "revision": cur["revision"],
+            "sources": [
+                {"filename": "development.yaml", "source": custom_dev},
+                {"filename": "helper.yaml", "source": secondary},
+            ]
+        }),
+    )
+    .unwrap();
+
+    // 1. Copy workflow collection directly from p1 into p2 (`workflow_source_project_id`).
+    let dir_p2 = dir.path().join("repo-p2");
+    std::fs::create_dir_all(&dir_p2).unwrap();
+    let p2: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "Copied Project",
+                "directory": dir_p2,
+                "workflow_source_project_id": p1.id,
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        p2.workflow
+            .stages
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["backlog", "design", "develop", "review"]
+    );
+    assert!(!p2.workflow.workspace.create_worktree);
+    assert!(!p2.workflow.workspace.sync_base);
+    assert_eq!(p2.workflow.workspace.remote, "upstream");
+
+    let p2_sources = app
+        .call("workflow.sources", json!({"project_id": p2.id}))
+        .unwrap();
+    let p2_rows = p2_sources["sources"].as_array().unwrap();
+    assert_eq!(p2_rows.len(), 2);
+    assert_eq!(
+        p2_rows[0]["active"]["workflow_id"],
+        format!("delivery:{}", p2.id)
+    );
+    assert_eq!(
+        p2_rows[1]["active"]["workflow_id"],
+        format!("helper:{}", p2.id)
+    );
+    assert!(
+        p2_rows[0]["source"]
+            .as_str()
+            .unwrap()
+            .contains("Custom tuned developer prompt")
+    );
+
+    // Chained copy p2 -> p3 does not accumulate `:pid:pid` suffixes.
+    let dir_p3 = dir.path().join("repo-p3");
+    std::fs::create_dir_all(&dir_p3).unwrap();
+    let p3: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "Chained Copy",
+                "directory": dir_p3,
+                "workflow_mode": "project",
+                "workflow_source_project_id": p2.id,
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let p3_sources = app
+        .call("workflow.sources", json!({"project_id": p3.id}))
+        .unwrap();
+    assert_eq!(
+        p3_sources["sources"][1]["active"]["workflow_id"],
+        format!("helper:{}", p3.id)
+    );
+
+    // 2. Save p1 as global default (`workflow.default.set`), verify Snapshot & `project.create` default.
+    assert!(
+        app.call(
+            "workflow.default.set",
+            json!({"project_id": p1.id, "execution": {"token": "agent"}}),
+        )
+        .is_err(),
+        "Card Agent execution tokens must not overwrite global default workflow"
+    );
+    let saved_tpl: WorkflowTemplate = serde_json::from_value(
+        app.call("workflow.default.set", json!({"project_id": p1.id}))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved_tpl.id, DEFAULT_WORKFLOW_TEMPLATE_ID);
+    assert_eq!(
+        saved_tpl.source_project_name.as_deref(),
+        Some(p1.name.as_str())
+    );
+    assert_eq!(saved_tpl.sources.len(), 2);
+    assert_eq!(app.snapshot().unwrap().workflow_templates.len(), 1);
+
+    let dir_p4 = dir.path().join("repo-p4");
+    std::fs::create_dir_all(&dir_p4).unwrap();
+    let p4: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "Uses Global Default",
+                "directory": dir_p4,
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(p4.workflow.stages.len(), 4);
+    assert_eq!(p4.workflow.workspace.remote, "upstream");
+    let p4_sources = app
+        .call("workflow.sources", json!({"project_id": p4.id}))
+        .unwrap();
+    assert_eq!(p4_sources["sources"].as_array().unwrap().len(), 2);
+
+    // 3. Explicit `workflow_mode: "builtin"` bypasses the custom global default.
+    let dir_p5 = dir.path().join("repo-p5");
+    std::fs::create_dir_all(&dir_p5).unwrap();
+    let p5: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({
+                "name": "Uses Builtin Explicitly",
+                "directory": dir_p5,
+                "workflow_mode": "builtin",
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        p5.workflow
+            .stages
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["backlog", "develop", "review"]
+    );
+    let p5_sources = app
+        .call("workflow.sources", json!({"project_id": p5.id}))
+        .unwrap();
+    assert_eq!(p5_sources["sources"].as_array().unwrap().len(), 1);
+
+    // 4. Resetting global default restores built-in default for subsequent projects.
+    let reset = app.call("workflow.default.reset", json!({})).unwrap();
+    assert_eq!(reset["reset"], true);
+    assert!(app.snapshot().unwrap().workflow_templates.is_empty());
+    assert!(app.call("workflow.default.get", json!({})).unwrap()["template"].is_null());
+}

@@ -165,6 +165,98 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
         )
 }
 
+fn project_template_files_from_snapshot(
+    snapshot: &canban_types::Snapshot,
+    project_id: &str,
+) -> Vec<canban_types::WorkflowTemplateFile> {
+    let mut active: Vec<_> = snapshot
+        .workflow_sources
+        .iter()
+        .filter(|s| s.project_id == project_id)
+        .collect();
+    active.sort_by(|a, b| a.filename.cmp(&b.filename));
+    active
+        .into_iter()
+        .filter_map(|item| {
+            let raw = snapshot
+                .workflow_revisions
+                .iter()
+                .find(|r| r.id == item.revision_id)
+                .and_then(|r| r.source_yaml.clone())?;
+            Some(canban_types::WorkflowTemplateFile {
+                filename: item.filename.clone(),
+                source: raw,
+            })
+        })
+        .collect()
+}
+
+pub fn set_default_workflow(ui: Ui) {
+    let state = ui.workflows;
+    let project = ui.project.get_untracked();
+    if project.is_empty() {
+        ui.notify("Select or create a Project first");
+        return;
+    }
+    let has_unsaved = state
+        .drafts
+        .with_untracked(|d| d.get(&project).is_some_and(Draft::needs_apply));
+    if has_unsaved {
+        ui.notify("Save workflow changes first (⌘S) before setting as default");
+        return;
+    }
+    if crate::APP.get().is_none() {
+        let project_name = ui.current_project().map(|p| p.name);
+        let draft_files: Vec<canban_types::WorkflowTemplateFile> = state
+            .drafts
+            .with_untracked(|d| {
+                d.get(&project).map(|dr| {
+                    dr.sources
+                        .iter()
+                        .map(|(k, v)| canban_types::WorkflowTemplateFile {
+                            filename: k.clone(),
+                            source: v.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| {
+                ui.snapshot
+                    .with_untracked(|s| project_template_files_from_snapshot(s, &project))
+            });
+        if draft_files.is_empty() {
+            return;
+        }
+        ui.snapshot.update(|s| {
+            s.workflow_templates
+                .retain(|t| t.id != canban_types::DEFAULT_WORKFLOW_TEMPLATE_ID);
+            s.workflow_templates.push(canban_types::WorkflowTemplate {
+                id: canban_types::DEFAULT_WORKFLOW_TEMPLATE_ID.into(),
+                name: "Default".into(),
+                source_project_name: project_name,
+                sources: draft_files,
+                updated_at: canban_types::now(),
+            });
+        });
+        ui.notify("Saved as default workflow for new Projects");
+        return;
+    }
+    dispatch(ui, "workflow.default.set", json!({"project_id": project}));
+}
+
+pub fn reset_default_workflow(ui: Ui) {
+    if crate::APP.get().is_none() {
+        ui.snapshot.update(|s| {
+            s.workflow_templates
+                .retain(|t| t.id != canban_types::DEFAULT_WORKFLOW_TEMPLATE_ID);
+        });
+        ui.notify("Reset new Project workflow to built-in default");
+        return;
+    }
+    dispatch(ui, "workflow.default.reset", json!({}));
+}
+
 fn project_source_stamp(ui: Ui, project: &str) -> SourceStamp {
     ui.snapshot.with_untracked(|s| {
         s.workflow_sources
@@ -453,6 +545,45 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             .drafts
             .with(|d| d.get(&project).is_some_and(Draft::dirty))
     });
+    let default_state = computed(move || {
+        let project = ui.project.get();
+        let draft_files: Vec<canban_types::WorkflowTemplateFile> = state
+            .drafts
+            .with(|d| {
+                d.get(&project).map(|dr| {
+                    dr.sources
+                        .iter()
+                        .map(|(k, v)| canban_types::WorkflowTemplateFile {
+                            filename: k.clone(),
+                            source: v.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .unwrap_or_default();
+        ui.snapshot.with(|s| {
+            let tpl = s
+                .workflow_templates
+                .iter()
+                .find(|t| t.id == canban_types::DEFAULT_WORKFLOW_TEMPLATE_ID);
+            let Some(tpl) = tpl else {
+                return (false, false);
+            };
+            let files = if !draft_files.is_empty() {
+                draft_files.clone()
+            } else {
+                project_template_files_from_snapshot(s, &project)
+            };
+            let matches = match (
+                canban_workflow_engine::source::normalized_collection_signature(&files),
+                canban_workflow_engine::source::normalized_collection_signature(&tpl.sources),
+            ) {
+                (Some(a), Some(b)) => a == b,
+                _ => false,
+            };
+            (true, matches)
+        })
+    });
     on_key_with(
         "mod+s",
         KeyOptions {
@@ -543,18 +674,73 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .bg(move || if apply.get() { SELECTED } else { CLEAR })
                         .border_1()
                         .border_color(move || if apply.get() { ACCENT } else { CLEAR })
-                        .child(muted(move || {
-                            if apply.get() {
-                                "Unsaved workflow changes · Press Save or ⌘S to apply"
-                            } else {
-                                "All workflow changes saved"
-                            }
-                        }))
                         .child(
                             view()
                                 .flex_row()
                                 .items_center()
                                 .gap_2()
+                                .child(muted(move || {
+                                    if apply.get() {
+                                        "Unsaved workflow changes · Press Save or ⌘S to apply"
+                                    } else if default_state.get().1 {
+                                        "All workflow changes saved · Default for new Projects"
+                                    } else {
+                                        "All workflow changes saved"
+                                    }
+                                }))
+                                .child(when(
+                                    move || !apply.get() && default_state.get().1,
+                                    move || {
+                                        view()
+                                            .tooltip(
+                                                hint_tooltip(
+                                                    "Revert new Projects back to the built-in default workflow",
+                                                )
+                                                .placement(Placement::Top),
+                                            )
+                                            .child(
+                                                compact_action(
+                                                    "Reset default",
+                                                    Variant::Quiet,
+                                                    move |_| reset_default_workflow(ui),
+                                                )
+                                                .disabled(move || {
+                                                    ui.is_method_pending("workflow.default.reset")
+                                                        || state.loading.get()
+                                                }),
+                                            )
+                                    },
+                                )),
+                        )
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(when(
+                                    move || !apply.get() && !default_state.get().1,
+                                    move || {
+                                        view()
+                                            .tooltip(
+                                                hint_tooltip(
+                                                    "Use this Project's saved workflows as the default for all new Projects",
+                                                )
+                                                .placement(Placement::Top),
+                                            )
+                                            .child(
+                                                action(
+                                                    "Set as default",
+                                                    Variant::Secondary,
+                                                    move |_| set_default_workflow(ui),
+                                                )
+                                                .disabled(move || {
+                                                    ui.is_method_pending("workflow.default.set")
+                                                        || state.loading.get()
+                                                        || ui.project.get().is_empty()
+                                                }),
+                                            )
+                                    },
+                                ))
                                 .child(when(
                                     move || dirty.get() || !state.latest.get().is_null(),
                                     move || {

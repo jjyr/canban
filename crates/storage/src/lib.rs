@@ -61,6 +61,7 @@ macro_rules! record {
 }
 record!(Project, "projects");
 record!(WorkflowSource, "workflow_sources", project);
+record!(WorkflowTemplate, "workflow_templates");
 record!(ConfigurationSession, "configuration_sessions", project);
 record!(MergeBatch, "merge_batches", project);
 record!(WorkflowRevision, "workflow_revisions", project);
@@ -445,6 +446,7 @@ impl Db<'_> {
             workflow_runs: self.list()?,
             workflow_revisions: active,
             workflow_sources: sources,
+            workflow_templates: self.list()?,
             event_subscriptions: self.list()?,
             configuration_sessions: self.list()?,
             merge_batches: self.list()?,

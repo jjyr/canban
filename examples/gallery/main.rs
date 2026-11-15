@@ -1413,7 +1413,40 @@ pub fn Gallery() -> impl IntoElement {
         ui.page.set("project-agents".into());
         return canban_ui::frame::screen(ui).into_element();
     }
-    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("new-project") {
+    if matches!(
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
+        Ok("new-project" | "new-project-custom-default")
+    ) {
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("new-project-custom-default") {
+            let mut snapshot = fixtures::workspace();
+            let default_raw = canban_workflow_engine::source::encode(
+                &canban_workflow_engine::source::default_document(
+                    "delivery:gallery-project",
+                    canban_types::WorkspaceSettings::default(),
+                ),
+            )
+            .unwrap();
+            let plan_raw = include_str!("../workflows/plan-and-develop.yaml").to_string();
+            snapshot
+                .workflow_templates
+                .push(canban_types::WorkflowTemplate {
+                    id: canban_types::DEFAULT_WORKFLOW_TEMPLATE_ID.into(),
+                    name: "Default".into(),
+                    source_project_name: Some("Canban".into()),
+                    sources: vec![
+                        canban_types::WorkflowTemplateFile {
+                            filename: "development.yaml".into(),
+                            source: default_raw,
+                        },
+                        canban_types::WorkflowTemplateFile {
+                            filename: "issue-planning.yaml".into(),
+                            source: plan_raw,
+                        },
+                    ],
+                    updated_at: canban_types::now(),
+                });
+            ui.snapshot.set(snapshot);
+        }
         ui.card.set(String::new());
         ui.page.set("new-project".into());
         return canban_ui::frame::screen(ui).into_element();
@@ -1889,6 +1922,27 @@ pub fn Gallery() -> impl IntoElement {
                 }))
                 .child(action("No signed-in providers", Variant::Quiet, move |_| {ui.usage.set(json!({"readings":[]}));}))
                 .child(action("New Project", Variant::Quiet, move |_| {
+                    let mut snapshot = fixtures::workspace();
+                    let default_raw = canban_workflow_engine::source::encode(
+                        &canban_workflow_engine::source::default_document(
+                            "delivery:gallery-project",
+                            canban_types::WorkspaceSettings::default(),
+                        ),
+                    )
+                    .unwrap();
+                    snapshot
+                        .workflow_templates
+                        .push(canban_types::WorkflowTemplate {
+                            id: canban_types::DEFAULT_WORKFLOW_TEMPLATE_ID.into(),
+                            name: "Default".into(),
+                            source_project_name: Some("Canban".into()),
+                            sources: vec![canban_types::WorkflowTemplateFile {
+                                filename: "development.yaml".into(),
+                                source: default_raw,
+                            }],
+                            updated_at: canban_types::now(),
+                        });
+                    ui.snapshot.set(snapshot);
                     scene.set("new-project-detected".into());
                 }))
                 .child(action("GitHub Repo · Auto-linked", Variant::Quiet, move |_| {

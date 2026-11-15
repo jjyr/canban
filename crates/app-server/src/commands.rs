@@ -19,6 +19,7 @@ impl AppServer {
                     | "draft.list"
                     | "herdr.check"
                     | "project.detect_github"
+                    | "workflow.default.get"
             )
         {
             bail!("Canban is upgrading; retry after the service handoff");
@@ -29,7 +30,13 @@ impl AppServer {
 
         if matches!(
             method,
-            "workflow.sources" | "workflow.apply" | "workflow.check" | "workflow.prompt"
+            "workflow.sources"
+                | "workflow.apply"
+                | "workflow.check"
+                | "workflow.prompt"
+                | "workflow.default.get"
+                | "workflow.default.set"
+                | "workflow.default.reset"
         ) {
             return self.authoring_call(method, p);
         }
@@ -275,18 +282,47 @@ impl AppServer {
                     "JSON workflow templates have been removed; pass workspace and/or workflow_yaml, or publish YAML via workflow.apply"
                 );
                 let mut workflow = Workflow::default();
-                if let Some(ws) = p.get("workspace") {
-                    workflow.workspace = serde_json::from_value(ws.clone())?;
+                let explicit_workspace: Option<WorkspaceSettings> = match p.get("workspace") {
+                    Some(ws) if !ws.is_null() => Some(serde_json::from_value(ws.clone())?),
+                    _ => None,
+                };
+                if let Some(ws) = &explicit_workspace {
+                    workflow.workspace = ws.clone();
                 }
                 canban_workflow_engine::validate(&workflow)?;
                 let workflow_yaml = match p.get("workflow_yaml") {
-                    Some(v) => Some(
+                    Some(v) if !v.is_null() => Some(
                         v.as_str()
                             .context("workflow_yaml must be a YAML string")?
                             .to_owned(),
                     ),
-                    None => None,
+                    _ => None,
                 };
+                let workflow_mode_raw = match p.get("workflow_mode") {
+                    Some(v) if !v.is_null() => Some(
+                        v.as_str()
+                            .context("workflow_mode must be a string")?
+                            .trim()
+                            .to_owned(),
+                    ),
+                    _ => None,
+                };
+                let source_project_raw = match p.get("workflow_source_project_id") {
+                    Some(v) if !v.is_null() => Some(
+                        v.as_str()
+                            .context("workflow_source_project_id must be a string")?
+                            .trim()
+                            .to_owned(),
+                    ),
+                    _ => None,
+                }
+                .filter(|s| !s.is_empty());
+                if workflow_yaml.is_some() {
+                    ensure!(
+                        workflow_mode_raw.is_none() && source_project_raw.is_none(),
+                        "workflow_yaml cannot be combined with workflow_mode or workflow_source_project_id"
+                    );
+                }
                 if let Some(yaml) = &workflow_yaml {
                     let doc = canban_workflow_engine::source::parse(yaml)?;
                     let compiled = doc.compile()?;
@@ -299,6 +335,53 @@ impl AppServer {
                         config.profiles.iter().map(|a| a.id.clone()).collect();
                     canban_workflow_engine::validate_definition(&compiled, &cols, &profiles)?;
                 }
+                let (resolved_source_pid, effective_remote) = {
+                    let mut store = self.store.lock().unwrap();
+                    store.write(|db| {
+                        let resolved_pid = match (
+                            workflow_mode_raw.as_deref(),
+                            source_project_raw.as_deref(),
+                        ) {
+                            (_, Some(raw_pid)) => {
+                                ensure!(
+                                    workflow_mode_raw.as_deref().is_none_or(|m| m == "project"),
+                                    "workflow_source_project_id requires workflow_mode 'project' (or omitted)"
+                                );
+                                let pid = super::resolve_project_id(db, raw_pid)?;
+                                let src_proj: Project = db.get(&pid)?;
+                                authoring::initialize(&self.home, db, &config, &src_proj)?;
+                                Some(pid)
+                            }
+                            (Some("project"), None) => {
+                                bail!(
+                                    "workflow_source_project_id is required when workflow_mode is 'project'"
+                                );
+                            }
+                            (Some("default") | Some("builtin") | None, None) => None,
+                            (Some(other), None) => {
+                                bail!(
+                                    "Unsupported workflow_mode '{other}'; expected 'default', 'builtin', or 'project'"
+                                );
+                            }
+                        };
+                        let probe_mode = if let Some(yaml) = workflow_yaml.as_deref() {
+                            authoring::NewProjectWorkflow::ExplicitYaml(yaml)
+                        } else if let Some(pid) = &resolved_pid {
+                            authoring::NewProjectWorkflow::FromProject(pid.clone())
+                        } else if workflow_mode_raw.as_deref() == Some("builtin") {
+                            authoring::NewProjectWorkflow::Builtin
+                        } else {
+                            authoring::NewProjectWorkflow::Default
+                        };
+                        let remote = authoring::effective_initial_remote(
+                            db,
+                            &probe_mode,
+                            explicit_workspace.as_ref(),
+                        )?;
+                        Ok((resolved_pid, remote))
+                    })?
+                };
+                workflow.workspace.remote = effective_remote;
                 let location = self.work_location(&p)?;
                 let agent_overrides =
                     self.parse_agent_overrides(&config, p.get("agent_overrides"))?;
@@ -338,12 +421,22 @@ impl AppServer {
                 };
                 let result = self.mutate(method, &p, |db| {
                     db.save(&project)?;
+                    let init_mode = if let Some(yaml) = workflow_yaml.as_deref() {
+                        authoring::NewProjectWorkflow::ExplicitYaml(yaml)
+                    } else if let Some(pid) = &resolved_source_pid {
+                        authoring::NewProjectWorkflow::FromProject(pid.clone())
+                    } else if workflow_mode_raw.as_deref() == Some("builtin") {
+                        authoring::NewProjectWorkflow::Builtin
+                    } else {
+                        authoring::NewProjectWorkflow::Default
+                    };
                     authoring::initialize_new(
                         &self.home,
                         db,
                         &config,
                         &project,
-                        workflow_yaml.as_deref(),
+                        init_mode,
+                        explicit_workspace.as_ref(),
                     )?;
                     let saved: Project = db.get(&project.id)?;
                     Ok(serde_json::to_value(saved)?)

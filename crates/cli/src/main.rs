@@ -254,6 +254,13 @@ enum WorkflowCmd {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Save a Project's published workflow collection as the global default for new Projects.
+    SetDefault {
+        #[arg(long)]
+        project_id: String,
+    },
+    /// Reset the global default workflow for new Projects back to the built-in default.
+    ResetDefault,
 }
 
 fn run() -> Result<()> {
@@ -370,6 +377,22 @@ fn run() -> Result<()> {
                     "{}",
                     json!({"output":output,"revision":collection["revision"]})
                 );
+            }
+            WorkflowCmd::SetDefault { project_id } => {
+                let value = canban_app_server::rpc(
+                    &endpoint,
+                    "workflow.default.set",
+                    json!({"project_id": project_id, "request_key": canban_types::id()}),
+                )?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
+            }
+            WorkflowCmd::ResetDefault => {
+                let value = canban_app_server::rpc(
+                    &endpoint,
+                    "workflow.default.reset",
+                    json!({"request_key": canban_types::id()}),
+                )?;
+                println!("{}", serde_json::to_string_pretty(&value)?);
             }
         }
         return Ok(());

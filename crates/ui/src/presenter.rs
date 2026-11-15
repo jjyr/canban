@@ -811,6 +811,12 @@ pub fn dispatch_complete(
                         "github.sync" => ui.notify("GitHub repository synced"),
                         "github.source.disconnect" => ui.notify("GitHub repository disconnected"),
                         "workflow.save" => ui.notify("Workflow saved"),
+                        "workflow.default.set" => {
+                            ui.notify("Saved as default workflow for new Projects")
+                        }
+                        "workflow.default.reset" => {
+                            ui.notify("Reset new Project workflow to built-in default")
+                        }
                         "review.merge" if value["state"] == "merged" => ui.notify(format!(
                             "Merged into {}",
                             value["target_branch"].as_str().unwrap_or("target branch")
