@@ -131,8 +131,15 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                                 if let Some(bounds) = anchor.measure().await {
                                     popup_menu_at(
                                         vec![
-                                            MenuItem::new("Workflows…")
-                                                .on_select(move || ui.navigate("workflows")),
+                                            MenuItem::new("Workflows…").on_select(move || {
+                                                ui.workflows.section.set("workflows".into());
+                                                ui.navigate("workflows");
+                                            }),
+                                            MenuItem::new("Scheduled Tasks…").on_select(
+                                                move || {
+                                                    crate::workflows::open_schedules(ui, None);
+                                                },
+                                            ),
                                             MenuItem::new("Drafts…")
                                                 .on_select(move || ui.navigate("drafts")),
                                             MenuItem::new("Archive")

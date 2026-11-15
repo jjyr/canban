@@ -1,6 +1,6 @@
 # Unified workflow engine, Studio and implementation
 
-Status: implemented and active (reconciled 2026-11-15; SQLite schema 18, workflow schema 7, desktop API 51). This is the canonical product and engineering contract for Canban Workflows, consolidating the unified engine rules, Project/Board workflow ownership, Visual Studio UX, YAML schema, RPC/CLI operations, workspace lifecycle, and acceptance evidence. [Events and subscriptions](events-and-notifications.md) owns the durable journal envelope and trigger delivery.
+Status: implemented and active (reconciled 2026-11-15; SQLite schema 20, workflow schema 8, desktop API 55). This is the canonical product and engineering contract for Canban Workflows, consolidating the unified engine rules, Project/Board workflow ownership, Visual Studio UX, Scheduled Tasks (`Schedules`), YAML schema, RPC/CLI operations, workspace lifecycle, and acceptance evidence. [Events and subscriptions](events-and-notifications.md) owns the durable journal envelope and trigger delivery.
 
 ## Core design principles
 
@@ -289,6 +289,9 @@ All clients share the same AppServer validation and publication boundary (`canba
 | `card.hold_auto_merge` | `card_id`, `revision`, optional `hold: bool` -> pause or resume Queue Merge on a Card |
 | `card.adopt` | `execution`, optional `stage` (default `"develop"`) -> transition the active Agent's own Card into `stage` and adopt its `WorkflowRun` without re-triggering scheduling |
 | `workflow.stop` | `run_id` -> cancel future run progression |
+| `schedule.list` / `schedule.runs` | `project_id`, optional `schedule_id`, `limit` -> inspect active `ScheduleState` timers and `ScheduledRun` execution history (`canban schedule list` / `runs`) |
+| `schedule.trigger` / `schedule.toggle` | `schedule_id` (or `project_id` + `workflow_id`/`filename` + `rule_id`), `enabled` -> manually trigger a schedule immediately (`Run now`) or toggle a schedule rule On/Off in place (`canban schedule trigger` / `toggle`) |
+| `schedule.bind` / `schedule.report` / `schedule.read_artifact` | Bind a Cardless scheduled Terminal Agent (`CANBAN_SCHEDULE_RUN_ID`), record its `canban report` outcome before automatic PTY reclamation, and read stored Markdown reports or captured output |
 | `event.list` / `subscription.*` | Durable journal pagination and `save` / `list` / `deliveries` / `ack` / `retry` |
 
 CLI file transport helpers (`canban workflow submit --check` / `submit` / `export`) read or write user-chosen external files against `workflow.sources` collection tokens without creating internal workflow directories.
@@ -299,7 +302,8 @@ CLI file transport helpers (`canban workflow submit --check` / `submit` / `expor
 
 - **SQLite schema 11–12 migration:** Upgrades legacy Project `Workflow` stage templates, queued/running `Request`s, and pending human gates into SQLite `development.yaml` revisions and `WorkflowRun` checkpoints without relaunching Agents or recreating worktrees. Downgrade refuses to discard user-authored YAML sources or active configuration sessions.
 - **SQLite schema 16–17 migrations:** Schema `16` shortens newly generated record IDs to 8-character lowercase hex strings (`canban_types::id()`), migrates existing 32-char UUID hex IDs while recording reversible `id_migrations` and `path_migrations`, and moves Card asset directories from `projects/<pid>/cards/<card_id>` to `projects/<pid>/cards/<card.number>` (and `archives/<pid>/<card.number>`). Schema `17` adds the `merge_batches` table for batch merge-queue persistence (`Snapshot.merge_batches`).
-- **Linear Workflow YAML schema migrations (`crates/workflow-engine/src/migrations.rs`, `BASELINE = 1`, `CURRENT = 7`):**
+- **SQLite schema 20 migration:** Adds `schedule_states` and `scheduled_runs` tables (`Snapshot.schedule_states`, `Snapshot.scheduled_runs`); rollback (`schedules_down`) refuses to drop tables while any scheduled run is active.
+- **Linear Workflow YAML schema migrations (`crates/workflow-engine/src/migrations.rs`, `BASELINE = 1`, `CURRENT = 8`):**
   - Authoring, compilation, and Studio UI target `CURRENT` exclusively instead of retaining legacy branches across modules.
   - `source::parse` upgrades older supported `Document.schema` inputs (`1..=CURRENT`) in memory, `workflow.apply` / `project.create` canonicalize older submitted YAML to `CURRENT`, and `AppServer` startup (`authoring::initialize`) automatically publishes a migrated `WorkflowRevision` for any active `WorkflowSource` still on an older `schema`—keeping historical revisions intact and leaving active `WorkflowRun`s pinned to their captured `definition_revision`.
   - **Workflow schema 2:** Strips unmodified v1 built-in Agent prompts from `with.instruction` so built-in prompts resolve at compile time while user-customized prompts stay explicit in YAML.
@@ -307,6 +311,7 @@ CLI file transport helpers (`canban workflow submit --check` / `submit` / `expor
   - **Workflow schema 5:** Introduces `deliver.with.strategy` (`rebase` default, `squash`, `merge`), omitting redundant explicit `strategy: rebase` so default linear delivery stays concise in YAML.
   - **Workflow schema 6:** Adds top-level and step-level `env` (`script` and `agent` steps), dual `script` step syntax (shorthand `run:` and explicit `uses: script` + `with.run`), `$CANBAN_ENV` / `$CANBAN_OUTPUT` context propagation, and single-attempt `on_failure` recovery.
   - **Workflow schema 7:** Canonicalizes `deliver.with.batch_size` (omitting redundant explicit `batch_size: 5` default, clamped `1..=50`) and optional `deliver.with.test_command` (omitting blank values).
+  - **Workflow schema 8:** Adds scheduled cron triggers (`on.<rule>.cron` and GitHub Actions `on.schedule: [{ cron: ... }]` array shorthand), optional `timezone`, `overlap` (`skip` default, `queue`, `allow`), and optional `card` (`column`, `title`, `body`) for Card-creating schedules vs. Cardless Terminal Agent schedules with automatic post-report PTY reclamation and offline sleep-skip reconciliation.
 - **Verification suite:**
   - `mise run test` & `cargo clippy --workspace --all-targets -- -D warnings`: Unit and integration coverage in `crates/workflow-engine/src/source.rs` and `crates/app-server/src/tests/workflows.rs`, including default `development.yaml` (`Backlog` quiet intake, `Develop` auto-run, `Review` Queue Merge with `sync_upstream: true` against bare Git remotes vs. `sync_upstream: false` local-only merge), Backlog Auto-Analyze + Auto-Start Develop sequencing, Manual Review gates, external PR trust branching, rework feedback, and 4-column custom workflow preservation.
   - `mise run acceptance` & `mise run acceptance-workflows`: Isolated Herdr Core + real PTY end-to-end execution, restart checkpointing, optimistic `revision_conflict` protection, and CLI export/submit checks.

@@ -283,6 +283,25 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     .with(|idx| idx.projects.get(&c.project_id).map(|p| p.name.clone()))
                     .unwrap_or_default();
                 row = row.child(muted(format!("{project} / Card #{}", c.number)));
+                if let Some(sched) = &c.schedule_source {
+                    let sid = sched.schedule_id.clone();
+                    row = row
+                        .child(muted("·"))
+                        .child(icon_tinted(Icon::Clock, ACCENT).w(px(13.)).h(px(13.)))
+                        .child(muted(format!(
+                            "Scheduled · {} #{}",
+                            sched.workflow_name, sched.run_number
+                        )))
+                        .child(badge(sched.cron.clone()))
+                        .child(view().flex_1())
+                        .child(compact_action(
+                            "View Schedule →",
+                            Variant::Quiet,
+                            move |_| {
+                                crate::workflows::open_schedules(ui, Some(sid.clone()));
+                            },
+                        ));
+                }
             }
             row.into_element()
         }))

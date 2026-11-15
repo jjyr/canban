@@ -107,6 +107,11 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                                         b.error.clone().unwrap_or_else(|| format!("{}…", b.state))
                                     })
                                 })
+                                .or_else(|| {
+                                    s.scheduled_runs.iter().find(|r| r.id == sel).map(|r| {
+                                        r.error.clone().unwrap_or_else(|| format!("{}…", r.state))
+                                    })
+                                })
                                 .unwrap_or_else(|| "Connecting…".into())
                         })
                     }))
@@ -246,6 +251,27 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                     }) {
                         ui.project.set(project);
                         ui.navigate("workflows");
+                    }
+                })
+            },
+        ))
+        .child(when(
+            move || {
+                let sel = ui.terminal_selection.get();
+                ui.snapshot
+                    .with(|s| s.scheduled_runs.iter().any(|r| r.id == sel))
+            },
+            move || {
+                action("← Back to Schedules", Variant::Quiet, move |_| {
+                    let sel = ui.terminal_selection.get_untracked();
+                    if let Some((project, sid)) = ui.snapshot.with_untracked(|s| {
+                        s.scheduled_runs
+                            .iter()
+                            .find(|r| r.id == sel)
+                            .map(|r| (r.project_id.clone(), r.schedule_id.clone()))
+                    }) {
+                        ui.project.set(project);
+                        crate::workflows::open_schedules(ui, Some(sid));
                     }
                 })
             },

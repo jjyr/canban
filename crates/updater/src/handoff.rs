@@ -76,7 +76,10 @@ struct Pending {
 }
 pub fn enqueue(home: &Path, method: &str, params: &Value) -> Result<PathBuf> {
     ensure!(
-        matches!(method, "execution.report" | "batch.report" | "agent.reply"),
+        matches!(
+            method,
+            "execution.report" | "batch.report" | "schedule.report" | "agent.reply"
+        ),
         "Only idempotent Agent reports/replies can be queued"
     );
     ensure!(

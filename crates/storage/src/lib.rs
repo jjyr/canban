@@ -64,6 +64,25 @@ record!(WorkflowSource, "workflow_sources", project);
 record!(WorkflowTemplate, "workflow_templates");
 record!(ConfigurationSession, "configuration_sessions", project);
 record!(MergeBatch, "merge_batches", project);
+record!(ScheduleState, "schedule_states", project);
+impl Record for ScheduledRun {
+    const TABLE: &'static str = "scheduled_runs";
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn project(&self) -> Option<&str> {
+        Some(&self.project_id)
+    }
+    fn card(&self) -> Option<&str> {
+        self.card_id.as_deref()
+    }
+    fn state(&self) -> &str {
+        &self.state
+    }
+    fn number(&self) -> u64 {
+        self.number
+    }
+}
 record!(WorkflowRevision, "workflow_revisions", project);
 record!(WorkflowRun, "workflow_runs", card);
 record!(EventSubscription, "event_subscriptions");
@@ -76,7 +95,18 @@ record!(NoteEvent, "note_events", project);
 record!(Notice, "notifications", card);
 record!(CardRead, "card_reads", card);
 record!(Artifact, "artifacts", card);
-record!(Report, "reports", card);
+impl Record for Report {
+    const TABLE: &'static str = "reports";
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn project(&self) -> Option<&str> {
+        (!self.project_id.is_empty()).then_some(self.project_id.as_str())
+    }
+    fn card(&self) -> Option<&str> {
+        (!self.card_id.is_empty()).then_some(self.card_id.as_str())
+    }
+}
 record!(Conversation, "conversations", card);
 record!(Question, "questions", card);
 impl Record for TerminalEntry {
@@ -93,6 +123,7 @@ impl Record for TerminalEntry {
                 self.id
                     .strip_prefix("merge-queue:")
                     .or_else(|| self.id.strip_prefix("configuration:"))
+                    .or_else(|| self.id.strip_prefix("scheduled:"))
                     .and_then(|rest| rest.split(':').next())
                     .filter(|id| !id.is_empty())
             })
@@ -450,6 +481,8 @@ impl Db<'_> {
             event_subscriptions: self.list()?,
             configuration_sessions: self.list()?,
             merge_batches: self.list()?,
+            schedule_states: self.list()?,
+            scheduled_runs: self.list()?,
             card_reads: self.list()?,
             github: Default::default(),
             github_issues: self.list()?,

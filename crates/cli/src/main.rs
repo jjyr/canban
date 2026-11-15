@@ -109,7 +109,7 @@ enum Cmd {
         provider: String,
         payload: Option<String>,
     },
-    /// Report your own outcome for the Card injected by Canban.
+    /// Report your own outcome for the Card or Scheduled Run injected by Canban.
     Report {
         /// Outcome state: completed | backlog | blocked | failed | working
         #[arg(long)]
@@ -119,11 +119,18 @@ enum Cmd {
         #[arg(long)]
         file: Option<PathBuf>,
         #[arg(long, env = "CANBAN_CARD")]
-        card: u64,
+        card: Option<u64>,
+        #[arg(long, env = "CANBAN_SCHEDULE_RUN_ID")]
+        schedule_run_id: Option<String>,
         #[arg(long, env = "CANBAN_PROJECT")]
         project: Option<String>,
         #[arg(long)]
         request_key: Option<String>,
+    },
+    /// Inspect, trigger, or toggle scheduled tasks configured in Project workflows.
+    Schedule {
+        #[command(subcommand)]
+        command: ScheduleCmd,
     },
     /// Batch merge queue reporting for a project `_merge_queue` Agent session.
     Batch {
@@ -144,6 +151,57 @@ enum ServiceCmd {
     },
     /// Show background service installation and active status.
     Status,
+}
+#[derive(Subcommand)]
+enum ScheduleCmd {
+    /// List configured scheduled tasks and recent runs.
+    List {
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project_id: Option<String>,
+    },
+    /// List recent execution history for scheduled tasks.
+    Runs {
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project_id: Option<String>,
+        #[arg(long)]
+        schedule_id: Option<String>,
+        #[arg(long, default_value_t = 25)]
+        limit: u64,
+    },
+    /// Manually trigger a scheduled task immediately.
+    Trigger {
+        #[arg(long)]
+        schedule_id: Option<String>,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project_id: Option<String>,
+        #[arg(long)]
+        filename: Option<String>,
+        #[arg(long)]
+        workflow_id: Option<String>,
+        #[arg(long, alias = "rule")]
+        rule_id: Option<String>,
+        #[arg(long)]
+        request_key: Option<String>,
+    },
+    /// Enable or disable a scheduled task rule in its Workflow YAML.
+    Toggle {
+        #[arg(long)]
+        schedule_id: Option<String>,
+        #[arg(long, env = "CANBAN_PROJECT")]
+        project_id: Option<String>,
+        #[arg(long)]
+        filename: Option<String>,
+        #[arg(long, alias = "rule")]
+        rule_id: Option<String>,
+        #[arg(long, action = clap::ArgAction::Set)]
+        enabled: Option<bool>,
+        #[arg(long, conflicts_with_all = ["enabled", "off"])]
+        on: bool,
+        #[arg(long, conflicts_with_all = ["enabled", "on"])]
+        off: bool,
+        #[arg(long)]
+        request_key: Option<String>,
+    },
 }
 #[derive(Subcommand)]
 enum BatchCmd {
@@ -630,6 +688,13 @@ fn run() -> Result<()> {
                     "configuration.bind".into(),
                     json!({"configuration_id":configuration,"generation":std::env::var("CANBAN_CONFIGURATION_GENERATION")?.parse::<u64>()?,"session_id":session_id}),
                 )
+            } else if let Ok(schedule_run_id) = std::env::var("CANBAN_SCHEDULE_RUN_ID")
+                && !schedule_run_id.trim().is_empty()
+            {
+                let mut params = card_scope(card, project);
+                params["schedule_run_id"] = json!(schedule_run_id);
+                params["session_id"] = json!(session_id);
+                ("schedule.bind".into(), params)
             } else if let Ok(batch_id) = std::env::var("CANBAN_BATCH_ID")
                 && !batch_id.trim().is_empty()
             {
@@ -667,16 +732,93 @@ fn run() -> Result<()> {
             message,
             file,
             card,
+            schedule_run_id,
             project,
             request_key,
         } => {
-            let mut params = card_scope(Some(card), project);
+            let srid = schedule_run_id
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty());
+            anyhow::ensure!(
+                card.is_some() || srid.is_some(),
+                "Supply --card (or CANBAN_CARD) or --schedule-run-id (or CANBAN_SCHEDULE_RUN_ID)"
+            );
+            let mut params = card_scope(card, project);
             params["request_key"] = json!(request_key.unwrap_or_else(canban_types::id));
             params["state"] = json!(state);
             params["message"] = json!(message);
             params["body"] = json!(file.map(std::fs::read_to_string).transpose()?);
-            ("execution.report".into(), params)
+            if let Some(srid) = srid
+                && card.is_none()
+            {
+                params["schedule_run_id"] = json!(srid);
+                ("schedule.report".into(), params)
+            } else {
+                ("execution.report".into(), params)
+            }
         }
+        Cmd::Schedule { command } => match command {
+            ScheduleCmd::List { project_id } => {
+                ("schedule.list".into(), json!({ "project_id": project_id }))
+            }
+            ScheduleCmd::Runs {
+                project_id,
+                schedule_id,
+                limit,
+            } => (
+                "schedule.runs".into(),
+                json!({ "project_id": project_id, "schedule_id": schedule_id, "limit": limit }),
+            ),
+            ScheduleCmd::Trigger {
+                schedule_id,
+                project_id,
+                filename,
+                workflow_id,
+                rule_id,
+                request_key,
+            } => (
+                "schedule.trigger".into(),
+                json!({
+                    "schedule_id": schedule_id,
+                    "project_id": project_id,
+                    "filename": filename,
+                    "workflow_id": workflow_id,
+                    "rule_id": rule_id,
+                    "request_key": request_key.unwrap_or_else(canban_types::id),
+                }),
+            ),
+            ScheduleCmd::Toggle {
+                schedule_id,
+                project_id,
+                filename,
+                rule_id,
+                enabled,
+                on,
+                off,
+                request_key,
+            } => {
+                let target_enabled = if let Some(v) = enabled {
+                    v
+                } else if on {
+                    true
+                } else if off {
+                    false
+                } else {
+                    anyhow::bail!("Specify `--enabled <true|false>`, `--on`, or `--off`");
+                };
+                (
+                    "schedule.toggle".into(),
+                    json!({
+                        "schedule_id": schedule_id,
+                        "project_id": project_id,
+                        "filename": filename,
+                        "rule_id": rule_id,
+                        "enabled": target_enabled,
+                        "request_key": request_key.unwrap_or_else(canban_types::id),
+                    }),
+                )
+            }
+        },
         Cmd::Batch { command } => match command {
             BatchCmd::Report {
                 state,
@@ -726,6 +868,9 @@ fn run() -> Result<()> {
             | "diagnostics.logs"
             | "host.discover"
             | "host.probe"
+            | "schedule.list"
+            | "schedule.runs"
+            | "schedule.read_artifact"
     ) && p.get("request_key").is_none()
     {
         p["request_key"] = json!(canban_types::id());
@@ -744,6 +889,8 @@ fn run() -> Result<()> {
             | "workflow.decide"
             | "workflow.deliver"
             | "workflow.stop"
+            | "schedule.trigger"
+            | "schedule.toggle"
             | "card.hold_auto_merge"
     ) && p.get("execution").is_none()
         && let Ok(profile) = std::env::var("CANBAN_PROFILE_ID")
@@ -770,7 +917,7 @@ fn run() -> Result<()> {
     }
     let retryable = matches!(
         method.as_str(),
-        "execution.report" | "batch.report" | "agent.reply"
+        "execution.report" | "batch.report" | "schedule.report" | "agent.reply"
     ) && endpoint == home.join("app.sock");
     let queued = if retryable {
         Some(canban_updater::handoff::enqueue(&home, &method, &p)?)
@@ -852,6 +999,61 @@ mod tests {
                 assert_eq!(evict, vec!["2", "5"]);
             }
             _ => panic!("expected batch report"),
+        }
+    }
+
+    #[test]
+    fn parses_schedule_toggle_and_trigger_aliases() {
+        let p_false = Args::try_parse_from([
+            "canban",
+            "schedule",
+            "toggle",
+            "--schedule-id",
+            "schedule:p:wf:r",
+            "--enabled",
+            "false",
+        ])
+        .unwrap();
+        match p_false.command {
+            Some(Cmd::Schedule {
+                command: ScheduleCmd::Toggle { enabled, .. },
+            }) => assert_eq!(enabled, Some(false)),
+            _ => panic!("unexpected command"),
+        }
+
+        let p_off = Args::try_parse_from([
+            "canban",
+            "schedule",
+            "toggle",
+            "--schedule-id",
+            "schedule:p:wf:r",
+            "--off",
+        ])
+        .unwrap();
+        match p_off.command {
+            Some(Cmd::Schedule {
+                command: ScheduleCmd::Toggle { off, .. },
+            }) => assert!(off),
+            _ => panic!("unexpected command"),
+        }
+
+        let trig = Args::try_parse_from([
+            "canban",
+            "schedule",
+            "trigger",
+            "--project-id",
+            "p",
+            "--workflow-id",
+            "wf",
+            "--rule",
+            "nightly",
+        ])
+        .unwrap();
+        match trig.command {
+            Some(Cmd::Schedule {
+                command: ScheduleCmd::Trigger { rule_id, .. },
+            }) => assert_eq!(rule_id.as_deref(), Some("nightly")),
+            _ => panic!("unexpected command"),
         }
     }
 }

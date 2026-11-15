@@ -601,6 +601,9 @@ impl AppServer {
                 if let Some(at) = server.refine_deadline() {
                     due(at);
                 }
+                if let Some(at) = server.schedule_deadline(&s) {
+                    due(at);
+                }
                 if s.workflow_runs
                     .iter()
                     .any(|r| r.state == "waiting_delivery" && r.queue_pause_reason().is_some())
@@ -674,6 +677,11 @@ impl AppServer {
                 // Only queued work awaiting an unavailable machine needs retry admission.
                 let retry_needed = canban_scheduler::next(&s, server.config().scheduler.max_agents)
                     .is_some()
+                    || canban_scheduler::timers::next_scheduled_run(
+                        &s,
+                        server.config().scheduler.max_agents,
+                    )
+                    .is_some()
                     || (canban_scheduler::active_count(&s) < server.config().scheduler.max_agents
                         && s.merge_batches.iter().any(|b| b.state == "queued"));
                 if retry_needed {
@@ -692,6 +700,12 @@ impl AppServer {
                             .iter()
                             .filter(|b| b.state == "queued")
                             .map(|b| b.id.clone()),
+                    );
+                    current.extend(
+                        s.scheduled_runs
+                            .iter()
+                            .filter(|r| !r.creates_card && r.state == "queued")
+                            .map(|r| r.id.clone()),
                     );
                     if current != queued {
                         queued = current;

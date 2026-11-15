@@ -22,6 +22,7 @@ pub struct Document {
         deserialize_with = "deserialize_env_map"
     )]
     pub env: BTreeMap<String, String>,
+    #[serde(deserialize_with = "deserialize_on_map")]
     pub on: BTreeMap<String, WorkflowRule>,
     pub steps: Vec<Step>,
     #[serde(default)]
@@ -155,12 +156,79 @@ where
     let raw = Option::<BTreeMap<String, Value>>::deserialize(deserializer)?.unwrap_or_default();
     value_map_to_env_map(raw).map_err(serde::de::Error::custom)
 }
+fn deserialize_on_map<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, WorkflowRule>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RuleOrScheduleList {
+        Rule(Box<WorkflowRule>),
+        ScheduleList(Vec<WorkflowRule>),
+    }
+    let raw = BTreeMap::<String, RuleOrScheduleList>::deserialize(deserializer)?;
+    let mut out = BTreeMap::new();
+    for (key, entry) in raw {
+        match entry {
+            RuleOrScheduleList::Rule(mut rule) => {
+                if rule.cron.is_some() {
+                    rule.event = "schedule".into();
+                }
+                out.insert(key, *rule);
+            }
+            RuleOrScheduleList::ScheduleList(items) => {
+                if items.is_empty() {
+                    return Err(serde::de::Error::custom(format!(
+                        "`on.{key}` schedule list cannot be empty"
+                    )));
+                }
+                let single = items.len() == 1;
+                for (idx, mut rule) in items.into_iter().enumerate() {
+                    rule.event = "schedule".into();
+                    let name = if single && !out.contains_key(&key) {
+                        key.clone()
+                    } else {
+                        let mut cand = format!("{key}_{}", idx + 1);
+                        let mut n = idx + 2;
+                        while out.contains_key(&cand) {
+                            cand = format!("{key}_{n}");
+                            n += 1;
+                        }
+                        cand
+                    };
+                    out.insert(name, rule);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn parse_raw(source: &str) -> Result<Document> {
+    let mut doc: Document = serde_yaml_ng::from_str(source)?;
+    let first_step = doc.steps.first().map(|s| s.id.clone());
+    for rule in doc.on.values_mut() {
+        if rule.cron.is_some() {
+            rule.event = "schedule".into();
+        }
+        if rule.is_schedule()
+            && rule.start_at.trim().is_empty()
+            && let Some(first) = &first_step
+        {
+            rule.start_at = first.clone();
+        }
+    }
+    Ok(doc)
+}
+
 pub fn parse(source: &str) -> Result<Document> {
     ensure!(
         source.len() <= 2 * 1024 * 1024,
         "Workflow source exceeds 2 MiB"
     );
-    let mut doc: Document = serde_yaml_ng::from_str(source)?;
+    let mut doc = parse_raw(source)?;
     crate::migrations::upgrade(&mut doc)?;
     ensure!(!doc.on.is_empty(), "Workflow needs at least one on rule");
     Ok(doc)
@@ -753,6 +821,7 @@ pub fn default_document(workflow_id: impl Into<String>, workspace: WorkspaceSett
                         ..Default::default()
                     },
                     enabled: true,
+                    ..Default::default()
                 },
             ),
             (
@@ -765,6 +834,7 @@ pub fn default_document(workflow_id: impl Into<String>, workspace: WorkspaceSett
                         ..Default::default()
                     },
                     enabled: true,
+                    ..Default::default()
                 },
             ),
         ]),
@@ -1618,6 +1688,7 @@ fn set_backlog_flow(doc: &mut Document, analyze: bool, auto_develop: bool) {
                     ..Default::default()
                 },
                 enabled: true,
+                ..Default::default()
             },
         );
     } else {
@@ -1639,6 +1710,7 @@ fn set_backlog_flow(doc: &mut Document, analyze: bool, auto_develop: bool) {
                     ..Default::default()
                 },
                 enabled: true,
+                ..Default::default()
             },
         );
     }
@@ -1770,6 +1842,7 @@ pub fn set_review_manual(doc: &mut Document, manual: bool) {
                     ..Default::default()
                 },
                 enabled: true,
+                ..Default::default()
             },
         );
         retarget_moves_to_column(doc, &review_col, &new_entry);
@@ -1939,6 +2012,7 @@ pub fn set_review_manual(doc: &mut Document, manual: bool) {
                     ..Default::default()
                 },
                 enabled: true,
+                ..Default::default()
             },
         );
         retarget_moves_to_column(doc, &review_col, &new_entry);
@@ -2486,6 +2560,191 @@ pub fn column_summary(
     column_automation(column, files, revisions, &[]).map(|a| a.label)
 }
 
+/// Validates scheduled `on:` rules against the compiled `WorkflowDefinition` and Board columns.
+pub fn validate_schedules(
+    doc: &Document,
+    flow: &WorkflowDefinition,
+    effective_columns: &[String],
+) -> Result<()> {
+    for (rule_id, rule) in &doc.on {
+        if !rule.is_schedule() {
+            ensure!(
+                rule.cron.is_none()
+                    && rule.timezone.is_none()
+                    && rule.overlap == ScheduleOverlap::Skip
+                    && rule.card.is_none(),
+                "Rule `{rule_id}` ({}) cannot define schedule-only fields (`cron`, `timezone`, `overlap`, `card`)",
+                rule.event
+            );
+            continue;
+        }
+        let cron = rule
+            .cron
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .with_context(|| format!("Scheduled rule `{rule_id}` requires a non-empty `cron`"))?;
+        canban_types::cron::parse_schedule(cron, rule.timezone.as_deref())
+            .map_err(|e| anyhow::anyhow!("Invalid schedule in `{rule_id}`: {e}"))?;
+        ensure!(
+            rule.selector == EventSelector::default(),
+            "Scheduled rule `{rule_id}` does not accept `match` selectors"
+        );
+        let start_id = flow
+            .entries
+            .get(rule_id)
+            .with_context(|| format!("Scheduled rule `{rule_id}` is missing an entry step"))?;
+
+        if let Some(card_cfg) = &rule.card {
+            if let Some(col) = card_cfg.column.as_deref().filter(|c| !c.trim().is_empty()) {
+                ensure!(
+                    effective_columns.iter().any(|c| c == col),
+                    "Scheduled rule `{rule_id}` targets unknown Card column `{col}`"
+                );
+            }
+        } else {
+            // Cardless Terminal Agent mode: walk reachable steps from `start_id` and ensure only
+            // `script`, `agent` (at most one terminal Agent step), and `complete` are used.
+            let mut cur = Some(start_id.as_str());
+            let mut seen = BTreeSet::new();
+            let mut agent_count = 0usize;
+            while let Some(step_id) = cur {
+                if !seen.insert(step_id) {
+                    break;
+                }
+                let Some(step) = flow.steps.get(step_id) else {
+                    break;
+                };
+                match step {
+                    WorkflowStep::Complete => break,
+                    WorkflowStep::Script {
+                        next, on_failure, ..
+                    } => {
+                        if let Some(fail_to) = on_failure {
+                            ensure!(
+                                matches!(flow.steps.get(fail_to), Some(WorkflowStep::Agent { .. })),
+                                "Cardless schedule `{rule_id}` script `on_failure` must target an `agent` step (or configure `card:`)"
+                            );
+                        }
+                        cur = next.as_deref();
+                    }
+                    WorkflowStep::Agent { next, .. } => {
+                        agent_count += 1;
+                        if let Some(next_id) = next
+                            && !matches!(flow.steps.get(next_id), Some(WorkflowStep::Complete))
+                        {
+                            bail!(
+                                "Cardless schedule `{rule_id}` runs a single Terminal Agent session (`{step_id}`) and cannot continue to `{next_id}`; add `card:` to run multi-step Card pipelines"
+                            );
+                        }
+                        break;
+                    }
+                    other => {
+                        let kind = match other {
+                            WorkflowStep::Move { .. } => "card.move",
+                            WorkflowStep::Deliver { .. } => "deliver",
+                            WorkflowStep::Approval { .. } => "approval",
+                            WorkflowStep::Admit { .. } => "admit",
+                            WorkflowStep::Condition { .. } => "condition",
+                            WorkflowStep::Notify { .. } => "notify",
+                            _ => "step",
+                        };
+                        bail!(
+                            "Cardless schedule `{rule_id}` cannot execute `{kind}` step `{step_id}`; configure `card:` on the schedule rule to create a Card for each run"
+                        );
+                    }
+                }
+            }
+            ensure!(
+                agent_count > 0
+                    || seen
+                        .iter()
+                        .any(|id| matches!(flow.steps.get(*id), Some(WorkflowStep::Script { .. }))),
+                "Cardless schedule `{rule_id}` needs an `agent` or `script` step at `{start_id}`"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Returns the first `agent` step profile reachable from `start_at` in `def`, if any.
+pub fn schedule_agent_profile(def: &WorkflowDefinition, rule_id: &str) -> Option<String> {
+    let mut cur = def.entries.get(rule_id).map(String::as_str);
+    let mut seen = BTreeSet::new();
+    while let Some(step_id) = cur {
+        if !seen.insert(step_id) {
+            break;
+        }
+        match def.steps.get(step_id)? {
+            WorkflowStep::Agent { profile, .. } => return profile.clone(),
+            WorkflowStep::Script {
+                next, on_failure, ..
+            } => {
+                if let Some(next_id) = next {
+                    cur = Some(next_id.as_str());
+                } else if let Some(fail_id) = on_failure {
+                    cur = Some(fail_id.as_str());
+                } else {
+                    break;
+                }
+            }
+            other => cur = other.next(),
+        }
+    }
+    None
+}
+
+/// Builds a fresh standalone scheduled workflow YAML document.
+pub fn default_scheduled_document(
+    workflow_id: impl Into<String>,
+    name: impl Into<String>,
+    profile: Option<&str>,
+) -> Document {
+    let mut with = BTreeMap::new();
+    if let Some(p) = profile.map(str::trim).filter(|s| !s.is_empty()) {
+        with.insert("profile".into(), json!(p));
+    }
+    with.insert(
+        "instruction".into(),
+        json!("Inspect the repository health, run relevant checks, and summarize findings in your report."),
+    );
+    Document {
+        schema: crate::migrations::CURRENT,
+        id: workflow_id.into(),
+        name: name.into(),
+        enabled: true,
+        columns: Vec::new(),
+        env: BTreeMap::new(),
+        on: BTreeMap::from([(
+            "schedule".into(),
+            WorkflowRule {
+                event: "schedule".into(),
+                start_at: "agent:run".into(),
+                cron: Some("0 9 * * 1-5".into()),
+                enabled: true,
+                ..Default::default()
+            },
+        )]),
+        steps: vec![
+            Step {
+                id: "agent:run".into(),
+                name: Some("Scheduled Agent".into()),
+                uses: "agent".into(),
+                with,
+                next: Some("__end".into()),
+                ..Default::default()
+            },
+            Step {
+                id: "__end".into(),
+                uses: "complete".into(),
+                ..Default::default()
+            },
+        ],
+        workspace: WorkspaceSettings::default(),
+        max_steps: 100,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2996,5 +3255,78 @@ steps:
         )
         .unwrap();
         assert!(misplaced.compile().is_err());
+    }
+
+    #[test]
+    fn parses_named_and_github_actions_schedule_rules_and_validates_modes() {
+        let gha = r#"schema: 8
+id: nightly:audit
+name: Nightly Audit
+on:
+  schedule:
+    - cron: "0 2 * * *"
+      timezone: Asia/Shanghai
+steps:
+  - id: precheck
+    run: echo ok
+  - id: agent:audit
+    uses: agent
+    with:
+      profile: developer
+      instruction: Audit repository health.
+"#;
+        let doc = parse(gha).unwrap();
+        let rule = doc.on.get("schedule").expect("normalized schedule rule");
+        assert_eq!(rule.event, "schedule");
+        assert_eq!(rule.cron.as_deref(), Some("0 2 * * *"));
+        assert_eq!(rule.timezone.as_deref(), Some("Asia/Shanghai"));
+        assert_eq!(rule.start_at, "precheck");
+        let flow = doc.compile().unwrap();
+        validate_schedules(&doc, &flow, &["backlog".into(), "develop".into()]).unwrap();
+        assert_eq!(
+            schedule_agent_profile(&flow, "schedule").as_deref(),
+            Some("developer")
+        );
+
+        // Cardless schedule cannot use `card.move` without `card:`.
+        let invalid_cardless = r#"schema: 8
+id: bad:sched
+name: Bad Schedule
+on:
+  nightly:
+    cron: "0 2 * * *"
+    start_at: move:dev
+steps:
+  - id: move:dev
+    uses: card.move
+    with:
+      column: develop
+"#;
+        let bad_doc = parse(invalid_cardless).unwrap();
+        let bad_flow = bad_doc.compile().unwrap();
+        assert!(
+            validate_schedules(&bad_doc, &bad_flow, &["backlog".into(), "develop".into()]).is_err()
+        );
+
+        // Adding `card:` makes `card.move` valid!
+        let valid_card = r#"schema: 8
+id: ok:sched
+name: Daily Card
+on:
+  nightly:
+    cron: "0 2 * * *"
+    start_at: move:dev
+    card:
+      column: backlog
+      title: "Daily Triage · {{date}}"
+steps:
+  - id: move:dev
+    uses: card.move
+    with:
+      column: develop
+"#;
+        let ok_doc = parse(valid_card).unwrap();
+        let ok_flow = ok_doc.compile().unwrap();
+        validate_schedules(&ok_doc, &ok_flow, &["backlog".into(), "develop".into()]).unwrap();
     }
 }

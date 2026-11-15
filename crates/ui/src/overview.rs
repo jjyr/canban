@@ -109,7 +109,10 @@ fn standalone_terminal_is_running(s: &canban_types::Snapshot, e: &crate::termina
         .any(|c| c.id == e.saved.id && !matches!(c.state.as_str(), "finished" | "cancelled"))
         || s.merge_batches
             .iter()
-            .any(|b| b.id == e.saved.id && b.active());
+            .any(|b| b.id == e.saved.id && b.active())
+        || s.scheduled_runs
+            .iter()
+            .any(|r| r.id == e.saved.id && r.active());
     e.herdr_status().is_working()
         || (is_special_active
             && !matches!(

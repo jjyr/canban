@@ -95,7 +95,10 @@ fn validate(
                 );
             }
             for rule in doc.on.values() {
-                ensure!(!rule.event.is_empty(), "Trigger event is required");
+                ensure!(
+                    rule.is_schedule() || !rule.event.is_empty(),
+                    "Trigger event or cron expression is required"
+                );
                 ensure!(
                     rule.selector
                         .project_id
@@ -115,6 +118,7 @@ fn validate(
                 }
             }
             let flow = doc.compile()?;
+            source::validate_schedules(&doc, &flow, &effective_columns)?;
             canban_workflow_engine::validate_definition(
                 &flow,
                 &effective_columns,
@@ -131,6 +135,16 @@ fn validate(
     }
     Ok(out)
 }
+pub(super) fn publish_collection(
+    home: &Path,
+    db: Db<'_>,
+    project: &Project,
+    config: &Config,
+    inputs: &[Value],
+) -> Result<()> {
+    publish(home, db, project, config, inputs)
+}
+
 fn publish(
     _home: &Path,
     db: Db<'_>,
@@ -210,7 +224,7 @@ fn publish(
             rules: doc.on,
         };
         for (key, rule) in &file.rules {
-            if rule.event == "manual" {
+            if rule.event == "manual" || rule.is_schedule() {
                 continue;
             }
             let sub_id = format!("source:{}:{}:{key}", project.id, definition.id);
@@ -331,6 +345,8 @@ fn publish(
             }
         }
     }
+    let updated_project: Project = db.get(&project.id)?;
+    super::schedules::sync_project_schedules(db, &updated_project, &active_sources)?;
     Ok(())
 }
 /// How a newly created Project initializes its workflow source collection.
@@ -460,7 +476,10 @@ fn validate_template_files(config: &Config, inputs: &[Value]) -> Result<Vec<Work
                 "Invalid workflow ID"
             );
             for rule in doc.on.values() {
-                ensure!(!rule.event.is_empty(), "Trigger event is required");
+                ensure!(
+                    rule.is_schedule() || !rule.event.is_empty(),
+                    "Trigger event or cron expression is required"
+                );
                 ensure!(
                     rule.selector.types.is_empty(),
                     "Use event rather than match.types"
@@ -473,6 +492,7 @@ fn validate_template_files(config: &Config, inputs: &[Value]) -> Result<Vec<Work
                 }
             }
             let flow = doc.compile()?;
+            source::validate_schedules(&doc, &flow, &effective_columns)?;
             canban_workflow_engine::validate_definition(&flow, &effective_columns, &profiles)?;
             Ok(())
         })()
@@ -595,6 +615,8 @@ pub(super) fn initialize(
     }
     if needs_upgrade {
         publish(home, db, project, config, &inputs)?;
+    } else {
+        super::schedules::sync_project_schedules(db, project, &existing)?;
     }
     Ok(())
 }

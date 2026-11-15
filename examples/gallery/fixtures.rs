@@ -497,7 +497,7 @@ pub fn workspace() -> canban_types::Snapshot {
             3 => "\n\nTags: #ux",
             _ => "",
         };
-        s.cards.push(Card{source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),terminal_id:None,next_stage:None}),delivery,created_at:now()});
+        s.cards.push(Card{schedule_source:None,source_trust:Some("local".into()),hold_auto_merge:false,github_links:vec![],created_by:"Gallery".into(),content:Default::default(),removed_at:None,pull_request:None,pull_request_history:Vec::new(),delivery_mode:None,workspace:None,workspace_history:Vec::new(),id:format!("card-{i}"),project_id:"gallery-project".into(),number:i,board_order:None,title:title.into(),body:format!("## Goal\nMake progress easy to understand.\n\nKeep long descriptions readable, preserve drafts and provide clear next actions.\n\n中文与 English content uses the same document component.{tag_suffix}"),context_notes:Some(vec!["note-1".into()]),stage:stage.into(),revision:1,attention:attention.map(str::to_owned),archived_at:None,archive:None,archive_error:None,worktree:Some(format!("/preview/worktrees/card-{i}")),branch:Some(format!("canban/gallery/{i}")),base_commit:Some("abcdef0123".into()),human_gate:attention.map(|reason|HumanGate{reason:reason.into(),terminal_id:None,next_stage:None}),delivery,created_at:now()});
     }
     s.notes.push(Note{id:"note-1".into(),project_id:"gallery-project".into(),title:"Search ideas.md".into(),body:"# Search experience\n\nFind a Card without remembering its number.\n\nSee [Architecture](note:note-2).".into(),revision:1,created_at:now(),updated_at:now(),links:vec!["note-2".into()],card_ids:vec!["card-1".into()]});
     s.notes.push(Note {
@@ -2595,4 +2595,412 @@ pub fn insights() -> canban_types::Snapshot {
     }
 
     s
+}
+
+pub fn schedules() -> (canban_types::Snapshot, canban_ui::workflows::Draft) {
+    use canban_types::*;
+    let mut s = workspace();
+    let now_ms = now();
+    let project_id = "gallery-project".to_owned();
+
+    let default_raw =
+        canban_workflow_engine::source::encode(&canban_workflow_engine::source::default_document(
+            "delivery:gallery-project",
+            WorkspaceSettings::default(),
+        ))
+        .unwrap();
+
+    let audit_yaml = r#"schema: 8
+id: dependency-audit:gallery-project
+name: Nightly Dependency Audit
+enabled: true
+on:
+  schedule:
+    event: schedule
+    start_at: agent:audit
+    cron: "0 2 * * *"
+    timezone: Asia/Shanghai
+    overlap: skip
+    enabled: true
+steps:
+  - id: agent:audit
+    name: Security & Outdated Audit
+    uses: agent
+    with:
+      profile: developer
+      instruction: |
+        Run cargo audit and check Cargo.lock for security advisories or outdated workspace crates, then report a concise summary.
+    next: __end
+  - id: __end
+    uses: complete
+"#
+    .to_owned();
+
+    let qa_yaml = r#"schema: 8
+id: nightly-qa:gallery-project
+name: Weekday QA Smoke Card
+enabled: true
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  schedule:
+    event: schedule
+    start_at: agent:qa
+    cron: "30 3 * * 1-5"
+    timezone: Local
+    overlap: queue
+    card:
+      column: develop
+      title: "Weekday QA Smoke · {{date}} (#{{run_number}})"
+      body: "Automated weekday acceptance suite and UI regression check."
+    enabled: true
+steps:
+  - id: agent:qa
+    name: Run Acceptance Suite
+    uses: agent
+    with:
+      profile: qa
+      instruction: |
+        Execute mise run test and verify UI regression scenarios on the scheduled Card branch.
+    next: move:review
+  - id: move:review
+    uses: card.move
+    with:
+      column: review
+    next: __end
+  - id: __end
+    uses: complete
+"#
+    .to_owned();
+
+    let cleanup_yaml = r#"schema: 8
+id: weekly-cleanup:gallery-project
+name: Weekly Worktree Prune
+enabled: true
+on:
+  schedule:
+    event: schedule
+    start_at: agent:prune
+    cron: "0 10 * * 1"
+    timezone: UTC
+    enabled: false
+steps:
+  - id: agent:prune
+    uses: agent
+    with:
+      profile: developer
+      instruction: Inspect stale local caches and summarize disk usage.
+    next: __end
+  - id: __end
+    uses: complete
+"#
+    .to_owned();
+
+    let sid_audit = "schedule:gallery-project:dependency-audit:gallery-project:schedule".to_owned();
+    let sid_qa = "schedule:gallery-project:nightly-qa:gallery-project:schedule".to_owned();
+    let sid_cleanup = "schedule:gallery-project:weekly-cleanup:gallery-project:schedule".to_owned();
+
+    let next_audit = cron::parse_schedule("0 2 * * *", Some("Asia/Shanghai"))
+        .ok()
+        .and_then(|(sc, tz)| sc.next_after_ms(now_ms, tz));
+    let next_qa = cron::parse_schedule("30 3 * * 1-5", None)
+        .ok()
+        .and_then(|(sc, tz)| sc.next_after_ms(now_ms, tz));
+
+    s.schedule_states = vec![
+        ScheduleState {
+            id: sid_audit.clone(),
+            project_id: project_id.clone(),
+            workflow_id: "dependency-audit:gallery-project".into(),
+            workflow_name: "Nightly Dependency Audit".into(),
+            filename: "dependency-audit.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "0 2 * * *".into(),
+            timezone: Some("Asia/Shanghai".into()),
+            overlap: ScheduleOverlap::Skip,
+            creates_card: false,
+            target_column: None,
+            profile_id: Some("developer".into()),
+            enabled: true,
+            last_scheduled_at: Some(now_ms.saturating_sub(180_000)),
+            next_run_at: next_audit,
+            last_run_id: Some("scheduled:gallery-project:run42".into()),
+            run_count: 42,
+            queued_triggers: 0,
+            updated_at: now_ms,
+        },
+        ScheduleState {
+            id: sid_qa.clone(),
+            project_id: project_id.clone(),
+            workflow_id: "nightly-qa:gallery-project".into(),
+            workflow_name: "Weekday QA Smoke Card".into(),
+            filename: "nightly-qa.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "30 3 * * 1-5".into(),
+            timezone: None,
+            overlap: ScheduleOverlap::Queue,
+            creates_card: true,
+            target_column: Some("develop".into()),
+            profile_id: None,
+            enabled: true,
+            last_scheduled_at: Some(now_ms.saturating_sub(3_600_000)),
+            next_run_at: next_qa,
+            last_run_id: Some("scheduled:gallery-project:qa14".into()),
+            run_count: 14,
+            queued_triggers: 0,
+            updated_at: now_ms,
+        },
+        ScheduleState {
+            id: sid_cleanup,
+            project_id: project_id.clone(),
+            workflow_id: "weekly-cleanup:gallery-project".into(),
+            workflow_name: "Weekly Worktree Prune".into(),
+            filename: "weekly-cleanup.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "0 10 * * 1".into(),
+            timezone: Some("UTC".into()),
+            overlap: ScheduleOverlap::Skip,
+            creates_card: false,
+            target_column: None,
+            profile_id: Some("developer".into()),
+            enabled: false,
+            last_scheduled_at: None,
+            next_run_at: None,
+            last_run_id: None,
+            run_count: 0,
+            queued_triggers: 0,
+            updated_at: now_ms,
+        },
+    ];
+
+    // Scheduled Card on the Board with `schedule_source` provenance.
+    s.cards.push(Card {
+        schedule_source: Some(ScheduleSourceRef {
+            schedule_id: sid_qa.clone(),
+            workflow_id: "nightly-qa:gallery-project".into(),
+            workflow_name: "Weekday QA Smoke Card".into(),
+            filename: "nightly-qa.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "30 3 * * 1-5".into(),
+            run_id: "scheduled:gallery-project:qa14".into(),
+            run_number: 14,
+            scheduled_at: now_ms.saturating_sub(3_600_000),
+        }),
+        source_trust: Some("local".into()),
+        hold_auto_merge: false,
+        github_links: Vec::new(),
+        created_by: "schedule:Weekday QA Smoke Card".into(),
+        content: Default::default(),
+        removed_at: None,
+        pull_request: None,
+        pull_request_history: Vec::new(),
+        delivery_mode: None,
+        workspace: None,
+        workspace_history: Vec::new(),
+        id: "card-5".into(),
+        project_id: project_id.clone(),
+        number: 5,
+        title: "Weekday QA Smoke · 2026-11-15 (#14)".into(),
+        body: "Automated weekday acceptance suite and UI regression check.".into(),
+        board_order: None,
+        context_notes: None,
+        stage: "review".into(),
+        revision: 2,
+        attention: None,
+        archived_at: None,
+        archive: None,
+        archive_error: None,
+        worktree: Some("/preview/worktrees/card-5".into()),
+        branch: Some("canban/gallery/5".into()),
+        base_commit: Some("abcdef0123".into()),
+        human_gate: None,
+        delivery: None,
+        created_at: now_ms.saturating_sub(3_600_000),
+    });
+
+    // Live Cardless Terminal Agent entry (`scheduled:gallery-project:run42`).
+    s.terminals.push(TerminalEntry {
+        id: "scheduled:gallery-project:run42".into(),
+        conversation_id: None,
+        number: 9,
+        name: Some("Scheduled · Nightly Dependency Audit #42 (@developer)".into()),
+        origin_project_id: Some(project_id.clone()),
+        origin_card_id: None,
+        agent_engine: Some("agy".into()),
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: Some("local".into()),
+            core_id: Some("local".into()),
+            terminal: Some("pty-sched-42".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("working".into()),
+            agent_turn: Some(1),
+            observed_agent: Some("agy".into()),
+            waiting: None,
+        }),
+        agent: None,
+        created_at: now_ms.saturating_sub(180_000),
+    });
+
+    s.scheduled_runs = vec![
+        ScheduledRun {
+            id: "scheduled:gallery-project:run42".into(),
+            schedule_id: sid_audit.clone(),
+            project_id: project_id.clone(),
+            workflow_id: "dependency-audit:gallery-project".into(),
+            workflow_name: "Nightly Dependency Audit".into(),
+            filename: "dependency-audit.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "0 2 * * *".into(),
+            number: 42,
+            trigger_kind: "manual".into(),
+            creates_card: false,
+            card_id: None,
+            card_number: None,
+            workflow_run_id: None,
+            start_step: Some("agent:audit".into()),
+            current_step: Some("agent:audit".into()),
+            profile_id: Some("developer".into()),
+            provider_session_id: None,
+            terminal_id: Some("scheduled:gallery-project:run42".into()),
+            cwd: "/example/project".into(),
+            state: "running".into(),
+            summary: Some("Auditing Cargo.lock advisories in live Terminal Agent…".into()),
+            report_path: None,
+            output_path: None,
+            error: None,
+            scheduled_at: now_ms.saturating_sub(180_000),
+            started_at: Some(now_ms.saturating_sub(180_000)),
+            completed_at: None,
+            close_requested_at: None,
+            updated_at: now_ms,
+        },
+        ScheduledRun {
+            id: "scheduled:gallery-project:run41".into(),
+            schedule_id: sid_audit.clone(),
+            project_id: project_id.clone(),
+            workflow_id: "dependency-audit:gallery-project".into(),
+            workflow_name: "Nightly Dependency Audit".into(),
+            filename: "dependency-audit.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "0 2 * * *".into(),
+            number: 41,
+            trigger_kind: "cron".into(),
+            creates_card: false,
+            card_id: None,
+            card_number: None,
+            workflow_run_id: None,
+            start_step: Some("agent:audit".into()),
+            current_step: Some("agent:audit".into()),
+            profile_id: Some("developer".into()),
+            provider_session_id: None,
+            terminal_id: None,
+            cwd: "/example/project".into(),
+            state: "completed".into(),
+            summary: Some(
+                "0 security advisories across 312 crates; Terminal Agent automatically reclaimed after reporting."
+                    .into(),
+            ),
+            report_path: Some("projects/gallery-project/schedules/run41/report.md".into()),
+            output_path: None,
+            error: None,
+            scheduled_at: now_ms.saturating_sub(86_400_000),
+            started_at: Some(now_ms.saturating_sub(86_400_000)),
+            completed_at: Some(now_ms.saturating_sub(86_350_000)),
+            close_requested_at: Some(now_ms.saturating_sub(86_350_000)),
+            updated_at: now_ms.saturating_sub(86_350_000),
+        },
+        ScheduledRun {
+            id: "scheduled:gallery-project:run40".into(),
+            schedule_id: sid_audit,
+            project_id: project_id.clone(),
+            workflow_id: "dependency-audit:gallery-project".into(),
+            workflow_name: "Nightly Dependency Audit".into(),
+            filename: "dependency-audit.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "0 2 * * *".into(),
+            number: 40,
+            trigger_kind: "cron".into(),
+            creates_card: false,
+            card_id: None,
+            card_number: None,
+            workflow_run_id: None,
+            start_step: None,
+            current_step: None,
+            profile_id: None,
+            provider_session_id: None,
+            terminal_id: None,
+            cwd: "/example/project".into(),
+            state: "skipped".into(),
+            summary: Some("Skipped overlap tick while run #39 was still running".into()),
+            report_path: None,
+            output_path: None,
+            error: None,
+            scheduled_at: now_ms.saturating_sub(172_800_000),
+            started_at: None,
+            completed_at: Some(now_ms.saturating_sub(172_800_000)),
+            close_requested_at: None,
+            updated_at: now_ms.saturating_sub(172_800_000),
+        },
+        ScheduledRun {
+            id: "scheduled:gallery-project:qa14".into(),
+            schedule_id: sid_qa,
+            project_id,
+            workflow_id: "nightly-qa:gallery-project".into(),
+            workflow_name: "Weekday QA Smoke Card".into(),
+            filename: "nightly-qa.yaml".into(),
+            rule_id: "schedule".into(),
+            cron: "30 3 * * 1-5".into(),
+            number: 14,
+            trigger_kind: "cron".into(),
+            creates_card: true,
+            card_id: Some("card-5".into()),
+            card_number: Some(5),
+            workflow_run_id: Some("wfrun-qa-14".into()),
+            start_step: Some("agent:qa".into()),
+            current_step: None,
+            profile_id: Some("qa".into()),
+            provider_session_id: None,
+            terminal_id: None,
+            cwd: "/preview/worktrees/card-5".into(),
+            state: "completed".into(),
+            summary: Some("All 192 workspace tests and acceptance suites passed on Card #5.".into()),
+            report_path: None,
+            output_path: None,
+            error: None,
+            scheduled_at: now_ms.saturating_sub(3_600_000),
+            started_at: Some(now_ms.saturating_sub(3_600_000)),
+            completed_at: Some(now_ms.saturating_sub(3_200_000)),
+            close_requested_at: None,
+            updated_at: now_ms.saturating_sub(3_200_000),
+        },
+    ];
+
+    let mut draft = canban_ui::workflows::Draft {
+        base: json!({"revision": "gallery", "sources": [
+            {"filename": "dependency-audit.yaml", "source": audit_yaml, "active": {"revision": 1, "workflow_id": "dependency-audit:gallery-project"}},
+            {"filename": "development.yaml", "source": default_raw, "active": {"revision": 1, "workflow_id": "delivery:gallery-project"}},
+            {"filename": "nightly-qa.yaml", "source": qa_yaml, "active": {"revision": 1, "workflow_id": "nightly-qa:gallery-project"}},
+            {"filename": "weekly-cleanup.yaml", "source": cleanup_yaml, "active": {"revision": 1, "workflow_id": "weekly-cleanup:gallery-project"}}
+        ]}),
+        ..Default::default()
+    };
+    draft
+        .sources
+        .insert("dependency-audit.yaml".into(), audit_yaml);
+    draft.sources.insert("development.yaml".into(), default_raw);
+    draft.sources.insert("nightly-qa.yaml".into(), qa_yaml);
+    draft
+        .sources
+        .insert("weekly-cleanup.yaml".into(), cleanup_yaml);
+    draft.selected = "dependency-audit.yaml".into();
+
+    (s, draft)
 }

@@ -1,3 +1,4 @@
+pub mod timers;
 use anyhow::Result;
 use canban_types::{
     AgentRun, Config, ExecutionTrigger, Lifecycle, Profile, Project, TerminalEntry, now,
@@ -131,6 +132,17 @@ pub fn active_count(snapshot: &canban_types::Snapshot) -> usize {
                     b.state.as_str(),
                     "starting" | "unknown" | "running" | "working"
                 )
+            })
+            .count()
+        + snapshot
+            .scheduled_runs
+            .iter()
+            .filter(|r| {
+                !r.creates_card
+                    && matches!(
+                        r.state.as_str(),
+                        "starting" | "unknown" | "running" | "working"
+                    )
             })
             .count()
 }
@@ -271,6 +283,11 @@ pub fn admissions(snapshot: &canban_types::Snapshot, max_agents: usize) -> Vec<S
             .merge_batches
             .iter()
             .filter(|b| b.state == "queued")
+            .count()
+        + snapshot
+            .scheduled_runs
+            .iter()
+            .filter(|r| !r.creates_card && r.state == "queued")
             .count();
     let mut free = max_agents.saturating_sub(active_count(snapshot) + queued);
     // (project, workflow, gate step, column) -> admitted Cards still in that column.
@@ -476,6 +493,7 @@ mod tests {
         };
 
         let make_card = |id: &str, number: u64| canban_types::Card {
+            schedule_source: None,
             source_trust: None,
             hold_auto_merge: false,
             github_links: vec![],

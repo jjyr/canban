@@ -1,9 +1,14 @@
 //! Project Workflows owns source drafts. Source editors and Prompt preview use
 //! native NSH selection/editing; launching is a separate explicit intent.
+pub mod schedules;
 mod studio;
 use crate::presenter::*;
 use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
+pub use schedules::{
+    add_schedule_rule_to_file, collect_project_schedules, new_scheduled_workflow, open_schedules,
+    project_schedule_count, toggle_schedule_by_id, trigger_schedule_by_id,
+};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -59,6 +64,9 @@ type SourceStamp = Vec<(String, u64, String)>;
 pub struct State {
     pub drafts: Signal<BTreeMap<String, Draft>>,
     pub selected: Signal<String>,
+    pub section: Signal<String>,
+    pub selected_schedule: Signal<String>,
+    pub schedule_artifact: Signal<Option<(String, String)>>,
     pub mode: Signal<String>,
     pub selected_step: Signal<String>,
     pub new_column_name: Signal<String>,
@@ -84,6 +92,9 @@ impl State {
         Self {
             drafts: signal(BTreeMap::new()),
             selected: signal(String::new()),
+            section: signal("workflows".into()),
+            selected_schedule: signal(String::new()),
+            schedule_artifact: signal(None),
             mode: signal("visual".into()),
             selected_step: signal(String::new()),
             new_column_name: signal(String::new()),
@@ -113,6 +124,7 @@ impl Default for State {
 }
 pub fn chrome_bar(ui: Ui) -> impl IntoElement {
     let state = ui.workflows;
+    let sched_count = computed(move || schedules::project_schedule_count(ui));
     view()
         .flex_1()
         .min_w(px(0.))
@@ -126,7 +138,7 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
             view()
                 .flex_row()
                 .items_center()
-                .gap_1p5()
+                .gap_2()
                 .min_w(px(0.))
                 .window_drag(false)
                 .child(compact_action("← Board", Variant::Quiet, move |_| {
@@ -135,14 +147,37 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                 .child(
                     label(move || {
                         format!(
-                            "{} / Workflows",
-                            ui.current_project().map(|p| p.name).unwrap_or_default()
+                            "{} / {}",
+                            ui.current_project().map(|p| p.name).unwrap_or_default(),
+                            if state.section.get() == "schedules" {
+                                "Schedules"
+                            } else {
+                                "Workflows"
+                            }
                         )
                     })
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_size(px(13.5))
                     .truncate()
                     .min_w(px(0.)),
+                )
+                .child(
+                    segmented()
+                        .child(segment(
+                            "Workflows",
+                            Some(Icon::Trigger),
+                            move || state.section.get() != "schedules",
+                            move |_| state.section.set("workflows".into()),
+                        ))
+                        .child(
+                            segment(
+                                "Schedules",
+                                Some(Icon::Clock),
+                                move || state.section.get() == "schedules",
+                                move |_| state.section.set("schedules".into()),
+                            )
+                            .child(reminder_count(move || sched_count.get(), || false)),
+                        ),
                 ),
         )
         .child(view().flex_1().h_full().window_drag(true))
@@ -367,6 +402,55 @@ fn save(ui: Ui) {
         return;
     }
     state.error.set(String::new());
+    if crate::APP.get().is_none() {
+        for (fname, raw) in &draft.sources {
+            match canban_workflow_engine::source::parse(raw) {
+                Ok(doc) => match doc.compile() {
+                    Ok(flow) => {
+                        let cols = ui.snapshot.with_untracked(|s| {
+                            s.projects
+                                .iter()
+                                .find(|p| p.id == project)
+                                .map(|p| {
+                                    p.workflow
+                                        .stages
+                                        .iter()
+                                        .map(|st| st.id.clone())
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default()
+                        });
+                        if let Err(err) =
+                            canban_workflow_engine::source::validate_schedules(&doc, &flow, &cols)
+                        {
+                            state.error.set(format!("{fname}: {err:#}"));
+                            return;
+                        }
+                    }
+                    Err(err) => {
+                        state.error.set(format!("{fname}: {err:#}"));
+                        return;
+                    }
+                },
+                Err(err) => {
+                    state.error.set(format!("{fname}: {err:#}"));
+                    return;
+                }
+            }
+        }
+        state.drafts.update(|d| {
+            let current = d.entry(project.clone()).or_default();
+            let v = json!({
+                "revision": "gallery",
+                "sources": draft.inputs(),
+            });
+            current.accept_publication(v, &draft.sources);
+        });
+        schedules::offline_save_schedules(ui, &project);
+        state.latest.set(Value::Null);
+        ui.notify("Workflow saved");
+        return;
+    }
     dispatch_complete(
         ui,
         "workflow.apply",
@@ -619,15 +703,125 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         move |_| {
             if !state.agent.get_untracked()
                 && !state.history_open.get_untracked()
+                && state.schedule_artifact.with_untracked(Option::is_none)
                 && !ui.quick_open.get_untracked()
             {
                 save(ui);
             }
         },
     );
+    let save_bar = move || {
+        view()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .px_3()
+            .py_2()
+            .rounded(px(RADIUS))
+            .bg(move || if apply.get() { SELECTED } else { CLEAR })
+            .border_1()
+            .border_color(move || if apply.get() { ACCENT } else { CLEAR })
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(muted(move || {
+                        if apply.get() {
+                            "Unsaved workflow changes · Press Save or ⌘S to apply"
+                        } else if default_state.get().1 {
+                            "All workflow changes saved · Default for new Projects"
+                        } else {
+                            "All workflow changes saved"
+                        }
+                    }))
+                    .child(when(
+                        move || !apply.get() && default_state.get().1,
+                        move || {
+                            view()
+                                .tooltip(
+                                    hint_tooltip(
+                                        "Revert new Projects back to the built-in default workflow",
+                                    )
+                                    .placement(Placement::Top),
+                                )
+                                .child(
+                                    compact_action(
+                                        "Reset default",
+                                        Variant::Quiet,
+                                        move |_| reset_default_workflow(ui),
+                                    )
+                                    .disabled(move || {
+                                        ui.is_method_pending("workflow.default.reset")
+                                            || state.loading.get()
+                                    }),
+                                )
+                        },
+                    )),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(when(
+                        move || !apply.get() && !default_state.get().1,
+                        move || {
+                            view()
+                                .tooltip(
+                                    hint_tooltip(
+                                        "Use this Project's saved workflows as the default for all new Projects",
+                                    )
+                                    .placement(Placement::Top),
+                                )
+                                .child(
+                                    action(
+                                        "Set as default",
+                                        Variant::Secondary,
+                                        move |_| set_default_workflow(ui),
+                                    )
+                                    .disabled(move || {
+                                        ui.is_method_pending("workflow.default.set")
+                                            || state.loading.get()
+                                            || ui.project.get().is_empty()
+                                    }),
+                                )
+                        },
+                    ))
+                    .child(when(
+                        move || dirty.get() || !state.latest.get().is_null(),
+                        move || {
+                            action("Discard", Variant::Quiet, move |_| load(ui, true)).disabled(
+                                move || {
+                                    ui.is_method_pending("workflow.apply") || state.loading.get()
+                                },
+                            )
+                        },
+                    ))
+                    .child(
+                        action("Save · ⌘S", Variant::Primary, move |_| save(ui)).disabled(
+                            move || {
+                                ui.is_method_pending("workflow.apply")
+                                    || state.loading.get()
+                                    || !apply.get()
+                            },
+                        ),
+                    ),
+            )
+    };
     view().flex_1().min_h(px(0.)).min_w(px(0.)).p_5().gap_4()
         .child(when(move || !state.error.get().is_empty(), move || notice(move || state.error.get(), Tone::Attention)))
-        .child(view().flex_1().min_h(px(0.)).flex_row().gap_4()
+        .child(when(move || state.section.get() == "schedules", move || {
+            view()
+                .flex_1()
+                .min_h(px(0.))
+                .min_w(px(0.))
+                .gap_3()
+                .child(schedules::render(ui))
+                .child(save_bar())
+        }))
+        .child(when(move || state.section.get() != "schedules", move || view().flex_1().min_h(px(0.)).flex_row().gap_4()
             .child(view().w(px(200.)).flex_shrink_0().min_h(px(0.)).gap_2()
                 .child(scroll().min_h(px(0.)).child(view().gap_1().child(each(move || names.get(), |name| name.clone(), move |name, _| {
                     let name = name.get_untracked();
@@ -652,7 +846,8 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         })
                         .bg(move || if state.selected.get() == name { SELECTED } else { CLEAR })
                 }))))
-                .child(action_with_icon(Icon::Plus, "New workflow", Variant::Quiet, move |_| new_workflow(ui)).w_full().justify_start().disabled(move || ui.pending.get() || state.loading.get())))
+                .child(action_with_icon(Icon::Plus, "New workflow", Variant::Quiet, move |_| new_workflow(ui)).w_full().justify_start().disabled(move || ui.pending.get() || state.loading.get()))
+                .child(action_with_icon(Icon::Clock, "New schedule", Variant::Quiet, move |_| new_scheduled_workflow(ui)).w_full().justify_start().disabled(move || ui.pending.get() || state.loading.get())))
             .child(view().flex_1().min_w(px(0.)).min_h(px(0.)).gap_2()
                 .child(view().flex_row().items_center().gap_2()
                     .child(label(move || state.selected.get()).truncate().min_w(px(0.)).flex_1())
@@ -688,105 +883,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         untracked(|| visual_studio(ui))
                     }
                 }))
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(RADIUS))
-                        .bg(move || if apply.get() { SELECTED } else { CLEAR })
-                        .border_1()
-                        .border_color(move || if apply.get() { ACCENT } else { CLEAR })
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(muted(move || {
-                                    if apply.get() {
-                                        "Unsaved workflow changes · Press Save or ⌘S to apply"
-                                    } else if default_state.get().1 {
-                                        "All workflow changes saved · Default for new Projects"
-                                    } else {
-                                        "All workflow changes saved"
-                                    }
-                                }))
-                                .child(when(
-                                    move || !apply.get() && default_state.get().1,
-                                    move || {
-                                        view()
-                                            .tooltip(
-                                                hint_tooltip(
-                                                    "Revert new Projects back to the built-in default workflow",
-                                                )
-                                                .placement(Placement::Top),
-                                            )
-                                            .child(
-                                                compact_action(
-                                                    "Reset default",
-                                                    Variant::Quiet,
-                                                    move |_| reset_default_workflow(ui),
-                                                )
-                                                .disabled(move || {
-                                                    ui.is_method_pending("workflow.default.reset")
-                                                        || state.loading.get()
-                                                }),
-                                            )
-                                    },
-                                )),
-                        )
-                        .child(
-                            view()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .child(when(
-                                    move || !apply.get() && !default_state.get().1,
-                                    move || {
-                                        view()
-                                            .tooltip(
-                                                hint_tooltip(
-                                                    "Use this Project's saved workflows as the default for all new Projects",
-                                                )
-                                                .placement(Placement::Top),
-                                            )
-                                            .child(
-                                                action(
-                                                    "Set as default",
-                                                    Variant::Secondary,
-                                                    move |_| set_default_workflow(ui),
-                                                )
-                                                .disabled(move || {
-                                                    ui.is_method_pending("workflow.default.set")
-                                                        || state.loading.get()
-                                                        || ui.project.get().is_empty()
-                                                }),
-                                            )
-                                    },
-                                ))
-                                .child(when(
-                                    move || dirty.get() || !state.latest.get().is_null(),
-                                    move || {
-                                        action("Discard", Variant::Quiet, move |_| load(ui, true))
-                                            .disabled(move || {
-                                                ui.is_method_pending("workflow.apply")
-                                                    || state.loading.get()
-                                            })
-                                    },
-                                ))
-                                .child(
-                                    action("Save · ⌘S", Variant::Primary, move |_| save(ui))
-                                        .disabled(move || {
-                                            ui.is_method_pending("workflow.apply")
-                                                || state.loading.get()
-                                                || !apply.get()
-                                        }),
-                                ),
-                        ),
-                )))
+                .child(save_bar()))))
         .child(when(move || state.agent.get(), move || agent_panel(ui)))
         .child(when(move || state.history_open.get(), move || history_panel(ui)))
 }
@@ -917,7 +1014,7 @@ fn source_editor(ui: Ui) -> AnyElement {
         .into_element()
 }
 /// Real native modal surface: editor layers behind it cannot paint through it.
-fn workflow_dialog(
+pub(super) fn workflow_dialog(
     content: impl IntoElement,
     close: impl Fn() + Copy + 'static,
 ) -> impl IntoElement {

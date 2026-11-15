@@ -159,6 +159,9 @@ pub fn entry_scope(s: &Snapshot, e: &Entry) -> WorktreeScope {
     if let Some(batch) = s.merge_batches.iter().find(|b| b.id == e.saved.id) {
         return WorktreeScope::ProjectRoot(batch.project_id.clone());
     }
+    if let Some(sr) = s.scheduled_runs.iter().find(|r| r.id == e.saved.id) {
+        return WorktreeScope::ProjectRoot(sr.project_id.clone());
+    }
     if let Some(wid) = e
         .location
         .as_ref()

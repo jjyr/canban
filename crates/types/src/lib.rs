@@ -483,6 +483,8 @@ pub struct WorkspaceBinding {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Card {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_source: Option<ScheduleSourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_trust: Option<String>,
     #[serde(default)]
     pub hold_auto_merge: bool,
@@ -1020,6 +1022,10 @@ pub struct Snapshot {
     #[serde(default)]
     pub merge_batches: Vec<MergeBatch>,
     #[serde(default)]
+    pub schedule_states: Vec<ScheduleState>,
+    #[serde(default)]
+    pub scheduled_runs: Vec<ScheduledRun>,
+    #[serde(default)]
     pub workflow_revisions: Vec<WorkflowRevision>,
     #[serde(default)]
     pub card_reads: Vec<CardRead>,
@@ -1061,6 +1067,13 @@ impl Snapshot {
         }
         if let Some(batch) = self.merge_batches.iter().find(|b| b.id == t.id) {
             return Some(batch.project_id.as_str());
+        }
+        if let Some(srun) = self
+            .scheduled_runs
+            .iter()
+            .find(|r| r.terminal_id.as_deref() == Some(t.id.as_str()) || r.id == t.id)
+        {
+            return Some(srun.project_id.as_str());
         }
         if let Some(ctx) = self
             .terminal_contexts
@@ -1336,7 +1349,9 @@ impl HerdrStatus {
 
 impl TerminalEntry {
     pub fn is_special_session(&self) -> bool {
-        self.id.starts_with("configuration:") || self.id.starts_with("merge-queue:")
+        self.id.starts_with("configuration:")
+            || self.id.starts_with("merge-queue:")
+            || self.id.starts_with("scheduled:")
     }
 
     /// Active CLI / Role Agent engine identifier if an Agent is running in this terminal.
@@ -1703,6 +1718,7 @@ pub struct GitHubPr {
     pub workspace: WorkspaceBinding,
 }
 
+pub mod cron;
 mod hosts;
 pub use hosts::*;
 mod workflow;

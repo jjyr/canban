@@ -243,7 +243,88 @@ workspace:
  script_report=next(r for r in s['reports'] if r['card_id']==script_card['id'])
  report_text=(home/script_report['path']).read_text()
  assert 'ACCEPTANCE_WF_ENV=wf_default' in report_text and 'DYNAMIC_TOKEN=from_dotenv' in report_text and 'ACCEPTANCE_STEP_ENV=step_value' in report_text and 'SHARED_OVERRIDE=from_step' in report_text
- evidence['checks']+=['original YAML preservation','collection revision conflict','SQL source revision matches publication','explicit YAML file submit/export','Project-owned configuration PTY','exact preview and launch prompt','Continue without reinjection','exact provider history resume','schema 6 script execution and inherited Agent PTY env']
+ # Schema 8 scheduled workflows: both GitHub Actions `on.schedule` Cardless Terminal Agents
+ # (with automatic PTY reclamation after `canban report`) and Card-creating schedules.
+ assert call('workflow.schema')['schema_version']>=8
+ sched_project=call('project.create',{'name':'Scheduled acceptance','directory':str(source),'workspace':{'create_worktree':False,'sync_base':False}})
+ sched_col=call('workflow.sources',{'project_id':sched_project['id']})
+ sched_sources=[{'filename':f['filename'],'source':f['source']} for f in sched_col['sources']]
+ sched_sources.append({'filename':'audit-agent.yaml','source':"""schema: 8
+id: audit-agent:sched
+name: Nightly Audit Agent
+enabled: true
+on:
+  schedule:
+    - cron: "0 2 * * *"
+steps:
+  - id: run_audit
+    uses: agent
+    with:
+      profile: developer
+      instruction: Run scheduled dependency audit and report findings.
+  - id: done
+    uses: complete
+"""})
+ sched_sources.append({'filename':'qa-card.yaml','source':"""schema: 8
+id: qa-card:sched
+name: Scheduled QA Card
+enabled: true
+columns:
+  - id: backlog
+    name: Backlog
+  - id: develop
+    name: Develop
+  - id: review
+    name: Review
+on:
+  nightly_qa:
+    event: schedule
+    cron: "30 3 * * 1-5"
+    timezone: UTC
+    overlap: skip
+    card:
+      column: develop
+      title: "QA Smoke · {{date}} (#{{run}})"
+      body: "Triggered from {{workflow}} ({{cron}})"
+    start_at: dev
+steps:
+  - id: dev
+    uses: agent
+    with:
+      profile: developer
+      instruction: Verify scheduled Card execution.
+    next: done
+  - id: done
+    uses: complete
+workspace:
+  create_worktree: false
+  sync_base: false
+"""})
+ call('workflow.apply',{'project_id':sched_project['id'],'revision':sched_col['revision'],'sources':sched_sources})
+ sched_list=json.loads(subprocess.check_output([str(cli),'schedule','list','--project-id',sched_project['id']],env=env,text=True))['schedules']
+ assert len(sched_list)==2
+ audit_sched=next(st for st in sched_list if st['filename']=='audit-agent.yaml')
+ card_sched=next(st for st in sched_list if st['filename']=='qa-card.yaml')
+ toggled_off=json.loads(subprocess.check_output([str(cli),'schedule','toggle','--schedule-id',audit_sched['id'],'--off'],env=env,text=True))
+ assert not toggled_off['enabled']
+ toggled_on=json.loads(subprocess.check_output([str(cli),'schedule','toggle','--schedule-id',audit_sched['id'],'--on'],env=env,text=True))
+ assert toggled_on['enabled']
+ # 1) Trigger Card-creating schedule via CLI -> creates Card with `schedule_source` and completes WorkflowRun.
+ card_trig=json.loads(subprocess.check_output([str(cli),'schedule','trigger','--schedule-id',card_sched['id']],env=env,text=True))
+ created_cid=card_trig['card_id'];assert created_cid
+ s=wait(lambda s:any(r['card_id']==created_cid and r['state']=='completed' for r in s['workflow_runs']),'scheduled Card workflow completion')
+ sched_card_obj=next(c for c in s['cards'] if c['id']==created_cid)
+ assert sched_card_obj['schedule_source']['schedule_id']==card_sched['id'] and 'QA Smoke · ' in sched_card_obj['title']
+ # 2) Trigger Cardless Terminal Agent schedule via CLI -> runs real Herdr PTY, records report, and auto-reclaims PTY!
+ audit_trig=json.loads(subprocess.check_output([str(cli),'schedule','trigger','--schedule-id',audit_sched['id']],env=env,text=True))
+ audit_run_id=audit_trig['id'];assert not audit_trig.get('card_id')
+ s=wait(lambda s:any(sr['id']==audit_run_id and sr['state']=='completed' for sr in s['scheduled_runs']) and any(t['id']==audit_run_id and (t.get('runtime') or {}).get('state')=='finished' for t in s['terminals']),'scheduled Cardless Terminal Agent completion and auto-reclamation')
+ assert not [c for c in s['cards'] if c['project_id']==sched_project['id'] and c['id']!=created_cid]
+ audit_runs=json.loads(subprocess.check_output([str(cli),'schedule','runs','--schedule-id',audit_sched['id']],env=env,text=True))['runs']
+ assert audit_runs and audit_runs[0]['id']==audit_run_id and audit_runs[0]['state']=='completed' and audit_runs[0]['report_path']
+ art=call('schedule.read_artifact',{'schedule_run_id':audit_run_id,'path':audit_runs[0]['report_path']})
+ assert 'completed cleanly without creating a Card' in art['body']
+ evidence['checks']+=['original YAML preservation','collection revision conflict','SQL source revision matches publication','explicit YAML file submit/export','Project-owned configuration PTY','exact preview and launch prompt','Continue without reinjection','exact provider history resume','schema 6 script execution and inherited Agent PTY env','schema 8 scheduled Card and Cardless Terminal Agent execution with auto-reclamation']
  (base/'evidence.json').write_text(json.dumps(evidence,indent=2));print('WORKFLOW_ACCEPTANCE_OK '+str(base),flush=True)
  if options.native:
   bundle=base/'CanbanWorkflowAcceptance.app';shutil.copytree(repo/'.local/Canban.app',bundle)

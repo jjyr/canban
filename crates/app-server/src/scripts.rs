@@ -163,7 +163,7 @@ fn validate_env_key(key: &str) -> Result<()> {
 }
 
 /// Resolves the command vector executing `script_path` under the configured `shell`.
-fn shell_argv(shell: Option<&str>, script_path: &Path) -> Result<Vec<String>> {
+pub(crate) fn shell_argv(shell: Option<&str>, script_path: &Path) -> Result<Vec<String>> {
     let path_str = script_path.to_string_lossy().into_owned();
     let Some(raw) = shell.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(vec![
@@ -220,7 +220,7 @@ fn wrapped_herdr_argv(log_path: &Path, inner: &[String]) -> Vec<String> {
     argv
 }
 
-fn sanitized_step_slug(step_id: &str) -> String {
+pub(crate) fn sanitized_step_slug(step_id: &str) -> String {
     let s: String = step_id
         .chars()
         .map(|c| {
@@ -234,7 +234,7 @@ fn sanitized_step_slug(step_id: &str) -> String {
     if s.is_empty() { "script".into() } else { s }
 }
 
-fn resolve_working_directory(
+pub(crate) fn resolve_working_directory(
     host: &canban_herdr::host::Host,
     base: &Path,
     rel: Option<&str>,
@@ -284,7 +284,7 @@ fn read_host_text(host: &canban_herdr::host::Host, path: &Path) -> Result<String
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn log_tail(text: &str) -> String {
+pub(crate) fn log_tail(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(LOG_TAIL_LINES);
     let joined = lines[start..].join("\n");
@@ -312,7 +312,10 @@ struct PreparedScript {
     continue_on_error: bool,
 }
 
-fn script_timeout_secs(timeout_minutes: Option<u32>, timeout_seconds: Option<u64>) -> u64 {
+pub(crate) fn script_timeout_secs(
+    timeout_minutes: Option<u32>,
+    timeout_seconds: Option<u64>,
+) -> u64 {
     timeout_seconds
         .or_else(|| timeout_minutes.map(|m| u64::from(m).saturating_mul(60)))
         .unwrap_or(DEFAULT_SCRIPT_TIMEOUT_SECS)
@@ -1049,7 +1052,7 @@ impl AppServer {
     }
 }
 
-fn run_local_process(
+pub(crate) fn run_local_process(
     argv: &[String],
     cwd: &Path,
     env: &BTreeMap<String, String>,

@@ -417,6 +417,7 @@ impl AppServer {
         self.observe_terminals()?;
         self.reconcile_merge_batches()?;
         self.pump_configuration()?;
+        self.pump_schedules()?;
         self.pump_merge_batches()?;
         let client = canban_herdr::Client {
             config: self.config(),

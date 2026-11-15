@@ -602,6 +602,7 @@ impl AppServer {
             for project in db.list::<Project>()? {
                 authoring::initialize(&home, db, &config, &project)?;
             }
+            schedules::reconcile_startup(db)?;
             Ok(())
         })?;
         // Verify that the full durable snapshot decodes cleanly before claiming the home socket,
@@ -931,6 +932,7 @@ mod reminders;
 mod reports;
 mod resources;
 mod runtime;
+mod schedules;
 mod scripts;
 mod sessions;
 mod terminals;

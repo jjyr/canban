@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 19;
+pub const CURRENT: u32 = 20;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -69,7 +69,47 @@ const STEPS: &[Migration] = &[
         up: purge_legacy_workflow_templates_up,
         down: purge_legacy_workflow_templates_down,
     },
+    Migration {
+        version: 20,
+        up: schedules_up,
+        down: schedules_down,
+    },
 ];
+
+fn schedules_up(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS schedule_states(\
+            id TEXT PRIMARY KEY,\
+            project_id TEXT,\
+            card_id TEXT,\
+            state TEXT NOT NULL,\
+            number INTEGER NOT NULL,\
+            data TEXT NOT NULL\
+        );\
+        CREATE INDEX IF NOT EXISTS schedule_states_scope ON schedule_states(project_id, state);\
+        CREATE TABLE IF NOT EXISTS scheduled_runs(\
+            id TEXT PRIMARY KEY,\
+            project_id TEXT,\
+            card_id TEXT,\
+            state TEXT NOT NULL,\
+            number INTEGER NOT NULL,\
+            data TEXT NOT NULL\
+        );\
+        CREATE INDEX IF NOT EXISTS scheduled_runs_scope ON scheduled_runs(project_id, state);",
+    )?;
+    Ok(())
+}
+
+fn schedules_down(tx: &Transaction<'_>) -> Result<()> {
+    let active: u64 = tx.query_row(
+        "SELECT count(*) FROM scheduled_runs WHERE json_extract(data,'$.state') IN ('queued','starting','unknown','running','working')",
+        [],
+        |r| r.get(0),
+    )?;
+    ensure!(active == 0, "End active scheduled runs before downgrading");
+    tx.execute_batch("DROP TABLE IF EXISTS scheduled_runs; DROP TABLE IF EXISTS schedule_states;")?;
+    Ok(())
+}
 
 fn purge_legacy_workflow_templates_up(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch(
@@ -3546,5 +3586,40 @@ mod tests {
 
         assert_eq!(migrate(home.path(), 18).unwrap(), 18);
         assert_eq!(migrate(home.path(), 19).unwrap(), 19);
+    }
+
+    #[test]
+    fn schema_20_creates_schedule_tables_and_round_trips_cleanly() {
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(home.path()).unwrap();
+        assert_eq!(version(&store.conn).unwrap(), 20);
+        let state = canban_types::ScheduleState {
+            id: "schedule:p1:wf1:nightly".into(),
+            project_id: "p1".into(),
+            workflow_id: "wf1".into(),
+            workflow_name: "Nightly Audit".into(),
+            filename: "nightly.yaml".into(),
+            rule_id: "nightly".into(),
+            cron: "0 2 * * *".into(),
+            timezone: Some("UTC".into()),
+            overlap: canban_types::ScheduleOverlap::Skip,
+            creates_card: false,
+            target_column: None,
+            profile_id: Some("developer".into()),
+            enabled: true,
+            last_scheduled_at: None,
+            next_run_at: Some(1_700_000_000_000),
+            last_run_id: None,
+            run_count: 0,
+            queued_triggers: 0,
+            updated_at: 1,
+        };
+        store.db().save(&state).unwrap();
+        let snap = store.snapshot().unwrap();
+        assert_eq!(snap.schedule_states, vec![state]);
+        drop(store);
+
+        assert_eq!(migrate(home.path(), 19).unwrap(), 19);
+        assert_eq!(migrate(home.path(), 20).unwrap(), 20);
     }
 }

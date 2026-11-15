@@ -20,6 +20,42 @@ if os.environ.get("CANBAN_CONFIGURATION_ID"):
         print("Configuration conversation: "+line.strip(),flush=True)
     sys.exit(0)
 
+if os.environ.get("CANBAN_SCHEDULE_RUN_ID") and not os.environ.get("CANBAN_CARD"):
+    run_dir = Path(os.environ["CANBAN_RUN_DIR"])
+    ctx_file = run_dir / "context.json"
+    ctx = json.loads(ctx_file.read_text()) if ctx_file.exists() else {}
+    srid = os.environ["CANBAN_SCHEDULE_RUN_ID"]
+    instruction = ctx.get("instruction", "")
+    print(f"Fixture scheduled Agent running {srid}", flush=True)
+    if "concurrency-barrier" in instruction:
+        barrier = home / "acceptance-barrier"
+        barrier.mkdir(exist_ok=True)
+        (barrier / srid.replace(":", "-")).write_text(ctx.get("project", {}).get("id", ""))
+        deadline = time.monotonic() + 45
+        while not (barrier / "release").exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Acceptance did not release scheduled Agent")
+            time.sleep(0.1)
+    report = run_dir / "report.md"
+    report.write_text(
+        f"# Scheduled Run Report\n\nSchedule run `{srid}` completed cleanly without creating a Card.\n"
+    )
+    state = "blocked" if "block-me" in instruction else "completed"
+    subprocess.run(
+        [
+            os.environ["CANBAN_CLI"],
+            "report",
+            "--state",
+            state,
+            "--message",
+            f"Scheduled fixture {state}",
+            "--file",
+            str(report),
+        ],
+        check=True,
+    )
+    sys.exit(0)
+
 run_dir = Path(os.environ["CANBAN_RUN_DIR"])
 manifest = run_dir / "context.json"
 context = json.loads(manifest.read_text())

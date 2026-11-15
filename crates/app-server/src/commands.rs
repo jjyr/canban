@@ -47,6 +47,9 @@ impl AppServer {
         if method.starts_with("configuration.") {
             return self.configuration_call(method, p);
         }
+        if method.starts_with("schedule.") {
+            return self.schedule_call(method, p);
+        }
         if method.starts_with("workflow.") {
             return self.workflow_call(method, p);
         }
@@ -233,7 +236,12 @@ impl AppServer {
                     .iter()
                     .filter_map(|t| t.agent.as_ref())
                     .filter(|a| a.state == "queued" || a.pending.is_some())
-                    .count();
+                    .count()
+                    + snapshot
+                        .scheduled_runs
+                        .iter()
+                        .filter(|r| !r.creates_card && r.state == "queued")
+                        .count();
                 Ok(
                     json!({"active":canban_scheduler::active_count(&snapshot),"max_agents":config.scheduler.max_agents,"queued":queued}),
                 )

@@ -19,6 +19,12 @@ impl AppServer {
             {
                 self.cancel_batch_from_terminal_close(db, &mut batch, &mut item)?;
             }
+            if let Ok(mut sched) = db.get::<canban_types::ScheduledRun>(terminal_id)
+                && !sched.creates_card
+                && sched.active()
+            {
+                self.cancel_scheduled_run_from_terminal_close(db, &mut sched, &mut item)?;
+            }
             if let Ok(mut configuration)=db.get::<ConfigurationSession>(terminal_id) && configuration.state=="queued" {
                 configuration.state="cancelled".into();db.save(&configuration)?;
                 item.runtime=Some(TerminalRuntime{machine:"local".into(),owner_core_id:None,core_id:None,terminal:None,state:"finished".into(),connection:"connected".into(),error:None,agent_status:None,agent_turn:None,observed_agent:None,waiting:None});db.save(&item)?;
@@ -1012,6 +1018,7 @@ impl AppServer {
                 t.conversation_id.is_none()
                     && !t.id.starts_with("merge-queue:")
                     && !t.id.starts_with("configuration:")
+                    && !t.id.starts_with("scheduled:")
             })
             .any(|t| {
                 let live = t.runtime.as_ref().is_some_and(|r| r.state != "finished");

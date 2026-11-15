@@ -230,6 +230,7 @@ fn ensure_entry_rule(doc: &mut Document, column: &str, start: &str) {
                 ..Default::default()
             },
             enabled: true,
+            ..Default::default()
         },
     );
 }

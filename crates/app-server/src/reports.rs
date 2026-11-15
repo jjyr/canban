@@ -2,6 +2,15 @@ use super::*;
 
 impl AppServer {
     pub(super) fn report(&self, p: Value) -> Result<Value> {
+        if p["schedule_run_id"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+            || p["terminal_id"]
+                .as_str()
+                .is_some_and(|s| s.trim().starts_with("scheduled:"))
+        {
+            return self.schedule_report(p);
+        }
         if p["batch_id"].as_str().is_some_and(|s| !s.trim().is_empty())
             || p["batch"].as_str().is_some_and(|s| !s.trim().is_empty())
             || p["terminal_id"]

@@ -2208,6 +2208,8 @@ mod github;
 
 mod workflows;
 
+mod schedules_cases;
+
 mod multi_host;
 
 #[test]

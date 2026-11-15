@@ -475,15 +475,218 @@ pub struct WorkflowTemplate {
     pub updated_at: u64,
 }
 pub const DEFAULT_WORKFLOW_TEMPLATE_ID: &str = "default";
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleOverlap {
+    #[default]
+    Skip,
+    Queue,
+    Allow,
+}
+
+impl ScheduleOverlap {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::Queue => "queue",
+            Self::Allow => "allow",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Skip => "Skip overlap",
+            Self::Queue => "Queue 1",
+            Self::Allow => "Allow concurrent",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "skip" => Some(Self::Skip),
+            "queue" => Some(Self::Queue),
+            "allow" => Some(Self::Allow),
+            _ => None,
+        }
+    }
+}
+
+pub fn is_default_schedule_overlap(v: &ScheduleOverlap) -> bool {
+    *v == ScheduleOverlap::Skip
+}
+
+/// Optional Card creation settings for a scheduled `WorkflowRule`.
+/// When omitted (`None`), the schedule runs in Cardless Terminal Agent mode.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduleCardConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+/// Provenance recorded on a `Card` created automatically by a scheduled workflow trigger.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduleSourceRef {
+    pub schedule_id: String,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub filename: String,
+    pub rule_id: String,
+    pub cron: String,
+    pub run_id: String,
+    pub run_number: u64,
+    pub scheduled_at: u64,
+}
+
+/// Persistent timer state for an active scheduled `WorkflowRule` (`schedule:<project_id>:<workflow_id>:<rule_id>`).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduleState {
+    pub id: String,
+    pub project_id: String,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub filename: String,
+    pub rule_id: String,
+    pub cron: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default)]
+    pub overlap: ScheduleOverlap,
+    pub creates_card: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_column: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_scheduled_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_id: Option<String>,
+    #[serde(default)]
+    pub run_count: u64,
+    #[serde(default)]
+    pub queued_triggers: u32,
+    pub updated_at: u64,
+}
+
+/// Persistent execution record for a scheduled workflow trigger (Card-creating or Cardless Terminal Agent).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ScheduledRun {
+    pub id: String,
+    pub schedule_id: String,
+    pub project_id: String,
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub filename: String,
+    pub rule_id: String,
+    pub cron: String,
+    pub number: u64,
+    /// `"cron"` or `"manual"`.
+    pub trigger_kind: String,
+    pub creates_card: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<String>,
+    #[serde(default)]
+    pub cwd: String,
+    /// One of `"queued"`, `"starting"`, `"running"`, `"completed"`, `"blocked"`, `"failed"`, `"skipped"`, `"cancelled"`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub scheduled_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_requested_at: Option<u64>,
+    pub updated_at: u64,
+}
+
+impl ScheduledRun {
+    pub fn active(&self) -> bool {
+        matches!(
+            self.state.as_str(),
+            "queued" | "starting" | "unknown" | "running" | "working"
+        )
+    }
+
+    pub fn short_id(&self) -> &str {
+        self.id.rsplit(':').next().unwrap_or(&self.id)
+    }
+}
+
+fn default_rule_event() -> String {
+    "schedule".into()
+}
+
+fn is_empty_selector(s: &EventSelector) -> bool {
+    *s == EventSelector::default()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowRule {
+    #[serde(default = "default_rule_event")]
     pub event: String,
+    #[serde(default)]
     pub start_at: String,
-    #[serde(default, rename = "match")]
+    #[serde(default, rename = "match", skip_serializing_if = "is_empty_selector")]
     pub selector: EventSelector,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "is_default_schedule_overlap")]
+    pub overlap: ScheduleOverlap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<ScheduleCardConfig>,
     #[serde(default = "enabled_rule")]
     pub enabled: bool,
+}
+impl Default for WorkflowRule {
+    fn default() -> Self {
+        Self {
+            event: default_rule_event(),
+            start_at: String::new(),
+            selector: EventSelector::default(),
+            cron: None,
+            timezone: None,
+            overlap: ScheduleOverlap::default(),
+            card: None,
+            enabled: true,
+        }
+    }
+}
+impl WorkflowRule {
+    pub fn is_schedule(&self) -> bool {
+        self.event == "schedule" || self.cron.is_some()
+    }
 }
 fn enabled_rule() -> bool {
     true

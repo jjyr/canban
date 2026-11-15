@@ -456,6 +456,19 @@ impl AppServer {
                 }
             }
         } else {
+            if let Ok(sched) = self.store.lock().unwrap().db().get::<ScheduledRun>(id)
+                && !sched.creates_card
+                && entry
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|r| r.state == "finished")
+                && let Some(path) = &sched.output_path
+            {
+                return self.schedule_call(
+                    "schedule.read_artifact",
+                    json!({ "schedule_run_id": sched.id, "path": path }),
+                );
+            }
             let runtime = entry
                 .runtime
                 .as_ref()

@@ -1,0 +1,1948 @@
+//! Workflow-configured scheduled tasks (`ScheduleState` & `ScheduledRun`),
+//! supporting both Card-creating automation and Cardless Terminal Agent execution
+//! with automatic post-report PTY reclamation.
+
+use super::*;
+use canban_scheduler::timers::{
+    ScheduleAction, compute_next_run_at, evaluate_schedules, next_schedule_deadline,
+    next_scheduled_run,
+};
+use canban_types::cron::CronTimeZone;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Settle delay before forcibly reclaiming a completed Cardless scheduled PTY
+/// when Herdr has not yet emitted `"idle"` / `"done"` (`5s`).
+pub(super) const SCHEDULE_RECLAIM_SETTLE_MS: u64 = 5_000;
+
+/// Maximum wait after sending a graceful exit command (`ExitAction::Input`) before
+/// falling back to `terminal.kill` so completed scheduled terminals never linger (`10s`).
+pub(super) const SCHEDULE_GRACEFUL_EXIT_TIMEOUT_MS: u64 = 10_000;
+
+/// Maximum number of retained `ScheduledRun` rows per schedule so history stays bounded.
+const MAX_RUNS_PER_SCHEDULE: usize = 50;
+
+pub(super) fn schedule_state_id(project_id: &str, workflow_id: &str, rule_id: &str) -> String {
+    format!("schedule:{project_id}:{workflow_id}:{rule_id}")
+}
+
+fn profile_agent_engine(prof: &Profile) -> String {
+    let cmd = prof.command_name();
+    match cmd.as_str() {
+        "codex" | "claude" => cmd,
+        _ => prof.preset.clone().unwrap_or(cmd),
+    }
+}
+
+fn expand_schedule_placeholders(
+    template: &str,
+    tz: CronTimeZone,
+    scheduled_at: u64,
+    run_number: u64,
+    workflow_name: &str,
+    rule_id: &str,
+) -> String {
+    let (date, dt) = tz.format_timestamp(scheduled_at);
+    template
+        .replace("{{date}}", &date)
+        .replace("{{datetime}}", &dt)
+        .replace("{{run_number}}", &run_number.to_string())
+        .replace("{{workflow}}", workflow_name)
+        .replace("{{rule}}", rule_id)
+}
+
+/// Synchronizes `ScheduleState` rows in SQLite with the Project's published `WorkflowSource` collection.
+pub(super) fn sync_project_schedules(
+    db: Db<'_>,
+    project: &Project,
+    active_sources: &[WorkflowSource],
+) -> Result<()> {
+    let existing: Vec<ScheduleState> = db
+        .list::<ScheduleState>()?
+        .into_iter()
+        .filter(|s| s.project_id == project.id)
+        .collect();
+    let now_ms = now();
+    let mut keep_ids = BTreeSet::new();
+
+    for source in active_sources {
+        let rev: WorkflowRevision = db.get(&source.revision_id)?;
+        let workflow_name = if rev.definition.name.trim().is_empty() {
+            source.filename.trim_end_matches(".yaml").to_owned()
+        } else {
+            rev.definition.name.clone()
+        };
+        for (rule_id, rule) in &source.rules {
+            if !rule.is_schedule() {
+                continue;
+            }
+            let Some(cron) = rule
+                .cron
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let sid = schedule_state_id(&project.id, &source.workflow_id, rule_id);
+            keep_ids.insert(sid.clone());
+
+            let enabled = source.enabled && rule.enabled;
+            let timezone = rule
+                .timezone
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned);
+            let target_column = rule.card.as_ref().map(|c| {
+                c.column
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        project
+                            .workflow
+                            .stages
+                            .first()
+                            .map(|s| s.id.clone())
+                            .unwrap_or_else(|| "backlog".into())
+                    })
+            });
+            let profile_id = if rule.card.is_none() {
+                canban_workflow_engine::source::schedule_agent_profile(&rev.definition, rule_id)
+            } else {
+                None
+            };
+
+            let prev = existing.iter().find(|s| s.id == sid);
+            let schedule_changed = prev.is_none_or(|p| {
+                p.cron != cron || p.timezone != timezone || (!p.enabled && enabled)
+            });
+            let next_run_at = if !enabled {
+                None
+            } else if schedule_changed || prev.and_then(|p| p.next_run_at).is_none() {
+                compute_next_run_at(cron, timezone.as_deref(), now_ms)
+            } else {
+                prev.and_then(|p| p.next_run_at)
+            };
+
+            let state = ScheduleState {
+                id: sid,
+                project_id: project.id.clone(),
+                filename: source.filename.clone(),
+                workflow_id: source.workflow_id.clone(),
+                workflow_name: workflow_name.clone(),
+                rule_id: rule_id.clone(),
+                cron: cron.to_owned(),
+                timezone,
+                overlap: rule.overlap,
+                enabled,
+                creates_card: rule.card.is_some(),
+                target_column,
+                profile_id,
+                next_run_at,
+                last_scheduled_at: prev.and_then(|p| p.last_scheduled_at),
+                last_run_id: prev.and_then(|p| p.last_run_id.clone()),
+                queued_triggers: if enabled {
+                    prev.map_or(0, |p| p.queued_triggers)
+                } else {
+                    0
+                },
+                run_count: prev.map_or(0, |p| p.run_count),
+                updated_at: now_ms,
+            };
+            db.save(&state)?;
+        }
+    }
+
+    for old in existing {
+        if !keep_ids.contains(&old.id) {
+            db.conn
+                .execute("DELETE FROM schedule_states WHERE id=?1", [&old.id])?;
+        }
+    }
+    Ok(())
+}
+
+/// Reconciles persisted schedule timers and in-flight runs on `AppServer::open` startup:
+/// - Advances any past `next_run_at <= now` directly to the next future occurrence (never replays missed offline ticks).
+/// - Marks any interrupted `"starting"` Cardless run without a terminal receipt as `"unknown"`.
+pub(super) fn reconcile_startup(db: Db<'_>) -> Result<()> {
+    let now_ms = now();
+    for mut state in db.list::<ScheduleState>()? {
+        if !state.enabled {
+            if state.next_run_at.is_some() || state.queued_triggers > 0 {
+                state.next_run_at = None;
+                state.queued_triggers = 0;
+                state.updated_at = now_ms;
+                db.save(&state)?;
+            }
+            continue;
+        }
+        let needs_advance = state.next_run_at.is_none_or(|due| due <= now_ms);
+        if needs_advance {
+            state.next_run_at = compute_next_run_at(&state.cron, state.timezone.as_deref(), now_ms);
+            state.updated_at = now_ms;
+            db.save(&state)?;
+        }
+    }
+    for mut run in db.list::<ScheduledRun>()? {
+        if !run.creates_card && run.state == "starting" {
+            let has_terminal = run
+                .terminal_id
+                .as_deref()
+                .and_then(|tid| db.get::<TerminalEntry>(tid).ok())
+                .and_then(|t| t.runtime)
+                .and_then(|r| r.terminal)
+                .is_some();
+            if has_terminal {
+                run.state = "running".into();
+            } else {
+                run.state = "unknown".into();
+                run.error = Some(
+                    "AppServer restarted while scheduled Agent launch was in flight; not automatically replayed"
+                        .into(),
+                );
+            }
+            db.save(&run)?;
+        }
+    }
+    Ok(())
+}
+
+fn trim_schedule_history(db: Db<'_>, schedule_id: &str) -> Result<()> {
+    let mut runs: Vec<ScheduledRun> = db
+        .list::<ScheduledRun>()?
+        .into_iter()
+        .filter(|r| r.schedule_id == schedule_id && !r.active())
+        .collect();
+    if runs.len() <= MAX_RUNS_PER_SCHEDULE {
+        return Ok(());
+    }
+    runs.sort_by(|a, b| {
+        b.scheduled_at
+            .cmp(&a.scheduled_at)
+            .then_with(|| b.number.cmp(&a.number))
+    });
+    for stale in runs.into_iter().skip(MAX_RUNS_PER_SCHEDULE) {
+        db.conn
+            .execute("DELETE FROM scheduled_runs WHERE id=?1", [&stale.id])?;
+    }
+    Ok(())
+}
+
+/// Fires one scheduled task invocation (either cron tick or manual `schedule.trigger`),
+/// creating either a scheduled Board Card + `WorkflowRun` or a queued Cardless `ScheduledRun` + `TerminalEntry`.
+pub(super) fn fire_schedule(
+    db: Db<'_>,
+    config: &Config,
+    schedule_id: &str,
+    scheduled_at: u64,
+    trigger_kind: &str,
+    allow_disabled_manual: bool,
+) -> Result<(ScheduledRun, Option<String>)> {
+    let mut state: ScheduleState = db
+        .get(schedule_id)
+        .with_context(|| format!("Schedule not found: {schedule_id}"))?;
+    let project: Project = db.get(&state.project_id)?;
+    let source = db
+        .list::<WorkflowSource>()?
+        .into_iter()
+        .find(|s| s.project_id == project.id && s.workflow_id == state.workflow_id)
+        .context("Scheduled Workflow source is no longer active")?;
+    let rule = source
+        .rules
+        .get(&state.rule_id)
+        .cloned()
+        .context("Scheduled trigger rule no longer exists")?;
+    ensure!(
+        rule.is_schedule(),
+        "Rule `{}` is no longer a scheduled trigger",
+        state.rule_id
+    );
+    if !allow_disabled_manual {
+        ensure!(
+            source.enabled && rule.enabled && state.enabled,
+            "Schedule is disabled"
+        );
+    }
+
+    let rev = super::workflow::published(db, &state.workflow_id)?;
+    let start_step = rev
+        .definition
+        .entries
+        .get(&state.rule_id)
+        .cloned()
+        .or_else(|| {
+            let s = rule.start_at.trim();
+            (!s.is_empty()).then(|| s.to_owned())
+        });
+    let run_number = db.counter(&format!("schedule-run:{}", state.id))?;
+    let short = id();
+    let run_id = format!("scheduled:{}:{short}", project.id);
+    let now_ms = now();
+    let tz = CronTimeZone::parse(rule.timezone.as_deref()).unwrap_or(CronTimeZone::Local);
+
+    let (scheduled_run, created_card_id) = if let Some(card_cfg) = &rule.card {
+        let target_column = card_cfg
+            .column
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                project
+                    .workflow
+                    .stages
+                    .first()
+                    .map(|s| s.id.clone())
+                    .unwrap_or_else(|| "backlog".into())
+            });
+        ensure!(
+            project
+                .workflow
+                .stages
+                .iter()
+                .any(|s| s.id == target_column),
+            "Target column `{target_column}` does not exist in Project `{}`",
+            project.name
+        );
+        let default_title = format!("{} ({{{{date}}}})", state.workflow_name);
+        let raw_title = card_cfg
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&default_title);
+        let title = expand_schedule_placeholders(
+            raw_title,
+            tz,
+            scheduled_at,
+            run_number,
+            &state.workflow_name,
+            &state.rule_id,
+        );
+        let body = card_cfg
+            .body
+            .as_deref()
+            .map(|b| {
+                expand_schedule_placeholders(
+                    b,
+                    tz,
+                    scheduled_at,
+                    run_number,
+                    &state.workflow_name,
+                    &state.rule_id,
+                )
+            })
+            .unwrap_or_default();
+
+        let card_num = db.counter(&format!("cards:{}", project.id))?;
+        let mut card = canban_kanban::card(&project, card_num, title.trim(), &body)?;
+        card.stage = target_column;
+        card.created_by = format!("schedule:{}", state.workflow_name);
+        card.schedule_source = Some(ScheduleSourceRef {
+            schedule_id: state.id.clone(),
+            workflow_id: state.workflow_id.clone(),
+            workflow_name: state.workflow_name.clone(),
+            filename: state.filename.clone(),
+            rule_id: state.rule_id.clone(),
+            cron: state.cron.clone(),
+            run_id: run_id.clone(),
+            run_number,
+            scheduled_at,
+        });
+        canban_kanban::order::place(db, &mut card, None)?;
+        db.save(&card)?;
+        // `origin: "schedule"` keeps `card.column_entered` local subscriptions from double-starting a second WorkflowRun.
+        log(
+            db,
+            &card,
+            "card.created",
+            "schedule",
+            &format!(
+                "Scheduled Card created by {} ({})",
+                state.workflow_name, state.rule_id
+            ),
+            None,
+            json!({
+                "title": card.title,
+                "stage": card.stage,
+                "origin": "schedule",
+                "reason": "scheduled",
+                "schedule_id": state.id,
+                "scheduled_run_id": run_id,
+                "workflow_id": state.workflow_id,
+                "rule_id": state.rule_id,
+                "run_number": run_number,
+                "trigger_kind": trigger_kind,
+            }),
+        )?;
+
+        let wf_run = super::workflow::start_scheduled(db, config, &mut card, rev, &state.rule_id)?;
+        let initial_state = if wf_run.active() {
+            "running".to_owned()
+        } else {
+            wf_run.state.clone()
+        };
+        let completed_at = (!wf_run.active()).then_some(now_ms);
+        let run = ScheduledRun {
+            id: run_id,
+            schedule_id: state.id.clone(),
+            project_id: project.id.clone(),
+            workflow_id: state.workflow_id.clone(),
+            workflow_name: state.workflow_name.clone(),
+            filename: state.filename.clone(),
+            rule_id: state.rule_id.clone(),
+            cron: state.cron.clone(),
+            number: run_number,
+            trigger_kind: trigger_kind.to_owned(),
+            creates_card: true,
+            card_id: Some(card.id.clone()),
+            card_number: Some(card.number),
+            workflow_run_id: Some(wf_run.id),
+            start_step: start_step.clone(),
+            current_step: wf_run.step,
+            profile_id: None,
+            provider_session_id: None,
+            terminal_id: wf_run.terminal_id,
+            cwd: project.work_location().directory,
+            state: initial_state,
+            summary: Some(format!("Created Card #{} ({})", card.number, card.title)),
+            report_path: None,
+            output_path: None,
+            error: wf_run.error,
+            scheduled_at,
+            started_at: Some(now_ms),
+            completed_at,
+            close_requested_at: None,
+            updated_at: now_ms,
+        };
+        db.save(&run)?;
+        (run, Some(card.id))
+    } else {
+        let explicit_prof =
+            canban_workflow_engine::source::schedule_agent_profile(&rev.definition, &state.rule_id);
+        let has_agent_step = explicit_prof.is_some()
+            || rev
+                .definition
+                .steps
+                .values()
+                .any(|s| matches!(s, WorkflowStep::Agent { .. }));
+        let selected_profile = if has_agent_step {
+            Some(canban_scheduler::select_in_project(
+                config,
+                Some(&project),
+                explicit_prof.as_deref(),
+            )?)
+        } else {
+            None
+        };
+        let location = project.work_location();
+        let terminal_id = if let Some(prof) = selected_profile.as_ref() {
+            let entry = TerminalEntry {
+                id: run_id.clone(),
+                conversation_id: None,
+                number: db.counter("terminal-number")?,
+                name: Some(format!("{} #{}", state.workflow_name, run_number)),
+                origin_project_id: Some(project.id.clone()),
+                origin_card_id: None,
+                agent_engine: Some(profile_agent_engine(prof)),
+                created_at: now_ms,
+                runtime: Some(TerminalRuntime {
+                    machine: location.machine.clone(),
+                    owner_core_id: None,
+                    core_id: None,
+                    terminal: None,
+                    state: "queued".into(),
+                    connection: "connecting".into(),
+                    error: None,
+                    agent_status: None,
+                    agent_turn: None,
+                    observed_agent: None,
+                    waiting: None,
+                }),
+                agent: None,
+            };
+            db.save(&entry)?;
+            Some(run_id.clone())
+        } else {
+            None
+        };
+        let run = ScheduledRun {
+            id: run_id,
+            schedule_id: state.id.clone(),
+            project_id: project.id.clone(),
+            workflow_id: state.workflow_id.clone(),
+            workflow_name: state.workflow_name.clone(),
+            filename: state.filename.clone(),
+            rule_id: state.rule_id.clone(),
+            cron: state.cron.clone(),
+            number: run_number,
+            trigger_kind: trigger_kind.to_owned(),
+            creates_card: false,
+            card_id: None,
+            card_number: None,
+            workflow_run_id: None,
+            start_step: start_step.clone(),
+            current_step: start_step,
+            profile_id: selected_profile.map(|p| p.id),
+            provider_session_id: None,
+            terminal_id,
+            cwd: location.directory,
+            state: "queued".into(),
+            summary: None,
+            report_path: None,
+            output_path: None,
+            error: None,
+            scheduled_at,
+            started_at: None,
+            completed_at: None,
+            close_requested_at: None,
+            updated_at: now_ms,
+        };
+        db.save(&run)?;
+        (run, None)
+    };
+
+    state.run_count = state.run_count.saturating_add(1);
+    state.last_scheduled_at = Some(scheduled_at);
+    state.last_run_id = Some(scheduled_run.id.clone());
+    state.updated_at = now_ms;
+    db.save(&state)?;
+    trim_schedule_history(db, &state.id)?;
+    Ok((scheduled_run, created_card_id))
+}
+
+fn record_skipped_overlap(
+    db: Db<'_>,
+    schedule_id: &str,
+    scheduled_at: u64,
+    next_run_at: Option<u64>,
+) -> Result<()> {
+    let mut state: ScheduleState = db.get(schedule_id)?;
+    let run_number = db.counter(&format!("schedule-run:{}", state.id))?;
+    let now_ms = now();
+    let run_id = format!("scheduled:{}:{}", state.project_id, id());
+    let run = ScheduledRun {
+        id: run_id.clone(),
+        schedule_id: state.id.clone(),
+        project_id: state.project_id.clone(),
+        workflow_id: state.workflow_id.clone(),
+        workflow_name: state.workflow_name.clone(),
+        filename: state.filename.clone(),
+        rule_id: state.rule_id.clone(),
+        cron: state.cron.clone(),
+        number: run_number,
+        trigger_kind: "cron".into(),
+        creates_card: state.creates_card,
+        card_id: None,
+        card_number: None,
+        workflow_run_id: None,
+        start_step: None,
+        current_step: None,
+        profile_id: state.profile_id.clone(),
+        provider_session_id: None,
+        terminal_id: None,
+        cwd: String::new(),
+        state: "skipped".into(),
+        summary: Some("Skipped due to active previous run (overlap: skip)".into()),
+        report_path: None,
+        output_path: None,
+        error: None,
+        scheduled_at,
+        started_at: Some(now_ms),
+        completed_at: Some(now_ms),
+        close_requested_at: None,
+        updated_at: now_ms,
+    };
+    db.save(&run)?;
+    state.next_run_at = next_run_at;
+    state.last_scheduled_at = Some(scheduled_at);
+    state.last_run_id = Some(run_id);
+    state.run_count = state.run_count.saturating_add(1);
+    state.updated_at = now_ms;
+    db.save(&state)?;
+    trim_schedule_history(db, &state.id)?;
+    Ok(())
+}
+
+impl AppServer {
+    /// Returns the earliest wakeup deadline across enabled schedules and settling Cardless PTYs.
+    pub(super) fn schedule_deadline(&self, snapshot: &Snapshot) -> Option<u64> {
+        let mut earliest = next_schedule_deadline(&snapshot.schedule_states);
+        let mut consider = |at: u64| {
+            earliest = Some(earliest.map_or(at, |cur| cur.min(at)));
+        };
+        for run in &snapshot.scheduled_runs {
+            if run.creates_card {
+                continue;
+            }
+            let Some(tid) = run.terminal_id.as_deref() else {
+                continue;
+            };
+            let Some(rt) = snapshot
+                .terminals
+                .iter()
+                .find(|t| t.id == tid)
+                .and_then(|t| t.runtime.as_ref())
+            else {
+                continue;
+            };
+            if rt.state == "finished" {
+                continue;
+            }
+            if matches!(run.state.as_str(), "completed" | "failed" | "blocked") {
+                if let Some(req_at) = run.close_requested_at {
+                    consider(req_at.saturating_add(SCHEDULE_GRACEFUL_EXIT_TIMEOUT_MS + 1));
+                } else if let Some(done_at) = run.completed_at {
+                    consider(done_at.saturating_add(SCHEDULE_RECLAIM_SETTLE_MS + 1));
+                }
+            }
+        }
+        earliest
+    }
+
+    pub(super) fn cancel_scheduled_run_from_terminal_close(
+        &self,
+        db: Db<'_>,
+        run: &mut ScheduledRun,
+        item: &mut TerminalEntry,
+    ) -> Result<()> {
+        if run.state == "queued" {
+            item.runtime = Some(TerminalRuntime {
+                machine: item
+                    .runtime
+                    .as_ref()
+                    .map(|r| r.machine.clone())
+                    .unwrap_or_else(|| "local".into()),
+                owner_core_id: None,
+                core_id: None,
+                terminal: None,
+                state: "finished".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            });
+            db.save(item)?;
+        }
+        run.state = "cancelled".into();
+        run.error = Some("Scheduled Agent terminal closed by user".into());
+        run.completed_at = Some(now());
+        db.save(run)?;
+        Ok(())
+    }
+
+    /// Reconciles Card-mode scheduled runs, fires due cron timers, launches queued Cardless
+    /// scheduled runs within `scheduler.max_agents`, and automatically reclaims finished Cardless PTYs.
+    pub(super) fn pump_schedules(&self) -> Result<()> {
+        self.reconcile_card_scheduled_runs()?;
+        self.evaluate_and_fire_due_schedules()?;
+        self.observe_and_reclaim_cardless_schedules()?;
+        self.launch_queued_cardless_schedules()?;
+        Ok(())
+    }
+
+    fn reconcile_card_scheduled_runs(&self) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        let mut updates = Vec::new();
+        for run in snapshot
+            .scheduled_runs
+            .iter()
+            .filter(|r| r.creates_card && r.active())
+        {
+            let wf = run
+                .workflow_run_id
+                .as_deref()
+                .and_then(|id| snapshot.workflow_runs.iter().find(|w| w.id == id));
+            let card = run
+                .card_id
+                .as_deref()
+                .and_then(|id| snapshot.cards.iter().find(|c| c.id == id));
+            let (next_state, next_step, next_terminal, next_err, done) = match wf {
+                Some(w) if w.active() => {
+                    let st = if w.state == "blocked" || card.is_some_and(|c| c.human_gate.is_some())
+                    {
+                        "blocked"
+                    } else {
+                        "running"
+                    };
+                    (
+                        st.to_owned(),
+                        w.step.clone(),
+                        w.terminal_id.clone(),
+                        w.error.clone(),
+                        false,
+                    )
+                }
+                Some(w) => (
+                    w.state.clone(),
+                    w.step.clone(),
+                    w.terminal_id.clone(),
+                    w.error.clone(),
+                    true,
+                ),
+                None => (
+                    "cancelled".to_owned(),
+                    run.current_step.clone(),
+                    run.terminal_id.clone(),
+                    None,
+                    true,
+                ),
+            };
+            if run.state != next_state
+                || run.current_step != next_step
+                || run.terminal_id != next_terminal
+                || (done && run.completed_at.is_none())
+            {
+                updates.push((
+                    run.id.clone(),
+                    next_state,
+                    next_step,
+                    next_terminal,
+                    next_err,
+                    done,
+                ));
+            }
+        }
+        if !updates.is_empty() {
+            let now_ms = now();
+            self.store.lock().unwrap().write(|db| {
+                for (rid, st, step, tid, err, done) in updates {
+                    if let Ok(mut cur) = db.get::<ScheduledRun>(&rid) {
+                        cur.state = st;
+                        cur.current_step = step;
+                        if tid.is_some() {
+                            cur.terminal_id = tid;
+                        }
+                        if err.is_some() {
+                            cur.error = err;
+                        }
+                        if done && cur.completed_at.is_none() {
+                            cur.completed_at = Some(now_ms);
+                        }
+                        db.save(&cur)?;
+                    }
+                }
+                Ok(())
+            })?;
+            self.emit("schedules", None);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn evaluate_and_fire_due_schedules_for_test(&self) -> Result<()> {
+        self.evaluate_and_fire_due_schedules()
+    }
+
+    fn evaluate_and_fire_due_schedules(&self) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        let actions = evaluate_schedules(&snapshot, now());
+        if actions.is_empty() {
+            return Ok(());
+        }
+        let config = self.config();
+        let mut emitted_cards = Vec::new();
+        let mut changed = false;
+        self.store.lock().unwrap().write(|db| {
+            for action in actions {
+                match action {
+                    ScheduleAction::AdvanceOnly {
+                        schedule_id,
+                        next_run_at,
+                        clear_queued,
+                    } => {
+                        if let Ok(mut st) = db.get::<ScheduleState>(&schedule_id) {
+                            st.next_run_at = next_run_at;
+                            if clear_queued {
+                                st.queued_triggers = 0;
+                            }
+                            st.updated_at = now();
+                            db.save(&st)?;
+                            changed = true;
+                        }
+                    }
+                    ScheduleAction::SkipOverlap {
+                        schedule_id,
+                        scheduled_at,
+                        next_run_at,
+                    } => {
+                        record_skipped_overlap(db, &schedule_id, scheduled_at, next_run_at)?;
+                        changed = true;
+                    }
+                    ScheduleAction::QueueOverlap {
+                        schedule_id,
+                        next_run_at,
+                    } => {
+                        if let Ok(mut st) = db.get::<ScheduleState>(&schedule_id) {
+                            st.queued_triggers = 1;
+                            st.next_run_at = next_run_at;
+                            st.updated_at = now();
+                            db.save(&st)?;
+                            changed = true;
+                        }
+                    }
+                    ScheduleAction::Trigger {
+                        schedule_id,
+                        scheduled_at,
+                        next_run_at,
+                        consume_queued,
+                    } => {
+                        if let Ok(mut st) = db.get::<ScheduleState>(&schedule_id) {
+                            if consume_queued {
+                                st.queued_triggers = 0;
+                            } else {
+                                st.next_run_at = next_run_at;
+                            }
+                            st.updated_at = now();
+                            db.save(&st)?;
+                        }
+                        if let Ok((_, card_id)) =
+                            fire_schedule(db, &config, &schedule_id, scheduled_at, "cron", false)
+                        {
+                            if let Some(cid) = card_id {
+                                emitted_cards.push(cid);
+                            }
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            events::pump(db, &config)?;
+            Ok(())
+        })?;
+        if changed {
+            let _ = self.pump_admissions();
+            self.request_deliveries();
+            self.request_scripts();
+            for cid in emitted_cards {
+                self.emit("application", Some(cid));
+            }
+            self.emit("schedules", None);
+        }
+        Ok(())
+    }
+
+    fn observe_and_reclaim_cardless_schedules(&self) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        let now_ms = now();
+        let client = canban_herdr::Client {
+            config: self.config(),
+        };
+        for run in snapshot.scheduled_runs.iter().filter(|r| !r.creates_card) {
+            let Some(tid) = run.terminal_id.as_deref() else {
+                continue;
+            };
+            let Some(entry) = snapshot.terminals.iter().find(|t| t.id == tid) else {
+                continue;
+            };
+            let Some(rt) = entry.runtime.as_ref() else {
+                continue;
+            };
+
+            if rt.state == "finished" {
+                if matches!(run.state.as_str(), "running" | "working") {
+                    let out_path = self.capture_scheduled_output(&run.id, entry).ok().flatten();
+                    self.store.lock().unwrap().write(|db| {
+                        let mut cur: ScheduledRun = db.get(&run.id)?;
+                        if matches!(cur.state.as_str(), "running" | "working") {
+                            cur.state = "failed".into();
+                            cur.error =
+                                Some("Scheduled Agent exited without reporting an outcome".into());
+                            cur.completed_at = Some(now_ms);
+                            if out_path.is_some() {
+                                cur.output_path = out_path;
+                            }
+                            db.save(&cur)?;
+                        }
+                        Ok(())
+                    })?;
+                    self.emit("schedules", None);
+                }
+                continue;
+            }
+
+            if matches!(run.state.as_str(), "running" | "working") {
+                let next_state = if rt.agent_status.as_deref() == Some("working") {
+                    "working"
+                } else {
+                    "running"
+                };
+                if run.state != next_state {
+                    self.store.lock().unwrap().write(|db| {
+                        let mut cur: ScheduledRun = db.get(&run.id)?;
+                        if matches!(cur.state.as_str(), "running" | "working") {
+                            cur.state = next_state.into();
+                            db.save(&cur)?;
+                        }
+                        Ok(())
+                    })?;
+                    self.emit("schedules", None);
+                }
+                continue;
+            }
+
+            if !matches!(run.state.as_str(), "completed" | "failed" | "blocked") {
+                continue;
+            }
+            let Some(addr) = rt.terminal.as_deref() else {
+                self.mark_scheduled_terminal_finished(tid);
+                continue;
+            };
+            let core_matches = rt
+                .core_id
+                .as_deref()
+                .is_some_and(|cid| self.verified_core_id().ok().as_deref() == Some(cid));
+
+            if let Some(req_at) = run.close_requested_at {
+                if now_ms.saturating_sub(req_at) >= SCHEDULE_GRACEFUL_EXIT_TIMEOUT_MS {
+                    if run.output_path.is_none()
+                        && let Ok(Some(rel)) = self.capture_scheduled_output(&run.id, entry)
+                    {
+                        let _ = self.store.lock().unwrap().write(|db| {
+                            let mut cur: ScheduledRun = db.get(&run.id)?;
+                            cur.output_path = Some(rel);
+                            db.save(&cur)
+                        });
+                    }
+                    if core_matches {
+                        let _ = client.call("terminal.kill", json!({ "terminal": addr }));
+                    }
+                    self.mark_scheduled_terminal_finished(tid);
+                    self.emit("schedules", None);
+                }
+                continue;
+            }
+
+            let settled = matches!(rt.agent_status.as_deref(), Some("idle" | "done" | "error"))
+                || run
+                    .completed_at
+                    .is_some_and(|at| now_ms.saturating_sub(at) >= SCHEDULE_RECLAIM_SETTLE_MS);
+            if !settled {
+                continue;
+            }
+
+            if run.output_path.is_none()
+                && let Ok(Some(rel)) = self.capture_scheduled_output(&run.id, entry)
+            {
+                let _ = self.store.lock().unwrap().write(|db| {
+                    let mut cur: ScheduledRun = db.get(&run.id)?;
+                    cur.output_path = Some(rel);
+                    db.save(&cur)
+                });
+            }
+
+            if !core_matches {
+                self.mark_scheduled_terminal_finished(tid);
+                continue;
+            }
+
+            let exit_input = run
+                .profile_id
+                .as_deref()
+                .and_then(|pid| {
+                    self.config()
+                        .profiles
+                        .into_iter()
+                        .find(|p| p.id == pid)
+                        .and_then(|p| p.exit)
+                })
+                .and_then(|ex| match ex {
+                    ExitAction::Input { text } => Some(text),
+                    ExitAction::Manual => None,
+                });
+
+            if let Some(text) = exit_input
+                && matches!(rt.agent_status.as_deref(), Some("idle" | "done"))
+                && client
+                    .call("terminal.send", json!({ "terminal": addr, "text": text }))
+                    .is_ok()
+            {
+                let _ = self.store.lock().unwrap().write(|db| {
+                    let mut cur: ScheduledRun = db.get(&run.id)?;
+                    cur.close_requested_at = Some(now_ms);
+                    db.save(&cur)
+                });
+                continue;
+            }
+
+            let _ = client.call("terminal.kill", json!({ "terminal": addr }));
+            self.mark_scheduled_terminal_finished(tid);
+            self.emit("schedules", None);
+        }
+        Ok(())
+    }
+
+    fn mark_scheduled_terminal_finished(&self, terminal_id: &str) {
+        let _ = self.store.lock().unwrap().write(|db| {
+            if let Ok(mut entry) = db.get::<TerminalEntry>(terminal_id) {
+                if let Some(rt) = &mut entry.runtime {
+                    rt.state = "finished".into();
+                    rt.agent_status = None;
+                    rt.agent_turn = None;
+                    rt.observed_agent = None;
+                    rt.waiting = None;
+                }
+                db.save(&entry)?;
+            }
+            Ok(())
+        });
+        self.emit("terminals", None);
+    }
+
+    fn capture_scheduled_output(
+        &self,
+        schedule_run_id: &str,
+        entry: &TerminalEntry,
+    ) -> Result<Option<String>> {
+        let Some(rt) = entry.runtime.as_ref() else {
+            return Ok(None);
+        };
+        let Some(addr) = rt.terminal.as_deref() else {
+            return Ok(None);
+        };
+        let client = canban_herdr::Client {
+            config: self.config(),
+        };
+        if rt.core_id.as_deref() != self.verified_core_id().ok().as_deref() {
+            return Ok(None);
+        }
+        let value = client.read(addr)?;
+        let Some(text) = value["text"].as_str() else {
+            return Ok(None);
+        };
+        let run: ScheduledRun = self.store.lock().unwrap().db().get(schedule_run_id)?;
+        let dir = self.schedule_run_dir(&self.home, &run);
+        let path = dir.join("output.txt");
+        canban_context::atomic(&path, text.as_bytes())?;
+        Ok(Some(canban_context::relative(&self.home, &path)?))
+    }
+
+    pub(super) fn schedule_run_dir(&self, home: &Path, run: &ScheduledRun) -> PathBuf {
+        home.join("projects")
+            .join(&run.project_id)
+            .join("schedules")
+            .join(run.short_id())
+    }
+}
+
+impl AppServer {
+    fn launch_queued_cardless_schedules(&self) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        let Some(queued) = next_scheduled_run(&snapshot, self.config().scheduler.max_agents) else {
+            return Ok(());
+        };
+        let _gate = self.terminal_gate.lock().unwrap();
+        let admitted = self.store.lock().unwrap().write(|db| {
+            let current = db.snapshot()?;
+            if canban_scheduler::active_count(&current) >= self.config().scheduler.max_agents {
+                return Ok(None);
+            }
+            let mut run: ScheduledRun = db.get(&queued.id)?;
+            if run.state != "queued" || run.creates_card {
+                return Ok(None);
+            }
+            let project: Project = db.get(&run.project_id)?;
+            let rev: WorkflowRevision = super::workflow::published(db, &run.workflow_id)?;
+            run.state = "starting".into();
+            run.started_at = Some(now());
+            run.updated_at = now();
+            db.save(&run)?;
+            if let Some(tid) = run.terminal_id.as_deref()
+                && let Ok(mut entry) = db.get::<TerminalEntry>(tid)
+                && let Some(rt) = &mut entry.runtime
+            {
+                rt.state = "starting".into();
+                rt.connection = "connecting".into();
+                db.save(&entry)?;
+            }
+            Ok(Some((run, project, rev)))
+        })?;
+        let Some((mut run, project, rev)) = admitted else {
+            return Ok(());
+        };
+
+        if let Err(e) = self.execute_cardless_scheduled_run(&mut run, &project, &rev) {
+            let err_msg = format!("{e:#}");
+            self.store.lock().unwrap().write(|db| {
+                let mut cur: ScheduledRun = db.get(&run.id)?;
+                if !matches!(cur.state.as_str(), "completed" | "failed" | "blocked") {
+                    cur.state = "failed".into();
+                    cur.error = Some(err_msg.clone());
+                    cur.completed_at = Some(now());
+                    db.save(&cur)?;
+                }
+                if let Some(tid) = cur.terminal_id.as_deref()
+                    && let Ok(mut entry) = db.get::<TerminalEntry>(tid)
+                    && let Some(rt) = &mut entry.runtime
+                    && rt.terminal.is_none()
+                {
+                    rt.state = "finished".into();
+                    rt.error = Some(err_msg);
+                    db.save(&entry)?;
+                }
+                Ok(())
+            })?;
+            self.emit("schedules", None);
+            self.emit("terminals", None);
+        }
+        Ok(())
+    }
+
+    fn execute_cardless_scheduled_run(
+        &self,
+        run: &mut ScheduledRun,
+        project: &Project,
+        rev: &WorkflowRevision,
+    ) -> Result<()> {
+        let location = project.work_location();
+        if self.observer_running.load(Ordering::SeqCst) {
+            self.resolve_machine(&location.machine, true)?;
+        }
+        let remote = location.machine != "local";
+        let exec_home = self.execution_home(&location.machine)?;
+        let ops = self.ops(&location.machine);
+        let run_dir_local = self.schedule_run_dir(&self.home, run);
+        std::fs::create_dir_all(run_dir_local.join("reports"))?;
+        let run_dir_exec = self.schedule_run_dir(&exec_home, run);
+        ops.host.mkdir(&run_dir_exec)?;
+
+        let endpoint = if remote {
+            format!("spool:{}", exec_home.join("rpc").display())
+        } else {
+            self.endpoint().to_string_lossy().into_owned()
+        };
+        let cli = if remote {
+            exec_home.join("bin/canban")
+        } else {
+            self.cli.clone()
+        };
+
+        let mut shared_env = rev.definition.env.clone();
+        let mut script_notes = Vec::<String>::new();
+        let mut step_cursor = run.start_step.clone();
+        let mut visited_failure = BTreeSet::<String>::new();
+
+        for _ in 0..32 {
+            let Some(step_id) = step_cursor.clone() else {
+                let summary = if script_notes.is_empty() {
+                    "Scheduled script workflow completed".to_owned()
+                } else {
+                    script_notes.join("; ")
+                };
+                self.complete_script_only_scheduled_run(run, "completed", Some(summary), None)?;
+                return Ok(());
+            };
+            let step = rev
+                .definition
+                .steps
+                .get(&step_id)
+                .with_context(|| format!("Unknown scheduled step `{step_id}`"))?;
+            match step {
+                WorkflowStep::Complete => {
+                    let summary = if script_notes.is_empty() {
+                        "Scheduled workflow completed".to_owned()
+                    } else {
+                        script_notes.join("; ")
+                    };
+                    self.complete_script_only_scheduled_run(run, "completed", Some(summary), None)?;
+                    return Ok(());
+                }
+                WorkflowStep::Notify { message, next } => {
+                    script_notes.push(message.clone());
+                    step_cursor = next.clone();
+                }
+                WorkflowStep::Script {
+                    run: body,
+                    shell,
+                    working_directory,
+                    timeout_minutes,
+                    timeout_seconds,
+                    continue_on_error,
+                    on_failure,
+                    env: step_env,
+                    next,
+                } => {
+                    let base = Path::new(&location.directory);
+                    let script_cwd = crate::scripts::resolve_working_directory(
+                        &ops.host,
+                        base,
+                        working_directory.as_deref(),
+                    )?;
+                    let slug = crate::scripts::sanitized_step_slug(&step_id);
+                    let scripts_dir = run_dir_exec.join("scripts");
+                    ops.host.mkdir(&scripts_dir)?;
+                    let script_file = scripts_dir.join(format!("{slug}.sh"));
+                    let env_file = scripts_dir.join(format!("{slug}.env"));
+                    let output_file = scripts_dir.join(format!("{slug}.output"));
+                    let log_file = run_dir_local.join("scripts").join(format!("{slug}.log"));
+                    std::fs::create_dir_all(log_file.parent().unwrap())?;
+                    ops.host.write(&script_file.to_string_lossy(), body)?;
+                    ops.host.write(&env_file.to_string_lossy(), "")?;
+                    ops.host.write(&output_file.to_string_lossy(), "")?;
+
+                    let mut env = self.base_schedule_env(
+                        &cli,
+                        &exec_home,
+                        &endpoint,
+                        project,
+                        run,
+                        &run_dir_exec,
+                        Some(&step_id),
+                    );
+                    env.insert("CANBAN_ENV".into(), env_file.to_string_lossy().into_owned());
+                    env.insert(
+                        "CANBAN_OUTPUT".into(),
+                        output_file.to_string_lossy().into_owned(),
+                    );
+                    for (k, v) in &shared_env {
+                        env.insert(k.clone(), v.clone());
+                    }
+                    for (k, v) in step_env {
+                        env.insert(k.clone(), v.clone());
+                    }
+                    let argv = crate::scripts::shell_argv(shell.as_deref(), &script_file)?;
+                    let timeout_secs =
+                        crate::scripts::script_timeout_secs(*timeout_minutes, *timeout_seconds);
+                    let (exit_code, timed_out) = if !remote {
+                        crate::scripts::run_local_process(
+                            &argv,
+                            &script_cwd,
+                            &env,
+                            &log_file,
+                            timeout_secs,
+                        )?
+                    } else {
+                        let args_ref: Vec<&str> = argv.iter().map(String::as_str).collect();
+                        let out = ops.host.run(&script_cwd, &args_ref, None)?;
+                        let mut combined = out.stdout;
+                        combined.extend_from_slice(&out.stderr);
+                        canban_context::atomic(&log_file, &combined)?;
+                        (out.status.code().map(i64::from), false)
+                    };
+                    if !remote
+                        && let Ok(raw_env) = std::fs::read_to_string(&env_file)
+                        && let Ok(parsed) = crate::scripts::parse_key_value_file(&raw_env)
+                    {
+                        for (k, v) in parsed {
+                            shared_env.insert(k, v);
+                        }
+                    }
+                    let log_text = std::fs::read_to_string(&log_file).unwrap_or_default();
+                    let rel_log = canban_context::relative(&self.home, &log_file)?;
+                    let ok = !timed_out && exit_code == Some(0);
+                    if ok || *continue_on_error {
+                        script_notes.push(format!("Script `{step_id}` succeeded"));
+                        run.output_path = Some(rel_log);
+                        step_cursor = next.clone();
+                    } else if let Some(target) = on_failure
+                        && visited_failure.insert(step_id.clone())
+                    {
+                        let tail = crate::scripts::log_tail(&log_text);
+                        script_notes.push(format!(
+                            "Script `{step_id}` failed (exit {exit_code:?}):\n```\n{tail}\n```"
+                        ));
+                        run.output_path = Some(rel_log);
+                        step_cursor = Some(target.clone());
+                    } else {
+                        let err = if timed_out {
+                            format!("Scheduled script `{step_id}` timed out after {timeout_secs}s")
+                        } else {
+                            format!("Scheduled script `{step_id}` failed with exit {exit_code:?}")
+                        };
+                        run.output_path = Some(rel_log);
+                        self.complete_script_only_scheduled_run(run, "failed", None, Some(err))?;
+                        return Ok(());
+                    }
+                }
+                WorkflowStep::Agent {
+                    profile: step_prof,
+                    instruction,
+                    env: step_env,
+                    ..
+                } => {
+                    return self.launch_cardless_agent_step(
+                        run,
+                        project,
+                        &location,
+                        remote,
+                        &exec_home,
+                        &ops,
+                        &run_dir_local,
+                        &run_dir_exec,
+                        &cli,
+                        &endpoint,
+                        &step_id,
+                        step_prof.as_deref(),
+                        Some(instruction.as_str()),
+                        &shared_env,
+                        step_env,
+                        &script_notes,
+                    );
+                }
+                other => {
+                    bail!(
+                        "Step `{step_id}` ({other:?}) requires a Card; add `card:` to the schedule rule"
+                    );
+                }
+            }
+        }
+        bail!("Scheduled workflow exceeded maximum step transitions")
+    }
+}
+
+impl AppServer {
+    #[allow(clippy::too_many_arguments)]
+    fn launch_cardless_agent_step(
+        &self,
+        run: &ScheduledRun,
+        project: &Project,
+        location: &WorkLocation,
+        remote: bool,
+        exec_home: &Path,
+        ops: &canban_workspaces::Ops,
+        run_dir_local: &Path,
+        run_dir_exec: &Path,
+        cli: &Path,
+        endpoint: &str,
+        step_id: &str,
+        step_prof: Option<&str>,
+        instruction: Option<&str>,
+        shared_env: &BTreeMap<String, String>,
+        step_env: &BTreeMap<String, String>,
+        script_notes: &[String],
+    ) -> Result<()> {
+        let config = self.config();
+        let prof = canban_scheduler::select_in_project(
+            &config,
+            Some(project),
+            step_prof.or(run.profile_id.as_deref()),
+        )?;
+        let session_id = if prof.command().iter().any(|s| s.contains("{session_id}")) {
+            Some(super::runtime::uuid_session_id())
+        } else {
+            None
+        };
+        let mut env = self.base_schedule_env(
+            cli,
+            exec_home,
+            endpoint,
+            project,
+            run,
+            run_dir_exec,
+            Some(step_id),
+        );
+        env.insert("CANBAN_PROFILE_ID".into(), prof.id.clone());
+        env.insert(
+            "CANBAN_SESSION_ID".into(),
+            session_id.clone().unwrap_or_default(),
+        );
+        for (k, v) in shared_env {
+            env.insert(k.clone(), v.clone());
+        }
+        for (k, v) in step_env {
+            env.insert(k.clone(), v.clone());
+        }
+
+        let prompt = self.render_cardless_schedule_prompt(
+            project,
+            run,
+            &prof,
+            step_id,
+            instruction,
+            script_notes,
+        );
+        canban_context::atomic(&run_dir_local.join("prompt.md"), prompt.as_bytes())?;
+        canban_context::atomic(
+            &run_dir_local.join("context.json"),
+            &serde_json::to_vec_pretty(&json!({
+                "schedule_run_id": run.id,
+                "schedule_id": run.schedule_id,
+                "project": { "id": project.id, "name": project.name, "directory": location.directory },
+                "workflow_id": run.workflow_id,
+                "workflow_name": run.workflow_name,
+                "rule_id": run.rule_id,
+                "cron": run.cron,
+                "run_number": run.number,
+                "step_id": step_id,
+                "profile_id": prof.id,
+                "instruction": instruction.unwrap_or_default(),
+            }))?,
+        )?;
+
+        let mut argv = canban_profiles::command(
+            &prof,
+            session_id.as_deref(),
+            true,
+            &[
+                ("home", &exec_home.to_string_lossy()),
+                ("cwd", &location.directory),
+                ("project_dir", &location.directory),
+                ("cli", &cli.to_string_lossy()),
+                ("prompt", &prompt),
+            ],
+        )?;
+        let is_herdr_template = prof
+            .preset
+            .as_deref()
+            .is_some_and(|s| s.starts_with("herdr:"));
+        if !is_herdr_template {
+            if !remote {
+                argv[0] = canban_profiles::executable(&argv[0]);
+            } else if Path::new(&argv[0]).components().count() == 1 {
+                let program = ops.host.python(
+                    "import os,shutil,json,sys;h=os.path.expanduser('~');p=os.environ.get('PATH','')+os.pathsep+os.path.join(h,'.local/bin')+os.pathsep+os.path.join(h,'.cargo/bin');print(json.dumps(shutil.which(sys.argv[1],path=p) or sys.argv[1]))",
+                    &[&argv[0]],
+                )?;
+                argv[0] = program.as_str().context("No remote executable")?.into();
+            }
+        }
+
+        let client = canban_herdr::Client { config };
+        let core = client.status()?;
+        let core_id = strp(&core["core"], "id")?.to_owned();
+        let labels = BTreeMap::from([
+            ("canban.project".into(), project.id.clone()),
+            ("canban.schedule_run".into(), run.id.clone()),
+            ("canban.terminal".into(), run.id.clone()),
+        ]);
+        let receipt =
+            client.launch_on(&location.machine, argv, &location.directory, env, labels)?;
+        let terminal_address = strp(&receipt, "address")?.to_owned();
+        {
+            let mut inv = self.inventory.lock().unwrap();
+            if inv.core == core_id {
+                let key = inv.address(&terminal_address);
+                inv.records.entry(key.clone()).or_insert_with(|| {
+                    let mut seeded = receipt.clone();
+                    seeded["address"] = json!(key);
+                    if seeded["state"].is_null() {
+                        seeded["state"] = json!("live");
+                    }
+                    if seeded["cwd"].is_null() {
+                        seeded["cwd"] = json!(location.directory);
+                    }
+                    seeded
+                });
+            }
+        }
+        let prev_out = run.output_path.clone();
+        self.store.lock().unwrap().write(|db| {
+            let mut cur: ScheduledRun = db.get(&run.id)?;
+            cur.current_step = Some(step_id.to_owned());
+            cur.profile_id = Some(prof.id.clone());
+            if cur.provider_session_id.is_none() {
+                cur.provider_session_id = session_id.clone();
+            }
+            if prev_out.is_some() && cur.output_path.is_none() {
+                cur.output_path = prev_out;
+            }
+            if cur.state == "starting" {
+                cur.state = "running".into();
+            }
+            cur.cwd = location.directory.clone();
+            db.save(&cur)?;
+
+            let tid = cur.terminal_id.clone().unwrap_or_else(|| run.id.clone());
+            let mut entry: TerminalEntry = db.get(&tid)?;
+            entry.agent_engine = Some(profile_agent_engine(&prof));
+            entry.runtime = Some(TerminalRuntime {
+                machine: location.machine.clone(),
+                owner_core_id: if remote {
+                    Some(location.machine.clone())
+                } else {
+                    Some(core_id.clone())
+                },
+                core_id: Some(core_id),
+                terminal: Some(terminal_address),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            });
+            db.save(&entry)
+        })?;
+        self.emit("schedules", None);
+        self.emit("terminals", None);
+        ensure!(
+            receipt
+                .get("first_message")
+                .is_none_or(|v| v["sent"] != false),
+            "Herdr did not deliver the initial scheduled prompt; inspect Terminal"
+        );
+        Ok(())
+    }
+
+    fn complete_script_only_scheduled_run(
+        &self,
+        run: &ScheduledRun,
+        state: &str,
+        summary: Option<String>,
+        error: Option<String>,
+    ) -> Result<()> {
+        let out_path = run.output_path.clone();
+        self.store.lock().unwrap().write(|db| {
+            let mut cur: ScheduledRun = db.get(&run.id)?;
+            cur.state = state.into();
+            cur.summary = summary;
+            cur.error = error;
+            if out_path.is_some() {
+                cur.output_path = out_path;
+            }
+            cur.completed_at = Some(now());
+            db.save(&cur)?;
+            if let Some(tid) = cur.terminal_id.as_deref()
+                && let Ok(mut entry) = db.get::<TerminalEntry>(tid)
+                && let Some(rt) = &mut entry.runtime
+            {
+                rt.state = "finished".into();
+                db.save(&entry)?;
+            }
+            Ok(())
+        })?;
+        self.emit("schedules", None);
+        self.emit("terminals", None);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn base_schedule_env(
+        &self,
+        cli: &Path,
+        exec_home: &Path,
+        endpoint: &str,
+        project: &Project,
+        run: &ScheduledRun,
+        run_dir: &Path,
+        step_id: Option<&str>,
+    ) -> BTreeMap<String, String> {
+        let loc = project.work_location();
+        let mut env = BTreeMap::from([
+            ("CANBAN_CLI".into(), cli.to_string_lossy().into_owned()),
+            (
+                "CANBAN_HOME".into(),
+                exec_home.to_string_lossy().into_owned(),
+            ),
+            ("CANBAN_ENDPOINT".into(), endpoint.to_owned()),
+            ("CANBAN_PROJECT".into(), project.id.clone()),
+            ("CANBAN_PROJECT_DIR".into(), loc.directory.clone()),
+            ("CANBAN_WORKSPACE".into(), loc.directory),
+            ("CANBAN_SCHEDULE_ID".into(), run.schedule_id.clone()),
+            ("CANBAN_SCHEDULE_RUN_ID".into(), run.id.clone()),
+            ("CANBAN_WORKFLOW".into(), run.workflow_id.clone()),
+            (
+                "CANBAN_RUN_DIR".into(),
+                run_dir.to_string_lossy().into_owned(),
+            ),
+        ]);
+        if let Some(sid) = step_id {
+            env.insert("CANBAN_STEP_ID".into(), sid.to_owned());
+        }
+        env
+    }
+
+    fn render_cardless_schedule_prompt(
+        &self,
+        project: &Project,
+        run: &ScheduledRun,
+        profile: &Profile,
+        step_id: &str,
+        instruction: Option<&str>,
+        script_notes: &[String],
+    ) -> String {
+        let mut out = format!(
+            "# Scheduled Task: {} (#{})\n\n\
+             You are running as scheduled Terminal Agent `@{}` for Project `{}` (`{}`).\n\
+             This scheduled run operates directly in `{}` without creating a Kanban Card.\n\n\
+             - Schedule Rule: `{}` (`{}`)\n\
+             - Workflow: `{}` (step `{}`)\n\
+             - Trigger: `{}`\n\
+             - Run ID: `{}`\n",
+            run.workflow_name,
+            run.number,
+            profile.id,
+            project.name,
+            project.id,
+            project.work_location().directory,
+            run.rule_id,
+            run.cron,
+            run.workflow_id,
+            step_id,
+            run.trigger_kind,
+            run.id,
+        );
+        if !script_notes.is_empty() {
+            out.push_str("\n## Preceding Step Context\n");
+            for note in script_notes {
+                out.push_str("- ");
+                out.push_str(note);
+                out.push('\n');
+            }
+        }
+        out.push_str("\n## Task Instructions\n");
+        let body = instruction
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(
+                "Execute the scheduled maintenance or inspection task described by this workflow.",
+            );
+        out.push_str(body);
+        out.push_str(
+            "\n\n## Reporting Outcome\n\
+             When finished, report your outcome via the injected CLI so Canban records the run summary and reclaims this Agent session cleanly:\n\
+             ```sh\n\
+             \"$CANBAN_CLI\" report --state <completed|blocked|failed> --message 'Concise summary' [--file \"$CANBAN_RUN_DIR/report.md\"]\n\
+             ```\n\
+             Keep temporary or report files under `$CANBAN_RUN_DIR` (`$CANBAN_RUN_DIR/report.md`).\n",
+        );
+        out
+    }
+}
+
+impl AppServer {
+    pub(super) fn schedule_bind(&self, p: Value) -> Result<Value> {
+        let run_id = p["schedule_run_id"]
+            .as_str()
+            .or_else(|| p["terminal_id"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .context("Missing schedule_run_id")?
+            .to_owned();
+        let session = strp(&p, "session_id")?.trim().to_owned();
+        ensure!(
+            !session.is_empty() && session.len() < 512,
+            "Invalid provider session ID"
+        );
+        self.mutate("schedule.bind", &p, |db| {
+            let mut run: ScheduledRun = db.get(&run_id)?;
+            run.provider_session_id = Some(session.clone());
+            db.save(&run)?;
+            Ok(json!({ "bound": true, "schedule_run_id": run.id, "session_id": session }))
+        })
+    }
+
+    pub(super) fn schedule_report(&self, p: Value) -> Result<Value> {
+        let state = strp(&p, "state")?;
+        ensure!(
+            ["working", "completed", "blocked", "failed"].contains(&state),
+            "invalid_report: scheduled Terminal Agent supports working | completed | blocked | failed"
+        );
+        let run_id = p["schedule_run_id"]
+            .as_str()
+            .or_else(|| {
+                p["terminal_id"]
+                    .as_str()
+                    .filter(|s| s.trim().starts_with("scheduled:"))
+            })
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .context("Missing schedule_run_id")?
+            .to_owned();
+        let key = strp(&p, "request_key")?;
+        let fingerprint = canban_context::digest(&serde_json::to_vec(&p)?);
+
+        let run_check: ScheduledRun = {
+            let store = self.store.lock().unwrap();
+            let db = store.db();
+            if let Some(old) = db
+                .list::<Report>()?
+                .into_iter()
+                .find(|r| r.request_key == key)
+            {
+                ensure!(old.fingerprint == fingerprint, "request_key_conflict");
+                return Ok(json!({ "accepted": true, "duplicate": true }));
+            }
+            db.get(&run_id)?
+        };
+        ensure!(
+            !run_check.creates_card,
+            "Card-backed scheduled runs report against their Card"
+        );
+
+        let report_id = id();
+        let report_path = if let Some(body) = p["body"].as_str() {
+            let path = self
+                .schedule_run_dir(&self.home, &run_check)
+                .join("reports")
+                .join(format!("{report_id}.md"));
+            canban_context::atomic(&path, body.as_bytes())?;
+            Some(canban_context::relative(&self.home, &path)?)
+        } else {
+            None
+        };
+        let message = p["message"].as_str().unwrap_or("").trim().to_owned();
+
+        let res = self.mutate("schedule.report", &p, |db| {
+            if let Some(old) = db
+                .list::<Report>()?
+                .into_iter()
+                .find(|r| r.request_key == key)
+            {
+                ensure!(old.fingerprint == fingerprint, "request_key_conflict");
+                return Ok(json!({ "accepted": true, "duplicate": true }));
+            }
+            let mut cur: ScheduledRun = db.get(&run_id)?;
+            let profile_label = cur
+                .profile_id
+                .clone()
+                .or_else(|| {
+                    p["profile_id"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| self.config().default_agent);
+            let actor = format!("agent:{profile_label}");
+            let now_ms = now();
+            let report = Report {
+                id: report_id.clone(),
+                terminal_id: cur.terminal_id.clone(),
+                workflow_run_id: None,
+                project_id: cur.project_id.clone(),
+                card_id: String::new(),
+                actor,
+                state: state.to_owned(),
+                message: message.clone(),
+                path: report_path.clone(),
+                request_key: key.to_owned(),
+                fingerprint,
+                created_at: now_ms,
+            };
+            db.save(&report)?;
+
+            cur.state = state.to_owned();
+            if !message.is_empty() {
+                cur.summary = Some(message.clone());
+            }
+            if report_path.is_some() {
+                cur.report_path = report_path.clone();
+            }
+            if state == "working" {
+                cur.error = None;
+            } else {
+                cur.completed_at = Some(now_ms);
+                if matches!(state, "failed" | "blocked") && !message.is_empty() {
+                    cur.error = Some(message);
+                }
+            }
+            db.save(&cur)?;
+            Ok(json!({
+                "accepted": true,
+                "duplicate": false,
+                "schedule_run_id": cur.id,
+                "recorded_state": cur.state,
+            }))
+        })?;
+        self.emit("schedules", None);
+        self.wake_runtime();
+        Ok(res)
+    }
+
+    pub(super) fn schedule_call(&self, method: &str, p: Value) -> Result<Value> {
+        match method {
+            "schedule.bind" => self.schedule_bind(p),
+            "schedule.report" => self.schedule_report(p),
+            "schedule.list" => {
+                let store = self.store.lock().unwrap();
+                let db = store.db();
+                let filter_pid = p["project_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|raw| super::resolve_project_id(db, raw))
+                    .transpose()?;
+                let mut schedules: Vec<ScheduleState> = db
+                    .list::<ScheduleState>()?
+                    .into_iter()
+                    .filter(|s| filter_pid.as_deref().is_none_or(|pid| s.project_id == pid))
+                    .collect();
+                schedules.sort_by(|a, b| {
+                    a.filename
+                        .cmp(&b.filename)
+                        .then_with(|| a.rule_id.cmp(&b.rule_id))
+                });
+                let mut runs: Vec<ScheduledRun> = db
+                    .list::<ScheduledRun>()?
+                    .into_iter()
+                    .filter(|r| filter_pid.as_deref().is_none_or(|pid| r.project_id == pid))
+                    .collect();
+                runs.sort_by(|a, b| {
+                    b.scheduled_at
+                        .cmp(&a.scheduled_at)
+                        .then_with(|| b.number.cmp(&a.number))
+                });
+                Ok(json!({ "schedules": schedules, "runs": runs }))
+            }
+            "schedule.runs" => {
+                let store = self.store.lock().unwrap();
+                let db = store.db();
+                let filter_pid = p["project_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|raw| super::resolve_project_id(db, raw))
+                    .transpose()?;
+                let filter_sid = p["schedule_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let limit = p["limit"].as_u64().unwrap_or(50).clamp(1, 200) as usize;
+                let mut runs: Vec<ScheduledRun> = db
+                    .list::<ScheduledRun>()?
+                    .into_iter()
+                    .filter(|r| filter_pid.as_deref().is_none_or(|pid| r.project_id == pid))
+                    .filter(|r| filter_sid.is_none_or(|sid| r.schedule_id == sid))
+                    .collect();
+                runs.sort_by(|a, b| {
+                    b.scheduled_at
+                        .cmp(&a.scheduled_at)
+                        .then_with(|| b.number.cmp(&a.number))
+                });
+                runs.truncate(limit);
+                Ok(json!({ "runs": runs }))
+            }
+            "schedule.trigger" => {
+                ensure!(
+                    p["execution"].is_null(),
+                    "Triggering a schedule requires a user action"
+                );
+                let mut created_card = None;
+                let res = self.mutate(method, &p, |db| {
+                    let schedule_id = if let Some(sid) = p["schedule_id"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        sid.to_owned()
+                    } else {
+                        let pid = super::resolve_project_id(db, strp(&p, "project_id")?)?;
+                        let rule_id = strp(&p, "rule_id")?;
+                        if let Some(wf_id) = p["workflow_id"]
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            schedule_state_id(&pid, wf_id, rule_id)
+                        } else {
+                            let filename = strp(&p, "filename")?;
+                            let src = db
+                                .list::<WorkflowSource>()?
+                                .into_iter()
+                                .find(|s| s.project_id == pid && s.filename == filename)
+                                .context("Workflow source not found")?;
+                            schedule_state_id(&pid, &src.workflow_id, rule_id)
+                        }
+                    };
+                    let config = self.config();
+                    let (run, card_id) =
+                        fire_schedule(db, &config, &schedule_id, now(), "manual", true)?;
+                    created_card = card_id;
+                    Ok(serde_json::to_value(run)?)
+                })?;
+                if let Some(cid) = created_card {
+                    self.emit("application", Some(cid));
+                }
+                self.emit("schedules", None);
+                self.wake_runtime();
+                Ok(res)
+            }
+            "schedule.toggle" => {
+                ensure!(
+                    p["execution"].is_null(),
+                    "Toggling a schedule requires a user action"
+                );
+                let enabled = p["enabled"]
+                    .as_bool()
+                    .context("Missing boolean field: enabled")?;
+                let res = self.mutate(method, &p, |db| {
+                    let (pid, filename, rule_id) = if let Some(sid) = p["schedule_id"]
+                        .as_str()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        let st: ScheduleState = db.get(sid)?;
+                        (st.project_id, st.filename, st.rule_id)
+                    } else {
+                        (
+                            super::resolve_project_id(db, strp(&p, "project_id")?)?,
+                            strp(&p, "filename")?.to_owned(),
+                            strp(&p, "rule_id")?.to_owned(),
+                        )
+                    };
+                    let project: Project = db.get(&pid)?;
+                    let config = self.config();
+                    authoring::initialize(&self.home, db, &config, &project)?;
+                    let current = authoring::project_template_files(db, &project.id)?;
+                    let mut found = false;
+                    let mut inputs = Vec::with_capacity(current.len());
+                    for file in current {
+                        if file.filename == filename {
+                            let mut doc = canban_workflow_engine::source::parse(&file.source)?;
+                            if enabled {
+                                doc.enabled = true;
+                            }
+                            let rule = doc.on.get_mut(&rule_id).with_context(|| {
+                                format!("Rule `{rule_id}` not found in {filename}")
+                            })?;
+                            ensure!(rule.is_schedule(), "Rule `{rule_id}` is not a schedule");
+                            rule.enabled = enabled;
+                            found = true;
+                            inputs.push(json!({
+                                "filename": file.filename,
+                                "source": canban_workflow_engine::source::encode(&doc)?,
+                            }));
+                        } else {
+                            inputs.push(json!({
+                                "filename": file.filename,
+                                "source": file.source,
+                            }));
+                        }
+                    }
+                    ensure!(found, "Workflow file `{filename}` not found");
+                    authoring::publish_collection(&self.home, db, &project, &config, &inputs)?;
+                    let updated = db
+                        .list::<ScheduleState>()?
+                        .into_iter()
+                        .find(|s| {
+                            s.project_id == project.id
+                                && s.filename == filename
+                                && s.rule_id == rule_id
+                        })
+                        .context("Updated schedule state missing")?;
+                    Ok(serde_json::to_value(updated)?)
+                })?;
+                self.emit("schedules", None);
+                self.wake_runtime();
+                Ok(res)
+            }
+            "schedule.read_artifact" => {
+                let run_id = strp(&p, "schedule_run_id")?;
+                let path = strp(&p, "path")?;
+                let run: ScheduledRun = self.store.lock().unwrap().db().get(run_id)?;
+                let root = self.schedule_run_dir(&self.home, &run);
+                let full = self.home.join(path);
+                ensure!(
+                    full.starts_with(&root)
+                        && !Path::new(path)
+                            .components()
+                            .any(|c| matches!(c, std::path::Component::ParentDir)),
+                    "Artifact path is outside this scheduled run"
+                );
+                let bytes = std::fs::read(&full)
+                    .with_context(|| format!("Scheduled artifact not found: {path}"))?;
+                Ok(json!({
+                    "body": String::from_utf8_lossy(&bytes).into_owned()
+                }))
+            }
+            _ => bail!("Unknown schedule operation: {method}"),
+        }
+    }
+}

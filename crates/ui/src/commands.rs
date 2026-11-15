@@ -359,6 +359,22 @@ pub const CATALOG: &[Command] = &[
         keywords: "studio stages yaml",
     },
     Command {
+        id: "go-schedules",
+        title: "Open Scheduled Tasks",
+        key: "",
+        display: "Workflows",
+        context: "Navigation",
+        keywords: "cron timer schedule workflows periodic automation",
+    },
+    Command {
+        id: "new-scheduled-workflow",
+        title: "New Scheduled Workflow",
+        key: "",
+        display: "Schedules",
+        context: "Project",
+        keywords: "cron timer schedule workflow create periodic",
+    },
+    Command {
         id: "edit-workflow-agent",
         title: "Edit Workflows with Default Agent",
         key: "",
@@ -803,6 +819,14 @@ pub fn execute(ui: Ui, id: &str) {
         }
         return;
     }
+    if let Some(sched_id) = id.strip_prefix("schedule-run:") {
+        crate::workflows::trigger_schedule_by_id(ui, sched_id);
+        return;
+    }
+    if let Some(sched_id) = id.strip_prefix("schedule-toggle:") {
+        crate::workflows::toggle_schedule_by_id(ui, sched_id);
+        return;
+    }
 
     match id {
         "back" => crate::navigation::go(ui, false),
@@ -860,7 +884,12 @@ pub fn execute(ui: Ui, id: &str) {
                 ui.notify("Select a Project first");
             }
         }
-        "go-workflows" => ui.navigate("workflows"),
+        "go-workflows" => {
+            ui.workflows.section.set("workflows".into());
+            ui.navigate("workflows");
+        }
+        "go-schedules" => crate::workflows::open_schedules(ui, None),
+        "new-scheduled-workflow" => crate::workflows::new_scheduled_workflow(ui),
         "edit-workflow-agent" => crate::workflows::edit_agent(ui),
         "set-default-workflow" => crate::workflows::set_default_workflow(ui),
         "reset-default-workflow" => crate::workflows::reset_default_workflow(ui),

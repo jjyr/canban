@@ -30,6 +30,8 @@ Canban injects `CANBAN_CLI` and task environment variables when launching an Age
 | `CANBAN_PROJECT` | Active Project ID (CLI commands also infer the Project from a git repository or Card worktree CWD when omitted). |
 | `CANBAN_RUN_DIR` | Scratch directory outside the repository worktree for Markdown payloads. |
 | `CANBAN_PROFILE_ID` | Active `@identity` or Agent profile ID (when applicable). |
+| `CANBAN_SCHEDULE_RUN_ID` | Scheduled run ID (`scheduled:<project_id>:<short_id>`), injected into Cardless scheduled Terminal Agent runs. |
+| `CANBAN_SCHEDULE_ID` | Parent schedule state ID (`schedule:<project_id>:<workflow_id>:<rule_id>`), injected into Cardless scheduled runs. |
 
 ## Core Execution Commands
 
@@ -139,4 +141,94 @@ When asked to inspect or update a Project's Workflow YAML (`workflow.sources` is
 "$CANBAN_CLI" workflow export --project-id <PROJECT_ID> --name development.yaml --output "$CANBAN_RUN_DIR/development.yaml"
 "$CANBAN_CLI" workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file "$CANBAN_RUN_DIR/development.yaml" --check
 "$CANBAN_CLI" workflow submit --project-id <PROJECT_ID> --revision <REVISION> --file "$CANBAN_RUN_DIR/development.yaml"
+```
+
+## Scheduled Workflows (Cron Tasks)
+
+Workflows support GitHub Actions-style cron triggers (`schema: 8`), running in either **Cardless Terminal Agent mode** (default when `card:` is omitted) or **Card-creating mode** (`card:`). Missed ticks while Canban was offline or asleep are skipped rather than replayed on wakeup.
+
+### 1. Cardless Terminal Agent mode (default)
+
+Launches a Project-scoped Terminal Agent (`scheduled:<project_id>:<short_id>`) governed by `scheduler.max_agents` without creating a Kanban Card. Once the Agent calls `"$CANBAN_CLI" report` with a terminal state (`completed`, `blocked`, or `failed`) and its turn settles, Canban automatically reclaims and closes the PTY while preserving run history and reports in `Project / Workflows -> Schedules`.
+
+Both GitHub Actions `on.schedule` array shorthand and named schedule rules are supported:
+
+```yaml
+schema: 8
+id: dep_audit:example
+name: Dependency Audit
+on:
+  schedule:
+    - cron: "0 2 * * *"
+      timezone: Asia/Shanghai
+      overlap: skip          # skip (default) | queue | allow
+steps:
+  - id: audit
+    uses: agent
+    with:
+      profile: developer
+      instruction: |
+        Check dependency security advisories and summarize findings.
+    next: finish
+  - id: finish
+    uses: complete
+```
+
+Inside a Cardless scheduled Agent (`CANBAN_SCHEDULE_RUN_ID` is injected, `CANBAN_CARD` is unset), report your outcome with the standard `report` command:
+
+```sh
+"$CANBAN_CLI" report \
+  --state <completed|blocked|failed|working> \
+  --message 'Concise summary of scheduled run' \
+  [--file "$CANBAN_RUN_DIR/report.md"]
+```
+
+### 2. Card-creating mode (`card:`)
+
+Creates a Card on each trigger with `schedule_source` provenance (`Scheduled · <Workflow> #<run_number>` badge on Board and Card Detail) and runs the workflow's step graph against that Card so execution logs, reports, and diffs attach to its Timeline:
+
+```yaml
+schema: 8
+id: nightly_qa:example
+name: Nightly QA
+on:
+  nightly:
+    cron: "30 3 * * 1-5"
+    timezone: UTC
+    overlap: skip
+    start_at: run_qa
+    card:
+      column: develop
+      title: "Nightly QA ({{date}} #{{run_number}})"
+      body: "Automated scheduled check for {{workflow}} ({{datetime}})."
+steps:
+  - id: run_qa
+    uses: agent
+    with:
+      profile: developer
+      instruction: Run full integration suite and fix or report regressions.
+    next: finish
+  - id: finish
+    uses: complete
+```
+
+Supported placeholders in `card.title` / `card.body`: `{{date}}`, `{{datetime}}`, `{{run_number}}`, `{{workflow}}`, `{{rule}}`. Supported `timezone` values: `Local` (default), `UTC`, fixed offsets (`+08:00`), or standard IANA names (`Asia/Shanghai`, `America/New_York`, `Europe/London`, `Asia/Tokyo`, etc.).
+
+### 3. Operating Schedules via CLI
+
+```sh
+# List schedules and recent runs for a Project
+"$CANBAN_CLI" schedule list --project-id <PROJECT_ID>
+"$CANBAN_CLI" schedule runs --project-id <PROJECT_ID> [--schedule-id <SCHEDULE_ID>] [--limit 20]
+
+# Manually trigger a schedule immediately ("Run now")
+"$CANBAN_CLI" schedule trigger --schedule-id <SCHEDULE_ID>
+"$CANBAN_CLI" schedule trigger --project-id <PROJECT_ID> --workflow-id <WORKFLOW_ID> --rule <RULE_ID>
+
+# Enable or pause a schedule rule in place
+"$CANBAN_CLI" schedule toggle --schedule-id <SCHEDULE_ID> --enabled false
+"$CANBAN_CLI" schedule toggle --schedule-id <SCHEDULE_ID> --enabled true
+
+# Read a finished Cardless run's report or captured terminal output
+"$CANBAN_CLI" call schedule.read_artifact '{"schedule_run_id":"<RUN_ID>","path":"<REPORT_OR_OUTPUT_PATH>"}'
 ```

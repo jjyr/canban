@@ -7,7 +7,7 @@ use crate::source::Document;
 use anyhow::{Result, ensure};
 
 pub const BASELINE: u32 = 1;
-pub const CURRENT: u32 = 7;
+pub const CURRENT: u32 = 8;
 
 pub struct Migration {
     pub version: u32,
@@ -38,6 +38,10 @@ const STEPS: &[Migration] = &[
     Migration {
         version: 7,
         up: v7_deliver_batch_and_test,
+    },
+    Migration {
+        version: 8,
+        up: v8_schedules,
     },
 ];
 
@@ -81,7 +85,7 @@ pub fn upgrade_yaml(raw: &str) -> Result<Option<String>> {
         raw.len() <= 2 * 1024 * 1024,
         "Workflow source exceeds 2 MiB"
     );
-    let mut doc: Document = serde_yaml_ng::from_str(raw)?;
+    let mut doc = crate::source::parse_raw(raw)?;
     if !upgrade(&mut doc)? {
         return Ok(None);
     }
@@ -228,6 +232,46 @@ fn v7_deliver_batch_and_test(doc: &mut Document) -> Result<()> {
             {
                 step.with.remove("test_command");
             }
+        }
+    }
+    Ok(())
+}
+
+/// Schema 8: Scheduled workflow rules (`on.<rule>.cron` and GitHub Actions `on.schedule` array
+/// shorthand). Normalizes blank `timezone` / `card` fields and fills missing `start_at` on
+/// schedule rules from the first step in `steps`.
+fn v8_schedules(doc: &mut Document) -> Result<()> {
+    let first_step = doc.steps.first().map(|s| s.id.clone());
+    for rule in doc.on.values_mut() {
+        if rule.cron.is_some() && rule.event.trim().is_empty() {
+            rule.event = "schedule".into();
+        }
+        if let Some(cron) = &mut rule.cron {
+            *cron = cron.trim().to_owned();
+        }
+        if rule
+            .timezone
+            .as_deref()
+            .is_some_and(|tz| tz.trim().is_empty() || tz.trim().eq_ignore_ascii_case("local"))
+        {
+            rule.timezone = None;
+        }
+        if let Some(card) = &mut rule.card {
+            if card.column.as_deref().is_some_and(|c| c.trim().is_empty()) {
+                card.column = None;
+            }
+            if card.title.as_deref().is_some_and(|t| t.trim().is_empty()) {
+                card.title = None;
+            }
+            if card.body.as_deref().is_some_and(|b| b.trim().is_empty()) {
+                card.body = None;
+            }
+        }
+        if rule.is_schedule()
+            && rule.start_at.trim().is_empty()
+            && let Some(first) = &first_step
+        {
+            rule.start_at = first.clone();
         }
     }
     Ok(())

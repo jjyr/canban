@@ -25,7 +25,9 @@ pub fn matches(ui: Ui, c: &Card, snapshot: &Snapshot) -> bool {
         }
     }
     let source = c.github_issue();
-    if filter.source == "local" && source.is_some() || filter.source == "github" && source.is_none()
+    if filter.source == "local" && source.is_some()
+        || filter.source == "github" && source.is_none()
+        || filter.source == "scheduled" && c.schedule_source.is_none()
     {
         return false;
     }
@@ -100,7 +102,12 @@ pub fn toolbar(ui: Ui) -> impl IntoElement {
             });
         });
         let mut source_seg = segmented();
-        for (key, title) in [("all", "All"), ("local", "Local"), ("github", "GitHub")] {
+        for (key, title) in [
+            ("all", "All"),
+            ("local", "Local"),
+            ("github", "GitHub"),
+            ("scheduled", "Scheduled"),
+        ] {
             source_seg = source_seg.child(compact_segment(
                 title,
                 None,

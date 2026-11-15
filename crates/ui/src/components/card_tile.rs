@@ -289,6 +289,29 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
         }
         tile = tile.child(meta);
     }
+    if let Some(sched) = &card.schedule_source {
+        let meta = view()
+            .key("schedule-meta")
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .min_w(px(0.))
+            .tooltip(hint_tooltip(format!(
+                "Scheduled by {} ({}) · Run #{}",
+                sched.workflow_name, sched.cron, sched.run_number
+            )))
+            .child(icon_tinted(Icon::Clock, ACCENT).w(px(12.)).h(px(12.)))
+            .child(
+                muted(format!(
+                    "Scheduled · {} #{}",
+                    sched.workflow_name, sched.run_number
+                ))
+                .truncate(),
+            )
+            .child(badge(sched.cron.clone()));
+        tile = tile.child(meta);
+    }
     let excerpt = card
         .body
         .lines()

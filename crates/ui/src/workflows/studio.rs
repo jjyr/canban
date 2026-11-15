@@ -828,10 +828,13 @@ pub(super) fn render(ui: Ui) -> AnyElement {
                     && graph.with(|g| g.has_doc)
             },
             move || {
-                scroll()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .child(view().gap_3().pb_4().child(stage_canvas(ctx)))
+                scroll().flex_1().min_h(px(0.)).child(
+                    view()
+                        .gap_3()
+                        .pb_4()
+                        .child(schedule_triggers_banner(ctx))
+                        .child(stage_canvas(ctx)),
+                )
             },
         ))
         .child(when(
@@ -847,6 +850,98 @@ pub(super) fn render(ui: Ui) -> AnyElement {
             move || env_editor_dialog(ctx),
         ))
         .into_element()
+}
+
+fn schedule_triggers_banner(ctx: Ctx) -> impl IntoElement {
+    let state = ctx.ui.workflows;
+    let rules = computed(move || {
+        let filename = state.selected.get();
+        state.studio_doc.with(|doc_opt| {
+            doc_opt
+                .as_ref()
+                .map(|doc| {
+                    doc.on
+                        .iter()
+                        .filter(|(_, r)| r.is_schedule())
+                        .map(|(rid, r)| {
+                            let cron = r.cron.clone().unwrap_or_default();
+                            let desc = canban_types::cron::describe_cron(&cron);
+                            let mode = if let Some(card) = &r.card {
+                                format!("Card → {}", card.column.as_deref().unwrap_or("backlog"))
+                            } else {
+                                "Terminal Agent".into()
+                            };
+                            (
+                                super::schedules::schedule_key(&filename, rid),
+                                rid.clone(),
+                                cron,
+                                desc,
+                                mode,
+                                doc.enabled && r.enabled,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+    });
+    when(
+        move || !rules.with(Vec::is_empty),
+        move || {
+            panel()
+                .gap_2()
+                .border_1()
+                .border_color(BORDER)
+                .child(
+                    view()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            view()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .child(icon_tinted(Icon::Clock, ACCENT).w(px(15.)).h(px(15.)))
+                                .child(
+                                    label("Scheduled Triggers").font_weight(FontWeight::SEMIBOLD),
+                                )
+                                .child(muted("Click a schedule to configure or run it")),
+                        )
+                        .child(compact_action(
+                            "Open Schedules Panel →",
+                            Variant::Quiet,
+                            move |_| {
+                                state.section.set("schedules".into());
+                            },
+                        )),
+                )
+                .child(view().flex_row().flex_wrap().gap_2().child(each(
+                    move || rules.get(),
+                    |(key, _, _, _, _, _)| key.clone(),
+                    move |row, _| {
+                        let (key, rid, cron, desc, mode, enabled) = row.get_untracked();
+                        compact_action(
+                            format!(
+                                "{} · {} ({}) · {}{}",
+                                rid,
+                                cron,
+                                desc,
+                                mode,
+                                if enabled { "" } else { " [Paused]" }
+                            ),
+                            Variant::Secondary,
+                            move |_| {
+                                state.selected_schedule.set(key.clone());
+                                state.section.set("schedules".into());
+                            },
+                        )
+                    },
+                )))
+        },
+    )
 }
 
 fn stage_canvas(ctx: Ctx) -> AnyElement {
@@ -942,6 +1037,14 @@ fn stage_canvas(ctx: Ctx) -> AnyElement {
                         .flex_wrap()
                         .items_center()
                         .gap_2()
+                        .child(compact_action(
+                            "+ Add schedule",
+                            Variant::Secondary,
+                            move |_| {
+                                let sel = state.selected.get_untracked();
+                                super::schedules::add_schedule_rule_to_file(ctx.ui, &sel);
+                            },
+                        ))
                         .child(compact_action(
                             move || {
                                 ctx.graph.with(|g| {

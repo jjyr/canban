@@ -213,6 +213,25 @@ impl Entry {
                 batch.items.iter().filter(|i| !i.evicted).count()
             ));
         }
+        if let Some(sr) = s
+            .scheduled_runs
+            .iter()
+            .find(|r| r.id == self.saved.id && r.active())
+        {
+            let rt = self.saved.runtime.as_ref()?;
+            if rt.state == "finished" || rt.state == "closing" || rt.terminal.is_none() {
+                return None;
+            }
+            let who = sr
+                .profile_id
+                .as_deref()
+                .map(|p| format!("@{p}"))
+                .unwrap_or_else(|| "Agent".into());
+            return Some(format!(
+                "Scheduled task `{}` #{} ({who}) is still running. Closing this terminal cancels the scheduled run.",
+                sr.workflow_name, sr.number
+            ));
+        }
         let r = self.saved.runtime.as_ref()?;
         if r.state == "finished" || r.state == "closing" || r.terminal.is_none() {
             return None;
@@ -441,6 +460,7 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
             .cloned();
         let configuration = s.configuration_sessions.iter().find(|c| c.id == t.id);
         let merge_batch = s.merge_batches.iter().find(|b| b.id == t.id);
+        let scheduled_run = s.scheduled_runs.iter().find(|r| r.id == t.id);
         let origin_card = t
             .origin_card_id
             .as_ref()
@@ -458,7 +478,7 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                     })
                 })
         });
-        let card = if configuration.is_some() || merge_batch.is_some() {
+        let card = if configuration.is_some() || merge_batch.is_some() || scheduled_run.is_some() {
             None
         } else {
             agent.as_ref().map(|r| r.card.clone()).or_else(|| {
@@ -497,6 +517,7 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
         let project_id = configuration
             .map(|c| c.project_id.clone())
             .or_else(|| merge_batch.map(|b| b.project_id.clone()))
+            .or_else(|| scheduled_run.map(|r| r.project_id.clone()))
             .or_else(|| {
                 agent
                     .as_ref()

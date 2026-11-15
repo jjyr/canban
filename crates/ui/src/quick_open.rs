@@ -131,6 +131,37 @@ fn contextual_commands(ui: Ui, raw_query: &str) -> Vec<(usize, SearchChoice)> {
             keywords: format!("worktree delete remove {}", wt.branch),
         });
     }
+    for st in &snapshot.schedule_states {
+        let project_name = snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == st.project_id)
+            .map(|p| p.name.as_str())
+            .unwrap_or("Project");
+        let name = if st.rule_id == "schedule" {
+            st.workflow_name.clone()
+        } else {
+            format!("{} / {}", st.workflow_name, st.rule_id)
+        };
+        dynamic_cmds.push(DynamicCommand {
+            id: format!("cmd:schedule-run:{}", st.id),
+            title: format!("Run Schedule Now: {name}"),
+            detail: format!("{project_name} · {}", st.cron),
+            icon: Icon::Clock,
+            keywords: format!("schedule cron run trigger now {} {}", name, st.filename),
+        });
+        dynamic_cmds.push(DynamicCommand {
+            id: format!("cmd:schedule-toggle:{}", st.id),
+            title: if st.enabled {
+                format!("Pause Schedule: {name}")
+            } else {
+                format!("Enable Schedule: {name}")
+            },
+            detail: format!("{project_name} · {}", st.cron),
+            icon: Icon::Clock,
+            keywords: format!("schedule cron toggle pause enable {} {}", name, st.filename),
+        });
+    }
 
     dynamic_cmds
         .into_iter()
@@ -246,6 +277,8 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                         },
                                         icon: if c.id.contains("insights") {
                                             Icon::Insights
+                                        } else if c.id.contains("schedule") {
+                                            Icon::Clock
                                         } else if c.id.contains("agent") {
                                             Icon::Agent
                                         } else if c.id.contains("worktree") {
