@@ -489,8 +489,11 @@ impl AppServer {
         Ok(())
     }
     fn github_remote_action(&self, method: &str, p: &Value) -> Result<Value> {
+        if let Some(receipt) = self.github_receipt(method, p)? {
+            return Ok(receipt);
+        }
         let _guard = self
-            .review_gate
+            .github_action_gate
             .try_lock()
             .map_err(|_| anyhow::anyhow!("Another GitHub action is pending"))?;
         if let Some(receipt) = self.github_receipt(method, p)? {
@@ -668,8 +671,11 @@ impl AppServer {
         Ok(result)
     }
     fn github_notification_action(&self, method: &str, p: &Value) -> Result<Value> {
+        if let Some(receipt) = self.github_receipt(method, p)? {
+            return Ok(receipt);
+        }
         let _guard = self
-            .review_gate
+            .github_action_gate
             .try_lock()
             .map_err(|_| anyhow::anyhow!("Another GitHub action is pending"))?;
         if let Some(receipt) = self.github_receipt(method, p)? {

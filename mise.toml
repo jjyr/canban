@@ -1,6 +1,7 @@
 [tools]
 rust = "beta-2026-10-14"
 zig = "0.17.1"
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.152"
 
 [tasks.terminal-deps]
 run = "/usr/bin/python3 scripts/terminal-deps.py"
@@ -12,7 +13,7 @@ run = "cargo check --workspace"
 [tasks.test]
 depends = ["terminal-deps"]
 env = { CANBAN_UPDATES_DISABLED = "1" }
-run = "cargo nextest run --workspace"
+run = "cargo nextest run --workspace --locked"
 
 [tasks.run]
 depends = ["build-binaries"]

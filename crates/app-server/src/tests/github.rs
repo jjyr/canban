@@ -325,3 +325,50 @@ fn project_auto_detects_github_remote_links_with_intake_off_and_respects_manual_
     assert_eq!(upgraded_gh.intake, GitHubIntake::Off);
     assert_eq!(upgraded_gh.pr_intake, GitHubPrIntake::Off);
 }
+
+#[test]
+fn delivery_review_gate_does_not_block_github_remote_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+
+    // Holding `review_gate` (as `pump_deliveries` or `git.commit` does) must never reject
+    // `github.remote.*` or `github.notification.*` with "Another GitHub action is pending".
+    let _delivery_guard = app.review_gate.lock().unwrap();
+    let err = app
+        .call(
+            "github.remote.comment",
+            json!({
+                "reference": {
+                    "repository": "fixture/repo",
+                    "kind": "pr",
+                    "number": 2,
+                    "url": "https://github.com/fixture/repo/pull/2"
+                },
+                "body": "",
+                "request_key": "no-false-pending"
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(err, "Comment is empty");
+
+    // Meanwhile, concurrent GitHub remote actions still serialize via `github_action_gate`.
+    let _gh_guard = app.github_action_gate.lock().unwrap();
+    let busy_err = app
+        .call(
+            "github.remote.comment",
+            json!({
+                "reference": {
+                    "repository": "fixture/repo",
+                    "kind": "pr",
+                    "number": 2,
+                    "url": "https://github.com/fixture/repo/pull/2"
+                },
+                "body": "hello",
+                "request_key": "serialized-gh-action"
+            }),
+        )
+        .unwrap_err()
+        .to_string();
+    assert_eq!(busy_err, "Another GitHub action is pending");
+}

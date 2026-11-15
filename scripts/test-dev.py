@@ -19,6 +19,12 @@ class Selection(unittest.TestCase):
         self.environment = patch.dict(os.environ, {}, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
+        self.repo = patch.object(dev, 'REPO', Path('/private/tmp/cb-dev-repo'))
+        self.root = patch.object(dev, 'ROOT', Path('/private/tmp/cb-dev-repo/.local/dev'))
+        self.repo.start()
+        self.root.start()
+        self.addCleanup(self.repo.stop)
+        self.addCleanup(self.root.stop)
 
     def test_branch_names_checkout_and_detached_head_have_distinct_instances(self):
         a = dev.select('feature/editor')

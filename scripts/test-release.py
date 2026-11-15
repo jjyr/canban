@@ -163,17 +163,34 @@ class Releases(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,'Injected upload failure'):release.main()
         self.assertFalse(any(method=='PATCH' for method,_ in calls))
     def test_workflow_is_manual_only_official_release_with_pre_release_integration_tests(self):
-        workflow=pathlib.Path(__file__).resolve().parents[1]/'.github/workflows/release.yml'
+        root=pathlib.Path(__file__).resolve().parents[1]
+        workflow=root/'.github/workflows/release.yml'
         content=workflow.read_text()
+        mise_content=(root/'mise.toml').read_text()
         self.assertTrue(content.startswith('name: Release\n'))
         self.assertNotIn('internal release',content.lower())
         self.assertIn('workflow_dispatch:',content)
         self.assertNotIn('push:',content)
+        self.assertIn('concurrency:',content)
+        self.assertIn('cancel-in-progress: false',content)
+        self.assertIn('timeout-minutes:',content)
+        self.assertIn('Swatinem/rust-cache@v2',content)
+        self.assertIn('~/Library/Caches/canban',content)
         self.assertIn('https://releases.herdr.dev/core/install.sh',content)
+        self.assertIn('HC_VERSION:',content)
+        self.assertNotIn('actions/checkout@v4',content)
+        self.assertNotIn('jdx/mise-action@v2',content)
+        self.assertNotIn('actions/upload-artifact@v4',content)
+        self.assertNotIn('get.nexte.st/latest',content)
+        self.assertIn('cargo-nextest',mise_content)
+        self.assertIn('cargo nextest run --workspace --locked',mise_content)
         self.assertIn('mise run test-integration',content)
+        self.assertIn('scripts/test-install.py',content)
         self.assertLess(content.index('mise run test-integration'),content.index('scripts/release.py reserve'))
+        self.assertLess(content.index('scripts/test-install.py'),content.index('scripts/release.py reserve'))
         self.assertLess(content.index('scripts/release.py reserve'),content.index('mise run build-release'))
-        self.assertLess(content.index('mise run build-release'),content.index('scripts/release.py publish'))
+        self.assertLess(content.index('mise run build-release'),content.index('scripts/release.py package'))
+        self.assertLess(content.index('scripts/release.py package'),content.index('scripts/release.py publish'))
     def test_dispatch_triggers_workflow_discovers_run_and_supports_watch(self):
         calls=[];subproc=[]
         now=release.datetime.datetime.now(release.datetime.timezone.utc).isoformat().replace('+00:00','Z')

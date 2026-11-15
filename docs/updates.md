@@ -55,7 +55,7 @@ The implementation lives in `crates/storage/src/migrations.rs`. Append a `Migrat
 
 ```text
 GitHub Actions (`Release`) / scripts/release.py
-  unit & packaging tests -> test-integration -> reserve tag -> build-release -> package -> publish release
+  unit & packaging tests -> test-integration & test-install -> reserve tag -> build-release -> package -> publish release
                                      |
 canban-github -> authenticated release/asset requests
                                      |
@@ -88,7 +88,7 @@ The in-app updater remains the release installation path. A newer App installed
 externally can also activate its bundled backend through the explicit startup
 action below. Opening an App never silently replaces an answering backend.
 
-`mise run build` packages UI, CLI and updater together. `mise run build-release` produces optimized, ad-hoc-signed binaries; it does not publish. `mise run install-app` builds the release bundle and atomically installs it into `/Applications/Canban.app`. `mise run release` dispatches `.github/workflows/release.yml` (`Release`) via `workflow_dispatch` (defaulting to `--ref main`, with optional `-- --ref <branch>` and `-- --watch`, authenticating through `GH_TOKEN`/`GITHUB_TOKEN` or `gh auth token`). `.github/workflows/release.yml` runs only on `workflow_dispatch`, installs `librsvg` and Herdr Core (`hc`), runs unit/packaging tests and the deterministic headless integration suite (`mise run test-integration`), and only then reserves `YYYYMMDD-N`, builds the triggering SHA on a macOS arm64 runner, uploads `Canban-macos-aarch64.tar.zst` plus `manifest-macos-aarch64.json`, and publishes the completed draft as an official GitHub Release (`prerelease: false`). Packaging includes existing third-party notices. Developer ID signing/notarization is not implemented.
+`mise run build` packages UI, CLI and updater together. `mise run build-release` produces optimized, ad-hoc-signed binaries; it does not publish. `mise run install-app` builds the release bundle and atomically installs it into `/Applications/Canban.app`. `mise run release` dispatches `.github/workflows/release.yml` (`Release`) via `workflow_dispatch` (defaulting to `--ref main`, with optional `-- --ref <branch>` and `-- --watch`, authenticating through `GH_TOKEN`/`GITHUB_TOKEN` or `gh auth token`). `.github/workflows/release.yml` runs only on `workflow_dispatch` with serialized `release` concurrency, caches Cargo/Rust and `~/Library/Caches/canban` (`libghostty-vt` sources and Zig artifacts), installs `librsvg` and version-pinned Herdr Core (`hc`), runs locked unit/packaging tests, the deterministic headless integration suite (`mise run test-integration`) and `scripts/test-install.py`, and only then reserves `YYYYMMDD-N`, builds the triggering SHA on a macOS arm64 runner, uploads `Canban-macos-aarch64.tar.zst`, `Canban-macos-aarch64.tar.gz` and `manifest-macos-aarch64.json`, and publishes the completed draft as an official GitHub Release (`prerelease: false`). Packaging includes existing third-party notices. Developer ID signing/notarization is not implemented.
 
 Development uses `mise run dev`, which derives an isolated checkout/branch home
 and disables channel updates; it does not replace the installed `~/.canban`
