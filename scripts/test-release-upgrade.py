@@ -147,9 +147,13 @@ def extract_bundle(archive_path: pathlib.Path, extract_dir: pathlib.Path, update
 
 def write_ui_probe(path: pathlib.Path):
     """Headless UI shim that exercises real Bootstrap/workspace RPCs before writing ui-ready."""
+    # Resolve `sys.executable` directly rather than `/usr/bin/python3` because macOS's
+    # xcrun stub re-execs into `Python.app/Contents/MacOS/Python`, changing `ps -o command=`
+    # mid-flight and invalidating `canban-updater`'s source-UI identity check.
+    shebang = f"#!{sys.executable}\n"
     path.write_text(
-        """#!/usr/bin/python3
-import json, os, socket, subprocess, sys, time
+        shebang
+        + """import json, os, socket, subprocess, sys, time
 from pathlib import Path
 
 home = Path(os.environ["CANBAN_HOME"])
@@ -187,6 +191,8 @@ if token:
         except Exception:
             pass
     (home / "updates" / f"ui-ready-{token}").write_bytes(info)
+
+(home / "updates/ui-probe-started").write_text(str(os.getpid()))
 
 while True:
     try:
@@ -423,7 +429,11 @@ def run_upgrade_gate(
         "XDG_STATE_HOME": str(base / "hc-state"),
         "XDG_CONFIG_HOME": str(base / "hc-config"),
     }
-    clean_env = {k: v for k, v in os.environ.items() if not k.startswith(("CANBAN_", "HC_"))}
+    clean_env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith(("CANBAN_", "HC_"))
+    }
     env = {
         **clean_env,
         **core_env,
@@ -432,6 +442,25 @@ def run_upgrade_gate(
         "CANBAN_UPDATE_API": f"http://127.0.0.1:{feed_server.server_address[1]}",
         "CANBAN_UPDATE_REPOSITORY": "jjyr/canban",
     }
+
+    # Pre-seed `config/agents.json` before starting the baseline AppServer so its
+    # initial Herdr observer connects directly to the isolated session rather than
+    # auto-starting a `default` Core on the shared socket first.
+    (home / "config").mkdir(parents=True, exist_ok=True)
+    (home / "config/agents.json").write_text(
+        json.dumps(
+            {
+                "hc": hc,
+                "hc_session": core_env["HC_SESSION"],
+                "hc_env": core_env,
+                "default_agent": "developer",
+                "profiles": [
+                    {"id": "developer", "preset": "codex"},
+                    {"id": "reviewer", "preset": "codex"},
+                ],
+            }
+        )
+    )
 
     cli = target / "Contents/MacOS/canban"
     log_file = (base / "server.log").open("w")
@@ -509,26 +538,43 @@ def run_upgrade_gate(
         )["pid"]
 
         # Discover and install the candidate release via the real updater pipeline.
-        rpc(home / "app.sock", "update.check")
-        wait_until(
-            lambda: (rpc(home / "app.sock", "update.state")["state"].get("available") or {})
-            .get("manifest", {})
-            .get("version")
-            == manifest["version"],
-            "candidate release discovery",
-        )
+        # AppServer spawns an automatic update check immediately on boot, holding
+        # `operation.lock` until `save_state()` returns and drops the File handle.
+        # Wait for `phase == "available"` before calling `update.install`, and tolerate
+        # the microscopic window between `save_state()` atomic rename and `_lock` drop.
+        def candidate_ready():
+            st = rpc(home / "app.sock", "update.state")["state"]
+            return (
+                st.get("phase") == "available"
+                and (st.get("available") or {}).get("manifest", {}).get("version") == manifest["version"]
+            )
+
+        if not candidate_ready():
+            rpc(home / "app.sock", "update.check")
+        wait_until(candidate_ready, "candidate release discovery")
 
         ui = subprocess.Popen([str(target / "Contents/MacOS/canban-ui")], env=env, stdout=log_file, stderr=log_file)
         wait_until(
-            lambda: "canban-ui"
+            lambda: (home / "updates/ui-probe-started").is_file()
+            and (home / "updates/ui-probe-started").read_text().strip() == str(ui.pid)
+            and "canban-ui"
             in subprocess.run(["/bin/ps", "-p", str(ui.pid), "-o", "command="], capture_output=True, text=True).stdout,
             "baseline UI shim",
         )
-        rpc(
-            home / "app.sock",
-            "update.install",
-            {"version": manifest["version"], "ui_pid": ui.pid, "app_id": app_id},
-        )
+
+        def request_install():
+            try:
+                return rpc(
+                    home / "app.sock",
+                    "update.install",
+                    {"version": manifest["version"], "ui_pid": ui.pid, "app_id": app_id},
+                )
+            except RuntimeError as exc:
+                if "operation.lock is busy" in str(exc):
+                    return None
+                raise
+
+        wait_until(request_install, "update.install admission", timeout=15.0)
 
         def check_journal():
             p = home / "updates/install.json"

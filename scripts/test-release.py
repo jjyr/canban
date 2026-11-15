@@ -221,6 +221,13 @@ class Releases(unittest.TestCase):
         self.assertFalse(cross.has_header('Authorization'))
         same=handler.redirect_request(orig,None,302,'Found',{},'https://api.github.com/repos/jjyr/canban/releases/assets/2')
         self.assertEqual(same.get_header('Authorization'),'Bearer secret-token')
+
+        with tempfile.TemporaryDirectory(prefix='cb-ui-probe-') as directory:
+            probe=pathlib.Path(directory)/'canban-ui'
+            gate.write_ui_probe(probe)
+            first_line=probe.read_text().splitlines()[0]
+            self.assertEqual(first_line,'#!'+sys.executable)
+            self.assertIn('ui-probe-started',probe.read_text())
     def test_dispatch_triggers_workflow_discovers_run_and_supports_watch(self):
         calls=[];subproc=[]
         now=release.datetime.datetime.now(release.datetime.timezone.utc).isoformat().replace('+00:00','Z')
