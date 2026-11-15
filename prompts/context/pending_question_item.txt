@@ -1,2 +1,2 @@
 - Question ID `{{question_id}}`: {{question_body}}
-  Reply with: {{cli}} reply --to {{question_id_quoted}} --file "$CANBAN_RUN_DIR/answer.md" (a reply does not complete the assignment).
+  Reply with: "$CANBAN_CLI" reply --to {{question_id_quoted}} --file "$CANBAN_RUN_DIR/answer.md" (a reply does not complete the assignment).

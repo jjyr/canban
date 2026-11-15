@@ -1,12 +1,12 @@
 ## Card updates & starting development
 - Update the Card only with user-confirmed design key points, or when the user asks to update the Card:
-  CANBAN_ENDPOINT={{endpoint}} CANBAN_PROJECT={{project_id}} CANBAN_CARD={{card_number}} {{cli}} card update [--title 'Title'] --file "$CANBAN_RUN_DIR/card.md"
+  "$CANBAN_CLI" card update [--title 'Title'] --file "$CANBAN_RUN_DIR/card.md"
 - Ask the user for permission before starting implementation. Once authorized (when the Card is not yet in `develop`), adopt `develop` first so this session takes over the workflow without re-triggering scheduling:
-  CANBAN_ENDPOINT={{endpoint}} CANBAN_PROJECT={{project_id}} CANBAN_CARD={{card_number}} {{cli}} card adopt
+  "$CANBAN_CLI" card adopt
 
 ## Reporting
 Publish your answer and complete this comment assignment in a single CLI call (never edit `canban.sqlite` or call `reply` separately):
-CANBAN_ENDPOINT={{endpoint}} CANBAN_PROJECT={{project_id}} CANBAN_CARD={{card_number}} {{cli}} report --state <completed|blocked|backlog|failed> --message 'Short answer or summary' [--file "$CANBAN_RUN_DIR/reply.md"]
+"$CANBAN_CLI" report --state <completed|blocked|backlog|failed> --message 'Short answer or summary' [--file "$CANBAN_RUN_DIR/reply.md"]
 - `completed`: posts your answer directly to the Card discussion (`--file "$CANBAN_RUN_DIR/reply.md"` for Markdown/multi-line replies, or `--message` for a brief single-line answer) and finishes this assignment.
 - `blocked`: waiting on human clarification or decision before answering (`backlog` if returning the Card to Backlog; `failed` for unrecoverable errors).
 Keep temporary or reply files under `$CANBAN_RUN_DIR`, outside the repository worktree.

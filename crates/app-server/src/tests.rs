@@ -334,16 +334,7 @@ fn deferred_notes_preserve_legacy_data_without_injecting_it_into_new_executions(
     let snapshot = app.snapshot().unwrap();
     let req = &snapshot.terminals[0];
     let card = &snapshot.cards[0];
-    let path = canban_context::capture(
-        &app.home,
-        &project,
-        card,
-        req,
-        &snapshot,
-        "/tmp/canban-test.sock",
-        Path::new("/bin/echo"),
-    )
-    .unwrap();
+    let path = canban_context::capture(&app.home, &project, card, req, &snapshot).unwrap();
     let manifest = app.home.join(&path).with_file_name("context.json");
     let original = std::fs::read(&manifest).unwrap();
     let value: Value = serde_json::from_slice(&original).unwrap();
@@ -537,16 +528,8 @@ fn queued_role_and_stage_task_are_immutable_after_config_reload() {
     app.call("config.reload", json!({})).unwrap();
     assert_eq!(app.snapshot().unwrap().terminals[0], before);
     let snapshot = app.snapshot().unwrap();
-    let path = canban_context::capture(
-        &app.home,
-        &project,
-        &snapshot.cards[0],
-        &before,
-        &snapshot,
-        "/tmp/test.sock",
-        Path::new("/bin/echo"),
-    )
-    .unwrap();
+    let path = canban_context::capture(&app.home, &project, &snapshot.cards[0], &before, &snapshot)
+        .unwrap();
     let prompt = std::fs::read_to_string(app.home.join(path)).unwrap();
     let before_agent = before.agent.as_ref().unwrap();
     assert!(prompt.contains(&before_agent.profile.role_instruction));
@@ -2967,16 +2950,7 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
 
     let capture_prompt = |card: &Card, att: &TerminalEntry| -> String {
         let s = app.snapshot().unwrap();
-        let rel = canban_context::capture(
-            &app.home,
-            &project,
-            card,
-            att,
-            &s,
-            "/tmp/test.sock",
-            Path::new("/bin/canban"),
-        )
-        .unwrap();
+        let rel = canban_context::capture(&app.home, &project, card, att, &s).unwrap();
         std::fs::read_to_string(app.home.join(rel)).unwrap()
     };
 
@@ -2985,8 +2959,13 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     assert!(
         comment_prompt.contains(
             "Publish your answer and complete this comment assignment in a single CLI call"
-        ),
-        "comment prompt should use reporting_comment.txt"
+        ) && comment_prompt.contains("\"$CANBAN_CLI\" card update")
+            && comment_prompt.contains("\"$CANBAN_CLI\" card adopt")
+            && comment_prompt.contains("\"$CANBAN_CLI\" report --state")
+            && !comment_prompt.contains("CANBAN_ENDPOINT=")
+            && !comment_prompt.contains("CANBAN_PROJECT=")
+            && !comment_prompt.contains("CANBAN_CARD="),
+        "comment prompt should use reporting_comment.txt via $CANBAN_CLI without inline env vars"
     );
     assert!(
         !comment_prompt.contains("## Pending questions") && !comment_prompt.contains("reply --to"),
@@ -3076,8 +3055,14 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     let interactive_attempt = admit(&app, &interactive_req);
     let interactive_prompt = capture_prompt(&c2, &interactive_attempt);
     assert!(
-        interactive_prompt.contains("This is an interactive Card discussion session"),
-        "interactive prompt should use reporting_interactive.txt"
+        interactive_prompt.contains("This is an interactive Card discussion session")
+            && interactive_prompt.contains("\"$CANBAN_CLI\" card update")
+            && interactive_prompt.contains("\"$CANBAN_CLI\" card adopt")
+            && interactive_prompt.contains("\"$CANBAN_CLI\" report --state")
+            && !interactive_prompt.contains("CANBAN_ENDPOINT=")
+            && !interactive_prompt.contains("CANBAN_PROJECT=")
+            && !interactive_prompt.contains("CANBAN_CARD="),
+        "interactive prompt should use reporting_interactive.txt via $CANBAN_CLI without inline env vars"
     );
 
     // 3. Workflow/stage task with an injected pending question DOES include `## Pending questions`.
@@ -3114,9 +3099,13 @@ fn request_trigger_prompts_omit_duplicate_reply_for_comments_and_dedupe_completi
     let task_prompt = capture_prompt(&c3, &task_attempt);
     assert!(
         task_prompt.contains("Report your outcome via CLI")
+            && task_prompt.contains("\"$CANBAN_CLI\" report --state")
             && task_prompt.contains("## Pending questions")
-            && task_prompt.contains("reply --to"),
-        "non-comment task with a concurrent question retains `## Pending questions` + `reply --to`"
+            && task_prompt.contains("\"$CANBAN_CLI\" reply --to")
+            && !task_prompt.contains("CANBAN_ENDPOINT=")
+            && !task_prompt.contains("CANBAN_PROJECT=")
+            && !task_prompt.contains("CANBAN_CARD="),
+        "non-comment task with a concurrent question retains `## Pending questions` + `\"$CANBAN_CLI\" reply --to` without inline env vars"
     );
 }
 

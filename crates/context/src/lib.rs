@@ -140,30 +140,21 @@ pub fn run_dir(home: &Path, entry: &TerminalEntry) -> PathBuf {
         home.join("terminals").join(&entry.id)
     }
 }
-#[allow(
-    clippy::too_many_arguments,
-    reason = "Explicit immutable input and reporting boundaries for a captured execution"
-)]
 pub fn capture(
     home: &Path,
     project: &Project,
     card: &Card,
     entry: &TerminalEntry,
     snapshot: &Snapshot,
-    endpoint: &str,
-    cli: &Path,
 ) -> Result<String> {
-    capture_for(home, project, card, entry, snapshot, endpoint, cli, home)
+    capture_for(home, project, card, entry, snapshot, home)
 }
-#[allow(clippy::too_many_arguments)]
 pub fn capture_for(
     home: &Path,
     project: &Project,
     card: &Card,
     entry: &TerminalEntry,
     snapshot: &Snapshot,
-    endpoint: &str,
-    cli: &Path,
     execution_home: &Path,
 ) -> Result<String> {
     let run = entry
@@ -309,7 +300,6 @@ pub fn capture_for(
         }
     }
 
-    let cli_quoted = shell_quote(&cli.to_string_lossy());
     if let Some(source) = github_source {
         let number = source.number.to_string();
         let params = shell_quote(
@@ -322,7 +312,6 @@ pub fn capture_for(
                 ("repository", &source.repository),
                 ("number", &number),
                 ("url", &source.url),
-                ("cli", &cli_quoted),
                 ("params", &params),
             ],
         ));
@@ -335,19 +324,8 @@ pub fn capture_for(
             REPORTING_TASK_TEMPLATE
         }
     };
-    let endpoint_quoted = shell_quote(endpoint);
-    let project_quoted = shell_quote(&project.id);
-    let card_num_str = card.number.to_string();
     prompt.push('\n');
-    prompt.push_str(&render_template(
-        reporting_template,
-        &[
-            ("endpoint", &endpoint_quoted),
-            ("project_id", &project_quoted),
-            ("card_number", &card_num_str),
-            ("cli", &cli_quoted),
-        ],
-    ));
+    prompt.push_str(reporting_template);
 
     if let Some(instruction) = run
         .profile
@@ -371,7 +349,6 @@ pub fn capture_for(
                 &[
                     ("question_id", &q.id),
                     ("question_body", q.body.trim()),
-                    ("cli", &cli_quoted),
                     ("question_id_quoted", &qid_quoted),
                 ],
             ));
@@ -611,5 +588,28 @@ mod tests {
             ),
             "npx skills add '/Users/alice/My Home/.canban/skills' --skill canban -g"
         );
+    }
+
+    #[test]
+    fn context_prompt_templates_use_injected_canban_cli_without_inline_env_overrides() {
+        for (name, tpl) in [
+            ("reporting_task.txt", REPORTING_TASK_TEMPLATE),
+            ("reporting_comment.txt", REPORTING_COMMENT_TEMPLATE),
+            ("reporting_interactive.txt", REPORTING_INTERACTIVE_TEMPLATE),
+            ("pending_question_item.txt", PENDING_QUESTION_ITEM_TEMPLATE),
+            ("github_source.txt", GITHUB_SOURCE_TEMPLATE),
+        ] {
+            assert!(
+                tpl.contains("\"$CANBAN_CLI\""),
+                "{name} should invoke CLI through \"$CANBAN_CLI\""
+            );
+            assert!(
+                !tpl.contains("CANBAN_ENDPOINT=")
+                    && !tpl.contains("CANBAN_PROJECT=")
+                    && !tpl.contains("CANBAN_CARD=")
+                    && !tpl.contains("{{cli}}"),
+                "{name} should not inline environment variables or expand raw CLI binary paths"
+            );
+        }
     }
 }

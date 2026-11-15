@@ -1,4 +1,3 @@
-New Canban assignment on Card #{{card_number}} (use this scratch directory for new temporary files):
-CANBAN_RUN_DIR={{run_dir}}
+New Canban assignment on Card #{{card_number}}:
 
 {{prompt}}

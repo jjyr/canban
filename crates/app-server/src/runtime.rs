@@ -995,9 +995,8 @@ impl AppServer {
         } else {
             self.cli.clone()
         };
-        let input = canban_context::capture_for(
-            &self.home, &project, &prepared, entry, snapshot, &endpoint, &cli, &home,
-        )?;
+        let input =
+            canban_context::capture_for(&self.home, &project, &prepared, entry, snapshot, &home)?;
         if remote {
             self.stage_remote(&ops.host, &home, card)?;
         }

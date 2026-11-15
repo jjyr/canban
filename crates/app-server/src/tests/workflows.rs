@@ -2596,16 +2596,7 @@ fn streamlined_prompt_omits_manifest_instruction_and_inlines_context_conditional
                 .is_some_and(|a| a.card_id == moved.id && a.state == "queued")
         })
         .unwrap();
-    let rel_prompt = canban_context::capture(
-        &app.home,
-        &p,
-        &moved,
-        req,
-        &snap,
-        "/tmp/canban-test.sock",
-        Path::new("/bin/echo"),
-    )
-    .unwrap();
+    let rel_prompt = canban_context::capture(&app.home, &p, &moved, req, &snap).unwrap();
     // Internal context.json remains persisted for audit/archival, never referenced in prompt.md.
     assert!(
         app.home
@@ -2653,16 +2644,7 @@ fn streamlined_prompt_omits_manifest_instruction_and_inlines_context_conditional
     let card2 = snap2.cards.iter().find(|x| x.id == c.id).unwrap();
     let mut next_att = attempt.clone();
     next_att.agent.as_mut().unwrap().number = 2;
-    let rel_prompt2 = canban_context::capture(
-        &app.home,
-        &p,
-        card2,
-        &next_att,
-        &snap2,
-        "/tmp/canban-test.sock",
-        Path::new("/bin/echo"),
-    )
-    .unwrap();
+    let rel_prompt2 = canban_context::capture(&app.home, &p, card2, &next_att, &snap2).unwrap();
     let rich_prompt = std::fs::read_to_string(app.home.join(&rel_prompt2)).unwrap();
     assert!(!rich_prompt.contains("context.json"));
     assert!(rich_prompt.contains("## Card discussion"));
@@ -3200,16 +3182,9 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
     let term_entry = admit(&app, &req);
 
     // Prompt teaches both user-confirmed Card updates and permission-gated `card adopt`.
-    let prompt_rel = canban_context::capture(
-        &app.home,
-        &p,
-        &card,
-        &term_entry,
-        &app.snapshot().unwrap(),
-        "/tmp/test.sock",
-        Path::new("/bin/canban"),
-    )
-    .unwrap();
+    let prompt_rel =
+        canban_context::capture(&app.home, &p, &card, &term_entry, &app.snapshot().unwrap())
+            .unwrap();
     let prompt = std::fs::read_to_string(app.home.join(prompt_rel)).unwrap();
     assert!(prompt.contains("card update"));
     assert!(prompt.contains("card adopt"));

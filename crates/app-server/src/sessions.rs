@@ -281,16 +281,6 @@ impl AppServer {
         let runtime_home =
             PathBuf::from(old.runtime_home.as_ref().context("Runtime home missing")?);
         let remote = location.machine != "local";
-        let endpoint = if remote {
-            runtime_home.join("app.sock")
-        } else {
-            self.endpoint()
-        };
-        let cli = if remote {
-            runtime_home.join("bin/canban")
-        } else {
-            self.cli.clone()
-        };
         let client = canban_herdr::Client {
             config: self.config(),
         };
@@ -341,8 +331,6 @@ impl AppServer {
             card,
             &promoted_entry,
             snapshot,
-            &endpoint.to_string_lossy(),
-            &cli,
             &runtime_home,
         )?;
         promoted_entry.agent.as_mut().unwrap().input_path = input.clone();
@@ -373,22 +361,14 @@ impl AppServer {
             )
         })?;
         let prompt = std::fs::read_to_string(self.home.join(&input))?;
-        let run_dir = canban_context::run_dir(&runtime_home, &promoted_entry);
-        let proj_quoted = canban_context::shell_quote(&card.project_id);
         let card_number = card.number.to_string();
-        let run_dir_quoted = canban_context::shell_quote(&run_dir.to_string_lossy());
         let text = canban_context::render_template(
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/../../prompts/runtime/continue_assignment.txt"
             ))
             .trim_end(),
-            &[
-                ("project_id", &proj_quoted),
-                ("card_number", &card_number),
-                ("run_dir", &run_dir_quoted),
-                ("prompt", &prompt),
-            ],
+            &[("card_number", &card_number), ("prompt", &prompt)],
         );
         if let Err(e) = client.call("terminal.send", json!({"terminal":terminal,"text":text})) {
             self.store.lock().unwrap().write(|db| {
