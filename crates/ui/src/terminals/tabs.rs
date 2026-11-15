@@ -53,7 +53,11 @@ pub async fn menu(ui: Ui, id: String, at: Option<Point<Points>>) {
     ];
     if let Some(card) = &e.card {
         let card = card.id.clone();
-        items.push(MenuItem::new("Open Card").on_select(move || ui.terminal_card(card.clone())));
+        let terminal = e.saved.id.clone();
+        items.push(
+            MenuItem::new("Open Card")
+                .on_select(move || ui.terminal_card(card.clone(), Some(terminal.clone()))),
+        );
     }
     items.push(
         MenuItem::new(e.cwd().unwrap_or_else(|| "Directory unavailable".into())).disabled(true),
@@ -585,6 +589,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
 
             if let Some(ref e) = cur {
                 if let Some(card) = e.card.clone() {
+                    let terminal = e.saved.id.clone();
                     context_bar = context_bar.child(
                         view()
                             .flex_1()
@@ -621,7 +626,9 @@ pub fn header(ui: Ui) -> impl IntoElement {
                                             .truncate(),
                                     )
                                     .accessibility_label(move || Some("Open current Card".into()))
-                                    .on_press(move |_: &()| ui.terminal_card(card.id.clone())),
+                                    .on_press(move |_: &()| {
+                                        ui.terminal_card(card.id.clone(), Some(terminal.clone()))
+                                    }),
                             ),
                     );
                 } else if let Some(project) = e.project_id.clone() {

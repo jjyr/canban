@@ -891,6 +891,33 @@ fn card_open_collapses_terminal_by_default_while_terminal_and_pill_entries_expan
         assert_eq!(ui.card.get_untracked(), "c1");
         assert_eq!(ui.card_tab.get_untracked(), "c1-shell");
         assert!(ui.card_terminal_open.get_untracked());
+
+        // 6. Clicking the top Card link (`#N Title`) or `Open Card` menu item inside `Terminals` (`terminal_card`)
+        // navigates to the Card in standalone mode AND expands/focuses that exact terminal tab (`conv_id`),
+        // forming a symmetric round-trip with `card::terminal::pop_out`.
+        ui.open_terminal(conv_id.clone());
+        assert_eq!(ui.page.get_untracked(), "terminals");
+        assert_eq!(ui.terminal_selection.get_untracked(), conv_id);
+        ui.terminal_card("c1".into(), Some(conv_id.clone()));
+        assert_eq!(ui.page.get_untracked(), "card");
+        assert_eq!(ui.card.get_untracked(), "c1");
+        assert!(ui.card_standalone.get_untracked());
+        assert_eq!(ui.card_tab.get_untracked(), conv_id);
+        assert!(ui.card_terminal_open.get_untracked());
+        assert!(ui.card_terminal_focused.get_untracked());
+
+        // Popping back out returns to `Terminals` with `conv_id` selected, and Card worktree `Open Card` (`None`)
+        // also preserves the currently selected terminal when it belongs to that Card.
+        crate::card::terminal::pop_out(ui);
+        assert_eq!(ui.page.get_untracked(), "terminals");
+        assert_eq!(ui.terminal_selection.get_untracked(), conv_id);
+        ui.terminal_card("c1".into(), None);
+        assert_eq!(ui.page.get_untracked(), "card");
+        assert_eq!(ui.card.get_untracked(), "c1");
+        assert!(ui.card_standalone.get_untracked());
+        assert_eq!(ui.card_tab.get_untracked(), conv_id);
+        assert!(ui.card_terminal_open.get_untracked());
+        assert!(ui.card_terminal_focused.get_untracked());
     });
 }
 

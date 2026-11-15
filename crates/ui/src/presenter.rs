@@ -477,8 +477,13 @@ impl Ui {
         crate::terminals::reveal(self, &conversation);
         self.page.set("terminals".into());
     }
-    pub fn terminal_card(self, card: String) {
-        self.open_card(card);
+    pub fn terminal_card(self, card: String, terminal: Option<String>) {
+        let target_terminal = terminal.or_else(|| {
+            untracked(|| crate::terminals::current(self))
+                .filter(|e| e.card.as_ref().is_some_and(|c| c.id == card))
+                .map(|e| e.saved.id)
+        });
+        self.open_card_with_terminal(card, target_terminal);
         self.card_standalone.set(true);
     }
     pub fn show_search(self, projects: bool) {
