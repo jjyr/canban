@@ -630,6 +630,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                             .flex_1()
                             .min_w(px(0.))
                             .h(px(30.))
+                            .justify_center()
                             .px_2()
                             .rounded(px(5.))
                             .bg(CLEAR)
@@ -660,6 +661,9 @@ pub fn header(ui: Ui) -> impl IntoElement {
                         view()
                             .flex_1()
                             .min_w(px(0.))
+                            .h(px(30.))
+                            .justify_center()
+                            .px_2()
                             .overflow_hidden()
                             .tooltip(
                                 hint_tooltip(e.cwd().unwrap_or_default())

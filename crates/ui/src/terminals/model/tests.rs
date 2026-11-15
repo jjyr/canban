@@ -2723,3 +2723,340 @@ fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stage
         "selecting a renamed Agent must NOT add a second `#86 ...` original Card title line: {renamed_texts:?}"
     );
 }
+
+#[test]
+fn top_right_project_card_and_cwd_context_labels_are_vertically_centered_in_terminal_header() {
+    use nsh_core::{
+        ApproxTextEngine, Bounds, Core, EventKind, EventPayload, MountItem, NodeId, Points,
+        element::JsEvent, geometry::size, prelude::*,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    #[component]
+    fn ContextCenterProbe() -> impl IntoElement {
+        canban_ui_kit::tokens::install_theme();
+        let ui = crate::presenter::Ui::new();
+        let mut s = fixture();
+        s.projects[0].name = "Alpha Project".into();
+        s.projects[0].directory = "/repo/p1".into();
+        s.projects[0].target_branch = Some("main".into());
+        s.cards[0].title = "Card Context Title".into();
+        s.cards[0].worktree = Some("/repo/p1-worktrees/c1".into());
+        s.cards[0].branch = Some("canban/1".into());
+
+        let mk_shell = |id: &str, num: u64, proj: Option<&str>, card: Option<&str>| TerminalEntry {
+            id: id.into(),
+            conversation_id: None,
+            number: num,
+            name: Some(format!("Terminal {num}")),
+            origin_project_id: proj.map(str::to_owned),
+            origin_card_id: card.map(str::to_owned),
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some(format!("pty-{id}")),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+            created_at: num,
+        };
+
+        s.terminals.extend([
+            mk_shell("project-shell", 10, Some("p1"), None),
+            mk_shell("card-shell", 11, Some("p1"), Some("c1")),
+            mk_shell("external-shell", 12, None, None),
+        ]);
+        s.terminal_contexts.extend([
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "project-shell".into(),
+                core_id: "core".into(),
+                terminal: "pty-project-shell".into(),
+                cwd: Some("/repo/p1".into()),
+                project_id: Some("p1".into()),
+                branch: Some("main".into()),
+                ..Default::default()
+            },
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "card-shell".into(),
+                core_id: "core".into(),
+                terminal: "pty-card-shell".into(),
+                cwd: Some("/repo/p1-worktrees/c1".into()),
+                project_id: Some("p1".into()),
+                card_id: Some("c1".into()),
+                branch: Some("canban/1".into()),
+                ..Default::default()
+            },
+            TerminalContext {
+                machine: "local".into(),
+                terminal_id: "external-shell".into(),
+                core_id: "core".into(),
+                terminal: "pty-external-shell".into(),
+                cwd: Some("/opt/external-dir".into()),
+                ..Default::default()
+            },
+        ]);
+
+        ui.snapshot.set(s);
+        ui.snapshot_ready.set(true);
+        ui.project.set("p1".into());
+        ui.page.set("terminals".into());
+        ui.open_terminal("project-shell".into());
+
+        view()
+            .w(px(1200.))
+            .h(px(42.))
+            .child(
+                canban_ui_kit::press_target()
+                    .w(px(0.))
+                    .h(px(0.))
+                    .accessibility_label(Some("Switch to Card Shell".into()))
+                    .on_press(move |_: &()| ui.open_terminal("card-shell".into())),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .w(px(0.))
+                    .h(px(0.))
+                    .accessibility_label(Some("Switch to External Shell".into()))
+                    .on_press(move |_: &()| ui.open_terminal("external-shell".into())),
+            )
+            .child(crate::terminals::tabs::header(ui))
+    }
+
+    struct LayoutTree {
+        alive: HashSet<NodeId>,
+        parents: HashMap<NodeId, NodeId>,
+        frames: HashMap<NodeId, Bounds<Points>>,
+        texts: HashMap<NodeId, String>,
+        labels: HashMap<String, NodeId>,
+    }
+
+    impl LayoutTree {
+        fn new() -> Self {
+            Self {
+                alive: HashSet::new(),
+                parents: HashMap::new(),
+                frames: HashMap::new(),
+                texts: HashMap::new(),
+                labels: HashMap::new(),
+            }
+        }
+        fn apply(&mut self, batch: &nsh_core::MountBatch) {
+            for item in &batch.items {
+                match item {
+                    MountItem::Create { id, .. } => {
+                        self.alive.insert(*id);
+                    }
+                    MountItem::Insert { parent, child, .. } => {
+                        self.parents.insert(*child, *parent);
+                    }
+                    MountItem::Remove { id } => {
+                        self.parents.remove(id);
+                    }
+                    MountItem::Delete { id } => {
+                        self.alive.remove(id);
+                        self.parents.remove(id);
+                        self.frames.remove(id);
+                        self.texts.remove(id);
+                    }
+                    MountItem::Frame { id, frame } => {
+                        self.frames.insert(*id, *frame);
+                    }
+                    MountItem::Text { id, text, .. } => {
+                        self.texts.insert(*id, text.text.to_string());
+                    }
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(label) = &props.accessibility.label {
+                            self.labels.insert(label.to_string(), *id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        fn is_mounted(&self, mut id: NodeId) -> bool {
+            if !self.alive.contains(&id) {
+                return false;
+            }
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let Some(&parent) = self.parents.get(&id) else {
+                    return false;
+                };
+                id = parent;
+                guard += 1;
+                if guard > 256 {
+                    return false;
+                }
+            }
+            true
+        }
+        fn page_center_y(&self, mut id: NodeId) -> Option<(f32, Bounds<Points>, Bounds<Points>)> {
+            let text_frame = *self.frames.get(&id)?;
+            let parent_id = *self.parents.get(&id)?;
+            let parent_frame = *self.frames.get(&parent_id)?;
+            let mut y = 0.0f32;
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let f = self.frames.get(&id)?;
+                y += f.origin.y.0;
+                id = *self.parents.get(&id)?;
+                guard += 1;
+                if guard > 256 {
+                    return None;
+                }
+            }
+            Some((y + text_frame.size.height.0 * 0.5, text_frame, parent_frame))
+        }
+        fn find_mounted_text(&self, expected: &str) -> NodeId {
+            *self
+                .texts
+                .iter()
+                .find(|(id, t)| self.is_mounted(**id) && t.as_str() == expected)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "mounted text `{expected}` not found in {:?}",
+                        self.texts
+                            .iter()
+                            .filter(|(id, _)| self.is_mounted(**id))
+                            .map(|(_, t)| t.clone())
+                            .collect::<Vec<_>>()
+                    )
+                })
+                .0
+        }
+    }
+
+    fn pump(core: &mut Core<ApproxTextEngine>, tree: &mut LayoutTree) {
+        for _ in 0..8 {
+            let had_batch = if let Some(batch) = core.commit() {
+                tree.apply(&batch);
+                true
+            } else {
+                false
+            };
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            let mut dispatched = false;
+            for ev in events {
+                match ev {
+                    JsEvent::Event(id, kind, payload) => {
+                        core.component_event(id, kind, &payload);
+                        dispatched = true;
+                    }
+                    JsEvent::LayoutListener {
+                        host,
+                        id,
+                        listener,
+                        frame,
+                    } => {
+                        core.component_layout(host, id, &listener, frame);
+                        dispatched = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !had_batch && !dispatched {
+                break;
+            }
+        }
+    }
+
+    let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(42.)));
+    core.set_components(nsh_base::registry());
+    core.mount_root(&nsh_core::element::Root::of::<ContextCenterProbe>());
+    let mut tree = LayoutTree::new();
+    pump(&mut core, &mut tree);
+
+    // 1. Project context button (`Alpha Project`): must be vertically centered inside its 30pt button
+    //    and inside the 42pt header bar (`center_y` == 21.0pt, `text_frame.origin.y > 0`).
+    let proj_text_id = tree.find_mounted_text("Alpha Project");
+    let (proj_center_y, proj_frame, proj_parent_frame) = tree
+        .page_center_y(proj_text_id)
+        .expect("project text frame");
+    assert!(
+        (proj_parent_frame.size.height.0 - 30.0).abs() < 0.5,
+        "expected 30pt project button height, got {proj_parent_frame:?}"
+    );
+    assert!(
+        proj_frame.origin.y.0 > 2.0,
+        "project title must not stick to top of its 30pt button: text={proj_frame:?}, parent={proj_parent_frame:?}"
+    );
+    let inner_center_diff = ((proj_frame.origin.y.0 + proj_frame.size.height.0 * 0.5)
+        - proj_parent_frame.size.height.0 * 0.5)
+        .abs();
+    assert!(
+        inner_center_diff <= 1.0,
+        "project title must be vertically centered within its 30pt button (diff={inner_center_diff}): text={proj_frame:?}, parent={proj_parent_frame:?}"
+    );
+    assert!(
+        (proj_center_y - 21.0).abs() <= 1.5,
+        "project title must be vertically centered in 42pt header (center_y={proj_center_y}): text={proj_frame:?}"
+    );
+
+    // Also compare against the neighboring worktree switcher pill branch label (`main`).
+    let branch_text_id = tree.find_mounted_text("main");
+    let (branch_center_y, _, _) = tree
+        .page_center_y(branch_text_id)
+        .expect("branch pill text frame");
+    assert!(
+        (proj_center_y - branch_center_y).abs() <= 1.0,
+        "project title center_y ({proj_center_y}) must align with worktree switcher pill ({branch_center_y})"
+    );
+
+    // 2. Card context button (`#1 Card Context Title`): shares the same vertical center.
+    let switch_card = *tree
+        .labels
+        .get("Switch to Card Shell")
+        .expect("Switch to Card Shell");
+    assert!(core.component_event(switch_card, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+
+    let card_text_id = tree.find_mounted_text("#1 Card Context Title");
+    let (card_center_y, card_frame, card_parent_frame) =
+        tree.page_center_y(card_text_id).expect("card text frame");
+    assert!(
+        ((card_frame.origin.y.0 + card_frame.size.height.0 * 0.5)
+            - card_parent_frame.size.height.0 * 0.5)
+            .abs()
+            <= 1.0,
+        "card title must be vertically centered in its 30pt button: {card_frame:?} in {card_parent_frame:?}"
+    );
+    assert!(
+        (card_center_y - proj_center_y).abs() <= 0.5,
+        "project title ({proj_center_y}) and card title ({card_center_y}) must share identical vertical alignment"
+    );
+
+    // 3. Unassigned external cwd context (`/opt/external-dir`): shares the same vertical center.
+    let switch_ext = *tree
+        .labels
+        .get("Switch to External Shell")
+        .expect("Switch to External Shell");
+    assert!(core.component_event(switch_ext, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+
+    let ext_text_id = tree.find_mounted_text("/opt/external-dir");
+    let (ext_center_y, ext_frame, ext_parent_frame) = tree
+        .page_center_y(ext_text_id)
+        .expect("external cwd text frame");
+    assert!(
+        ((ext_frame.origin.y.0 + ext_frame.size.height.0 * 0.5)
+            - ext_parent_frame.size.height.0 * 0.5)
+            .abs()
+            <= 1.0,
+        "external cwd title must be vertically centered in its 30pt container: {ext_frame:?} in {ext_parent_frame:?}"
+    );
+    assert!(
+        (ext_center_y - proj_center_y).abs() <= 1.0,
+        "external cwd ({ext_center_y}) must align vertically with project title ({proj_center_y})"
+    );
+}

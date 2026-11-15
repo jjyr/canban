@@ -8,6 +8,7 @@ pub fn navigation(
 ) -> nsh_base::ButtonElement {
     crate::press_target()
         .min_h(px(CONTROL_HEIGHT))
+        .justify_center()
         .px_3()
         .py_2()
         .rounded(px(RADIUS))

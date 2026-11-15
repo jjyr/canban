@@ -271,6 +271,8 @@ fn render_submit_drawer(ui: Ui) -> impl IntoElement {
                             canban_ui_kit::press_target()
                                 .h(px(28.))
                                 .px_2p5()
+                                .justify_center()
+                                .items_center()
                                 .rounded(px(RADIUS))
                                 .border_1()
                                 .border_color(move || {
