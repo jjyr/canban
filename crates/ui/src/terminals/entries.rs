@@ -349,7 +349,7 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                 conversation_id: Some(row.id.clone()),
                 number: saved.iter().map(|t| t.number).max().unwrap_or(0) + 1,
                 name: None,
-                manual_number: None,
+                origin_project_id: None,
                 origin_card_id: None,
                 agent_engine: None,
                 runtime: None,
@@ -436,6 +436,7 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                     .as_ref()
                     .map(|r| r.card.project_id.clone())
                     .or_else(|| location.as_ref().and_then(|c| c.project_id.clone()))
+                    .or_else(|| t.origin_project_id.clone())
                     .or_else(|| card.as_ref().map(|c| c.project_id.clone()))
             });
         let inferred_card = agent.is_none() && t.origin_card_id.is_none() && card.is_some();

@@ -858,8 +858,27 @@ pub fn rename_dialog(ui: Ui) -> impl IntoElement {
                 }
                 if crate::APP.get().is_none() {
                     ui.snapshot.update(|s| {
-                        if let Some(t) = s.terminals.iter_mut().find(|t| t.id == id) {
-                            t.name = (!next.trim().is_empty()).then(|| next.trim().into());
+                        let trimmed = next.trim();
+                        if !trimmed.is_empty() {
+                            if let Some(t) = s.terminals.iter_mut().find(|t| t.id == id) {
+                                t.name = Some(trimmed.into());
+                            }
+                        } else if let Some(target) =
+                            s.terminals.iter().find(|t| t.id == id).cloned()
+                        {
+                            let replacement = if target.conversation_id.is_none() {
+                                let pid = s.terminal_project_id(&target).map(str::to_owned);
+                                Some(s.next_terminal_label(
+                                    pid.as_deref(),
+                                    target.agent_engine.as_deref(),
+                                    Some(&target.id),
+                                ))
+                            } else {
+                                None
+                            };
+                            if let Some(t) = s.terminals.iter_mut().find(|t| t.id == id) {
+                                t.name = replacement;
+                            }
                         }
                     });
                     close_rename();

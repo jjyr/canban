@@ -435,7 +435,7 @@ mod tests {
             conversation_id: Some("conv1".into()),
             number: 1,
             name: None,
-            manual_number: None,
+            origin_project_id: None,
             origin_card_id: None,
             agent_engine: None,
             runtime: None,

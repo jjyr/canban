@@ -218,7 +218,7 @@ mod tests {
             conversation_id: Some("three:developer".into()),
             number: 1,
             name: None,
-            manual_number: None,
+            origin_project_id: None,
             origin_card_id: Some("three".into()),
             agent_engine: None,
             runtime: None,

@@ -29,7 +29,7 @@ fn fixture() -> Snapshot {
             conversation_id: Some(tid),
             number: idx as u64 + 1,
             name: None,
-            manual_number: None,
+            origin_project_id: None,
             origin_card_id: Some(card.into()),
             agent_engine: None,
             runtime: None,
@@ -53,7 +53,7 @@ fn tree_keeps_projects_and_profiles_distinct_and_excludes_unassigned_recovery() 
         conversation_id: Some(rev_id),
         number: 3,
         name: None,
-        manual_number: None,
+        origin_project_id: None,
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: None,
@@ -146,7 +146,7 @@ fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() 
         conversation_id: None,
         number: 9,
         name: Some("Server".into()),
-        manual_number: Some(1),
+        origin_project_id: None,
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -204,7 +204,7 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
         conversation_id: None,
         number: 9,
         name: None,
-        manual_number: None,
+        origin_project_id: None,
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -391,7 +391,7 @@ fn card_destination_requires_choice_and_remembers_only_live_selection() {
         conversation_id: Some(preferred.clone()),
         number: 3,
         name: None,
-        manual_number: None,
+        origin_project_id: None,
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: None,
@@ -461,8 +461,8 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
         id: "agent-ephemeral".into(),
         conversation_id: None,
         number: 3,
-        name: None,
-        manual_number: Some(1),
+        name: Some("Antigravity 1".into()),
+        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
@@ -484,8 +484,8 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
         id: "shell-backlog".into(),
         conversation_id: None,
         number: 4,
-        name: None,
-        manual_number: Some(2),
+        name: Some("Terminal 2".into()),
+        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -507,8 +507,8 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
         id: "shell-ended".into(),
         conversation_id: None,
         number: 5,
-        name: None,
-        manual_number: Some(3),
+        name: Some("Terminal 3".into()),
+        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -577,8 +577,8 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
         id: "agent-second".into(),
         conversation_id: None,
         number: 3,
-        name: None,
-        manual_number: Some(1),
+        name: Some("Antigravity 1".into()),
+        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
@@ -600,8 +600,8 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
         id: "shell-ended".into(),
         conversation_id: None,
         number: 4,
-        name: None,
-        manual_number: Some(2),
+        name: Some("Terminal 2".into()),
+        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -651,8 +651,8 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
         id: "manual-shell".into(),
         conversation_id: None,
         number: 3,
-        name: None,
-        manual_number: Some(1),
+        name: Some("Terminal 1".into()),
+        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -674,8 +674,8 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
         id: "ephemeral-cli".into(),
         conversation_id: None,
         number: 4,
-        name: None,
-        manual_number: Some(2),
+        name: Some("Antigravity 2".into()),
+        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
@@ -753,8 +753,8 @@ fn card_open_collapses_terminal_by_default_while_terminal_and_pill_entries_expan
             id: "c1-shell".into(),
             conversation_id: None,
             number: 1,
-            name: None,
-            manual_number: Some(1),
+            name: Some("Terminal 1".into()),
+            origin_project_id: Some("p1".into()),
             origin_card_id: Some("c1".into()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -870,8 +870,8 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
             id: "plain-shell".into(),
             conversation_id: None,
             number: 10,
-            name: None,
-            manual_number: Some(1),
+            name: Some("Terminal 1".into()),
+            origin_project_id: Some("p1".into()),
             origin_card_id: Some("c1".into()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -893,8 +893,8 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
             id: "ephemeral-agent".into(),
             conversation_id: None,
             number: 11,
-            name: None,
-            manual_number: Some(2),
+            name: Some("Antigravity 1".into()),
+            origin_project_id: Some("p1".into()),
             origin_card_id: Some("c1".into()),
             agent_engine: Some("agy".into()),
             runtime: Some(TerminalRuntime {
@@ -927,7 +927,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
             conversation_id: None,
             number: 12,
             name: Some("Workflows · developer".into()),
-            manual_number: None,
+            origin_project_id: Some("p1".into()),
             origin_card_id: None,
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -1064,8 +1064,8 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 id: "shell-with-manual-agent".into(),
                 conversation_id: None,
                 number: 13,
-                name: None,
-                manual_number: Some(3),
+                name: Some("Terminal 3".into()),
+                origin_project_id: None,
                 origin_card_id: None,
                 agent_engine: None,
                 runtime: Some(TerminalRuntime {
@@ -1129,8 +1129,8 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
                 id: "term-1".into(),
                 conversation_id: None,
                 number: 21,
-                name: None,
-                manual_number: Some(1),
+                name: Some("Terminal 1".into()),
+                origin_project_id: Some("p1".into()),
                 origin_card_id: Some("c1".into()),
                 agent_engine: None,
                 runtime: Some(TerminalRuntime {
@@ -1152,8 +1152,8 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
                 id: "term-2".into(),
                 conversation_id: None,
                 number: 22,
-                name: None,
-                manual_number: Some(2),
+                name: Some("Terminal 2".into()),
+                origin_project_id: Some("p1".into()),
                 origin_card_id: Some("c1".into()),
                 agent_engine: None,
                 runtime: Some(TerminalRuntime {
@@ -1296,8 +1296,8 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
             id: id.into(),
             conversation_id: None,
             number: num,
-            name: None,
-            manual_number: Some(num),
+            name: Some(format!("Terminal {num}")),
+            origin_project_id: Some("p1".into()),
             origin_card_id: origin.map(str::to_owned),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -1451,7 +1451,7 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
 }
 
 #[test]
-fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_then_empty_state() {
+fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_then_global_prev() {
     let runtime = nsh_core::element::Runtime::default();
     let _entered = runtime.enter();
     let (_owner, ()) = nsh_core::element::create_root(|| {
@@ -1460,13 +1460,14 @@ fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_the
         s.cards[0].worktree = Some("/repo/p1-wt/c1".into());
         // Finish the default workflow agent on c1 so we control exact shells in p1; keep p2's agent alive!
         s.terminals[0].agent.as_mut().unwrap().observed = Some(json!({"state": "finished"}));
+        let p2_agent_id = s.terminals[1].id.clone();
 
         let mk = |id: &str, num: u64| TerminalEntry {
             id: id.into(),
             conversation_id: None,
             number: num,
-            name: None,
-            manual_number: Some(num),
+            name: Some(format!("Terminal {num}")),
+            origin_project_id: Some("p1".into()),
             origin_card_id: None,
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -1578,8 +1579,21 @@ fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_the
         crate::terminals::close_tab(ui, "r1");
         assert_eq!(ui.terminal_selection.get_untracked(), "wt1");
 
-        // 5. Closing the final terminal in `p1` (`wt1`) -> clears selection (`""` Empty State), NEVER jumping to `p2`!
+        // 5. Closing the final terminal in `p1` (`wt1`) -> jumps globally to `p2`'s live terminal (`p2_agent_id`)!
         crate::terminals::close_tab(ui, "wt1");
+        assert_eq!(ui.terminal_selection.get_untracked(), p2_agent_id);
+        assert_eq!(ui.project.get_untracked(), "p2");
+
+        // 6. Add an Unassigned ("Other") terminal after p2; closing it jumps back to PREVIOUS global terminal (`p2_agent_id`),
+        //    and closing the last global terminal enters Empty State (`""`).
+        let mut ext = mk("ext-1", 30);
+        ext.origin_project_id = None;
+        ui.snapshot.update(|s| s.terminals.push(ext));
+        ui.open_terminal("ext-1".into());
+        crate::terminals::close_tab(ui, "ext-1");
+        assert_eq!(ui.terminal_selection.get_untracked(), p2_agent_id);
+
+        crate::terminals::close_entry_confirmed(ui, &p2_agent_id);
         assert_eq!(ui.terminal_selection.get_untracked(), "");
     });
 }
@@ -1674,7 +1688,7 @@ fn merge_batch_terminal_lives_directly_in_project_root_without_polluting_root_gi
         conversation_id: None,
         number: 10,
         name: Some("@merger".into()),
-        manual_number: None,
+        origin_project_id: Some("p1".into()),
         origin_card_id: None,
         agent_engine: Some("agy".into()),
         runtime: Some(canban_types::TerminalRuntime {
@@ -1728,8 +1742,8 @@ fn manual_shell_observed_agent_exposes_icon_only_without_changing_title_or_close
         id: "manual-shell".into(),
         conversation_id: None,
         number: 10,
-        name: None,
-        manual_number: Some(2),
+        name: Some("Terminal 2".into()),
+        origin_project_id: Some("p1".into()),
         origin_card_id: Some("c1".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -1810,8 +1824,8 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
             id: id.into(),
             conversation_id: None,
             number: num,
-            name: None,
-            manual_number: Some(num),
+            name: Some(format!("Terminal {num}")),
+            origin_project_id: Some("p1".into()),
             origin_card_id: origin.map(str::to_owned),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -2147,4 +2161,54 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
             .iter()
             .any(|(lbl, sel)| lbl.contains("Terminal 20") && !*sel)
     );
+}
+
+#[test]
+fn mod_digit_shortcuts_select_numbered_tab_in_current_workspace_and_reset_labels_on_close() {
+    let runtime = nsh_core::element::Runtime::default();
+    let _entered = runtime.enter();
+    let (_owner, ()) = nsh_core::element::create_root(|| {
+        let mut s = fixture();
+        s.projects[0].directory = "/repo/p1".into();
+        s.terminals[0].agent.as_mut().unwrap().observed = Some(json!({"state": "finished"}));
+
+        let ui = crate::presenter::Ui::new();
+        ui.snapshot.set(s);
+        ui.snapshot_ready.set(true);
+        ui.project.set("p1".into());
+        ui.page.set("terminals".into());
+
+        // Spawn 9 terminals in ProjectRoot("p1") -> Terminal 1 .. Terminal 9
+        let mut ids = Vec::new();
+        for expected_num in 1..=9 {
+            crate::terminals::create(ui, "p1".into(), None);
+            let tid = ui.terminal_selection.get_untracked();
+            let title = ui.snapshot.with_untracked(|snap| {
+                snap.terminals.iter().find(|t| t.id == tid).unwrap().title()
+            });
+            assert_eq!(title, format!("Terminal {expected_num}"));
+            ids.push(tid);
+        }
+
+        // ⌘1 .. ⌘9 switch directly to the 1st .. 9th tab in the current workspace!
+        for idx in 1..=9 {
+            crate::commands::execute(ui, &format!("terminal-tab-{idx}"));
+            assert_eq!(ui.terminal_selection.get_untracked(), ids[idx - 1]);
+        }
+
+        // Close all 9 terminals -> next created terminal in p1 resets to Terminal 1!
+        for tid in &ids {
+            crate::terminals::close_tab(ui, tid);
+        }
+        crate::terminals::create(ui, "p1".into(), None);
+        let reset_tid = ui.terminal_selection.get_untracked();
+        let reset_title = ui.snapshot.with_untracked(|snap| {
+            snap.terminals
+                .iter()
+                .find(|t| t.id == reset_tid)
+                .unwrap()
+                .title()
+        });
+        assert_eq!(reset_title, "Terminal 1");
+    });
 }

@@ -1039,6 +1039,95 @@ pub struct Snapshot {
     #[serde(default)]
     pub note_events: Vec<NoteEvent>,
 }
+impl Snapshot {
+    pub fn terminal_project_id<'a>(&'a self, t: &'a TerminalEntry) -> Option<&'a str> {
+        if let Some(a) = &t.agent {
+            return Some(a.project_id.as_str());
+        }
+        if let Some(cfg) = self.configuration_sessions.iter().find(|c| c.id == t.id) {
+            return Some(cfg.project_id.as_str());
+        }
+        if let Some(batch) = self.merge_batches.iter().find(|b| b.id == t.id) {
+            return Some(batch.project_id.as_str());
+        }
+        if let Some(ctx) = self
+            .terminal_contexts
+            .iter()
+            .find(|c| c.terminal_id == t.id)
+            && let Some(pid) = &ctx.project_id
+        {
+            return Some(pid.as_str());
+        }
+        if let Some(pid) = &t.origin_project_id {
+            return Some(pid.as_str());
+        }
+        if let Some(cid) = &t.origin_card_id
+            && let Some(c) = self.cards.iter().find(|c| &c.id == cid)
+        {
+            return Some(c.project_id.as_str());
+        }
+        None
+    }
+
+    pub fn terminal_is_live(&self, t: &TerminalEntry) -> bool {
+        if t.conversation_id.is_some() {
+            return false;
+        }
+        let Some(r) = &t.runtime else {
+            return false;
+        };
+        if r.state == "finished" {
+            return false;
+        }
+        if let Some(cid) = self
+            .terminal_contexts
+            .iter()
+            .find(|c| c.terminal_id == t.id)
+            .and_then(|c| c.card_id.as_deref())
+            .or(t.origin_card_id.as_deref())
+            && let Some(card) = self.cards.iter().find(|c| c.id == cid)
+            && !card.active()
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Next automatic label `<prefix> <max_N + 1>` (or `<prefix> 1`) among live
+    /// independent terminals in the same Project (`exclude_id` skips a terminal being renamed).
+    pub fn next_terminal_label(
+        &self,
+        project_id: Option<&str>,
+        agent_engine: Option<&str>,
+        exclude_id: Option<&str>,
+    ) -> String {
+        let prefix = match agent_engine {
+            Some(engine) => friendly_agent_engine(engine),
+            None => "Terminal".into(),
+        };
+        let head = format!("{prefix} ");
+        let max_n = self
+            .terminals
+            .iter()
+            .filter(|t| exclude_id != Some(t.id.as_str()))
+            .filter(|t| self.terminal_is_live(t))
+            .filter(|t| self.terminal_project_id(t) == project_id)
+            .filter_map(|t| {
+                let title = t.title();
+                let suffix = title.strip_prefix(&head)?;
+                if suffix.is_empty()
+                    || suffix.starts_with('0')
+                    || !suffix.bytes().all(|b| b.is_ascii_digit())
+                {
+                    return None;
+                }
+                suffix.parse::<u64>().ok().filter(|&n| n > 0)
+            })
+            .max()
+            .unwrap_or(0);
+        format!("{prefix} {}", max_n + 1)
+    }
+}
 /// Durable terminal and Card-role Agent execution record.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TerminalEntry {
@@ -1046,8 +1135,9 @@ pub struct TerminalEntry {
     pub conversation_id: Option<String>,
     pub number: u64,
     pub name: Option<String>,
-    /// Separate durable sequence for independently opened Terminal labels.
-    pub manual_number: Option<u64>,
+    /// Optional Project association when opened within a Project scope.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_project_id: Option<String>,
     /// Optional Card association when opened directly from a Card.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin_card_id: Option<String>,
@@ -1061,15 +1151,17 @@ pub struct TerminalEntry {
     pub created_at: u64,
 }
 impl TerminalEntry {
+    pub fn default_prefix(&self) -> String {
+        if let Some(engine) = &self.agent_engine {
+            friendly_agent_engine(engine)
+        } else {
+            "Terminal".into()
+        }
+    }
     pub fn title(&self) -> String {
         self.name.clone().unwrap_or_else(|| {
             if self.conversation_id.is_none() {
-                let n = self.manual_number.unwrap_or(self.number);
-                if let Some(engine) = &self.agent_engine {
-                    format!("{} {n}", friendly_agent_engine(engine))
-                } else {
-                    format!("Terminal {n}")
-                }
+                format!("{} {}", self.default_prefix(), self.number)
             } else {
                 self.number.to_string()
             }
@@ -1097,7 +1189,7 @@ impl TerminalEntry {
         serde_json::from_value(value)
     }
 }
-fn friendly_agent_engine(engine: &str) -> String {
+pub fn friendly_agent_engine(engine: &str) -> String {
     let clean = engine.strip_prefix("herdr:").unwrap_or(engine);
     match clean {
         "codex" => "Codex".into(),
@@ -1362,7 +1454,6 @@ mod tests {
             "conversation_id": format!("{card_id}:developer"),
             "number": 1,
             "name": null,
-            "manual_number": null,
             "runtime": null,
             "created_at": 1,
             "agent": {

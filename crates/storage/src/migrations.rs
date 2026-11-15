@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 17;
+pub const CURRENT: u32 = 18;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -59,7 +59,81 @@ const STEPS: &[Migration] = &[
         up: merge_batches_up,
         down: merge_batches_down,
     },
+    Migration {
+        version: 18,
+        up: drop_manual_terminal_counter_up,
+        down: drop_manual_terminal_counter_down,
+    },
 ];
+
+fn drop_manual_terminal_counter_up(tx: &Transaction<'_>) -> Result<()> {
+    let rows: Vec<(String, String)> = {
+        let mut q = tx.prepare("SELECT id, data FROM terminals")?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (id, raw) in rows {
+        let mut value: Value = serde_json::from_str(&raw)?;
+        let Some(obj) = value.as_object_mut() else {
+            continue;
+        };
+        let manual = obj.remove("manual_number").and_then(|v| v.as_u64());
+        let has_name = obj
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty());
+        let is_independent = obj.get("conversation_id").is_none_or(Value::is_null);
+        if is_independent
+            && !has_name
+            && let Some(n) = manual
+        {
+            let prefix = obj
+                .get("agent_engine")
+                .and_then(Value::as_str)
+                .map(canban_types::friendly_agent_engine)
+                .unwrap_or_else(|| "Terminal".into());
+            obj.insert("name".into(), serde_json::json!(format!("{prefix} {n}")));
+        }
+        tx.execute(
+            "UPDATE terminals SET data=?2 WHERE id=?1",
+            params![id, serde_json::to_string(&value)?],
+        )?;
+    }
+    tx.execute_batch("DELETE FROM counters WHERE id='terminal-manual-number';")?;
+    Ok(())
+}
+
+fn drop_manual_terminal_counter_down(tx: &Transaction<'_>) -> Result<()> {
+    let rows: Vec<(String, i64, String)> = {
+        let mut q = tx.prepare("SELECT id, number, data FROM terminals ORDER BY number ASC")?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut seq = 0u64;
+    for (id, _num, raw) in rows {
+        let mut value: Value = serde_json::from_str(&raw)?;
+        let Some(obj) = value.as_object_mut() else {
+            continue;
+        };
+        if obj.get("conversation_id").is_none_or(Value::is_null) {
+            seq += 1;
+            obj.insert("manual_number".into(), serde_json::json!(seq));
+        } else {
+            obj.insert("manual_number".into(), Value::Null);
+        }
+        tx.execute(
+            "UPDATE terminals SET data=?2 WHERE id=?1",
+            params![id, serde_json::to_string(&value)?],
+        )?;
+    }
+    if seq > 0 {
+        tx.execute(
+            "INSERT OR REPLACE INTO counters(id, value) VALUES('terminal-manual-number', ?1)",
+            [seq],
+        )?;
+    }
+    Ok(())
+}
 
 fn merge_batches_up(tx: &Transaction<'_>) -> Result<()> {
     tx.execute_batch(
@@ -3318,7 +3392,64 @@ mod tests {
 
         assert_eq!(migrate(home.path(), 16).unwrap(), 16);
         assert_eq!(migrate(home.path(), 17).unwrap(), 17);
+        assert_eq!(migrate(home.path(), CURRENT).unwrap(), CURRENT);
         let store = crate::Store::open(home.path()).unwrap();
         assert!(store.snapshot().unwrap().merge_batches.is_empty());
+    }
+
+    #[test]
+    fn schema_18_drops_manual_terminal_counter_and_preserves_labels() {
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(home.path()).unwrap();
+        drop(store);
+
+        assert_eq!(migrate(home.path(), 17).unwrap(), 17);
+        let conn = Connection::open(home.path().join("canban.sqlite")).unwrap();
+        conn.execute(
+            "INSERT INTO counters(id, value) VALUES('terminal-manual-number', 7)",
+            [],
+        )
+        .unwrap();
+        let shell_v17 = serde_json::json!({
+            "id": "shell-11112222",
+            "conversation_id": null,
+            "number": 4,
+            "name": null,
+            "manual_number": 7,
+            "runtime": {
+                "machine": "local",
+                "core_id": "c1",
+                "terminal": "t1",
+                "state": "running",
+                "connection": "connected",
+                "error": null
+            },
+            "created_at": 1
+        });
+        conn.execute(
+            "INSERT INTO terminals(id, project_id, card_id, state, number, data) VALUES('shell-11112222', NULL, NULL, 'running', 4, ?1)",
+            [serde_json::to_string(&shell_v17).unwrap()],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(migrate(home.path(), 18).unwrap(), 18);
+        let store = crate::Store::open(home.path()).unwrap();
+        let count: i64 = store
+            .conn
+            .query_row(
+                "SELECT count(*) FROM counters WHERE id='terminal-manual-number'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        let snap = store.snapshot().unwrap();
+        assert_eq!(snap.terminals.len(), 1);
+        assert_eq!(snap.terminals[0].title(), "Terminal 7");
+        drop(store);
+
+        assert_eq!(migrate(home.path(), 17).unwrap(), 17);
+        assert_eq!(migrate(home.path(), 18).unwrap(), 18);
     }
 }

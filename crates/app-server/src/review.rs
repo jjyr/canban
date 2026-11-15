@@ -287,6 +287,17 @@ impl AppServer {
     }
 
     pub(crate) fn pump_deliveries(&self) -> Result<()> {
+        let has_active_deliveries = {
+            let store = self.store.lock().unwrap();
+            store
+                .db()
+                .list::<WorkflowRun>()?
+                .iter()
+                .any(|run| run.step_is_deliver() && run.active())
+        };
+        if !has_active_deliveries {
+            return Ok(());
+        }
         let Ok(_gate) = self.review_gate.try_lock() else {
             return Ok(());
         };
@@ -1196,7 +1207,7 @@ impl AppServer {
                 conversation_id: None,
                 number: db.counter("terminal-number")?,
                 name: Some(title_trimmed),
-                manual_number: Some(db.counter("terminal-manual-number")?),
+                origin_project_id: Some(project.id.clone()),
                 origin_card_id: None,
                 agent_engine: None,
                 created_at: now(),

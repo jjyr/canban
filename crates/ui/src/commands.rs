@@ -116,6 +116,78 @@ pub const CATALOG: &[Command] = &[
         context: "Terminals",
         keywords: "",
     },
+    Command {
+        id: "terminal-tab-1",
+        title: "Switch to Terminal Tab 1",
+        key: "mod+1",
+        display: "⌘1",
+        context: "Terminals",
+        keywords: "tab number",
+    },
+    Command {
+        id: "terminal-tab-2",
+        title: "Switch to Terminal Tab 2",
+        key: "mod+2",
+        display: "⌘2",
+        context: "Terminals",
+        keywords: "tab number",
+    },
+    Command {
+        id: "terminal-tab-3",
+        title: "Switch to Terminal Tab 3",
+        key: "mod+3",
+        display: "⌘3",
+        context: "Terminals",
+        keywords: "tab number",
+    },
+    Command {
+        id: "terminal-tab-4",
+        title: "Switch to Terminal Tab 4",
+        key: "mod+4",
+        display: "⌘4",
+        context: "Terminals",
+        keywords: "tab number",
+    },
+    Command {
+        id: "terminal-tab-5",
+        title: "Switch to Terminal Tab 5",
+        key: "mod+5",
+        display: "⌘5",
+        context: "Terminals",
+        keywords: "tab number",
+    },
+    Command {
+        id: "terminal-tab-6",
+        title: "Switch to Terminal Tab 6",
+        key: "mod+6",
+        display: "⌘6",
+        context: "Terminals",
+        keywords: "tab number",
+    },
+    Command {
+        id: "terminal-tab-7",
+        title: "Switch to Terminal Tab 7",
+        key: "mod+7",
+        display: "⌘7",
+        context: "Terminals",
+        keywords: "tab number",
+    },
+    Command {
+        id: "terminal-tab-8",
+        title: "Switch to Terminal Tab 8",
+        key: "mod+8",
+        display: "⌘8",
+        context: "Terminals",
+        keywords: "tab number",
+    },
+    Command {
+        id: "terminal-tab-9",
+        title: "Switch to Terminal Tab 9",
+        key: "mod+9",
+        display: "⌘9",
+        context: "Terminals",
+        keywords: "tab number",
+    },
     CREATE_CARD,
     SEND_COMMENT,
     Command {
@@ -1108,6 +1180,18 @@ pub fn execute(ui: Ui, id: &str) {
             } else {
                 ui.navigate("terminals");
                 crate::terminals::cycle(ui, false);
+            }
+        }
+        id if id.starts_with("terminal-tab-") => {
+            if let Some(n) = id
+                .strip_prefix("terminal-tab-")
+                .and_then(|s| s.parse::<usize>().ok())
+                .filter(|&n| (1..=9).contains(&n))
+            {
+                if !(ui.page.get_untracked() == "card" && ui.card_terminal_open.get_untracked()) {
+                    ui.navigate("terminals");
+                }
+                crate::terminals::select_tab_index(ui, n - 1);
             }
         }
         "toggle-terminal-sidebar" => {

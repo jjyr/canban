@@ -87,6 +87,7 @@ impl Record for TerminalEntry {
         self.agent
             .as_ref()
             .map(|a| a.project_id.as_str())
+            .or(self.origin_project_id.as_deref())
             .or_else(|| {
                 self.id
                     .strip_prefix("merge-queue:")
@@ -269,15 +270,7 @@ impl Store {
             conn.execute_batch("PRAGMA user_version=5; COMMIT;")?;
         }
         if version < 6 {
-            conn.execute_batch("BEGIN IMMEDIATE;")?;
-            let db = Db { conn: &conn };
-            let mut entries = db.list::<TerminalEntry>()?;
-            entries.sort_by_key(|t| t.number);
-            for mut t in entries.into_iter().filter(|t| t.conversation_id.is_none()) {
-                t.manual_number = Some(db.counter("terminal-manual-number")?);
-                db.save(&t)?;
-            }
-            conn.execute_batch("PRAGMA user_version=6; COMMIT;")?;
+            conn.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=6; COMMIT;")?;
         }
         if version < 7 {
             conn.execute_batch("BEGIN IMMEDIATE; CREATE TABLE github_issues (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id), card_id TEXT, state TEXT NOT NULL, number INTEGER NOT NULL,data TEXT NOT NULL); CREATE UNIQUE INDEX github_card_source ON cards(project_id,json_extract(data,'$.content.source.repository_id'),json_extract(data,'$.content.source.issue_id')) WHERE json_extract(data,'$.content.kind')='github_issue'; PRAGMA user_version=7; COMMIT;")?;
@@ -340,7 +333,7 @@ impl Db<'_> {
                 conversation_id: Some(c.id.clone()),
                 number: self.counter("terminal-number")?,
                 name: None,
-                manual_number: None,
+                origin_project_id: None,
                 origin_card_id: None,
                 agent_engine: None,
                 runtime: None,

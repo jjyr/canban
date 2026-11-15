@@ -572,7 +572,7 @@ fn push_agent_terminal(s: &mut canban_types::Snapshot, run: canban_types::AgentR
         conversation_id: Some(tid.clone()),
         number,
         name: None,
-        manual_number: None,
+        origin_project_id: None,
         origin_card_id: origin,
         agent_engine: None,
         runtime: None,
@@ -614,8 +614,8 @@ pub fn workspace_with_card_terminals() -> canban_types::Snapshot {
         id: "card-2-shell-1".into(),
         conversation_id: None,
         number: 2,
-        name: None,
-        manual_number: Some(1),
+        name: Some("Terminal 1".into()),
+        origin_project_id: Some("gallery-project".into()),
         origin_card_id: Some("card-2".into()),
         agent_engine: None,
         runtime: Some(TerminalRuntime {
@@ -637,8 +637,8 @@ pub fn workspace_with_card_terminals() -> canban_types::Snapshot {
         id: "card-2-agy-1".into(),
         conversation_id: None,
         number: 3,
-        name: None,
-        manual_number: Some(2),
+        name: Some("Antigravity 1".into()),
+        origin_project_id: Some("gallery-project".into()),
         origin_card_id: Some("card-2".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {
@@ -1139,8 +1139,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         id: "gallery-manual".into(),
         conversation_id: None,
         number,
-        name: None,
-        manual_number: Some(1),
+        name: Some("Terminal 1".into()),
+        origin_project_id: None,
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
@@ -1161,7 +1161,6 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     let mut remote = s.terminals.last().unwrap().clone();
     remote.id = "gallery-remote-shell".into();
     remote.number += 2;
-    remote.manual_number = Some(3);
     remote.name = Some("Remote shell with a long custom name for layout checks".into());
     let runtime = remote.runtime.as_mut().unwrap();
     runtime.machine = "gallery-remote".into();
@@ -1170,7 +1169,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     let mut linked = s.terminals.last().unwrap().clone();
     linked.id = "gallery-linked-shell".into();
     linked.number += 1;
-    linked.manual_number = Some(2);
+    linked.name = Some("Terminal 1".into());
     linked.runtime.as_mut().unwrap().terminal = Some("linked-shell".into());
     s.terminals.push(linked);
     s.terminals.push(remote);
@@ -1210,8 +1209,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         id: "gallery-project-root-shell".into(),
         conversation_id: None,
         number: number + 3,
-        name: None,
-        manual_number: Some(5),
+        name: Some("Terminal 2".into()),
+        origin_project_id: Some(proj_id.clone()),
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
@@ -1274,7 +1273,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         conversation_id: None,
         number: number + 4,
         name: Some("feat/standalone-spike".into()),
-        manual_number: Some(4),
+        origin_project_id: Some(proj_id.clone()),
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
@@ -1310,8 +1309,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         id: "gallery-wt-shell-2".into(),
         conversation_id: None,
         number: number + 5,
-        name: None,
-        manual_number: Some(6),
+        name: Some("Terminal 3".into()),
+        origin_project_id: Some(proj_id.clone()),
         origin_card_id: None,
         agent_engine: None,
         runtime: Some(canban_types::TerminalRuntime {
@@ -1475,8 +1474,8 @@ pub fn board_cards() -> canban_types::Snapshot {
         id: "gallery-card-1-cli-agent".into(),
         conversation_id: None,
         number: 9,
-        name: None,
-        manual_number: Some(1),
+        name: Some("Antigravity 1".into()),
+        origin_project_id: Some("gallery-project".into()),
         origin_card_id: Some("card-1".into()),
         agent_engine: Some("agy".into()),
         runtime: Some(TerminalRuntime {

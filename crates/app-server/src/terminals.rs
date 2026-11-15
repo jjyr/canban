@@ -85,12 +85,18 @@ impl AppServer {
                         db.save(&item)?;
                     }
                 }
-            } else if result.is_err() {
+            } else if let Err(_e) = &result {
                 let mut item: TerminalEntry = db.get(terminal_id)?;
                 if let Some(r) = &mut item.runtime {
                     r.state = "unknown".into();
                     r.connection = "unavailable".into();
                     r.error = Some(value["message"].as_str().unwrap_or("").into());
+                }
+                db.save(&item)?;
+            } else {
+                let mut item: TerminalEntry = db.get(terminal_id)?;
+                if let Some(r) = &mut item.runtime {
+                    r.state = "finished".into();
                 }
                 db.save(&item)?;
             }
@@ -385,13 +391,47 @@ impl AppServer {
             } else {
                 None
             };
+            if project.is_none() {
+                if let Some(wt) = db
+                    .list::<ManagedWorktree>()?
+                    .into_iter()
+                    .find(|w| w.location.machine == machine && super::path_within(&w.path, &cwd))
+                {
+                    project = db.get::<Project>(&wt.project_id).ok();
+                } else {
+                    let mut best: Option<(usize, Project)> = None;
+                    for proj in db.list::<Project>()? {
+                        let loc = proj.work_location();
+                        if loc.machine == machine && super::path_within(&loc.directory, &cwd) {
+                            let len = loc.directory.len();
+                            if best.as_ref().is_none_or(|(b, _)| len > *b) {
+                                best = Some((len, proj));
+                            }
+                        }
+                    }
+                    project = best.map(|(_, p)| p);
+                }
+            }
+            let origin_project_id = project.as_ref().map(|p| p.id.clone());
+            let resolved_name = match custom_name {
+                Some(n) => Some(n),
+                None => {
+                    let mut snap = db.snapshot()?;
+                    snap.terminal_contexts = self.terminal_contexts.lock().unwrap().clone();
+                    Some(snap.next_terminal_label(
+                        origin_project_id.as_deref(),
+                        agent_engine.as_deref(),
+                        None,
+                    ))
+                }
+            };
             let prefix = if want_agent { "agent" } else { "shell" };
             let item = TerminalEntry {
                 id: format!("{prefix}-{}", id()),
                 conversation_id: None,
                 number: db.counter("terminal-number")?,
-                name: custom_name,
-                manual_number: Some(db.counter("terminal-manual-number")?),
+                name: resolved_name,
+                origin_project_id,
                 origin_card_id,
                 agent_engine,
                 created_at: now(),
@@ -634,7 +674,20 @@ impl AppServer {
                 name.chars().count() <= 80 && !name.chars().any(char::is_control),
                 "Use at most 80 printable characters"
             );
-            item.name = (!name.is_empty()).then(|| name.into());
+            item.name = if !name.is_empty() {
+                Some(name.into())
+            } else if item.conversation_id.is_none() {
+                let mut snap = db.snapshot()?;
+                snap.terminal_contexts = self.terminal_contexts.lock().unwrap().clone();
+                let pid = snap.terminal_project_id(&item).map(str::to_owned);
+                Some(snap.next_terminal_label(
+                    pid.as_deref(),
+                    item.agent_engine.as_deref(),
+                    Some(&item.id),
+                ))
+            } else {
+                None
+            };
             db.save(&item)?;
             Ok(serde_json::to_value(item)?)
         })
@@ -951,8 +1004,8 @@ mod tests {
             id: "shell-fresh".into(),
             conversation_id: None,
             number: 1,
-            name: None,
-            manual_number: Some(1),
+            name: Some("Terminal 1".into()),
+            origin_project_id: None,
             origin_card_id: None,
             agent_engine: None,
             created_at: created,
@@ -1013,8 +1066,8 @@ mod tests {
             id: "shell-1".into(),
             conversation_id: None,
             number: 1,
-            name: None,
-            manual_number: Some(1),
+            name: Some("Terminal 1".into()),
+            origin_project_id: None,
             origin_card_id: None,
             agent_engine: None,
             created_at: created,

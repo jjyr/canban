@@ -656,8 +656,8 @@ mod tests {
             id: "shell-live".into(),
             conversation_id: None,
             number: 1,
-            name: None,
-            manual_number: Some(1),
+            name: Some("Terminal 1".into()),
+            origin_project_id: None,
             origin_card_id: Some("c-live".into()),
             agent_engine: None,
             runtime: Some(TerminalRuntime {
@@ -679,8 +679,8 @@ mod tests {
             id: "cli-attention".into(),
             conversation_id: None,
             number: 2,
-            name: None,
-            manual_number: Some(2),
+            name: Some("Antigravity 2".into()),
+            origin_project_id: None,
             origin_card_id: Some("c-attention".into()),
             agent_engine: Some("agy".into()),
             runtime: Some(TerminalRuntime {

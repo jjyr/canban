@@ -490,71 +490,94 @@ fn archive_protects_a_worktree_entered_from_an_unrelated_independent_terminal() 
 }
 
 #[test]
-fn manual_labels_have_their_own_durable_sequence_and_v5_migration_keeps_runtime_and_names() {
-    let (dir, app, _p, c) = setup();
+fn manual_labels_derive_max_plus_one_from_live_project_terminals_without_durable_counter() {
+    let (dir, app, p, c) = setup();
     core(&app, dir.path());
-    app.call("agent.open", json!({"card_id":c.id,"profile_id":"codex"}))
-        .unwrap();
-    let first = app.call("terminal.create", json!({})).unwrap();
+    let source_p2 = dir.path().join("source-p2");
+    std::fs::create_dir_all(&source_p2).unwrap();
+    let p2: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Second Project", "directory": source_p2}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // Card-role Agents do not advance independent Terminal labels.
     app.call(
         "agent.open",
-        json!({"card_id":c.id,"profile_id":"reviewer"}),
+        json!({"card_id": c.id, "profile_id": "codex"}),
     )
     .unwrap();
-    let second = app.call("terminal.create", json!({})).unwrap();
-    assert_eq!(first["manual_number"], 1);
-    assert_eq!(second["manual_number"], 2);
-    assert_eq!(second["number"], 4);
+    let first = app
+        .call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
     app.call(
-        "terminal.rename",
-        json!({"terminal_id":first["id"],"name":"Server"}),
+        "agent.open",
+        json!({"card_id": c.id, "profile_id": "reviewer"}),
     )
     .unwrap();
-    let before = app.snapshot().unwrap();
-    {
-        let store = app.store.lock().unwrap();
-        // Reproduce the exact v5 representation: only the new display sequence is absent.
-        store.db().conn.execute_batch("UPDATE terminals SET data=json_remove(data,'$.manual_number'); DELETE FROM counters WHERE id='terminal-manual-number'; DROP TABLE card_reads; DROP TABLE github_issues; DROP INDEX github_card_source; DROP TABLE editor_drafts; PRAGMA user_version=5;").unwrap();
-    }
-    drop(app);
-    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
-    core(&app, dir.path());
-    let migrated = app.snapshot().unwrap();
-    assert_eq!(
-        before
-            .terminals
-            .iter()
-            .map(|t| &t.agent)
-            .collect::<Vec<_>>(),
-        migrated
-            .terminals
-            .iter()
-            .map(|t| &t.agent)
-            .collect::<Vec<_>>()
-    );
-    let one = migrated
-        .terminals
-        .iter()
-        .find(|t| t.id == first["id"])
+    let second = app
+        .call("terminal.create", json!({"project_id": p.id}))
         .unwrap();
-    assert_eq!(one.title(), "Server");
-    assert_eq!(one.manual_number, Some(1));
-    assert_eq!(one.runtime, before.terminals[1].runtime);
-    let two = migrated
-        .terminals
-        .iter()
-        .find(|t| t.id == second["id"])
+    assert_eq!(first["name"], "Terminal 1");
+    assert_eq!(second["name"], "Terminal 2");
+    assert_eq!(second["number"], 4);
+
+    // Independent Project scope: p2 starts fresh at Terminal 1!
+    let p2_first = app
+        .call("terminal.create", json!({"project_id": p2.id}))
         .unwrap();
-    assert_eq!(two.title(), "Terminal 2");
-    app.call("terminal.rename", json!({"terminal_id":one.id,"name":""}))
+    assert_eq!(p2_first["name"], "Terminal 1");
+
+    // Closing Terminal 2 in p leaves Terminal 1 live -> next in p is Terminal 2 again.
+    app.call("terminal.close", json!({"terminal_id": second["id"]}))
         .unwrap();
-    assert_eq!(app.snapshot().unwrap().terminals[1].title(), "Terminal 1");
-    let third = app.call("terminal.create", json!({})).unwrap();
-    assert_eq!(third["manual_number"], 3);
-    assert_eq!(
-        app.snapshot().unwrap().terminals.last().unwrap().title(),
-        "Terminal 3"
-    );
+    // Reset test-hc finished marker so new launches stay live.
+    let _ = std::fs::remove_file(dir.path().join("finished"));
+    let second_reborn = app
+        .call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
+    assert_eq!(second_reborn["name"], "Terminal 2");
+
+    // Closing Terminal 1 while Terminal 2 stays live -> max is 2, so next is Terminal 3;
+    // then closing both resets p back to Terminal 1!
+    app.call("terminal.close", json!({"terminal_id": first["id"]}))
+        .unwrap();
+    let _ = std::fs::remove_file(dir.path().join("finished"));
+    let third = app
+        .call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
+    assert_eq!(third["name"], "Terminal 3");
+
+    app.call(
+        "terminal.close",
+        json!({"terminal_id": second_reborn["id"]}),
+    )
+    .unwrap();
+    app.call("terminal.close", json!({"terminal_id": third["id"]}))
+        .unwrap();
+    let _ = std::fs::remove_file(dir.path().join("finished"));
+    let reset = app
+        .call("terminal.create", json!({"project_id": p.id}))
+        .unwrap();
+    assert_eq!(reset["name"], "Terminal 1");
+
+    // No durable manual-number counter exists in SQLite.
+    let count: i64 = app
+        .store
+        .lock()
+        .unwrap()
+        .db()
+        .conn
+        .query_row(
+            "SELECT count(*) FROM counters WHERE id='terminal-manual-number'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 #[test]
@@ -568,7 +591,7 @@ fn first_terminal_accepts_empty_inheritance_without_a_project_or_conversation() 
         .unwrap();
     assert_eq!(first["runtime"]["state"], "running");
     assert_eq!(first["runtime"]["machine"], "local");
-    assert_eq!(first["manual_number"], 1);
+    assert_eq!(first["name"], "Terminal 1");
     assert!(first["runtime"]["terminal"].is_string());
     let s = app.snapshot().unwrap();
     assert!(s.projects.is_empty() && s.conversations.is_empty());

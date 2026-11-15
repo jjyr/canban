@@ -388,8 +388,7 @@ pub async fn card_scope_menu(ui: Ui, card: canban_types::Card, at: Option<Point<
     items.push(MenuItem::separator());
     items.push(MenuItem::new("Open Card").on_select(move || ui.terminal_card(cid_open.clone())));
     items.push(
-        MenuItem::new("Open in Git")
-            .on_select(move || crate::review::open_card(ui, &cid_diff)),
+        MenuItem::new("Open in Git").on_select(move || crate::review::open_card(ui, &cid_diff)),
     );
     if let Some(path) = wt_copy {
         items.push(
@@ -416,15 +415,7 @@ pub fn open_shell(ui: Ui, wt: &ManagedWorktree) {
                 .with_untracked(|s| s.terminals.iter().map(|t| t.number).max().unwrap_or(8))
                 + 1,
             name: Some(wt.branch.clone()),
-            manual_number: Some(
-                ui.snapshot.with_untracked(|s| {
-                    s.terminals
-                        .iter()
-                        .filter_map(|t| t.manual_number)
-                        .max()
-                        .unwrap_or(0)
-                }) + 1,
-            ),
+            origin_project_id: Some(wt.project_id.clone()),
             origin_card_id: None,
             agent_engine: None,
             agent: None,

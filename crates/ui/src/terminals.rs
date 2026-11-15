@@ -106,6 +106,15 @@ pub fn watch(ui: Ui) {
                                 ts.push(fallback.clone());
                             }
                         });
+                        if let Some(pid) = ui.snapshot.with_untracked(|s| {
+                            ui.terminal_entries.with_untracked(|rows| {
+                                rows.iter()
+                                    .find(|e| e.saved.id == fallback)
+                                    .and_then(|e| worktrees::entry_scope(s, e).project_id(s))
+                            })
+                        }) {
+                            ui.project.set(pid);
+                        }
                     }
                     ui.terminal_card_context.set(String::new());
                     ui.terminal_details.set(false);
@@ -155,7 +164,7 @@ pub fn scope_tabs(ui: Ui) -> Vec<Entry> {
 /// Pure fallback resolution when closing a live Terminal:
 /// 1. Previous live Terminal in the same `WorktreeScope` (or next if none precedes it);
 /// 2. Previous live Terminal in the same Project in tree order (or next if none precedes it);
-/// 3. `None` (Empty State — never jumps across different Projects).
+/// 3. Previous live Terminal globally in sidebar tree order (or next if none precedes it).
 pub fn fallback_after_close(
     s: &canban_types::Snapshot,
     rows: &[Entry],
@@ -198,6 +207,26 @@ pub fn fallback_after_close(
         }
         if pos + 1 < same_project.len() {
             return Some(same_project[pos + 1].saved.id.clone());
+        }
+    }
+
+    let mut global_tree: Vec<Entry> = Vec::new();
+    for p in &s.projects {
+        for (_, children) in
+            worktrees::project_scopes_in_tree_order(s, &candidate_rows, Some(p.id.as_str()))
+        {
+            global_tree.extend(children);
+        }
+    }
+    for (_, children) in worktrees::project_scopes_in_tree_order(s, &candidate_rows, None) {
+        global_tree.extend(children);
+    }
+    if let Some(pos) = global_tree.iter().position(|e| e.saved.id == closed_id) {
+        if pos > 0 {
+            return Some(global_tree[pos - 1].saved.id.clone());
+        }
+        if pos + 1 < global_tree.len() {
+            return Some(global_tree[pos + 1].saved.id.clone());
         }
     }
 
@@ -362,6 +391,22 @@ fn gallery_create_entry(
             .filter(|e| e.agent.is_none())
             .and_then(|e| e.saved.origin_card_id.clone())
     });
+    let origin_project = project_id
+        .clone()
+        .or_else(|| {
+            origin_card.as_deref().and_then(|cid| {
+                ui.snapshot.with_untracked(|s| {
+                    s.cards
+                        .iter()
+                        .find(|c| c.id == cid)
+                        .map(|c| c.project_id.clone())
+                })
+            })
+        })
+        .or_else(|| inherited.as_ref().and_then(|e| e.project_id.clone()));
+    let resolved_name = ui.snapshot.with_untracked(|s| {
+        s.next_terminal_label(origin_project.as_deref(), agent_engine.as_deref(), None)
+    });
     let saved = canban_types::TerminalEntry {
         id: id.clone(),
         conversation_id: None,
@@ -369,16 +414,8 @@ fn gallery_create_entry(
             .snapshot
             .with_untracked(|s| s.terminals.iter().map(|t| t.number).max().unwrap_or(8))
             + 1,
-        name: None,
-        manual_number: Some(
-            ui.snapshot.with_untracked(|s| {
-                s.terminals
-                    .iter()
-                    .filter_map(|t| t.manual_number)
-                    .max()
-                    .unwrap_or(0)
-            }) + 1,
-        ),
+        name: Some(resolved_name),
+        origin_project_id: origin_project,
         origin_card_id: origin_card,
         agent_engine,
         agent: None,
@@ -1033,24 +1070,28 @@ fn apply_tab_removal(ui: Ui, id: &str, fallback: Option<String>) {
             tabs.push(next.clone());
         }
         ui.terminal_tabs.set(tabs);
-        if !next.is_empty() {
-            let scope_opt = ui.snapshot.with_untracked(|s| {
+        if !next.is_empty()
+            && let Some((card_id, scope_key, pid)) = ui.snapshot.with_untracked(|s| {
                 ui.terminal_entries.with_untracked(|rows| {
                     rows.iter().find(|e| e.saved.id == next).map(|e| {
+                        let scope = worktrees::entry_scope(s, e);
                         (
                             e.card.as_ref().map(|c| c.id.clone()),
-                            worktrees::entry_scope(s, e).recent_key(),
+                            scope.recent_key(),
+                            scope.project_id(s),
                         )
                     })
                 })
+            })
+        {
+            ui.terminal_recent.with(|recent| {
+                if let Some(cid) = card_id {
+                    recent.insert(cid, next.clone());
+                }
+                recent.insert(scope_key, next.clone());
             });
-            if let Some((card_id, scope_key)) = scope_opt {
-                ui.terminal_recent.with(|recent| {
-                    if let Some(cid) = card_id {
-                        recent.insert(cid, next.clone());
-                    }
-                    recent.insert(scope_key, next.clone());
-                });
+            if let Some(pid) = pid {
+                ui.project.set(pid);
             }
         }
         ui.terminal_selection.set(next);
@@ -1103,7 +1144,43 @@ pub fn cycle(ui: Ui, forward: bool) {
     };
     ui.open_terminal(tabs[next].clone());
 }
-pub(crate) const TAB_KEYS: [(&str, u8); 3] = [("mod+w", 1), ("mod+shift+]", 2), ("mod+shift+[", 3)];
+pub fn select_tab_index(ui: Ui, index: usize) {
+    if ui.page.get_untracked() == "card"
+        && ui.card_terminal_open.get_untracked()
+        && let Some(c) = ui.current_card()
+    {
+        let slots: Vec<_> = untracked(|| card_live_entries_for_ui(ui, &c.id))
+            .into_iter()
+            .map(|e| e.saved.id)
+            .collect();
+        if let Some(target) = slots.get(index) {
+            select_card_tab(ui, &c.id, target.clone());
+        }
+        return;
+    }
+    let tabs: Vec<String> = untracked(|| scope_tabs(ui))
+        .into_iter()
+        .map(|e| e.saved.id)
+        .collect();
+    if let Some(target) = tabs.get(index) {
+        ui.open_terminal(target.clone());
+    }
+}
+
+pub(crate) const TAB_KEYS: [(&str, u8); 12] = [
+    ("mod+w", 1),
+    ("mod+shift+]", 2),
+    ("mod+shift+[", 3),
+    ("mod+1", 11),
+    ("mod+2", 12),
+    ("mod+3", 13),
+    ("mod+4", 14),
+    ("mod+5", 15),
+    ("mod+6", 16),
+    ("mod+7", 17),
+    ("mod+8", 18),
+    ("mod+9", 19),
+];
 pub fn bindings(ui: Ui) {
     use nsh_core::keymap::When;
     effect(move || {
@@ -1142,7 +1219,9 @@ pub fn bindings(ui: Ui) {
                             }
                         }
                         2 => cycle(ui, true),
-                        _ => cycle(ui, false),
+                        3 => cycle(ui, false),
+                        n @ 11..=19 => select_tab_index(ui, usize::from(n - 11)),
+                        _ => {}
                     }
                     ui.terminal_focus.update(|v| *v += 1);
                 },

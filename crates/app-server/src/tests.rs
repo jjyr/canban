@@ -257,7 +257,7 @@ fn ipc_preserves_large_context_and_report_frames() {
         conversation_id: Some(cid),
         number: 1,
         name: None,
-        manual_number: None,
+        origin_project_id: None,
         origin_card_id: Some(initial_card.id.clone()),
         agent_engine: None,
         runtime: None,
@@ -3803,7 +3803,10 @@ fn short_ids_card_number_paths_and_legacy_alias_resolution() {
     let by_prefix = app.call("card.get", json!({"card_id":&c.id[..4]})).unwrap();
     assert_eq!(by_prefix["id"], c.id);
     let preview_err = app
-        .call("review.preview", json!({"project_id":&p.id,"card":c.number}))
+        .call(
+            "review.preview",
+            json!({"project_id":&p.id,"card":c.number}),
+        )
         .unwrap_err();
     assert!(preview_err.to_string().contains("no prepared worktree"));
 
