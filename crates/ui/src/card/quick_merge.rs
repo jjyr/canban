@@ -38,11 +38,11 @@ pub(crate) fn start(ui: Ui, card: Card) {
     if busy(ui) {
         return;
     }
-    let Some(app) = crate::APP.get().cloned() else {
+    if crate::APP.get().is_none() {
         ui.operation_error
             .set("Gallery preview: no AppServer connected".into());
         return;
-    };
+    }
     let target = ui.snapshot.with_untracked(|s| {
         s.projects
             .iter()
@@ -61,7 +61,7 @@ pub(crate) fn start(ui: Ui, card: Card) {
     let merging_id = card.id.clone();
     let params = json!({"card_id": card_id, "target_branch": target});
     ui.spawn(async move {
-        let result = blocking(move || app.call(PREVIEW, params)).await;
+        let result = blocking(move || crate::routed_call(PREVIEW, params, None)).await;
         ui.pending_methods.update(|s| {
             s.remove(PREVIEW);
         });

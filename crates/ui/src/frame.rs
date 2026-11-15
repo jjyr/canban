@@ -238,6 +238,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                 .pr(px(10.))
                                 .child(crate::navigation::controls(ui))
                                 .child(route_chrome(ui))
+                                .child(crate::hosts::trigger_pill(ui))
                                 .child(crate::overview::trigger_pill(ui)),
                         )
                         .child(

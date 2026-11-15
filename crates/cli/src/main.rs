@@ -36,8 +36,34 @@ enum Cmd {
         #[arg(long)]
         target: u32,
     },
-    /// Run the shared AppServer without a UI (also useful for acceptance).
-    Serve,
+    /// Run the shared AppServer without a UI (also useful for remote daemons and acceptance).
+    Serve {
+        /// Bind to the host's Tailscale IPv4 address for direct remote client access.
+        #[arg(long)]
+        tailscale: bool,
+        /// TCP port when `--tailscale` is enabled (default: 7680).
+        #[arg(long, default_value_t = canban_types::DEFAULT_DAEMON_PORT)]
+        port: u16,
+        /// Explicit private/loopback TCP bind address (`ip:port`).
+        #[arg(long)]
+        listen: Option<String>,
+    },
+    /// Generate or display the authenticated TCP pairing URI (`canban://addr:port#token`).
+    Pair {
+        #[arg(long)]
+        tailscale: bool,
+        #[arg(long, default_value_t = canban_types::DEFAULT_DAEMON_PORT)]
+        port: u16,
+        #[arg(long)]
+        listen: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install or inspect the user background daemon (`systemd --user` on Linux, `launchd` on macOS).
+    Service {
+        #[command(subcommand)]
+        command: ServiceCmd,
+    },
     /// Call a public operation with JSON parameters. See docs/interfaces.
     Call {
         method: String,
@@ -104,6 +130,20 @@ enum Cmd {
         #[command(subcommand)]
         command: BatchCmd,
     },
+}
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// Install and enable the background daemon service.
+    Install {
+        #[arg(long)]
+        tailscale: bool,
+        #[arg(long, default_value_t = canban_types::DEFAULT_DAEMON_PORT)]
+        port: u16,
+        #[arg(long)]
+        listen: Option<String>,
+    },
+    /// Show background service installation and active status.
+    Status,
 }
 #[derive(Subcommand)]
 enum BatchCmd {
@@ -291,12 +331,104 @@ fn run() -> Result<()> {
         println!("{}", json!({"schema":version}));
         return Ok(());
     }
-    if matches!(command, Cmd::Serve) {
+    if let Cmd::Serve {
+        tailscale,
+        port,
+        listen,
+    } = command
+    {
+        let override_listen = if tailscale || listen.is_some() {
+            let cfg = canban_types::ServerListenConfig {
+                tailscale,
+                port,
+                listen,
+            };
+            canban_app_server::network::save_listen_config(&home, &cfg)?;
+            Some(cfg)
+        } else {
+            None
+        };
         let app = canban_app_server::AppServer::open(home, std::env::current_exe()?)?;
-        let _runtime = app.start()?;
+        let _runtime = app.start_with_listen(override_listen)?;
         println!("Canban AppServer listening at {}", app.endpoint().display());
+        for tcp in app.bound_tcp_addrs() {
+            println!("Canban TCP listener bound at {tcp}");
+        }
         while !app.stopped() {
             std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        return Ok(());
+    }
+    if let Cmd::Pair {
+        tailscale,
+        port,
+        listen,
+        json: as_json,
+    } = command
+    {
+        let mut cfg = canban_app_server::network::load_listen_config(&home);
+        if tailscale {
+            cfg.tailscale = true;
+        }
+        if port != canban_types::DEFAULT_DAEMON_PORT || cfg.port == 0 {
+            cfg.port = port;
+        }
+        if listen.is_some() {
+            cfg.listen = listen;
+        }
+        if !cfg.tcp_enabled() {
+            cfg.tailscale = true;
+        }
+        canban_app_server::network::save_listen_config(&home, &cfg)?;
+        let token = canban_app_server::network::ensure_server_token(&home)?;
+        let addr = if let Some(explicit) = cfg.listen.as_deref() {
+            canban_types::normalize_daemon_addr(explicit)
+        } else if let Ok(ts_ip) = canban_app_server::network::detect_tailscale_ipv4() {
+            format!("{ts_ip}:{}", cfg.port)
+        } else {
+            format!("<host-ip>:{}", cfg.port)
+        };
+        let uri = canban_types::format_pairing_uri(&addr, &token);
+        if as_json {
+            let sid = std::fs::read_to_string(home.join("server-id"))
+                .ok()
+                .map(|s| s.trim().to_owned());
+            println!(
+                "{}",
+                json!({
+                    "addr": addr,
+                    "token": token,
+                    "uri": uri,
+                    "server_id": sid,
+                    "hostname": canban_app_server::network::hostname_string(),
+                    "platform": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                })
+            );
+        } else {
+            println!("{uri}");
+        }
+        return Ok(());
+    }
+    if let Cmd::Service { command } = command {
+        match command {
+            ServiceCmd::Install {
+                tailscale,
+                port,
+                listen,
+            } => {
+                let status = canban_app_server::network::install_user_service(
+                    &home,
+                    &std::env::current_exe()?,
+                    tailscale,
+                    port,
+                    listen,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            }
+            ServiceCmd::Status => {
+                let status = canban_app_server::network::service_status(&home);
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            }
         }
         return Ok(());
     }
@@ -569,7 +701,12 @@ fn run() -> Result<()> {
                 ("batch.report".into(), params)
             }
         },
-        Cmd::Serve | Cmd::BuildInfo | Cmd::Skill | Cmd::Database { .. } => unreachable!(),
+        Cmd::Serve { .. }
+        | Cmd::Pair { .. }
+        | Cmd::Service { .. }
+        | Cmd::BuildInfo
+        | Cmd::Skill
+        | Cmd::Database { .. } => unreachable!(),
     };
     anyhow::ensure!(p.is_object(), "Parameters must be an object");
     if !matches!(
@@ -585,6 +722,10 @@ fn run() -> Result<()> {
             | "execution.output"
             | "card.show"
             | "card.get"
+            | "diagnostics.status"
+            | "diagnostics.logs"
+            | "host.discover"
+            | "host.probe"
     ) && p.get("request_key").is_none()
     {
         p["request_key"] = json!(canban_types::id());

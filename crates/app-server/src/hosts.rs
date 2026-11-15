@@ -1,0 +1,1083 @@
+//! Multi-host connection registry (`This Mac` + remote Tailscale/TCP and SSH `canband`s),
+//! offline snapshot caching, SSH Unix-socket tunneling, and host-aware RPC routing.
+use super::*;
+use std::{
+    collections::BTreeMap,
+    process::{Child, Command, Stdio},
+};
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct CachedHostData {
+    saved_at: u64,
+    snapshot: Snapshot,
+    config: Config,
+}
+
+type EstablishedConnection = (
+    Option<Arc<AppClient>>,
+    Option<SshTunnel>,
+    HostConnectionState,
+    Option<Value>,
+    Option<String>,
+);
+
+struct SshTunnel {
+    socket_path: PathBuf,
+    child: Child,
+}
+
+impl SshTunnel {
+    fn start(
+        tunnels_dir: &Path,
+        host_id: &str,
+        target: &str,
+        remote_home: Option<&str>,
+    ) -> Result<Self> {
+        std::fs::create_dir_all(tunnels_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(tunnels_dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let socket_path = tunnels_dir.join(format!("{host_id}.sock"));
+        let _ = std::fs::remove_file(&socket_path);
+
+        // Resolve remote home path cleanly if `~` or unset so ssh StreamLocalForward gets an absolute path.
+        let remote_sock = match remote_home.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(h) if Path::new(h).is_absolute() => {
+                format!("{}/app.sock", h.trim_end_matches('/'))
+            }
+            _ => {
+                let probe = Command::new("ssh")
+                    .args([
+                        "-o",
+                        "BatchMode=yes",
+                        "-o",
+                        "ConnectTimeout=8",
+                        target.trim(),
+                        "printf '%s' \"$HOME/.canban/app.sock\"",
+                    ])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .context("Failed to invoke ssh for tunnel setup")?;
+                ensure!(
+                    probe.status.success(),
+                    "SSH connection to {} failed: {}",
+                    target.trim(),
+                    String::from_utf8_lossy(&probe.stderr).trim()
+                );
+                let resolved = String::from_utf8_lossy(&probe.stdout).trim().to_owned();
+                ensure!(
+                    resolved.starts_with('/'),
+                    "Could not resolve remote ~/.canban/app.sock path on {}",
+                    target.trim()
+                );
+                resolved
+            }
+        };
+
+        let forward_spec = format!("{}:{remote_sock}", socket_path.display());
+        let mut child = Command::new("ssh")
+            .args([
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ExitOnForwardFailure=yes",
+                "-o",
+                "StreamLocalBindUnlink=yes",
+                "-o",
+                "ConnectTimeout=8",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-N",
+                "-L",
+                &forward_spec,
+                target.trim(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("Failed to start SSH socket forwarder")?;
+
+        for _ in 0..80 {
+            if socket_path.exists() && UnixStream::connect(&socket_path).is_ok() {
+                return Ok(Self { socket_path, child });
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                let mut err_msg = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    let _ = stderr.read_to_string(&mut err_msg);
+                }
+                bail!(
+                    "SSH tunnel to {} exited ({status}): {}",
+                    target.trim(),
+                    err_msg.trim()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&socket_path);
+        bail!(
+            "Timed out waiting for SSH socket tunnel to {}",
+            target.trim()
+        )
+    }
+
+    fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+}
+
+impl Drop for SshTunnel {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.socket_path);
+    }
+}
+
+struct RemoteSlot {
+    saved: SavedHost,
+    client: Option<Arc<AppClient>>,
+    tunnel: Option<SshTunnel>,
+    connection: HostConnectionState,
+    cached: Option<CachedHostData>,
+    last_state_raw: Value,
+    reconnect_count: u32,
+    consecutive_failures: u32,
+    next_retry_at: std::time::Instant,
+}
+
+pub struct HostRegistry {
+    local_home: PathBuf,
+    local: Arc<AppClient>,
+    remotes: Mutex<BTreeMap<String, RemoteSlot>>,
+    entity_hosts: RwLock<BTreeMap<String, String>>,
+    listeners: Mutex<Vec<mpsc::Sender<AppEvent>>>,
+    wake_tx: mpsc::SyncSender<()>,
+    stop: AtomicBool,
+}
+
+impl Drop for HostRegistry {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = self.wake_tx.try_send(());
+    }
+}
+
+fn count_active_agents(s: &Snapshot) -> usize {
+    s.terminals
+        .iter()
+        .filter(|t| {
+            t.agent
+                .as_ref()
+                .is_some_and(|a| matches!(a.state.as_str(), "starting" | "running" | "working"))
+        })
+        .count()
+}
+
+impl HostRegistry {
+    pub fn new(local: Arc<AppClient>) -> Arc<Self> {
+        let local_home = local.home.clone();
+        let hosts_file = Self::load_hosts_file(&local_home);
+        let mut map = BTreeMap::new();
+        for saved in hosts_file.hosts {
+            let cached = Self::load_cache(&local_home, &saved.id);
+            let initial_conn = if !saved.enabled {
+                HostConnectionState::Offline {
+                    error: "Disabled".into(),
+                    cached_at: cached.as_ref().map(|c| c.saved_at),
+                }
+            } else {
+                HostConnectionState::Connecting
+            };
+            map.insert(
+                saved.id.clone(),
+                RemoteSlot {
+                    saved,
+                    client: None,
+                    tunnel: None,
+                    connection: initial_conn,
+                    cached,
+                    last_state_raw: Value::Null,
+                    reconnect_count: 0,
+                    consecutive_failures: 0,
+                    next_retry_at: std::time::Instant::now(),
+                },
+            );
+        }
+
+        let (wake_tx, wake_rx) = mpsc::sync_channel(4);
+        let registry = Arc::new(Self {
+            local_home,
+            local: local.clone(),
+            remotes: Mutex::new(map),
+            entity_hosts: RwLock::new(BTreeMap::new()),
+            listeners: Mutex::new(Vec::new()),
+            wake_tx,
+            stop: AtomicBool::new(false),
+        });
+
+        // Forward local AppClient subscription events into unified listeners.
+        let local_rx = local.subscribe();
+        let weak_local = Arc::downgrade(&registry);
+        std::thread::spawn(move || {
+            while let Ok(ev) = local_rx.recv() {
+                let Some(reg) = weak_local.upgrade() else {
+                    break;
+                };
+                if reg.stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                reg.emit(ev);
+            }
+        });
+
+        // Background remote host supervisor & state poller.
+        let weak_sup = Arc::downgrade(&registry);
+        std::thread::spawn(move || {
+            while let Some(reg) = weak_sup.upgrade() {
+                if reg.stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                reg.poll_remotes_once();
+                drop(reg);
+                let _ = wake_rx.recv_timeout(Duration::from_millis(850));
+            }
+        });
+
+        registry
+    }
+
+    pub fn local(&self) -> &Arc<AppClient> {
+        &self.local
+    }
+
+    pub fn hosts_path(home: &Path) -> PathBuf {
+        home.join("config/hosts.json")
+    }
+
+    fn cache_path(home: &Path, host_id: &str) -> PathBuf {
+        home.join("cache/hosts").join(format!("{host_id}.json"))
+    }
+
+    fn tunnels_dir(home: &Path) -> PathBuf {
+        home.join("run/tunnels")
+    }
+
+    pub fn load_hosts_file(home: &Path) -> HostsFile {
+        std::fs::read(Self::hosts_path(home))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_hosts_file(&self, hosts: &[SavedHost]) -> Result<()> {
+        let file = HostsFile {
+            hosts: hosts.to_vec(),
+        };
+        canban_context::atomic(
+            &Self::hosts_path(&self.local_home),
+            &serde_json::to_vec_pretty(&file)?,
+        )
+    }
+
+    fn load_cache(home: &Path, host_id: &str) -> Option<CachedHostData> {
+        std::fs::read(Self::cache_path(home, host_id))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+    }
+
+    fn save_cache(home: &Path, host_id: &str, data: &CachedHostData) {
+        if let Ok(bytes) = serde_json::to_vec(data) {
+            let _ = canban_context::atomic(&Self::cache_path(home, host_id), &bytes);
+        }
+    }
+
+    pub fn subscribe(&self) -> mpsc::Receiver<AppEvent> {
+        let (tx, rx) = mpsc::channel();
+        self.listeners.lock().unwrap().push(tx);
+        rx
+    }
+
+    fn emit(&self, event: AppEvent) {
+        self.listeners
+            .lock()
+            .unwrap()
+            .retain(|tx| tx.send(event.clone()).is_ok());
+    }
+
+    pub fn wake(&self) {
+        let _ = self.wake_tx.try_send(());
+    }
+
+    pub fn saved_hosts(&self) -> Vec<SavedHost> {
+        self.remotes
+            .lock()
+            .unwrap()
+            .values()
+            .map(|slot| slot.saved.clone())
+            .collect()
+    }
+
+    /// Validate and connect/register a new or updated remote host.
+    /// Rejects accidental loopback connections to `This Mac` or duplicate `server_id`s.
+    pub fn add_host(&self, mut host: SavedHost) -> Result<HostSummary> {
+        ensure!(
+            host.id != "local" && !host.id.trim().is_empty(),
+            "Invalid remote host ID"
+        );
+        host.name = host.name.trim().to_owned();
+        ensure!(!host.name.is_empty(), "Host display name is required");
+        if let HostTransport::Tcp { addr, token } = &mut host.transport {
+            *addr = canban_types::normalize_daemon_addr(addr);
+            *token = token.trim().to_owned();
+            ensure!(!addr.is_empty(), "Remote host address is required");
+            ensure!(!token.is_empty(), "Pairing token is required");
+        }
+
+        // Perform immediate connection/probe validation so errors surface cleanly in the wizard.
+        let (client, tunnel, conn, state_val, server_id) =
+            self.establish_connection(&host.id, &host.transport)?;
+
+        if let Some(sid) = &server_id {
+            if self.local.server_id() == Some(sid.as_str()) {
+                bail!(
+                    "That address points to This Mac's own Canban service ({sid}), which is already connected locally."
+                );
+            }
+            let guard = self.remotes.lock().unwrap();
+            if let Some(dup) = guard.values().find(|s| {
+                s.saved.id != host.id && s.saved.server_id.as_deref() == Some(sid.as_str())
+            }) {
+                bail!(
+                    "That Canban daemon is already connected under '{}'.",
+                    dup.saved.name
+                );
+            }
+        }
+
+        host.server_id = server_id;
+        let cached = if let Some(val) = &state_val
+            && let Ok(snap) = serde_json::from_value::<Snapshot>(val["snapshot"].clone())
+            && let Ok(cfg) = serde_json::from_value::<Config>(val["config"].clone())
+        {
+            let data = CachedHostData {
+                saved_at: now(),
+                snapshot: snap,
+                config: cfg,
+            };
+            Self::save_cache(&self.local_home, &host.id, &data);
+            Some(data)
+        } else {
+            Self::load_cache(&self.local_home, &host.id)
+        };
+
+        let summary = {
+            let mut guard = self.remotes.lock().unwrap();
+            let slot = RemoteSlot {
+                saved: host,
+                client,
+                tunnel,
+                connection: conn,
+                cached,
+                last_state_raw: state_val.unwrap_or(Value::Null),
+                reconnect_count: 0,
+                consecutive_failures: 0,
+                next_retry_at: std::time::Instant::now(),
+            };
+            let sum = Self::slot_summary(&slot);
+            guard.insert(slot.saved.id.clone(), slot);
+            let all_saved: Vec<SavedHost> = guard.values().map(|s| s.saved.clone()).collect();
+            drop(guard);
+            self.save_hosts_file(&all_saved)?;
+            sum
+        };
+
+        self.emit(AppEvent::Changed {
+            topic: "resync",
+            card_id: None,
+        });
+        self.wake();
+        Ok(summary)
+    }
+
+    pub fn remove_host(&self, host_id: &str) -> Result<()> {
+        ensure!(host_id != "local", "Cannot remove This Mac");
+        let all_saved = {
+            let mut guard = self.remotes.lock().unwrap();
+            guard.remove(host_id);
+            guard.values().map(|s| s.saved.clone()).collect::<Vec<_>>()
+        };
+        let _ = std::fs::remove_file(Self::cache_path(&self.local_home, host_id));
+        self.save_hosts_file(&all_saved)?;
+        self.emit(AppEvent::Changed {
+            topic: "resync",
+            card_id: None,
+        });
+        Ok(())
+    }
+
+    pub fn rename_host(&self, host_id: &str, new_name: &str) -> Result<()> {
+        ensure!(host_id != "local", "Cannot rename This Mac");
+        let trimmed = new_name.trim();
+        ensure!(!trimmed.is_empty(), "Host display name cannot be empty");
+        let all_saved = {
+            let mut guard = self.remotes.lock().unwrap();
+            let slot = guard
+                .get_mut(host_id)
+                .with_context(|| format!("Unknown Canban host '{host_id}'"))?;
+            slot.saved.name = trimmed.to_owned();
+            guard.values().map(|s| s.saved.clone()).collect::<Vec<_>>()
+        };
+        self.save_hosts_file(&all_saved)?;
+        self.emit(AppEvent::Changed {
+            topic: "application",
+            card_id: None,
+        });
+        Ok(())
+    }
+
+    pub fn set_host_enabled(&self, host_id: &str, enabled: bool) -> Result<()> {
+        ensure!(host_id != "local", "Cannot disable This Mac");
+        let all_saved = {
+            let mut guard = self.remotes.lock().unwrap();
+            let slot = guard
+                .get_mut(host_id)
+                .with_context(|| format!("Unknown Canban host '{host_id}'"))?;
+            slot.saved.enabled = enabled;
+            if !enabled {
+                slot.client = None;
+                slot.tunnel = None;
+                slot.connection = HostConnectionState::Offline {
+                    error: "Disabled".into(),
+                    cached_at: slot.cached.as_ref().map(|c| c.saved_at),
+                };
+            } else {
+                slot.consecutive_failures = 0;
+                slot.next_retry_at = std::time::Instant::now();
+                slot.connection = HostConnectionState::Connecting;
+            }
+            guard.values().map(|s| s.saved.clone()).collect::<Vec<_>>()
+        };
+        self.save_hosts_file(&all_saved)?;
+        self.emit(AppEvent::Changed {
+            topic: "resync",
+            card_id: None,
+        });
+        self.wake();
+        Ok(())
+    }
+
+    pub fn reconnect(&self, host_id: Option<&str>) {
+        {
+            let mut guard = self.remotes.lock().unwrap();
+            for (id, slot) in guard.iter_mut() {
+                if host_id.is_none_or(|target| target == id) && slot.saved.enabled {
+                    slot.client = None;
+                    slot.tunnel = None;
+                    slot.consecutive_failures = 0;
+                    slot.next_retry_at = std::time::Instant::now();
+                    slot.connection = HostConnectionState::Connecting;
+                }
+            }
+        }
+        self.emit(AppEvent::Changed {
+            topic: "application",
+            card_id: None,
+        });
+        self.wake();
+    }
+
+    fn establish_connection(
+        &self,
+        host_id: &str,
+        transport: &HostTransport,
+    ) -> Result<EstablishedConnection> {
+        let start = std::time::Instant::now();
+        let (connect_res, tunnel) = match transport {
+            HostTransport::Local => bail!("Local transport is reserved for This Mac"),
+            HostTransport::Tcp { addr, token } => {
+                (AppClient::connect_tcp(addr.clone(), token.clone()), None)
+            }
+            HostTransport::Ssh {
+                target,
+                remote_home,
+            } => {
+                let tun = SshTunnel::start(
+                    &Self::tunnels_dir(&self.local_home),
+                    host_id,
+                    target,
+                    remote_home.as_deref(),
+                )?;
+                let res = AppClient::connect_ssh_socket(tun.socket_path.clone());
+                (res, Some(tun))
+            }
+        };
+
+        match connect_res {
+            Ok(client) => {
+                let rtt_ms = start.elapsed().as_millis() as u64;
+                let ping = client.call("app.ping", json!({})).unwrap_or_default();
+                let state_val = client.call("app.state", json!({})).ok();
+                let api_version = ping["api_version"]
+                    .as_u64()
+                    .unwrap_or(u64::from(API_VERSION)) as u32;
+                let version = ping["build"]["version"]
+                    .as_str()
+                    .or_else(|| ping["version"].as_str())
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let platform = ping["build"]["platform"]
+                    .as_str()
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let server_id = client
+                    .server_id()
+                    .map(str::to_owned)
+                    .or_else(|| ping["server_id"].as_str().map(str::to_owned));
+                Ok((
+                    Some(client),
+                    tunnel,
+                    HostConnectionState::Connected {
+                        rtt_ms,
+                        api_version,
+                        version,
+                        platform,
+                    },
+                    state_val,
+                    server_id,
+                ))
+            }
+            Err(err) => {
+                if let Some(older) = err.downcast_ref::<BackendOlder>() {
+                    let server_api = older.ping["api_version"].as_u64().unwrap_or(0) as u32;
+                    let version = older.ping["build"]["version"]
+                        .as_str()
+                        .or_else(|| older.ping["version"].as_str())
+                        .unwrap_or("unknown")
+                        .to_owned();
+                    let sid = older.ping["server_id"].as_str().map(str::to_owned);
+                    return Ok((
+                        None,
+                        None,
+                        HostConnectionState::ApiMismatch {
+                            server_api,
+                            app_api: API_VERSION,
+                            version,
+                        },
+                        None,
+                        sid,
+                    ));
+                }
+                let msg = format!("{err:#}");
+                if msg.contains("auth_failed:") {
+                    bail!("{msg}");
+                }
+                Err(err)
+            }
+        }
+    }
+
+    pub fn poll_remotes_once(&self) {
+        let ids: Vec<String> = {
+            let guard = self.remotes.lock().unwrap();
+            guard.keys().cloned().collect()
+        };
+        let mut any_changed = false;
+        let mut resync = false;
+
+        for id in ids {
+            let (saved, existing_client, should_retry) = {
+                let mut guard = self.remotes.lock().unwrap();
+                let Some(slot) = guard.get_mut(&id) else {
+                    continue;
+                };
+                if !slot.saved.enabled {
+                    continue;
+                }
+                if let Some(tun) = &mut slot.tunnel
+                    && !tun.is_alive()
+                {
+                    slot.client = None;
+                    slot.tunnel = None;
+                }
+                (
+                    slot.saved.clone(),
+                    slot.client.clone(),
+                    std::time::Instant::now() >= slot.next_retry_at,
+                )
+            };
+
+            if let Some(client) = existing_client {
+                let start = std::time::Instant::now();
+                match client.call("app.state", json!({})) {
+                    Ok(state_val) => {
+                        let rtt_ms = start.elapsed().as_millis() as u64;
+                        let mut guard = self.remotes.lock().unwrap();
+                        if let Some(slot) = guard.get_mut(&id) {
+                            if slot.last_state_raw != state_val {
+                                if let (Ok(snap), Ok(cfg)) = (
+                                    serde_json::from_value::<Snapshot>(
+                                        state_val["snapshot"].clone(),
+                                    ),
+                                    serde_json::from_value::<Config>(state_val["config"].clone()),
+                                ) {
+                                    client.set_cached_config(cfg.clone());
+                                    let data = CachedHostData {
+                                        saved_at: now(),
+                                        snapshot: snap,
+                                        config: cfg,
+                                    };
+                                    Self::save_cache(&self.local_home, &id, &data);
+                                    slot.cached = Some(data);
+                                }
+                                slot.last_state_raw = state_val;
+                                any_changed = true;
+                            }
+                            if let HostConnectionState::Connected {
+                                rtt_ms: prev_rtt, ..
+                            } = &mut slot.connection
+                            {
+                                *prev_rtt = rtt_ms;
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        let msg = format!("{err:#}");
+                        let mut guard = self.remotes.lock().unwrap();
+                        if let Some(slot) = guard.get_mut(&id) {
+                            slot.client = None;
+                            slot.tunnel = None;
+                            slot.reconnect_count = slot.reconnect_count.saturating_add(1);
+                            slot.consecutive_failures = 1;
+                            slot.next_retry_at = std::time::Instant::now() + Duration::from_secs(1);
+                            slot.connection = if msg.contains("auth_failed:") {
+                                HostConnectionState::AuthFailed { error: msg }
+                            } else {
+                                HostConnectionState::Reconnecting {
+                                    attempt: 1,
+                                    error: msg,
+                                }
+                            };
+                            any_changed = true;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if !should_retry {
+                continue;
+            }
+
+            match self.establish_connection(&id, &saved.transport) {
+                Ok((client_opt, tunnel, conn_state, state_val, server_id)) => {
+                    let mut guard = self.remotes.lock().unwrap();
+                    if let Some(slot) = guard.get_mut(&id) {
+                        let was_connected = slot.connection.is_connected();
+                        slot.client = client_opt;
+                        slot.tunnel = tunnel;
+                        slot.connection = conn_state;
+                        slot.consecutive_failures = 0;
+                        if let Some(sid) = server_id
+                            && slot.saved.server_id.is_none()
+                        {
+                            slot.saved.server_id = Some(sid);
+                        }
+                        if let Some(val) = state_val {
+                            if let (Ok(snap), Ok(cfg)) = (
+                                serde_json::from_value::<Snapshot>(val["snapshot"].clone()),
+                                serde_json::from_value::<Config>(val["config"].clone()),
+                            ) {
+                                let data = CachedHostData {
+                                    saved_at: now(),
+                                    snapshot: snap,
+                                    config: cfg,
+                                };
+                                Self::save_cache(&self.local_home, &id, &data);
+                                slot.cached = Some(data);
+                            }
+                            slot.last_state_raw = val;
+                        }
+                        if !was_connected {
+                            resync = true;
+                        }
+                        any_changed = true;
+                    }
+                }
+                Err(err) => {
+                    let msg = format!("{err:#}");
+                    let mut guard = self.remotes.lock().unwrap();
+                    if let Some(slot) = guard.get_mut(&id) {
+                        slot.consecutive_failures = slot.consecutive_failures.saturating_add(1);
+                        let backoff_secs = match slot.consecutive_failures {
+                            1 => 1,
+                            2 => 2,
+                            _ => 4,
+                        };
+                        slot.next_retry_at =
+                            std::time::Instant::now() + Duration::from_secs(backoff_secs);
+                        let prev = slot.connection.clone();
+                        slot.connection = if msg.contains("auth_failed:") {
+                            HostConnectionState::AuthFailed { error: msg }
+                        } else if slot.consecutive_failures <= 2 {
+                            HostConnectionState::Reconnecting {
+                                attempt: slot.consecutive_failures,
+                                error: msg,
+                            }
+                        } else {
+                            HostConnectionState::Offline {
+                                error: msg,
+                                cached_at: slot.cached.as_ref().map(|c| c.saved_at),
+                            }
+                        };
+                        if slot.connection != prev {
+                            any_changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if any_changed {
+            self.emit(AppEvent::Changed {
+                topic: if resync { "resync" } else { "application" },
+                card_id: None,
+            });
+        }
+    }
+
+    fn slot_summary(slot: &RemoteSlot) -> HostSummary {
+        let (active_agents, max_agents, project_count, last_synced_at) = match &slot.cached {
+            Some(c) => (
+                count_active_agents(&c.snapshot),
+                c.config.scheduler.max_agents,
+                c.snapshot.projects.len(),
+                Some(c.saved_at),
+            ),
+            None => (0, 8, 0, None),
+        };
+        HostSummary {
+            id: slot.saved.id.clone(),
+            name: slot.saved.name.clone(),
+            is_local: false,
+            transport_label: slot.saved.transport.label().into(),
+            endpoint_label: slot.saved.transport.endpoint_display(),
+            ssh_target: slot
+                .saved
+                .ssh_target
+                .clone()
+                .or_else(|| match &slot.saved.transport {
+                    HostTransport::Ssh { target, .. } => Some(target.clone()),
+                    _ => None,
+                }),
+            server_id: slot.saved.server_id.clone(),
+            connection: slot.connection.clone(),
+            active_agents,
+            max_agents,
+            project_count,
+            reconnect_count: slot.reconnect_count,
+            last_synced_at,
+        }
+    }
+
+    pub fn summaries(&self) -> Vec<HostSummary> {
+        let local_cfg = self.local.config();
+        let (local_active, local_projects) = self
+            .local
+            .snapshot()
+            .map(|s| (count_active_agents(&s), s.projects.len()))
+            .unwrap_or((0, 0));
+        let mut out = vec![HostSummary {
+            id: "local".into(),
+            name: "This Mac".into(),
+            is_local: true,
+            transport_label: "Local socket".into(),
+            endpoint_label: self
+                .local
+                .home
+                .join("app.sock")
+                .to_string_lossy()
+                .into_owned(),
+            ssh_target: None,
+            server_id: self.local.server_id().map(str::to_owned),
+            connection: HostConnectionState::Connected {
+                rtt_ms: 0,
+                api_version: API_VERSION,
+                version: env!("CARGO_PKG_VERSION").into(),
+                platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+            },
+            active_agents: local_active,
+            max_agents: local_cfg.scheduler.max_agents,
+            project_count: local_projects,
+            reconnect_count: 0,
+            last_synced_at: Some(now()),
+        }];
+        let guard = self.remotes.lock().unwrap();
+        for slot in guard.values() {
+            out.push(Self::slot_summary(slot));
+        }
+        out
+    }
+
+    /// Build the unified `Snapshot` across `This Mac` and all enabled remote hosts
+    /// (live when connected, cached read-only when offline) and refresh the O(1) routing table.
+    pub fn merged_snapshot(&self) -> Result<Snapshot> {
+        let mut combined = self.local.snapshot()?;
+        let local_cfg = self.local.config();
+        combined.register_host_entities("local");
+        combined.host_summaries.insert(
+            "local".into(),
+            HostSummary {
+                id: "local".into(),
+                name: "This Mac".into(),
+                is_local: true,
+                transport_label: "Local socket".into(),
+                endpoint_label: self
+                    .local
+                    .home
+                    .join("app.sock")
+                    .to_string_lossy()
+                    .into_owned(),
+                ssh_target: None,
+                server_id: self.local.server_id().map(str::to_owned),
+                connection: HostConnectionState::Connected {
+                    rtt_ms: 0,
+                    api_version: API_VERSION,
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                },
+                active_agents: count_active_agents(&combined),
+                max_agents: local_cfg.scheduler.max_agents,
+                project_count: combined.projects.len(),
+                reconnect_count: 0,
+                last_synced_at: Some(now()),
+            },
+        );
+
+        let remote_snapshots: Vec<(Option<Snapshot>, HostSummary)> = {
+            let guard = self.remotes.lock().unwrap();
+            guard
+                .values()
+                .filter(|slot| slot.saved.enabled)
+                .map(|slot| {
+                    let snap = slot.cached.as_ref().map(|c| c.snapshot.clone());
+                    (snap, Self::slot_summary(slot))
+                })
+                .collect()
+        };
+
+        for (snap_opt, summary) in remote_snapshots {
+            if let Some(remote_snap) = snap_opt {
+                combined.merge_remote_snapshot(remote_snap, summary);
+            } else {
+                combined.host_summaries.insert(summary.id.clone(), summary);
+            }
+        }
+
+        *self.entity_hosts.write().unwrap() = combined.entity_hosts.clone();
+        Ok(combined)
+    }
+
+    pub fn client_for(&self, host_id: &str) -> Result<Arc<AppClient>> {
+        if host_id.is_empty() || host_id == "local" {
+            return Ok(self.local.clone());
+        }
+        let guard = self.remotes.lock().unwrap();
+        let slot = guard
+            .get(host_id)
+            .with_context(|| format!("Unknown Canban host '{host_id}'"))?;
+        if let Some(client) = &slot.client {
+            return Ok(client.clone());
+        }
+        bail!(
+            "Host '{}' is currently unavailable ({})",
+            slot.saved.name,
+            slot.connection.short_status()
+        )
+    }
+
+    pub fn config_for(&self, host_id: &str) -> Config {
+        if host_id.is_empty() || host_id == "local" {
+            return self.local.config();
+        }
+        let guard = self.remotes.lock().unwrap();
+        if let Some(slot) = guard.get(host_id) {
+            if let Some(client) = &slot.client {
+                return client.config();
+            }
+            if let Some(cached) = &slot.cached {
+                return cached.config.clone();
+            }
+        }
+        self.local.config()
+    }
+
+    pub fn home_for(&self, host_id: &str) -> PathBuf {
+        if host_id.is_empty() || host_id == "local" {
+            return self.local.home.clone();
+        }
+        let guard = self.remotes.lock().unwrap();
+        if let Some(slot) = guard.get(host_id)
+            && let Some(client) = &slot.client
+        {
+            return client.home.clone();
+        }
+        PathBuf::from("~/.canban")
+    }
+
+    pub fn resolve_target_host(
+        &self,
+        method: &str,
+        params: &Value,
+        active_project_id: Option<&str>,
+    ) -> String {
+        if let Some(explicit) = params["host_id"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return explicit.to_owned();
+        }
+        // Global desktop / single-authority GitHub Workspace operations stay on `local`.
+        if method.starts_with("utilities.")
+            || method.starts_with("update.")
+            || method.starts_with("workflow.default.")
+            || method == "host.discover"
+            || method.starts_with("github.auth.")
+            || matches!(
+                method,
+                "github.status" | "github.search" | "github.item" | "review.github_pr"
+            )
+        {
+            return "local".into();
+        }
+        let map = self.entity_hosts.read().unwrap();
+        for key in [
+            "card_id",
+            "project_id",
+            "terminal_id",
+            "worktree_id",
+            "inherit_terminal_id",
+        ] {
+            if let Some(id) = params[key]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                && let Some(h) = map.get(id)
+            {
+                return h.clone();
+            }
+        }
+        if let Some(pid) = active_project_id.filter(|s| !s.is_empty())
+            && let Some(h) = map.get(pid)
+        {
+            return h.clone();
+        }
+        "local".into()
+    }
+
+    pub fn sync_host_now(&self, host_id: &str) {
+        if host_id.is_empty() || host_id == "local" {
+            return;
+        }
+        let client = {
+            let guard = self.remotes.lock().unwrap();
+            guard.get(host_id).and_then(|s| s.client.clone())
+        };
+        let Some(client) = client else {
+            return;
+        };
+        if let Ok(state_val) = client.call("app.state", json!({}))
+            && let (Ok(snap), Ok(cfg)) = (
+                serde_json::from_value::<Snapshot>(state_val["snapshot"].clone()),
+                serde_json::from_value::<Config>(state_val["config"].clone()),
+            )
+        {
+            client.set_cached_config(cfg.clone());
+            let mut reg_snap = snap.clone();
+            reg_snap.register_host_entities(host_id);
+            {
+                let mut eh = self.entity_hosts.write().unwrap();
+                for (k, v) in reg_snap.entity_hosts {
+                    eh.insert(k, v);
+                }
+            }
+            let data = CachedHostData {
+                saved_at: now(),
+                snapshot: snap,
+                config: cfg,
+            };
+            Self::save_cache(&self.local_home, host_id, &data);
+            let mut guard = self.remotes.lock().unwrap();
+            if let Some(slot) = guard.get_mut(host_id) {
+                slot.cached = Some(data);
+                slot.last_state_raw = state_val;
+            }
+        }
+    }
+
+    pub fn call_routed(
+        &self,
+        method: &str,
+        mut params: Value,
+        active_project_id: Option<&str>,
+    ) -> Result<Value> {
+        if method == "notifications.read_all"
+            && params["host_id"].is_null()
+            && params["project_id"]
+                .as_str()
+                .is_none_or(|s| s.trim().is_empty())
+        {
+            let local_res = self.local.call(method, params.clone())?;
+            let remote_ids: Vec<(String, Arc<AppClient>)> = {
+                let guard = self.remotes.lock().unwrap();
+                guard
+                    .iter()
+                    .filter_map(|(id, slot)| Some((id.clone(), slot.client.clone()?)))
+                    .collect()
+            };
+            for (hid, client) in remote_ids {
+                if client.call(method, params.clone()).is_ok() {
+                    self.sync_host_now(&hid);
+                }
+            }
+            return Ok(local_res);
+        }
+        let host_id = self.resolve_target_host(method, &params, active_project_id);
+        if let Some(obj) = params.as_object_mut() {
+            obj.remove("host_id");
+        }
+        let client = self.client_for(&host_id)?;
+        let res = client.call(method, params)?;
+        if host_id != "local"
+            && !matches!(
+                method,
+                "app.ping"
+                    | "app.state"
+                    | "app.snapshot"
+                    | "diagnostics.status"
+                    | "diagnostics.logs"
+                    | "directory.list"
+                    | "review.preview"
+                    | "execution.output"
+                    | "resource.read"
+            )
+        {
+            self.sync_host_now(&host_id);
+            self.emit(AppEvent::Changed {
+                topic: "application",
+                card_id: None,
+            });
+        }
+        Ok(res)
+    }
+}

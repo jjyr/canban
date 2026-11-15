@@ -823,6 +823,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
             }
             context_bar
         }))
+        .child(crate::hosts::trigger_pill(ui))
         .child(crate::overview::trigger_pill(ui))
 }
 pub fn rename_dialog(ui: Ui) -> impl IntoElement {

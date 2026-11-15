@@ -33,11 +33,12 @@ pub fn watch(ui: Ui) {
         if terminal.is_empty() {
             return;
         }
-        if let Some(app) = crate::APP.get().cloned() {
+        if crate::APP.get().is_some() {
             ui.spawn(async move {
-                let _ =
-                    blocking(move || app.call("terminal.context", json!({"terminal_id":terminal})))
-                        .await;
+                let _ = blocking(move || {
+                    crate::routed_call("terminal.context", json!({"terminal_id":terminal}), None)
+                })
+                .await;
             });
         }
     });
@@ -995,7 +996,7 @@ pub fn close_entry_confirmed(ui: Ui, id: &str) {
     if id.is_empty() {
         return;
     }
-    let Some(app) = crate::APP.get().cloned() else {
+    if crate::APP.get().is_none() {
         // A static Gallery has no runtime; simulate the same closed outcome.
         ui.terminal_close_confirm.set(None);
         let was_selected = ui.terminal_selection.get_untracked() == id;
@@ -1012,7 +1013,7 @@ pub fn close_entry_confirmed(ui: Ui, id: &str) {
         });
         apply_tab_removal(ui, id, fallback);
         return;
-    };
+    }
     let Some(ctx) = begin_optimistic_close(ui, id) else {
         return;
     };
@@ -1020,11 +1021,12 @@ pub fn close_entry_confirmed(ui: Ui, id: &str) {
     let request_key = canban_types::id();
     ui.spawn(async move {
         let result = blocking(move || {
-            let value = app.call(
+            let value = crate::routed_call(
                 "terminal.close",
                 json!({"terminal_id": rpc_id, "request_key": request_key}),
+                None,
             )?;
-            let snapshot = app.snapshot().ok();
+            let snapshot = crate::merged_snapshot().ok();
             Ok::<_, anyhow::Error>((value, snapshot))
         })
         .await;

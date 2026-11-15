@@ -230,6 +230,7 @@ pub fn new_project_form(
     let name = signal(String::new());
     let custom_name = signal(false);
     let directory = signal(initial_directory);
+    let target_host = signal("local".to_owned());
     let machine = signal("local".to_owned());
     let expanded = signal(false);
     let workflow_expanded = signal(false);
@@ -258,30 +259,38 @@ pub fn new_project_form(
         }
     });
     effect(move || {
-        let host = machine.get();
+        let canban_host = target_host.get();
+        let host = if canban_host == "local" {
+            machine.get()
+        } else {
+            "local".to_owned()
+        };
         let path = directory.get();
         let trimmed = path.trim().to_owned();
         let generation = detect_epoch.get_untracked() + 1;
         detect_epoch.set(generation);
-        let Some(app) = crate::APP.get().cloned() else {
+        if crate::APP.get().is_none() {
             return;
-        };
+        }
         if trimmed.is_empty() || !std::path::Path::new(&trimmed).is_absolute() {
             detected_github.set(None);
             return;
         }
         ui.spawn(async move {
-            let target_host = host.clone();
+            let req_host = canban_host.clone();
+            let exec_machine = host.clone();
             let target_path = trimmed.clone();
             let result = blocking(move || {
-                app.call(
+                crate::routed_call(
                     "project.detect_github",
                     json!({
+                        "host_id": req_host,
                         "location": {
-                            "machine": target_host,
+                            "machine": exec_machine,
                             "directory": target_path,
                         }
                     }),
+                    None,
                 )
             })
             .await;
@@ -307,12 +316,14 @@ pub fn new_project_form(
                 .w_full()
                 .max_w(px(720.))
                 .gap_4()
-                .child(
-                    view()
-                        .gap_2()
-                        .child(label("Directory"))
-                        .child(machines::directory_picker(ui, machine, directory)),
-                )
+                .child(crate::hosts::new_project_host_picker(
+                    ui,
+                    target_host,
+                    directory,
+                ))
+                .child(view().gap_2().child(label("Directory")).child(
+                    machines::directory_picker_for_host(ui, target_host, machine, directory),
+                ))
                 .child(
                     view().gap_2().child(label("Name")).child(
                         bound_field(
@@ -494,31 +505,63 @@ pub fn new_project_form(
                                 let auto_link = detected_github
                                     .get_untracked()
                                     .is_none_or(|_| link_github.get_untracked());
+                                let chosen_host = target_host.get_untracked();
+                                let exec_machine = if chosen_host == "local" {
+                                    machine.get_untracked()
+                                } else {
+                                    "local".to_owned()
+                                };
                                 let mut payload = json!({
+                                    "host_id": chosen_host,
                                     "name": name.get_untracked().trim(),
                                     "location": {
-                                        "machine": machine.get_untracked(),
+                                        "machine": exec_machine,
                                         "directory": directory.get_untracked().trim(),
                                     },
                                     "github_auto_link": auto_link,
                                     "agent_overrides": agent_overrides.get_untracked(),
                                 });
                                 match workflow_choice.get_untracked() {
-                                    WorkflowChoice::Default => {}
+                                    WorkflowChoice::Default => {
+                                        if chosen_host != "local" {
+                                            let custom_sources = ui.snapshot.with_untracked(|s| {
+                                                s.workflow_templates
+                                                    .iter()
+                                                    .find(|t| t.id == DEFAULT_WORKFLOW_TEMPLATE_ID)
+                                                    .map(|t| t.sources.clone())
+                                                    .filter(|v| !v.is_empty())
+                                            });
+                                            if let Some(files) = custom_sources {
+                                                payload["workflow_sources"] = json!(files);
+                                            }
+                                        }
+                                    }
                                     WorkflowChoice::Builtin => {
                                         payload["workflow_mode"] = json!("builtin");
                                     }
                                     WorkflowChoice::Project(pid) => {
-                                        let still_exists = ui.snapshot.with_untracked(|s| {
-                                            s.projects.iter().any(|p| p.id == pid)
+                                        ui.snapshot.with_untracked(|s| {
+                                            if s.projects.iter().any(|p| p.id == pid) {
+                                                if s.host_of(&pid) == chosen_host {
+                                                    payload["workflow_mode"] = json!("project");
+                                                    payload["workflow_source_project_id"] =
+                                                        json!(pid);
+                                                } else {
+                                                    let files = project_workflow_files(s, &pid);
+                                                    if !files.is_empty() {
+                                                        payload["workflow_sources"] = json!(files);
+                                                    }
+                                                }
+                                            }
                                         });
-                                        if still_exists {
-                                            payload["workflow_mode"] = json!("project");
-                                            payload["workflow_source_project_id"] = json!(pid);
-                                        }
                                     }
                                 }
-                                dispatch(ui, "project.create", payload);
+                                dispatch_then(ui, "project.create", payload, move |created| {
+                                    if let Some(pid) = created["id"].as_str() {
+                                        ui.project.set(pid.to_owned());
+                                    }
+                                    ui.navigate("board");
+                                });
                             })
                             .disabled(move || {
                                 ui.pending.get()

@@ -136,6 +136,14 @@ pub struct Ui {
     pub worktree_modal: Signal<Option<String>>,
     pub worktree_promote: Signal<Option<String>>,
     pub worktree_remove_confirm: Signal<Option<String>>,
+    pub hosts: Signal<Vec<HostSummary>>,
+    pub settings_host: Signal<String>,
+    pub diagnostics: Signal<Value>,
+    pub diagnostics_logs: Signal<Value>,
+    pub diagnostics_log_source: Signal<String>,
+    pub diagnostics_loading: Signal<bool>,
+    pub discovery: Signal<DiscoveryCatalog>,
+    pub discovery_loading: Signal<bool>,
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -183,6 +191,31 @@ impl Ui {
             .set(ordered_enabled_profiles(&cfg.profiles, &cfg.default_agent));
         self.max_agents.set(cfg.scheduler.max_agents);
         self.idle_minutes.set(cfg.scheduler.idle_minutes);
+    }
+    pub fn active_project_host(self) -> String {
+        let pid = self.project.get_untracked();
+        if pid.is_empty() {
+            return "local".into();
+        }
+        self.snapshot
+            .with_untracked(|s| s.project_host(&pid).to_owned())
+    }
+    pub fn is_active_project_offline(self) -> bool {
+        let pid = self.project.get();
+        if pid.is_empty() {
+            return false;
+        }
+        self.snapshot
+            .with(|s| s.is_host_offline(s.project_host(&pid)))
+    }
+    pub fn effective_config_host(self) -> String {
+        let page = self.page.get_untracked();
+        if page == "settings" || page == "agent-setup" {
+            let h = self.settings_host.get_untracked();
+            if h.is_empty() { "local".into() } else { h }
+        } else {
+            self.active_project_host()
+        }
     }
     pub fn spawn<T: 'static>(self, future: impl std::future::Future<Output = T> + 'static) {
         self.owner.run(|| {
@@ -402,6 +435,14 @@ impl Ui {
             worktree_modal: signal(None),
             worktree_promote: signal(None),
             worktree_remove_confirm: signal(None),
+            hosts: signal(crate::host_summaries()),
+            settings_host: signal("local".into()),
+            diagnostics: signal(Value::Null),
+            diagnostics_logs: signal(Value::Null),
+            diagnostics_log_source: signal("server".into()),
+            diagnostics_loading: signal(false),
+            discovery: signal(DiscoveryCatalog::default()),
+            discovery_loading: signal(false),
         }
     }
     pub fn location(self) -> Location {
@@ -662,9 +703,11 @@ pub fn refresh(ui: Ui) {
     };
     let epoch = ui.snapshot_epoch.get_untracked();
     let restore_project = ui.project.get_untracked().is_empty();
+    let cfg_host = ui.effective_config_host();
     ui.spawn(async move {
         let result = blocking(move || {
-            let snapshot = app.snapshot()?;
+            let snapshot = crate::merged_snapshot()?;
+            let summaries = crate::host_summaries();
             let saved_project = if restore_project {
                 app.call("utilities.state", json!({}))?["preferences"]["last_project"]
                     .as_str()
@@ -672,7 +715,12 @@ pub fn refresh(ui: Ui) {
             } else {
                 None
             };
-            Ok::<_, anyhow::Error>((snapshot, app.config(), saved_project))
+            Ok::<_, anyhow::Error>((
+                snapshot,
+                crate::config_for_host(&cfg_host),
+                summaries,
+                saved_project,
+            ))
         })
         .await;
         if ui.snapshot_epoch.get_untracked() != epoch {
@@ -680,10 +728,13 @@ pub fn refresh(ui: Ui) {
             return;
         }
         match result {
-            Ok(Ok((snapshot, config, saved_project))) => {
+            Ok(Ok((snapshot, config, summaries, saved_project))) => {
                 if ui.notification_resync.replace(false) {
                     ui.notification_delivery
                         .with(|t| t.baseline(&canban_notifications::sound_items(&snapshot)));
+                }
+                if !summaries.is_empty() && ui.hosts.with_untracked(|old| *old != summaries) {
+                    ui.hosts.set(summaries);
                 }
                 ui.apply_config(&config);
                 if ui.project.get_untracked().is_empty()
@@ -736,10 +787,10 @@ pub fn dispatch_complete(
         ));
         return;
     }
-    let Some(app) = crate::APP.get().cloned() else {
+    if crate::APP.get().is_none() {
         after(Err("Gallery preview: no AppServer connected".into()));
         return;
-    };
+    }
     ui.pending_methods.update(|s| {
         s.insert(method);
     });
@@ -760,11 +811,31 @@ pub fn dispatch_complete(
     if params.get("request_key").is_none() {
         params["request_key"] = json!(id());
     }
+    if params.get("host_id").is_none()
+        && matches!(
+            method,
+            "config.agents.save"
+                | "config.reload"
+                | "agent.setup"
+                | "scheduler.configure"
+                | "herdr.status"
+                | "herdr.check"
+        )
+    {
+        params["host_id"] = json!(ui.effective_config_host());
+    }
     let source = ui.location();
+    let active_project = ui.project.get_untracked();
+    let cfg_host = ui.effective_config_host();
     ui.spawn(async move {
         let result = blocking(move || {
-            let value = app.call(method, params)?;
-            Ok::<_, anyhow::Error>((value, app.snapshot()?, app.config()))
+            let value = crate::routed_call(method, params, Some(active_project.as_str()))?;
+            Ok::<_, anyhow::Error>((
+                value,
+                crate::merged_snapshot()?,
+                crate::config_for_host(&cfg_host),
+                crate::host_summaries(),
+            ))
         })
         .await;
         ui.pending_methods.update(|s| {
@@ -778,8 +849,11 @@ pub fn dispatch_complete(
         ui.pending
             .set(!ui.pending_methods.with_untracked(BTreeSet::is_empty));
         match result {
-            Ok(Ok((value, snapshot, config))) => {
+            Ok(Ok((value, snapshot, config, summaries))) => {
                 ui.snapshot_epoch.update(|v| *v += 1);
+                if !summaries.is_empty() {
+                    ui.hosts.set(summaries);
+                }
                 ui.apply_config(&config);
                 ui.runtime_clock.set(now());
                 ui.snapshot.set(snapshot);
@@ -950,13 +1024,16 @@ pub fn load_text(ui: Ui, method: &'static str, params: Value) {
     let generation = ui.output_request.get_untracked() + 1;
     ui.output_request.set(generation);
     ui.output.set("Loading…".into());
-    let Some(app) = crate::APP.get().cloned() else {
+    if crate::APP.get().is_none() {
         ui.status
             .set("Gallery preview: no AppServer connected".into());
         return;
-    };
+    }
+    let active_project = ui.project.get_untracked();
     ui.spawn(async move {
-        let result = blocking(move || app.call(method, params)).await;
+        let result =
+            blocking(move || crate::routed_call(method, params, Some(active_project.as_str())))
+                .await;
         if ui.output_request.get_untracked() != generation {
             return;
         }
@@ -988,24 +1065,57 @@ pub fn load_text(ui: Ui, method: &'static str, params: Value) {
 }
 
 pub fn open_resource(ui: Ui, card_id: String, path: String) {
-    let Some(app) = crate::APP.get().cloned() else {
+    if crate::APP.get().is_none() {
         ui.status
             .set("Gallery preview: no AppServer connected".into());
         return;
-    };
+    }
+    let host_id = ui
+        .snapshot
+        .with_untracked(|s| s.card_host(&card_id).to_owned());
     ui.spawn(async move {
         match blocking(move || {
-            let value = app.call(
-                "resource.materialize",
-                json!({"card_id":card_id,"path":path}),
-            )?;
-            let path = value["path"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("Attachment path is missing"))?;
-            // NSH intentionally refuses file: URLs. Opening a validated local
-            // resource belongs to the native desktop host, off the render thread.
+            let local_open_path = if host_id == "local" {
+                let value = crate::routed_call(
+                    "resource.materialize",
+                    json!({"card_id": card_id, "path": path, "host_id": "local"}),
+                    None,
+                )?;
+                value["path"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("Attachment path is missing"))?
+                    .to_owned()
+            } else {
+                // Materialize remote attachment bytes into local scratch cache before opening on macOS.
+                let value = crate::routed_call(
+                    "resource.read",
+                    json!({"card_id": card_id, "path": path, "host_id": host_id}),
+                    None,
+                )?;
+                let scratch_dir = std::env::temp_dir()
+                    .join("canban-remote-resources")
+                    .join(&card_id);
+                std::fs::create_dir_all(&scratch_dir)?;
+                let filename = std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("attachment");
+                let dest = scratch_dir.join(filename);
+                if let Some(bytes) = value["bytes"].as_array() {
+                    let raw: Vec<u8> = bytes
+                        .iter()
+                        .filter_map(|b| b.as_u64().map(|n| n as u8))
+                        .collect();
+                    std::fs::write(&dest, raw)?;
+                } else if let Some(text) = value["body"].as_str().or(value["text"].as_str()) {
+                    std::fs::write(&dest, text)?;
+                } else {
+                    anyhow::bail!("Remote attachment content is empty");
+                }
+                dest.to_string_lossy().into_owned()
+            };
             let result = std::process::Command::new("/usr/bin/open")
-                .arg(path)
+                .arg(&local_open_path)
                 .status()?;
             anyhow::ensure!(result.success(), "macOS could not open this attachment");
             Ok::<_, anyhow::Error>(())

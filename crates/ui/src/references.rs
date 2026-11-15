@@ -165,19 +165,20 @@ pub fn source(
                 if epoch.try_get() != Some(generation) {
                     return;
                 }
-                let Some(app) = crate::APP.get().cloned() else {
+                if crate::APP.get().is_none() {
                     return;
-                };
+                }
                 ui.spawn(async move {
                     let repository = source.repository.clone();
                     let result = blocking(move || {
-                        app.call(
+                        crate::routed_call(
                             "github.reference.search",
                             json!({
                                 "project_id": target,
                                 "query": query,
                                 "source_generation": source.generation
                             }),
+                            None,
                         )
                     })
                     .await;

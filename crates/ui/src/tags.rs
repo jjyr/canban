@@ -367,12 +367,16 @@ pub fn register(ui: Ui, project_id: &str, raw_tag: &str) -> Option<String> {
                 .is_some_and(|p| p.tags.iter().any(|t| t.to_lowercase() == lower))
         });
         if !already_in_project {
-            if let Some(app) = crate::APP.get().cloned() {
+            if crate::APP.get().is_some() {
                 let send_tag = tag.clone();
                 ui.spawn(async move {
                     let result = blocking(move || {
-                        app.call("tag.create", json!({"project_id": pid, "tag": send_tag}))?;
-                        app.snapshot()
+                        crate::routed_call(
+                            "tag.create",
+                            json!({"project_id": pid, "tag": send_tag}),
+                            None,
+                        )?;
+                        crate::merged_snapshot()
                     })
                     .await;
                     if let Ok(Ok(snapshot)) = result {

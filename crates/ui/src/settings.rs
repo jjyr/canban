@@ -5,12 +5,14 @@ use canban_ui_kit::{tokens::*, *};
 use nsh_core::prelude::*;
 use serde_json::json;
 
-pub const SECTION_COUNT: usize = 9;
+pub const SECTION_COUNT: usize = 11;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SectionId {
     Theme,
     Terminal,
+    Hosts,
+    Diagnostics,
     Updates,
     Scheduling,
     Machines,
@@ -24,6 +26,8 @@ impl SectionId {
     pub const ALL: [Self; SECTION_COUNT] = [
         Self::Theme,
         Self::Terminal,
+        Self::Hosts,
+        Self::Diagnostics,
         Self::Updates,
         Self::Scheduling,
         Self::Machines,
@@ -37,13 +41,15 @@ impl SectionId {
         match self {
             Self::Theme => 0,
             Self::Terminal => 1,
-            Self::Updates => 2,
-            Self::Scheduling => 3,
-            Self::Machines => 4,
-            Self::Agents => 5,
-            Self::Herdr => 6,
-            Self::Storage => 7,
-            Self::Acknowledgements => 8,
+            Self::Hosts => 2,
+            Self::Diagnostics => 3,
+            Self::Updates => 4,
+            Self::Scheduling => 5,
+            Self::Machines => 6,
+            Self::Agents => 7,
+            Self::Herdr => 8,
+            Self::Storage => 9,
+            Self::Acknowledgements => 10,
         }
     }
 
@@ -51,6 +57,8 @@ impl SectionId {
         match self {
             Self::Theme => "theme",
             Self::Terminal => "terminal",
+            Self::Hosts => "hosts",
+            Self::Diagnostics => "diagnostics",
             Self::Updates => "updates",
             Self::Scheduling => "scheduling",
             Self::Machines => "machines",
@@ -71,6 +79,8 @@ impl SectionId {
         match self {
             Self::Theme => "Theme & support",
             Self::Terminal => "Terminal",
+            Self::Hosts => "Hosts",
+            Self::Diagnostics => "Diagnostics",
             Self::Updates => "Updates",
             Self::Scheduling => "Agent scheduling",
             Self::Machines => "Machines",
@@ -83,9 +93,9 @@ impl SectionId {
 
     pub const fn group_heading(self) -> Option<&'static str> {
         match self {
-            Self::Theme => Some("INTERFACE"),
-            Self::Scheduling => Some("EXECUTION"),
-            Self::Storage => Some("SYSTEM"),
+            Self::Theme => Some("APP"),
+            Self::Scheduling => Some("HOST SETTINGS"),
+            Self::Acknowledgements => None,
             _ => None,
         }
     }
@@ -462,13 +472,19 @@ pub fn acknowledgements_section(ui: Ui) -> impl IntoElement {
 }
 
 pub fn screen(ui: Ui) -> impl IntoElement {
-    let home = crate::APP
-        .get()
-        .map(|app| app.home.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "/preview/.canban".into());
-    let home_for_copy = home.clone();
-    let config_path = format!("{home}/config/agents.json");
-    let runtime = crate::APP.get().map(|app| app.config()).unwrap_or_default();
+    let active_host_home = move || {
+        let hid = ui.settings_host.get();
+        if let Some(reg) = crate::HOSTS.get() {
+            reg.home_for(&hid).to_string_lossy().into_owned()
+        } else if let Some(app) = crate::APP.get() {
+            app.home.to_string_lossy().into_owned()
+        } else if hid == "local" || hid.is_empty() {
+            "/preview/.canban".into()
+        } else {
+            "/home/builder/.canban".into()
+        }
+    };
+    let config_path = format!("{}/config/agents.json", untracked(active_host_home));
 
     let scroll_ref = element_ref();
     let offsets = signal([0.0_f32; SECTION_COUNT]);
@@ -558,64 +574,176 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             .into_element()
     };
 
-    let herdr_section = settings_section(
-        "Herdr",
-        "Terminal runtime connection; configure it in agents.json.",
-    )
-    .trailing(compact_action(
-        "Check connection",
-        Variant::Secondary,
-        move |_| dispatch(ui, "herdr.status", json!({})),
-    ))
-    .child(
-        view()
-            .flex_row()
-            .flex_wrap()
-            .gap_6()
-            .child(view().flex_1().min_w(px(220.)).child(settings_field(
-                "Executable",
-                "Used to connect to the configured runtime.",
-                label(runtime.hc).font_family("Menlo").text_size(px(12.)),
-            )))
-            .child(
-                view().flex_1().min_w(px(220.)).child(settings_field(
-                    "Session",
-                    "The configured Herdr runtime session.",
-                    label(runtime.hc_session)
-                        .font_family("Menlo")
-                        .text_size(px(12.)),
-                )),
-            ),
-    );
-
-    let storage_section = view()
-        .gap_4()
-        .min_w(px(0.))
-        .child(
-            settings_section(
-                "Storage",
-                "Canban keeps structured data, configuration and managed artifacts in its application home.",
-            )
-            .trailing(compact_action(
-                "Copy path",
-                Variant::Quiet,
-                move |_| copy_text(ui, home_for_copy.clone()),
-            ))
-            .child(settings_field(
-                "Application home",
-                "Configuration, documents and execution history are stored here.",
-                label(home).font_family("Menlo").text_size(px(12.)),
-            )),
+    let herdr_section = dynamic(move || {
+        let hid = ui.settings_host.get();
+        let runtime = crate::config_for_host(&hid);
+        settings_section(
+            "Herdr",
+            "Terminal runtime connection; configure it in agents.json on the selected Canban host.",
         )
-        .child(muted(
-            "Closing this window keeps AppServer and scheduling running. Herdr owns the terminal programs.",
-        ));
+        .trailing(compact_action(
+            "Check connection",
+            Variant::Secondary,
+            move |_| dispatch(ui, "herdr.status", json!({})),
+        ))
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .gap_6()
+                .child(view().flex_1().min_w(px(220.)).child(settings_field(
+                    "Executable",
+                    "Used to connect to the configured runtime.",
+                    label(runtime.hc).font_family("Menlo").text_size(px(12.)),
+                )))
+                .child(
+                    view().flex_1().min_w(px(220.)).child(settings_field(
+                        "Session",
+                        "The configured Herdr runtime session.",
+                        label(runtime.hc_session)
+                            .font_family("Menlo")
+                            .text_size(px(12.)),
+                    )),
+                ),
+        )
+    });
+
+    let storage_section = dynamic(move || {
+        let home_str = active_host_home();
+        let home_for_copy = home_str.clone();
+        view()
+            .gap_4()
+            .min_w(px(0.))
+            .child(
+                settings_section(
+                    "Storage",
+                    "Canban keeps structured data, configuration and managed artifacts in its application home.",
+                )
+                .trailing(compact_action(
+                    "Copy path",
+                    Variant::Quiet,
+                    move |_| copy_text(ui, home_for_copy.clone()),
+                ))
+                .child(settings_field(
+                    "Application home",
+                    "Configuration, documents and execution history are stored here.",
+                    label(home_str).font_family("Menlo").text_size(px(12.)),
+                )),
+            )
+            .child(muted(
+                "Closing this window keeps AppServer and scheduling running. Herdr owns the terminal programs.",
+            ))
+    });
+
+    let host_target_bar = move || {
+        dynamic(move || {
+            let hosts = crate::hosts::effective_hosts(ui);
+            let cur_host = ui.settings_host.get();
+            if hosts.len() <= 1 {
+                return view()
+                    .pt_2()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(muted("HOST SETTINGS · This Mac"))
+                    .child(compact_action(
+                        "+ Connect Remote Machine…",
+                        Variant::Quiet,
+                        move |_| crate::hosts::open_connect_modal(ui),
+                    ))
+                    .into_element();
+            }
+            panel()
+                .p_3()
+                .bg(INSET)
+                .border_1()
+                .border_color(BORDER)
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .child(
+                    view()
+                        .gap_0p5()
+                        .child(label("Target Canban Host").font_weight(FontWeight::SEMIBOLD))
+                        .child(muted(
+                            "Scheduling, Agents & Identities, Herdr, and Storage below configure this host.",
+                        )),
+                )
+                .child(
+                    segmented().children(hosts.into_iter().map(|h| {
+                        let hid = h.id.clone();
+                        let hid_sel = h.id.clone();
+                        let cur_sel = cur_host.clone();
+                        compact_segment(
+                            h.name,
+                            Some(if h.is_local {
+                                Icon::Projects
+                            } else {
+                                Icon::Server
+                            }),
+                            move || cur_sel == hid_sel,
+                            move |_| ui.settings_host.set(hid.clone()),
+                        )
+                        .into_element()
+                    })),
+                )
+                .into_element()
+        })
+    };
 
     let middle_nav = move || {
         let mut col = view().p_2p5().gap_0p5().min_w(px(0.));
         for section in SectionId::ALL {
             if let Some(heading_text) = section.group_heading() {
                 col = col.child(settings_nav_heading(heading_text));
+                if section == SectionId::Scheduling {
+                    col = col.child(dynamic(move || {
+                        let hosts = crate::hosts::effective_hosts(ui);
+                        if hosts.len() <= 1 {
+                            return view().into_element();
+                        }
+                        let cur = ui.settings_host.get();
+                        let cur_name = hosts
+                            .iter()
+                            .find(|h| h.id == cur)
+                            .map(|h| h.name.clone())
+                            .unwrap_or_else(|| "This Mac".into());
+                        view()
+                            .px_2()
+                            .pb_1p5()
+                            .child(
+                                compact_action(
+                                    format!("Target: {cur_name} ▾"),
+                                    Variant::Secondary,
+                                    move |_| {
+                                        use nsh_core::element::desktop::{MenuItem, popup_menu};
+                                        let list = hosts.clone();
+                                        let active_h = cur.clone();
+                                        ui.spawn(async move {
+                                            let items: Vec<MenuItem> = list
+                                                .into_iter()
+                                                .map(|h| {
+                                                    let hid = h.id.clone();
+                                                    let prefix =
+                                                        if h.id == active_h { "✓ " } else { "" };
+                                                    MenuItem::new(format!("{prefix}{}", h.name))
+                                                        .on_select(move || {
+                                                            ui.settings_host.set(hid.clone());
+                                                        })
+                                                })
+                                                .collect();
+                                            popup_menu(items).await;
+                                        });
+                                    },
+                                )
+                                .w_full(),
+                            )
+                            .into_element()
+                    }));
+                }
             }
             if section == SectionId::Acknowledgements {
                 col = col.child(view().my_2().mx_2().h(px(1.)).bg(BORDER));
@@ -723,9 +851,18 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                             crate::utilities::terminal_settings(ui).into_element(),
                                         ))
                                         .child(wrap_section(
+                                            SectionId::Hosts,
+                                            crate::hosts::settings_section_view(ui).into_element(),
+                                        ))
+                                        .child(wrap_section(
+                                            SectionId::Diagnostics,
+                                            crate::diagnostics::section_view(ui).into_element(),
+                                        ))
+                                        .child(wrap_section(
                                             SectionId::Updates,
                                             crate::updates::settings(ui).into_element(),
                                         ))
+                                        .child(host_target_bar())
                                         .child(wrap_section(
                                             SectionId::Scheduling,
                                             crate::components::scheduling::settings(ui)
@@ -766,7 +903,7 @@ mod tests {
     use super::*;
 
     const SAMPLE_OFFSETS: [f32; SECTION_COUNT] = [
-        32.0, 220.0, 480.0, 720.0, 1050.0, 1380.0, 1820.0, 2060.0, 2280.0,
+        32.0, 220.0, 340.0, 480.0, 600.0, 720.0, 1050.0, 1380.0, 1820.0, 2060.0, 2280.0,
     ];
 
     #[test]

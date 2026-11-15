@@ -37,7 +37,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             || ui.card_standalone.get()
             || (ui.page.get() == "card" && ui.card_terminal_open.get())
     });
-    canban_ui_kit::split::reveal_split(
+    let split_view = canban_ui_kit::split::reveal_split(
         board::screen(ui).into_element(),
         move || {
             dynamic(move || {
@@ -56,6 +56,18 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         full,
         requested,
         move || ui.dismiss_workspace_pane(),
-    )
-    .into_element()
+    );
+    view()
+        .flex_1()
+        .min_h(px(0.))
+        .min_w(px(0.))
+        .child(crate::hosts::offline_banner(ui))
+        .child(
+            view()
+                .flex_1()
+                .min_h(px(0.))
+                .min_w(px(0.))
+                .child(split_view),
+        )
+        .into_element()
 }

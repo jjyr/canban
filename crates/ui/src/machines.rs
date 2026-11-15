@@ -158,39 +158,55 @@ fn fixture_listing(machine: &str, base_dir: &str) -> PathListing {
 
 fn browse(
     ui: Ui,
+    host_id: Signal<String>,
     machine: Signal<String>,
     path: String,
     listing: Signal<PathListing>,
     epoch: Signal<u64>,
 ) {
-    let host = machine.get_untracked();
-    let Some(app) = crate::APP.get().cloned() else {
+    let target_host = host_id.get_untracked();
+    let host = if target_host == "local" {
+        machine.get_untracked()
+    } else {
+        "local".to_owned()
+    };
+    if crate::APP.get().is_none() {
         listing.set(fixture_listing(&host, &path));
         return;
-    };
+    }
     let generation = epoch.get_untracked() + 1;
     epoch.set(generation);
     listing.update(|l| {
         l.loading = true;
         l.error.clear();
     });
-    let delay_ms = if host == "local" { 0 } else { 120 };
+    let delay_ms = if target_host == "local" && host == "local" {
+        0
+    } else {
+        120
+    };
     ui.spawn(async move {
         if delay_ms > 0 {
             timer(std::time::Duration::from_millis(delay_ms)).await;
             if epoch.try_get() != Some(generation)
-                || machine.try_get().as_deref() != Some(host.as_str())
+                || host_id.try_get().as_deref() != Some(target_host.as_str())
             {
                 return;
             }
         }
         let target = host.clone();
+        let req_host = target_host.clone();
         let req_path = path.clone();
-        let value =
-            blocking(move || app.call("directory.list", json!({"machine":target,"path":req_path})))
-                .await;
+        let value = blocking(move || {
+            crate::routed_call(
+                "directory.list",
+                json!({"host_id": req_host, "machine": target, "path": req_path}),
+                None,
+            )
+        })
+        .await;
         if epoch.try_get() != Some(generation)
-            || machine.try_get().as_deref() != Some(host.as_str())
+            || host_id.try_get().as_deref() != Some(target_host.as_str())
         {
             return;
         }
@@ -242,6 +258,15 @@ pub fn directory_picker(
     machine: Signal<String>,
     directory: Signal<String>,
 ) -> impl IntoElement {
+    directory_picker_for_host(ui, signal("local".to_owned()), machine, directory)
+}
+
+pub fn directory_picker_for_host(
+    ui: Ui,
+    host_id: Signal<String>,
+    machine: Signal<String>,
+    directory: Signal<String>,
+) -> impl IntoElement {
     let default_home = if crate::APP.get().is_some() {
         std::env::var("HOME").unwrap_or_default()
     } else {
@@ -252,12 +277,12 @@ pub fn directory_picker(
         ..Default::default()
     });
     let epoch = signal(0u64);
-    let prev_machine = stored(machine.get_untracked());
+    let prev_key = stored((host_id.get_untracked(), machine.get_untracked()));
     effect(move || {
-        let current = machine.get();
-        if prev_machine.replace(current.clone()) != current {
+        let current_key = (host_id.get(), machine.get());
+        if prev_key.replace(current_key.clone()) != current_key {
             epoch.update(|n| *n += 1);
-            let next_home = if current == "local" {
+            let next_home = if current_key.0 == "local" && current_key.1 == "local" {
                 if crate::APP.get().is_some() {
                     std::env::var("HOME").unwrap_or_default()
                 } else {
@@ -276,7 +301,7 @@ pub fn directory_picker(
         directory,
         move || listing.get(),
         move |base_dir| {
-            browse(ui, machine, base_dir, listing, epoch);
+            browse(ui, host_id, machine, base_dir, listing, epoch);
         },
         |_| {},
     )

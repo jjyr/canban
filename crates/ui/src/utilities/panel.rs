@@ -189,6 +189,12 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                 if popup == "notifications" {
                     return crate::overview::popover(ui).into_element();
                 }
+                if popup == "hosts" {
+                    return crate::hosts::popover(ui).into_element();
+                }
+                if popup == "connect-host" {
+                    return crate::hosts::connect_modal(ui).into_element();
+                }
                 if popup != "theme" {
                     return view().into_element();
                 }

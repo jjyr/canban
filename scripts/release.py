@@ -12,6 +12,17 @@ def pack_tar_gz(source, output):
                 raise RuntimeError(f'App bundle contains unsafe link or special file: {entry}')
             archive.add(entry,arcname=str(pathlib.Path('Canban.app')/entry.relative_to(source)),recursive=False)
 
+def pack_cli_tar_gz(binary, output):
+    binary=pathlib.Path(binary)
+    if binary.is_symlink() or not binary.is_file():
+        raise RuntimeError(f'CLI binary is missing or unsafe: {binary}')
+    with tarfile.open(output,'w:gz') as archive:
+        info=archive.gettarinfo(str(binary),arcname='canban')
+        info.mode=0o755
+        info.uid=0;info.gid=0;info.uname='';info.gname=''
+        with binary.open('rb') as stream:
+            archive.addfile(info,stream)
+
 def resolve_gh_token():
     token=os.environ.get('GH_TOKEN') or os.environ.get('GITHUB_TOKEN')
     if token:return token.strip()
@@ -171,7 +182,7 @@ def dispatch(repo,ref='main',workflow='release.yml',watch=False,poll_interval=2.
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command',choices=['dispatch','reserve','package','publish'])
+    parser.add_argument('command',choices=['dispatch','reserve','package','package-cli','publish'])
     parser.add_argument('--directory',type=pathlib.Path,default=pathlib.Path('dist'))
     parser.add_argument('--ref',default='main',help='Branch or tag ref to release (dispatch only, default: main)')
     parser.add_argument('--repo',default=None,help='GitHub owner/repo override (default: GITHUB_REPOSITORY or jjyr/canban)')
@@ -201,6 +212,13 @@ def main():
         pack_tar_gz('.local/Canban.app',gz_asset)
         manifest={**build,'rollback_floor':8,'asset':name,'size':asset.stat().st_size,'sha256':hashlib.sha256(asset.read_bytes()).hexdigest(),'tar_gz':gz_name,'tar_gz_size':gz_asset.stat().st_size,'tar_gz_sha256':hashlib.sha256(gz_asset.read_bytes()).hexdigest()}
         (args.directory/('manifest-'+build['platform']+'.json')).write_text(json.dumps(manifest,indent=2)+'\n');return
+    if args.command=='package-cli':
+        cli=pathlib.Path('target/release/canban')
+        build=json.loads(subprocess.check_output([str(cli),'build-info'],text=True));assert build['version']==version and build['commit']==commit
+        gz_name='canban-'+build['platform']+'.tar.gz';gz_asset=args.directory/gz_name
+        pack_cli_tar_gz(cli,gz_asset)
+        manifest={**build,'asset':gz_name,'size':gz_asset.stat().st_size,'sha256':hashlib.sha256(gz_asset.read_bytes()).hexdigest()}
+        (args.directory/('manifest-cli-'+build['platform']+'.json')).write_text(json.dumps(manifest,indent=2)+'\n');return
     release=find_release(repo,version)
     if release is None:raise RuntimeError('Reserved release is missing: '+version)
     if not release['draft']:

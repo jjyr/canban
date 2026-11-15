@@ -32,6 +32,9 @@ pub struct AppServer {
     github_cli: Arc<canban_github::cli::Service>,
     github_queries: Mutex<std::collections::BTreeMap<String, Value>>,
     identity: String,
+    started_at: u64,
+    bound_tcp: Mutex<Vec<String>>,
+    active_tcp_streams: Mutex<Vec<std::net::TcpStream>>,
     store: Mutex<Store>,
     config: RwLock<Config>,
     cli: PathBuf,
@@ -66,14 +69,20 @@ impl Drop for AppServer {
 }
 pub struct Running {
     server: Arc<AppServer>,
+    accept_handles: Vec<std::thread::JoinHandle<()>>,
 }
 impl Drop for Running {
     fn drop(&mut self) {
         self.server.stop.store(true, Ordering::SeqCst);
+        self.server.close_active_tcp_streams();
         self.server.wake_runtime();
         self.server.wake_delivery();
         self.server.wake_scripts();
         self.server.context_signal.notify_all();
+        for handle in self.accept_handles.drain(..) {
+            let _ = handle.join();
+        }
+        let _ = self.server._service_lock.unlock();
     }
 }
 pub(crate) struct MergingCard<'a> {
@@ -620,6 +629,9 @@ impl AppServer {
             )),
             github: Arc::new(canban_github::auth::Service::new(home.clone())),
             identity,
+            started_at: now(),
+            bound_tcp: Mutex::new(Vec::new()),
+            active_tcp_streams: Mutex::new(Vec::new()),
             home,
             store: Mutex::new(store),
             config: RwLock::new(config),
@@ -675,8 +687,8 @@ impl AppServer {
     }
     fn validate_config(c: &Config) -> Result<()> {
         ensure!(
-            c.relay_endpoint.is_none(),
-            "relay_endpoint is a client transport option; do not configure it on AppServer"
+            c.relay_endpoint.is_none() && c.relay_token.is_none(),
+            "relay_endpoint / relay_token are client transport options; do not configure them on AppServer"
         );
         ensure!(
             c.scheduler.max_agents > 0,
@@ -737,6 +749,17 @@ impl AppServer {
     }
     pub fn endpoint(&self) -> PathBuf {
         self.home.join("app.sock")
+    }
+    pub fn server_id(&self) -> &str {
+        &self.identity
+    }
+    pub fn bound_tcp_addrs(&self) -> Vec<String> {
+        self.bound_tcp.lock().unwrap().clone()
+    }
+    pub(crate) fn close_active_tcp_streams(&self) {
+        for s in self.active_tcp_streams.lock().unwrap().drain(..) {
+            let _ = s.shutdown(std::net::Shutdown::Both);
+        }
     }
     pub fn subscribe(&self) -> mpsc::Receiver<AppEvent> {
         let (tx, rx) = mpsc::channel();
@@ -880,9 +903,12 @@ impl AppServer {
 
 mod client;
 mod commands;
+mod diagnostics;
 mod drafts;
 mod github;
-pub use client::{AppClient, BackendOlder};
+pub mod hosts;
+pub mod network;
+pub use client::{AppClient, BackendOlder, ClientEndpoint};
 mod agents;
 mod authoring;
 mod configuration;
@@ -917,6 +943,19 @@ pub fn default_home() -> Result<PathBuf> {
     Ok(PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".canban"))
 }
 pub fn rpc(endpoint: &Path, method: &str, params: Value) -> Result<Value> {
+    let raw = endpoint.to_string_lossy();
+    if let Some((addr, token)) = canban_types::parse_pairing_uri(&raw) {
+        return client::rpc_tcp(&addr, Some(&token), method, params);
+    }
+    if let Some(addr) = raw.strip_prefix("tcp://") {
+        let token = std::env::var("CANBAN_TOKEN").ok();
+        return client::rpc_tcp(
+            &canban_types::normalize_daemon_addr(addr),
+            token.as_deref(),
+            method,
+            params,
+        );
+    }
     let mut stream = UnixStream::connect(endpoint)
         .with_context(|| format!("Canban is not running at {}", endpoint.display()))?;
     stream.set_read_timeout(Some(Duration::from_secs(90)))?;

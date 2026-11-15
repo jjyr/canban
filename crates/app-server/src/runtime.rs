@@ -5,6 +5,13 @@ pub(super) fn uuid_session_id() -> String {
 
 impl AppServer {
     pub fn start(self: &Arc<Self>) -> Result<Running> {
+        self.start_with_listen(None)
+    }
+
+    pub fn start_with_listen(
+        self: &Arc<Self>,
+        override_listen: Option<ServerListenConfig>,
+    ) -> Result<Running> {
         // The lock is held by the accept loop, including socket removal.
         let lock = self._service_lock.try_clone()?;
         let socket = self.endpoint();
@@ -105,8 +112,9 @@ impl AppServer {
             }
             Ok(())
         })?;
+        let mut accept_handles = Vec::new();
         let weak = Arc::downgrade(self);
-        std::thread::spawn(move || {
+        accept_handles.push(std::thread::spawn(move || {
             use std::os::fd::AsRawFd;
             unsafe extern "C" {
                 fn poll(fds: *mut PollFd, nfds: u32, timeout: i32) -> i32;
@@ -146,7 +154,64 @@ impl AppServer {
             }
             let _ = std::fs::remove_file(socket);
             drop(lock);
-        });
+        }));
+        let listen_cfg = override_listen.unwrap_or_else(|| network::load_listen_config(&self.home));
+        if listen_cfg.tcp_enabled() {
+            let _ = network::ensure_server_token(&self.home)?;
+            let bind_addrs = network::resolve_bind_addrs(&listen_cfg)?;
+            let mut actual_addrs = Vec::new();
+            for sa in bind_addrs {
+                let tcp_listener = std::net::TcpListener::bind(sa)
+                    .with_context(|| format!("Could not bind Canban TCP listener on {sa}"))?;
+                let local_addr = tcp_listener.local_addr()?.to_string();
+                actual_addrs.push(local_addr);
+                tcp_listener.set_nonblocking(true)?;
+                let weak_tcp = Arc::downgrade(self);
+                accept_handles.push(std::thread::spawn(move || {
+                    use std::os::fd::AsRawFd;
+                    unsafe extern "C" {
+                        fn poll(fds: *mut PollFd, nfds: u32, timeout: i32) -> i32;
+                    }
+                    #[repr(C)]
+                    struct PollFd {
+                        fd: i32,
+                        events: i16,
+                        revents: i16,
+                    }
+                    const POLLIN: i16 = 0x0001;
+                    let raw_fd = tcp_listener.as_raw_fd();
+                    while let Some(server) = weak_tcp.upgrade() {
+                        if server.stop.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        match tcp_listener.accept() {
+                            Ok((stream, _)) => {
+                                if let Ok(cloned) = stream.try_clone() {
+                                    server.active_tcp_streams.lock().unwrap().push(cloned);
+                                }
+                                let weak_conn = Arc::downgrade(&server);
+                                std::thread::spawn(move || {
+                                    let _ = AppServer::serve_tcp_weak(weak_conn, stream);
+                                });
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                drop(server);
+                                let mut pfd = PollFd {
+                                    fd: raw_fd,
+                                    events: POLLIN,
+                                    revents: 0,
+                                };
+                                unsafe {
+                                    let _ = poll(&mut pfd, 1, 50);
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }));
+            }
+            *self.bound_tcp.lock().unwrap() = actual_addrs;
+        }
         self.migrate_exit_failures()?;
         self.start_runtime();
         self.start_update_checks();
@@ -209,6 +274,7 @@ impl AppServer {
         });
         Ok(Running {
             server: self.clone(),
+            accept_handles,
         })
     }
     pub(super) fn serve(&self, mut stream: UnixStream) -> Result<()> {
@@ -248,6 +314,86 @@ impl AppServer {
                 return Ok(());
             }
             // Keep-alive idle timeout allows AppClient to reuse sockets across rapid RPCs.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+        }
+    }
+    pub(super) fn serve_tcp_weak(
+        weak: std::sync::Weak<Self>,
+        mut stream: std::net::TcpStream,
+    ) -> Result<()> {
+        stream.set_nonblocking(false)?;
+        let _ = stream.set_nodelay(true);
+        stream.set_read_timeout(Some(Duration::from_secs(20)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(90)))?;
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut first = true;
+        let mut authed = false;
+        loop {
+            let mut line = String::new();
+            let max_frame = if authed { 48 * 1024 * 1024 } else { 64 * 1024 };
+            let n = (&mut reader).take(max_frame).read_line(&mut line)?;
+            if n == 0 {
+                return Ok(());
+            }
+            let Some(this) = weak.upgrade() else {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                return Ok(());
+            };
+            if this.stopped() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                return Ok(());
+            }
+            let input: Value = serde_json::from_str(&line)?;
+            let id = input["id"].clone();
+            let method = strp(&input, "method")?;
+            if method == "host.probe" && first {
+                let reply = json!({"jsonrpc":"2.0","id":id,"result":this.host_probe_payload()});
+                writeln!(stream, "{reply}")?;
+                stream.flush()?;
+                first = false;
+                continue;
+            }
+            if !authed {
+                let provided = input["auth"].as_str().unwrap_or("");
+                let expected = network::read_server_token(&this.home).unwrap_or_default();
+                if !network::verify_token(&expected, provided) {
+                    let err_reply = json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32001,
+                            "message": "Authentication required: invalid or missing server token"
+                        }
+                    });
+                    let _ = writeln!(stream, "{err_reply}");
+                    let _ = stream.flush();
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    return Ok(());
+                }
+                authed = true;
+            }
+            if method == "herdr.connect" {
+                ensure!(
+                    first,
+                    "herdr.connect must be the first frame on a relay socket"
+                );
+                drop(reader);
+                return this.relay_tcp(stream, &input["params"]);
+            }
+            first = false;
+            let reply = match this.call(method, input["params"].clone()) {
+                Ok(result) => json!({"jsonrpc":"2.0","id":id,"result":result}),
+                Err(e) => {
+                    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":format!("{e:#}")}})
+                }
+            };
+            writeln!(stream, "{reply}")?;
+            stream.flush()?;
+            if this.stopped() {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                return Ok(());
+            }
+            drop(this);
             let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
         }
     }

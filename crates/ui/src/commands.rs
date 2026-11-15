@@ -45,6 +45,46 @@ pub const CATALOG: &[Command] = &[
         keywords: "overview alerts unread inbox running status slots",
     },
     Command {
+        id: "toggle-hosts",
+        title: "Toggle Connected Hosts",
+        key: "",
+        display: "Hosts",
+        context: "Global",
+        keywords: "hosts machines tailscale ssh remote server canband",
+    },
+    Command {
+        id: "connect-machine",
+        title: "Connect a Machine…",
+        key: "",
+        display: "Hosts",
+        context: "Global",
+        keywords: "connect pair machine host tailscale ssh linux remote canband",
+    },
+    Command {
+        id: "go-diagnostics",
+        title: "Open Diagnostics",
+        key: "",
+        display: "Settings",
+        context: "Preferences",
+        keywords: "diagnostics health logs server.log herdr sqlite latency tailscale",
+    },
+    Command {
+        id: "go-hosts",
+        title: "Manage Connected Hosts",
+        key: "",
+        display: "Settings",
+        context: "Preferences",
+        keywords: "hosts remote servers tailscale ssh remove rename",
+    },
+    Command {
+        id: "reconnect-hosts",
+        title: "Reconnect Remote Hosts",
+        key: "",
+        display: "Hosts",
+        context: "Global",
+        keywords: "reconnect retry offline sync hosts remote",
+    },
+    Command {
         id: "new-card",
         title: "New Card",
         key: "mod+n",
@@ -762,6 +802,14 @@ pub fn execute(ui: Ui, id: &str) {
         "go-drafts" => ui.navigate("drafts"),
         "go-archive" => ui.navigate("archive"),
         "go-settings" => ui.navigate("settings"),
+        "go-hosts" => ui.open_settings_section("hosts"),
+        "go-diagnostics" => {
+            let target = ui.active_project_host();
+            crate::hosts::open_host_settings(ui, target, "diagnostics");
+        }
+        "toggle-hosts" => crate::hosts::toggle_popover(ui),
+        "connect-machine" => crate::hosts::open_connect_modal(ui),
+        "reconnect-hosts" => crate::hosts::reconnect_host(ui, None),
         "go-acknowledgements" => ui.open_settings_section("acknowledgements"),
         "go-machines" => ui.navigate("machines"),
         "go-project-location" => {

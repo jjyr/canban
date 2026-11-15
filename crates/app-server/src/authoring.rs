@@ -342,6 +342,8 @@ pub(super) enum NewProjectWorkflow<'a> {
     Builtin,
     /// Explicit single-file `development.yaml` string (`project.create` `workflow_yaml`).
     ExplicitYaml(&'a str),
+    /// Explicit multi-file workflow collection (`project.create` `workflow_sources`).
+    ExplicitSources(Vec<WorkflowTemplateFile>),
     /// Clone an existing Project's active `WorkflowSource` collection.
     FromProject(String),
 }
@@ -393,6 +395,7 @@ pub(super) fn effective_initial_remote(
             filename: "development.yaml".into(),
             source: (*raw).to_owned(),
         }]),
+        NewProjectWorkflow::ExplicitSources(files) => Some(files.clone()),
         NewProjectWorkflow::FromProject(pid) => Some(project_template_files(db, pid)?),
     };
     if let Some(files) = files
@@ -493,6 +496,12 @@ pub(super) fn initialize_new(
     let inputs: Vec<Value> = match mode {
         NewProjectWorkflow::ExplicitYaml(yaml) => {
             vec![json!({"filename":"development.yaml","source":yaml})]
+        }
+        NewProjectWorkflow::ExplicitSources(raw_files) => {
+            source::instantiate_collection(&project.id, &raw_files, &profiles, explicit_workspace)?
+                .into_iter()
+                .map(|f| json!({"filename": f.filename, "source": f.source}))
+                .collect()
         }
         NewProjectWorkflow::FromProject(source_pid) => {
             let raw_files = project_template_files(db, &source_pid)?;

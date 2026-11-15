@@ -9,6 +9,10 @@ impl AppServer {
                     | "app.shutdown"
                     | "app.state"
                     | "app.snapshot"
+                    | "host.probe"
+                    | "host.discover"
+                    | "diagnostics.status"
+                    | "diagnostics.logs"
                     | "update.state"
                     | "utilities.state"
                     | "machine.list"
@@ -63,6 +67,9 @@ impl AppServer {
         if method.starts_with("worktree.") {
             return self.worktree_call(method, p);
         }
+        if method.starts_with("diagnostics.") {
+            return self.diagnostics_call(method, p);
+        }
         if method.starts_with("git.") {
             return self.git_call(method, p);
         }
@@ -81,13 +88,16 @@ impl AppServer {
                     );
                 }
                 self.stop.store(true, Ordering::SeqCst);
+                self.close_active_tcp_streams();
                 self.wake_runtime();
                 self.context_signal.notify_all();
                 Ok(json!({"stopping":true}))
             }
             "app.state" => Ok(
-                json!({"snapshot":self.snapshot()?,"config":self.config(),"home":self.home,"github_revision":self.github_revision.load(Ordering::SeqCst)}),
+                json!({"snapshot":self.snapshot()?,"config":self.config(),"home":self.home,"server_id":self.identity,"hostname":network::hostname_string(),"github_revision":self.github_revision.load(Ordering::SeqCst)}),
             ),
+            "host.probe" => Ok(self.host_probe_payload()),
+            "host.discover" => Ok(serde_json::to_value(network::discover_all())?),
             "machine.list" => self.machines(),
             "machine.default" => {
                 let machine = self.resolve_machine(strp(&p, "machine")?, false)?;
@@ -131,7 +141,7 @@ impl AppServer {
                 )
             }
             "app.ping" => Ok(
-                json!({"version":env!("CARGO_PKG_VERSION"),"api_version":API_VERSION,"pid":std::process::id(),"home":self.home,"build":canban_updater::Build::current(),"updates_disabled":self.updates_disabled}),
+                json!({"version":env!("CARGO_PKG_VERSION"),"api_version":API_VERSION,"pid":std::process::id(),"home":self.home,"server_id":self.identity,"hostname":network::hostname_string(),"build":canban_updater::Build::current(),"updates_disabled":self.updates_disabled}),
             ),
             "app.snapshot" => Ok(serde_json::to_value(self.snapshot()?)?),
             "project.list" => Ok(serde_json::to_value(
@@ -298,6 +308,17 @@ impl AppServer {
                     ),
                     _ => None,
                 };
+                let workflow_sources: Option<Vec<WorkflowTemplateFile>> =
+                    match p.get("workflow_sources") {
+                        Some(v) if !v.is_null() => {
+                            let files: Vec<WorkflowTemplateFile> =
+                                serde_json::from_value(v.clone())
+                                    .context("workflow_sources must be a list of {filename, source}")?;
+                            ensure!(!files.is_empty(), "workflow_sources cannot be empty");
+                            Some(files)
+                        }
+                        _ => None,
+                    };
                 let workflow_mode_raw = match p.get("workflow_mode") {
                     Some(v) if !v.is_null() => Some(
                         v.as_str()
@@ -319,8 +340,16 @@ impl AppServer {
                 .filter(|s| !s.is_empty());
                 if workflow_yaml.is_some() {
                     ensure!(
+                        workflow_sources.is_none()
+                            && workflow_mode_raw.is_none()
+                            && source_project_raw.is_none(),
+                        "workflow_yaml cannot be combined with workflow_sources, workflow_mode, or workflow_source_project_id"
+                    );
+                }
+                if workflow_sources.is_some() {
+                    ensure!(
                         workflow_mode_raw.is_none() && source_project_raw.is_none(),
-                        "workflow_yaml cannot be combined with workflow_mode or workflow_source_project_id"
+                        "workflow_sources cannot be combined with workflow_mode or workflow_source_project_id"
                     );
                 }
                 if let Some(yaml) = &workflow_yaml {
@@ -366,6 +395,8 @@ impl AppServer {
                         };
                         let probe_mode = if let Some(yaml) = workflow_yaml.as_deref() {
                             authoring::NewProjectWorkflow::ExplicitYaml(yaml)
+                        } else if let Some(files) = &workflow_sources {
+                            authoring::NewProjectWorkflow::ExplicitSources(files.clone())
                         } else if let Some(pid) = &resolved_pid {
                             authoring::NewProjectWorkflow::FromProject(pid.clone())
                         } else if workflow_mode_raw.as_deref() == Some("builtin") {
@@ -423,6 +454,8 @@ impl AppServer {
                     db.save(&project)?;
                     let init_mode = if let Some(yaml) = workflow_yaml.as_deref() {
                         authoring::NewProjectWorkflow::ExplicitYaml(yaml)
+                    } else if let Some(files) = workflow_sources.clone() {
+                        authoring::NewProjectWorkflow::ExplicitSources(files)
                     } else if let Some(pid) = &resolved_source_pid {
                         authoring::NewProjectWorkflow::FromProject(pid.clone())
                     } else if workflow_mode_raw.as_deref() == Some("builtin") {

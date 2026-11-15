@@ -400,10 +400,18 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                                             && !actionable_cards.contains(&c.id)
                                                     })
                                                     .count();
-                                            let seg_label = if proj_alerts > 0 {
-                                                format!("{} · {proj_alerts}", p.name)
+                                            let hid = s.project_host(&pid);
+                                            let base_name = if hid != "local"
+                                                && s.has_remote_hosts()
+                                            {
+                                                format!("{} ({})", p.name, s.host_display_name(hid))
                                             } else {
                                                 p.name.clone()
+                                            };
+                                            let seg_label = if proj_alerts > 0 {
+                                                format!("{base_name} · {proj_alerts}")
+                                            } else {
+                                                base_name
                                             };
                                             filter_seg = filter_seg.child(compact_segment(
                                                 seg_label,

@@ -1,5 +1,16 @@
 # Product discussion and decisions
 
+## 2026-11-15 — Multi-host `canband` connections, Tailscale-first transport, per-host Settings and Diagnostics
+
+Status: **User-confirmed design and active implementation**.
+
+To let Boards, Workflows and Agents continue running 24/7 on an always-on machine (such as a home Linux server) while the user's laptop sleeps or works offline—without interrupting daily local/remote context switching—Canban adopts a **simultaneous multi-host client model** ([full contract](../multi-host.md)):
+
+- **Multiple `canband` connections in one desktop client:** `Canban.app` connects concurrently to `This Mac` (`local`) and one or more remote `canband` daemons, mirroring Herdr's multi-Core model. Each `canband` owns its SQLite database, Workflow Engine, Scheduler and local `herdr-core`. When the laptop is offline, local Projects remain fully live while remote Projects render their last cached snapshot read-only (`Offline · Cached`); reconnecting immediately aggregates remote `Needs you` and `Updates` into the global Activity & Notifications (`Command+I`) popover.
+- **Tailscale-first direct data plane + SSH discovery/bootstrap/fallback:** Users pick machines from discovered Tailscale peers (`tailscale status --json`), SSH config hosts (`~/.ssh/config`), or manual pairing URIs. Whenever Tailscale/private TCP is reachable, RPCs and `herdr.connect` live Terminal streams use authenticated direct TCP (`server.token`) rather than SSH port-forwarding; SSH provides one-click Linux/macOS daemon bootstrap (`systemd --user` + linger / `launchd`), automatic token pairing, and Unix-socket tunnel fallback for non-Tailscale SSH hosts.
+- **Scoped Git / GitHub:** `Git` (`Diff & Review`) follows the active Project/Card's owning `canband`; the `GitHub` rail workspace remains single-authority on `local` without multi-host list duplication, with optional credential sync when linking a remote Project's repository.
+- **Connection UX, split Settings & Diagnostics:** Add a top-chrome `Hosts` status pill/popover and a `Connect a Machine` wizard; split `Settings` into client-wide `APP` sections versus per-host `HOST SETTINGS` (with a target host switcher and profile sync); and add a dedicated `Settings → Diagnostics` page for end-to-end transport, daemon/API version, `herdr-core`, toolchain/profile and live log inspection.
+
 ## 2026-11-11 — Built-in workflow policy layer, per-step Prompt overrides, custom columns and visual Pipeline/Stepper UI
 
 Status: **User-confirmed design and implementation direction**.

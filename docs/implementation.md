@@ -17,7 +17,7 @@ now manages a separate checkout/branch instance; it does not upgrade installed
 
 [Agent Overview and lifecycle](agent-overview-and-lifecycle.md) documents the implemented status-aware execution budget, configurable resumable idle exit and global attention/Agent workspace.
 
-Status: native macOS MVP with multi-machine execution; current contracts reconciled 2026-11-14. The desktop updater and manual `Release` workflow have isolated/native acceptance recorded in [updates](updates.md); older documentation-only reconciliation added no acceptance. This is the current implementation reference; earlier design documents contain broader proposals and dated pre-implementation statements.
+Status: native macOS MVP with simultaneous multi-host (`canband`) connections and multi-machine execution; current contracts reconciled 2026-11-15 (desktop API version 52). See [Multi-host `canband` architecture](multi-host.md) for simultaneous local + remote Tailscale/SSH `canband` operation, offline snapshot caching, Linux CLI release archives, split App vs Host Settings, and the Diagnostics inspector. The desktop updater and manual `Release` workflow have isolated/native acceptance recorded in [updates](updates.md); older documentation-only reconciliation added no acceptance. This is the current implementation reference; earlier design documents contain broader proposals and dated pre-implementation statements.
 
 [Desktop utilities](desktop-utilities.md) covers the shared bottom bar, subscription Usage, Caffeine, persisted appearance, command catalog and cross-Project Card creation.
 

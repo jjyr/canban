@@ -26,14 +26,14 @@ fn load(
     let Some(card) = ui.current_card() else {
         return;
     };
-    let Some(app) = crate::APP.get().cloned() else {
+    if crate::APP.get().is_none() {
         return;
-    };
+    }
     let token = generation.get_untracked() + 1;
     generation.set(token);
     spawn(async move {
         let result = blocking(move || {
-            app.call("card.workspace", json!({"card_id":card.id}))
+            crate::routed_call("card.workspace", json!({"card_id":card.id}), None)
                 .and_then(|v| Ok(serde_json::from_value::<WorkspaceInfo>(v)?))
         })
         .await;

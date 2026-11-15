@@ -290,6 +290,8 @@ enum BootOutcome {
 fn finalize_workspace(app: Arc<canban_app_server::AppClient>) -> Result<()> {
     let _ = app.snapshot();
     crate::drafts::persistence::start(app.clone())?;
+    let registry = canban_app_server::hosts::HostRegistry::new(app.clone());
+    let _ = crate::HOSTS.set(registry);
     let _ = crate::APP.set(app);
     clear_fatal_exit();
     Ok(())

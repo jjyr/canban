@@ -2042,6 +2042,44 @@ pub fn Gallery() -> impl IntoElement {
                     scene.set("workspace".into());
                     ui.open_settings_section("agents");
                 }))
+                .child(action("Multi-host · Online", Variant::Quiet, move |_| {
+                    let (snap, hosts) = fixtures::multi_host_workspace(false);
+                    ui.discovery.set(fixtures::discovery_catalog());
+                    ui.hosts.set(hosts);
+                    ui.snapshot.set(snap);
+                    ui.select_project("remote-linux-core".into());
+                    scene.set("workspace".into());
+                    ui.navigate("board");
+                    canban_ui::hosts::toggle_popover(ui);
+                }))
+                .child(action("Multi-host · Offline Cache", Variant::Quiet, move |_| {
+                    let (snap, hosts) = fixtures::multi_host_workspace(true);
+                    ui.discovery.set(fixtures::discovery_catalog());
+                    ui.hosts.set(hosts);
+                    ui.snapshot.set(snap);
+                    ui.select_project("remote-linux-core".into());
+                    scene.set("workspace".into());
+                    canban_ui::hosts::close_overlays(ui);
+                    ui.navigate("board");
+                }))
+                .child(action("Connect Machine", Variant::Quiet, move |_| {
+                    let (snap, hosts) = fixtures::multi_host_workspace(false);
+                    ui.discovery.set(fixtures::discovery_catalog());
+                    ui.hosts.set(hosts);
+                    ui.snapshot.set(snap);
+                    scene.set("workspace".into());
+                    ui.navigate("board");
+                    canban_ui::hosts::open_connect_modal(ui);
+                }))
+                .child(action("Diagnostics", Variant::Quiet, move |_| {
+                    let (snap, hosts) = fixtures::multi_host_workspace(false);
+                    ui.discovery.set(fixtures::discovery_catalog());
+                    ui.hosts.set(hosts);
+                    ui.snapshot.set(snap);
+                    scene.set("workspace".into());
+                    canban_ui::hosts::open_host_settings(ui, "home-linux".into(), "diagnostics");
+                    canban_ui::diagnostics::refresh_diagnostics(ui);
+                }))
                 .child(action("Acknowledgements", Variant::Quiet, move |_| {
                     scene.set("workspace".into());
                     ui.open_settings_section("acknowledgements");

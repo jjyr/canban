@@ -393,12 +393,14 @@ fn render_narrative(
     let edit_error = signal(String::new());
     let delete_error = signal(String::new());
     if let Some(path) = event.data["path"].as_str().map(str::to_owned)
-        && let Some(app) = crate::APP.get().cloned()
+        && crate::APP.get().is_some()
     {
         let card = card.clone();
         ui.spawn(async move {
-            match blocking(move || app.call("resource.read", json!({"card_id":card,"path":path})))
-                .await
+            match blocking(move || {
+                crate::routed_call("resource.read", json!({"card_id":card,"path":path}), None)
+            })
+            .await
             {
                 Ok(Ok(value)) => {
                     if let Some(text) = value["body"].as_str().or(value["text"].as_str()) {

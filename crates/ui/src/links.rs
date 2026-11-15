@@ -287,14 +287,14 @@ fn load(ui: Ui, url: String, title: String, value: Signal<Preview>, loading: Sig
     if loading.get_untracked() {
         return;
     }
-    let Some(app) = crate::APP.get().cloned() else {
+    if crate::APP.get().is_none() {
         return;
-    };
+    }
     loading.set(true);
     let source_generation = source.generation.clone();
     let project_id = project.clone();
     ui.spawn(async move {
-        let result = blocking(move ||app.call("github.reference.search",json!({"project_id":project,"source_generation":source.generation,"query":number.to_string()}))).await;
+        let result = blocking(move ||crate::routed_call("github.reference.search",json!({"project_id":project,"source_generation":source.generation,"query":number.to_string()}),None)).await;
         loading.try_set(false);
         if value.try_get().is_none()
             || crate::github::active_login_untracked(ui).as_deref() != Some(login.as_str())

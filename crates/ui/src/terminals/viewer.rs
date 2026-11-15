@@ -117,7 +117,7 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                 })
                 .into_element();
         }
-        let Some(app) = crate::APP.get() else {
+        if crate::APP.get().is_none() {
             return native("canban/terminal")
                 .prop("theme", crate::utilities::terminal_theme)
                 .prop("font", move || crate::utilities::terminal_font(ui))
@@ -150,8 +150,7 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                 .flex_1()
                 .min_h(px(0.))
                 .into_element();
-        };
-        let app_for_binding = app.clone();
+        }
         native("canban/terminal")
             .prop("theme", crate::utilities::terminal_theme)
             .prop("font", move || crate::utilities::terminal_font(ui))
@@ -173,11 +172,16 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
             })
             .prop("binding", move || {
                 target.with(|t| match t {
-                    Some((_, core_id, terminal, _, _)) => json!({
-                        "config": app_for_binding.config(),
-                        "terminal": terminal,
-                        "core_id": core_id,
-                    }),
+                    Some((entry_id, core_id, terminal, _, _)) => {
+                        let host_id = ui
+                            .snapshot
+                            .with_untracked(|s| s.terminal_host(entry_id).to_owned());
+                        json!({
+                            "config": crate::config_for_host(&host_id),
+                            "terminal": terminal,
+                            "core_id": core_id,
+                        })
+                    }
                     None => Value::Null,
                 })
             })

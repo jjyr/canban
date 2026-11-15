@@ -943,6 +943,34 @@ impl AppServer {
                         .unwrap_or_else(|| "developer".into());
                 }
             }
+            "replace_profiles" => {
+                let incoming: Vec<Profile> = serde_json::from_value(p["profiles"].clone())
+                    .context("Invalid profiles list")?;
+                ensure!(!incoming.is_empty(), "At least one profile is required");
+                for prof in &incoming {
+                    validate_profile_id(&prof.id)?;
+                }
+                raw.profiles = incoming;
+                if let Some(def) = p["default_agent"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    && raw.profiles.iter().any(|x| x.id == def && x.enabled)
+                {
+                    raw.default_agent = def.to_owned();
+                } else if !raw
+                    .profiles
+                    .iter()
+                    .any(|x| x.id == raw.default_agent && x.enabled)
+                    && let Some(fallback) = raw
+                        .profiles
+                        .iter()
+                        .find(|x| x.id == "developer" && x.enabled)
+                        .or_else(|| raw.profiles.iter().find(|x| x.enabled))
+                {
+                    raw.default_agent = fallback.id.clone();
+                }
+            }
             _ => bail!("Unsupported config.agents.save op: {op}"),
         }
         let resolved = self.save_raw_config(raw)?;

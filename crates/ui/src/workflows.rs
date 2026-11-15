@@ -242,7 +242,30 @@ pub fn set_default_workflow(ui: Ui) {
         ui.notify("Saved as default workflow for new Projects");
         return;
     }
-    dispatch(ui, "workflow.default.set", json!({"project_id": project}));
+    let is_remote_project = ui
+        .snapshot
+        .with_untracked(|s| s.host_of(&project) != "local");
+    if is_remote_project {
+        let sources = ui
+            .snapshot
+            .with_untracked(|s| project_template_files_from_snapshot(s, &project));
+        let source_name = ui.snapshot.with_untracked(|s| {
+            s.projects
+                .iter()
+                .find(|p| p.id == project)
+                .map(|p| p.name.clone())
+        });
+        dispatch(
+            ui,
+            "workflow.default.set",
+            json!({
+                "sources": sources,
+                "source_project_name": source_name,
+            }),
+        );
+    } else {
+        dispatch(ui, "workflow.default.set", json!({"project_id": project}));
+    }
 }
 
 pub fn reset_default_workflow(ui: Ui) {
@@ -267,9 +290,9 @@ fn project_source_stamp(ui: Ui, project: &str) -> SourceStamp {
     })
 }
 fn load(ui: Ui, discard: bool) {
-    let Some(app) = crate::APP.get().cloned() else {
+    if crate::APP.get().is_none() {
         return;
-    };
+    }
     let project = ui.project.get_untracked();
     let state = ui.workflows;
     let stamp = project_source_stamp(ui, &project);
@@ -288,7 +311,10 @@ fn load(ui: Ui, discard: bool) {
     }
     ui.spawn(async move {
         let id = project.clone();
-        let result = blocking(move || app.call("workflow.sources", json!({"project_id":id}))).await;
+        let result = blocking(move || {
+            crate::routed_call("workflow.sources", json!({"project_id":id}), None)
+        })
+        .await;
         if state.epoch.get_untracked() != ticket {
             return;
         }
@@ -987,14 +1013,15 @@ fn show_history(ui: Ui) {
             .set("Save this Workflow before viewing its history.".into());
         return;
     };
-    let Some(app) = crate::APP.get().cloned() else {
+    if crate::APP.get().is_none() {
         return;
-    };
+    }
     ui.spawn(async move {
         let result = blocking(move || {
-            app.call(
+            crate::routed_call(
                 "workflow.list",
                 json!({"project_id":project,"workflow_id":workflow}),
+                None,
             )
         })
         .await;

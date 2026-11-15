@@ -8,10 +8,12 @@ pub mod card;
 mod card_actions;
 pub mod commands;
 pub mod components;
+pub mod diagnostics;
 pub mod drafts;
 pub mod editor;
 pub mod frame;
 pub mod github;
+pub mod hosts;
 pub mod links;
 pub mod machines;
 pub mod navigation;
@@ -39,6 +41,46 @@ pub mod workspace;
 use nsh_core::prelude::*;
 use presenter::*;
 static APP: std::sync::OnceLock<Arc<canban_app_server::AppClient>> = std::sync::OnceLock::new();
+pub(crate) static HOSTS: std::sync::OnceLock<Arc<canban_app_server::hosts::HostRegistry>> =
+    std::sync::OnceLock::new();
+
+pub(crate) fn routed_call(
+    method: &str,
+    params: serde_json::Value,
+    active_project_id: Option<&str>,
+) -> Result<serde_json::Value> {
+    if let Some(hosts) = HOSTS.get() {
+        return hosts.call_routed(method, params, active_project_id);
+    }
+    let app = APP
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("Gallery preview: no AppServer connected"))?;
+    app.call(method, params)
+}
+
+pub(crate) fn merged_snapshot() -> Result<canban_types::Snapshot> {
+    if let Some(hosts) = HOSTS.get() {
+        return hosts.merged_snapshot();
+    }
+    let app = APP
+        .get()
+        .ok_or_else(|| anyhow::anyhow!("Gallery preview: no AppServer connected"))?;
+    app.snapshot()
+}
+
+pub(crate) fn host_summaries() -> Vec<canban_types::HostSummary> {
+    if let Some(hosts) = HOSTS.get() {
+        return hosts.summaries();
+    }
+    Vec::new()
+}
+
+pub(crate) fn config_for_host(host_id: &str) -> canban_types::Config {
+    if let Some(hosts) = HOSTS.get() {
+        return hosts.config_for(host_id);
+    }
+    APP.get().map(|app| app.config()).unwrap_or_default()
+}
 #[native_module("canban/native")]
 fn native(_: &mut Registry) {}
 #[component]
@@ -101,7 +143,28 @@ pub(crate) fn workspace_root() -> impl IntoElement {
             ui.runtime_clock.set(canban_types::now());
         }
     });
-    let events = stored(crate::APP.get().unwrap().subscribe());
+    let last_cfg_host = signal(String::from("local"));
+    effect(move || {
+        let page = ui.page.get();
+        let _ = ui.project.get();
+        let _ = ui.settings_host.get();
+        if crate::APP.get().is_some() {
+            let target = ui.effective_config_host();
+            ui.apply_config(&crate::config_for_host(&target));
+            if last_cfg_host.get_untracked() != target {
+                last_cfg_host.set(target);
+                ui.agent_catalog.set(serde_json::Value::Null);
+                if page == "settings" || page == "agent-setup" {
+                    agents_setup::refresh_catalog(ui, "local");
+                }
+            }
+        }
+    });
+    let events = stored(if let Some(hosts) = crate::HOSTS.get() {
+        hosts.subscribe()
+    } else {
+        crate::APP.get().unwrap().subscribe()
+    });
     let dirty = signal(false);
     set_interval(std::time::Duration::from_millis(250), move || {
         let changed = events.with(|rx| rx.try_iter().collect::<Vec<_>>());

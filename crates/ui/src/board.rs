@@ -408,10 +408,19 @@ fn project_picker(ui: Ui) -> impl IntoElement {
             })
             .child(
                 label(move || {
-                    let _ = ui.project.get();
-                    ui.current_project()
+                    let pid = ui.project.get();
+                    let base = ui
+                        .current_project()
                         .map(|p| p.name)
-                        .unwrap_or_else(|| "Choose Project".into())
+                        .unwrap_or_else(|| "Choose Project".into());
+                    ui.snapshot.with(|s| {
+                        let hid = s.project_host(&pid);
+                        if hid != "local" && s.has_remote_hosts() {
+                            format!("{base} · {}", s.host_display_name(hid))
+                        } else {
+                            base
+                        }
+                    })
                 })
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_size(px(13.5))

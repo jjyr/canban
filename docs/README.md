@@ -43,7 +43,8 @@ editor, modal, window-title and terminal checks.
 | Document | Purpose |
 | --- | --- |
 | [Vision and scope](product/vision.md) | Current user requirements and MVP boundary |
-| [Multi-machine execution](multi-machine.md) | Independent AppServer, mutable Project work location, remote Agent CLI and native Terminal routing |
+| [Multi-host daemons and Diagnostics](multi-host.md) | Simultaneous local + remote `canband` connections, Tailscale/SSH discovery, offline snapshot cache, per-host Settings and Diagnostics |
+| [Multi-machine execution](multi-machine.md) | Single-server Project work locations, remote Herdr Core routing and Terminal byte relay |
 | [Multi-machine acceptance](multi-machine-acceptance.md) | Isolated local/remote verification, limits and reproduction |
 | [Product discussion and decisions](product/product-log.md) | Rationale, superseded proposals, and open questions |
 | [Unified workflow engine, Studio and implementation](product/workflow-engine.md) | Canonical Workflow contract: 7 design principles, Project/Board ownership, default Queue Merge flow, graph-derived Studio options, YAML schema, CLI/RPC operations and workspaces |

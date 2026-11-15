@@ -8,9 +8,11 @@ concurrency:
   group: release
   cancel-in-progress: false
 jobs:
-  release:
+  macos:
     runs-on: macos-15
     timeout-minutes: 30
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
     env:
       CANBAN_RELEASE_COMMIT: ${{ github.sha }}
       CANBAN_UPDATES_DISABLED: '1'
@@ -68,10 +70,61 @@ jobs:
         run: /usr/bin/python3 scripts/test-release-upgrade.py --dist dist
       - uses: actions/upload-artifact@v7
         with:
-          name: canban-${{ steps.identity.outputs.version }}
+          name: canban-macos-${{ steps.identity.outputs.version }}
+          path: dist/
+
+  linux:
+    needs: macos
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    env:
+      CANBAN_RELEASE_COMMIT: ${{ github.sha }}
+      CANBAN_RELEASE_VERSION: ${{ needs.macos.outputs.version }}
+      CANBAN_UPDATES_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: jdx/mise-action@v5
+      - uses: Swatinem/rust-cache@v2
+      - name: Build headless Linux daemon CLI
+        run: cargo build --release --locked -p canban-cli
+      - name: Package verified Linux daemon artifact
+        run: python3 scripts/release.py package-cli
+      - uses: actions/upload-artifact@v7
+        with:
+          name: canban-linux-${{ matrix.arch }}-${{ needs.macos.outputs.version }}
+          path: dist/
+
+  publish:
+    needs: [macos, linux]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      CANBAN_RELEASE_COMMIT: ${{ github.sha }}
+      CANBAN_RELEASE_VERSION: ${{ needs.macos.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: canban-*-${{ needs.macos.outputs.version }}
+          path: dist/
+          merge-multiple: true
+      - uses: actions/upload-artifact@v7
+        with:
+          name: canban-${{ needs.macos.outputs.version }}
           path: dist/
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          CANBAN_RELEASE_VERSION: ${{ steps.identity.outputs.version }}
         run: python3 scripts/release.py publish

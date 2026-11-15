@@ -197,6 +197,9 @@ class Releases(unittest.TestCase):
         self.assertLess(content.index('mise run build-release'),content.index('scripts/release.py package'))
         self.assertLess(content.index('scripts/release.py package'),content.index('scripts/test-release-upgrade.py --dist dist'))
         self.assertLess(content.index('scripts/test-release-upgrade.py --dist dist'),content.index('scripts/release.py publish'))
+        self.assertIn('cargo build --release --locked -p canban-cli',content)
+        self.assertIn('scripts/release.py package-cli',content)
+        self.assertIn('ubuntu-24.04-arm',content)
     def test_upgrade_gate_baseline_selection_and_redirect_auth_stripping(self):
         gate_spec=importlib.util.spec_from_file_location('test_release_upgrade',pathlib.Path(__file__).with_name('test-release-upgrade.py'))
         gate=importlib.util.module_from_spec(gate_spec);gate_spec.loader.exec_module(gate)
@@ -272,4 +275,28 @@ class Releases(unittest.TestCase):
             self.assertIn('Canban.app',names)
             self.assertIn('Canban.app/Contents/MacOS/canban',names)
             self.assertIn('Canban.app/Contents/Info.plist',names)
+    def test_package_cli_creates_linux_tar_gz_and_manifest(self):
+        with tempfile.TemporaryDirectory(prefix='cb-release-cli-pkg-') as directory:
+            root=pathlib.Path(directory)
+            (root/'target/release').mkdir(parents=True)
+            build={'version':'20261115-1','commit':'d'*40,'schema':14,'api':52,'platform':'linux-x86_64'}
+            cli=root/'target/release/canban'
+            cli.write_text('#!/usr/bin/env python3\nimport json\nprint(json.dumps('+repr(build)+'))\n');cli.chmod(0o755)
+            dist=root/'dist'
+            cwd=os.getcwd()
+            try:
+                os.chdir(root)
+                with patch.dict(os.environ,{'CANBAN_RELEASE_COMMIT':'d'*40,'CANBAN_RELEASE_VERSION':'20261115-1'}),patch.object(sys,'argv',['release.py','package-cli','--directory',str(dist)]):
+                    release.main()
+            finally:
+                os.chdir(cwd)
+            gz=dist/'canban-linux-x86_64.tar.gz'
+            manifest_path=dist/'manifest-cli-linux-x86_64.json'
+            self.assertTrue(gz.is_file());self.assertTrue(manifest_path.is_file())
+            manifest=json.loads(manifest_path.read_text())
+            self.assertEqual(manifest['asset'],'canban-linux-x86_64.tar.gz')
+            self.assertEqual(manifest['sha256'],hashlib.sha256(gz.read_bytes()).hexdigest())
+            with tarfile.open(gz,'r:gz') as archive:
+                member=archive.getmember('canban')
+                self.assertEqual(member.mode & 0o777,0o755)
 if __name__=='__main__':unittest.main()

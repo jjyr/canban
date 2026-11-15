@@ -239,6 +239,7 @@ impl AppServer {
                 .into_iter()
                 .filter(|v| v.card_id == card_id)
                 .collect(),
+            ..Default::default()
         };
         // Repack after restore first, so previously compressed bytes are not omitted.
         if let Some(old) = &card.archive {

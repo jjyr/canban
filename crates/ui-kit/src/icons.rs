@@ -73,6 +73,8 @@ pub enum Icon {
     GitMerge,
     TriangleAlert,
     MessageSquare,
+    Server,
+    Diagnostics,
 }
 impl Icon {
     fn source(self) -> &'static str {
@@ -146,6 +148,8 @@ impl Icon {
             Self::GitMerge => include_str!("../assets/lucide/git-merge.svg"),
             Self::TriangleAlert => include_str!("../assets/lucide/triangle-alert.svg"),
             Self::MessageSquare => include_str!("../assets/lucide/message-square.svg"),
+            Self::Server => include_str!("../assets/lucide/server.svg"),
+            Self::Diagnostics => include_str!("../assets/lucide/activity.svg"),
         }
     }
 

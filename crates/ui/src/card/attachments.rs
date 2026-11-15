@@ -48,9 +48,10 @@ fn upload(ui: Ui, draft: Signal<Draft>, card: String, item: Upload) {
     ui.spawn(async move {
         let saved = item.clone();
         let target = card.clone();
-        let app = crate::APP.get().cloned();
+        let has_app = crate::APP.get().is_some();
+        let active_proj = ui.project.get_untracked();
         let result = blocking(move || -> anyhow::Result<String> {
-            let app = app.ok_or_else(|| anyhow::anyhow!("Gallery: no AppServer connected"))?;
+            anyhow::ensure!(has_app, "Gallery: no AppServer connected");
             let file = if let Some(file) = saved.file {
                 anyhow::ensure!(file.data.len() <= 32 * 1024 * 1024, "Attachment exceeds 32 MiB");
                 file
@@ -69,7 +70,7 @@ fn upload(ui: Ui, draft: Signal<Draft>, card: String, item: Upload) {
                     });
                 std::sync::Arc::new(PastedFile::new(saved.name.clone(), mime.to_owned(), data))
             };
-            let value = app.call("attachment.add", json!({"card_id":target,"name":file.name,"media_type":file.mime,"bytes":file.data,"request_key":saved.key}))?;
+            let value = crate::routed_call("attachment.add", json!({"card_id":target,"name":file.name,"media_type":file.mime,"bytes":file.data,"request_key":saved.key}), Some(active_proj.as_str()))?;
             Ok(format!("[{}](attachment:{})", escape_name(value["name"].as_str().unwrap_or("Attachment")), value["id"].as_str().ok_or_else(|| anyhow::anyhow!("Missing attachment id"))?))
         }).await;
         update(ui, draft, &card, |d| {

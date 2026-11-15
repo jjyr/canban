@@ -29,6 +29,18 @@ pub fn settings(ui: Ui) -> impl IntoElement {
     let value = signal(ui.max_agents.get_untracked().to_string());
     let error = signal(String::new());
     let idle = signal(ui.idle_minutes.get_untracked().to_string());
+    let tracked_host = signal(ui.settings_host.get_untracked());
+    effect(move || {
+        let cur_host = ui.settings_host.get();
+        let max_v = ui.max_agents.get();
+        let idle_v = ui.idle_minutes.get();
+        if tracked_host.get_untracked() != cur_host {
+            tracked_host.set(cur_host);
+            value.set(max_v.to_string());
+            idle.set(idle_v.to_string());
+            error.set(String::new());
+        }
+    });
     settings_section("Agent scheduling", "Shared execution limits and idle timeout across all Projects.")
         .child(summary(ui))
         .child(settings_field("Maximum executing Agents", "Lowering the limit leaves running Agents alone. Later workflow stages run first; human review gates stay paused.",

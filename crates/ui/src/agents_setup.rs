@@ -133,14 +133,22 @@ pub fn refresh_catalog(ui: Ui, machine: &str) {
     if ui.agent_catalog_loading.get_untracked() {
         return;
     }
-    let Some(app) = crate::APP.get().cloned() else {
+    if crate::APP.get().is_none() {
         return;
-    };
+    }
     let target = machine.to_owned();
+    let host_id = ui.effective_config_host();
     ui.agent_catalog_loading.set(true);
     ui.spawn(async move {
         let m = target.clone();
-        let result = blocking(move || app.call("agent.catalog", json!({"machine": m}))).await;
+        let result = blocking(move || {
+            crate::routed_call(
+                "agent.catalog",
+                json!({"machine": m, "host_id": host_id}),
+                None,
+            )
+        })
+        .await;
         let _ = ui.agent_catalog_loading.try_set(false);
         match result {
             Ok(Ok(val)) => {
@@ -1555,8 +1563,36 @@ pub fn global_settings_section(ui: Ui, config_path: String) -> impl IntoElement 
     .trailing(
         view()
             .flex_row()
+            .flex_wrap()
             .items_center()
             .gap_2()
+            .child(when(
+                move || ui.settings_host.get() != "local",
+                move || {
+                    compact_action(
+                        "Copy profiles from This Mac",
+                        Variant::Secondary,
+                        move |_| {
+                            let target = ui.settings_host.get_untracked();
+                            let local_cfg = crate::config_for_host("local");
+                            dispatch_then(
+                                ui,
+                                "config.agents.save",
+                                json!({
+                                    "host_id": target,
+                                    "op": "replace_profiles",
+                                    "profiles": local_cfg.profiles,
+                                    "default_agent": local_cfg.default_agent,
+                                }),
+                                move |_| {
+                                    refresh_catalog(ui, "local");
+                                    ui.notify("Copied Agent & @identity profiles from This Mac");
+                                },
+                            );
+                        },
+                    )
+                },
+            ))
             .child(compact_action(
                 "Run Setup…",
                 Variant::Secondary,

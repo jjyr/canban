@@ -2221,3 +2221,122 @@ pub fn agent_catalog() -> serde_json::Value {
         ],
     })
 }
+
+pub fn discovery_catalog() -> canban_types::DiscoveryCatalog {
+    use canban_types::*;
+    DiscoveryCatalog {
+        tailscale_available: true,
+        tailscale_self_ip: Some("100.84.0.1".into()),
+        tailscale_self_host: Some("macbook-pro".into()),
+        tailscale_error: None,
+        tailscale_peers: vec![
+            TailscalePeer {
+                hostname: "home-linux".into(),
+                dns_name: "home-linux.tailnet.ts.net".into(),
+                ips: vec!["100.84.0.2".into()],
+                os: "linux".into(),
+                online: true,
+            },
+            TailscalePeer {
+                hostname: "gpu-workstation".into(),
+                dns_name: "gpu-workstation.tailnet.ts.net".into(),
+                ips: vec!["100.84.0.9".into()],
+                os: "linux".into(),
+                online: false,
+            },
+        ],
+        ssh_hosts: vec![
+            SshHostEntry {
+                alias: "home-linux".into(),
+                hostname: "100.84.0.2".into(),
+                user: Some("builder".into()),
+                port: None,
+            },
+            SshHostEntry {
+                alias: "prod-bastion".into(),
+                hostname: "203.0.113.42".into(),
+                user: Some("ubuntu".into()),
+                port: Some(2222),
+            },
+        ],
+    }
+}
+
+pub fn multi_host_workspace(
+    offline_remote: bool,
+) -> (canban_types::Snapshot, Vec<canban_types::HostSummary>) {
+    use canban_types::*;
+    let mut local = workspace();
+    local.register_host_entities("local");
+
+    let mut remote = Snapshot::default();
+    let mut remote_proj = local.projects[0].clone();
+    remote_proj.id = "remote-linux-core".into();
+    remote_proj.name = "Core Service".into();
+    remote_proj.directory = "/home/builder/workspaces/core-service".into();
+    remote_proj.location = None;
+    remote.projects.push(remote_proj);
+
+    let mut remote_card = local.cards[0].clone();
+    remote_card.id = "remote-card-1".into();
+    remote_card.project_id = "remote-linux-core".into();
+    remote_card.number = 12;
+    remote_card.title = "Autonomous overnight workflow execution on Home Linux".into();
+    remote.cards.push(remote_card);
+
+    let local_summary = HostSummary {
+        id: "local".into(),
+        name: "This Mac".into(),
+        is_local: true,
+        transport_label: "Local socket".into(),
+        endpoint_label: "~/.canban/app.sock".into(),
+        ssh_target: None,
+        server_id: Some("srv-local-mac".into()),
+        connection: HostConnectionState::Connected {
+            rtt_ms: 0,
+            api_version: canban_updater::DESKTOP_API,
+            version: "20261115-1".into(),
+            platform: "macos-aarch64".into(),
+        },
+        active_agents: 1,
+        max_agents: 8,
+        project_count: local.projects.len(),
+        reconnect_count: 0,
+        last_synced_at: Some(now()),
+    };
+
+    let remote_summary = HostSummary {
+        id: "home-linux".into(),
+        name: "Home Linux".into(),
+        is_local: false,
+        transport_label: "Tailscale / TCP".into(),
+        endpoint_label: "100.84.0.2:7680".into(),
+        ssh_target: Some("builder@100.84.0.2".into()),
+        server_id: Some("srv-home-linux".into()),
+        connection: if offline_remote {
+            HostConnectionState::Offline {
+                error: "Tailscale tunnel asleep while laptop was closed".into(),
+                cached_at: Some(now().saturating_sub(300_000)),
+            }
+        } else {
+            HostConnectionState::Connected {
+                rtt_ms: 9,
+                api_version: canban_updater::DESKTOP_API,
+                version: "20261115-1".into(),
+                platform: "linux-x86_64".into(),
+            }
+        },
+        active_agents: 2,
+        max_agents: 12,
+        project_count: 1,
+        reconnect_count: if offline_remote { 2 } else { 0 },
+        last_synced_at: Some(now().saturating_sub(if offline_remote { 300_000 } else { 800 })),
+    };
+
+    local
+        .host_summaries
+        .insert("local".into(), local_summary.clone());
+    local.merge_remote_snapshot(remote, remote_summary.clone());
+
+    (local, vec![local_summary, remote_summary])
+}

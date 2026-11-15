@@ -386,12 +386,12 @@ pub fn load_refs(ui: Ui) {
     let Some(project) = ui.current_project() else {
         return;
     };
-    let Some(app) = crate::APP.get().cloned() else {
+    if crate::APP.get().is_none() {
         if st.log_commits.with_untracked(Vec::is_empty) {
             git_ops::load_branch_log(ui, String::new(), false);
         }
         return;
-    };
+    }
     let ticket = st.refs_ticket.get_untracked() + 1;
     st.refs_ticket.set(ticket);
     st.refs_loading.set(true);
@@ -402,7 +402,7 @@ pub fn load_refs(ui: Ui) {
         if !cwd.is_empty() {
             req["cwd"] = json!(cwd);
         }
-        let res = blocking(move || app.call("git.refs", req)).await;
+        let res = blocking(move || crate::routed_call("git.refs", req, None)).await;
         if st.refs_ticket.try_get() != Some(ticket) {
             return;
         }
@@ -427,10 +427,10 @@ pub fn load_refs_and_compare(ui: Ui, choose_smart_default: bool) {
     let Some(project) = ui.current_project() else {
         return;
     };
-    let Some(app) = crate::APP.get().cloned() else {
+    if crate::APP.get().is_none() {
         git_ops::load_branch_log(ui, String::new(), false);
         return;
-    };
+    }
     let ticket = st.refs_ticket.get_untracked() + 1;
     st.refs_ticket.set(ticket);
     st.refs_loading.set(true);
@@ -441,7 +441,7 @@ pub fn load_refs_and_compare(ui: Ui, choose_smart_default: bool) {
         if !cwd.is_empty() {
             req["cwd"] = json!(cwd);
         }
-        let res = blocking(move || app.call("git.refs", req)).await;
+        let res = blocking(move || crate::routed_call("git.refs", req, None)).await;
         if st.refs_ticket.try_get() != Some(ticket) {
             return;
         }
@@ -542,7 +542,7 @@ pub fn refresh_active_diff(ui: Ui, force_remote_refresh: bool) {
         let three_dot = st.three_dot.get_untracked();
         ui.spawn(async move {
             let res = blocking(move || {
-                app.call(
+                crate::routed_call(
                     "git.compare",
                     json!({
                         "card_id": cid,
@@ -550,6 +550,7 @@ pub fn refresh_active_diff(ui: Ui, force_remote_refresh: bool) {
                         "target_branch": target_branch,
                         "three_dot": three_dot,
                     }),
+                    None,
                 )
             })
             .await;
@@ -601,7 +602,7 @@ pub fn refresh_active_diff(ui: Ui, force_remote_refresh: bool) {
         if !cwd.is_empty() {
             req["cwd"] = json!(cwd);
         }
-        let res = blocking(move || app.call("git.compare", req)).await;
+        let res = blocking(move || crate::routed_call("git.compare", req, None)).await;
         if st.compare_ticket.try_get() != Some(ticket) {
             return;
         }
@@ -789,8 +790,16 @@ mod tests {
         let compare_opts = sidebar::build_git_ref_options(&refs, false, "WORKDIR");
         assert!(compare_opts.iter().any(|o| o.id == "WORKDIR" && o.selected));
         assert!(compare_opts.iter().any(|o| o.id == "STAGED"));
-        assert!(compare_opts.iter().any(|o| o.id == "feat/git-client" && o.detail == "↑2"));
-        assert!(compare_opts.iter().any(|o| o.id == "origin/main" && o.group.as_deref() == Some("Remote Branches")));
+        assert!(
+            compare_opts
+                .iter()
+                .any(|o| o.id == "feat/git-client" && o.detail == "↑2")
+        );
+        assert!(
+            compare_opts
+                .iter()
+                .any(|o| o.id == "origin/main" && o.group.as_deref() == Some("Remote Branches"))
+        );
         assert!(compare_opts.iter().any(|o| o.id == "v0.3.0"));
         assert!(compare_opts.iter().any(|o| o.id == "e4f5a6b7890"));
 

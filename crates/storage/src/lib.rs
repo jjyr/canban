@@ -471,6 +471,7 @@ impl Db<'_> {
             conversations: self.list()?,
             questions: self.list()?,
             note_events: self.list()?,
+            ..Default::default()
         })
     }
 }

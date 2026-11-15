@@ -88,7 +88,7 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
         0
     };
 
-    let Some(app) = crate::APP.get().cloned() else {
+    if crate::APP.get().is_none() {
         // Gallery fallback: filter static fixture commits in memory.
         let q = query.trim().to_lowercase();
         let commits: Vec<Value> = st.refs_data.with_untracked(|v| {
@@ -120,7 +120,7 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
         st.log_commits.set(commits);
         st.log_has_more.set(false);
         return;
-    };
+    }
 
     let Some(params) = git_params(
         ui,
@@ -137,9 +137,12 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
     let ticket = st.log_ticket.get_untracked() + 1;
     st.log_ticket.set(ticket);
     st.log_loading.set(true);
+    let active_proj = ui.project.get_untracked();
 
     ui.spawn(async move {
-        let res = blocking(move || app.call("git.log", params)).await;
+        let res =
+            blocking(move || crate::routed_call("git.log", params, Some(active_proj.as_str())))
+                .await;
         if st.log_ticket.try_get() != Some(ticket) {
             return;
         }

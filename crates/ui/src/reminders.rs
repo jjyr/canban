@@ -168,7 +168,7 @@ impl Reader {
                     return;
                 };
                 self.writing.set(true);
-                let Some(app) = crate::APP.get().cloned() else {
+                if crate::APP.get().is_none() {
                     ui.snapshot.update(|s| {
                         let project = s
                             .cards
@@ -188,12 +188,13 @@ impl Reader {
                     });
                     self.writing.set(false);
                     return;
-                };
+                }
                 ui.spawn(async move {
                     let result = blocking(move || {
-                        app.call(
+                        crate::routed_call(
                             "notifications.read",
                             serde_json::json!({"card_id":card,"sequence":sequence}),
+                            None,
                         )
                     })
                     .await;

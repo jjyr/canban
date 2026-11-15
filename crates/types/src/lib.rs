@@ -222,6 +222,9 @@ pub struct Config {
     /// Client-only relay to AppServer; never used by its own Core adapter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_endpoint: Option<String>,
+    /// Client-only Bearer Token for authenticated TCP AppServer relays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_token: Option<String>,
     #[serde(default)]
     pub scheduler: SchedulerSettings,
     pub hc: String,
@@ -245,6 +248,7 @@ impl Default for Config {
         Self {
             default_machine: "local".into(),
             relay_endpoint: None,
+            relay_token: None,
             scheduler: SchedulerSettings::default(),
             hc: "hc".into(),
             hc_session: "default".into(),
@@ -997,6 +1001,12 @@ pub struct Artifact {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub struct Snapshot {
+    /// Client-side host ownership (`entity_id -> host_id`) populated when merging remote hosts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub entity_hosts: BTreeMap<String, String>,
+    /// Client-side host connection summaries (`host_id -> HostSummary`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub host_summaries: BTreeMap<String, HostSummary>,
     #[serde(default)]
     pub workflow_runs: Vec<WorkflowRun>,
     #[serde(default)]
@@ -1665,6 +1675,8 @@ pub struct GitHubPr {
     pub workspace: WorkspaceBinding,
 }
 
+mod hosts;
+pub use hosts::*;
 mod workflow;
 pub use workflow::*;
 

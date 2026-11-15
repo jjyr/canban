@@ -25,21 +25,42 @@ pub fn candidates(s: &Snapshot) -> Vec<Candidate> {
 pub fn candidates_with_tags(s: &Snapshot, local_tags: &BTreeSet<String>) -> Vec<Candidate> {
     let known_tags = crate::tags::known_map(s, local_tags, None);
     let project = |id: &str| {
-        s.projects
+        let base = s
+            .projects
             .iter()
             .find(|p| p.id == id)
             .map(|p| p.name.clone())
-            .unwrap_or_else(|| "Unknown Project".into())
+            .unwrap_or_else(|| "Unknown Project".into());
+        let hid = s.project_host(id);
+        if hid != "local" && s.has_remote_hosts() {
+            format!("{base} · {}", s.host_display_name(hid))
+        } else {
+            base
+        }
     };
     let mut rows = Vec::new();
     for p in &s.projects {
+        let hid = s.project_host(&p.id);
+        let host_suffix = if hid != "local" && s.has_remote_hosts() {
+            if s.is_host_offline(hid) {
+                format!(" · {} (offline)", s.host_display_name(hid))
+            } else {
+                format!(" · {}", s.host_display_name(hid))
+            }
+        } else {
+            String::new()
+        };
         rows.push(Candidate {
             id: format!("project:{}", p.id),
             title: p.name.clone(),
-            detail: format!("Project · {}", p.directory),
+            detail: format!("Project{host_suffix} · {}", p.directory),
             kind: "Project",
             target: Target::Project(p.id.clone()),
-            fields: vec![p.name.clone(), p.directory.clone()],
+            fields: vec![
+                p.name.clone(),
+                p.directory.clone(),
+                s.host_display_name(hid).to_owned(),
+            ],
             tags: Vec::new(),
         });
     }
