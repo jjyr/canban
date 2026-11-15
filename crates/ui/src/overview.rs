@@ -121,27 +121,31 @@ fn standalone_terminal_is_running(s: &canban_types::Snapshot, e: &crate::termina
 }
 
 fn attention_summary(ui: Ui) -> (usize, usize, usize, usize) {
-    let s = ui.snapshot.get();
-    let counts = ui.reminder_counts.get();
-    let all_rows = overview(&s);
-    let actionable_cards: std::collections::BTreeSet<_> = all_rows
+    let all_rows = ui.overview_rows.get();
+    let actionable_cards: std::collections::BTreeSet<&str> = all_rows
         .iter()
         .filter(|r| r.actionable())
-        .map(|r| r.card.id.clone())
+        .map(|r| r.card.id.as_str())
         .collect();
-    let actionable = all_rows.iter().filter(|r| r.actionable()).count()
-        + crate::terminals::entries(&s)
-            .into_iter()
-            .filter(standalone_terminal_needs_you)
-            .count();
-    let unread_cards = s
-        .cards
-        .iter()
-        .filter(|c| {
-            counts.get(&c.id).is_some_and(|n| n.unread > 0) && !actionable_cards.contains(&c.id)
-        })
-        .count();
-    let active_slots = canban_scheduler::active_count(&s);
+    let terminal_alerts = ui.terminal_entries.with(|entries| {
+        entries
+            .iter()
+            .filter(|e| standalone_terminal_needs_you(e))
+            .count()
+    });
+    let actionable = actionable_cards.len() + terminal_alerts;
+    let (unread_cards, active_slots) = ui.snapshot.with(|s| {
+        let unread = ui.reminder_counts.with(|counts| {
+            s.cards
+                .iter()
+                .filter(|c| {
+                    counts.get(&c.id).is_some_and(|n| n.unread > 0)
+                        && !actionable_cards.contains(c.id.as_str())
+                })
+                .count()
+        });
+        (unread, canban_scheduler::active_count(s))
+    });
     let max_slots = ui.max_agents.get();
     (actionable, unread_cards, active_slots, max_slots)
 }

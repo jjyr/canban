@@ -11,12 +11,11 @@ use nsh_core::prelude::*;
 pub fn screen(ui: Ui) -> impl IntoElement {
     let query = input::debounced(ui.archive_query, std::time::Duration::from_millis(120));
     let archived = computed(move || {
-        model::project_entries_with_tags(
-            &ui.snapshot.get(),
-            &ui.local_tags.get(),
-            &ui.project.get(),
-            &query.get(),
-        )
+        let local_tags = ui.local_tags.get();
+        let project = ui.project.get();
+        let q = query.get();
+        ui.snapshot
+            .with(|s| model::project_entries_with_tags(s, &local_tags, &project, &q))
     });
     let searching = computed(move || !query.get().trim().is_empty());
     let scroll_key = format!("archive:list:{}", ui.project.get_untracked());

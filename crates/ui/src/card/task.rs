@@ -161,10 +161,8 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     let Some(source) = c.github_issue() else {
                         return view().into_element();
                     };
-                    let cached = ui.snapshot.with(|s| {
-                        s.github_issues
-                            .iter()
-                            .find(|i| i.project_id == c.project_id && i.source == *source)
+                    let cached = ui.index.with(|idx| {
+                        idx.github_issue(&c.project_id, source.repository_id, source.issue_id)
                             .cloned()
                     });
                     let mut area = view().gap_2();

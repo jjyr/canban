@@ -147,16 +147,23 @@ impl BoardDrag {
             ghost: signal(None),
         };
         effect(move || {
-            let _ = (
-                ui.snapshot.get(),
-                ui.github.filters.get(),
-                ui.merging_cards.get(),
-                ui.local_tags.get(),
-            );
+            ui.snapshot.with(|_| ());
+            ui.github.filters.with(|_| ());
+            ui.merging_cards.with(|_| ());
+            ui.local_tags.with(|_| ());
             if this.phase.get_untracked() == 0 {
                 this.sync();
             } else if this.trace {
                 eprintln!("BOARD_DRAG_REFRESH_DEFERRED");
+            }
+        });
+        effect(move || {
+            let on_workspace = matches!(ui.page.get().as_str(), "board" | "card" | "new-card");
+            if !on_workspace && this.phase.get_untracked() != 0 {
+                this.end(PanEvent {
+                    cancelled: true,
+                    ..Default::default()
+                });
             }
         });
         effect(move || {

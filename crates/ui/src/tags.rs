@@ -88,7 +88,7 @@ pub fn ordered_known(
     out
 }
 
-fn explicit_link_tags(source: &str) -> Vec<String> {
+pub(crate) fn explicit_link_tags(source: &str) -> Vec<String> {
     if !source.contains("tag:") {
         return Vec::new();
     }

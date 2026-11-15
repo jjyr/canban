@@ -409,28 +409,29 @@ pub fn header(ui: Ui) -> impl IntoElement {
         let Some(target_scope) = active_scope.get() else {
             return Vec::new();
         };
-        let s = ui.snapshot.get();
-        ui.closing_terminals.with(|closing| {
-            ui.terminal_entries.with(|rows| {
-                rows.iter()
-                    .filter(|e| {
-                        e.listed()
-                            && !closing.contains(&e.saved.id)
-                            && super::worktrees::entry_scope(&s, e) == target_scope
-                    })
-                    .map(|e| {
-                        (
-                            e.saved.id.clone(),
-                            e.title(),
-                            e.hint(),
-                            e.ended(),
-                            e.inactive(),
-                            e.herdr_status(),
-                            e.attention_reason(),
-                            e.provider(),
-                        )
-                    })
-                    .collect::<Vec<_>>()
+        ui.snapshot.with(|s| {
+            ui.closing_terminals.with(|closing| {
+                ui.terminal_entries.with(|rows| {
+                    rows.iter()
+                        .filter(|e| {
+                            e.listed()
+                                && !closing.contains(&e.saved.id)
+                                && super::worktrees::entry_scope(s, e) == target_scope
+                        })
+                        .map(|e| {
+                            (
+                                e.saved.id.clone(),
+                                e.title(),
+                                e.hint(),
+                                e.ended(),
+                                e.inactive(),
+                                e.herdr_status(),
+                                e.attention_reason(),
+                                e.provider(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
             })
         })
     });

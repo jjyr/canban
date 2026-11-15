@@ -1626,8 +1626,13 @@ pub fn Gallery() -> impl IntoElement {
                         ui.open_card("card-2".into())
                     }))
                     .child(action("Close Card", Variant::Quiet, move |_| {
-                        ui.card.set(String::new());
-                        ui.page.set("board".into());
+                        ui.close_card()
+                    }))
+                    .child(action("Terminals", Variant::Quiet, move |_| {
+                        ui.navigate("terminals")
+                    }))
+                    .child(action("Board", Variant::Quiet, move |_| {
+                        ui.navigate("board")
                     }))
                     .child(action("Reverse in 80ms", Variant::Quiet, move |_| {
                         let was_open = ui.page.get_untracked() == "card";

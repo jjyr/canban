@@ -96,107 +96,111 @@ fn current_project(ui: Ui) -> String {
     }
 }
 fn local_preview(ui: Ui, url: &str, title: &str) -> Preview {
-    let s = ui.snapshot.get_untracked();
-    let mut value = Preview {
-        title: title.into(),
-        detail: url.into(),
-        excerpt: String::new(),
-    };
-    match destination(url) {
-        Destination::Card(id) => {
-            if let Some(c) = s
-                .cards
-                .iter()
-                .find(|c| c.id == id && c.removed_at.is_none())
-            {
-                let project = s
-                    .projects
-                    .iter()
-                    .find(|p| p.id == c.project_id)
-                    .map(|p| p.name.as_str())
-                    .unwrap_or("Project");
-                value.title = c.title.clone();
-                value.detail = format!(
-                    "Card · {project} #{} · {}",
-                    c.number,
-                    if c.archived_at.is_some() {
-                        "Archived"
-                    } else {
-                        &c.stage
-                    }
-                );
-                value.excerpt = excerpt(&c.body);
-            } else {
-                value.excerpt = "This local Card is unavailable.".into();
-            }
-        }
-        Destination::Profile(id) => {
-            if let Some(p) = ui.profiles.get_untracked().iter().find(|p| p.id == id) {
-                value.title = format!("@{}", p.id);
-                value.detail = format!("{} · Agent profile", crate::profiles::provider(p).1);
-                value.excerpt = if p.role_instruction.is_empty() {
-                    "Open profile settings".into()
-                } else {
-                    excerpt(&p.role_instruction)
-                };
-            }
-        }
-        Destination::Tag(tag) => {
-            let known = crate::tags::known_map(&s, &ui.local_tags.get_untracked(), None);
-            let canonical = known
-                .get(&tag.to_lowercase())
-                .cloned()
-                .unwrap_or_else(|| tag.clone());
-            let count = crate::tags::matching_card_count(&s, &known, &canonical);
-            value.title = format!("#{canonical}");
-            value.detail = format!("Tag · {count} Card{}", if count == 1 { "" } else { "s" });
-            value.excerpt = "Click to search Cards with this tag".into();
-        }
-        Destination::Attachment(id) => {
-            if let Some(a) = s.artifacts.iter().find(|a| a.id == id) {
-                value.title = a.name.clone();
-                value.detail = "Card attachment · Open locally".into();
-            }
-        }
-        Destination::Web(ref web) => {
-            if let Some((repo, number, kind)) = github(web) {
-                let connected = crate::github::is_connected_untracked(ui);
-                value.detail = format!("GitHub {kind} · {repo}#{number}");
-                value.excerpt = if connected
-                    && s.projects.iter().any(|p| {
-                        p.github
-                            .as_ref()
-                            .is_some_and(|g| g.repository.eq_ignore_ascii_case(&repo))
-                    }) {
-                    "Hover to load details".into()
-                } else if connected {
-                    "Click to open in Canban".into()
-                } else {
-                    "Open in browser · Run `gh auth login` to connect GitHub".into()
-                };
-                if let Some(issue) = s.github_issues.iter().find(|i| {
-                    i.source.repository.eq_ignore_ascii_case(&repo) && i.source.number == number
-                }) {
-                    value.title = issue.title.clone();
-                    value.detail.push_str(&format!(" · {}", issue.state));
-                    value.excerpt = excerpt(&issue.body);
-                } else if let Some(pr) = s
-                    .cards
-                    .iter()
-                    .flat_map(|c| c.pull_request.iter().chain(&c.pull_request_history))
-                    .find(|p| p.repository.eq_ignore_ascii_case(&repo) && p.number == number)
+    ui.snapshot.with_untracked(|s| {
+        let mut value = Preview {
+            title: title.into(),
+            detail: url.into(),
+            excerpt: String::new(),
+        };
+        match destination(url) {
+            Destination::Card(id) => {
+                if let Some(c) = ui
+                    .index
+                    .with_untracked(|idx| idx.cards.get(&id).cloned())
+                    .filter(|c| c.removed_at.is_none())
                 {
-                    value.detail.push_str(&format!(" · {}", pr.state));
-                    value.excerpt = excerpt(&pr.review_summary);
+                    let project = ui
+                        .index
+                        .with_untracked(|idx| {
+                            idx.projects.get(&c.project_id).map(|p| p.name.clone())
+                        })
+                        .unwrap_or_else(|| "Project".into());
+                    value.title = c.title.clone();
+                    value.detail = format!(
+                        "Card · {project} #{} · {}",
+                        c.number,
+                        if c.archived_at.is_some() {
+                            "Archived"
+                        } else {
+                            &c.stage
+                        }
+                    );
+                    value.excerpt = excerpt(&c.body);
+                } else {
+                    value.excerpt = "This local Card is unavailable.".into();
                 }
-            } else if let Ok(url) = url::Url::parse(web) {
-                value.detail = url.host_str().unwrap_or("Website").into();
-                value.excerpt = web.clone();
             }
+            Destination::Profile(id) => {
+                if let Some(p) = ui
+                    .profiles
+                    .with_untracked(|profiles| profiles.iter().find(|p| p.id == id).cloned())
+                {
+                    value.title = format!("@{}", p.id);
+                    value.detail = format!("{} · Agent profile", crate::profiles::provider(&p).1);
+                    value.excerpt = if p.role_instruction.is_empty() {
+                        "Open profile settings".into()
+                    } else {
+                        excerpt(&p.role_instruction)
+                    };
+                }
+            }
+            Destination::Tag(tag) => {
+                let known = ui.known_tags.with_untracked(|kt| kt.global.clone());
+                let canonical = known
+                    .get(&tag.to_lowercase())
+                    .cloned()
+                    .unwrap_or_else(|| tag.clone());
+                let count = crate::tags::matching_card_count(s, &known, &canonical);
+                value.title = format!("#{canonical}");
+                value.detail = format!("Tag · {count} Card{}", if count == 1 { "" } else { "s" });
+                value.excerpt = "Click to search Cards with this tag".into();
+            }
+            Destination::Attachment(id) => {
+                if let Some(a) = s.artifacts.iter().find(|a| a.id == id) {
+                    value.title = a.name.clone();
+                    value.detail = "Card attachment · Open locally".into();
+                }
+            }
+            Destination::Web(ref web) => {
+                if let Some((repo, number, kind)) = github(web) {
+                    let connected = crate::github::is_connected_untracked(ui);
+                    value.detail = format!("GitHub {kind} · {repo}#{number}");
+                    value.excerpt = if connected
+                        && s.projects.iter().any(|p| {
+                            p.github
+                                .as_ref()
+                                .is_some_and(|g| g.repository.eq_ignore_ascii_case(&repo))
+                        }) {
+                        "Hover to load details".into()
+                    } else if connected {
+                        "Click to open in Canban".into()
+                    } else {
+                        "Open in browser · Run `gh auth login` to connect GitHub".into()
+                    };
+                    if let Some(issue) = s.github_issues.iter().find(|i| {
+                        i.source.repository.eq_ignore_ascii_case(&repo) && i.source.number == number
+                    }) {
+                        value.title = issue.title.clone();
+                        value.detail.push_str(&format!(" · {}", issue.state));
+                        value.excerpt = excerpt(&issue.body);
+                    } else if let Some(pr) = s
+                        .cards
+                        .iter()
+                        .flat_map(|c| c.pull_request.iter().chain(&c.pull_request_history))
+                        .find(|p| p.repository.eq_ignore_ascii_case(&repo) && p.number == number)
+                    {
+                        value.detail.push_str(&format!(" · {}", pr.state));
+                        value.excerpt = excerpt(&pr.review_summary);
+                    }
+                } else if let Ok(url) = url::Url::parse(web) {
+                    value.detail = url.host_str().unwrap_or("Website").into();
+                    value.excerpt = web.clone();
+                }
+            }
+            Destination::Other => {}
         }
-        Destination::Other => {}
-    }
-    value
+        value
+    })
 }
 /// Opening a reference never launches or resumes an Agent.
 pub fn open(ui: Ui, url: &str) {
@@ -263,15 +267,16 @@ fn load(ui: Ui, url: String, title: String, value: Signal<Preview>, loading: Sig
     let Some((repository, number, _)) = github(&url) else {
         return;
     };
-    let snapshot = ui.snapshot.get_untracked();
     let Some(login) = crate::github::active_login_untracked(ui) else {
         return;
     };
-    let Some((project, source)) = snapshot.projects.iter().find_map(|p| {
-        p.github
-            .as_ref()
-            .filter(|s| s.repository.eq_ignore_ascii_case(&repository))
-            .map(|s| (p.id.clone(), s.clone()))
+    let Some((project, source)) = ui.index.with_untracked(|idx| {
+        idx.project_order.iter().find_map(|p| {
+            p.github
+                .as_ref()
+                .filter(|s| s.repository.eq_ignore_ascii_case(&repository))
+                .map(|s| (p.id.clone(), s.clone()))
+        })
     }) else {
         return;
     };
@@ -315,7 +320,15 @@ fn load(ui: Ui, url: String, title: String, value: Signal<Preview>, loading: Sig
                 next.title = row["title"].as_str().unwrap_or(&title).into();
                 next.detail.push_str(&format!(" · {}",row["state"].as_str().unwrap_or_default()));
                 next.excerpt = excerpt(row["body"].as_str().unwrap_or_default());
-                ui.link_previews.with(|cache| { if cache.len() >= 64 { cache.clear(); } cache.insert(key,CachedPreview { at:canban_types::now(),value:next.clone() }); });
+                ui.link_previews.with(|cache| {
+                    cache.insert(
+                        key,
+                        CachedPreview {
+                            at: canban_types::now(),
+                            value: next.clone(),
+                        },
+                    );
+                });
                 value.try_set(next);
             },
             _ => { let mut next = local_preview(ui,&url,&title); next.excerpt = "Preview unavailable · Open in browser".into(); value.try_set(next); }
@@ -325,7 +338,11 @@ fn load(ui: Ui, url: String, title: String, value: Signal<Preview>, loading: Sig
 fn render(ui: Ui, node: &CustomNode) -> AnyElement {
     let url = node.attributes.get("href").cloned().unwrap_or_default();
     let title = node.text.clone();
-    let preview = signal(local_preview(ui, &url, &title));
+    let preview = signal(Preview {
+        title: title.clone(),
+        detail: url.clone(),
+        excerpt: String::new(),
+    });
     let loading = signal(false);
     let load_url = url.clone();
     let preview_content = view()
@@ -366,19 +383,22 @@ pub fn install(ui: Ui) {
 }
 pub fn reader(ui: Ui, body: impl Fn() -> String + 'static) -> nsh_base::TextViewElement {
     let source = computed(body);
-    let parsed = computed(move || Parser::new().markdown(&source.get()));
-    let document = computed(move || {
-        let mut document = parsed.get();
-        let snapshot = ui.snapshot.get();
-        let profiles = ui.profiles.get();
-        let local_tags = ui.local_tags.get();
-        let project = if ui.page.get() == "new-card" {
+    let parsed = computed(move || ui.parse_markdown_cached(&source.get()));
+    let project = computed(move || {
+        if ui.page.get() == "new-card" {
             ui.card_target.get()
         } else {
             current_project(ui)
-        };
-        let known_tags = crate::tags::known_map(&snapshot, &local_tags, Some(&project));
-        document::decorate(&mut document, &snapshot, &profiles, &known_tags, &project);
+        }
+    });
+    let document = computed(move || {
+        let mut document = parsed.get();
+        let lookup = ui.link_lookup.get();
+        let proj = project.get();
+        let known_tags = ui.known_tags.with(|kt| kt.for_project(Some(&proj)));
+        ui.profiles.with(|profiles| {
+            document::decorate_indexed(&mut document, &lookup, profiles, &known_tags, &proj);
+        });
         document
     });
     // The root-installed plugin returns styled spans directly, preserving

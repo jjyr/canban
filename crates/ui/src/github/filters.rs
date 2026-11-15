@@ -6,9 +6,17 @@ pub fn matches(ui: Ui, c: &Card, snapshot: &Snapshot) -> bool {
         .filters
         .with_untracked(|m| m.get(&c.project_id).cloned().unwrap_or_default());
     if !filter.tags.is_empty() {
-        let local_tags = ui.local_tags.get_untracked();
-        let known = crate::tags::known_map(snapshot, &local_tags, Some(&c.project_id));
-        let card_tags = crate::tags::card_tags(c, &known);
+        let card_tags = ui.known_tags.with_untracked(|kt| {
+            let indexed_matches = ui
+                .index
+                .with_untracked(|idx| idx.cards.get(&c.id) == Some(c));
+            if indexed_matches && c.removed_at.is_none() {
+                kt.tags_for_card(&c.id)
+            } else {
+                let known = kt.for_project(Some(&c.project_id));
+                crate::tags::card_tags(c, &known)
+            }
+        });
         if !filter.tags.iter().all(|wanted| {
             let w = wanted.to_lowercase();
             card_tags.iter().any(|t| t.to_lowercase() == w)

@@ -179,11 +179,9 @@ pub fn screen(ui: Ui) -> impl IntoElement {
     let has_github = computed(move || {
         let current = ui.project.get();
         project.get().is_some_and(|p| p.github.is_some())
-            || ui.snapshot.with(|s| {
-                s.cards
-                    .iter()
-                    .any(|c| c.project_id == current && c.github_issue().is_some())
-            })
+            || ui
+                .index
+                .with(|idx| idx.project_has_github_cards.contains(&current))
     });
     view()
         .flex_1()
@@ -258,40 +256,52 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                                     .on_layout(move |b: &Bounds<Points>| {
                                         state.content_width(b.size.width.0)
                                     })
-                                    .child(dynamic(move || {
-                                        let compact = compact.get();
-                                        let focus = focus.get();
-                                        let shown: Vec<_> = stages
-                                            .iter()
-                                            .filter(|s| !compact || s.id == focus)
-                                            .cloned()
-                                            .collect();
-                                        untracked(|| {
-                                            state.retain(
-                                                &shown
-                                                    .iter()
-                                                    .map(|s| s.id.clone())
-                                                    .collect::<Vec<_>>(),
-                                            );
-                                            view()
-                                                .flex_row()
-                                                .gap_3()
-                                                .flex_1()
-                                                .min_h(px(0.))
-                                                .children(
-                                                    shown
-                                                        .into_iter()
-                                                        .map(|stage| {
-                                                            columns::column(
-                                                                ui, state, stage, compact,
-                                                            )
-                                                            .into_element()
-                                                        })
+                                    .child({
+                                        let visible_stages = computed(move || {
+                                            let is_compact = compact.get();
+                                            if is_compact {
+                                                let focused = focus.get();
+                                                (
+                                                    true,
+                                                    stages
+                                                        .iter()
+                                                        .filter(|s| s.id == focused)
+                                                        .cloned()
                                                         .collect::<Vec<_>>(),
                                                 )
-                                                .into_element()
+                                            } else {
+                                                (false, stages.clone())
+                                            }
+                                        });
+                                        dynamic(move || {
+                                            let (compact, shown) = visible_stages.get();
+                                            untracked(|| {
+                                                state.retain(
+                                                    &shown
+                                                        .iter()
+                                                        .map(|s| s.id.clone())
+                                                        .collect::<Vec<_>>(),
+                                                );
+                                                view()
+                                                    .flex_row()
+                                                    .gap_3()
+                                                    .flex_1()
+                                                    .min_h(px(0.))
+                                                    .children(
+                                                        shown
+                                                            .into_iter()
+                                                            .map(|stage| {
+                                                                columns::column(
+                                                                    ui, state, stage, compact,
+                                                                )
+                                                                .into_element()
+                                                            })
+                                                            .collect::<Vec<_>>(),
+                                                    )
+                                                    .into_element()
+                                            })
                                         })
-                                    })),
+                                    }),
                             ),
                     )
                     .child(state.overlay())
@@ -323,8 +333,8 @@ fn focus_stage(ui: Ui, stages: &[canban_types::Stage]) -> Signal<String> {
     effect(move || {
         let id = ui.card.get();
         let stage = ui
-            .snapshot
-            .with_untracked(|s| s.cards.iter().find(|c| c.id == id).map(|c| c.stage.clone()));
+            .index
+            .with_untracked(|idx| idx.cards.get(&id).map(|c| c.stage.clone()));
         if let Some(stage) = stage.filter(|s| ids.contains(s)) {
             focus.set(stage);
         }

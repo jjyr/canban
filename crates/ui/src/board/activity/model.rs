@@ -12,16 +12,23 @@ pub struct Summary {
     pub pending: bool,
 }
 pub fn projects(snapshot: &Snapshot, recent: &[String]) -> Vec<Summary> {
-    let mut cards = BTreeMap::<String, BTreeSet<String>>::new();
     let reminders = canban_notifications::reminders(snapshot);
-    for item in &reminders {
+    projects_from_reminders(&snapshot.projects, &reminders, recent)
+}
+
+pub fn projects_from_reminders(
+    project_list: &[canban_types::Project],
+    reminders: &[canban_notifications::Reminder],
+    recent: &[String],
+) -> Vec<Summary> {
+    let mut cards = BTreeMap::<String, BTreeSet<String>>::new();
+    for item in reminders {
         cards
             .entry(item.project_id.clone())
             .or_default()
             .insert(item.card_id.clone());
     }
-    let mut result = snapshot
-        .projects
+    let mut result = project_list
         .iter()
         .map(|p| Summary {
             id: p.id.clone(),

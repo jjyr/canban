@@ -2,7 +2,29 @@ use crate::drafts::Draft;
 use canban_types::*;
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+};
+
+pub const REPORT_BODY_CACHE_CAP: usize = 128;
+pub const LINK_PREVIEW_CACHE_CAP: usize = 128;
+pub const PARSED_MARKDOWN_CACHE_CAP: usize = 192;
+pub const MAX_CACHED_MARKDOWN_BYTES: usize = 256 * 1024;
+const PREFETCH_REPORT_BATCH_LIMIT: usize = 48;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CachedReportBody {
+    pub version: u64,
+    pub body: String,
+}
+
+pub fn event_body_version(event: &canban_types::Event) -> u64 {
+    event.data["edited_at"]
+        .as_u64()
+        .or_else(|| event.data["revision"].as_u64())
+        .unwrap_or(event.created_at)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Location {
@@ -70,9 +92,16 @@ pub struct Ui {
     pub search_query: Signal<String>,
     pub local_tags: Signal<BTreeSet<String>>,
     pub recent_destinations: Stored<Vec<String>>,
-    pub link_previews: Stored<BTreeMap<String, crate::links::CachedPreview>>,
+    pub link_previews: Stored<crate::cache::LruCache<String, crate::links::CachedPreview>>,
+    pub report_bodies: Stored<crate::cache::LruCache<(String, String), CachedReportBody>>,
+    pub report_inflight: Stored<BTreeSet<(String, String)>>,
+    pub parsed_markdown: Stored<crate::cache::LruCache<String, nsh_base::text_view::Document>>,
     pub snapshot: Signal<Snapshot>,
     pub snapshot_ready: Signal<bool>,
+    pub index: Memo<Rc<crate::index::SnapshotIndex>>,
+    pub link_lookup: Memo<Rc<crate::index::LinkLookup>>,
+    pub known_tags: Memo<Rc<crate::index::KnownTagsIndex>>,
+    pub overview_rows: Memo<Rc<Vec<canban_notifications::OverviewRow>>>,
     pub reminders: Memo<Vec<canban_notifications::Reminder>>,
     pub sound_items: Memo<Vec<String>>,
     pub reminder_counts: Memo<BTreeMap<String, canban_notifications::ReminderCount>>,
@@ -114,6 +143,8 @@ pub struct Ui {
     pub merging_cards: Signal<BTreeSet<String>>,
     /// Periodic wall-clock timestamp (ms) updated on a slow timer for non-realtime elapsed badges.
     pub runtime_clock: Signal<u64>,
+    /// Shared minute-granularity clock (s) for utility bar usage countdowns.
+    pub utility_clock: Signal<u64>,
     pub refreshing: Signal<bool>,
     pub snapshot_epoch: Signal<u64>,
     pub output: Signal<String>,
@@ -184,13 +215,15 @@ pub fn workspace_dismiss_action(page: &str, blocked: bool) -> Option<WorkspaceDi
 
 impl Ui {
     pub fn apply_config(self, cfg: &Config) {
-        self.default_agent.set(cfg.default_agent.clone());
-        self.onboarded.set(cfg.onboarded);
-        self.all_profiles.set(cfg.profiles.clone());
-        self.profiles
-            .set(ordered_enabled_profiles(&cfg.profiles, &cfg.default_agent));
-        self.max_agents.set(cfg.scheduler.max_agents);
-        self.idle_minutes.set(cfg.scheduler.idle_minutes);
+        batch(move || {
+            self.default_agent.set(cfg.default_agent.clone());
+            self.onboarded.set(cfg.onboarded);
+            self.all_profiles.set(cfg.profiles.clone());
+            self.profiles
+                .set(ordered_enabled_profiles(&cfg.profiles, &cfg.default_agent));
+            self.max_agents.set(cfg.scheduler.max_agents);
+            self.idle_minutes.set(cfg.scheduler.idle_minutes);
+        });
     }
     pub fn active_project_host(self) -> String {
         let pid = self.project.get_untracked();
@@ -223,39 +256,51 @@ impl Ui {
         });
     }
     pub fn clear_output(self) {
-        self.output_request
-            .set(self.output_request.get_untracked() + 1);
-        self.output.set(String::new());
-        self.output_observed_at.set(None);
+        batch(move || {
+            self.output_request
+                .set(self.output_request.get_untracked() + 1);
+            self.output.set(String::new());
+            self.output_observed_at.set(None);
+        });
     }
     pub fn new_card(self) {
         if self.page.get_untracked() == "new-card" {
             return;
         }
-        self.utility_popup.set(String::new());
-        self.quick_open.set(false);
-        self.new_draft.set(format!("new-card:{}", id()));
-        self.card_target.set(self.project.get_untracked());
-        self.navigate("new-card");
+        batch(move || {
+            self.utility_popup.set(String::new());
+            self.quick_open.set(false);
+            self.new_draft.set(format!("new-card:{}", id()));
+            self.card_target.set(self.project.get_untracked());
+            self.navigate("new-card");
+        });
     }
     pub fn navigate(self, page: &str) {
-        self.card_standalone.set(false);
-        if page == "terminals" {
-            self.terminal_focus.update(|v| *v += 1);
-            self.terminal_card_context.set(String::new());
-            crate::terminals::restore_selection(self);
-            if self.narrow.get_untracked() && !self.terminal_selection.get_untracked().is_empty() {
-                self.terminal_sidebar.set(false);
+        let dest = page.to_owned();
+        batch(move || {
+            self.card_standalone.set(false);
+            if dest == "terminals" {
+                self.terminal_focus.update(|v| *v += 1);
+                self.terminal_card_context.set(String::new());
+                crate::terminals::restore_selection(self);
+                if self.narrow.get_untracked()
+                    && !self.terminal_selection.get_untracked().is_empty()
+                {
+                    self.terminal_sidebar.set(false);
+                }
             }
-        }
-        self.clear_output();
-        self.review_request
-            .set(self.review_request.get_untracked() + 1);
-        self.page.set(page.into());
+            self.clear_output();
+            self.review_request
+                .set(self.review_request.get_untracked() + 1);
+            self.page.set(dest);
+        });
     }
     pub fn open_settings_section(self, section: &str) {
-        self.settings_section.set(section.into());
-        self.navigate("settings");
+        let sec = section.to_owned();
+        batch(move || {
+            self.settings_section.set(sec);
+            self.navigate("settings");
+        });
     }
     pub fn has_blocking_overlay(self) -> bool {
         self.quick_open.get_untracked()
@@ -270,15 +315,17 @@ impl Ui {
             || self.review_state.discard_confirm.get_untracked().is_some()
     }
     pub fn close_card(self) {
-        self.editing_comment.set(None);
-        self.deleting_comment.set(None);
-        self.card_tab.set(String::new());
-        self.card_terminal_open.set(false);
-        self.card_terminal_focused.set(false);
-        self.card.set(String::new());
-        self.card_standalone.set(false);
-        self.clear_output();
-        self.page.set("board".into());
+        batch(move || {
+            self.editing_comment.set(None);
+            self.deleting_comment.set(None);
+            self.card_tab.set(String::new());
+            self.card_terminal_open.set(false);
+            self.card_terminal_focused.set(false);
+            self.card.set(String::new());
+            self.card_standalone.set(false);
+            self.clear_output();
+            self.page.set("board".into());
+        });
     }
     pub fn dismiss_workspace_pane(self) {
         match workspace_dismiss_action(&self.page.get_untracked(), self.has_blocking_overlay()) {
@@ -289,12 +336,23 @@ impl Ui {
     }
     pub fn new() -> Self {
         let snapshot = signal(Snapshot::default());
-        let reminders = computed(move || canban_notifications::reminders(&snapshot.get()));
-        let sound_items = computed(move || {
-            canban_notifications::sound_items_with_reminders(&snapshot.get(), &reminders.get())
+        let local_tags = signal(BTreeSet::new());
+        let index =
+            computed(move || snapshot.with(|s| Rc::new(crate::index::SnapshotIndex::build(s))));
+        let link_lookup = computed(move || Rc::new(crate::index::LinkLookup::build(&index.get())));
+        let known_tags = computed(move || {
+            local_tags.with(|lt| Rc::new(crate::index::KnownTagsIndex::build(&index.get(), lt)))
         });
-        let reminder_counts = computed(move || canban_notifications::counts(&reminders.get()));
-        let terminal_entries = computed(move || crate::terminals::entries(&snapshot.get()));
+        let overview_rows =
+            computed(move || snapshot.with(|s| Rc::new(canban_notifications::overview(s))));
+        let reminders = computed(move || snapshot.with(canban_notifications::reminders));
+        let sound_items = computed(move || {
+            snapshot.with(|s| {
+                reminders.with(|r| canban_notifications::sound_items_with_reminders(s, r))
+            })
+        });
+        let reminder_counts = computed(move || reminders.with(|r| canban_notifications::counts(r)));
+        let terminal_entries = computed(move || snapshot.with(crate::terminals::entries));
         Self {
             owner: Owner::current(),
             github: crate::github::Browser::new(),
@@ -344,6 +402,10 @@ impl Ui {
             terminal_width: signal(260.),
             snapshot,
             snapshot_ready: signal(false),
+            index,
+            link_lookup,
+            known_tags,
+            overview_rows,
             reminders,
             sound_items,
             reminder_counts,
@@ -352,9 +414,12 @@ impl Ui {
             quick_open: signal(false),
             project_picker: signal(false),
             search_query: signal(String::new()),
-            local_tags: signal(BTreeSet::new()),
+            local_tags,
             recent_destinations: stored(Vec::new()),
-            link_previews: stored(BTreeMap::new()),
+            link_previews: stored(crate::cache::LruCache::new(LINK_PREVIEW_CACHE_CAP)),
+            report_bodies: stored(crate::cache::LruCache::new(REPORT_BODY_CACHE_CAP)),
+            report_inflight: stored(BTreeSet::new()),
+            parsed_markdown: stored(crate::cache::LruCache::new(PARSED_MARKDOWN_CACHE_CAP)),
             idle_minutes: signal(
                 crate::APP
                     .get()
@@ -414,6 +479,7 @@ impl Ui {
             pending_methods: signal(BTreeSet::new()),
             merging_cards: signal(BTreeSet::new()),
             runtime_clock: signal(now()),
+            utility_clock: signal(now() / 1000),
             refreshing: signal(false),
             snapshot_epoch: signal(0),
             output: signal(String::new()),
@@ -554,9 +620,12 @@ impl Ui {
             }
             ids.truncate(32);
         });
-        self.project.set(id);
-        self.card.set(String::new());
-        self.navigate("board");
+        batch(move || {
+            self.project.set(id);
+            self.card.set(String::new());
+            self.navigate("board");
+        });
+        self.prefetch_active_reports();
     }
     pub fn card_id(self) -> String {
         self.card_view
@@ -564,47 +633,124 @@ impl Ui {
             .unwrap_or_else(|| self.card.get())
     }
     pub fn current_card(self) -> Option<Card> {
-        self.snapshot.with(|s| {
-            s.cards
-                .iter()
-                .find(|c| c.id == untracked(|| self.card_id()))
-                .cloned()
-        })
+        let cid = self.card_id();
+        self.index.with(|idx| idx.cards.get(&cid).cloned())
     }
     pub fn current_project(self) -> Option<Project> {
-        self.snapshot.with(|s| {
-            s.projects
-                .iter()
-                .find(|p| p.id == self.project.get_untracked())
-                .cloned()
+        let pid = self.project.get();
+        self.index.with(|idx| idx.projects.get(&pid).cloned())
+    }
+    pub fn parse_markdown_cached(self, source: &str) -> nsh_base::text_view::Document {
+        if source.len() <= MAX_CACHED_MARKDOWN_BYTES {
+            if let Some(doc) = self
+                .parsed_markdown
+                .with(|cache| cache.get(source).cloned())
+            {
+                return doc;
+            }
+            let doc = nsh_base::text_view::Parser::new().markdown(source);
+            self.parsed_markdown
+                .with(|cache| cache.insert(source.to_owned(), doc.clone()));
+            return doc;
+        }
+        nsh_base::text_view::Parser::new().markdown(source)
+    }
+    pub fn cached_report_body(self, card_id: &str, path: &str, min_version: u64) -> Option<String> {
+        let key = (card_id.to_owned(), path.to_owned());
+        self.report_bodies.with(|cache| {
+            cache
+                .get(&key)
+                .filter(|entry| entry.version >= min_version)
+                .map(|entry| entry.body.clone())
         })
     }
+    pub fn store_report_body(self, card_id: String, path: String, version: u64, body: String) {
+        self.report_bodies
+            .with(|cache| cache.insert((card_id, path), CachedReportBody { version, body }));
+    }
+    pub fn prefetch_active_reports(self) {
+        if crate::APP.get().is_none() {
+            return;
+        }
+        let project = self.project.get_untracked();
+        let pending_keys = self.index.with_untracked(|idx| {
+            let mut candidates: Vec<(u64, String, String, u64)> = Vec::new();
+            for card in idx
+                .cards
+                .values()
+                .filter(|c| c.active() && (project.is_empty() || c.project_id == project))
+            {
+                let Some(events) = idx.events_by_card.get(&card.id) else {
+                    continue;
+                };
+                for ev in events.iter().rev() {
+                    let Some(path) = ev.data["path"].as_str() else {
+                        continue;
+                    };
+                    let ver = event_body_version(ev);
+                    candidates.push((ev.created_at, card.id.clone(), path.to_owned(), ver));
+                }
+            }
+            candidates.sort_by_key(|(created_at, _, _, _)| std::cmp::Reverse(*created_at));
+            let mut selected = Vec::new();
+            let mut seen = BTreeSet::new();
+            for (_, cid, path, ver) in candidates {
+                if selected.len() >= PREFETCH_REPORT_BATCH_LIMIT {
+                    break;
+                }
+                let key = (cid, path);
+                if !seen.insert(key.clone()) {
+                    continue;
+                }
+                let already_cached = self
+                    .report_bodies
+                    .with(|cache| cache.peek(&key).is_some_and(|entry| entry.version >= ver));
+                if already_cached {
+                    continue;
+                }
+                let newly_inflight = self.report_inflight.with(|set| set.insert(key.clone()));
+                if newly_inflight {
+                    selected.push((key.0, key.1, ver));
+                }
+            }
+            selected
+        });
+        if pending_keys.is_empty() {
+            return;
+        }
+        self.spawn(async move {
+            let loaded = blocking(move || {
+                let mut out = Vec::with_capacity(pending_keys.len());
+                for (cid, path, ver) in pending_keys {
+                    let res = crate::routed_call(
+                        "resource.read",
+                        json!({"card_id": cid, "path": path}),
+                        None,
+                    );
+                    let body = res
+                        .ok()
+                        .and_then(|v| v["body"].as_str().or(v["text"].as_str()).map(str::to_owned));
+                    out.push((cid, path, ver, body));
+                }
+                out
+            })
+            .await;
+            if let Ok(items) = loaded {
+                for (cid, path, ver, body) in items {
+                    self.report_inflight.with(|set| {
+                        set.remove(&(cid.clone(), path.clone()));
+                    });
+                    if let Some(text) = body {
+                        self.store_report_body(cid, path, ver, text);
+                    }
+                }
+            }
+        });
+    }
     pub fn open_card(self, id: String) {
-        if self.card.get_untracked() != id {
-            self.editing_comment.set(None);
-            self.deleting_comment.set(None);
-        }
-        self.request.set(String::new());
-        self.card_event.set(None);
-        self.card_terminal_focused.set(false);
-        self.card_standalone.set(
-            matches!(
-                self.page.get_untracked().as_str(),
-                "terminals" | "overview" | "github"
-            ) || self.card_standalone.get_untracked()
-                && matches!(self.page.get_untracked().as_str(), "card" | "review"),
-        );
-        self.review.set(None);
-        self.review_request
-            .set(self.review_request.get_untracked() + 1);
-        if let Some(project) = self.snapshot.with_untracked(|s| {
-            s.cards
-                .iter()
-                .find(|c| c.id == id)
-                .map(|c| c.project_id.clone())
-        }) {
-            self.project.set(project);
-        }
+        let project = self
+            .index
+            .with_untracked(|idx| idx.cards.get(&id).map(|c| c.project_id.clone()));
         let recent = self.terminal_recent.with(|m| m.get(&id).cloned());
         let default_tab = untracked(|| {
             crate::terminals::default_card_terminal_for_ui(self, &id, recent.as_deref())
@@ -615,16 +761,38 @@ impl Ui {
                 m.insert(id.clone(), default_tab.clone());
             });
         }
-        self.card_tab.set(default_tab);
-        self.card_terminal_open.set(false);
-        self.card.set(id);
-        self.expanded.set(false);
-        self.focused_card.set(false);
-        self.output.set(String::new());
-        self.output_observed_at.set(None);
-        self.output_request
-            .set(self.output_request.get_untracked() + 1);
-        self.page.set("card".into());
+        batch(move || {
+            if self.card.get_untracked() != id {
+                self.editing_comment.set(None);
+                self.deleting_comment.set(None);
+            }
+            self.request.set(String::new());
+            self.card_event.set(None);
+            self.card_terminal_focused.set(false);
+            self.card_standalone.set(
+                matches!(
+                    self.page.get_untracked().as_str(),
+                    "terminals" | "overview" | "github"
+                ) || self.card_standalone.get_untracked()
+                    && matches!(self.page.get_untracked().as_str(), "card" | "review"),
+            );
+            self.review.set(None);
+            self.review_request
+                .set(self.review_request.get_untracked() + 1);
+            if let Some(project) = project {
+                self.project.set(project);
+            }
+            self.card_tab.set(default_tab);
+            self.card_terminal_open.set(false);
+            self.card.set(id);
+            self.expanded.set(false);
+            self.focused_card.set(false);
+            self.output.set(String::new());
+            self.output_observed_at.set(None);
+            self.output_request
+                .set(self.output_request.get_untracked() + 1);
+            self.page.set("card".into());
+        });
     }
     pub fn open_card_with_terminal(self, card_id: String, conversation: Option<String>) {
         if let Some(conv) = &conversation {
@@ -637,24 +805,32 @@ impl Ui {
                 }
             });
         }
-        self.open_card(card_id.clone());
-        if let Some(conv) = conversation {
-            let is_live = untracked(|| crate::terminals::card_live_entries_for_ui(self, &card_id))
-                .iter()
-                .any(|e| e.saved.id == conv);
-            if is_live {
-                self.card_tab.set(conv);
+        let open_existing = batch(|| {
+            self.open_card(card_id.clone());
+            if let Some(ref conv) = conversation {
+                let is_live =
+                    untracked(|| crate::terminals::card_live_entries_for_ui(self, &card_id))
+                        .iter()
+                        .any(|e| &e.saved.id == conv);
+                if is_live {
+                    self.card_tab.set(conv.clone());
+                }
             }
-        }
-        if !self.card_tab.get_untracked().is_empty() {
-            self.card_terminal_open.set(true);
-            self.card_terminal_focused.set(true);
-            self.terminal_focus.update(|v| *v += 1);
+            if !self.card_tab.get_untracked().is_empty() {
+                self.card_terminal_open.set(true);
+                self.card_terminal_focused.set(true);
+                self.terminal_focus.update(|v| *v += 1);
+                true
+            } else {
+                false
+            }
+        });
+        if open_existing {
             return;
         }
         if let Some(c) = self
-            .snapshot
-            .with_untracked(|s| s.cards.iter().find(|c| c.id == card_id).cloned())
+            .index
+            .with_untracked(|idx| idx.cards.get(&card_id).cloned())
             .filter(|c| c.archived_at.is_none())
         {
             crate::terminals::create_in_card(self, c.project_id, c.id, false);
@@ -733,26 +909,29 @@ pub fn refresh(ui: Ui) {
                     ui.notification_delivery
                         .with(|t| t.baseline(&canban_notifications::sound_items(&snapshot)));
                 }
-                if !summaries.is_empty() && ui.hosts.with_untracked(|old| *old != summaries) {
-                    ui.hosts.set(summaries);
-                }
-                ui.apply_config(&config);
-                if ui.project.get_untracked().is_empty()
-                    && let Some(id) = crate::projects::selection::restore(
-                        &snapshot.projects,
-                        saved_project.as_deref(),
-                    )
-                {
-                    ui.project.set(id);
-                }
-                let different = ui.snapshot.with_untracked(|old| {
-                    serde_json::to_value(old).ok() != serde_json::to_value(&snapshot).ok()
+                let different = ui.snapshot.with_untracked(|old| old != &snapshot);
+                batch(move || {
+                    if !summaries.is_empty() && ui.hosts.with_untracked(|old| *old != summaries) {
+                        ui.hosts.set(summaries);
+                    }
+                    ui.apply_config(&config);
+                    if ui.project.get_untracked().is_empty()
+                        && let Some(id) = crate::projects::selection::restore(
+                            &snapshot.projects,
+                            saved_project.as_deref(),
+                        )
+                    {
+                        ui.project.set(id);
+                    }
+                    if different {
+                        ui.runtime_clock.set(now());
+                        ui.snapshot.set(snapshot);
+                    }
+                    ui.snapshot_ready.set(true);
                 });
                 if different {
-                    ui.runtime_clock.set(now());
-                    ui.snapshot.set(snapshot);
+                    ui.prefetch_active_reports();
                 }
-                ui.snapshot_ready.set(true);
             }
             Ok(Err(e)) => ui.operation_error.set(format!("Could not refresh: {e:#}")),
             Err(e) => ui.operation_error.set(format!("Refresh worker: {e}")),
@@ -850,13 +1029,16 @@ pub fn dispatch_complete(
             .set(!ui.pending_methods.with_untracked(BTreeSet::is_empty));
         match result {
             Ok(Ok((value, snapshot, config, summaries))) => {
-                ui.snapshot_epoch.update(|v| *v += 1);
-                if !summaries.is_empty() {
-                    ui.hosts.set(summaries);
-                }
-                ui.apply_config(&config);
-                ui.runtime_clock.set(now());
-                ui.snapshot.set(snapshot);
+                batch(|| {
+                    ui.snapshot_epoch.update(|v| *v += 1);
+                    if !summaries.is_empty() {
+                        ui.hosts.set(summaries);
+                    }
+                    ui.apply_config(&config);
+                    ui.runtime_clock.set(now());
+                    ui.snapshot.set(snapshot);
+                });
+                ui.prefetch_active_reports();
                 let failed = matches!(value["state"].as_str(), Some("failed" | "unknown"));
                 if failed {
                     let msg = format!(
@@ -1198,5 +1380,59 @@ mod tests {
         let github = location("github", "");
         assert!(should_open_created_card(true, &github));
         assert!(!should_open_created_card(false, &github));
+    }
+
+    #[test]
+    fn ui_report_and_markdown_caches_enforce_lru_bounds_and_version_invalidation() {
+        #[component]
+        fn ProbeRoot() -> impl IntoElement {
+            let ui = Ui::new();
+            // 1. Report body cache enforces `REPORT_BODY_CACHE_CAP` and version checks.
+            for i in 0..(REPORT_BODY_CACHE_CAP + 4) {
+                ui.store_report_body(
+                    "card-88".into(),
+                    format!("reports/{i}.md"),
+                    10,
+                    format!("Body #{i}"),
+                );
+            }
+            assert_eq!(ui.report_bodies.with(|c| c.len()), REPORT_BODY_CACHE_CAP);
+            assert_eq!(ui.cached_report_body("card-88", "reports/0.md", 10), None);
+            assert_eq!(
+                ui.cached_report_body("card-88", "reports/4.md", 10),
+                Some("Body #4".into())
+            );
+            assert_eq!(
+                ui.cached_report_body("card-88", "reports/4.md", 11),
+                None,
+                "stale cached report body must be rejected when event version advances"
+            );
+
+            // 2. Parsed Markdown cache enforces `PARSED_MARKDOWN_CACHE_CAP`.
+            for i in 0..(PARSED_MARKDOWN_CACHE_CAP + 5) {
+                let _ = ui.parse_markdown_cached(&format!("## Reply {i}\nParagraph {i}"));
+            }
+            assert_eq!(
+                ui.parsed_markdown.with(|c| c.len()),
+                PARSED_MARKDOWN_CACHE_CAP
+            );
+            assert!(
+                !ui.parsed_markdown
+                    .with(|c| c.contains_key("## Reply 0\nParagraph 0"))
+            );
+            assert!(
+                ui.parsed_markdown
+                    .with(|c| c.contains_key("## Reply 5\nParagraph 5"))
+            );
+
+            view()
+        }
+
+        let mut core = nsh_core::Core::new(
+            nsh_core::ApproxTextEngine,
+            nsh_core::geometry::size(px(200.0), px(100.0)),
+        );
+        core.mount_root(&nsh_core::element::Root::of::<ProbeRoot>());
+        let _ = core.commit();
     }
 }

@@ -5,23 +5,29 @@ use nsh_core::prelude::*;
 use serde_json::json;
 pub fn summary(ui: Ui) -> impl IntoElement {
     muted(move || {
-        let snapshot = ui.snapshot.get();
-        let rows = canban_notifications::overview(&snapshot);
+        let max_agents = ui.max_agents.get();
+        let (active, queued) = ui.snapshot.with(|snapshot| {
+            (
+                canban_scheduler::active_count(snapshot),
+                snapshot
+                    .terminals
+                    .iter()
+                    .filter(|t| {
+                        t.agent
+                            .as_ref()
+                            .is_some_and(|a| a.state == "queued" || a.pending.is_some())
+                    })
+                    .count(),
+            )
+        });
+        let (idle, need_you) = ui.overview_rows.with(|rows| {
+            (
+                rows.iter().filter(|r| r.group == "Idle").count(),
+                rows.iter().filter(|r| r.actionable()).count(),
+            )
+        });
         format!(
-            "Execution slots {} / {} · {} queued · {} idle · {} need you",
-            canban_scheduler::active_count(&snapshot),
-            ui.max_agents.get(),
-            snapshot
-                .terminals
-                .iter()
-                .filter(|t| {
-                    t.agent
-                        .as_ref()
-                        .is_some_and(|a| a.state == "queued" || a.pending.is_some())
-                })
-                .count(),
-            rows.iter().filter(|r| r.group == "Idle").count(),
-            rows.iter().filter(|r| r.actionable()).count(),
+            "Execution slots {active} / {max_agents} · {queued} queued · {idle} idle · {need_you} need you",
         )
     })
 }

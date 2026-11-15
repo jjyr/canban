@@ -218,6 +218,12 @@ fn menu(ui: Ui, draft: Signal<Draft>, reading: Reading) {
     });
 }
 pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElement {
+    let is_review = computed(move || ui.page.get() == "review");
+    let show_back = computed(move || {
+        ui.page.get() == "card"
+            && (ui.narrow.get() || ui.card_standalone.get() || ui.card_terminal_open.get())
+    });
+    let show_expand = computed(move || !is_review.get() && !ui.card_terminal_open.get());
     view()
         .px_3()
         .py_2()
@@ -232,11 +238,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             let mut row = view().flex_row().flex_wrap().items_center().gap_2();
             if let Some(source) = c.github_issue() {
                 let state = ui
-                    .snapshot
-                    .with(|s| {
-                        s.github_issues
-                            .iter()
-                            .find(|i| i.project_id == c.project_id && i.source == *source)
+                    .index
+                    .with(|idx| {
+                        idx.github_issue(&c.project_id, source.repository_id, source.issue_id)
                             .map(|i| i.state.clone())
                     })
                     .unwrap_or_else(|| "Status unavailable".into());
@@ -255,11 +259,11 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     sha: None,
                     url: source.url.clone(),
                 };
-                let gh_connected = crate::github::active_login_from(
-                    &ui.snapshot.get(),
-                    &ui.github.gh_status.get(),
-                )
-                .is_some();
+                let gh_connected = ui.snapshot.with(|s| {
+                    ui.github
+                        .gh_status
+                        .with(|gh| crate::github::active_login_from(s, gh).is_some())
+                });
                 row = row.child(view().flex_1());
                 if gh_connected {
                     row = row.child(compact_action(
@@ -275,13 +279,8 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 ));
             } else {
                 let project = ui
-                    .snapshot
-                    .with(|s| {
-                        s.projects
-                            .iter()
-                            .find(|p| p.id == c.project_id)
-                            .map(|p| p.name.clone())
-                    })
+                    .index
+                    .with(|idx| idx.projects.get(&c.project_id).map(|p| p.name.clone()))
                     .unwrap_or_default();
                 row = row.child(muted(format!("{project} / Card #{}", c.number)));
             }
@@ -293,12 +292,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 .items_center()
                 .gap_1()
                 .child(when(
-                    move || {
-                        ui.page.get() == "card"
-                            && (ui.narrow.get()
-                                || ui.card_standalone.get()
-                                || ui.card_terminal_open.get())
-                    },
+                    move || show_back.get(),
                     move || chrome_button(Icon::Back, "Back to Board", move |_| close(ui)),
                 ))
                 .child(
@@ -316,7 +310,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         ),
                 )
                 .child(when(
-                    move || ui.page.get() != "review" && !ui.card_terminal_open.get(),
+                    move || show_expand.get(),
                     move || crate::editor::expand(ui),
                 ))
                 .child(when(
@@ -343,7 +337,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     menu(ui, draft, reading)
                 }))
                 .child(when(
-                    move || ui.page.get() != "review",
+                    move || !is_review.get(),
                     move || chrome_button(Icon::Close, "Close Card details", move |_| close(ui)),
                 )),
         )
@@ -351,11 +345,23 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
             let Some(c) = ui.current_card() else {
                 return view();
             };
-            let s = ui.snapshot.get();
-            let project_stages = s
-                .projects
-                .iter()
-                .find(|p| p.id == c.project_id)
+            let review_mode = is_review.get();
+            let ui_merging = c.active()
+                && !c.merged()
+                && ui.merging_cards.with(|ids| ids.contains(&c.id));
+            let (project, has_deliver_in_project, attachment_count, snapshot_merging) =
+                ui.index.with(|idx| {
+                    (
+                        idx.projects.get(&c.project_id).cloned(),
+                        idx.project_has_deliver.contains(&c.project_id),
+                        idx.artifact_counts.get(&c.id).copied().unwrap_or(0),
+                        idx.card_status
+                            .get(&c.id)
+                            .is_some_and(|st| st.is_merging),
+                    )
+                });
+            let project_stages = project
+                .as_ref()
                 .map(|p| p.workflow.stages.clone())
                 .unwrap_or_default();
             let stage = project_stages.iter().find(|t| t.id == c.stage);
@@ -420,20 +426,11 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 );
             if c.merged() {
                 row = row.child(status("Merged", Tone::Success));
-            } else if ui.is_card_merging(&s, &c) {
+            } else if snapshot_merging || ui_merging {
                 row = row.child(live_status("Merging", Tone::Info));
             }
-            if let Some(c_active) = Some(&c).filter(|c| c.active() && !c.merged()) {
-                let has_deliver_in_project = s.workflow_revisions.iter().any(|w| {
-                    w.project_id == c_active.project_id
-                        && w.definition
-                            .steps
-                            .values()
-                            .any(|st| matches!(st, canban_types::WorkflowStep::Deliver { .. }))
-                });
-                if has_deliver_in_project && c_active.hold_auto_merge {
-                    row = row.child(status("Auto-merge held", Tone::Attention));
-                }
+            if c.active() && !c.merged() && has_deliver_in_project && c.hold_auto_merge {
+                row = row.child(status("Auto-merge held", Tone::Attention));
             }
             if let Some(branch) = c.branch.clone().filter(|b| !b.is_empty()) {
                 row = row.child(
@@ -463,7 +460,6 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                         ),
                 );
             }
-            let attachment_count = s.artifacts.iter().filter(|a| a.card_id == c.id).count();
             if attachment_count > 0 {
                 row = row.child(
                     canban_ui_kit::press_target()
@@ -495,7 +491,7 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                 || c.branch.as_ref().is_some_and(|b| !b.is_empty())
                 || c.is_github_pr()
                 || c.pull_request.is_some();
-            if ui.page.get() != "review" && can_review_diff {
+            if !review_mode && can_review_diff {
                 row = row.child(compact_action(
                     if in_review_stage || c.is_github_pr() {
                         "Review"
@@ -510,9 +506,9 @@ pub fn render(ui: Ui, draft: Signal<Draft>, reading: Reading) -> impl IntoElemen
                     move |_| review(ui),
                 ));
             }
-            let project = s.projects.iter().find(|p| p.id == c.project_id);
-            if ui.page.get() != "review" && quick_merge::eligible(&c, project) {
+            if !review_mode && quick_merge::eligible(&c, project.as_ref()) {
                 let target = project
+                    .as_ref()
                     .and_then(|p| p.target_branch.clone())
                     .unwrap_or_else(|| "main".into());
                 let card = c.clone();

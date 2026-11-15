@@ -91,7 +91,11 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
     let pending_all = st.pending_comments.get();
     let editing_remote = st.editing_remote_comment.get();
     let deleting_remote = st.deleting_remote_comment.get();
-    let my_login = crate::github::active_login_from(&ui.snapshot.get(), &ui.github.gh_status.get());
+    let my_login = ui.snapshot.with(|s| {
+        ui.github
+            .gh_status
+            .with(|gh| crate::github::active_login_from(s, gh))
+    });
     let pr_target = st.pr_target.get();
     let pr_base_url = pr_target.as_ref().and_then(|pr| {
         pr["url"]

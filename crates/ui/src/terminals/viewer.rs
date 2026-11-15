@@ -41,16 +41,17 @@ fn context(ui: Ui) -> impl IntoElement {
             .child(action("Read saved output", Variant::Quiet, move |_| {
                 load_text(ui, "execution.output", json!({"terminal_id":id}))
             }));
-        let snapshot = ui.snapshot.get();
-        if let Some(report) = snapshot
-            .reports
-            .iter()
-            .rev()
-            .find(|r| r.terminal_id.as_deref() == row.outcome_terminal_id())
-        {
+        if let Some((state, message)) = ui.snapshot.with(|snapshot| {
+            snapshot
+                .reports
+                .iter()
+                .rev()
+                .find(|r| r.terminal_id.as_deref() == row.outcome_terminal_id())
+                .map(|report| (report.state.clone(), report.message.clone()))
+        }) {
             body = body
                 .child(label("Saved outcome"))
-                .child(read_text(format!("{} · {}", report.state, report.message)));
+                .child(read_text(format!("{state} · {message}")));
         }
         let output = ui.output.get();
         if !output.is_empty() {

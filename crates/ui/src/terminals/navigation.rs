@@ -130,7 +130,6 @@ pub fn open_after_launch(ui: Ui, conversation: String, request: String) {
 pub fn watch(ui: Ui) {
     effect(move || {
         let pending = ui.terminal_pending_open.get();
-        let snapshot = ui.snapshot.get();
         let _ = (
             ui.page.get(),
             ui.card.get(),
@@ -141,29 +140,43 @@ pub fn watch(ui: Ui) {
             return;
         };
         if ui.location() != pending.origin {
+            ui.snapshot.with(|_| {});
             ui.terminal_pending_open.set(None);
             return;
         }
-        if let Some(id) = live_request(&snapshot, &pending.request) {
-            ui.terminal_pending_open.set(None);
-            // The temporary queue context is feedback for this launch, not another
-            // user destination. Back returns to the original Overview/Card/Review.
-            ui.history
-                .update(|history| restore_launch_origin(history, &pending));
-            ui.open_terminal(id);
-        } else if snapshot
-            .terminals
-            .iter()
-            .find(|t| t.id == pending.request)
-            .and_then(|t| t.agent.as_ref())
-            .is_none_or(|a| {
-                !matches!(
-                    a.state.as_str(),
-                    "queued" | "starting" | "running" | "unknown"
-                ) && a.pending.is_none()
-            })
-        {
-            ui.terminal_pending_open.set(None);
+        let outcome = ui.snapshot.with(|snapshot| {
+            if let Some(id) = live_request(snapshot, &pending.request) {
+                Some(Some(id))
+            } else if snapshot
+                .terminals
+                .iter()
+                .find(|t| t.id == pending.request)
+                .and_then(|t| t.agent.as_ref())
+                .is_none_or(|a| {
+                    !matches!(
+                        a.state.as_str(),
+                        "queued" | "starting" | "running" | "unknown"
+                    ) && a.pending.is_none()
+                })
+            {
+                Some(None)
+            } else {
+                None
+            }
+        });
+        match outcome {
+            Some(Some(id)) => {
+                ui.terminal_pending_open.set(None);
+                // The temporary queue context is feedback for this launch, not another
+                // user destination. Back returns to the original Overview/Card/Review.
+                ui.history
+                    .update(|history| restore_launch_origin(history, &pending));
+                ui.open_terminal(id);
+            }
+            Some(None) => {
+                ui.terminal_pending_open.set(None);
+            }
+            None => {}
         }
     });
 }

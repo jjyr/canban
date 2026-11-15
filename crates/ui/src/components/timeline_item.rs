@@ -363,10 +363,19 @@ fn render_narrative(
     let top_pad = if spine.first { 0. } else { 8. };
     let bottom_pad = if spine.last { 0. } else { 8. };
 
-    let body = signal(event.message.clone());
+    let card = event.card_id.clone();
+    let report_path = event.data["path"].as_str().map(str::to_owned);
+    let report_version = crate::presenter::event_body_version(&event);
+    let cached_report = report_path
+        .as_deref()
+        .and_then(|p| ui.cached_report_body(&card, p, report_version));
+    let body = signal(
+        cached_report
+            .clone()
+            .unwrap_or_else(|| event.message.clone()),
+    );
     let error = signal(String::new());
     let expanded = signal(false);
-    let card = event.card_id.clone();
     let project_id = event.project_id.clone();
     let comment_id = event.id.clone();
     let is_own_comment = event.kind == "comment.created" && event.actor == "user";
@@ -377,8 +386,8 @@ fn render_narrative(
         move || {
             is_own_comment
                 && ui
-                    .snapshot
-                    .with(|s| s.cards.iter().any(|c| c.id == card_id && c.active()))
+                    .index
+                    .with(|idx| idx.cards.get(&card_id).is_some_and(|c| c.active()))
         }
     });
     let is_editing = computed({
@@ -392,18 +401,26 @@ fn render_narrative(
     let edit_draft = signal(event.message.clone());
     let edit_error = signal(String::new());
     let delete_error = signal(String::new());
-    if let Some(path) = event.data["path"].as_str().map(str::to_owned)
+    if cached_report.is_none()
+        && let Some(path) = report_path
         && crate::APP.get().is_some()
     {
         let card = card.clone();
         ui.spawn(async move {
+            let fetch_card = card.clone();
+            let fetch_path = path.clone();
             match blocking(move || {
-                crate::routed_call("resource.read", json!({"card_id":card,"path":path}), None)
+                crate::routed_call(
+                    "resource.read",
+                    json!({"card_id": fetch_card, "path": fetch_path}),
+                    None,
+                )
             })
             .await
             {
                 Ok(Ok(value)) => {
                     if let Some(text) = value["body"].as_str().or(value["text"].as_str()) {
+                        ui.store_report_body(card, path, report_version, text.to_owned());
                         body.try_set(text.into());
                     }
                 }

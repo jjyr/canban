@@ -1,6 +1,9 @@
 //! Decorate parsed inline nodes; code and link labels are never reparsed as prose.
 use super::NODE;
-use canban_types::{Profile, Snapshot};
+use crate::index::LinkLookup;
+use canban_types::Profile;
+#[cfg(test)]
+use canban_types::Snapshot;
 use nsh_base::text_view::{Block, CustomNode, Document, Inline};
 
 use std::collections::BTreeMap;
@@ -19,7 +22,7 @@ fn plain(content: &[Inline]) -> String {
 fn token_link(
     token: &str,
     trigger: char,
-    s: &Snapshot,
+    lookup: &LinkLookup,
     profiles: &[Profile],
     known_tags: &BTreeMap<String, String>,
     project: &str,
@@ -38,20 +41,13 @@ fn token_link(
     let number = token.parse::<u64>().ok()?;
     // Bare hashes in a GitHub-connected project are ambiguous. Completion writes
     // stable explicit links; never guess Issue vs PR vs local Card here.
-    if s.projects
-        .iter()
-        .any(|p| p.id == project && p.github.is_some())
-    {
-        return None;
-    }
-    s.cards
-        .iter()
-        .find(|c| c.project_id == project && c.number == number && c.removed_at.is_none())
-        .map(|c| format!("card:{}", c.id))
+    lookup
+        .resolve_card_number(project, number)
+        .map(|id| format!("card:{id}"))
 }
 fn text_nodes(
     text: &str,
-    s: &Snapshot,
+    lookup: &LinkLookup,
     profiles: &[Profile],
     known_tags: &BTreeMap<String, String>,
     project: &str,
@@ -84,7 +80,8 @@ fn text_nodes(
         {
             continue;
         }
-        let Some(href) = token_link(&tail[..len], trigger, s, profiles, known_tags, project) else {
+        let Some(href) = token_link(&tail[..len], trigger, lookup, profiles, known_tags, project)
+        else {
             continue;
         };
         if start > last {
@@ -101,7 +98,7 @@ fn text_nodes(
 }
 fn inlines(
     nodes: &mut Vec<Inline>,
-    s: &Snapshot,
+    lookup: &LinkLookup,
     profiles: &[Profile],
     known_tags: &BTreeMap<String, String>,
     project: &str,
@@ -111,7 +108,7 @@ fn inlines(
     for mut node in std::mem::take(nodes) {
         match &mut node {
             Inline::Text { text } if prose => {
-                out.extend(text_nodes(text, s, profiles, known_tags, project));
+                out.extend(text_nodes(text, lookup, profiles, known_tags, project));
                 continue;
             }
             Inline::Link { url, content, .. }
@@ -128,7 +125,7 @@ fn inlines(
             | Inline::Superscript { content }
             | Inline::Subscript { content }
             | Inline::Small { content } => {
-                inlines(content, s, profiles, known_tags, project, prose)
+                inlines(content, lookup, profiles, known_tags, project, prose)
             }
             _ => {}
         }
@@ -138,7 +135,7 @@ fn inlines(
 }
 fn blocks(
     nodes: &mut [Block],
-    s: &Snapshot,
+    lookup: &LinkLookup,
     profiles: &[Profile],
     known_tags: &BTreeMap<String, String>,
     project: &str,
@@ -147,31 +144,73 @@ fn blocks(
     for node in nodes {
         match node {
             Block::Paragraph { content } | Block::Heading { content, .. } => {
-                inlines(content, s, profiles, known_tags, project, prose)
+                inlines(content, lookup, profiles, known_tags, project, prose)
             }
             Block::Blockquote { children, .. } => {
-                blocks(children, s, profiles, known_tags, project, false)
+                blocks(children, lookup, profiles, known_tags, project, false)
             }
             Block::List { items, .. } => {
                 for item in items {
-                    blocks(&mut item.children, s, profiles, known_tags, project, prose);
+                    blocks(
+                        &mut item.children,
+                        lookup,
+                        profiles,
+                        known_tags,
+                        project,
+                        prose,
+                    );
                 }
             }
             Block::Details {
                 summary, children, ..
             } => {
-                inlines(summary, s, profiles, known_tags, project, prose);
-                blocks(children, s, profiles, known_tags, project, prose);
+                inlines(summary, lookup, profiles, known_tags, project, prose);
+                blocks(children, lookup, profiles, known_tags, project, prose);
             }
             Block::Table(table) => {
                 for cell in table.head.iter_mut().chain(table.rows.iter_mut().flatten()) {
-                    inlines(&mut cell.content, s, profiles, known_tags, project, prose);
+                    inlines(
+                        &mut cell.content,
+                        lookup,
+                        profiles,
+                        known_tags,
+                        project,
+                        prose,
+                    );
                 }
             }
             _ => {}
         }
     }
 }
+pub(super) fn decorate_indexed(
+    document: &mut Document,
+    lookup: &LinkLookup,
+    profiles: &[Profile],
+    known_tags: &BTreeMap<String, String>,
+    project: &str,
+) {
+    blocks(
+        &mut document.blocks,
+        lookup,
+        profiles,
+        known_tags,
+        project,
+        true,
+    );
+    for note in &mut document.footnotes {
+        blocks(
+            &mut note.children,
+            lookup,
+            profiles,
+            known_tags,
+            project,
+            true,
+        );
+    }
+}
+
+#[cfg(test)]
 pub(super) fn decorate(
     document: &mut Document,
     s: &Snapshot,
@@ -179,10 +218,9 @@ pub(super) fn decorate(
     known_tags: &BTreeMap<String, String>,
     project: &str,
 ) {
-    blocks(&mut document.blocks, s, profiles, known_tags, project, true);
-    for note in &mut document.footnotes {
-        blocks(&mut note.children, s, profiles, known_tags, project, true);
-    }
+    let idx = crate::index::SnapshotIndex::build(s);
+    let lookup = LinkLookup::build(&idx);
+    decorate_indexed(document, &lookup, profiles, known_tags, project);
 }
 
 /// Extract explicit Markdown destinations and pasted URLs, excluding code/images.

@@ -320,16 +320,14 @@ fn execution(ui: Ui, reading: Reading, terminal_id: String) -> impl IntoElement 
 pub(super) fn render(ui: Ui, reading: Reading) -> impl IntoElement {
     let expanded_groups = signal(BTreeSet::<u64>::new());
     let events = computed(move || {
-        ui.snapshot.with(|s| {
-            s.events
-                .iter()
-                .filter(|e| e.card_id == ui.card_id())
-                .cloned()
-                .collect::<Vec<_>>()
-        })
+        let cid = ui.card_id();
+        ui.index.with(|idx| idx.card_events(&cid))
     });
-    let rows =
-        computed(move || project_rows(&events.get(), &expanded_groups.get(), ui.card_event.get()));
+    let rows = computed(move || {
+        let expanded = expanded_groups.get();
+        let target = ui.card_event.get();
+        events.with(|evs| project_rows(evs, &expanded, target))
+    });
     view()
         .gap_2p5()
         .child(when(

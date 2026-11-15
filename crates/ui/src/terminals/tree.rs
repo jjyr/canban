@@ -340,70 +340,71 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
 pub fn sidebar(ui: Ui) -> impl IntoElement {
     // Runtime observation timestamps must not recreate pointer/focus targets.
     let inventory = computed(move || {
-        let s = ui.snapshot.get();
-        let entry_rows = ui.closing_terminals.with(|closing| {
-            ui.terminal_entries.with(|rows| {
-                rows.iter()
-                    .filter(|e| e.listed() && !closing.contains(&e.saved.id))
-                    .map(|e| {
-                        let loc = e.location.as_ref();
-                        (
-                            e.saved.id.clone(),
-                            entry_scope(&s, e),
+        ui.snapshot.with(|s| {
+            let entry_rows = ui.closing_terminals.with(|closing| {
+                ui.terminal_entries.with(|rows| {
+                    rows.iter()
+                        .filter(|e| e.listed() && !closing.contains(&e.saved.id))
+                        .map(|e| {
+                            let loc = e.location.as_ref();
                             (
-                                loc.and_then(|l| l.branch.clone()),
-                                loc.is_some_and(|l| l.dirty),
-                                loc.map_or(0, |l| l.additions),
-                                loc.map_or(0, |l| l.deletions),
-                                loc.map_or(0, |l| l.ahead),
-                                loc.map_or(0, |l| l.behind),
-                            ),
-                            super::labels::sidebar_hint(
-                                e,
-                                &if e.machine() == "local" {
-                                    "Local".into()
-                                } else {
-                                    crate::machines::name(ui, e.machine())
-                                },
-                            ),
-                            (e.ended(), e.inactive(), e.needs_attention()),
-                            (e.herdr_status(), e.wait_summary()),
-                            e.provider(),
+                                e.saved.id.clone(),
+                                entry_scope(s, e),
+                                (
+                                    loc.and_then(|l| l.branch.clone()),
+                                    loc.is_some_and(|l| l.dirty),
+                                    loc.map_or(0, |l| l.additions),
+                                    loc.map_or(0, |l| l.deletions),
+                                    loc.map_or(0, |l| l.ahead),
+                                    loc.map_or(0, |l| l.behind),
+                                ),
+                                super::labels::sidebar_hint(
+                                    e,
+                                    &if e.machine() == "local" {
+                                        "Local".into()
+                                    } else {
+                                        crate::machines::name(ui, e.machine())
+                                    },
+                                ),
+                                (e.ended(), e.inactive(), e.needs_attention()),
+                                (e.herdr_status(), e.wait_summary()),
+                                e.provider(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+            });
+            (
+                s.projects
+                    .iter()
+                    .map(|p| (p.id.clone(), p.name.clone(), p.target_branch.clone()))
+                    .collect::<Vec<_>>(),
+                s.cards
+                    .iter()
+                    .map(|c| {
+                        (
+                            c.id.clone(),
+                            c.number,
+                            c.title.clone(),
+                            c.branch.clone(),
+                            c.archived_at,
                         )
                     })
-                    .collect::<Vec<_>>()
-            })
-        });
-        (
-            s.projects
-                .iter()
-                .map(|p| (p.id.clone(), p.name.clone(), p.target_branch.clone()))
-                .collect::<Vec<_>>(),
-            s.cards
-                .iter()
-                .map(|c| {
-                    (
-                        c.id.clone(),
-                        c.number,
-                        c.title.clone(),
-                        c.branch.clone(),
-                        c.archived_at,
-                    )
-                })
-                .collect::<Vec<_>>(),
-            s.worktrees
-                .iter()
-                .map(|w| {
-                    (
-                        w.id.clone(),
-                        w.project_id.clone(),
-                        w.branch.clone(),
-                        w.path.clone(),
-                    )
-                })
-                .collect::<Vec<_>>(),
-            entry_rows,
-        )
+                    .collect::<Vec<_>>(),
+                s.worktrees
+                    .iter()
+                    .map(|w| {
+                        (
+                            w.id.clone(),
+                            w.project_id.clone(),
+                            w.branch.clone(),
+                            w.path.clone(),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                entry_rows,
+            )
+        })
     });
     view()
         .flex_1()

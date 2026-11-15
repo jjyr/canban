@@ -1,24 +1,22 @@
 use super::*;
 use canban_types::{Card, Snapshot};
 
-/// A read-only index of saved content. Drafts never mutate Card identity or GitHub.
-pub fn related(card: &Card, snapshot: &Snapshot) -> Vec<GitHubReference> {
+fn may_contain_github_url(text: &str) -> bool {
+    const NEEDLE: &[u8] = b"github.com";
+    text.as_bytes()
+        .windows(NEEDLE.len())
+        .any(|w| w.eq_ignore_ascii_case(NEEDLE))
+}
+
+fn collect_filtered_refs<'a>(
+    card: &Card,
+    bodies: impl IntoIterator<Item = &'a str>,
+) -> Vec<GitHubReference> {
     let mut refs = card.github_links.clone(); // Keep legacy explicit references visible.
-    let mut bodies = vec![card.body.as_str()];
-    if let Some(source) = card.github_issue()
-        && let Some(issue) = snapshot
-            .github_issues
-            .iter()
-            .find(|i| i.project_id == card.project_id && i.source == *source)
-    {
-        bodies.push(&issue.body);
-    }
-    for event in snapshot.events.iter().filter(|e| {
-        e.card_id == card.id && matches!(e.kind.as_str(), "comment.created" | "comment.replied")
-    }) {
-        bodies.push(event.data["body"].as_str().unwrap_or(&event.message));
-    }
     for body in bodies {
+        if !may_contain_github_url(body) {
+            continue;
+        }
         refs.extend(
             crate::links::content_links(body)
                 .into_iter()
@@ -43,12 +41,54 @@ pub fn related(card: &Card, snapshot: &Snapshot) -> Vec<GitHubReference> {
     });
     refs
 }
+
+/// A read-only index of saved content. Drafts never mutate Card identity or GitHub.
+pub fn related(card: &Card, snapshot: &Snapshot) -> Vec<GitHubReference> {
+    let mut bodies = vec![card.body.as_str()];
+    if let Some(source) = card.github_issue()
+        && let Some(issue) = snapshot
+            .github_issues
+            .iter()
+            .find(|i| i.project_id == card.project_id && i.source == *source)
+    {
+        bodies.push(&issue.body);
+    }
+    for event in snapshot.events.iter().filter(|e| {
+        e.card_id == card.id && matches!(e.kind.as_str(), "comment.created" | "comment.replied")
+    }) {
+        bodies.push(event.data["body"].as_str().unwrap_or(&event.message));
+    }
+    collect_filtered_refs(card, bodies)
+}
+
+pub(crate) fn related_indexed(
+    card: &Card,
+    index: &crate::index::SnapshotIndex,
+) -> Vec<GitHubReference> {
+    let mut bodies = vec![card.body.as_str()];
+    if let Some(source) = card.github_issue()
+        && let Some(issue) =
+            index.github_issue(&card.project_id, source.repository_id, source.issue_id)
+    {
+        bodies.push(&issue.body);
+    }
+    if let Some(events) = index.events_by_card.get(&card.id) {
+        for event in events
+            .iter()
+            .filter(|e| matches!(e.kind.as_str(), "comment.created" | "comment.replied"))
+        {
+            bodies.push(event.data["body"].as_str().unwrap_or(&event.message));
+        }
+    }
+    collect_filtered_refs(card, bodies)
+}
+
 pub fn panel(ui: Ui) -> impl IntoElement {
     dynamic(move || {
         let Some(c) = ui.current_card() else {
             return view().into_element();
         };
-        let refs = ui.snapshot.with(|s| related(&c, s));
+        let refs = ui.index.with(|idx| related_indexed(&c, idx));
         let mut area = view().gap_1();
         if !refs.is_empty() {
             let mut row = view()

@@ -83,7 +83,6 @@ pub fn panel(ui: Ui) -> impl IntoElement {
     view()
         .gap_1()
         .child(dynamic(move || {
-            let _ = ui.snapshot.get();
             let location = ui
                 .current_card()
                 .and_then(|c| c.workspace.map(|w| w.location))

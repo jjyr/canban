@@ -45,6 +45,9 @@ pub fn init(ui: Ui) {
     set_interval(std::time::Duration::from_secs(5), move || {
         usage(ui, machine(ui), false)
     });
+    set_interval(std::time::Duration::from_secs(60), move || {
+        ui.utility_clock.set(canban_types::now() / 1000);
+    });
     effect(move || {
         let v = ui.utility.get();
         let saved = v["preferences"]["theme"]
@@ -351,10 +354,6 @@ pub fn toggle_awake(ui: Ui) {
     });
 }
 pub fn bar(ui: Ui) -> impl IntoElement {
-    let clock = signal(canban_types::now() / 1000);
-    set_interval(std::time::Duration::from_secs(60), move || {
-        clock.set(canban_types::now() / 1000);
-    });
     view()
         .h(px(32.))
         .flex_shrink_0()
@@ -366,7 +365,7 @@ pub fn bar(ui: Ui) -> impl IntoElement {
         .gap_1()
         .px_2()
         .bg(SURFACE)
-        .child(dynamic(move || usage_summary(ui, clock.get())))
+        .child(dynamic(move || usage_summary(ui, ui.utility_clock.get())))
         .child(view().flex_1().min_w(px(0.)))
         .child(utility_button(
             Icon::Coffee,

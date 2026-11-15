@@ -147,21 +147,27 @@ impl Reader {
                 }
                 let sequence = ui.snapshot.with_untracked(|s| {
                     let through = canban_notifications::read_sequence(s, &card);
-                    self.rows.with(|rows| {
-                        rows.iter()
-                            .filter(|(seq, b)| {
-                                **seq > through
-                                    && visible(b.origin.y.0, b.size.height.0, offset, height)
-                            })
-                            .filter(|(seq, _)| {
-                                s.events.iter().any(|e| {
-                                    e.card_id == card
-                                        && e.sequence == **seq
-                                        && canban_notifications::message_id(s, e).is_some()
+                    ui.index.with_untracked(|idx| {
+                        let card_events = idx
+                            .events_by_card
+                            .get(&card)
+                            .map(|rc| rc.as_slice())
+                            .unwrap_or(&[]);
+                        self.rows.with(|rows| {
+                            rows.iter()
+                                .filter(|(seq, b)| {
+                                    **seq > through
+                                        && visible(b.origin.y.0, b.size.height.0, offset, height)
                                 })
-                            })
-                            .map(|(seq, _)| *seq)
-                            .max()
+                                .filter(|(seq, _)| {
+                                    card_events.iter().any(|e| {
+                                        e.sequence == **seq
+                                            && canban_notifications::message_id(s, e).is_some()
+                                    })
+                                })
+                                .map(|(seq, _)| *seq)
+                                .max()
+                        })
                     })
                 });
                 let Some(sequence) = sequence else {

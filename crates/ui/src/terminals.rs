@@ -133,9 +133,11 @@ pub fn watch(ui: Ui) {
 }
 pub fn selected(ui: Ui) -> Option<OverviewRow> {
     let sel = ui.terminal_selection.get();
-    model::conversations(&ui.snapshot.get())
-        .into_iter()
-        .find(|r| r.id == sel)
+    ui.overview_rows.with(|rows| {
+        rows.iter()
+            .find(|r| r.id == sel && r.terminal.is_some())
+            .cloned()
+    })
 }
 pub fn current(ui: Ui) -> Option<Entry> {
     let sel = ui.terminal_selection.get();
@@ -151,18 +153,19 @@ pub fn scope_tabs(ui: Ui) -> Vec<Entry> {
     let Some(cur) = current(ui) else {
         return Vec::new();
     };
-    let s = ui.snapshot.get();
-    let target_scope = worktrees::entry_scope(&s, &cur);
-    ui.closing_terminals.with(|closing| {
-        ui.terminal_entries.with(|rows| {
-            rows.iter()
-                .filter(|e| {
-                    e.listed()
-                        && !closing.contains(&e.saved.id)
-                        && worktrees::entry_scope(&s, e) == target_scope
-                })
-                .cloned()
-                .collect()
+    ui.snapshot.with(|s| {
+        let target_scope = worktrees::entry_scope(s, &cur);
+        ui.closing_terminals.with(|closing| {
+            ui.terminal_entries.with(|rows| {
+                rows.iter()
+                    .filter(|e| {
+                        e.listed()
+                            && !closing.contains(&e.saved.id)
+                            && worktrees::entry_scope(s, e) == target_scope
+                    })
+                    .cloned()
+                    .collect()
+            })
         })
     })
 }

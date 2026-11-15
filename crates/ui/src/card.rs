@@ -120,6 +120,8 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         let _ = ui.quick_open.get();
         let _ = ui.utility_popup.get();
         let _ = ui.native_modal.get();
+        let active_destination = matches!(page.as_str(), "card" | "review")
+            && untracked(|| ui.card_id()) == ui.card.get_untracked();
         if !matches!(page.as_str(), "card" | "review") {
             reading.editor.with(|ed| {
                 if let Some(editor) = ed {
@@ -127,7 +129,9 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 }
             });
         }
-        reading.reader.check(ui);
+        if active_destination {
+            reading.reader.check(ui);
+        }
     });
     let viewport_height = stored(0f32);
     let reminder_card = card.id.clone();
@@ -144,22 +148,18 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             }
         }
     });
-    let last_event = stored(ui.snapshot.with_untracked(|s| {
-        s.events
-            .iter()
-            .filter(|e| e.card_id == id)
-            .map(|e| e.sequence)
-            .max()
+    let last_event = stored(ui.index.with_untracked(|idx| {
+        idx.events_by_card
+            .get(&id)
+            .and_then(|evs| evs.iter().map(|e| e.sequence).max())
             .unwrap_or(0)
     }));
     let event_card = card.id.clone();
     effect(move || {
-        let last = ui.snapshot.with(|s| {
-            s.events
-                .iter()
-                .filter(|e| e.card_id == event_card)
-                .map(|e| e.sequence)
-                .max()
+        let last = ui.index.with(|idx| {
+            idx.events_by_card
+                .get(&event_card)
+                .and_then(|evs| evs.iter().map(|e| e.sequence).max())
                 .unwrap_or(0)
         });
         let before = last_event.replace(last);

@@ -4,6 +4,7 @@ use std::sync::Arc;
 pub mod agents_setup;
 pub mod archive;
 pub mod board;
+pub(crate) mod cache;
 pub mod card;
 mod card_actions;
 pub mod commands;
@@ -14,6 +15,7 @@ pub mod editor;
 pub mod frame;
 pub mod github;
 pub mod hosts;
+pub(crate) mod index;
 pub mod links;
 pub mod machines;
 pub mod navigation;
@@ -111,8 +113,9 @@ pub(crate) fn workspace_root() -> impl IntoElement {
     projects::selection::remember(ui);
     terminals::bindings(ui);
     let window = nsh_core::element::desktop::current_window();
+    let in_terminals = computed(move || ui.page.get() == "terminals");
     effect(move || {
-        if ui.page.get() != "terminals" {
+        if !in_terminals.get() {
             let mut attributes = nsh_core::desktop::WindowAttributes::default();
             attributes.title = Some("Canban — Human Context".into());
             window.set(attributes);

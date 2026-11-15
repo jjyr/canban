@@ -9,10 +9,15 @@ pub fn strip(ui: Ui) -> impl IntoElement {
     let width = signal(0_f32);
     let rows = computed(move || {
         let current = ui.project.get();
-        model::projects(&ui.snapshot.get(), &ui.recent_destinations.get())
-            .into_iter()
-            .filter(|r| r.id != current)
-            .collect::<Vec<_>>()
+        let idx = ui.index.get();
+        ui.reminders.with(|reminders| {
+            ui.recent_destinations.with(|recent| {
+                model::projects_from_reminders(&idx.project_order, reminders, recent)
+                    .into_iter()
+                    .filter(|r| r.id != current)
+                    .collect::<Vec<_>>()
+            })
+        })
     });
     let order = signal(Vec::<String>::new());
     effect(move || {

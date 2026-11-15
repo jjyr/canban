@@ -29,8 +29,6 @@ pub(crate) struct CardTileModel {
 
 impl CardTileModel {
     pub fn build(ui: Ui, card: Card) -> Self {
-        let snapshot = ui.snapshot.get();
-        let local_tags = ui.local_tags.get();
         let active_tags = ui.github.filters.with(|all| {
             all.get(&card.project_id)
                 .map(|f| f.tags.clone())
@@ -43,19 +41,22 @@ impl CardTileModel {
                 .cloned()
                 .collect::<Vec<_>>()
         });
-        Self::from_parts(
-            &snapshot,
-            &local_tags,
-            active_tags,
-            ui_merging,
-            live_entries,
-            card,
-        )
+        let idx = ui.index.get();
+        let known_index = ui.known_tags.get();
+        ui.snapshot.with(|snapshot| {
+            Self::from_indexed(
+                snapshot,
+                &idx,
+                &known_index,
+                active_tags,
+                ui_merging,
+                live_entries,
+                card,
+            )
+        })
     }
 
     pub fn from_snapshot(ui: Ui, card: Card) -> Self {
-        let snapshot = ui.snapshot.get_untracked();
-        let local_tags = ui.local_tags.get_untracked();
         let active_tags = ui.github.filters.with_untracked(|all| {
             all.get(&card.project_id)
                 .map(|f| f.tags.clone())
@@ -64,20 +65,31 @@ impl CardTileModel {
         let ui_merging = ui
             .merging_cards
             .with_untracked(|ids| ids.contains(&card.id));
-        let live_entries = crate::terminals::card_live_entries(&snapshot, &card.id);
-        Self::from_parts(
-            &snapshot,
-            &local_tags,
-            active_tags,
-            ui_merging,
-            live_entries,
-            card,
-        )
+        let live_entries = ui.terminal_entries.with_untracked(|rows| {
+            rows.iter()
+                .filter(|e| crate::terminals::is_card_live_entry(e, &card.id))
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        let idx = ui.index.get_untracked();
+        let known_index = ui.known_tags.get_untracked();
+        ui.snapshot.with_untracked(|snapshot| {
+            Self::from_indexed(
+                snapshot,
+                &idx,
+                &known_index,
+                active_tags,
+                ui_merging,
+                live_entries,
+                card,
+            )
+        })
     }
 
-    fn from_parts(
+    fn from_indexed(
         snapshot: &Snapshot,
-        local_tags: &std::collections::BTreeSet<String>,
+        idx: &crate::index::SnapshotIndex,
+        known_index: &crate::index::KnownTagsIndex,
         active_tags: Vec<String>,
         ui_merging: bool,
         live_entries: Vec<crate::terminals::Entry>,
@@ -86,27 +98,36 @@ impl CardTileModel {
         let has_terminal = !live_entries.is_empty();
         let terminal_tint = card_terminal_icon_tint(&live_entries, false);
         let github_cached = card.github_issue().and_then(|source| {
-            snapshot
-                .github_issues
-                .iter()
-                .find(|v| {
-                    v.project_id == card.project_id
-                        && v.source.repository_id == source.repository_id
-                        && v.source.issue_id == source.issue_id
-                })
+            idx.github_issue(&card.project_id, source.repository_id, source.issue_id)
                 .map(|v| (v.state.clone(), v.author_login.clone()))
         });
-        let known_tags = crate::tags::known_map(snapshot, local_tags, Some(&card.project_id));
-        let tags = crate::tags::card_tags(&card, &known_tags);
-        let status_specs =
-            crate::components::activity::card_status_specs(snapshot, &card, ui_merging);
-        let running = crate::components::activity::running_agents(snapshot, &card)
-            .into_iter()
-            .map(|req| {
-                let started = crate::components::activity::agent_started_at(snapshot, &req);
-                (req, started)
-            })
-            .collect();
+        let matches_indexed = idx.cards.get(&card.id) == Some(&card);
+        let tags = if matches_indexed && card.removed_at.is_none() {
+            known_index.tags_for_card(&card.id)
+        } else {
+            let known_tags = known_index.for_project(Some(&card.project_id));
+            crate::tags::card_tags(&card, &known_tags)
+        };
+        let (status_specs, running) = if matches_indexed
+            && let Some(digest) = idx.card_status.get(&card.id)
+        {
+            let specs = if ui_merging {
+                digest.specs_ui_merging.clone()
+            } else {
+                digest.specs_normal.clone()
+            };
+            (specs, digest.running.clone())
+        } else {
+            let specs = crate::components::activity::card_status_specs(snapshot, &card, ui_merging);
+            let running = crate::components::activity::running_agents(snapshot, &card)
+                .into_iter()
+                .map(|req| {
+                    let started = crate::components::activity::agent_started_at(snapshot, &req);
+                    (req, started)
+                })
+                .collect();
+            (specs, running)
+        };
         let ephemeral_agents = live_entries
             .iter()
             .filter(|e| e.agent.is_none() && e.saved.has_active_agent())
@@ -117,7 +138,7 @@ impl CardTileModel {
                 (entry, started_at)
             })
             .collect();
-        let replies = crate::card::timeline::reply_count(&snapshot.events, &card.id);
+        let replies = idx.reply_count(&card.id);
         Self {
             card,
             live_entries,
@@ -158,6 +179,7 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
             .with(|all| all.get(&reminder_id).copied().unwrap_or_default())
     });
     let selected_id = card.id.clone();
+    let is_selected = computed(move || ui.card.with(|cid| cid == &selected_id));
     let terminal_card = card.id.clone();
     let card_number = card.number;
     let archive_card = card.clone();
@@ -174,7 +196,7 @@ pub(crate) fn card_tile_from_model(ui: Ui, model: CardTileModel) -> View {
         .on_mouse_enter(move |_: &MouseEvent| hovered.set(true))
         .on_mouse_leave(move |_: &MouseEvent| hovered.set(false))
         .bg(move || {
-            if ui.card.get() == selected_id {
+            if is_selected.get() {
                 SELECTED.resolve()
             } else if merged {
                 INSET.resolve()

@@ -55,16 +55,31 @@ fn subpage_chrome(
         .child(view().flex_1().h_full().window_drag(true))
 }
 
+#[derive(Clone, PartialEq, Eq)]
+enum ChromeMode {
+    Board,
+    FullCard,
+    Subpage(String),
+}
+
 fn route_chrome(ui: Ui) -> impl IntoElement {
-    dynamic(move || {
+    let mode = computed(move || {
         let p = ui.page.get();
         let full_card = p == "card"
             && (ui.card_standalone.get() || ui.narrow.get() || ui.card_terminal_open.get());
-        if p == "board" || (p == "card" && !full_card) || p == "new-card" {
-            return crate::board::chrome_bar(ui).into_element();
+        if matches!(p.as_str(), "board" | "new-card" | "terminals") || (p == "card" && !full_card) {
+            ChromeMode::Board
+        } else if full_card {
+            ChromeMode::FullCard
+        } else {
+            ChromeMode::Subpage(p)
         }
-        if full_card {
-            return view()
+    });
+    dynamic(move || {
+        let current = mode.get();
+        untracked(|| match current {
+            ChromeMode::Board => crate::board::chrome_bar(ui).into_element(),
+            ChromeMode::FullCard => view()
                 .flex_1()
                 .min_w(px(0.))
                 .h_full()
@@ -100,91 +115,96 @@ fn route_chrome(ui: Ui) -> impl IntoElement {
                         ),
                 )
                 .child(view().flex_1().h_full().window_drag(true))
-                .into_element();
-        }
-        match p.as_str() {
-            "github" => crate::github::workspace::chrome_bar(ui).into_element(),
-            "github-account" => subpage_chrome(
-                ui,
-                Some(("← GitHub", "github")),
-                "GitHub / Account & access",
-            )
-            .into_element(),
-            "github-repository" => subpage_chrome(ui, Some(("← Board", "board")), move || {
-                ui.current_project()
-                    .map(|pr| format!("{} / GitHub repository", pr.name))
-                    .unwrap_or_else(|| "GitHub repository".into())
-            })
-            .into_element(),
-            "workflows" => crate::workflows::chrome_bar(ui).into_element(),
-            "review" => view()
-                .flex_1()
-                .min_w(px(0.))
-                .h_full()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .pl_2()
-                .window_drag(true)
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .min_w(px(0.))
-                        .window_drag(false)
-                        .child(icon(Icon::Compare).w(px(14.)).h(px(14.)))
-                        .child(
-                            label(move || {
-                                if let Some(c) = ui.current_card() {
-                                    format!("Git · #{} {}", c.number, c.title)
-                                } else if let Some(pr) = ui.current_project() {
-                                    format!("Git · {}", pr.name)
-                                } else {
-                                    "Git".into()
-                                }
-                            })
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_size(px(13.5))
-                            .truncate()
-                            .min_w(px(0.)),
-                        ),
-                )
-                .child(view().flex_1().h_full().window_drag(true))
                 .into_element(),
-            "settings" => subpage_chrome(ui, None, "Settings").into_element(),
-            "machines" => {
-                subpage_chrome(ui, Some(("← Settings", "settings")), "Settings / Machines")
+            ChromeMode::Subpage(p) => match p.as_str() {
+                "github" => crate::github::workspace::chrome_bar(ui).into_element(),
+                "github-account" => subpage_chrome(
+                    ui,
+                    Some(("← GitHub", "github")),
+                    "GitHub / Account & access",
+                )
+                .into_element(),
+                "github-repository" => {
+                    subpage_chrome(ui, Some(("← Board", "board")), move || {
+                        ui.current_project()
+                            .map(|pr| format!("{} / GitHub repository", pr.name))
+                            .unwrap_or_else(|| "GitHub repository".into())
+                    })
                     .into_element()
-            }
-            "archive" => subpage_chrome(ui, Some(("← Board", "board")), move || {
-                ui.current_project()
-                    .map(|pr| format!("{} / Archive", pr.name))
-                    .unwrap_or_else(|| "Archive".into())
-            })
-            .into_element(),
-            "drafts" => subpage_chrome(ui, Some(("← Board", "board")), "Drafts").into_element(),
-            "new-project" => {
-                subpage_chrome(ui, Some(("← Board", "board")), "New Project").into_element()
-            }
-            "project-location" => subpage_chrome(ui, Some(("← Board", "board")), move || {
-                ui.current_project()
-                    .map(|pr| format!("{} / Work location", pr.name))
-                    .unwrap_or_else(|| "Work location".into())
-            })
-            .into_element(),
-            "project-agents" => subpage_chrome(ui, Some(("← Board", "board")), move || {
-                ui.current_project()
-                    .map(|pr| format!("{} / Project Agents", pr.name))
-                    .unwrap_or_else(|| "Project Agents".into())
-            })
-            .into_element(),
-            "agent-setup" => {
-                subpage_chrome(ui, Some(("← Settings", "settings")), "Agent Setup").into_element()
-            }
-            "overview" | "agents" => subpage_chrome(ui, None, "Activity & Overview").into_element(),
-            _ => view().flex_1().h_full().window_drag(true).into_element(),
-        }
+                }
+                "workflows" => crate::workflows::chrome_bar(ui).into_element(),
+                "review" => view()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h_full()
+                    .flex_row()
+                    .items_center()
+                    .gap_1p5()
+                    .pl_2()
+                    .window_drag(true)
+                    .child(
+                        view()
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .min_w(px(0.))
+                            .window_drag(false)
+                            .child(icon(Icon::Compare).w(px(14.)).h(px(14.)))
+                            .child(
+                                label(move || {
+                                    if let Some(c) = ui.current_card() {
+                                        format!("Git · #{} {}", c.number, c.title)
+                                    } else if let Some(pr) = ui.current_project() {
+                                        format!("Git · {}", pr.name)
+                                    } else {
+                                        "Git".into()
+                                    }
+                                })
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_size(px(13.5))
+                                .truncate()
+                                .min_w(px(0.)),
+                            ),
+                    )
+                    .child(view().flex_1().h_full().window_drag(true))
+                    .into_element(),
+                "settings" => subpage_chrome(ui, None, "Settings").into_element(),
+                "machines" => {
+                    subpage_chrome(ui, Some(("← Settings", "settings")), "Settings / Machines")
+                        .into_element()
+                }
+                "archive" => subpage_chrome(ui, Some(("← Board", "board")), move || {
+                    ui.current_project()
+                        .map(|pr| format!("{} / Archive", pr.name))
+                        .unwrap_or_else(|| "Archive".into())
+                })
+                .into_element(),
+                "drafts" => subpage_chrome(ui, Some(("← Board", "board")), "Drafts").into_element(),
+                "new-project" => {
+                    subpage_chrome(ui, Some(("← Board", "board")), "New Project").into_element()
+                }
+                "project-location" => subpage_chrome(ui, Some(("← Board", "board")), move || {
+                    ui.current_project()
+                        .map(|pr| format!("{} / Work location", pr.name))
+                        .unwrap_or_else(|| "Work location".into())
+                })
+                .into_element(),
+                "project-agents" => subpage_chrome(ui, Some(("← Board", "board")), move || {
+                    ui.current_project()
+                        .map(|pr| format!("{} / Project Agents", pr.name))
+                        .unwrap_or_else(|| "Project Agents".into())
+                })
+                .into_element(),
+                "agent-setup" => {
+                    subpage_chrome(ui, Some(("← Settings", "settings")), "Agent Setup")
+                        .into_element()
+                }
+                "overview" | "agents" => {
+                    subpage_chrome(ui, None, "Activity & Overview").into_element()
+                }
+                _ => view().flex_1().h_full().window_drag(true).into_element(),
+            },
+        })
     })
 }
 
@@ -200,13 +220,56 @@ pub fn backend_notice(ui: Ui) -> impl IntoElement {
     )
 }
 
+fn is_workspace_page(page: &str) -> bool {
+    matches!(page, "board" | "card" | "new-card")
+        || !matches!(
+            page,
+            "agent-setup"
+                | "project-agents"
+                | "workflows"
+                | "machines"
+                | "project-location"
+                | "new-project"
+                | "terminals"
+                | "terminal"
+                | "overview"
+                | "agents"
+                | "review"
+                | "drafts"
+                | "archive"
+                | "settings"
+                | "github"
+                | "github-account"
+                | "github-repository"
+        )
+}
+
 pub fn screen(ui: Ui) -> impl IntoElement {
-    let route = computed(move || {
+    let in_terminals = computed(move || matches!(ui.page.get().as_str(), "terminals" | "terminal"));
+    let is_workspace = computed(move || is_workspace_page(&ui.page.get()));
+    let shell_mounted = signal(!in_terminals.get_untracked());
+    effect(move || {
+        if !in_terminals.get() && !shell_mounted.get_untracked() {
+            shell_mounted.set(true);
+        }
+    });
+    let workspace_project = signal::<Option<String>>(if is_workspace.get_untracked() {
+        Some(ui.project.get_untracked())
+    } else {
+        None
+    });
+    effect(move || {
+        let project = ui.project.get();
+        if is_workspace.get() && workspace_project.get_untracked().as_ref() != Some(&project) {
+            workspace_project.set(Some(project));
+        }
+    });
+    let subpage_route = computed(move || {
         let page = ui.page.get();
-        if matches!(page.as_str(), "board" | "card" | "new-card") {
-            ("workspace".to_owned(), String::new(), ui.project.get())
+        if matches!(page.as_str(), "terminals" | "terminal") || is_workspace_page(&page) {
+            None
         } else {
-            (page, ui.card.get(), ui.project.get())
+            Some((page, ui.card.get(), ui.project.get()))
         }
     });
     view()
@@ -214,59 +277,99 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .min_h(px(0.))
         .bg(BACKGROUND)
         .on_layout(move |b: &Bounds<Points>| ui.narrow.set(b.size.width.0 < 950.))
-        .child(dynamic(move || {
-            let (page, _, _) = route.get();
-            untracked(|| {
-                if page == "terminals" {
-                    terminals::screen(ui).into_element()
-                } else {
-                    view()
-                        .flex_1()
-                        .min_h(px(0.))
-                        .child(
-                            view()
-                                .h(px(42.))
-                                .flex_shrink_0()
-                                .flex_row()
-                                .items_center()
-                                .gap_1()
-                                .bg(canban_ui_kit::tokens::SURFACE)
-                                .border_b_1()
-                                .border_color(canban_ui_kit::tokens::BORDER)
-                                .window_drag(true)
-                                .pl(move || px(chrome_left_padding()))
-                                .pr(px(10.))
-                                .child(crate::navigation::controls(ui))
-                                .child(route_chrome(ui))
-                                .child(crate::hosts::trigger_pill(ui))
-                                .child(crate::overview::trigger_pill(ui)),
-                        )
-                        .child(
-                            view()
-                                .flex_1()
-                                .min_h(px(0.))
-                                .flex_row()
-                                .child(sidebar(ui))
-                                .child(
-                                    view()
-                                        .flex_1()
-                                        .min_h(px(0.))
-                                        .min_w(px(0.))
-                                        .child(
-                                            view()
-                                                .flex_1()
-                                                .min_h(px(0.))
-                                                .min_w(px(0.))
-                                                .child(screens::screen(ui, &page)),
-                                        )
-                                        .child(backend_notice(ui))
-                                        .child(crate::utilities::bar(ui)),
-                                ),
-                        )
-                        .into_element()
-                }
-            })
-        }))
+        .child(when(
+            move || in_terminals.get(),
+            move || terminals::screen(ui),
+        ))
+        .child(when(
+            move || shell_mounted.get(),
+            move || {
+                view()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .style_when(move || in_terminals.get(), |s| s.hidden())
+                    .accessibility_elements_hidden(move || in_terminals.get())
+                    .pointer_events(move || {
+                        if in_terminals.get() {
+                            PointerEvents::None
+                        } else {
+                            PointerEvents::Auto
+                        }
+                    })
+                    .child(
+                        view()
+                            .h(px(42.))
+                            .flex_shrink_0()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .bg(canban_ui_kit::tokens::SURFACE)
+                            .border_b_1()
+                            .border_color(canban_ui_kit::tokens::BORDER)
+                            .window_drag(true)
+                            .pl(move || px(chrome_left_padding()))
+                            .pr(px(10.))
+                            .child(crate::navigation::controls(ui))
+                            .child(route_chrome(ui))
+                            .child(crate::hosts::trigger_pill(ui))
+                            .child(crate::overview::trigger_pill(ui)),
+                    )
+                    .child(
+                        view()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .flex_row()
+                            .child(sidebar(ui))
+                            .child(
+                                view()
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .min_w(px(0.))
+                                    .child(
+                                        view()
+                                            .flex_1()
+                                            .min_h(px(0.))
+                                            .min_w(px(0.))
+                                            .child(dynamic(move || {
+                                                let Some(_project) = workspace_project.get() else {
+                                                    return view().into_element();
+                                                };
+                                                untracked(|| {
+                                                    view()
+                                                        .flex_1()
+                                                        .min_h(px(0.))
+                                                        .min_w(px(0.))
+                                                        .style_when(
+                                                            move || !is_workspace.get(),
+                                                            |s| s.hidden(),
+                                                        )
+                                                        .accessibility_elements_hidden(move || {
+                                                            !is_workspace.get()
+                                                        })
+                                                        .pointer_events(move || {
+                                                            if is_workspace.get() {
+                                                                PointerEvents::Auto
+                                                            } else {
+                                                                PointerEvents::None
+                                                            }
+                                                        })
+                                                        .child(crate::workspace::screen(ui))
+                                                        .into_element()
+                                                })
+                                            }))
+                                            .child(dynamic(move || {
+                                                let Some((page, _, _)) = subpage_route.get() else {
+                                                    return view().into_element();
+                                                };
+                                                untracked(|| screens::screen(ui, &page))
+                                            })),
+                                    )
+                                    .child(backend_notice(ui))
+                                    .child(crate::utilities::bar(ui)),
+                            ),
+                    )
+            },
+        ))
         .child(when(
             move || ui.operation_error.get().is_empty() && !ui.toast.get().is_empty(),
             move || {
@@ -337,4 +440,334 @@ pub fn screen(ui: Ui) -> impl IntoElement {
         .child(terminals::tabs::close_confirm_dialog(ui))
         .child(crate::terminals::worktrees::modals(ui))
         .child(crate::review::git_ops::render_discard_modal(ui))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canban_types::{Card, Project, Snapshot, Workflow};
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventPayload, MountBatch, MountItem, NodeId,
+        element::JsEvent, geometry::size,
+    };
+    use serde_json::json;
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
+    struct TreeTracker {
+        alive: HashSet<NodeId>,
+        parents: HashMap<NodeId, NodeId>,
+        texts: HashMap<NodeId, String>,
+        custom_components: HashMap<NodeId, String>,
+        labels: HashMap<String, NodeId>,
+    }
+
+    impl TreeTracker {
+        fn new() -> Self {
+            Self {
+                alive: HashSet::new(),
+                parents: HashMap::new(),
+                texts: HashMap::new(),
+                custom_components: HashMap::new(),
+                labels: HashMap::new(),
+            }
+        }
+
+        fn apply(&mut self, batch: &MountBatch) {
+            for item in &batch.items {
+                match item {
+                    MountItem::Create { id, .. } => {
+                        self.alive.insert(*id);
+                    }
+                    MountItem::Component { id, name } => {
+                        self.custom_components.insert(*id, name.to_string());
+                    }
+                    MountItem::Insert { parent, child, .. } => {
+                        self.parents.insert(*child, *parent);
+                    }
+                    MountItem::Remove { id } => {
+                        self.parents.remove(id);
+                    }
+                    MountItem::Delete { id } => {
+                        self.alive.remove(id);
+                        self.parents.remove(id);
+                        self.texts.remove(id);
+                        self.custom_components.remove(id);
+                    }
+                    MountItem::Text { id, text, .. } => {
+                        self.texts.insert(*id, text.text.to_string());
+                    }
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(label) = &props.accessibility.label {
+                            self.labels.insert(label.to_string(), *id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn is_mounted(&self, mut id: NodeId) -> bool {
+            if !self.alive.contains(&id) {
+                return false;
+            }
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let Some(&parent) = self.parents.get(&id) else {
+                    return false;
+                };
+                id = parent;
+                guard += 1;
+                if guard > 256 {
+                    return false;
+                }
+            }
+            true
+        }
+
+        fn mounted_node_for_text(&self, needle: &str) -> Option<NodeId> {
+            self.texts
+                .iter()
+                .find(|(id, t)| *t == needle && self.is_mounted(**id))
+                .map(|(id, _)| *id)
+        }
+
+        fn mounted_custom_count(&self, component_name: &str) -> usize {
+            self.custom_components
+                .iter()
+                .filter(|(id, name)| *name == component_name && self.is_mounted(**id))
+                .count()
+        }
+    }
+
+    fn pump(core: &mut Core<ApproxTextEngine>, tree: &mut TreeTracker) {
+        for _ in 0..8 {
+            let had_batch = if let Some(batch) = core.commit() {
+                tree.apply(&batch);
+                true
+            } else {
+                false
+            };
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            let mut dispatched = false;
+            for ev in events {
+                match ev {
+                    JsEvent::Event(id, kind, payload) => {
+                        core.component_event(id, kind, &payload);
+                        dispatched = true;
+                    }
+                    JsEvent::LayoutListener {
+                        host,
+                        id,
+                        listener,
+                        frame,
+                    } => {
+                        core.component_layout(host, id, &listener, frame);
+                        dispatched = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !had_batch && !dispatched {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn frame_preserves_board_workspace_and_chrome_across_card_and_terminals_transitions() {
+        #[component]
+        fn FrameHarness() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut snapshot = Snapshot::default();
+            snapshot.projects.push(Project {
+                id: "proj-1".into(),
+                name: "Canban".into(),
+                directory: "/tmp/canban".into(),
+                location: None,
+                github: None,
+                detected_github: None,
+                github_disconnected: false,
+                delivery_mode: Default::default(),
+                agent_overrides: BTreeMap::new(),
+                tags: vec!["perf".into()],
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: 1,
+            });
+            snapshot.projects.push(Project {
+                id: "proj-2".into(),
+                name: "OtherProject".into(),
+                directory: "/tmp/other".into(),
+                location: None,
+                github: None,
+                detected_github: None,
+                github_disconnected: false,
+                delivery_mode: Default::default(),
+                agent_overrides: BTreeMap::new(),
+                tags: Vec::new(),
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: 2,
+            });
+            let card: Card = serde_json::from_value(json!({
+                "id": "card-88",
+                "project_id": "proj-1",
+                "number": 88,
+                "title": "Smooth Card & Terminals Transitions",
+                "body": "Verify retained Board subtree.",
+                "stage": "develop",
+                "revision": 1,
+                "created_at": 1
+            }))
+            .unwrap();
+            snapshot.cards.push(card);
+            snapshot.terminals.push(canban_types::TerminalEntry {
+                id: "term-1".into(),
+                conversation_id: None,
+                number: 1,
+                name: Some("Shell 1".into()),
+                origin_project_id: Some("proj-1".into()),
+                origin_card_id: None,
+                agent_engine: None,
+                runtime: Some(canban_types::TerminalRuntime {
+                    machine: "local".into(),
+                    owner_core_id: None,
+                    core_id: Some("core-1".into()),
+                    terminal: Some("pty-1".into()),
+                    state: "running".into(),
+                    connection: "connected".into(),
+                    error: None,
+                    agent_status: None,
+                    agent_turn: None,
+                    observed_agent: None,
+                    waiting: None,
+                }),
+                agent: None,
+                created_at: 1,
+            });
+            ui.snapshot.set(snapshot);
+            ui.project.set("proj-1".into());
+            ui.board_width.set(1050.);
+            ui.terminal_selection.set("term-1".into());
+
+            view()
+                .w(px(1600.))
+                .h(px(800.))
+                .child(
+                    view()
+                        .h(px(1.))
+                        .child(
+                            canban_ui_kit::press_target()
+                                .accessibility_label(|| Some("harness-open-card".into()))
+                                .on_press(move |_: &()| ui.open_card("card-88".into())),
+                        )
+                        .child(
+                            canban_ui_kit::press_target()
+                                .accessibility_label(|| Some("harness-close-card".into()))
+                                .on_press(move |_: &()| ui.close_card()),
+                        )
+                        .child(
+                            canban_ui_kit::press_target()
+                                .accessibility_label(|| Some("harness-go-terminals".into()))
+                                .on_press(move |_: &()| ui.navigate("terminals")),
+                        )
+                        .child(
+                            canban_ui_kit::press_target()
+                                .accessibility_label(|| Some("harness-go-board".into()))
+                                .on_press(move |_: &()| ui.navigate("board")),
+                        )
+                        .child(
+                            canban_ui_kit::press_target()
+                                .accessibility_label(|| Some("harness-switch-project".into()))
+                                .on_press(move |_: &()| ui.select_project("proj-2".into())),
+                        ),
+                )
+                .child(super::screen(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1600.), px(800.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<FrameHarness>());
+        let mut tree = TreeTracker::new();
+        pump(&mut core, &mut tree);
+
+        let initial_tile_node = tree
+            .mounted_node_for_text("Smooth Card & Terminals Transitions")
+            .expect("Board Card tile text mounted");
+        let initial_chrome_agents = tree
+            .mounted_node_for_text("Agents")
+            .expect("Board chrome bar `Agents` action mounted");
+        assert_eq!(
+            tree.mounted_custom_count("canban/terminal"),
+            0,
+            "native terminal must not be mounted while on Board"
+        );
+
+        // 1. Opening and closing a Card in split view keeps the exact same Board chrome bar and tile nodes.
+        let open_card = *tree.labels.get("harness-open-card").unwrap();
+        assert!(core.component_event(open_card, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert_eq!(
+            tree.mounted_node_for_text("Agents"),
+            Some(initial_chrome_agents),
+            "route_chrome must not rebuild Board chrome bar when opening split Card"
+        );
+        assert!(
+            tree.is_mounted(initial_tile_node),
+            "Board tile node must stay the exact same mounted node when opening split Card"
+        );
+
+        let close_card = *tree.labels.get("harness-close-card").unwrap();
+        assert!(core.component_event(close_card, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert_eq!(
+            tree.mounted_node_for_text("Agents"),
+            Some(initial_chrome_agents),
+            "route_chrome must not rebuild Board chrome bar when closing split Card"
+        );
+
+        // 2. Navigating to Terminals mounts the single native PTY viewer while keeping the Board subtree retained.
+        let go_terminals = *tree.labels.get("harness-go-terminals").unwrap();
+        assert!(core.component_event(go_terminals, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert_eq!(
+            tree.mounted_custom_count("canban/terminal"),
+            1,
+            "Terminals route must mount its active native PTY viewer"
+        );
+        assert!(
+            tree.is_mounted(initial_tile_node),
+            "Board tile node must stay retained (hidden) while visiting Terminals"
+        );
+
+        // 3. Returning to Board unmounts the Terminals PTY viewer (preserving single-PTY attachment)
+        //    and reveals the exact same retained Board tile and chrome nodes without remounting.
+        let go_board = *tree.labels.get("harness-go-board").unwrap();
+        assert!(core.component_event(go_board, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert_eq!(
+            tree.mounted_custom_count("canban/terminal"),
+            0,
+            "leaving Terminals must unmount its native PTY viewer immediately"
+        );
+        assert!(
+            tree.is_mounted(initial_tile_node),
+            "returning from Terminals to Board must reuse the retained Board workspace"
+        );
+        assert_eq!(
+            tree.mounted_node_for_text("Agents"),
+            Some(initial_chrome_agents)
+        );
+
+        // 4. Switching Projects replaces the workspace subtree per `docs/ui-motion.md`.
+        let switch_proj = *tree.labels.get("harness-switch-project").unwrap();
+        assert!(core.component_event(switch_proj, EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut tree);
+        assert!(
+            !tree.is_mounted(initial_tile_node),
+            "switching Projects must replace the previous Project's workspace"
+        );
+    }
 }
