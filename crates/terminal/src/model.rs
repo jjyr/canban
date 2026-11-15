@@ -2,9 +2,15 @@
 //! terminal frame/input integration references Herdr (Apache-2.0), see notices.
 use crate::ffi::*;
 use std::ffi::c_void;
+use std::sync::Once;
 use std::time::{Duration, Instant};
 
 const RENDER_HOLD_TIMEOUT: Duration = Duration::from_secs(1);
+/// Kitty Unicode placeholder codepoint (`U+10EEEE`), rendered as an inline image
+/// placement rather than a visible glyph.
+pub const KITTY_UNICODE_PLACEHOLDER: u32 = 0x10EEEE;
+/// Default Kitty image storage budget per screen (64 MB).
+const KITTY_IMAGE_STORAGE_LIMIT_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default)]
 pub struct Cell {
@@ -103,6 +109,39 @@ pub struct RenderScrollbar {
     pub len: u64,
 }
 
+/// Zero-JSON C-ABI Kitty Graphics image placement descriptor.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenderImagePlacement {
+    pub image_id: u32,
+    pub image_generation: u64,
+    pub layer: u8,
+    pub z: i32,
+    pub viewport_col: i32,
+    pub viewport_row: i32,
+    pub grid_cols: u32,
+    pub grid_rows: u32,
+    pub cell_offset_x: u32,
+    pub cell_offset_y: u32,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+}
+
+/// Decoded RGBA8888 image payload resolved from `libghostty-vt` Kitty storage.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenderImageData {
+    pub rgba_ptr: *const u8,
+    pub rgba_len: usize,
+    pub width: u32,
+    pub height: u32,
+    pub generation: u64,
+}
+
 /// Zero-JSON C-ABI frame header passed across FFI to native host views.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -110,6 +149,10 @@ pub struct RenderSnapshot {
     pub cells: *const RenderCell,
     pub utf16: *const u16,
     pub dirty_rows: *const u8,
+    pub image_placements: *const RenderImagePlacement,
+    pub image_placements_len: usize,
+    pub image_placements_generation: u64,
+    pub next_animation_ms: u32,
     pub status_ptr: *const u8,
     pub status_len: usize,
     pub cols: u16,
@@ -161,6 +204,9 @@ struct SnapshotStorage {
     utf16_rows: Vec<Vec<u16>>,
     utf16_flat: Vec<u16>,
     dirty_rows: Vec<u8>,
+    image_placements: Vec<RenderImagePlacement>,
+    image_placements_generation: u64,
+    image_storage_generation: u64,
     cols: u16,
     rows: u16,
     background: [u8; 3],
@@ -176,6 +222,9 @@ impl Default for SnapshotStorage {
             utf16_rows: Vec::new(),
             utf16_flat: Vec::new(),
             dirty_rows: Vec::new(),
+            image_placements: Vec::new(),
+            image_placements_generation: 0,
+            image_storage_generation: 0,
             cols: 0,
             rows: 0,
             background: [24, 24, 28],
@@ -191,6 +240,7 @@ pub struct Model {
     state: GhosttyRenderState,
     rows: GhosttyRenderStateRowIterator,
     cells: GhosttyRenderStateRowCells,
+    images: GhosttyRenderStateImageIterator,
     keys: GhosttyKeyEncoder,
     event: GhosttyKeyEvent,
     mouse: GhosttyMouseEncoder,
@@ -205,6 +255,9 @@ pub struct Model {
     geom: SurfaceGeometry,
     snap: SnapshotStorage,
     grapheme_scratch: Vec<u32>,
+    image_rgba_scratch: Vec<u8>,
+    epoch: Instant,
+    next_animation_at: Option<Instant>,
     pub cols: u16,
     pub height: u16,
     pub revision: u64,
@@ -216,6 +269,118 @@ unsafe impl Send for Model {}
 
 fn ok(r: GhosttyResult) {
     assert_eq!(r, GHOSTTY_SUCCESS, "libghostty-vt operation failed: {r}");
+}
+
+/// Process-global PNG decoder callback registered with `libghostty-vt` so Kitty
+/// Graphics payloads (`f=100`) decode into 8-bit unpremultiplied RGBA buffers.
+unsafe extern "C" fn decode_png_callback(
+    _userdata: *mut c_void,
+    allocator: *const GhosttyAllocator,
+    data: *const u8,
+    data_len: usize,
+    out: *mut GhosttySysImage,
+) -> bool {
+    if data.is_null() || data_len == 0 || out.is_null() {
+        return false;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(data, data_len) };
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(slice));
+    decoder.set_transformations(
+        png::Transformations::EXPAND | png::Transformations::STRIP_16 | png::Transformations::ALPHA,
+    );
+    let Ok(mut reader) = decoder.read_info() else {
+        return false;
+    };
+    let info = reader.info();
+    let width = info.width;
+    let height = info.height;
+    if width == 0 || height == 0 {
+        return false;
+    }
+    let Some(rgba_len) = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|px| px.checked_mul(4))
+    else {
+        return false;
+    };
+    let buf_size = reader.output_buffer_size();
+    if buf_size == 0 {
+        return false;
+    }
+    let mut raw = vec![0u8; buf_size];
+    let Ok(frame_info) = reader.next_frame(&mut raw) else {
+        return false;
+    };
+    let decoded = &raw[..frame_info.buffer_size()];
+    let alloc_ptr = unsafe { ghostty_alloc(allocator, rgba_len) };
+    if alloc_ptr.is_null() {
+        return false;
+    }
+    let dst = unsafe { std::slice::from_raw_parts_mut(alloc_ptr, rgba_len) };
+    match (frame_info.color_type, frame_info.bit_depth) {
+        (png::ColorType::Rgba, png::BitDepth::Eight) if decoded.len() >= rgba_len => {
+            dst.copy_from_slice(&decoded[..rgba_len]);
+        }
+        (png::ColorType::Rgb, png::BitDepth::Eight)
+            if decoded.len() >= (width as usize) * (height as usize) * 3 =>
+        {
+            for (&[r, g, b], dst_px) in decoded
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .take((width as usize) * (height as usize))
+                .zip(dst.as_chunks_mut::<4>().0)
+            {
+                *dst_px = [r, g, b, 255];
+            }
+        }
+        (png::ColorType::GrayscaleAlpha, png::BitDepth::Eight)
+            if decoded.len() >= (width as usize) * (height as usize) * 2 =>
+        {
+            for (&[g, a], dst_px) in decoded
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .take((width as usize) * (height as usize))
+                .zip(dst.as_chunks_mut::<4>().0)
+            {
+                *dst_px = [g, g, g, a];
+            }
+        }
+        (png::ColorType::Grayscale, png::BitDepth::Eight)
+            if decoded.len() >= (width as usize) * (height as usize) =>
+        {
+            for (&g, dst_px) in decoded
+                .iter()
+                .take((width as usize) * (height as usize))
+                .zip(dst.as_chunks_mut::<4>().0)
+            {
+                *dst_px = [g, g, g, 255];
+            }
+        }
+        _ => {
+            unsafe { ghostty_free(allocator, alloc_ptr, rgba_len) };
+            return false;
+        }
+    }
+    unsafe {
+        (*out).width = width;
+        (*out).height = height;
+        (*out).data = alloc_ptr;
+        (*out).data_len = rgba_len;
+    }
+    true
+}
+
+fn ensure_ghostty_sys_initialized() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| unsafe {
+        let cb: GhosttySysDecodePngFn = Some(decode_png_callback);
+        ok(ghostty_sys_set(
+            GHOSTTY_SYS_OPT_DECODE_PNG,
+            std::mem::transmute::<GhosttySysDecodePngFn, *const c_void>(cb),
+        ));
+    });
 }
 
 const fn dec_mode(value: u16) -> GhosttyMode {
@@ -322,6 +487,7 @@ fn sanitize_key_utf8(text: &str) -> &str {
 
 impl Model {
     pub fn new(cols: u16, rows: u16) -> Self {
+        ensure_ghostty_sys_initialized();
         let cols = cols.max(1);
         let rows = rows.max(1);
         unsafe {
@@ -343,6 +509,11 @@ impl Model {
             ok(ghostty_render_state_row_cells_new(
                 std::ptr::null(),
                 &mut cells,
+            ));
+            let mut images = std::ptr::null_mut();
+            ok(ghostty_render_state_image_iterator_new(
+                std::ptr::null(),
+                &mut images,
             ));
             let mut keys = std::ptr::null_mut();
             ok(ghostty_key_encoder_new(std::ptr::null(), &mut keys));
@@ -484,12 +655,41 @@ impl Model {
                 GHOSTTY_TERMINAL_OPT_TERMINFO_NAME,
                 &tn_str as *const _ as *const c_void,
             );
+            let kitty_storage: u64 = KITTY_IMAGE_STORAGE_LIMIT_BYTES;
+            let _ = ghostty_terminal_set(
+                term,
+                GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT,
+                &kitty_storage as *const _ as *const c_void,
+            );
+            let enable_file_medium = true;
+            let _ = ghostty_terminal_set(
+                term,
+                GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE,
+                &enable_file_medium as *const _ as *const c_void,
+            );
+            let _ = ghostty_terminal_set(
+                term,
+                GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_SHARED_MEM,
+                &enable_file_medium as *const _ as *const c_void,
+            );
+            let temp_dir = std::env::temp_dir();
+            let temp_dir_bytes = temp_dir.to_string_lossy();
+            let temp_str = GhosttyString {
+                ptr: temp_dir_bytes.as_bytes().as_ptr(),
+                len: temp_dir_bytes.len(),
+            };
+            let _ = ghostty_terminal_set(
+                term,
+                GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_TEMP_FILE,
+                &temp_str as *const _ as *const c_void,
+            );
 
             Self {
                 term,
                 state,
                 rows: rows_it,
                 cells,
+                images,
                 keys,
                 event,
                 mouse,
@@ -504,6 +704,9 @@ impl Model {
                 geom,
                 snap: SnapshotStorage::default(),
                 grapheme_scratch: Vec::with_capacity(16),
+                image_rgba_scratch: Vec::new(),
+                epoch: Instant::now(),
+                next_animation_at: None,
                 cols,
                 height: rows,
                 revision: 0,
@@ -602,6 +805,157 @@ impl Model {
         } else {
             false
         }
+    }
+
+    pub fn advance_animation_if_due(&mut self) -> bool {
+        if self
+            .next_animation_at
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.revision += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn cell_size(&self) -> (u32, u32) {
+        (self.geom.cell_width.max(1), self.geom.cell_height.max(1))
+    }
+
+    pub fn default_colors(&self) -> ([u8; 3], [u8; 3], [u8; 3]) {
+        (
+            self.snap.foreground,
+            self.snap.background,
+            self.snap.cursor.color,
+        )
+    }
+
+    /// Resolve a Kitty Graphics image by `image_id` from active screen storage and
+    /// convert its current frame pixels into unpremultiplied RGBA8888 in `image_rgba_scratch`.
+    pub fn resolve_kitty_image(&mut self, image_id: u32) -> Option<RenderImageData> {
+        if image_id == 0 {
+            return None;
+        }
+        unsafe {
+            let mut graphics: GhosttyKittyGraphics = std::ptr::null_mut();
+            if ghostty_terminal_get(
+                self.term,
+                GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS,
+                &mut graphics as *mut _ as *mut c_void,
+            ) != GHOSTTY_SUCCESS
+                || graphics.is_null()
+            {
+                return None;
+            }
+            let img = ghostty_kitty_graphics_image(graphics, image_id);
+            if img.is_null() {
+                return None;
+            }
+            let mut width = 0u32;
+            let mut height = 0u32;
+            let mut format = GHOSTTY_KITTY_IMAGE_FORMAT_RGBA;
+            let mut generation = 0u64;
+            let mut pixels = GhosttyString {
+                ptr: std::ptr::null(),
+                len: 0,
+            };
+            if ghostty_kitty_graphics_image_get(
+                img,
+                GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_WIDTH,
+                &mut width as *mut _ as *mut c_void,
+            ) != GHOSTTY_SUCCESS
+                || ghostty_kitty_graphics_image_get(
+                    img,
+                    GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_HEIGHT,
+                    &mut height as *mut _ as *mut c_void,
+                ) != GHOSTTY_SUCCESS
+                || ghostty_kitty_graphics_image_get(
+                    img,
+                    GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_FORMAT,
+                    &mut format as *mut _ as *mut c_void,
+                ) != GHOSTTY_SUCCESS
+                || ghostty_kitty_graphics_image_get(
+                    img,
+                    GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_GENERATION,
+                    &mut generation as *mut _ as *mut c_void,
+                ) != GHOSTTY_SUCCESS
+                || ghostty_kitty_graphics_image_get(
+                    img,
+                    GHOSTTY_KITTY_GRAPHICS_IMAGE_DATA_PIXELS,
+                    &mut pixels as *mut _ as *mut c_void,
+                ) != GHOSTTY_SUCCESS
+            {
+                return None;
+            }
+            if width == 0 || height == 0 || pixels.ptr.is_null() || pixels.len == 0 {
+                return None;
+            }
+            let px_count = (width as usize).checked_mul(height as usize)?;
+            let rgba_len = px_count.checked_mul(4)?;
+            let src = std::slice::from_raw_parts(pixels.ptr, pixels.len);
+            self.image_rgba_scratch.resize(rgba_len, 0);
+            match format {
+                GHOSTTY_KITTY_IMAGE_FORMAT_RGBA | GHOSTTY_KITTY_IMAGE_FORMAT_PNG => {
+                    if src.len() < rgba_len {
+                        return None;
+                    }
+                    self.image_rgba_scratch.copy_from_slice(&src[..rgba_len]);
+                }
+                GHOSTTY_KITTY_IMAGE_FORMAT_RGB => {
+                    if src.len() < px_count.checked_mul(3)? {
+                        return None;
+                    }
+                    for (&[r, g, b], d) in src
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .take(px_count)
+                        .zip(self.image_rgba_scratch.as_chunks_mut::<4>().0)
+                    {
+                        *d = [r, g, b, 255];
+                    }
+                }
+                GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA => {
+                    if src.len() < px_count.checked_mul(2)? {
+                        return None;
+                    }
+                    for (&[g, a], d) in src
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .take(px_count)
+                        .zip(self.image_rgba_scratch.as_chunks_mut::<4>().0)
+                    {
+                        *d = [g, g, g, a];
+                    }
+                }
+                GHOSTTY_KITTY_IMAGE_FORMAT_GRAY => {
+                    if src.len() < px_count {
+                        return None;
+                    }
+                    for (&g, d) in src
+                        .iter()
+                        .take(px_count)
+                        .zip(self.image_rgba_scratch.as_chunks_mut::<4>().0)
+                    {
+                        *d = [g, g, g, 255];
+                    }
+                }
+                _ => return None,
+            }
+            Some(RenderImageData {
+                rgba_ptr: self.image_rgba_scratch.as_ptr(),
+                rgba_len,
+                width,
+                height,
+                generation,
+            })
+        }
+    }
+
+    pub fn image_placements(&self) -> &[RenderImagePlacement] {
+        &self.snap.image_placements
     }
 
     pub fn is_render_held(&self) -> bool {
@@ -1763,9 +2117,13 @@ impl Model {
                     &mut count,
                 );
                 if res == GHOSTTY_SUCCESS && count > 0 {
-                    for &cp in &stack[..count] {
-                        if let Some(ch) = char::from_u32(cp) {
-                            chars.push((x, end_x, ch));
+                    if stack[0] == KITTY_UNICODE_PLACEHOLDER {
+                        chars.push((x, end_x, ' '));
+                    } else {
+                        for &cp in &stack[..count] {
+                            if let Some(ch) = char::from_u32(cp) {
+                                chars.push((x, end_x, ch));
+                            }
                         }
                     }
                 } else {
@@ -1784,9 +2142,51 @@ impl Model {
     pub fn render_snapshot(&mut self, status: &str, force_full: bool) -> RenderSnapshot {
         let _ = self.expire_render_hold_if_due();
         unsafe {
+            let now_ms = u64::try_from(self.epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+            let mut next_animation_ms = 0u32;
+            let mut storage_gen = self.snap.image_storage_generation;
             if !self.shared.render_held {
+                let mut graphics: GhosttyKittyGraphics = std::ptr::null_mut();
+                if ghostty_terminal_get(
+                    self.term,
+                    GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS,
+                    &mut graphics as *mut _ as *mut c_void,
+                ) == GHOSTTY_SUCCESS
+                    && !graphics.is_null()
+                {
+                    let mut next_ms = 0u64;
+                    if ghostty_kitty_graphics_animation_tick(graphics, now_ms, &mut next_ms)
+                        == GHOSTTY_SUCCESS
+                    {
+                        let delay_ms = next_ms.saturating_sub(now_ms).clamp(1, 60_000);
+                        self.next_animation_at =
+                            Some(Instant::now() + Duration::from_millis(delay_ms));
+                        next_animation_ms = u32::try_from(delay_ms).unwrap_or(60_000);
+                    } else {
+                        self.next_animation_at = None;
+                    }
+                    let _ = ghostty_kitty_graphics_get(
+                        graphics,
+                        GHOSTTY_KITTY_GRAPHICS_DATA_GENERATION,
+                        &mut storage_gen as *mut _ as *mut c_void,
+                    );
+                } else {
+                    self.next_animation_at = None;
+                }
                 ok(ghostty_render_state_update(self.state, self.term));
+            } else if let Some(deadline) = self.next_animation_at {
+                let rem = deadline.saturating_duration_since(Instant::now());
+                next_animation_ms = u32::try_from(rem.as_millis().clamp(1, 60_000)).unwrap_or(16);
             }
+
+            let mut placements_gen = self.snap.image_placements_generation;
+            let _ = ghostty_render_state_get(
+                self.state,
+                GHOSTTY_RENDER_STATE_DATA_IMAGE_PLACEMENTS_GENERATION,
+                &mut placements_gen as *mut _ as *mut c_void,
+            );
+            let images_changed = placements_gen != self.snap.image_placements_generation
+                || storage_gen != self.snap.image_storage_generation;
 
             let mut cols = 0u16;
             let mut rows = 0u16;
@@ -1827,6 +2227,7 @@ impl Model {
             let full = force_full
                 || resized
                 || palette_changed
+                || images_changed
                 || dirty == GHOSTTY_RENDER_STATE_DIRTY_FULL;
 
             if resized {
@@ -1948,6 +2349,7 @@ impl Model {
                             let mut cp = 0u32;
                             let mut utf16_offset = 0u32;
                             let mut utf16_len = 0u16;
+                            let mut is_kitty_placeholder = false;
 
                             if !invisible {
                                 let mut g_len = 0u32;
@@ -1969,15 +2371,19 @@ impl Model {
                                         &mut buf as *mut _ as *mut c_void,
                                     ) == GHOSTTY_SUCCESS
                                     {
-                                        cp = single;
-                                        if single > 0xFFFF
-                                            && let Some(ch) = char::from_u32(single)
-                                        {
-                                            let mut tmp = [0u16; 2];
-                                            let enc = ch.encode_utf16(&mut tmp);
-                                            utf16_offset = row_utf16.len() as u32;
-                                            utf16_len = enc.len() as u16;
-                                            row_utf16.extend_from_slice(enc);
+                                        if single == KITTY_UNICODE_PLACEHOLDER {
+                                            is_kitty_placeholder = true;
+                                        } else {
+                                            cp = single;
+                                            if single > 0xFFFF
+                                                && let Some(ch) = char::from_u32(single)
+                                            {
+                                                let mut tmp = [0u16; 2];
+                                                let enc = ch.encode_utf16(&mut tmp);
+                                                utf16_offset = row_utf16.len() as u32;
+                                                utf16_len = enc.len() as u16;
+                                                row_utf16.extend_from_slice(enc);
+                                            }
                                         }
                                     }
                                 } else if g_len > 1 {
@@ -1993,20 +2399,34 @@ impl Model {
                                         &mut buf as *mut _ as *mut c_void,
                                     ) == GHOSTTY_SUCCESS
                                     {
-                                        cp = self.grapheme_scratch[0];
-                                        utf16_offset = row_utf16.len() as u32;
-                                        let start = row_utf16.len();
-                                        for &scalar in &self.grapheme_scratch[..buf.len] {
-                                            if let Some(ch) = char::from_u32(scalar) {
-                                                let mut tmp = [0u16; 2];
-                                                row_utf16
-                                                    .extend_from_slice(ch.encode_utf16(&mut tmp));
+                                        if self.grapheme_scratch[0] == KITTY_UNICODE_PLACEHOLDER {
+                                            is_kitty_placeholder = true;
+                                        } else {
+                                            cp = self.grapheme_scratch[0];
+                                            utf16_offset = row_utf16.len() as u32;
+                                            let start = row_utf16.len();
+                                            for &scalar in &self.grapheme_scratch[..buf.len] {
+                                                if let Some(ch) = char::from_u32(scalar) {
+                                                    let mut tmp = [0u16; 2];
+                                                    row_utf16.extend_from_slice(
+                                                        ch.encode_utf16(&mut tmp),
+                                                    );
+                                                }
                                             }
+                                            utf16_len = (row_utf16.len() - start) as u16;
                                         }
-                                        utf16_len = (row_utf16.len() - start) as u16;
                                     }
                                 }
                             }
+
+                            let cell_flags = if is_kitty_placeholder {
+                                style.flags
+                                    & !(CANBAN_STYLE_UNDERLINE
+                                        | CANBAN_STYLE_STRIKETHROUGH
+                                        | CANBAN_STYLE_OVERLINE)
+                            } else {
+                                style.flags
+                            };
 
                             let selected = u8::from(
                                 has_sel && (x as u16) >= sel.start_x && (x as u16) <= sel.end_x,
@@ -2016,7 +2436,7 @@ impl Model {
                                 cp,
                                 utf16_offset,
                                 utf16_len,
-                                flags: style.flags,
+                                flags: cell_flags,
                                 fg: rgb(fg),
                                 bg: rgb(bg),
                                 ul_color,
@@ -2134,6 +2554,161 @@ impl Model {
             let sb_changed = next_sb != self.snap.scrollbar;
             self.snap.scrollbar = next_sb;
 
+            if images_changed || resized {
+                self.snap.image_placements_generation = placements_gen;
+                self.snap.image_storage_generation = storage_gen;
+                self.snap.image_placements.clear();
+                if ghostty_render_state_get(
+                    self.state,
+                    GHOSTTY_RENDER_STATE_DATA_IMAGE_ITERATOR,
+                    &mut self.images as *mut _ as *mut c_void,
+                ) == GHOSTTY_SUCCESS
+                {
+                    while ghostty_render_state_image_iterator_next(self.images) {
+                        let mut protocol = GHOSTTY_IMAGE_PROTOCOL_KITTY;
+                        let mut image_id = 0u32;
+                        let mut image_generation = 0u64;
+                        let mut layer = GHOSTTY_IMAGE_LAYER_ABOVE_TEXT;
+                        let mut z = 0i32;
+                        let mut viewport_col = 0i32;
+                        let mut viewport_row = 0i32;
+                        let mut grid_cols = 0u32;
+                        let mut grid_rows = 0u32;
+                        let mut cell_offset_x = 0u32;
+                        let mut cell_offset_y = 0u32;
+                        let mut pixel_width = 0u32;
+                        let mut pixel_height = 0u32;
+                        let mut source_x = 0u32;
+                        let mut source_y = 0u32;
+                        let mut source_width = 0u32;
+                        let mut source_height = 0u32;
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_PROTOCOL,
+                            &mut protocol as *mut _ as *mut c_void,
+                        );
+                        if protocol != GHOSTTY_IMAGE_PROTOCOL_KITTY {
+                            continue;
+                        }
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_ID,
+                            &mut image_id as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_IMAGE_GENERATION,
+                            &mut image_generation as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_LAYER,
+                            &mut layer as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_Z,
+                            &mut z as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_COL,
+                            &mut viewport_col as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_VIEWPORT_ROW,
+                            &mut viewport_row as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_COLS,
+                            &mut grid_cols as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_GRID_ROWS,
+                            &mut grid_rows as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_X,
+                            &mut cell_offset_x as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_CELL_OFFSET_Y,
+                            &mut cell_offset_y as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_WIDTH,
+                            &mut pixel_width as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_PIXEL_HEIGHT,
+                            &mut pixel_height as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_X,
+                            &mut source_x as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_Y,
+                            &mut source_y as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_WIDTH,
+                            &mut source_width as *mut _ as *mut c_void,
+                        );
+                        let _ = ghostty_render_state_image_get(
+                            self.images,
+                            GHOSTTY_RENDER_STATE_IMAGE_DATA_SOURCE_HEIGHT,
+                            &mut source_height as *mut _ as *mut c_void,
+                        );
+                        if image_id == 0
+                            || pixel_width == 0
+                            || pixel_height == 0
+                            || source_width == 0
+                            || source_height == 0
+                        {
+                            continue;
+                        }
+                        let layer_u8 = match layer {
+                            GHOSTTY_IMAGE_LAYER_BELOW_BACKGROUND => 0,
+                            GHOSTTY_IMAGE_LAYER_BELOW_TEXT => 1,
+                            _ => 2,
+                        };
+                        self.snap.image_placements.push(RenderImagePlacement {
+                            image_id,
+                            image_generation,
+                            layer: layer_u8,
+                            z,
+                            viewport_col,
+                            viewport_row,
+                            grid_cols,
+                            grid_rows,
+                            cell_offset_x,
+                            cell_offset_y,
+                            pixel_width,
+                            pixel_height,
+                            source_x,
+                            source_y,
+                            source_width,
+                            source_height,
+                        });
+                    }
+                    // Sort placements stably by layer, then z-index, then image_id to match Ghostty.
+                    self.snap
+                        .image_placements
+                        .sort_by_key(|a| (a.layer, a.z, a.image_id));
+                }
+            }
+
             ok(ghostty_render_state_clean(self.state));
 
             let any_row_dirty = self.snap.dirty_rows.iter().any(|&d| d != 0);
@@ -2149,6 +2724,10 @@ impl Model {
                 cells: self.snap.cells.as_ptr(),
                 utf16: self.snap.utf16_flat.as_ptr(),
                 dirty_rows: self.snap.dirty_rows.as_ptr(),
+                image_placements: self.snap.image_placements.as_ptr(),
+                image_placements_len: self.snap.image_placements.len(),
+                image_placements_generation: self.snap.image_placements_generation,
+                next_animation_ms,
                 status_ptr: status.as_ptr(),
                 status_len: status.len(),
                 cols,
@@ -2291,6 +2870,7 @@ impl Drop for Model {
             ghostty_mouse_encoder_free(self.mouse);
             ghostty_key_event_free(self.event);
             ghostty_key_encoder_free(self.keys);
+            ghostty_render_state_image_iterator_free(self.images);
             ghostty_render_state_row_cells_free(self.cells);
             ghostty_render_state_row_iterator_free(self.rows);
             ghostty_render_state_free(self.state);
@@ -2635,5 +3215,167 @@ mod tests {
         model.write(zwj.as_bytes());
         let actual_2027 = model.frame().cursor.expect("visible cursor").0;
         assert_eq!(predicted_2027, actual_2027);
+    }
+
+    fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut buf, width, height);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().expect("png header");
+            writer.write_image_data(rgba).expect("png data");
+        }
+        buf
+    }
+
+    #[test]
+    fn kitty_graphics_direct_png_rgba_queries_crops_and_z_layers_work() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let mut model = Model::new(20, 8);
+        let _ = model.resize_with_metrics(20, 8, 8, 18, 8, 8, 6, 6);
+        let _ = model.replies();
+
+        // 1. Kitty Graphics query action (a=q,i=31,s=1,v=1,f=24) must reply OK on model.replies().
+        let rgb_1x1 = STANDARD.encode([255u8, 0, 128]);
+        let query_cmd = format!("\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;{rgb_1x1}\x1b\\");
+        model.write(query_cmd.as_bytes());
+        let reply = String::from_utf8(model.replies()).expect("valid utf8 reply");
+        assert!(
+            reply.contains("\x1b_Gi=31;OK\x1b\\"),
+            "expected Kitty OK reply, got {reply:?}"
+        );
+
+        // 2. Direct PNG transmission + placement (f=100,a=T,i=7,c=4,r=2,z=-1) at col 2, row 1.
+        //    2x2 quadrant PNG: TL=Red, TR=Green, BL=Blue, BR=Yellow.
+        let quad_rgba: [u8; 16] = [
+            255, 0, 0, 255, // TL: Red
+            0, 255, 0, 255, // TR: Green
+            0, 0, 255, 255, // BL: Blue
+            255, 255, 0, 255, // BR: Yellow
+        ];
+        let png_bytes = encode_rgba_png(2, 2, &quad_rgba);
+        let png_b64 = STANDARD.encode(&png_bytes);
+        let place_png = format!("\x1b[2;3H\x1b_Gf=100,a=T,i=7,c=4,r=2,z=-1,q=2;{png_b64}\x1b\\");
+        model.write(place_png.as_bytes());
+
+        // Add a second raw RGBA image (f=32) with cropped sub-rect above text (z=5) and another below bg (z=-2_000_000_000).
+        let raw_b64 = STANDARD.encode(quad_rgba);
+        let place_raw_above = format!(
+            "\x1b[1;1H\x1b_Gf=32,s=2,v=2,a=T,i=9,p=1,x=1,y=1,w=1,h=1,c=2,r=1,z=5,q=2;{raw_b64}\x1b\\"
+        );
+        let place_below_bg =
+            "\x1b[5;1H\x1b_Ga=p,i=9,p=2,c=2,r=1,z=-2000000000,q=2\x1b\\".to_owned();
+        model.write(place_raw_above.as_bytes());
+        model.write(place_below_bg.as_bytes());
+
+        let snap = model.render_snapshot("", true);
+        assert_eq!(snap.image_placements_len, 3);
+        let placements =
+            unsafe { std::slice::from_raw_parts(snap.image_placements, snap.image_placements_len) };
+
+        // Sorted by (layer, z, image_id):
+        // [0]: layer 0 (BELOW_BG, z=-2_000_000_000, i=9)
+        // [1]: layer 1 (BELOW_TEXT, z=-1, i=7)
+        // [2]: layer 2 (ABOVE_TEXT, z=5, i=9, cropped source 1,1 1x1)
+        assert_eq!(placements[0].layer, 0);
+        assert_eq!(placements[0].z, -2_000_000_000);
+        assert_eq!(placements[0].image_id, 9);
+        assert_eq!(
+            (placements[0].viewport_col, placements[0].viewport_row),
+            (0, 4)
+        );
+
+        assert_eq!(placements[1].layer, 1);
+        assert_eq!(placements[1].z, -1);
+        assert_eq!(placements[1].image_id, 7);
+        assert_eq!(
+            (placements[1].viewport_col, placements[1].viewport_row),
+            (2, 1)
+        );
+        assert_eq!((placements[1].grid_cols, placements[1].grid_rows), (4, 2));
+        assert_eq!(
+            (placements[1].pixel_width, placements[1].pixel_height),
+            (32, 36)
+        );
+
+        assert_eq!(placements[2].layer, 2);
+        assert_eq!(placements[2].z, 5);
+        assert_eq!(placements[2].image_id, 9);
+        assert_eq!(
+            (
+                placements[2].source_x,
+                placements[2].source_y,
+                placements[2].source_width,
+                placements[2].source_height
+            ),
+            (1, 1, 1, 1)
+        );
+
+        // Verify PNG-decoded RGBA pixels in Kitty storage match quad_rgba byte-for-byte.
+        let decoded = model.resolve_kitty_image(7).expect("resolved PNG image 7");
+        assert_eq!((decoded.width, decoded.height), (2, 2));
+        assert_ne!(decoded.generation, 0);
+        let decoded_bytes =
+            unsafe { std::slice::from_raw_parts(decoded.rgba_ptr, decoded.rgba_len) };
+        assert_eq!(decoded_bytes, &quad_rgba);
+    }
+
+    #[test]
+    fn kitty_graphics_virtual_placements_position_images_and_suppress_u10eeee_cells() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let mut model = Model::new(20, 6);
+        let _ = model.resize_with_metrics(20, 6, 8, 18, 8, 8, 6, 6);
+
+        // Transmit virtual placement U=1 for image ID 42 spanning 2x2 cells.
+        let cyan_rgba = [0u8, 210, 255, 255].repeat(16);
+        let b64 = STANDARD.encode(&cyan_rgba);
+        let virt_cmd = format!("\x1b_Gf=32,s=4,v=4,a=T,U=1,i=42,c=2,r=2,q=2;{b64}\x1b\\");
+        model.write(virt_cmd.as_bytes());
+
+        // Emit U+10EEEE placeholders with combining row/col diacritics (U+0305 = index 0, U+030D = index 1),
+        // foreground RGB (0, 0, 42) encoding image ID 42, plus underline SGR that some apps attach.
+        let row0 = "\x1b[2;4H\x1b[4;38;2;0;0;42m\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\u{0305}\u{030D}\x1b[0m";
+        let row1 = "\x1b[3;4H\x1b[4;38;2;0;0;42m\u{10EEEE}\u{030D}\u{0305}\u{10EEEE}\u{030D}\u{030D}\x1b[0m";
+        model.write(row0.as_bytes());
+        model.write(row1.as_bytes());
+
+        let snap = model.render_snapshot("", true);
+        assert!(
+            snap.image_placements_len >= 1,
+            "virtual U+10EEEE cells must materialize Kitty placements in RenderSnapshot"
+        );
+        let placements =
+            unsafe { std::slice::from_raw_parts(snap.image_placements, snap.image_placements_len) };
+        assert!(placements.iter().all(|p| p.image_id == 42 && p.layer == 1));
+        assert!(
+            placements
+                .iter()
+                .any(|p| p.viewport_col == 3 && p.viewport_row == 1),
+            "virtual placement must anchor at (col=3, row=1), got {placements:?}"
+        );
+
+        // Every U+10EEEE cell must be suppressed to cp=0, utf16_len=0, and cleared underline flags
+        // so CoreText never draws .LastResort tofu or spurious underlines.
+        let cells = unsafe {
+            std::slice::from_raw_parts(snap.cells, usize::from(snap.cols) * usize::from(snap.rows))
+        };
+        for r in 1..=2usize {
+            for c in 3..=4usize {
+                let cell = &cells[r * usize::from(snap.cols) + c];
+                assert_eq!(cell.cp, 0, "placeholder cell ({c},{r}) must suppress cp");
+                assert_eq!(
+                    cell.utf16_len, 0,
+                    "placeholder cell ({c},{r}) must omit utf16"
+                );
+                assert_eq!(
+                    cell.flags & CANBAN_STYLE_UNDERLINE,
+                    0,
+                    "placeholder cell ({c},{r}) must suppress underline decoration"
+                );
+            }
+        }
     }
 }

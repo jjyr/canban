@@ -19,15 +19,49 @@ pub struct Attachment {
     channel: u32,
     pub automatic_input: bool,
 }
+/// Viewer display colors and cell metrics reported to Herdr so display/cell-size
+/// queries (`CSI 14 t`, `CSI 16 t`, OSC 10/11/12) are answered accurately.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DisplayFacts {
+    pub fg: Option<[u8; 3]>,
+    pub bg: Option<[u8; 3]>,
+    pub cursor: Option<[u8; 3]>,
+    pub cell: Option<(u32, u32)>,
+}
+
+impl DisplayFacts {
+    fn hex(rgb: [u8; 3]) -> String {
+        format!("#{:02x}{:02x}{:02x}", rgb[0], rgb[1], rgb[2])
+    }
+
+    pub fn to_json(&self) -> Value {
+        json!({
+            "fg": self.fg.map(Self::hex),
+            "bg": self.bg.map(Self::hex),
+            "cursor": self.cursor.map(Self::hex),
+            "cell": self.cell.map(|(w, h)| [w.max(1), h.max(1)]),
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.fg.is_none() && self.bg.is_none() && self.cursor.is_none() && self.cell.is_none()
+    }
+}
+
 /// A dedicated input writer lets human keystrokes bypass output receive waits.
 #[derive(Clone)]
 pub struct InputWriter {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     channel: u32,
+    automatic_input: bool,
 }
 impl InputWriter {
     pub fn input(&self, data: &[u8]) -> Result<()> {
         frame(&mut *self.writer.lock().unwrap(), self.channel, 0, data)
+    }
+    pub fn automatic_input(&self, data: &[u8]) -> Result<()> {
+        let kind = if self.automatic_input { 6 } else { 0 };
+        frame(&mut *self.writer.lock().unwrap(), self.channel, kind, data)
     }
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
         let data = [cols.to_le_bytes(), rows.to_le_bytes()].concat();
@@ -40,6 +74,10 @@ impl InputWriter {
             4,
             &[u8::from(on)],
         )
+    }
+    pub fn facts(&self, display: &DisplayFacts) -> Result<()> {
+        let data = serde_json::to_vec(&display.to_json())?;
+        frame(&mut *self.writer.lock().unwrap(), self.channel, 5, &data)
     }
 }
 fn frame(writer: &mut (impl Write + ?Sized), channel: u32, kind: u8, data: &[u8]) -> Result<()> {
@@ -73,6 +111,17 @@ impl Client {
         rows: u16,
         expected_core_id: Option<&str>,
     ) -> Result<Attachment> {
+        self.attach_fenced_with_display(terminal, cols, rows, expected_core_id, None)
+    }
+
+    pub fn attach_fenced_with_display(
+        &self,
+        terminal: &str,
+        cols: u16,
+        rows: u16,
+        expected_core_id: Option<&str>,
+        display: Option<&DisplayFacts>,
+    ) -> Result<Attachment> {
         let mut transport =
             super::transport::connect_view_fenced(&self.config, Some(terminal), expected_core_id)?;
         let setup = (|| -> Result<_> {
@@ -88,7 +137,13 @@ impl Client {
             reader.read_line(&mut line)?;
             let hello: Value = serde_json::from_str(&line)?;
             ensure!(hello.get("error").is_none(), "Herdr handshake: {hello}");
-            let call = json!({"jsonrpc":"2.0","id":2,"method":"terminal.attach","params":{"terminal":terminal,"cols":cols,"rows":rows,"history":2000}});
+            let mut attach_params =
+                json!({"terminal":terminal,"cols":cols,"rows":rows,"history":2000});
+            if let Some(d) = display.filter(|d| !d.is_empty()) {
+                attach_params["display"] = d.to_json();
+            }
+            let call =
+                json!({"jsonrpc":"2.0","id":2,"method":"terminal.attach","params":attach_params});
             frame(&mut stdin, 0, 0, &serde_json::to_vec(&call)?)?;
             let result = loop {
                 let (channel, kind, data) = read_frame(&mut reader)?;
@@ -162,6 +217,7 @@ impl Attachment {
         InputWriter {
             writer: self.writer.clone(),
             channel: self.channel,
+            automatic_input: self.automatic_input,
         }
     }
     pub fn track_view(&mut self, core: &str, terminal: &str) {
@@ -209,6 +265,10 @@ impl Attachment {
             4,
             &[u8::from(on)],
         )
+    }
+    pub fn facts(&self, display: &DisplayFacts) -> Result<()> {
+        let data = serde_json::to_vec(&display.to_json())?;
+        frame(&mut *self.writer.lock().unwrap(), self.channel, 5, &data)
     }
 }
 impl Drop for Attachment {

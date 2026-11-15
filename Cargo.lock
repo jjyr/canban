@@ -570,13 +570,16 @@ name = "canban-terminal"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "bindgen",
  "canban-herdr",
  "canban-types",
  "cc",
  "nsh-core",
  "nsh-platform-macos",
+ "png",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

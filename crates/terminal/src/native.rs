@@ -1,10 +1,10 @@
 use crate::{
     ffi::*,
-    model::{KeyInput, Model, MouseInput, RenderSnapshot, WheelOutput},
+    model::{KeyInput, Model, MouseInput, RenderImageData, RenderSnapshot, WheelOutput},
 };
 use canban_herdr::{
     Client,
-    stream::{Attachment, Event},
+    stream::{Attachment, DisplayFacts, Event},
 };
 use canban_types::Config;
 use nsh_platform_macos::{
@@ -115,6 +115,7 @@ pub struct CbCallbacks {
     pub take_clipboard: extern "C" fn(*mut c_void, *mut usize) -> *const u8,
     pub take_bell: extern "C" fn(*mut c_void) -> bool,
     pub measure_text: extern "C" fn(*mut c_void, *const u8, usize) -> u16,
+    pub resolve_image: extern "C" fn(*mut c_void, u32, *mut RenderImageData) -> bool,
 }
 
 unsafe extern "C" {
@@ -138,6 +139,21 @@ unsafe extern "C" {
     fn cb_terminal_test_drag_and_file_paste(view: *mut c_void) -> bool;
     #[cfg(test)]
     fn cb_terminal_test_nerd_font_fallback(view: *mut c_void) -> bool;
+    #[cfg(test)]
+    fn cb_terminal_test_cell_metrics(
+        view: *mut c_void,
+        out_cw: *mut f64,
+        out_ch: *mut f64,
+        out_pad_x: *mut f64,
+        out_pad_y: *mut f64,
+    );
+    #[cfg(test)]
+    fn cb_terminal_test_render_rgba(
+        view: *mut c_void,
+        width: u32,
+        height: u32,
+        out_rgba: *mut u8,
+    ) -> bool;
 }
 
 pub fn installed_fonts() -> crate::InstalledFonts {
@@ -246,8 +262,10 @@ struct State {
 #[derive(Debug)]
 enum Input {
     Bytes(Vec<u8>),
+    AutoBytes(Vec<u8>),
     Resize(u16, u16),
     Focus(bool),
+    Facts(DisplayFacts),
 }
 
 struct LiveSession {
@@ -289,9 +307,40 @@ struct SessionInit {
     terminal: String,
     initial_cols: u16,
     initial_rows: u16,
+    initial_cell: (u32, u32),
     size_ready: bool,
     focused: bool,
     theme: Option<Value>,
+}
+
+fn display_facts_for_model(model: &Model, theme: Option<&Value>) -> DisplayFacts {
+    let parse_rgb = |v: &Value| -> Option<[u8; 3]> {
+        let a = v.as_array()?;
+        if a.len() != 3 {
+            return None;
+        }
+        Some([
+            u8::try_from(a[0].as_u64()?).ok()?,
+            u8::try_from(a[1].as_u64()?).ok()?,
+            u8::try_from(a[2].as_u64()?).ok()?,
+        ])
+    };
+    let (def_fg, def_bg, def_cur) = model.default_colors();
+    let fg = theme
+        .and_then(|t| parse_rgb(&t["foreground"]))
+        .or(Some(def_fg));
+    let bg = theme
+        .and_then(|t| parse_rgb(&t["background"]))
+        .or(Some(def_bg));
+    let cursor = theme
+        .and_then(|t| parse_rgb(&t["cursor"]))
+        .or(Some(def_cur));
+    DisplayFacts {
+        fg,
+        bg,
+        cursor,
+        cell: Some(model.cell_size()),
+    }
 }
 
 fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
@@ -301,14 +350,28 @@ fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
         terminal,
         initial_cols,
         initial_rows,
+        initial_cell,
         size_ready,
         focused,
         theme,
     } = init;
-    let mut model = Model::new(initial_cols.max(2), initial_rows.max(1));
+    let cols = initial_cols.max(2);
+    let rows = initial_rows.max(1);
+    let mut model = Model::new(cols, rows);
+    let _ = model.resize_with_metrics(
+        cols,
+        rows,
+        initial_cell.0.max(1),
+        initial_cell.1.max(1),
+        6,
+        6,
+        6,
+        6,
+    );
     if let Some(ref t) = theme {
         model.theme(t);
     }
+    let _ = model.replies();
     let state = Arc::new(Mutex::new(State {
         model,
         status: "Connecting…".into(),
@@ -371,25 +434,33 @@ fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
         }
         let mut first_attach = true;
         while !stop.load(Ordering::SeqCst) {
-            let attempt = (|| -> anyhow::Result<(Attachment, (u16, u16))> {
+            let attempt = (|| -> anyhow::Result<(Attachment, (u16, u16), DisplayFacts)> {
                 if !relay_fenced {
                     anyhow::ensure!(
                         client.status()?["core"]["id"] == core,
                         "Original core identity changed"
                     );
                 }
-                let size = {
+                let (size, display) = {
                     let s = state.lock().unwrap();
-                    (s.model.cols, s.model.height)
+                    (
+                        (s.model.cols, s.model.height),
+                        display_facts_for_model(&s.model, s.theme.as_ref()),
+                    )
                 };
-                let mut attachment =
-                    client.attach_fenced(&terminal, size.0, size.1, Some(&core))?;
+                let mut attachment = client.attach_fenced_with_display(
+                    &terminal,
+                    size.0,
+                    size.1,
+                    Some(&core),
+                    Some(&display),
+                )?;
                 if !relay_fenced {
                     attachment.track_view(&core, &terminal);
                 }
-                Ok((attachment, size))
+                Ok((attachment, size, display))
             })();
-            let (attach, attached_size) = match attempt {
+            let (attach, attached_size, attached_display) = match attempt {
                 Ok(v) => v,
                 Err(e) => {
                     {
@@ -418,10 +489,22 @@ fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 let mut s = state.lock().unwrap();
                 let size = (s.model.cols, s.model.height);
                 if !was_first_attach {
+                    let prev_cell = s.model.cell_size();
                     s.model = Model::new(size.0, size.1);
+                    let _ = s.model.resize_with_metrics(
+                        size.0,
+                        size.1,
+                        prev_cell.0.max(1),
+                        prev_cell.1.max(1),
+                        8,
+                        8,
+                        6,
+                        6,
+                    );
                     if let Some(theme) = s.theme.clone() {
                         s.model.theme(&theme);
                     }
+                    let _ = s.model.replies();
                 }
                 s.status = String::new();
                 s.connecting_since = None;
@@ -430,9 +513,13 @@ fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                 } else {
                     Ok(())
                 };
-                // Layout may have resized the view while attach was connecting or across a reconnect.
+                // Layout may have resized the view or updated font/theme while attach was connecting.
                 if setup_res.is_ok() && s.size_ready && size != attached_size {
                     setup_res = attach.resize(size.0, size.1);
+                }
+                let latest_display = display_facts_for_model(&s.model, s.theme.as_ref());
+                if setup_res.is_ok() && latest_display != attached_display {
+                    setup_res = attach.facts(&latest_display);
                 }
                 if let Err(e) = setup_res {
                     s.status = format!("Attach setup failed: {e} · reconnecting");
@@ -458,8 +545,10 @@ fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                         let message = rx.lock().unwrap().recv_timeout(Duration::from_millis(20));
                         let result = match message {
                             Ok(Input::Bytes(bytes)) => writer.input(&bytes),
+                            Ok(Input::AutoBytes(bytes)) => writer.automatic_input(&bytes),
                             Ok(Input::Resize(c, r)) => writer.resize(c, r),
                             Ok(Input::Focus(on)) => writer.focus(on),
+                            Ok(Input::Facts(facts)) => writer.facts(&facts),
                             Err(mpsc::RecvTimeoutError::Timeout) => continue,
                             Err(_) => break,
                         };
@@ -537,7 +626,12 @@ fn spawn_session(init: SessionInit) -> Arc<LiveSession> {
                         break;
                     }
                     Ok(None) => {
-                        if state.lock().unwrap().model.expire_render_hold_if_due() {
+                        let should_wake = {
+                            let mut s = state.lock().unwrap();
+                            s.model.expire_render_hold_if_due()
+                                || s.model.advance_animation_if_due()
+                        };
+                        if should_wake {
                             wake.notify();
                         }
                     }
@@ -572,6 +666,7 @@ fn get_or_spawn_session(init: SessionInit) -> Arc<LiveSession> {
         .position(|s| s.key.0 == init.core && s.key.1 == init.terminal)
     {
         let existing = pool.remove(idx).unwrap();
+        let mut facts_to_send = None;
         {
             let mut s = existing.state.lock().unwrap();
             if let Some(ref t) = init.theme
@@ -579,11 +674,17 @@ fn get_or_spawn_session(init: SessionInit) -> Arc<LiveSession> {
             {
                 s.model.theme(t);
                 s.theme = Some(t.clone());
+                if s.connected {
+                    facts_to_send = Some(display_facts_for_model(&s.model, s.theme.as_ref()));
+                }
             }
             if init.size_ready && !s.size_ready {
                 s.size_ready = true;
                 existing.size_cv.notify_all();
             }
+        }
+        if let Some(facts) = facts_to_send {
+            let _ = existing.input.send(Input::Facts(facts));
         }
         pool.push_back(existing.clone());
         return existing;
@@ -622,6 +723,7 @@ struct Host {
     link_scratch: String,
     ax_scratch: String,
     clipboard_scratch: String,
+    image_scratch: Vec<u8>,
     snapshot_box: RenderSnapshot,
     binding: String,
     content: Option<String>,
@@ -657,10 +759,15 @@ impl Host {
             link_scratch: String::new(),
             ax_scratch: String::new(),
             clipboard_scratch: String::new(),
+            image_scratch: Vec::new(),
             snapshot_box: RenderSnapshot {
                 cells: std::ptr::null(),
                 utf16: std::ptr::null(),
                 dirty_rows: std::ptr::null(),
+                image_placements: std::ptr::null(),
+                image_placements_len: 0,
+                image_placements_generation: 0,
+                next_animation_ms: 0,
                 status_ptr: std::ptr::null(),
                 status_len: 0,
                 cols: 0,
@@ -694,6 +801,15 @@ impl Host {
         }
         if let Some(tx) = &self.input {
             let _ = tx.send(Input::Bytes(bytes));
+        }
+    }
+
+    fn send_auto_bytes(&self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        if let Some(tx) = &self.input {
+            let _ = tx.send(Input::AutoBytes(bytes));
         }
     }
 
@@ -753,9 +869,14 @@ impl Host {
             return false;
         }
         let prev_focused = self.state.lock().unwrap().focused;
-        let (prev_cols, prev_rows, prev_ready) = {
+        let (prev_cols, prev_rows, prev_cell, prev_ready) = {
             let s = self.state.lock().unwrap();
-            (s.model.cols, s.model.height, s.size_ready)
+            (
+                s.model.cols,
+                s.model.height,
+                s.model.cell_size(),
+                s.size_ready,
+            )
         };
         let theme = self
             .theme
@@ -781,6 +902,7 @@ impl Host {
             terminal,
             initial_cols: prev_cols.max(2),
             initial_rows: prev_rows.max(1),
+            initial_cell: prev_cell,
             size_ready: prev_ready,
             focused: prev_focused,
             theme,
@@ -960,6 +1082,7 @@ extern "C" fn cb_snapshot(
         let cols = geom.cols.clamp(2, 500);
         let rows = geom.rows.clamp(1, 200);
         let became_ready = !state.size_ready;
+        let prev_cell = state.model.cell_size();
         state.size_ready = true;
         let grid_changed = state.model.resize_with_metrics(
             cols,
@@ -971,19 +1094,32 @@ extern "C" fn cb_snapshot(
             geom.pad_top,
             geom.pad_bottom,
         );
-        if grid_changed && let Some(tx) = &host.input {
-            let _ = tx.send(Input::Resize(cols, rows));
+        if let Some(tx) = &host.input {
+            if grid_changed {
+                let _ = tx.send(Input::Resize(cols, rows));
+            }
+            if state.connected && state.model.cell_size() != prev_cell {
+                let _ = tx.send(Input::Facts(display_facts_for_model(
+                    &state.model,
+                    state.theme.as_ref(),
+                )));
+            }
         }
         if became_ready {
             host.size_cv.notify_all();
         }
     }
     let _ = state.model.expire_render_hold_if_due();
+    let _ = state.model.advance_animation_if_due();
     let replies = state.model.replies();
     let status = host.effective_status(&state);
     let status_changed = status != host.seen_status;
     let rev = state.model.revision;
     if !force_full && rev == host.seen && !status_changed {
+        drop(state);
+        if !replies.is_empty() {
+            host.send_auto_bytes(replies);
+        }
         return std::ptr::null();
     }
     host.seen = rev;
@@ -997,7 +1133,7 @@ extern "C" fn cb_snapshot(
     }
     drop(state);
     if !replies.is_empty() {
-        host.send_bytes(replies);
+        host.send_auto_bytes(replies);
     }
     host.snapshot_box = snap;
     &host.snapshot_box as *const RenderSnapshot
@@ -1359,6 +1495,40 @@ extern "C" fn cb_measure_text(host_ptr: *mut c_void, ptr: *const u8, len: usize)
     host.state.lock().unwrap().model.measure_text_cells(text)
 }
 
+extern "C" fn cb_resolve_image(
+    host_ptr: *mut c_void,
+    image_id: u32,
+    out: *mut RenderImageData,
+) -> bool {
+    if host_ptr.is_null() || out.is_null() {
+        return false;
+    }
+    let host = unsafe { &mut *(host_ptr as *mut Host) };
+    let resolved = {
+        let mut state = host.state.lock().unwrap();
+        let Some(img) = state.model.resolve_kitty_image(image_id) else {
+            return false;
+        };
+        let slice = unsafe { std::slice::from_raw_parts(img.rgba_ptr, img.rgba_len) };
+        host.image_scratch.clear();
+        host.image_scratch.extend_from_slice(slice);
+        RenderImageData {
+            rgba_ptr: std::ptr::null(),
+            rgba_len: host.image_scratch.len(),
+            width: img.width,
+            height: img.height,
+            generation: img.generation,
+        }
+    };
+    unsafe {
+        *out = RenderImageData {
+            rgba_ptr: host.image_scratch.as_ptr(),
+            ..resolved
+        };
+    }
+    true
+}
+
 fn callbacks() -> CbCallbacks {
     CbCallbacks {
         snapshot: cb_snapshot,
@@ -1379,6 +1549,7 @@ fn callbacks() -> CbCallbacks {
         take_clipboard: cb_take_clipboard,
         take_bell: cb_take_bell,
         measure_text: cb_measure_text,
+        resolve_image: cb_resolve_image,
     }
 }
 
@@ -1449,13 +1620,23 @@ impl NativeComponent for Terminal {
                 unsafe { cb_terminal_set_theme_bg(view_ptr, r as u8, g as u8, b as u8) };
             }
             let mut changed = false;
+            let mut facts_to_send = None;
             {
                 let mut state = self.host.state.lock().unwrap();
                 if state.theme.as_ref() != Some(theme) {
                     state.model.theme(theme);
                     state.theme = Some(theme.clone());
                     changed = true;
+                    if state.connected {
+                        facts_to_send =
+                            Some(display_facts_for_model(&state.model, state.theme.as_ref()));
+                    }
                 }
+            }
+            if let Some(facts) = facts_to_send
+                && let Some(tx) = &self.host.input
+            {
+                let _ = tx.send(Input::Facts(facts));
             }
             if changed {
                 self.host.seen = u64::MAX;
@@ -1488,11 +1669,25 @@ impl NativeComponent for Terminal {
                 self.host.content = content.map(str::to_owned);
                 {
                     let mut state = self.host.state.lock().unwrap();
-                    state.model = Model::new(state.model.cols, state.model.height);
+                    let prev_cols = state.model.cols;
+                    let prev_rows = state.model.height;
+                    let prev_cell = state.model.cell_size();
+                    state.model = Model::new(prev_cols, prev_rows);
+                    let _ = state.model.resize_with_metrics(
+                        prev_cols,
+                        prev_rows,
+                        prev_cell.0.max(1),
+                        prev_cell.1.max(1),
+                        8,
+                        8,
+                        6,
+                        6,
+                    );
                     state.model.write(content.unwrap_or("").as_bytes());
                     if let Some(theme) = state.theme.clone() {
                         state.model.theme(&theme);
                     }
+                    let _ = state.model.replies();
                 }
                 self.host.seen = u64::MAX;
                 self.host.wake.notify();
@@ -2051,6 +2246,222 @@ mod tests {
             ok,
             "Nerd Font / PUA fallback resolution and offscreen glyph drawing must succeed without .LastResort tofu"
         );
+
+        unsafe {
+            cb_terminal_detach(raw_view as *mut c_void);
+            drop(Retained::from_raw(raw_view));
+        }
+    }
+
+    fn encode_test_png(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        let mut enc = png::Encoder::new(&mut buf, width, height);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc.write_header().expect("png header");
+        writer.write_image_data(rgba).expect("png data");
+        drop(writer);
+        buf
+    }
+
+    fn sample_rgb(rgba: &[u8], width: u32, x: f64, y: f64) -> [u8; 3] {
+        let px = (x.floor() as usize).min(width as usize - 1);
+        let py = y.floor() as usize;
+        let idx = (py * width as usize + px) * 4;
+        [rgba[idx], rgba[idx + 1], rgba[idx + 2]]
+    }
+
+    #[test]
+    fn offscreen_kitty_direct_png_renders_oriented_quadrants_and_z_ordering_and_auto_replies() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let mut host = Box::new(Host::new());
+        let (tx, rx) = mpsc::channel();
+        host.input = Some(tx);
+        host.state.lock().unwrap().connected = true;
+
+        let raw_view = unsafe { cb_terminal_new(&mut *host as *mut _ as *mut c_void, callbacks()) };
+        assert!(!raw_view.is_null());
+
+        let width = 480u32;
+        let height = 240u32;
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        // Initial layout render so Model acquires exact cell metrics.
+        assert!(unsafe {
+            cb_terminal_test_render_rgba(raw_view as *mut c_void, width, height, rgba.as_mut_ptr())
+        });
+        while rx.try_recv().is_ok() {}
+
+        let (mut cw, mut ch, mut pad_x, mut pad_y) = (0.0, 0.0, 0.0, 0.0);
+        unsafe {
+            cb_terminal_test_cell_metrics(
+                raw_view as *mut c_void,
+                &mut cw,
+                &mut ch,
+                &mut pad_x,
+                &mut pad_y,
+            );
+        }
+        assert!(cw >= 4.0 && ch >= 8.0);
+
+        // 1. 4x4 PNG split into 4 solid 2x2 quadrants (avoids linear filter blending at centers):
+        //    TL = Red (240, 20, 30), TR = Green (20, 220, 40),
+        //    BL = Blue (30, 60, 245), BR = Yellow (245, 220, 20).
+        let mut png_px = vec![0u8; 4 * 4 * 4];
+        for y in 0..4usize {
+            for x in 0..4usize {
+                let c = match (x < 2, y < 2) {
+                    (true, true) => [240, 20, 30, 255],
+                    (false, true) => [20, 220, 40, 255],
+                    (true, false) => [30, 60, 245, 255],
+                    (false, false) => [245, 220, 20, 255],
+                };
+                png_px[(y * 4 + x) * 4..(y * 4 + x + 1) * 4].copy_from_slice(&c);
+            }
+        }
+        let png_b64 = STANDARD.encode(encode_test_png(4, 4, &png_px));
+
+        // Solid Magenta 2x2 image for z-order test against bright white full-block U+2588 text:
+        // - At row 0, col 10: write white U+2588 + z = -1 magenta placement -> white glyph wins over magenta!
+        // - At row 0, col 14: write white U+2588 + z = +1 magenta placement -> magenta image covers white glyph!
+        let mag_b64 = STANDARD.encode([220u8, 20, 200, 255].repeat(4));
+        let stream = format!(
+            "\x1b[?25l\x1b_Gi=77,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\
+             \x1b[2;3H\x1b_Gf=100,a=T,i=10,c=4,r=2,q=2;{png_b64}\x1b\\\
+             \x1b[1;11H\x1b[97m\u{2588}\x1b[0m\x1b[1;11H\x1b_Gf=32,s=2,v=2,a=T,i=11,p=1,c=1,r=1,z=-1,q=2;{mag_b64}\x1b\\\
+             \x1b[1;15H\x1b[97m\u{2588}\x1b[0m\x1b[1;15H\x1b_Ga=p,i=11,p=2,c=1,r=1,z=1,q=2\x1b\\"
+        );
+        host.state.lock().unwrap().model.write(stream.as_bytes());
+
+        assert!(unsafe {
+            cb_terminal_test_render_rgba(raw_view as *mut c_void, width, height, rgba.as_mut_ptr())
+        });
+
+        // Automatic Kitty query reply must be sent as Input::AutoBytes (not human Input::Bytes).
+        let mut saw_auto_reply = false;
+        while let Ok(msg) = rx.try_recv() {
+            if let Input::AutoBytes(ref bytes) = msg
+                && String::from_utf8_lossy(bytes).contains("\x1b_Gi=77;OK\x1b\\")
+            {
+                saw_auto_reply = true;
+            } else if matches!(msg, Input::Bytes(_)) {
+                panic!("Kitty query reply must not be sent as human Input::Bytes: {msg:?}");
+            }
+        }
+        assert!(
+            saw_auto_reply,
+            "expected Input::AutoBytes Kitty query reply"
+        );
+
+        // Verify 4x4 quadrant PNG at (col=2..6, row=1..3) is right-side up:
+        let tl = sample_rgb(&rgba, width, pad_x + 2.5 * cw, pad_y + 1.25 * ch);
+        let tr = sample_rgb(&rgba, width, pad_x + 5.5 * cw, pad_y + 1.25 * ch);
+        let bl = sample_rgb(&rgba, width, pad_x + 2.5 * cw, pad_y + 2.75 * ch);
+        let br = sample_rgb(&rgba, width, pad_x + 5.5 * cw, pad_y + 2.75 * ch);
+        assert!(
+            tl[0] > 180 && tl[1] < 80 && tl[2] < 80,
+            "top-left quadrant must render Red, got {tl:?}"
+        );
+        assert!(
+            tr[1] > 170 && tr[0] < 80 && tr[2] < 80,
+            "top-right quadrant must render Green, got {tr:?}"
+        );
+        assert!(
+            bl[2] > 180 && bl[0] < 80 && bl[1] < 110,
+            "bottom-left quadrant must render Blue, got {bl:?}"
+        );
+        assert!(
+            br[0] > 180 && br[1] > 170 && br[2] < 80,
+            "bottom-right quadrant must render Yellow, got {br:?}"
+        );
+
+        // Verify z-ordering at (col=10, row=0) [z=-1 below white block] vs (col=14, row=0) [z=+1 above white block]:
+        let z_neg_px = sample_rgb(&rgba, width, pad_x + 10.5 * cw, pad_y + 0.5 * ch);
+        let z_pos_px = sample_rgb(&rgba, width, pad_x + 14.5 * cw, pad_y + 0.5 * ch);
+        assert!(
+            z_neg_px[0] > 200 && z_neg_px[1] > 200 && z_neg_px[2] > 200,
+            "z=-1 placement must render behind white U+2588 text glyph, got {z_neg_px:?}"
+        );
+        assert!(
+            z_pos_px[0] > 170 && z_pos_px[1] < 80 && z_pos_px[2] > 150,
+            "z=+1 placement must render above white U+2588 text glyph, got {z_pos_px:?}"
+        );
+
+        unsafe {
+            cb_terminal_detach(raw_view as *mut c_void);
+            drop(Retained::from_raw(raw_view));
+        }
+    }
+
+    #[test]
+    fn offscreen_kitty_virtual_placements_render_pixels_and_suppress_u10eeee_tofu() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let mut host = Box::new(Host::new());
+        host.state.lock().unwrap().connected = true;
+
+        let raw_view = unsafe { cb_terminal_new(&mut *host as *mut _ as *mut c_void, callbacks()) };
+        assert!(!raw_view.is_null());
+
+        let width = 480u32;
+        let height = 240u32;
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        assert!(unsafe {
+            cb_terminal_test_render_rgba(raw_view as *mut c_void, width, height, rgba.as_mut_ptr())
+        });
+
+        let (mut cw, mut ch, mut pad_x, mut pad_y) = (0.0, 0.0, 0.0, 0.0);
+        unsafe {
+            cb_terminal_test_cell_metrics(
+                raw_view as *mut c_void,
+                &mut cw,
+                &mut ch,
+                &mut pad_x,
+                &mut pad_y,
+            );
+        }
+
+        // Virtual placement U=1 for a 16x36 aspect-matched image ID 5 (solid bright Orange: 250, 130, 15)
+        // spanning 2x2 cells placed at (col=2..4, row=1..3), PLUS an unbacked U+10EEEE cell at (col=8, row=1)
+        // with bright white foreground + underline color to prove U+10EEEE never draws CoreText .LastResort tofu or underlines!
+        let orange_b64 = STANDARD.encode([250u8, 130, 15, 255].repeat(16 * 36));
+        let stream = format!(
+            "\x1b[?25l\x1b_Gf=32,s=16,v=36,a=T,U=1,i=5,c=2,r=2,q=2;{orange_b64}\x1b\\\
+             \x1b[2;3H\x1b[4;38;2;0;0;5m\u{10EEEE}\u{0305}\u{0305}\u{10EEEE}\u{0305}\u{030D}\x1b[0m\
+             \x1b[3;3H\x1b[4;38;2;0;0;5m\u{10EEEE}\u{030D}\u{0305}\u{10EEEE}\u{030D}\u{030D}\x1b[0m\
+             \x1b[2;9H\x1b[4;38;2;255;255;255;58;2;255;255;255m\u{10EEEE}\u{0305}\u{0305}\x1b[0m"
+        );
+        host.state.lock().unwrap().model.write(stream.as_bytes());
+
+        assert!(unsafe {
+            cb_terminal_test_render_rgba(raw_view as *mut c_void, width, height, rgba.as_mut_ptr())
+        });
+
+        // 1. All 4 cells of the 2x2 virtual placement (col=2..4, row=1..3) render bright Orange pixels:
+        for (cx, cy) in [(2.5, 1.5), (3.5, 1.5), (2.5, 2.5), (3.5, 2.5)] {
+            let px = sample_rgb(&rgba, width, pad_x + cx * cw, pad_y + cy * ch);
+            assert!(
+                px[0] > 200 && px[1] > 90 && px[1] < 175 && px[2] < 60,
+                "virtual placement cell ({cx}, {cy}) must render Orange image pixels without tofu, got {px:?}"
+            );
+        }
+
+        // 2. Unbacked U+10EEEE cell at (col=8, row=1) must remain 100% pure default background
+        //    across its entire cell rect (zero .LastResort tofu box strokes and zero underline pixels):
+        let bg_ref = sample_rgb(&rgba, width, pad_x + 15.5 * cw, pad_y + 1.5 * ch);
+        let x0 = (pad_x + 8.0 * cw).ceil() as u32;
+        let x1 = (pad_x + 9.0 * cw).floor() as u32;
+        let y0 = (pad_y + 1.0 * ch).ceil() as u32;
+        let y1 = (pad_y + 2.0 * ch).floor() as u32;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let px = sample_rgb(&rgba, width, f64::from(x), f64::from(y));
+                assert_eq!(
+                    px, bg_ref,
+                    "unbacked U+10EEEE cell pixel ({x},{y}) must equal background {bg_ref:?} (no .LastResort tofu or underline), got {px:?}"
+                );
+            }
+        }
 
         unsafe {
             cb_terminal_detach(raw_view as *mut c_void);

@@ -8,11 +8,16 @@ links = "ghostty-vt"
 
 [dependencies]
 anyhow.workspace = true
+png.workspace = true
 serde_json.workspace = true
 nsh-core.workspace = true
 nsh-platform-macos.workspace = true
 canban-herdr.workspace = true
 canban-types.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+tempfile.workspace = true
 
 [build-dependencies]
 bindgen = "0.72"

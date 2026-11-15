@@ -40,9 +40,40 @@ typedef struct {
 } CbRenderScrollbar;
 
 typedef struct {
+  uint32_t image_id;
+  uint64_t image_generation;
+  uint8_t layer;
+  int32_t z;
+  int32_t viewport_col;
+  int32_t viewport_row;
+  uint32_t grid_cols;
+  uint32_t grid_rows;
+  uint32_t cell_offset_x;
+  uint32_t cell_offset_y;
+  uint32_t pixel_width;
+  uint32_t pixel_height;
+  uint32_t source_x;
+  uint32_t source_y;
+  uint32_t source_width;
+  uint32_t source_height;
+} CbRenderImagePlacement;
+
+typedef struct {
+  const uint8_t *rgba_ptr;
+  size_t rgba_len;
+  uint32_t width;
+  uint32_t height;
+  uint64_t generation;
+} CbRenderImageData;
+
+typedef struct {
   const CbRenderCell *cells;
   const uint16_t *utf16;
   const uint8_t *dirty_rows;
+  const CbRenderImagePlacement *image_placements;
+  size_t image_placements_len;
+  uint64_t image_placements_generation;
+  uint32_t next_animation_ms;
   const uint8_t *status_ptr;
   size_t status_len;
   uint16_t cols;
@@ -131,6 +162,7 @@ typedef struct {
   const uint8_t *(*take_clipboard)(void *, size_t *);
   bool (*take_bell)(void *);
   uint16_t (*measure_text)(void *, const uint8_t *, size_t);
+  bool (*resolve_image)(void *, uint32_t, CbRenderImageData *);
 } CbCallbacks;
 
 enum {
@@ -181,6 +213,33 @@ enum {
   CB_WIDE_SPACER_TAIL = 2,
   CB_WIDE_SPACER_HEAD = 3,
 };
+
+enum {
+  CB_IMAGE_LAYER_BELOW_BG = 0,
+  CB_IMAGE_LAYER_BELOW_TEXT = 1,
+  CB_IMAGE_LAYER_ABOVE_TEXT = 2,
+};
+
+static const uint32_t kKittyUnicodePlaceholder = 0x10EEEE;
+
+@interface CbCachedKittyImage : NSObject {
+@public
+  uint32_t _imageId;
+  uint64_t _generation;
+  uint32_t _width;
+  uint32_t _height;
+  CGImageRef _cgImage;
+}
+@end
+
+@implementation CbCachedKittyImage
+- (void)dealloc {
+  if (_cgImage) {
+    CFRelease(_cgImage);
+    _cgImage = NULL;
+  }
+}
+@end
 
 static const CGFloat kPadX = 8.0;
 static const CGFloat kPadY = 6.0;
@@ -911,6 +970,9 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
   CTFontRef _fontItalic;
   CTFontRef _fontBoldItalic;
   CFMutableDictionaryRef _fallbackCache;
+  NSMutableDictionary<NSNumber *, CbCachedKittyImage *> *_imageCache;
+  uint64_t _prevImagePlacementsGen;
+  size_t _prevImagePlacementsLen;
   uint64_t _physicalKeyDownLo;
   uint64_t _physicalKeyDownHi;
   uint8_t _themeBg[3];
@@ -987,6 +1049,7 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
   _lastBlinkTime = [NSProcessInfo processInfo].systemUptime;
   _fallbackCache = CFDictionaryCreateMutable(
       kCFAllocatorDefault, 0, NULL, &kCFTypeDictionaryValueCallBacks);
+  _imageCache = [NSMutableDictionary dictionary];
   _themeBg[0] = 25;
   _themeBg[1] = 30;
   _themeBg[2] = 38;
@@ -1042,6 +1105,9 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
   _prevScrollTotal = 0;
   _cursorBlinkVisible = YES;
   _lastBlinkTime = [NSProcessInfo processInfo].systemUptime;
+  [_imageCache removeAllObjects];
+  _prevImagePlacementsGen = 0;
+  _prevImagePlacementsLen = 0;
   _snap = NULL;
   [self pollSnapshotForceFull:YES];
   [self setNeedsDisplay:YES];
@@ -1075,6 +1141,7 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
 - (void)detachHost {
   _host = NULL;
   _snap = NULL;
+  [_imageCache removeAllObjects];
   _commitCursorActive = NO;
   _commitHoldUntil = 0;
   _lastUnmarkTime = 0;
@@ -1402,7 +1469,13 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
   _prevScrollOffset = next->scrollbar.offset;
   _prevScrollTotal = next->scrollbar.total;
 
-  if (forceFull || next->dirty_state == 2) {
+  BOOL imagesChanged =
+      (next->image_placements_generation != _prevImagePlacementsGen) ||
+      (next->image_placements_len != _prevImagePlacementsLen);
+  _prevImagePlacementsGen = next->image_placements_generation;
+  _prevImagePlacementsLen = next->image_placements_len;
+
+  if (forceFull || next->dirty_state == 2 || imagesChanged) {
     [self setNeedsDisplay:YES];
   } else if (next->dirty_state == 1) {
     if (next->dirty_rows) {
@@ -1444,11 +1517,17 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
   BOOL needScrollbarFade = (now < _scrollbarVisibleUntil + 0.25);
   BOOL needLayoutSettle = (_pendingLayoutRedraws > 0);
   BOOL needCommitHold = _commitCursorActive;
+  BOOL needKittyAnim = (_snap && _snap->next_animation_ms > 0);
   BOOL needed = needCursorBlink || needAutoscroll || needScrollbarFade ||
-                needLayoutSettle || needCommitHold;
+                needLayoutSettle || needCommitHold || needKittyAnim;
 
   NSTimeInterval desiredInterval =
       (needAutoscroll || needCommitHold) ? 0.033 : 0.08;
+  if (needKittyAnim) {
+    NSTimeInterval kittyInterval =
+        fmax(0.016, fmin(0.5, (double)_snap->next_animation_ms / 1000.0));
+    desiredInterval = fmin(desiredInterval, kittyInterval);
+  }
   if (!needed) {
     [self.animTimer invalidate];
     self.animTimer = nil;
@@ -1511,6 +1590,8 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
     _pendingLayoutRedraws--;
     [self pollSnapshotForceFull:NO];
     [self setNeedsDisplay:YES];
+  } else if (_snap && _snap->next_animation_ms > 0) {
+    [self pollSnapshotForceFull:NO];
   }
   [self updateAnimTimerState];
 }
@@ -1761,6 +1842,186 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
   CGContextRestoreGState(ctx);
 }
 
+- (CGImageRef)cachedKittyImageForId:(uint32_t)imageId
+                         generation:(uint64_t)generation
+                           outWidth:(uint32_t *)outW
+                          outHeight:(uint32_t *)outH {
+  if (!_host || !_cb.resolve_image || imageId == 0)
+    return NULL;
+  NSNumber *key = @(imageId);
+  CbCachedKittyImage *cached = _imageCache[key];
+  if (cached && cached->_cgImage &&
+      (generation == 0 || cached->_generation == generation)) {
+    if (outW)
+      *outW = cached->_width;
+    if (outH)
+      *outH = cached->_height;
+    return cached->_cgImage;
+  }
+
+  CbRenderImageData imgData;
+  memset(&imgData, 0, sizeof(imgData));
+  if (!_cb.resolve_image(_host, imageId, &imgData) || !imgData.rgba_ptr ||
+      imgData.width == 0 || imgData.height == 0) {
+    return NULL;
+  }
+  size_t expectedLen = (size_t)imgData.width * (size_t)imgData.height * 4;
+  if (imgData.rgba_len < expectedLen)
+    return NULL;
+
+  if (cached && cached->_cgImage && cached->_generation == imgData.generation &&
+      cached->_width == imgData.width && cached->_height == imgData.height) {
+    if (outW)
+      *outW = cached->_width;
+    if (outH)
+      *outH = cached->_height;
+    return cached->_cgImage;
+  }
+
+  CFDataRef data = CFDataCreate(kCFAllocatorDefault, imgData.rgba_ptr,
+                                (CFIndex)expectedLen);
+  if (!data)
+    return NULL;
+  CGDataProviderRef provider = CGDataProviderCreateWithCFData(data);
+  CFRelease(data);
+  if (!provider)
+    return NULL;
+
+  CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+  CGImageRef cgImg = CGImageCreate(
+      imgData.width, imgData.height, 8, 32, (size_t)imgData.width * 4, cs,
+      (CGBitmapInfo)kCGImageAlphaLast | (CGBitmapInfo)kCGBitmapByteOrderDefault,
+      provider, NULL, true, kCGRenderingIntentDefault);
+  CGColorSpaceRelease(cs);
+  CGDataProviderRelease(provider);
+  if (!cgImg)
+    return NULL;
+
+  if (_imageCache.count >= 256 && _snap && _snap->image_placements &&
+      _snap->image_placements_len > 0) {
+    NSMutableSet<NSNumber *> *active =
+        [NSMutableSet setWithCapacity:_snap->image_placements_len];
+    for (size_t i = 0; i < _snap->image_placements_len; i++) {
+      [active addObject:@(_snap->image_placements[i].image_id)];
+    }
+    NSArray<NSNumber *> *allKeys = [_imageCache allKeys];
+    for (NSNumber *k in allKeys) {
+      if (![active containsObject:k]) {
+        [_imageCache removeObjectForKey:k];
+      }
+    }
+    if (_imageCache.count >= 512) {
+      [_imageCache removeAllObjects];
+    }
+  } else if (_imageCache.count >= 256) {
+    [_imageCache removeAllObjects];
+  }
+
+  CbCachedKittyImage *entry = [[CbCachedKittyImage alloc] init];
+  entry->_imageId = imageId;
+  entry->_generation = imgData.generation;
+  entry->_width = imgData.width;
+  entry->_height = imgData.height;
+  entry->_cgImage = cgImg;
+  _imageCache[key] = entry;
+
+  if (outW)
+    *outW = imgData.width;
+  if (outH)
+    *outH = imgData.height;
+  return cgImg;
+}
+
+- (void)drawKittyLayer:(uint8_t)layer
+             inContext:(CGContextRef)ctx
+             dirtyRect:(NSRect)dirtyRect {
+  const CbSnapshot *snap = _snap;
+  if (!snap || !snap->image_placements || snap->image_placements_len == 0 ||
+      snap->cols == 0 || snap->rows == 0) {
+    return;
+  }
+
+  CGFloat cw = _cellWidth > 0.0 ? _cellWidth : 8.0;
+  CGFloat ch = _cellHeight > 0.0 ? _cellHeight : 18.0;
+  NSRect viewportRect =
+      NSMakeRect(kPadX, kPadY, (CGFloat)snap->cols * cw, (CGFloat)snap->rows * ch);
+  NSRect clipRect = NSIntersectionRect(dirtyRect, viewportRect);
+  if (NSIsEmptyRect(clipRect))
+    return;
+
+  CGFloat geomCw = fmax(1.0, round(cw));
+  CGFloat geomCh = fmax(1.0, round(ch));
+  CGFloat scaleX = cw / geomCw;
+  CGFloat scaleY = ch / geomCh;
+
+  BOOL savedClip = NO;
+  for (size_t i = 0; i < snap->image_placements_len; i++) {
+    const CbRenderImagePlacement *p = &snap->image_placements[i];
+    if (p->layer != layer || p->pixel_width == 0 || p->pixel_height == 0)
+      continue;
+
+    CGFloat destX = kPadX + (CGFloat)p->viewport_col * cw +
+                    (CGFloat)p->cell_offset_x * scaleX;
+    CGFloat destY = kPadY + (CGFloat)p->viewport_row * ch +
+                    (CGFloat)p->cell_offset_y * scaleY;
+    CGFloat destW = (CGFloat)p->pixel_width * scaleX;
+    CGFloat destH = (CGFloat)p->pixel_height * scaleY;
+    NSRect destRect = NSMakeRect(destX, destY, destW, destH);
+    if (!NSIntersectsRect(destRect, clipRect))
+      continue;
+
+    uint32_t imgW = 0, imgH = 0;
+    CGImageRef fullImg = [self cachedKittyImageForId:p->image_id
+                                          generation:p->image_generation
+                                            outWidth:&imgW
+                                           outHeight:&imgH];
+    if (!fullImg || imgW == 0 || imgH == 0)
+      continue;
+
+    if (!savedClip) {
+      CGContextSaveGState(ctx);
+      CGContextClipToRect(ctx, NSRectToCGRect(clipRect));
+      CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
+      savedClip = YES;
+    }
+
+    uint32_t sx = p->source_x < imgW ? p->source_x : 0;
+    uint32_t sy = p->source_y < imgH ? p->source_y : 0;
+    uint32_t sw = (p->source_width > 0 && sx + p->source_width <= imgW)
+                      ? p->source_width
+                      : (imgW - sx);
+    uint32_t sh = (p->source_height > 0 && sy + p->source_height <= imgH)
+                      ? p->source_height
+                      : (imgH - sy);
+    if (sw == 0 || sh == 0)
+      continue;
+
+    CGImageRef drawImg = fullImg;
+    BOOL releaseSubImg = NO;
+    if (sx != 0 || sy != 0 || sw != imgW || sh != imgH) {
+      drawImg = CGImageCreateWithImageInRect(
+          fullImg, CGRectMake((CGFloat)sx, (CGFloat)sy, (CGFloat)sw, (CGFloat)sh));
+      if (!drawImg)
+        continue;
+      releaseSubImg = YES;
+    }
+
+    CGContextSaveGState(ctx);
+    CGContextTranslateCTM(ctx, destX, destY + destH);
+    CGContextScaleCTM(ctx, 1.0, -1.0);
+    CGContextDrawImage(ctx, CGRectMake(0.0, 0.0, destW, destH), drawImg);
+    CGContextRestoreGState(ctx);
+
+    if (releaseSubImg) {
+      CFRelease(drawImg);
+    }
+  }
+
+  if (savedClip) {
+    CGContextRestoreGState(ctx);
+  }
+}
+
 - (void)drawRect:(NSRect)dirtyRect {
   NSRectClip(self.bounds);
   dirtyRect = NSIntersectionRect(dirtyRect, self.bounds);
@@ -1790,6 +2051,9 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
     CGColorSpaceRelease(cs);
     return;
   }
+
+  // Pass 0.5: Kitty Graphics placements below non-default cell backgrounds (z < INT32_MIN/2).
+  [self drawKittyLayer:CB_IMAGE_LAYER_BELOW_BG inContext:ctx dirtyRect:dirtyRect];
 
   CGContextSetShouldSmoothFonts(ctx, true);
   CGContextSetAllowsFontSmoothing(ctx, true);
@@ -1891,6 +2155,9 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
     CFRelease(curBg);
   }
 
+  // Pass 1.5: Kitty Graphics placements below text (INT32_MIN/2 <= z < 0, including U+10EEEE virtual placements).
+  [self drawKittyLayer:CB_IMAGE_LAYER_BELOW_TEXT inContext:ctx dirtyRect:dirtyRect];
+
   // Pass 2: Glyphs, procedural Box/Block/Braille, underlines, strikethrough, overline.
   for (int r = firstRow; r <= lastRow; r++) {
     CGFloat rowY = kPadY + (CGFloat)r * ch;
@@ -1918,7 +2185,8 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
       CGColorRef fgColor = CGColorCreate(cs, fgComp);
 
       uint32_t cp = cell->cp;
-      if (cp > 0x20 && !(flags & CB_STYLE_INVISIBLE)) {
+      if (cp > 0x20 && cp != kKittyUnicodePlaceholder &&
+          !(flags & CB_STYLE_INVISIBLE)) {
         NSRect cellRect = NSMakeRect(cellX, rowY, cellW, ch);
         if (!cb_draw_box_or_block(ctx, cp, cellRect, fgColor, _backingScale)) {
           UniChar localBuf[2];
@@ -2081,6 +2349,9 @@ static CTFontRef cb_resolve_nerd_fallback_retained(const UniChar *chars,
       CFRelease(fgColor);
     }
   }
+
+  // Pass 2.5: Kitty Graphics placements above text (z >= 0).
+  [self drawKittyLayer:CB_IMAGE_LAYER_ABOVE_TEXT inContext:ctx dirtyRect:dirtyRect];
 
   // Pass 3: Non-solid cursor styles (hollow block when unfocused or requested, bar, underline).
   if (showCursor && !cursorSolidBlock && curY < rows && curX < cols &&
@@ -4078,6 +4349,54 @@ bool cb_terminal_test_nerd_font_fallback(void *view) {
         return false;
     }
 
+    return true;
+  }
+}
+
+void cb_terminal_test_cell_metrics(void *view, double *outCw, double *outCh,
+                                   double *outPadX, double *outPadY) {
+  if (!view)
+    return;
+  CanbanTerminal *term = (__bridge CanbanTerminal *)view;
+  if (outCw)
+    *outCw = (double)term.cellWidth;
+  if (outCh)
+    *outCh = (double)term.cellHeight;
+  if (outPadX)
+    *outPadX = (double)kPadX;
+  if (outPadY)
+    *outPadY = (double)kPadY;
+}
+
+bool cb_terminal_test_render_rgba(void *view, uint32_t width, uint32_t height,
+                                  uint8_t *outRgba) {
+  if (!view || !outRgba || width < 64 || height < 64)
+    return false;
+  @autoreleasepool {
+    CanbanTerminal *term = (__bridge CanbanTerminal *)view;
+    [term setFrame:NSMakeRect(0.0, 0.0, (CGFloat)width, (CGFloat)height)];
+    [term pollSnapshotForceFull:YES];
+
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef cg = CGBitmapContextCreate(
+        outRgba, width, height, 8, (size_t)width * 4, cs,
+        (CGBitmapInfo)kCGImageAlphaPremultipliedLast |
+            (CGBitmapInfo)kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(cs);
+    if (!cg)
+      return false;
+
+    [NSGraphicsContext saveGraphicsState];
+    CGContextTranslateCTM(cg, 0.0, (CGFloat)height);
+    CGContextScaleCTM(cg, 1.0, -1.0);
+    CGContextSetInterpolationQuality(cg, kCGInterpolationNone);
+    NSGraphicsContext *flippedCtx =
+        [NSGraphicsContext graphicsContextWithCGContext:cg flipped:YES];
+    [NSGraphicsContext setCurrentContext:flippedCtx];
+    [term drawRect:term.bounds];
+    CGContextFlush(cg);
+    [NSGraphicsContext restoreGraphicsState];
+    CGContextRelease(cg);
     return true;
   }
 }

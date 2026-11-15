@@ -911,3 +911,51 @@ fn opening_card_shell_and_agent_terminals_immediately_creates_card_worktree_and_
             .all(|t| t.agent.is_none())
     );
 }
+
+#[test]
+fn terminal_launches_inject_default_ghostty_identity_and_respect_hc_env_overrides() {
+    let (dir, app, p, c) = setup();
+    core(&app, dir.path());
+
+    // 1. Default config injects TERM=xterm-256color, TERM_PROGRAM=ghostty, COLORTERM=truecolor
+    //    for both manual Shell terminals and interactive Card Agent terminals.
+    app.call(
+        "terminal.create",
+        json!({"project_id": p.id, "request_key": "ghostty-default-shell"}),
+    )
+    .unwrap();
+    app.call(
+        "terminal.create",
+        json!({"project_id": p.id, "card": c.number, "agent": true, "request_key": "ghostty-default-agent"}),
+    )
+    .unwrap();
+
+    let launches_raw = std::fs::read_to_string(dir.path().join("launches")).unwrap();
+    let launches: Vec<Value> = launches_raw
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(launches.len(), 2);
+    for l in &launches {
+        assert_eq!(l["env"]["TERM"], "xterm-256color");
+        assert_eq!(l["env"]["TERM_PROGRAM"], "ghostty");
+        assert_eq!(l["env"]["COLORTERM"], "truecolor");
+    }
+
+    // 2. Explicit hc_env overrides take precedence over defaults without clobbering other defaults.
+    app.config
+        .write()
+        .unwrap()
+        .hc_env
+        .insert("TERM_PROGRAM".into(), "custom-term".into());
+    app.call(
+        "terminal.create",
+        json!({"project_id": p.id, "request_key": "ghostty-override-shell"}),
+    )
+    .unwrap();
+    let updated_raw = std::fs::read_to_string(dir.path().join("launches")).unwrap();
+    let overridden: Value = serde_json::from_str(updated_raw.lines().last().unwrap()).unwrap();
+    assert_eq!(overridden["env"]["TERM"], "xterm-256color");
+    assert_eq!(overridden["env"]["TERM_PROGRAM"], "custom-term");
+    assert_eq!(overridden["env"]["COLORTERM"], "truecolor");
+}

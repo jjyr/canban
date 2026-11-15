@@ -255,9 +255,7 @@ fn run_herdr_installer(home: &Path, install_state: &Arc<Mutex<HerdrInstallState>
     if let Ok(joined) = std::env::join_paths(path_entries) {
         cmd.env("PATH", joined);
     }
-    for (k, v) in &raw.hc_env {
-        cmd.env(k, v);
-    }
+    canban_herdr::apply_default_terminal_env_to_command(&mut cmd, &raw.hc_env);
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
