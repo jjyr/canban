@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 pub const BASELINE: u32 = 8;
-pub const CURRENT: u32 = 18;
+pub const CURRENT: u32 = 19;
 pub struct Migration {
     pub version: u32,
     pub up: fn(&Transaction<'_>) -> Result<()>,
@@ -64,7 +64,38 @@ const STEPS: &[Migration] = &[
         up: drop_manual_terminal_counter_up,
         down: drop_manual_terminal_counter_down,
     },
+    Migration {
+        version: 19,
+        up: purge_legacy_workflow_templates_up,
+        down: purge_legacy_workflow_templates_down,
+    },
 ];
+
+fn purge_legacy_workflow_templates_up(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "DELETE FROM workflow_templates \
+         WHERE json_type(data, '$.sources') IS NOT 'array' \
+            OR json_type(data, '$.name') IS NOT 'text' \
+            OR json_type(data, '$.updated_at') IS NOT 'integer';",
+    )?;
+    tx.execute_batch("DROP TABLE IF EXISTS workflow_bindings;")?;
+    Ok(())
+}
+
+fn purge_legacy_workflow_templates_down(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS workflow_bindings(\
+            id TEXT PRIMARY KEY,\
+            project_id TEXT,\
+            card_id TEXT,\
+            state TEXT NOT NULL,\
+            number INTEGER NOT NULL,\
+            data TEXT NOT NULL\
+        );\
+        CREATE INDEX IF NOT EXISTS workflow_bindings_scope ON workflow_bindings(project_id, card_id, state);",
+    )?;
+    Ok(())
+}
 
 fn drop_manual_terminal_counter_up(tx: &Transaction<'_>) -> Result<()> {
     let rows: Vec<(String, String)> = {
@@ -3457,5 +3488,63 @@ mod tests {
 
         assert_eq!(migrate(home.path(), 17).unwrap(), 17);
         assert_eq!(migrate(home.path(), 18).unwrap(), 18);
+    }
+
+    #[test]
+    fn schema_19_purges_legacy_json_workflow_templates_and_keeps_valid_yaml_presets() {
+        let home = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(home.path()).unwrap();
+        drop(store);
+
+        assert_eq!(migrate(home.path(), 18).unwrap(), 18);
+        let conn = Connection::open(home.path().join("canban.sqlite")).unwrap();
+        let legacy_row = serde_json::json!({
+            "id": "default",
+            "workflow": {
+                "name": "Development",
+                "stages": [
+                    {
+                        "id": "backlog",
+                        "name": "Backlog",
+                        "execute": false,
+                        "instruction": "",
+                        "profile": null,
+                        "on_completed": null,
+                        "require_human_review": false
+                    }
+                ]
+            }
+        });
+        conn.execute(
+            "INSERT INTO workflow_templates(id, project_id, card_id, state, number, data) VALUES('default', NULL, NULL, '', 0, ?1)",
+            [serde_json::to_string(&legacy_row).unwrap()],
+        )
+        .unwrap();
+        let valid_tpl = canban_types::WorkflowTemplate {
+            id: "custom".into(),
+            name: "Custom YAML".into(),
+            source_project_name: Some("Demo".into()),
+            sources: vec![canban_types::WorkflowTemplateFile {
+                filename: "development.yaml".into(),
+                source: "schema: 3\nid: demo\nname: Demo\nsteps: []\n".into(),
+            }],
+            updated_at: 42,
+        };
+        conn.execute(
+            "INSERT INTO workflow_templates(id, project_id, card_id, state, number, data) VALUES('custom', NULL, NULL, '', 0, ?1)",
+            [serde_json::to_string(&valid_tpl).unwrap()],
+        )
+        .unwrap();
+        drop(conn);
+
+        assert_eq!(migrate(home.path(), 19).unwrap(), 19);
+        let store = crate::Store::open(home.path()).unwrap();
+        let snap = store.snapshot().unwrap();
+        assert_eq!(snap.workflow_templates.len(), 1);
+        assert_eq!(snap.workflow_templates[0].id, "custom");
+        drop(store);
+
+        assert_eq!(migrate(home.path(), 18).unwrap(), 18);
+        assert_eq!(migrate(home.path(), 19).unwrap(), 19);
     }
 }

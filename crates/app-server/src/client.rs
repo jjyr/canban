@@ -123,28 +123,45 @@ impl AppClient {
         }
         let mut state = None;
         let mut server_notice = None;
+        let mut last_error: Option<anyhow::Error> = None;
         for _ in 0..100 {
-            if let Ok(ping) = rpc(&endpoint, "app.ping", json!({})) {
-                match canban_updater::backend_order(&ping, &canban_updater::Build::current()) {
-                    std::cmp::Ordering::Less => {
-                        return Err(BackendOlder {
-                            home,
-                            ping,
-                            explicit_endpoint: explicit.is_some(),
+            match rpc(&endpoint, "app.ping", json!({})) {
+                Ok(ping) => {
+                    match canban_updater::backend_order(&ping, &canban_updater::Build::current()) {
+                        std::cmp::Ordering::Less => {
+                            return Err(BackendOlder {
+                                home,
+                                ping,
+                                explicit_endpoint: explicit.is_some(),
+                            }
+                            .into());
                         }
-                        .into());
+                        std::cmp::Ordering::Greater => {
+                            server_notice = Some(
+                                "The backend is newer than this App. Please use a newer Canban App."
+                                    .into(),
+                            )
+                        }
+                        std::cmp::Ordering::Equal => {}
                     }
-                    std::cmp::Ordering::Greater => {
-                        server_notice = Some(
-                            "The backend is newer than this App. Please use a newer Canban App."
-                                .into(),
-                        )
+                    match rpc(&endpoint, "app.state", json!({})) {
+                        Ok(v) => {
+                            state = Some(v);
+                            break;
+                        }
+                        Err(err) => {
+                            if err.downcast_ref::<std::io::Error>().is_some() {
+                                last_error = Some(err);
+                            } else {
+                                // `app.ping` succeeded, so an application-level JSON-RPC error
+                                // from `app.state` is deterministic—surface the root cause immediately.
+                                return Err(err.context("AppServer failed to load state"));
+                            }
+                        }
                     }
-                    std::cmp::Ordering::Equal => {}
                 }
-                if let Ok(v) = rpc(&endpoint, "app.state", json!({})) {
-                    state = Some(v);
-                    break;
+                Err(err) => {
+                    last_error = Some(err);
                 }
             }
             if explicit.is_some() {
@@ -152,8 +169,15 @@ impl AppClient {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        let state =
-            state.context("AppServer unavailable; inspect server.log or CANBAN_ENDPOINT")?;
+        let state = match state {
+            Some(v) => v,
+            None => {
+                let detail = last_error
+                    .map(|e| format!(": {e:#}"))
+                    .unwrap_or_default();
+                bail!("AppServer unavailable; inspect server.log or CANBAN_ENDPOINT{detail}");
+            }
+        };
         Ok(Arc::new(Self {
             home: PathBuf::from(strp(&state, "home")?),
             endpoint,

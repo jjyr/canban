@@ -594,6 +594,11 @@ impl AppServer {
             }
             Ok(())
         })?;
+        // Verify that the full durable snapshot decodes cleanly before claiming the home socket,
+        // so any incompatible SQL row fails fast at startup rather than after `app.ping`.
+        let _ = store
+            .snapshot()
+            .context("Failed to decode durable SQLite snapshot on startup")?;
         Ok(Arc::new(Self {
             _development: development
                 .as_ref()

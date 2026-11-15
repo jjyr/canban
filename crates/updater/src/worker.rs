@@ -254,18 +254,21 @@ fn spawn_ui(j: &Journal) -> Result<Child> {
 }
 fn health(j: &Journal, server: &mut Child, expected: &Build) -> Result<()> {
     let until = Instant::now() + Duration::from_secs(30);
+    let endpoint = j.home.join("app.sock");
     loop {
         ensure!(
             server.try_wait()?.is_none(),
             "Candidate AppServer exited before readiness"
         );
-        if let Ok(ping) = handoff::rpc(&j.home.join("app.sock"), "app.ping", json!({})) {
+        if let Ok(ping) = handoff::rpc(&endpoint, "app.ping", json!({})) {
             ensure!(
                 ping["pid"].as_u64() == Some(server.id() as u64),
                 "A different service answered candidate readiness"
             );
             let build: Build = serde_json::from_value(ping["build"].clone())?;
             ensure!(build == *expected, "AppServer build identity mismatch");
+            handoff::rpc(&endpoint, "app.state", json!({}))
+                .context("Candidate AppServer failed initial app.state check")?;
             return Ok(());
         }
         ensure!(
