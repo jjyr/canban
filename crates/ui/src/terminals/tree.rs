@@ -269,6 +269,7 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
         let selected = is_selected.get();
         let id = id.clone();
         let context_id = id.clone();
+        let herdr = e.herdr_status();
         let attention = e.attention_reason();
         let machine = if e.machine() == "local" {
             "Local".into()
@@ -278,6 +279,29 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
         let hint = super::labels::sidebar_hint(&e, &machine);
         let title = label(e.title()).flex_1().min_w(px(0.));
         let title = if selected { title } else { title.truncate() };
+        let mut lead_group = view()
+            .flex_1()
+            .min_w(px(0.))
+            .flex_row()
+            .items_center()
+            .gap_1p5();
+        if let Some(mark_el) = super::labels::status_mark(&e) {
+            lead_group = lead_group.child(mark_el);
+        }
+        if e.agent.is_none() {
+            if let Some((mark, _)) = e.provider() {
+                lead_group = lead_group.child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0());
+            } else if herdr == canban_types::HerdrStatus::PlainShell {
+                lead_group = lead_group.child(
+                    icon_tinted(Icon::Terminal, MUTED)
+                        .w(px(13.))
+                        .h(px(13.))
+                        .flex_shrink_0(),
+                );
+            }
+        }
+        lead_group = lead_group.child(title);
+
         let mut content = view().w_full().min_w(px(0.)).gap_1();
         let mut first = view()
             .w_full()
@@ -285,36 +309,9 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
             .flex_row()
             .items_center()
             .gap_2()
-            .child(
-                if e.agent.is_none()
-                    && let Some((mark, _)) = e.provider()
-                {
-                    view()
-                        .flex_1()
-                        .min_w(px(0.))
-                        .flex_row()
-                        .items_center()
-                        .gap_1p5()
-                        .child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0())
-                        .child(title)
-                        .into_element()
-                } else {
-                    title.into_element()
-                },
-            );
-        if e.agent.is_some() {
-            let stage = muted(e.stage.clone().unwrap_or_default())
-                .w(px(super::labels::stage_width(&e)))
-                .flex_shrink_0();
-            first = first.child(if selected { stage } else { stage.truncate() });
-        }
-        if let Some(reason) = &attention {
-            first = first.child(
-                view()
-                    .flex_shrink_0()
-                    .tooltip(hint_tooltip(reason.clone()).placement(Placement::Right))
-                    .child(icon_tinted(Icon::Info, ATTENTION).w(px(14.)).h(px(14.))),
-            );
+            .child(lead_group);
+        if let Some(status_el) = super::labels::sidebar_status_label(&e) {
+            first = first.child(status_el);
         }
         content = content.child(first);
         if e.agent.is_some() {
@@ -328,22 +325,62 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
                         .min_w(px(0.)),
                 );
             }
-            content = content.child(
-                view()
-                    .w_full()
-                    .min_w(px(0.))
-                    .flex_row()
-                    .items_start()
-                    .gap_2()
-                    .child(super::labels::sidebar_provider(&e, selected).flex_1()),
-            );
+            let mut meta_row = view()
+                .w_full()
+                .min_w(px(0.))
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .child(super::labels::sidebar_provider(&e, selected).flex_1());
+            if let Some(stage_name) = e.stage.as_deref().filter(|s| !s.is_empty()) {
+                let stage = muted(format!("· {stage_name}")).flex_shrink_0();
+                meta_row = meta_row.child(if selected { stage } else { stage.truncate() });
+            }
+            content = content.child(meta_row);
+        } else if let Some((_, prov_name)) = e.provider() {
+            let prov = muted(prov_name).w_full().min_w(px(0.));
+            content = content.child(if selected { prov } else { prov.truncate() });
         }
-        let machine = muted(machine).w_full().min_w(px(0.));
-        content = content.child(if selected {
-            machine
+        if matches!(
+            herdr,
+            canban_types::HerdrStatus::Blocked
+                | canban_types::HerdrStatus::Error
+                | canban_types::HerdrStatus::Disconnected
+        ) || e.needs_attention()
+        {
+            if let Some(reason) = &attention {
+                let reason_color = match herdr {
+                    canban_types::HerdrStatus::Error | canban_types::HerdrStatus::Disconnected => {
+                        DANGER
+                    }
+                    _ => ATTENTION,
+                };
+                let reason_line = text(format!("{reason} · {machine}"))
+                    .text_size(px(CAPTION_SIZE))
+                    .text_color(reason_color)
+                    .w_full()
+                    .min_w(px(0.));
+                content = content.child(if selected {
+                    reason_line
+                } else {
+                    reason_line.truncate()
+                });
+            } else {
+                let machine_line = muted(machine).w_full().min_w(px(0.));
+                content = content.child(if selected {
+                    machine_line
+                } else {
+                    machine_line.truncate()
+                });
+            }
         } else {
-            machine.truncate()
-        });
+            let machine_line = muted(machine).w_full().min_w(px(0.));
+            content = content.child(if selected {
+                machine_line
+            } else {
+                machine_line.truncate()
+            });
+        }
         view()
             .on_context_menu(move |event: &nsh_core::ContextMenuEvent| {
                 ui.spawn(super::tabs::menu(
@@ -352,10 +389,15 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
                     Some(event.page_position),
                 ));
             })
+            .tooltip(hint_tooltip(hint.clone()).placement(Placement::Right))
             .child(
                 canban_ui_kit::press_target()
                     .w_full()
-                    .min_h(px(if e.agent.is_some() { 72. } else { 48. }))
+                    .min_h(px(if e.agent.is_some() || e.provider().is_some() {
+                        64.
+                    } else {
+                        48.
+                    }))
                     .px_2()
                     .flex_row()
                     .items_center()
@@ -401,9 +443,8 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                                     crate::machines::name(ui, e.machine())
                                 },
                             ),
-                            e.ended(),
-                            e.inactive(),
-                            e.needs_attention(),
+                            (e.ended(), e.inactive(), e.needs_attention()),
+                            (e.herdr_status(), e.wait_summary()),
                             e.provider(),
                         )
                     })

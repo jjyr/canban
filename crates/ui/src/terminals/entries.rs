@@ -55,6 +55,16 @@ impl Entry {
                 .unwrap_or_else(|| engine.to_owned()),
         ))
     }
+    pub fn herdr_status(&self) -> HerdrStatus {
+        self.saved.herdr_status()
+    }
+    pub fn runtime_wait(&self) -> Option<&RuntimeWait> {
+        self.saved.runtime_wait()
+    }
+    pub fn wait_summary(&self) -> Option<String> {
+        let w = self.runtime_wait()?;
+        format_runtime_wait(w)
+    }
     pub fn display_status(&self) -> String {
         if self.ended() {
             return "Ended".into();
@@ -66,35 +76,30 @@ impl Entry {
         {
             return reason;
         }
-        if self.needs_attention() {
-            return "Needs you".into();
+        match self.herdr_status() {
+            HerdrStatus::PlainShell => "Open".into(),
+            HerdrStatus::Queued => "Queued".into(),
+            HerdrStatus::Starting => "Starting".into(),
+            HerdrStatus::Working => "Working".into(),
+            HerdrStatus::Blocked => "Blocked".into(),
+            HerdrStatus::Done => "Done".into(),
+            HerdrStatus::Idle => "Idle".into(),
+            HerdrStatus::Error => "Error".into(),
+            HerdrStatus::Disconnected => "Offline".into(),
+            HerdrStatus::Closing => "Closing".into(),
+            HerdrStatus::Ended => "Ended".into(),
         }
-        if self.agent.is_none() {
-            return match self.status().as_str() {
-                "starting" | "checking" | "connecting" => "Starting",
-                "closing" => "Closing",
-                "unavailable" | "replaced" => "Disconnected",
-                _ => "Open",
-            }
-            .into();
-        }
-        if self.inactive() {
-            return "Idle".into();
-        }
-        match self.status().as_str() {
-            "running" | "working" => "Working",
-            "queued" => "Queued",
-            "starting" => "Starting",
-            "idle" | "done" => "Idle",
-            _ => "Unknown",
-        }
-        .into()
     }
     pub fn attention_reason(&self) -> Option<String> {
         if self.ended() {
             return None;
         }
         if let Some(row) = &self.agent {
+            if self.herdr_status() == HerdrStatus::Blocked
+                && let Some(summary) = self.wait_summary()
+            {
+                return Some(summary);
+            }
             if row.actionable() {
                 return Some(
                     row.reasons
@@ -110,19 +115,25 @@ impl Entry {
         if r.state == "finished" {
             return None;
         }
-        if r.connection != "connected" && !matches!(r.state.as_str(), "starting") {
+        if r.connection != "connected"
+            && !matches!(r.state.as_str(), "starting" | "checking" | "queued")
+        {
             return Some(
                 r.error
                     .clone()
                     .unwrap_or_else(|| "Terminal disconnected — inspect session".into()),
             );
         }
-        if self.saved.agent_engine.is_some() {
+        if self.saved.has_active_agent() {
             match r.agent_status.as_deref() {
-                Some("blocked") => return Some("Agent needs terminal input".into()),
-                Some("error") => return Some("Agent reported an error — inspect terminal".into()),
-                Some("idle" | "done") if r.agent_turn.unwrap_or(0) > 0 => {
-                    return Some("Agent finished its turn and is waiting for your input".into());
+                Some("blocked") => {
+                    return Some(
+                        self.wait_summary()
+                            .unwrap_or_else(|| "Agent needs terminal input".into()),
+                    );
+                }
+                Some("error") => {
+                    return Some("Agent reported an error — inspect terminal".into());
                 }
                 _ => {}
             }
@@ -264,8 +275,14 @@ impl Entry {
                 .unwrap_or("unknown")
                 .into()
         } else if let Some(r) = &self.saved.runtime {
-            if r.connection != "connected" && r.state != "finished" {
+            if r.state == "finished" || r.state == "closing" {
+                r.state.clone()
+            } else if r.connection != "connected" {
                 r.connection.clone()
+            } else if self.saved.has_active_agent()
+                && let Some(st) = &r.agent_status
+            {
+                st.clone()
             } else {
                 r.state.clone()
             }
@@ -322,6 +339,7 @@ impl Entry {
                 self.profile().unwrap_or("unknown"),
             ));
         }
+        lines.push(format!("Status: {}", self.display_status()));
         if let Some(reason) = self.attention_reason() {
             lines.push(reason);
         }
@@ -333,6 +351,54 @@ impl Entry {
         }
         lines.push(format!("Machine: {}", self.machine()));
         lines.join("\n")
+    }
+}
+
+pub fn format_runtime_wait(w: &RuntimeWait) -> Option<String> {
+    let headline = match w.kind.as_str() {
+        "permission" | "approval" | "command" | "tool" | "bash" | "file" => "Permission required",
+        "auth" | "login" | "signin" | "sign_in" => "Sign-in required",
+        "question" | "prompt" | "answer" => "Answer needed",
+        _ => "Input needed",
+    };
+    let t = w
+        .title
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let m = w
+        .message
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let generic_title = t.is_empty()
+        || t.eq_ignore_ascii_case("agent needs input")
+        || t.eq_ignore_ascii_case("permission required")
+        || t.eq_ignore_ascii_case("input required")
+        || t.eq_ignore_ascii_case("sign-in required")
+        || t.eq_ignore_ascii_case("answer required");
+    let detail = match (generic_title, m.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => m,
+        (false, true) => t,
+        (false, false) => {
+            if m.to_lowercase().contains(&t.to_lowercase()) {
+                m
+            } else if t.to_lowercase().contains(&m.to_lowercase()) {
+                t
+            } else {
+                format!("{t} · {m}")
+            }
+        }
+    };
+    if detail.is_empty() {
+        Some(headline.to_owned())
+    } else {
+        Some(format!("{headline}: {detail}"))
     }
 }
 pub fn entries(s: &Snapshot) -> Vec<Entry> {

@@ -485,6 +485,7 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
             agent_status: Some("idle".into()),
             agent_turn: Some(0),
             observed_agent: None,
+            waiting: None,
         }),
         agent: None,
         created_at: 2,
@@ -508,4 +509,50 @@ fn unfinished_idle_turns_and_ephemeral_cli_agents_keep_visual_reminders_silent_w
         delivery.observe(&sound_items(&s)),
         vec!["terminal-attn:ephemeral-agy:error"]
     );
+
+    // Manual Shell (`agent_engine: None`) where user ran `claude` (`observed_agent: Some("claude")`)
+    // chimes on `blocked` (keyed by RuntimeWait ID when present) and `error`, stays silent on `done`/`idle`!
+    s.terminals.push(TerminalEntry {
+        id: "shell-manual-claude".into(),
+        conversation_id: None,
+        number: 3,
+        name: Some("Terminal 2".into()),
+        origin_project_id: None,
+        origin_card_id: None,
+        agent_engine: None,
+        runtime: Some(TerminalRuntime {
+            machine: "local".into(),
+            owner_core_id: None,
+            core_id: Some("core".into()),
+            terminal: Some("pty-shell".into()),
+            state: "running".into(),
+            connection: "connected".into(),
+            error: None,
+            agent_status: Some("working".into()),
+            agent_turn: Some(1),
+            observed_agent: Some("claude".into()),
+            waiting: None,
+        }),
+        agent: None,
+        created_at: 3,
+    });
+    assert!(delivery.observe(&sound_items(&s)).is_empty());
+
+    let manual_rt = s.terminals[2].runtime.as_mut().unwrap();
+    manual_rt.agent_status = Some("blocked".into());
+    manual_rt.waiting = Some(RuntimeWait {
+        id: "w-bash-1".into(),
+        kind: "permission".into(),
+        title: "Allow bash?".into(),
+        message: "rm -rf target".into(),
+        since: 10,
+    });
+    assert_eq!(delivery.observe(&sound_items(&s)), vec!["wait:w-bash-1"]);
+
+    // Exiting back to zsh clears wait/status -> silent.
+    let manual_rt = s.terminals[2].runtime.as_mut().unwrap();
+    manual_rt.observed_agent = None;
+    manual_rt.agent_status = None;
+    manual_rt.waiting = None;
+    assert!(delivery.observe(&sound_items(&s)).is_empty());
 }

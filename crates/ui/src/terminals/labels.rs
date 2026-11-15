@@ -52,12 +52,143 @@ pub fn sidebar_hint(e: &Entry, machine: &str) -> String {
         {
             lines.push(format!("#{} {}", c.number, c.title));
         }
+    } else if let Some((_, provider)) = e.provider() {
+        lines.push(format!("Agent: {provider}"));
     }
+    lines.push(format!("Status: {}", e.display_status()));
     if let Some(reason) = e.attention_reason() {
         lines.push(reason);
     }
     lines.push(format!("Machine: {machine}"));
     lines.join("\n")
+}
+
+/// Compact leading Herdr status mark for Terminal sidebar rows and top/Card tab strips.
+pub fn status_mark(e: &Entry) -> Option<AnyElement> {
+    use canban_types::HerdrStatus;
+    match e.herdr_status() {
+        HerdrStatus::PlainShell | HerdrStatus::Ended => None,
+        HerdrStatus::Working => Some(live_dot(ACCENT).into_element()),
+        HerdrStatus::Starting | HerdrStatus::Queued | HerdrStatus::Closing => Some(
+            view()
+                .w(px(6.))
+                .h(px(6.))
+                .rounded_full()
+                .bg(MUTED)
+                .flex_shrink_0()
+                .pointer_events(PointerEvents::None)
+                .into_element(),
+        ),
+        HerdrStatus::Blocked => {
+            let blocked_icon = match e.runtime_wait().map(|w| w.kind.as_str()) {
+                Some("permission" | "approval" | "command" | "tool" | "bash" | "file") => {
+                    Icon::ShieldAlert
+                }
+                _ => Icon::CircleHelp,
+            };
+            Some(
+                icon_tinted(blocked_icon, ATTENTION)
+                    .w(px(13.))
+                    .h(px(13.))
+                    .flex_shrink_0()
+                    .into_element(),
+            )
+        }
+        HerdrStatus::Done => {
+            if e.needs_attention() {
+                Some(
+                    icon_tinted(Icon::Info, ATTENTION)
+                        .w(px(13.))
+                        .h(px(13.))
+                        .flex_shrink_0()
+                        .into_element(),
+                )
+            } else {
+                Some(
+                    icon_tinted(Icon::Check, SUCCESS)
+                        .w(px(13.))
+                        .h(px(13.))
+                        .flex_shrink_0()
+                        .into_element(),
+                )
+            }
+        }
+        HerdrStatus::Idle => {
+            if e.needs_attention() {
+                Some(
+                    icon_tinted(Icon::Info, ATTENTION)
+                        .w(px(13.))
+                        .h(px(13.))
+                        .flex_shrink_0()
+                        .into_element(),
+                )
+            } else {
+                Some(
+                    view()
+                        .w(px(6.))
+                        .h(px(6.))
+                        .rounded_full()
+                        .bg(MUTED)
+                        .flex_shrink_0()
+                        .pointer_events(PointerEvents::None)
+                        .into_element(),
+                )
+            }
+        }
+        HerdrStatus::Error | HerdrStatus::Disconnected => Some(
+            icon_tinted(Icon::TriangleAlert, DANGER)
+                .w(px(13.))
+                .h(px(13.))
+                .flex_shrink_0()
+                .into_element(),
+        ),
+    }
+}
+
+/// Right-aligned compact Herdr status label for Terminal sidebar rows.
+pub fn sidebar_status_label(e: &Entry) -> Option<AnyElement> {
+    use canban_types::HerdrStatus;
+    let st = e.herdr_status();
+    let (word, color) = match st {
+        HerdrStatus::PlainShell | HerdrStatus::Ended => return None,
+        HerdrStatus::Working => ("Working", ACCENT),
+        HerdrStatus::Starting => ("Starting", MUTED),
+        HerdrStatus::Queued => ("Queued", MUTED),
+        HerdrStatus::Closing => ("Closing", MUTED),
+        HerdrStatus::Blocked => ("Blocked", ATTENTION),
+        HerdrStatus::Done => {
+            if e.needs_attention() {
+                ("Needs you", ATTENTION)
+            } else {
+                ("Done", SUCCESS)
+            }
+        }
+        HerdrStatus::Idle => {
+            if e.needs_attention() {
+                ("Needs you", ATTENTION)
+            } else {
+                ("Idle", MUTED)
+            }
+        }
+        HerdrStatus::Error => ("Error", DANGER),
+        HerdrStatus::Disconnected => ("Offline", DANGER),
+    };
+    let badge_el = text(word)
+        .text_size(px(11.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(color)
+        .flex_shrink_0();
+    if let Some(reason) = e.attention_reason() {
+        Some(
+            view()
+                .flex_shrink_0()
+                .tooltip(hint_tooltip(reason).placement(Placement::Right))
+                .child(badge_el)
+                .into_element(),
+        )
+    } else {
+        Some(badge_el.into_element())
+    }
 }
 pub fn profile_width(e: &Entry) -> f32 {
     (text_width(e.profile().unwrap_or_default()) + 22.).clamp(52., 128.)

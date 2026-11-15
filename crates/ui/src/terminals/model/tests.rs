@@ -160,6 +160,7 @@ fn unified_entries_keep_numeric_names_across_agent_resume_and_shell_lifetimes() 
             agent_status: None,
             agent_turn: None,
             observed_agent: None,
+            waiting: None,
         }),
         agent: None,
         created_at: 0,
@@ -218,6 +219,7 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
             agent_status: None,
             agent_turn: None,
             observed_agent: None,
+            waiting: None,
         }),
         agent: None,
         created_at: 0,
@@ -476,6 +478,7 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             agent_status: None,
             agent_turn: None,
             observed_agent: None,
+            waiting: None,
         }),
         agent: None,
         created_at: 2,
@@ -499,6 +502,7 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             agent_status: None,
             agent_turn: None,
             observed_agent: None,
+            waiting: None,
         }),
         agent: None,
         created_at: 3,
@@ -522,6 +526,7 @@ fn card_live_entries_unify_workflow_agents_ephemeral_cli_agents_and_card_shells(
             agent_status: None,
             agent_turn: None,
             observed_agent: None,
+            waiting: None,
         }),
         agent: None,
         created_at: 4,
@@ -592,6 +597,7 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
             agent_status: None,
             agent_turn: None,
             observed_agent: None,
+            waiting: None,
         }),
         agent: None,
         created_at: 2,
@@ -615,6 +621,7 @@ fn default_card_terminal_prefers_recent_live_otherwise_first_active_entry() {
             agent_status: None,
             agent_turn: None,
             observed_agent: None,
+            waiting: None,
         }),
         agent: None,
         created_at: 3,
@@ -666,6 +673,7 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
             agent_status: Some("idle".into()),
             agent_turn: Some(3),
             observed_agent: None,
+            waiting: None,
         }),
         agent: None,
         created_at: 2,
@@ -689,6 +697,7 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
             agent_status: Some("idle".into()),
             agent_turn: Some(0),
             observed_agent: None,
+            waiting: None,
         }),
         agent: None,
         created_at: 3,
@@ -698,13 +707,16 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
     let shell = rows.iter().find(|e| e.saved.id == "manual-shell").unwrap();
     assert!(!shell.inactive());
     assert!(!shell.needs_attention());
+    assert_eq!(shell.herdr_status(), HerdrStatus::PlainShell);
 
     let cli = rows.iter().find(|e| e.saved.id == "ephemeral-cli").unwrap();
     assert!(!cli.inactive());
-    // Fresh launch at turn 0 does not show false attention.
+    // Fresh launch at turn 0 is `Idle` and does not show false attention.
     assert!(!cli.needs_attention());
+    assert_eq!(cli.herdr_status(), HerdrStatus::Idle);
+    assert_eq!(cli.display_status(), "Idle");
 
-    // After finishing turn 1, ephemeral CLI Agent shows attention icon / reason.
+    // After finishing turn 1, ephemeral CLI Agent shows positive `Done` status (not amber Needs attention).
     s.terminals
         .last_mut()
         .unwrap()
@@ -716,14 +728,11 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
         .into_iter()
         .find(|e| e.saved.id == "ephemeral-cli")
         .unwrap();
-    assert!(cli.needs_attention());
-    assert!(
-        cli.attention_reason()
-            .unwrap()
-            .contains("waiting for your input")
-    );
+    assert!(!cli.needs_attention());
+    assert_eq!(cli.herdr_status(), HerdrStatus::Done);
+    assert_eq!(cli.display_status(), "Done");
 
-    // Permission block at any turn shows attention icon / reason.
+    // Permission block at any turn shows attention icon / reason (including RuntimeWait details when present).
     let rt = s.terminals.last_mut().unwrap().runtime.as_mut().unwrap();
     rt.agent_turn = Some(0);
     rt.agent_status = Some("blocked".into());
@@ -732,9 +741,40 @@ fn manual_terminals_never_participate_in_inactive_and_ephemeral_cli_agents_surfa
         .find(|e| e.saved.id == "ephemeral-cli")
         .unwrap();
     assert!(cli.needs_attention());
+    assert_eq!(cli.herdr_status(), HerdrStatus::Blocked);
     assert_eq!(
         cli.attention_reason().as_deref(),
         Some("Agent needs terminal input")
+    );
+
+    // Manual shell (`agent_engine: None`) where user ran `claude` (`observed_agent: Some("claude")`)
+    // also surfaces `Working`, `Blocked` (with RuntimeWait), and `Done` uniformly!
+    let shell_rt = s
+        .terminals
+        .iter_mut()
+        .find(|t| t.id == "manual-shell")
+        .unwrap()
+        .runtime
+        .as_mut()
+        .unwrap();
+    shell_rt.observed_agent = Some("claude".into());
+    shell_rt.agent_status = Some("blocked".into());
+    shell_rt.waiting = Some(RuntimeWait {
+        id: "w-shell".into(),
+        kind: "permission".into(),
+        title: "Allow bash?".into(),
+        message: "cargo test".into(),
+        since: 1,
+    });
+    let shell = crate::terminals::entries(&s)
+        .into_iter()
+        .find(|e| e.saved.id == "manual-shell")
+        .unwrap();
+    assert_eq!(shell.herdr_status(), HerdrStatus::Blocked);
+    assert!(shell.needs_attention());
+    assert_eq!(
+        shell.attention_reason().as_deref(),
+        Some("Permission required: Allow bash? · cargo test")
     );
 }
 
@@ -768,6 +808,7 @@ fn card_open_collapses_terminal_by_default_while_terminal_and_pill_entries_expan
                 agent_status: None,
                 agent_turn: None,
                 observed_agent: None,
+                waiting: None,
             }),
             agent: None,
             created_at: 2,
@@ -885,6 +926,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 agent_status: None,
                 agent_turn: None,
                 observed_agent: None,
+                waiting: None,
             }),
             agent: None,
             created_at: 10,
@@ -908,6 +950,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 agent_status: None,
                 agent_turn: None,
                 observed_agent: None,
+                waiting: None,
             }),
             agent: None,
             created_at: 11,
@@ -941,6 +984,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                 agent_status: Some("working".into()),
                 agent_turn: Some(1),
                 observed_agent: None,
+                waiting: None,
             }),
             agent: None,
             created_at: 12,
@@ -1079,6 +1123,7 @@ fn closing_terminal_with_non_done_agent_prompts_for_confirmation_while_done_and_
                     agent_status: Some("working".into()),
                     agent_turn: Some(2),
                     observed_agent: None,
+                    waiting: None,
                 }),
                 agent: None,
                 created_at: 13,
@@ -1144,6 +1189,7 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
                     agent_status: None,
                     agent_turn: None,
                     observed_agent: None,
+                    waiting: None,
                 }),
                 agent: None,
                 created_at: 21,
@@ -1167,6 +1213,7 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
                     agent_status: None,
                     agent_turn: None,
                     observed_agent: None,
+                    waiting: None,
                 }),
                 agent: None,
                 created_at: 22,
@@ -1311,6 +1358,7 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
                 agent_status: None,
                 agent_turn: None,
                 observed_agent: None,
+                waiting: None,
             }),
             agent: None,
             created_at: num,
@@ -1481,6 +1529,7 @@ fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_the
                 agent_status: None,
                 agent_turn: None,
                 observed_agent: None,
+                waiting: None,
             }),
             agent: None,
             created_at: num,
@@ -1702,6 +1751,7 @@ fn merge_batch_terminal_lives_directly_in_project_root_without_polluting_root_gi
             agent_status: Some("running".into()),
             agent_turn: Some(1),
             observed_agent: None,
+            waiting: None,
         }),
         agent: None,
         created_at: 2,
@@ -1757,6 +1807,7 @@ fn manual_shell_observed_agent_exposes_icon_only_without_changing_title_or_close
             agent_status: None,
             agent_turn: None,
             observed_agent: Some("agy".into()),
+            waiting: None,
         }),
         agent: None,
         created_at: 10,
@@ -1839,6 +1890,7 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
                 agent_status: None,
                 agent_turn: None,
                 observed_agent: None,
+                waiting: None,
             }),
             agent: None,
             created_at: num,

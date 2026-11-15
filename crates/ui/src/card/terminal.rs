@@ -96,7 +96,6 @@ fn card_tab_item(ui: Ui, cid: String, e: Entry, selected_id: Memo<String>) -> im
         let text = card_tab_title(&e);
         let hint = e.hint();
         let mark = e.provider().map(|(ic, _)| ic).unwrap_or(Icon::Terminal);
-        let attention = e.attention_reason();
         let mut tab_button = view()
             .h_full()
             .focusable(true)
@@ -115,27 +114,8 @@ fn card_tab_item(ui: Ui, cid: String, e: Entry, selected_id: Memo<String>) -> im
                 ..Default::default()
             })
             .label(format!("Tab {text}"));
-        if attention.is_some() {
-            tab_button = tab_button.child(
-                icon_tinted(Icon::Info, ATTENTION)
-                    .w(px(13.))
-                    .h(px(13.))
-                    .flex_shrink_0(),
-            );
-        } else if e.agent.is_some() {
-            tab_button = tab_button.child(
-                view()
-                    .w(px(5.))
-                    .h(px(5.))
-                    .rounded(px(3.))
-                    .bg(if e.ended() || e.inactive() {
-                        MUTED
-                    } else {
-                        SUCCESS
-                    })
-                    .flex_shrink_0()
-                    .pointer_events(PointerEvents::None),
-            );
+        if let Some(mark_el) = crate::terminals::labels::status_mark(&e) {
+            tab_button = tab_button.child(mark_el);
         }
         tab_button = tab_button
             .child(icon(mark).w(px(13.)).h(px(13.)).flex_shrink_0())
@@ -226,6 +206,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                     e.hint(),
                     e.ended(),
                     e.inactive(),
+                    e.herdr_status(),
                     e.attention_reason(),
                     e.provider(),
                 )

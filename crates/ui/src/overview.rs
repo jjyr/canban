@@ -95,11 +95,29 @@ pub fn mark_all_read(ui: Ui, project_scope: Option<String>) {
     );
 }
 
-fn is_special_agent_terminal(s: &canban_types::Snapshot, e: &crate::terminals::Entry) -> bool {
-    e.agent.is_none()
-        && (s.configuration_sessions.iter().any(|c| c.id == e.saved.id)
-            || s.merge_batches.iter().any(|b| b.id == e.saved.id)
-            || e.saved.agent_engine.is_some())
+fn standalone_terminal_needs_you(e: &crate::terminals::Entry) -> bool {
+    e.agent.is_none() && e.listed() && (e.needs_attention() || e.herdr_status().is_attention())
+}
+
+fn standalone_terminal_is_running(s: &canban_types::Snapshot, e: &crate::terminals::Entry) -> bool {
+    if e.agent.is_some() || !e.listed() || standalone_terminal_needs_you(e) {
+        return false;
+    }
+    let is_special_active = s
+        .configuration_sessions
+        .iter()
+        .any(|c| c.id == e.saved.id && !matches!(c.state.as_str(), "finished" | "cancelled"))
+        || s.merge_batches
+            .iter()
+            .any(|b| b.id == e.saved.id && b.active());
+    e.herdr_status().is_working()
+        || (is_special_active
+            && !matches!(
+                e.herdr_status(),
+                canban_types::HerdrStatus::Done
+                    | canban_types::HerdrStatus::Idle
+                    | canban_types::HerdrStatus::Ended
+            ))
 }
 
 fn attention_summary(ui: Ui) -> (usize, usize, usize, usize) {
@@ -114,11 +132,7 @@ fn attention_summary(ui: Ui) -> (usize, usize, usize, usize) {
     let actionable = all_rows.iter().filter(|r| r.actionable()).count()
         + crate::terminals::entries(&s)
             .into_iter()
-            .filter(|e| {
-                e.listed()
-                    && (e.needs_attention() || e.status() == "blocked")
-                    && is_special_agent_terminal(&s, e)
-            })
+            .filter(standalone_terminal_needs_you)
             .count();
     let unread_cards = s
         .cards
@@ -371,12 +385,9 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                                 + entries
                                                     .iter()
                                                     .filter(|e| {
-                                                        e.listed()
-                                                            && e.project_id.as_deref()
-                                                                == Some(pid.as_str())
-                                                            && (e.needs_attention()
-                                                                || e.status() == "blocked")
-                                                            && is_special_agent_terminal(&s, e)
+                                                        e.project_id.as_deref()
+                                                            == Some(pid.as_str())
+                                                            && standalone_terminal_needs_you(e)
                                                     })
                                                     .count()
                                                 + s.cards
@@ -578,6 +589,30 @@ fn clean_wait_detail(title: &str, message: &str) -> Option<String> {
     (!combined.is_empty()).then_some(combined)
 }
 
+fn classify_runtime_wait(
+    w: &canban_types::RuntimeWait,
+) -> (Icon, Tone, &'static str, Option<String>) {
+    let detail = clean_wait_detail(&w.title, &w.message);
+    match w.kind.as_str() {
+        "permission" | "approval" | "command" | "tool" | "bash" | "file" => (
+            Icon::ShieldAlert,
+            Tone::Attention,
+            "Permission required",
+            detail,
+        ),
+        "auth" | "login" | "signin" | "sign_in" => (
+            Icon::CircleHelp,
+            Tone::Attention,
+            "Sign-in required",
+            detail,
+        ),
+        "question" | "prompt" | "answer" => {
+            (Icon::CircleHelp, Tone::Attention, "Answer needed", detail)
+        }
+        _ => (Icon::CircleHelp, Tone::Attention, "Input needed", detail),
+    }
+}
+
 fn is_merge_gate_reason(msg: &str) -> bool {
     let lower = msg.to_lowercase();
     lower.contains("merge")
@@ -597,25 +632,7 @@ fn classify_reason(
             let runtime = row.agent().map(|a| a.runtime_status());
             if runtime == Some("blocked") {
                 if let Some(w) = row.agent().and_then(|a| a.lifecycle.waiting.as_ref()) {
-                    let detail = clean_wait_detail(&w.title, &w.message);
-                    match w.kind.as_str() {
-                        "permission" | "approval" | "command" | "tool" | "bash" | "file" => (
-                            Icon::ShieldAlert,
-                            Tone::Attention,
-                            "Permission required",
-                            detail,
-                        ),
-                        "auth" | "login" | "signin" | "sign_in" => (
-                            Icon::CircleHelp,
-                            Tone::Attention,
-                            "Sign-in required",
-                            detail,
-                        ),
-                        "question" | "prompt" | "answer" => {
-                            (Icon::CircleHelp, Tone::Attention, "Answer needed", detail)
-                        }
-                        _ => (Icon::CircleHelp, Tone::Attention, "Input needed", detail),
-                    }
+                    classify_runtime_wait(w)
                 } else {
                     (
                         Icon::CircleHelp,
@@ -1100,11 +1117,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
             let actionable_count = all_rows.iter().filter(|r| r.actionable()).count()
                 + crate::terminals::entries(&s)
                     .into_iter()
-                    .filter(|e| {
-                        e.listed()
-                            && (e.needs_attention() || e.status() == "blocked")
-                            && is_special_agent_terminal(&s, e)
-                    })
+                    .filter(standalone_terminal_needs_you)
                     .count();
             let active_slots = canban_scheduler::active_count(&s);
             let max_slots = ui.max_agents.get();
@@ -1246,19 +1259,13 @@ fn activity_body(
             crate::terminals::entries(&s)
                 .into_iter()
                 .filter(|e| {
-                    e.listed()
-                        && scope
-                            .as_deref()
-                            .is_none_or(|pid| e.project_id.as_deref() == Some(pid))
+                    scope
+                        .as_deref()
+                        .is_none_or(|pid| e.project_id.as_deref() == Some(pid))
                         && if group == "Needs you" {
-                            (e.needs_attention() || e.status() == "blocked")
-                                && is_special_agent_terminal(&s, e)
+                            standalone_terminal_needs_you(e)
                         } else {
-                            !(e.needs_attention() || e.status() == "blocked")
-                                && (s.configuration_sessions.iter().any(|c| c.id == e.saved.id)
-                                    || s.merge_batches
-                                        .iter()
-                                        .any(|b| b.id == e.saved.id && b.active()))
+                            standalone_terminal_is_running(&s, e)
                         }
                 })
                 .collect()
@@ -1350,6 +1357,89 @@ pub fn agent_row(ui: Ui, row: OverviewRow, selected: bool) -> impl IntoElement {
     row_view(ui, row, selected, stored(true), true)
 }
 
+fn describe_standalone_terminal(
+    entry: &crate::terminals::Entry,
+    is_config: bool,
+    merge_batch: Option<&canban_types::MergeBatch>,
+) -> RowEvent {
+    use canban_types::HerdrStatus;
+    let herdr = entry.herdr_status();
+    if herdr == HerdrStatus::Blocked {
+        let (icon, tone, headline, detail) = if let Some(w) = entry.runtime_wait() {
+            classify_runtime_wait(w)
+        } else {
+            (
+                Icon::CircleHelp,
+                Tone::Attention,
+                "Input needed",
+                Some("Waiting in terminal".into()),
+            )
+        };
+        return RowEvent {
+            icon,
+            tone,
+            live: false,
+            headline: headline.into(),
+            detail,
+        };
+    }
+    if matches!(herdr, HerdrStatus::Error | HerdrStatus::Disconnected) || entry.needs_attention() {
+        let headline = if herdr == HerdrStatus::Disconnected {
+            "Terminal disconnected"
+        } else if herdr == HerdrStatus::Error {
+            "Terminal error"
+        } else {
+            "Session attention"
+        };
+        let detail = entry
+            .attention_reason()
+            .or_else(|| Some(entry.display_status()));
+        return RowEvent {
+            icon: Icon::TriangleAlert,
+            tone: Tone::Danger,
+            live: false,
+            headline: headline.into(),
+            detail,
+        };
+    }
+    if is_config {
+        return RowEvent {
+            icon: Icon::Trigger,
+            tone: Tone::Info,
+            live: true,
+            headline: "Configuring workflows".into(),
+            detail: Some(entry.display_status()),
+        };
+    }
+    if let Some(batch) = merge_batch {
+        return RowEvent {
+            icon: Icon::Branch,
+            tone: Tone::Info,
+            live: batch.active(),
+            headline: format!("Merging batch (@{})", batch.profile_id),
+            detail: Some(entry.display_status()),
+        };
+    }
+    let headline = if herdr == HerdrStatus::Starting {
+        "Starting"
+    } else {
+        "Working"
+    };
+    let branch_detail = entry
+        .location
+        .as_ref()
+        .and_then(|l| l.branch.as_deref())
+        .filter(|b| !b.is_empty())
+        .map(|b| format!("Branch: {b}"));
+    RowEvent {
+        icon: entry.provider().map(|(ic, _)| ic).unwrap_or(Icon::Agent),
+        tone: Tone::Info,
+        live: true,
+        headline: headline.into(),
+        detail: branch_detail.or_else(|| Some(entry.title())),
+    }
+}
+
 fn config_session_row(
     ui: Ui,
     entry: crate::terminals::Entry,
@@ -1363,53 +1453,19 @@ fn config_session_row(
             s.merge_batches.iter().find(|b| b.id == id).cloned(),
         )
     });
-    let status_word = entry.status();
-    let needs_attn = entry.needs_attention() || status_word == "blocked";
-    let status_text = entry
-        .attention_reason()
-        .unwrap_or_else(|| entry.display_status());
+    let needs_attn = standalone_terminal_needs_you(&entry);
+    let event = describe_standalone_terminal(&entry, is_config, merge_batch.as_ref());
+    let waiting_age = entry
+        .runtime_wait()
+        .map(|w| w.since)
+        .filter(|&s| s > 0)
+        .map(|since| {
+            crate::components::activity::age(since)
+                .trim_end_matches(" ago")
+                .to_owned()
+        });
+    let top_trailing = waiting_age.map(|wait| status(wait, Tone::Attention).into_element());
     let project_name = entry.project_name.clone();
-    let (row_icon, tone, live, headline, detail) = if status_word == "blocked" {
-        (
-            Icon::CircleHelp,
-            Tone::Attention,
-            false,
-            "Input needed".to_owned(),
-            Some(status_text.clone()),
-        )
-    } else if needs_attn {
-        (
-            Icon::TriangleAlert,
-            Tone::Danger,
-            false,
-            "Session attention".to_owned(),
-            Some(status_text.clone()),
-        )
-    } else if is_config {
-        (
-            Icon::Trigger,
-            Tone::Info,
-            true,
-            "Configuring workflows".to_owned(),
-            Some(status_text.clone()),
-        )
-    } else if let Some(ref batch) = merge_batch {
-        (
-            Icon::Branch,
-            Tone::Info,
-            batch.active(),
-            format!("Merging batch (@{})", batch.profile_id),
-            Some(status_text.clone()),
-        )
-    } else {
-        (
-            entry.provider().map(|(ic, _)| ic).unwrap_or(Icon::Agent),
-            Tone::Info,
-            true,
-            "Working".to_owned(),
-            Some(status_text.clone()),
-        )
-    };
     let context_title = if is_config {
         "Edit Project Workflows".into()
     } else if let Some(ref batch) = merge_batch {
@@ -1425,16 +1481,24 @@ fn config_session_row(
     let card_dest_btn = card_dest.clone();
 
     let mut context_parts = vec![match &entry.card {
-        Some(c) => format!("#{} {}", c.number, c.title),
+        Some(c) => {
+            if c.title.is_empty() {
+                format!("#{} · {}", c.number, entry.title())
+            } else {
+                format!("#{} {} · {}", c.number, c.title, entry.title())
+            }
+        }
         None => context_title.clone(),
     }];
     if show_project && !project_name.is_empty() {
         context_parts.push(project_name.clone());
     }
     if let Some((_, prov_name)) = entry.provider() {
-        context_parts.push(prov_name.to_owned());
+        context_parts.push(prov_name);
     }
-    let context_line = view()
+    let remote_machine = (entry.machine() != "local" && !entry.machine().is_empty())
+        .then(|| entry.machine().to_owned());
+    let mut context_line = view()
         .flex_row()
         .w_full()
         .items_center()
@@ -1447,8 +1511,19 @@ fn config_session_row(
                 .min_w(px(0.))
                 .truncate(),
         );
+    if let Some(machine) = remote_machine {
+        context_line = context_line.child(view().flex_shrink_0().child(badge(machine)));
+    }
 
-    let hint = format!("{headline} · {status_text}\n{context_title} · {project_name}");
+    let summary_detail = event.detail.as_deref().unwrap_or("");
+    let hint = if summary_detail.is_empty() {
+        format!("{}\n{context_title} · {project_name}", event.headline)
+    } else {
+        format!(
+            "{} · {summary_detail}\n{context_title} · {project_name}",
+            event.headline
+        )
+    };
 
     view()
         .flex_row()
@@ -1484,19 +1559,28 @@ fn config_session_row(
                                 ui.open_terminal(id.clone());
                             }
                         })
-                        .child(tone_icon_badge(row_icon, tone, live))
+                        .child(tone_icon_badge(event.icon, event.tone, event.live))
                         .child(
                             view()
                                 .flex_1()
                                 .min_w(px(0.))
                                 .gap_1()
-                                .child(event_headline_row(headline, tone, detail, None))
+                                .child(event_headline_row(
+                                    event.headline,
+                                    event.tone,
+                                    event.detail,
+                                    top_trailing,
+                                ))
                                 .child(context_line),
                         ),
                 ),
         )
         .child(compact_action(
-            "Terminal →",
+            if card_dest_btn.is_some() {
+                "Card & Terminal →"
+            } else {
+                "Terminal →"
+            },
             if needs_attn {
                 Variant::Secondary
             } else {
@@ -2107,5 +2191,123 @@ mod tests {
         assert_eq!(stalled_ev.tone, Tone::Danger);
         assert_eq!(stalled_ev.headline, "Stopped before reporting");
         assert_eq!(stalled_ev.detail.as_deref(), Some("Inspect terminal"));
+    }
+
+    #[test]
+    fn standalone_and_manual_shell_agent_terminals_route_into_needs_you_and_running() {
+        let mut s = canban_types::Snapshot::default();
+        s.projects.push(
+            serde_json::from_value(json!({
+                "id": "p1",
+                "name": "Canban",
+                "directory": "/tmp/canban",
+                "workflow": canban_types::Workflow::default(),
+                "created_at": 1
+            }))
+            .unwrap(),
+        );
+        // 1. Plain shell in zsh -> neither Needs you nor Running.
+        s.terminals.push(canban_types::TerminalEntry {
+            id: "shell-plain".into(),
+            conversation_id: None,
+            number: 1,
+            name: Some("Terminal 1".into()),
+            origin_project_id: Some("p1".into()),
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: Some(canban_types::TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some("pty-1".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+            created_at: 1,
+        });
+        // 2. Manual shell running `claude` in `working` -> enters Running, not Needs you, and consumes 0 Scheduler slots!
+        s.terminals.push(canban_types::TerminalEntry {
+            id: "shell-working-claude".into(),
+            conversation_id: None,
+            number: 2,
+            name: Some("Terminal 2".into()),
+            origin_project_id: Some("p1".into()),
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: Some(canban_types::TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some("pty-2".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: Some("working".into()),
+                agent_turn: Some(1),
+                observed_agent: Some("claude".into()),
+                waiting: None,
+            }),
+            agent: None,
+            created_at: 2,
+        });
+        // 3. Manual shell running `agy` blocked on permission -> enters Needs you with Permission required!
+        s.terminals.push(canban_types::TerminalEntry {
+            id: "shell-blocked-agy".into(),
+            conversation_id: None,
+            number: 3,
+            name: Some("Terminal 3".into()),
+            origin_project_id: Some("p1".into()),
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: Some(canban_types::TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some("pty-3".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: Some("blocked".into()),
+                agent_turn: Some(1),
+                observed_agent: Some("agy".into()),
+                waiting: Some(canban_types::RuntimeWait {
+                    id: "w-perm".into(),
+                    kind: "permission".into(),
+                    title: "Allow command?".into(),
+                    message: "git status".into(),
+                    since: 10,
+                }),
+            }),
+            agent: None,
+            created_at: 3,
+        });
+
+        assert_eq!(canban_scheduler::active_count(&s), 0);
+        let entries = crate::terminals::entries(&s);
+        assert!(!standalone_terminal_needs_you(&entries[0]));
+        assert!(!standalone_terminal_is_running(&s, &entries[0]));
+
+        assert!(!standalone_terminal_needs_you(&entries[1]));
+        assert!(standalone_terminal_is_running(&s, &entries[1]));
+        let working_ev = describe_standalone_terminal(&entries[1], false, None);
+        assert_eq!(working_ev.headline, "Working");
+        assert!(working_ev.live);
+
+        assert!(standalone_terminal_needs_you(&entries[2]));
+        assert!(!standalone_terminal_is_running(&s, &entries[2]));
+        let blocked_ev = describe_standalone_terminal(&entries[2], false, None);
+        assert_eq!(blocked_ev.icon, Icon::ShieldAlert);
+        assert_eq!(blocked_ev.tone, Tone::Attention);
+        assert_eq!(blocked_ev.headline, "Permission required");
+        assert_eq!(
+            blocked_ev.detail.as_deref(),
+            Some("Allow command? · git status")
+        );
     }
 }

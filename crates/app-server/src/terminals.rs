@@ -21,7 +21,7 @@ impl AppServer {
             }
             if let Ok(mut configuration)=db.get::<ConfigurationSession>(terminal_id) && configuration.state=="queued" {
                 configuration.state="cancelled".into();db.save(&configuration)?;
-                item.runtime=Some(TerminalRuntime{machine:"local".into(),owner_core_id:None,core_id:None,terminal:None,state:"finished".into(),connection:"connected".into(),error:None,agent_status:None,agent_turn:None,observed_agent:None});db.save(&item)?;
+                item.runtime=Some(TerminalRuntime{machine:"local".into(),owner_core_id:None,core_id:None,terminal:None,state:"finished".into(),connection:"connected".into(),error:None,agent_status:None,agent_turn:None,observed_agent:None,waiting:None});db.save(&item)?;
             }
             if let Some(run) = &mut item.agent {
                 if !run.finished() && run.terminal.is_some() {
@@ -446,6 +446,7 @@ impl AppServer {
                     agent_status: None,
                     agent_turn: None,
                     observed_agent: None,
+                    waiting: None,
                 }),
                 agent: None,
             };
@@ -879,6 +880,12 @@ impl AppServer {
                     contexts.push(context);
                 }
             }
+            let is_special_agent = item.is_special_session()
+                || snapshot
+                    .configuration_sessions
+                    .iter()
+                    .any(|c| c.id == item.id)
+                || snapshot.merge_batches.iter().any(|b| b.id == item.id);
             if let Some(runtime) = &mut item.runtime {
                 match (&observed, value) {
                     (Ok(_), Some(v)) => {
@@ -887,17 +894,56 @@ impl AppServer {
                         if v["state"] == "finished" {
                             runtime.state = "finished".into();
                             runtime.agent_status = None;
+                            runtime.agent_turn = None;
                             runtime.observed_agent = None;
+                            runtime.waiting = None;
                         } else {
-                            runtime.agent_status = v["status"]["state"].as_str().map(str::to_owned);
-                            runtime.agent_turn = v["turn"].as_u64();
-                            runtime.observed_agent =
+                            let observed_agent =
                                 canban_profiles::identify_herdr_agent(v).map(str::to_owned);
+                            runtime.observed_agent = observed_agent.clone();
+                            let has_agent = item.agent_engine.is_some()
+                                || observed_agent.is_some()
+                                || is_special_agent;
+                            if has_agent {
+                                let status = v["status"]["state"].as_str().map(str::to_owned);
+                                runtime.agent_turn = v["turn"].as_u64();
+                                if status.as_deref() == Some("blocked") {
+                                    let kind =
+                                        v["status"]["kind"].as_str().unwrap_or("input").to_owned();
+                                    let title = v["status"]["title"]
+                                        .as_str()
+                                        .unwrap_or("Agent needs input")
+                                        .to_owned();
+                                    let message =
+                                        v["status"]["msg"].as_str().unwrap_or("").to_owned();
+                                    let old = runtime.waiting.as_ref();
+                                    if old.is_none_or(|w| {
+                                        w.kind != kind || w.title != title || w.message != message
+                                    }) {
+                                        runtime.waiting = Some(RuntimeWait {
+                                            id: old.map(|w| w.id.clone()).unwrap_or_else(id),
+                                            since: old.map(|w| w.since).unwrap_or_else(now),
+                                            kind,
+                                            title,
+                                            message,
+                                        });
+                                    }
+                                } else {
+                                    runtime.waiting = None;
+                                }
+                                runtime.agent_status = status;
+                            } else {
+                                // Clear stale PTY OSC 7501 state once a manual shell returns to zsh/bash.
+                                runtime.agent_status = None;
+                                runtime.agent_turn = None;
+                                runtime.waiting = None;
+                            }
                         }
                     }
                     (Ok((core, _)), _) if runtime.core_id.as_ref().is_some_and(|id| id != core) => {
                         runtime.connection = "replaced".into();
                         runtime.observed_agent = None;
+                        runtime.waiting = None;
                         runtime.error = Some(
                             "Original Core identity changed; this terminal was not replaced".into(),
                         );
@@ -905,6 +951,7 @@ impl AppServer {
                     (Err(e), _) => {
                         runtime.connection = "unavailable".into();
                         runtime.observed_agent = None;
+                        runtime.waiting = None;
                         runtime.error = Some(format!("{e:#}"));
                     }
                     _ if runtime.state != "finished" => {
@@ -914,6 +961,7 @@ impl AppServer {
                         if !fresh_launch {
                             runtime.connection = "unavailable".into();
                             runtime.observed_agent = None;
+                            runtime.waiting = None;
                         }
                     }
                     _ => {}
@@ -1022,6 +1070,7 @@ mod tests {
                 agent_status: None,
                 agent_turn: None,
                 observed_agent: None,
+                waiting: None,
             }),
             agent: None,
         };
@@ -1084,6 +1133,7 @@ mod tests {
                 agent_status: None,
                 agent_turn: None,
                 observed_agent: None,
+                waiting: None,
             }),
             agent: None,
         };
@@ -1112,7 +1162,8 @@ mod tests {
         assert_eq!(t.title(), "Terminal 1");
         assert_eq!(t.runtime.as_ref().unwrap().observed_agent, None);
 
-        // 2. User launches `agy` inside the shell -> Herdr foreground push identifies `"agy"`, keeping title "Terminal 1".
+        // 2. User launches `agy` inside the shell and hits a permission block ->
+        // Herdr foreground push identifies `"agy"`, captures `RuntimeWait`, and preserves wait ID across polls.
         {
             let mut inv = app.inventory.lock().unwrap();
             inv.last_at = now();
@@ -1121,20 +1172,48 @@ mod tests {
                 json!({
                     "address": "t1",
                     "state": "live",
+                    "turn": 1,
+                    "status": {
+                        "state": "blocked",
+                        "app": "agy",
+                        "kind": "permission",
+                        "title": "Allow command?",
+                        "msg": "cargo test"
+                    },
                     "foreground": {"pid": 101, "name": "agy", "argv": ["/opt/homebrew/bin/agy"], "cwd": "/tmp"}
                 }),
             );
         }
         app.observe_terminals().unwrap();
-        let t = &app.snapshot().unwrap().terminals[0];
+        let t = app.snapshot().unwrap().terminals[0].clone();
         assert_eq!(t.title(), "Terminal 1");
         assert_eq!(t.agent_engine, None);
-        assert_eq!(
-            t.runtime.as_ref().unwrap().observed_agent.as_deref(),
-            Some("agy")
-        );
+        let rt = t.runtime.as_ref().unwrap();
+        assert_eq!(rt.observed_agent.as_deref(), Some("agy"));
+        assert_eq!(rt.agent_status.as_deref(), Some("blocked"));
+        assert_eq!(t.herdr_status(), HerdrStatus::Blocked);
+        let first_wait = rt
+            .waiting
+            .clone()
+            .expect("expected RuntimeWait on blocked shell agent");
+        assert_eq!(first_wait.kind, "permission");
+        assert_eq!(first_wait.title, "Allow command?");
+        assert_eq!(first_wait.message, "cargo test");
 
-        // 3. Agent exits back to `zsh` (even if last OSC 7501 status remains on PTY) -> clears `observed_agent`.
+        // Re-observing the same block keeps the wait ID and timestamp stable.
+        app.observe_terminals().unwrap();
+        let second_wait = app.snapshot().unwrap().terminals[0]
+            .runtime
+            .as_ref()
+            .unwrap()
+            .waiting
+            .clone()
+            .unwrap();
+        assert_eq!(second_wait.id, first_wait.id);
+        assert_eq!(second_wait.since, first_wait.since);
+
+        // 3. Agent exits back to `zsh` (even if last OSC 7501 status remains on PTY) ->
+        // clears `observed_agent`, stale `agent_status`, `agent_turn`, and `waiting`.
         {
             let mut inv = app.inventory.lock().unwrap();
             inv.last_at = now();
@@ -1143,20 +1222,20 @@ mod tests {
                 json!({
                     "address": "t1",
                     "state": "live",
+                    "turn": 1,
                     "status": {"state": "done", "app": "agy"},
                     "foreground": {"pid": 100, "name": "zsh", "argv": ["/bin/zsh", "-l"], "cwd": "/tmp"}
                 }),
             );
         }
         app.observe_terminals().unwrap();
-        assert_eq!(
-            app.snapshot().unwrap().terminals[0]
-                .runtime
-                .as_ref()
-                .unwrap()
-                .observed_agent,
-            None
-        );
+        let cleaned = app.snapshot().unwrap().terminals[0].clone();
+        assert_eq!(cleaned.herdr_status(), HerdrStatus::PlainShell);
+        let cleaned_rt = cleaned.runtime.as_ref().unwrap();
+        assert_eq!(cleaned_rt.observed_agent, None);
+        assert_eq!(cleaned_rt.agent_status, None);
+        assert_eq!(cleaned_rt.agent_turn, None);
+        assert_eq!(cleaned_rt.waiting, None);
 
         // 4. Subscription disconnect / error clears `observed_agent` so unreadable sessions show no icon.
         {

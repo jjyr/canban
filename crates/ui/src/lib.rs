@@ -89,12 +89,12 @@ pub(crate) fn workspace_root() -> impl IntoElement {
                         "waiting_agent" | "running" | "waiting_script"
                     )
             }) || s.terminals.iter().any(|t| {
-                t.agent
-                    .as_ref()
-                    .is_some_and(|a| matches!(a.state.as_str(), "starting" | "running" | "working"))
-                    || (t.agent.is_none()
-                        && t.agent_engine.is_some()
-                        && t.runtime.as_ref().is_some_and(|r| r.state != "finished"))
+                matches!(
+                    t.herdr_status(),
+                    canban_types::HerdrStatus::Working
+                        | canban_types::HerdrStatus::Starting
+                        | canban_types::HerdrStatus::Blocked
+                )
             })
         });
         if has_active_runtime {

@@ -1,6 +1,6 @@
 //! Independent Terminal workspace: split window chrome, numbered tabs and one viewer.
 pub mod entries;
-mod labels;
+pub(crate) mod labels;
 pub mod model;
 pub mod navigation;
 pub(crate) mod tabs;
@@ -434,6 +434,7 @@ fn gallery_create_entry(
             agent_status: None,
             agent_turn: None,
             observed_agent: None,
+            waiting: None,
         }),
     };
     let inherited_location = inherited.and_then(|e| e.location);

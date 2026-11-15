@@ -109,7 +109,7 @@ impl CardTileModel {
             .collect();
         let ephemeral_agents = live_entries
             .iter()
-            .filter(|e| e.agent.is_none() && e.saved.agent_engine.is_some())
+            .filter(|e| e.agent.is_none() && e.saved.has_active_agent())
             .cloned()
             .map(|entry| {
                 let started_at =
@@ -504,17 +504,46 @@ fn terminal_button(ui: Ui, card: String, number: u64, tint: ThemeColor) -> View 
         .child(btn)
 }
 
-/// A running workflow/profile Agent: pulsing mark + provider icon + profile + compact elapsed runtime. Opens Card + Agent terminal.
+/// A live workflow/profile Agent: Herdr-aligned mark + provider icon + profile + compact elapsed runtime. Opens Card + Agent terminal.
 fn agent_pill(ui: Ui, entry: TerminalEntry, started_at: Option<u64>) -> View {
+    let herdr = entry.herdr_status();
+    let wait_detail = entry
+        .runtime_wait()
+        .and_then(crate::terminals::entries::format_runtime_wait);
     let agent = entry
         .agent
         .as_ref()
         .expect("agent_pill requires an Agent terminal");
     let (mark, provider) = crate::profiles::provider(&agent.profile);
     let profile = agent.profile.id.clone();
-    let hint = format!("{provider} · @{profile} is working — open in Card");
+    let is_blocked = herdr == canban_types::HerdrStatus::Blocked;
+    let hint = if is_blocked {
+        let reason = wait_detail
+            .as_deref()
+            .unwrap_or("Blocked on terminal input");
+        format!("{provider} · @{profile} · {reason} — open in Card")
+    } else {
+        format!(
+            "{provider} · @{profile} is {} — open in Card",
+            herdr.label().to_lowercase()
+        )
+    };
     let a11y = hint.clone();
+    let tone_color = if is_blocked { ATTENTION } else { ACCENT };
+    let bg_color = if is_blocked {
+        ATTENTION_SURFACE
+    } else {
+        SELECTED
+    };
     let id = entry.id.clone();
+    let lead_mark = if is_blocked {
+        icon_tinted(Icon::ShieldAlert, ATTENTION)
+            .w(px(12.))
+            .h(px(12.))
+            .into_element()
+    } else {
+        live_dot(ACCENT).into_element()
+    };
     view().flex_shrink_0().tooltip(hint_tooltip(hint)).child(
         press_target()
             .h(px(22.))
@@ -523,41 +552,47 @@ fn agent_pill(ui: Ui, entry: TerminalEntry, started_at: Option<u64>) -> View {
             .items_center()
             .gap_1p5()
             .rounded(px(11.))
-            .bg(SELECTED)
+            .bg(bg_color)
             .border_1()
-            .border_color(ACCENT)
+            .border_color(tone_color)
             .hover(|s| s.bg(CARD_HOVER))
-            .focus(|s| s.ring(px(1.)).ring_color(ACCENT))
+            .focus(move |s| s.ring(px(1.)).ring_color(tone_color))
             .accessibility_label(move || Some(a11y.clone().into()))
-            .child(live_dot(ACCENT))
+            .child(lead_mark)
             .child(icon(mark).w(px(12.)).h(px(12.)))
             .child(
                 text(move || {
-                    if let Some(ts) = started_at {
+                    if herdr.is_working()
+                        && let Some(ts) = started_at
+                    {
                         let elapsed = crate::components::activity::compact_duration(
                             ui.runtime_clock.get().saturating_sub(ts),
                         );
                         format!("@{profile} · {elapsed}")
+                    } else if is_blocked {
+                        format!("@{profile} · Blocked")
                     } else {
                         format!("@{profile}")
                     }
                 })
                 .text_size(px(CAPTION_SIZE))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(ACCENT)
+                .text_color(tone_color)
                 .truncate(),
             )
             .on_press(move |_: &()| crate::terminals::open_request(ui, &id)),
     )
 }
 
-/// A live interactive CLI Agent spawned on this Card: opens the Card with that Agent tab selected.
+/// A live interactive CLI Agent (or manual Shell running an Agent) on this Card:
+/// opens the Card with that Agent tab selected, reflecting real-time Herdr status.
 fn ephemeral_agent_pill(
     ui: Ui,
     card_id: &str,
     entry: crate::terminals::Entry,
     started_at: Option<u64>,
 ) -> View {
+    let herdr = entry.herdr_status();
     let (mark, provider) = entry
         .provider()
         .unwrap_or_else(|| (Icon::Agent, "Agent".into()));
@@ -565,14 +600,48 @@ fn ephemeral_agent_pill(
     let attention = entry.attention_reason();
     let hint = match &attention {
         Some(reason) => format!("{provider} · {reason} — open in Card"),
-        None => format!("{provider} is active — open in Card"),
+        None => format!("{provider} · {} — open in Card", entry.display_status()),
     };
     let a11y = hint.clone();
-    let tone_color = if attention.is_some() {
-        ATTENTION
-    } else {
-        ACCENT
+    let (bg_color, tone_color, lead_mark) = match herdr {
+        canban_types::HerdrStatus::Blocked => (
+            ATTENTION_SURFACE,
+            ATTENTION,
+            icon_tinted(Icon::ShieldAlert, ATTENTION)
+                .w(px(12.))
+                .h(px(12.))
+                .into_element(),
+        ),
+        canban_types::HerdrStatus::Error | canban_types::HerdrStatus::Disconnected => (
+            DANGER_SURFACE,
+            DANGER,
+            icon_tinted(Icon::TriangleAlert, DANGER)
+                .w(px(12.))
+                .h(px(12.))
+                .into_element(),
+        ),
+        canban_types::HerdrStatus::Done => (
+            SUCCESS_SURFACE,
+            SUCCESS,
+            icon_tinted(Icon::Check, SUCCESS)
+                .w(px(12.))
+                .h(px(12.))
+                .into_element(),
+        ),
+        canban_types::HerdrStatus::Idle => (
+            INSET,
+            MUTED,
+            view()
+                .w(px(6.))
+                .h(px(6.))
+                .rounded_full()
+                .bg(MUTED)
+                .flex_shrink_0()
+                .into_element(),
+        ),
+        _ => (SELECTED, ACCENT, live_dot(ACCENT).into_element()),
     };
+    let is_working = herdr.is_working();
     let cid = card_id.to_owned();
     let tid = entry.saved.id;
     view().flex_shrink_0().tooltip(hint_tooltip(hint)).child(
@@ -583,28 +652,25 @@ fn ephemeral_agent_pill(
             .items_center()
             .gap_1p5()
             .rounded(px(11.))
-            .bg(SELECTED)
+            .bg(bg_color)
             .border_1()
             .border_color(tone_color)
             .hover(|s| s.bg(CARD_HOVER))
             .focus(move |s| s.ring(px(1.)).ring_color(tone_color))
             .accessibility_label(move || Some(a11y.clone().into()))
-            .child(if attention.is_some() {
-                icon_tinted(Icon::Info, ATTENTION)
-                    .w(px(12.))
-                    .h(px(12.))
-                    .into_element()
-            } else {
-                live_dot(ACCENT).into_element()
-            })
+            .child(lead_mark)
             .child(icon(mark).w(px(12.)).h(px(12.)))
             .child(
                 text(move || {
-                    if let Some(ts) = started_at {
+                    if is_working && let Some(ts) = started_at {
                         let elapsed = crate::components::activity::compact_duration(
                             ui.runtime_clock.get().saturating_sub(ts),
                         );
                         format!("{title} · {elapsed}")
+                    } else if herdr == canban_types::HerdrStatus::Done {
+                        format!("{title} · Done")
+                    } else if herdr == canban_types::HerdrStatus::Blocked {
+                        format!("{title} · Blocked")
                     } else {
                         title.clone()
                     }
@@ -671,6 +737,7 @@ mod tests {
                 agent_status: None,
                 agent_turn: None,
                 observed_agent: None,
+                waiting: None,
             }),
             agent: None,
             created_at: 1,
@@ -694,6 +761,7 @@ mod tests {
                 agent_status: Some("blocked".into()),
                 agent_turn: Some(1),
                 observed_agent: None,
+                waiting: None,
             }),
             agent: None,
             created_at: 1,

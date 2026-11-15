@@ -1236,6 +1236,230 @@ pub struct TerminalRuntime {
     pub agent_turn: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<RuntimeWait>,
+}
+
+/// Unified Herdr runtime state across Card Role Agents, Ephemeral CLI Agents,
+/// Configuration/Merge sessions, and interactive Shell terminals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HerdrStatus {
+    /// Interactive shell without an active Agent process.
+    PlainShell,
+    /// Scheduled or queued before PTY launch.
+    Queued,
+    /// PTY or Agent process is launching / connecting.
+    Starting,
+    /// Agent is actively running a turn in Herdr (`working` / `running`).
+    Working,
+    /// Agent is blocked waiting on user input / permission (`blocked`).
+    Blocked,
+    /// Agent completed at least one turn or reported completion (`done`, or `idle` after turn).
+    Done,
+    /// Agent is sitting at prompt before running a turn (`idle` at turn 0).
+    Idle,
+    /// Agent reported an error or failed (`error` / `failed`).
+    Error,
+    /// PTY connection was lost or replaced (`unavailable` / `replaced`).
+    Disconnected,
+    /// Terminal is closing (`closing`).
+    Closing,
+    /// Terminal process has exited (`finished` / `closed`).
+    Ended,
+}
+
+impl HerdrStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PlainShell => "Open",
+            Self::Queued => "Queued",
+            Self::Starting => "Starting",
+            Self::Working => "Working",
+            Self::Blocked => "Blocked",
+            Self::Done => "Done",
+            Self::Idle => "Idle",
+            Self::Error => "Error",
+            Self::Disconnected => "Offline",
+            Self::Closing => "Closing",
+            Self::Ended => "Ended",
+        }
+    }
+
+    pub fn is_working(self) -> bool {
+        matches!(self, Self::Working | Self::Starting)
+    }
+
+    pub fn is_attention(self) -> bool {
+        matches!(self, Self::Blocked | Self::Error | Self::Disconnected)
+    }
+}
+
+impl TerminalEntry {
+    pub fn is_special_session(&self) -> bool {
+        self.id.starts_with("configuration:") || self.id.starts_with("merge-queue:")
+    }
+
+    /// Active CLI / Role Agent engine identifier if an Agent is running in this terminal.
+    pub fn active_agent_engine(&self) -> Option<&str> {
+        if let Some(a) = &self.agent {
+            if a.finished() {
+                return None;
+            }
+            return a.profile.preset.as_deref().or(Some(a.profile.id.as_str()));
+        }
+        if let Some(engine) = self.agent_engine.as_deref() {
+            return Some(engine);
+        }
+        let r = self.runtime.as_ref()?;
+        if r.state == "finished" || r.connection != "connected" {
+            return None;
+        }
+        r.observed_agent.as_deref()
+    }
+
+    /// True when this terminal hosts an active Agent (launched as an Agent, special
+    /// Configuration/Merge session, or foreground CLI Agent detected in a manual shell).
+    pub fn has_active_agent(&self) -> bool {
+        if let Some(a) = &self.agent {
+            return !a.finished();
+        }
+        let Some(r) = &self.runtime else {
+            return false;
+        };
+        if r.state == "finished" {
+            return false;
+        }
+        self.agent_engine.is_some()
+            || self.is_special_session()
+            || (r.connection == "connected"
+                && (r.observed_agent.is_some()
+                    || matches!(
+                        r.agent_status.as_deref(),
+                        Some("working" | "running" | "blocked" | "error")
+                    )))
+    }
+
+    /// Unified live `RuntimeWait` across Card Role Agents and independent terminals.
+    pub fn runtime_wait(&self) -> Option<&RuntimeWait> {
+        if let Some(a) = &self.agent {
+            if a.finished() {
+                return None;
+            }
+            return a.lifecycle.waiting.as_ref();
+        }
+        let r = self.runtime.as_ref()?;
+        if r.state == "finished" || r.connection != "connected" || !self.has_active_agent() {
+            return None;
+        }
+        r.waiting.as_ref()
+    }
+
+    /// Unified real-time Herdr status across all terminal types.
+    pub fn herdr_status(&self) -> HerdrStatus {
+        if let Some(a) = &self.agent {
+            if a.finished() {
+                return HerdrStatus::Ended;
+            }
+            if a.close_state == "closing" {
+                return HerdrStatus::Closing;
+            }
+            if a.terminal.is_none() {
+                return match a.state.as_str() {
+                    "queued" => HerdrStatus::Queued,
+                    "starting" => HerdrStatus::Starting,
+                    "failed" => HerdrStatus::Error,
+                    "blocked" => HerdrStatus::Blocked,
+                    "completed" | "backlog" => HerdrStatus::Ended,
+                    _ => HerdrStatus::Starting,
+                };
+            }
+            if a.connection_state == "connecting" {
+                return HerdrStatus::Starting;
+            }
+            if !a.connection_state.is_empty() && a.connection_state != "connected" {
+                return HerdrStatus::Disconnected;
+            }
+            let obs_state = a
+                .observed
+                .as_ref()
+                .and_then(|v| v["status"]["state"].as_str());
+            let turn = a
+                .observed
+                .as_ref()
+                .and_then(|v| v["turn"].as_u64())
+                .unwrap_or(0);
+            return match obs_state {
+                Some("working" | "running") => HerdrStatus::Working,
+                Some("blocked") => HerdrStatus::Blocked,
+                Some("error") => HerdrStatus::Error,
+                Some("done") => HerdrStatus::Done,
+                Some("idle") => {
+                    if a.state == "failed" || a.close_state == "error" {
+                        HerdrStatus::Error
+                    } else if a.state == "blocked" {
+                        HerdrStatus::Blocked
+                    } else if turn > 0 || a.state == "completed" {
+                        HerdrStatus::Done
+                    } else {
+                        HerdrStatus::Idle
+                    }
+                }
+                Some(_) => HerdrStatus::Working,
+                None => match a.state.as_str() {
+                    "queued" => HerdrStatus::Queued,
+                    "starting" => HerdrStatus::Starting,
+                    "running" | "working" => HerdrStatus::Working,
+                    "blocked" => HerdrStatus::Blocked,
+                    "failed" => HerdrStatus::Error,
+                    "completed" => HerdrStatus::Done,
+                    _ => {
+                        if a.close_state == "error" {
+                            HerdrStatus::Error
+                        } else {
+                            HerdrStatus::Starting
+                        }
+                    }
+                },
+            };
+        }
+
+        let Some(r) = &self.runtime else {
+            return HerdrStatus::Disconnected;
+        };
+        if r.state == "finished" {
+            return HerdrStatus::Ended;
+        }
+        if r.state == "closing" {
+            return HerdrStatus::Closing;
+        }
+        if matches!(r.state.as_str(), "queued") {
+            return HerdrStatus::Queued;
+        }
+        if matches!(r.state.as_str(), "starting" | "checking") || r.connection == "connecting" {
+            return HerdrStatus::Starting;
+        }
+        if r.connection != "connected" {
+            return HerdrStatus::Disconnected;
+        }
+        if !self.has_active_agent() {
+            return HerdrStatus::PlainShell;
+        }
+        match r.agent_status.as_deref() {
+            Some("working" | "running") => HerdrStatus::Working,
+            Some("blocked") => HerdrStatus::Blocked,
+            Some("error") => HerdrStatus::Error,
+            Some("done") => HerdrStatus::Done,
+            Some("idle") => {
+                if r.agent_turn.unwrap_or(0) > 0 {
+                    HerdrStatus::Done
+                } else {
+                    HerdrStatus::Idle
+                }
+            }
+            Some(_) => HerdrStatus::Working,
+            None => HerdrStatus::Working,
+        }
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct TerminalContext {

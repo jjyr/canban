@@ -284,17 +284,26 @@ pub fn sound_items_with_reminders(s: &Snapshot, reminder_items: &[Reminder]) -> 
     }
 
     for t in &s.terminals {
-        if t.conversation_id.is_some() || t.agent_engine.is_none() {
+        if t.conversation_id.is_some() {
             continue;
         }
-        let Some(runtime) = &t.runtime else {
-            continue;
-        };
-        if runtime.state == "finished" || runtime.connection != "connected" {
+        let is_managed_special = s.configuration_sessions.iter().any(|c| c.id == t.id)
+            || s.merge_batches.iter().any(|b| b.id == t.id);
+        if !t.has_active_agent() && !is_managed_special {
             continue;
         }
-        if let Some(st @ ("blocked" | "error")) = runtime.agent_status.as_deref() {
-            ids.insert(format!("terminal-attn:{}:{st}", t.id));
+        match t.herdr_status() {
+            HerdrStatus::Blocked => {
+                if let Some(w) = t.runtime_wait() {
+                    ids.insert(format!("wait:{}", w.id));
+                } else {
+                    ids.insert(format!("terminal-attn:{}:blocked", t.id));
+                }
+            }
+            HerdrStatus::Error => {
+                ids.insert(format!("terminal-attn:{}:error", t.id));
+            }
+            _ => {}
         }
     }
 

@@ -1083,6 +1083,7 @@ impl AppServer {
             agent_status: None,
             agent_turn: None,
             observed_agent: None,
+            waiting: None,
         };
         match client.launch_on("local", argv, &batch.worktree, env, labels) {
             Ok(receipt) => {
@@ -1340,6 +1341,7 @@ impl AppServer {
                     agent_status: None,
                     agent_turn: None,
                     observed_agent: None,
+                    waiting: None,
                 });
             }
             entry = current.clone();
@@ -1789,6 +1791,7 @@ impl AppServer {
                 agent_status: None,
                 agent_turn: None,
                 observed_agent: None,
+                waiting: None,
             });
             db.save(item)?;
         }

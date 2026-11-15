@@ -46,12 +46,25 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
             }
         },
     ));
+    let terminal_attention = computed(move || {
+        ui.closing_terminals.with(|closing| {
+            ui.terminal_entries.with(|rows| {
+                rows.iter()
+                    .filter(|e| {
+                        e.listed()
+                            && !closing.contains(&e.saved.id)
+                            && e.herdr_status().is_attention()
+                    })
+                    .count()
+            })
+        })
+    });
     let rail = rail
         .child(icon_action(
             Icon::Terminal,
             "Terminals".into(),
             move || ui.page.get() == "terminals",
-            || 0,
+            move || terminal_attention.get(),
             move |_| ui.navigate("terminals"),
         ))
         .child(icon_action(

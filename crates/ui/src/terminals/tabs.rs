@@ -131,7 +131,6 @@ fn tab(ui: Ui, e: Entry, capacity: Memo<f32>) -> impl IntoElement {
         let context = id.clone();
         let rename = id.clone();
         let hint = e.hint();
-        let attention = e.attention_reason();
         let mut tab_button = view()
             .h_full()
             .focusable(true)
@@ -151,27 +150,8 @@ fn tab(ui: Ui, e: Entry, capacity: Memo<f32>) -> impl IntoElement {
             .label(format!("Tab {hint}"))
             .flex_row()
             .gap_2();
-        if attention.is_some() {
-            tab_button = tab_button.child(
-                icon_tinted(Icon::Info, ATTENTION)
-                    .w(px(13.))
-                    .h(px(13.))
-                    .flex_shrink_0(),
-            );
-        } else if e.agent.is_some() {
-            tab_button = tab_button.child(
-                view()
-                    .w(px(5.))
-                    .h(px(5.))
-                    .rounded(px(3.))
-                    .bg(if e.ended() || e.inactive() {
-                        MUTED
-                    } else {
-                        SUCCESS
-                    })
-                    .flex_shrink_0()
-                    .pointer_events(PointerEvents::None),
-            );
+        if let Some(mark_el) = super::labels::status_mark(&e) {
+            tab_button = tab_button.child(mark_el);
         }
         tab_button = tab_button
             .child(super::labels::tab(&e, selected))
@@ -441,6 +421,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                             e.hint(),
                             e.ended(),
                             e.inactive(),
+                            e.herdr_status(),
                             e.attention_reason(),
                             e.provider(),
                         )

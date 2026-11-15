@@ -351,7 +351,9 @@ pub fn card_status_with_merging(
         .collect()
 }
 
-/// Agents currently executing for this Card: newest live terminal per profile.
+/// Agents currently active in Herdr (`Working`, `Starting`, or `Blocked`) for this Card:
+/// newest live terminal per profile. Once Herdr settles to `Idle` or `Done`, the live
+/// pill stops pulsing so Board cards reflect real terminal execution.
 pub fn running_agents(
     snapshot: &canban_types::Snapshot,
     card: &canban_types::Card,
@@ -361,10 +363,13 @@ pub fn running_agents(
         .terminals
         .iter()
         .filter(|t| {
-            t.agent.as_ref().is_some_and(|a| {
-                a.card_id == card.id
-                    && matches!(a.state.as_str(), "starting" | "running" | "working")
-            })
+            t.agent.as_ref().is_some_and(|a| a.card_id == card.id)
+                && matches!(
+                    t.herdr_status(),
+                    canban_types::HerdrStatus::Working
+                        | canban_types::HerdrStatus::Starting
+                        | canban_types::HerdrStatus::Blocked
+                )
         })
         .collect();
     running.sort_by_key(|t| std::cmp::Reverse(t.agent.as_ref().map(|a| a.updated_at).unwrap_or(0)));
@@ -425,6 +430,19 @@ mod tests {
             .map(|t| t.id)
             .collect();
         assert_eq!(ids, vec!["new", "rev"]);
+
+        // Once Herdr observes the newest run as `idle` or `done` (even while internal DB state
+        // is still `"running"`), `running_agents` stops treating it as actively executing.
+        let new_agent = snapshot.terminals[1].agent.as_mut().unwrap();
+        new_agent.terminal = Some("pty-new".into());
+        new_agent.connection_state = "connected".into();
+        new_agent.observed =
+            Some(serde_json::json!({"state": "live", "turn": 1, "status": {"state": "done"}}));
+        let ids_after_done: Vec<_> = running_agents(&snapshot, &card)
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ids_after_done, vec!["old", "rev"]);
     }
 
     #[test]
