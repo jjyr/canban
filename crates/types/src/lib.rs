@@ -1253,6 +1253,10 @@ pub struct TerminalContext {
     #[serde(default)]
     pub dirty: bool,
     #[serde(default)]
+    pub additions: u32,
+    #[serde(default)]
+    pub deletions: u32,
+    #[serde(default)]
     pub ahead: u32,
     #[serde(default)]
     pub behind: u32,

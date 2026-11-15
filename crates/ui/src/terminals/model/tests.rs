@@ -1870,6 +1870,9 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
                 project_id: Some("p1".into()),
                 card_id: Some("c1".into()),
                 branch: Some("canban/1".into()),
+                dirty: true,
+                additions: 27,
+                deletions: 5,
                 ..Default::default()
             },
             TerminalContext {
@@ -1881,6 +1884,9 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
                 project_id: Some("p1".into()),
                 worktree_id: Some("wt-1".into()),
                 branch: Some("feat/isolated".into()),
+                dirty: true,
+                additions: 0,
+                deletions: 0,
                 ..Default::default()
             },
             TerminalContext {
@@ -2102,6 +2108,14 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
             .any(|(t, w)| t == "Worktree Card Task" && *w == FontWeight::NORMAL),
         "sibling CardWorktree Agent tab must appear alongside current shell in NORMAL weight: {texts_card:?}"
     );
+    assert!(
+        texts_card.iter().any(|(t, _)| t == "+27") && texts_card.iter().any(|(t, _)| t == "−5"),
+        "dirty CardWorktree switcher pill must render `+27` and `−5` instead of `changed`: {texts_card:?}"
+    );
+    assert!(
+        !texts_card.iter().any(|(t, _)| t == "changed"),
+        "top header pill must not render `changed`: {texts_card:?}"
+    );
     let card_tabs = tree.mounted_tabs();
     assert_eq!(
         card_tabs.len(),
@@ -2148,6 +2162,10 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
             .iter()
             .any(|(t, w)| t == "Terminal 20" && *w == FontWeight::NORMAL),
         "sibling ManagedWorktree tab `Terminal 20` must be NORMAL: {texts_wt:?}"
+    );
+    assert!(
+        texts_wt.iter().any(|(t, _)| t == "+0") && texts_wt.iter().any(|(t, _)| t == "−0"),
+        "dirty zero-line ManagedWorktree switcher pill must render `+0` and `−0` (Scheme B): {texts_wt:?}"
     );
     let wt_tabs = tree.mounted_tabs();
     assert_eq!(wt_tabs.len(), 2);

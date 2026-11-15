@@ -788,6 +788,8 @@ impl AppServer {
             worktree_id: resolved.worktree_id,
             branch: resolved.branch,
             dirty: resolved.dirty,
+            additions: resolved.additions,
+            deletions: resolved.deletions,
             ahead: resolved.ahead,
             behind: resolved.behind,
         }

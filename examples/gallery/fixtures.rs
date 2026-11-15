@@ -1201,6 +1201,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
             "canban/very-long-worktree-and-branch-name/context-navigation-acceptance-42".into(),
         ),
         dirty: true,
+        additions: 48,
+        deletions: 12,
         ahead: 2,
         behind: 0,
     });
@@ -1239,6 +1241,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         worktree_id: None,
         branch: Some("main".into()),
         dirty: false,
+        additions: 0,
+        deletions: 0,
         ahead: 0,
         behind: 1,
     });
@@ -1302,6 +1306,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         worktree_id: Some("gallery-wt-spike".into()),
         branch: Some("feat/standalone-spike".into()),
         dirty: true,
+        additions: 14,
+        deletions: 3,
         ahead: 3,
         behind: 1,
     });
@@ -1339,6 +1345,8 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         worktree_id: Some("gallery-wt-spike".into()),
         branch: Some("feat/standalone-spike".into()),
         dirty: true,
+        additions: 14,
+        deletions: 3,
         ahead: 3,
         behind: 1,
     });

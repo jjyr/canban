@@ -9,6 +9,10 @@ use std::collections::BTreeMap;
 pub struct GitStatus {
     pub branch: Option<String>,
     pub dirty: bool,
+    #[serde(default)]
+    pub additions: u32,
+    #[serde(default)]
+    pub deletions: u32,
     pub ahead: u32,
     pub behind: u32,
 }
@@ -20,8 +24,110 @@ pub struct ResolvedContext {
     pub worktree_id: Option<String>,
     pub branch: Option<String>,
     pub dirty: bool,
+    pub additions: u32,
+    pub deletions: u32,
     pub ahead: u32,
     pub behind: u32,
+}
+
+const MAX_UNTRACKED_FILES: usize = 512;
+const MAX_UNTRACKED_FILE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_UNTRACKED_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+const BINARY_SNIFF_BYTES: usize = 8192;
+
+fn accumulate_numstat(stdout: &str, additions: &mut u32, deletions: &mut u32) {
+    for line in stdout.lines() {
+        let mut cols = line.split('\t');
+        if let (Some(add), Some(del)) = (cols.next(), cols.next()) {
+            if let Ok(a) = add.parse::<u32>() {
+                *additions = additions.saturating_add(a);
+            }
+            if let Ok(d) = del.parse::<u32>() {
+                *deletions = deletions.saturating_add(d);
+            }
+        }
+    }
+}
+
+fn untracked_file_lines(path: &Path, total_bytes: &mut u64) -> u32 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !meta.file_type().is_file() {
+        return 0;
+    }
+    let len = meta.len();
+    if len == 0 || len > MAX_UNTRACKED_FILE_BYTES {
+        return 0;
+    }
+    if total_bytes.saturating_add(len) > MAX_UNTRACKED_TOTAL_BYTES {
+        return 0;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return 0;
+    };
+    *total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+    if bytes.is_empty() {
+        return 0;
+    }
+    let sniff = bytes.len().min(BINARY_SNIFF_BYTES);
+    if bytes[..sniff].contains(&0) {
+        return 0;
+    }
+    let lines =
+        bytes.iter().filter(|&&b| b == b'\n').count() + usize::from(!bytes.ends_with(b"\n"));
+    u32::try_from(lines).unwrap_or(u32::MAX)
+}
+
+fn parse_porcelain_v2_z(raw: &[u8]) -> (GitStatus, Vec<PathBuf>) {
+    let mut status = GitStatus::default();
+    let mut untracked = Vec::new();
+    let mut records = raw.split(|&b| b == 0);
+    while let Some(rec) = records.next() {
+        if rec.is_empty() {
+            continue;
+        }
+        if let Some(rest) = rec.strip_prefix(b"# ") {
+            if let Ok(rest) = std::str::from_utf8(rest) {
+                if let Some(head) = rest.strip_prefix("branch.head ") {
+                    let head = head.trim();
+                    if !head.is_empty() && head != "(detached)" {
+                        status.branch = Some(head.to_owned());
+                    }
+                } else if let Some(ab) = rest.strip_prefix("branch.ab ") {
+                    for token in ab.split_whitespace() {
+                        if let Some(a) = token.strip_prefix('+') {
+                            status.ahead = a.parse::<u32>().unwrap_or(0);
+                        } else if let Some(b) = token.strip_prefix('-') {
+                            status.behind = b.parse::<u32>().unwrap_or(0);
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        if rec.starts_with(b"! ") {
+            continue;
+        }
+        status.dirty = true;
+        if rec.starts_with(b"2 ") {
+            // In `-z` format, renamed/copied entries (`2 ...`) consume a following NUL-terminated origPath.
+            let _ = records.next();
+        } else if let Some(rel) = rec.strip_prefix(b"? ")
+            && untracked.len() < MAX_UNTRACKED_FILES
+        {
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStrExt;
+                untracked.push(PathBuf::from(std::ffi::OsStr::from_bytes(rel)));
+            }
+            #[cfg(not(unix))]
+            if let Ok(s) = std::str::from_utf8(rel) {
+                untracked.push(PathBuf::from(s));
+            }
+        }
+    }
+    (status, untracked)
 }
 
 pub fn parse_porcelain_v2_branch(stdout: &str) -> GitStatus {
@@ -92,28 +198,81 @@ impl Ops {
             .zip(self.host.canonical(Path::new(cwd)).ok())
             .is_some_and(|(root, cwd)| cwd.starts_with(root))
     }
-    fn probe_git_status(&self, cwd: &str) -> GitStatus {
-        match self.checked(
-            Path::new(cwd),
+    fn probe_git_status(&self, cwd: &str, top_hint: Option<&str>) -> GitStatus {
+        let cwd_path = Path::new(cwd);
+        match self.git(
+            cwd_path,
             &[
                 "--no-optional-locks",
                 "status",
                 "--porcelain=v2",
+                "-z",
                 "--branch",
-                "--untracked-files=normal",
+                "--untracked-files=all",
             ],
         ) {
-            Ok(out) => {
-                let mut status = parse_porcelain_v2_branch(&out);
+            Ok(out) if out.status.success() => {
+                let (mut status, untracked) = parse_porcelain_v2_z(&out.stdout);
                 if status.branch.is_none() {
-                    status.branch = self.rebase_branch(Path::new(cwd));
+                    status.branch = self.rebase_branch(cwd_path);
+                }
+                if status.dirty {
+                    if let Ok(numstat) = self.checked(
+                        cwd_path,
+                        &["--no-optional-locks", "diff", "HEAD", "--numstat"],
+                    ) {
+                        accumulate_numstat(&numstat, &mut status.additions, &mut status.deletions);
+                    } else {
+                        if let Ok(cached) = self.checked(
+                            cwd_path,
+                            &["--no-optional-locks", "diff", "--cached", "--numstat"],
+                        ) {
+                            accumulate_numstat(
+                                &cached,
+                                &mut status.additions,
+                                &mut status.deletions,
+                            );
+                        }
+                        if let Ok(unstaged) =
+                            self.checked(cwd_path, &["--no-optional-locks", "diff", "--numstat"])
+                        {
+                            accumulate_numstat(
+                                &unstaged,
+                                &mut status.additions,
+                                &mut status.deletions,
+                            );
+                        }
+                    }
+                    if !untracked.is_empty() {
+                        let root = top_hint.map(PathBuf::from).or_else(|| {
+                            self.checked(
+                                cwd_path,
+                                &[
+                                    "--no-optional-locks",
+                                    "rev-parse",
+                                    "--path-format=absolute",
+                                    "--show-toplevel",
+                                ],
+                            )
+                            .ok()
+                            .map(PathBuf::from)
+                        });
+                        if let Some(root) = root {
+                            let mut total_bytes = 0u64;
+                            for rel in untracked {
+                                status.additions = status.additions.saturating_add(
+                                    untracked_file_lines(&root.join(rel), &mut total_bytes),
+                                );
+                            }
+                        }
+                    }
                 }
                 status
             }
-            Err(_) => GitStatus {
+            _ => GitStatus {
                 branch: self
                     .current_branch(cwd)
-                    .or_else(|| self.rebase_branch(Path::new(cwd))),
+                    .or_else(|| self.rebase_branch(cwd_path)),
                 ..Default::default()
             },
         }
@@ -243,12 +402,13 @@ for p in json.loads(sys.argv[1]):
  def git(args):
   r=subprocess.run(['git','--no-optional-locks','-C',p]+args,capture_output=True,text=True)
   return r.stdout.strip() if r.returncode==0 else None
- dirs=git(['rev-parse','--path-format=absolute','--git-common-dir','--git-dir'])
+ dirs=git(['rev-parse','--path-format=absolute','--git-common-dir','--git-dir','--show-toplevel'])
  parts=dirs.splitlines() if dirs else []
- rows[p]={'path':os.path.realpath(p),'repo':os.path.realpath(parts[0]) if parts else None,'git_dir':os.path.realpath(parts[1]) if len(parts)>1 else None}
+ rows[p]={'path':os.path.realpath(p),'repo':os.path.realpath(parts[0]) if parts else None,'git_dir':os.path.realpath(parts[1]) if len(parts)>1 else None,'top':os.path.realpath(parts[2]) if len(parts)>2 else None}
 cwd=sys.argv[2]
 gd=sys.argv[3] or ((rows.get(cwd) or {}).get('git_dir') if cwd in rows else '')
-known=set(json.loads(sys.argv[4]))
+top=sys.argv[4] or ((rows.get(cwd) or {}).get('top') if cwd in rows else '')
+known=set(json.loads(sys.argv[5]))
 def rebase_br():
  for rel in ('rebase-merge/head-name','rebase-apply/head-name'):
   hp=os.path.join(gd,rel)
@@ -258,14 +418,28 @@ def rebase_br():
     if raw.startswith('refs/heads/') and len(raw)>11:return raw[11:]
    except OSError:pass
  return None
+def sum_numstat(txt):
+ a=0;d=0
+ for ln in txt.splitlines():
+  cols=ln.split('\t')
+  if len(cols)>=2:
+   try:a+=int(cols[0])
+   except ValueError:pass
+   try:d+=int(cols[1])
+   except ValueError:pass
+ return a,d
 st=None
 if gd and gd not in known:
- r=subprocess.run(['git','--no-optional-locks','-C',cwd,'status','--porcelain=v2','--branch','--untracked-files=normal'],capture_output=True,text=True)
+ r=subprocess.run(['git','--no-optional-locks','-C',cwd,'status','--porcelain=v2','-z','--branch','--untracked-files=all'],capture_output=True)
  if r.returncode==0:
-  br=None;dirty=False;ahead=0;behind=0
-  for line in r.stdout.splitlines():
-   if line.startswith('# '):
-    rest=line[2:]
+  br=None;dirty=False;ahead=0;behind=0;untracked=[]
+  recs=r.stdout.split(b'\x00')
+  i=0
+  while i<len(recs):
+   rec=recs[i];i+=1
+   if not rec:continue
+   if rec.startswith(b'# '):
+    rest=rec[2:].decode('utf-8','replace')
     if rest.startswith('branch.head '):
      h=rest[len('branch.head '):].strip()
      if h and h!='(detached)':br=h
@@ -277,17 +451,52 @@ if gd and gd not in known:
       elif tok.startswith('-'):
        try:behind=int(tok[1:])
        except ValueError:pass
-   elif line:
-    dirty=True;break
-  st={'branch':br or rebase_br(),'dirty':dirty,'ahead':ahead,'behind':behind}
+   elif rec.startswith(b'! '):
+    continue
+   else:
+    dirty=True
+    if rec.startswith(b'2 '):i+=1
+    elif rec.startswith(b'? ') and len(untracked)<512:untracked.append(rec[2:])
+  adds=0;dels=0
+  if dirty:
+   nd=subprocess.run(['git','--no-optional-locks','-C',cwd,'diff','HEAD','--numstat'],capture_output=True,text=True)
+   if nd.returncode==0:
+    adds,dels=sum_numstat(nd.stdout)
+   else:
+    for ex in (['diff','--cached','--numstat'],['diff','--numstat']):
+     nx=subprocess.run(['git','--no-optional-locks','-C',cwd]+ex,capture_output=True,text=True)
+     if nx.returncode==0:
+      ca,cd=sum_numstat(nx.stdout);adds+=ca;dels+=cd
+   if untracked:
+    if not top:
+     rt=subprocess.run(['git','--no-optional-locks','-C',cwd,'rev-parse','--path-format=absolute','--show-toplevel'],capture_output=True,text=True)
+     if rt.returncode==0:top=rt.stdout.strip()
+    if top:
+     tb=os.fsencode(top);tot=0
+     for rel in untracked:
+      fp=os.path.join(tb,rel)
+      try:
+       if os.path.islink(fp) or not os.path.isfile(fp):continue
+       sz=os.path.getsize(fp)
+       if sz<=0 or sz>2097152 or tot+sz>16777216:continue
+       data=open(fp,'rb').read();tot+=len(data)
+       if data and b'\x00' not in data[:8192]:
+        adds+=data.count(b'\n')+(0 if data.endswith(b'\n') else 1)
+      except OSError:pass
+  st={'branch':br or rebase_br(),'dirty':dirty,'additions':adds,'deletions':dels,'ahead':ahead,'behind':behind}
  else:
   r2=subprocess.run(['git','--no-optional-locks','-C',cwd,'symbolic-ref','--quiet','--short','HEAD'],capture_output=True,text=True)
-  st={'branch':(r2.stdout.strip() if r2.returncode==0 else None) or rebase_br(),'dirty':False,'ahead':0,'behind':0}
+  st={'branch':(r2.stdout.strip() if r2.returncode==0 else None) or rebase_br(),'dirty':False,'additions':0,'deletions':0,'ahead':0,'behind':0}
 print(json.dumps({'paths':rows,'git_dir':gd or None,'status':st}))"#,
                     &[
                         &serde_json::to_string(&missing)?,
                         cwd,
                         cached_git_dir.as_deref().unwrap_or(""),
+                        cache
+                            .paths
+                            .get(cwd)
+                            .and_then(|v| v["top"].as_str())
+                            .unwrap_or(""),
                         &serde_json::to_string(&known_statuses)?,
                     ],
                 )?;
@@ -312,6 +521,7 @@ print(json.dumps({'paths':rows,'git_dir':gd or None,'status':st}))"#,
                                     "--path-format=absolute",
                                     "--git-common-dir",
                                     "--git-dir",
+                                    "--show-toplevel",
                                 ],
                             )
                             .ok();
@@ -322,7 +532,8 @@ print(json.dumps({'paths':rows,'git_dir':gd or None,'status':st}))"#,
                         json!({
                             "path": path,
                             "repo": parts.first().and_then(|p| self.host.canonical(Path::new(p)).ok()),
-                            "git_dir": parts.get(1).and_then(|p| self.host.canonical(Path::new(p)).ok())
+                            "git_dir": parts.get(1).and_then(|p| self.host.canonical(Path::new(p)).ok()),
+                            "top": parts.get(2).and_then(|p| self.host.canonical(Path::new(p)).ok())
                         })
                     } else {
                         Value::Null
@@ -336,7 +547,12 @@ print(json.dumps({'paths':rows,'git_dir':gd or None,'status':st}))"#,
                     .map(str::to_owned)
                     && !cache.statuses.contains_key(&gd)
                 {
-                    let st = self.probe_git_status(cwd);
+                    let top_hint = cache
+                        .paths
+                        .get(cwd)
+                        .and_then(|v| v["top"].as_str())
+                        .map(str::to_owned);
+                    let st = self.probe_git_status(cwd, top_hint.as_deref());
                     cache.statuses.insert(gd, st);
                 }
             }
@@ -363,6 +579,8 @@ print(json.dumps({'paths':rows,'git_dir':gd or None,'status':st}))"#,
             return Ok(ResolvedContext {
                 branch,
                 dirty: git_status.dirty,
+                additions: git_status.additions,
+                deletions: git_status.deletions,
                 ahead: git_status.ahead,
                 behind: git_status.behind,
                 ..Default::default()
@@ -398,6 +616,8 @@ print(json.dumps({'paths':rows,'git_dir':gd or None,'status':st}))"#,
             return Ok(ResolvedContext {
                 branch,
                 dirty: git_status.dirty,
+                additions: git_status.additions,
+                deletions: git_status.deletions,
                 ahead: git_status.ahead,
                 behind: git_status.behind,
                 ..Default::default()
@@ -447,6 +667,8 @@ print(json.dumps({'paths':rows,'git_dir':gd or None,'status':st}))"#,
             worktree_id,
             branch,
             dirty: git_status.dirty,
+            additions: git_status.additions,
+            deletions: git_status.deletions,
             ahead: git_status.ahead,
             behind: git_status.behind,
         })
@@ -786,5 +1008,73 @@ mod cache_tests {
             .unwrap();
         assert_eq!(rebase_ctx.branch.as_deref(), Some("feat/spike"));
         assert!(rebase_ctx.dirty);
+    }
+
+    #[test]
+    fn diff_line_counts_include_staged_unstaged_untracked_subdir_unborn_and_zero_line_dirty() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = Ops::local();
+
+        // 1. Unborn HEAD repository with staged + unstaged + nested untracked files
+        let unborn = dir.path().join("unborn");
+        std::fs::create_dir(&unborn).unwrap();
+        checked(&unborn, &["init", "-b", "main"]).unwrap();
+        std::fs::write(unborn.join("staged.txt"), "a\nb\n").unwrap();
+        checked(&unborn, &["add", "staged.txt"]).unwrap();
+        // Modify staged file in working tree (+1 line) and add nested untracked file (+3 lines, no trailing newline)
+        std::fs::write(unborn.join("staged.txt"), "a\nb\nc\n").unwrap();
+        std::fs::create_dir_all(unborn.join("nested/dir")).unwrap();
+        std::fs::write(unborn.join("nested/dir/new.txt"), "one\ntwo\nthree").unwrap();
+
+        let unborn_ctx = ops.directory_context_full(&Snapshot::default(), unborn.to_str().unwrap());
+        assert_eq!(unborn_ctx.branch.as_deref(), Some("main"));
+        assert!(unborn_ctx.dirty);
+        assert_eq!((unborn_ctx.additions, unborn_ctx.deletions), (6, 0));
+
+        // 2. Committed repo probed from a subdirectory: tracked staged + unstaged + untracked + binary
+        let repo = dir.path().join("committed");
+        std::fs::create_dir(&repo).unwrap();
+        checked(&repo, &["init", "-b", "main"]).unwrap();
+        std::fs::write(repo.join("tracked.txt"), "l1\nl2\nl3\nl4\n").unwrap();
+        checked(&repo, &["add", "tracked.txt"]).unwrap();
+        checked(
+            &repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "Init",
+            ],
+        )
+        .unwrap();
+
+        // Replace 2 lines with 3 lines in tracked.txt (+3 -2), stage a new 2-line file (+2),
+        // add an untracked 4-line file at root while probing from `sub/` (+4), plus a binary untracked file (+0).
+        std::fs::write(repo.join("tracked.txt"), "l1\nmod2\nmod3\nadd4\nl4\n").unwrap();
+        std::fs::write(repo.join("staged_new.txt"), "s1\ns2\n").unwrap();
+        checked(&repo, &["add", "staged_new.txt"]).unwrap();
+        std::fs::write(repo.join("root_untracked.rs"), "u1\nu2\nu3\nu4\n").unwrap();
+        std::fs::write(repo.join("blob.bin"), b"\x00\x01\x02\n\n\n").unwrap();
+        let sub = repo.join("sub");
+        std::fs::create_dir(&sub).unwrap();
+
+        let sub_ctx = ops.directory_context_full(&Snapshot::default(), sub.to_str().unwrap());
+        assert!(sub_ctx.dirty);
+        assert_eq!((sub_ctx.additions, sub_ctx.deletions), (9, 2));
+
+        // 3. Zero-line dirty state (empty untracked file + binary file only) -> dirty: true, +0 -0
+        checked(&repo, &["reset", "--hard", "HEAD"]).unwrap();
+        std::fs::remove_file(repo.join("root_untracked.rs")).unwrap();
+        std::fs::write(repo.join("empty.txt"), "").unwrap();
+        let zero_ctx = ops.directory_context_full(&Snapshot::default(), repo.to_str().unwrap());
+        assert!(zero_ctx.dirty);
+        assert_eq!((zero_ctx.additions, zero_ctx.deletions), (0, 0));
     }
 }

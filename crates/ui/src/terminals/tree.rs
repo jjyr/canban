@@ -10,7 +10,19 @@ use crate::drafts::{capture_scroll, scroll_position};
 fn git_status_chips(git: &super::worktrees::ScopeGitSummary) -> View {
     let mut row = view().flex_row().items_center().gap_1().flex_shrink_0();
     if git.dirty {
-        row = row.child(label("changed").text_size(px(11.)).text_color(ATTENTION));
+        row = row
+            .child(
+                label(format!("+{}", git.additions))
+                    .text_size(px(11.))
+                    .font_family("Menlo")
+                    .text_color(SUCCESS),
+            )
+            .child(
+                label(format!("−{}", git.deletions))
+                    .text_size(px(11.))
+                    .font_family("Menlo")
+                    .text_color(DANGER),
+            );
     }
     if git.ahead > 0 || git.behind > 0 {
         let mut ab = Vec::new();
@@ -57,7 +69,7 @@ fn scope_header(
                 .map(|p| p.directory.clone())
                 .unwrap_or_default();
             let mut tip = format!("Project root · {display}");
-            let ind = git.indicators();
+            let ind = git.tooltip_indicators();
             if !ind.is_empty() {
                 tip.push_str(&format!(" ({})", ind.join(" · ")));
             }
@@ -73,7 +85,7 @@ fn scope_header(
                 Some(c) => format!("#{} {}\nBranch: {display}", c.number, c.title),
                 None => format!("Card worktree · {display}"),
             };
-            let ind = git.indicators();
+            let ind = git.tooltip_indicators();
             if !ind.is_empty() {
                 tip.push_str(&format!(" ({})", ind.join(" · ")));
             }
@@ -96,7 +108,7 @@ fn scope_header(
                 ),
                 None => format!("Managed worktree `{display}`"),
             };
-            let ind = git.indicators();
+            let ind = git.tooltip_indicators();
             if !ind.is_empty() {
                 tip.push_str(&format!(" ({})", ind.join(" · ")));
             }
@@ -373,10 +385,14 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
                         (
                             e.saved.id.clone(),
                             entry_scope(&s, e),
-                            loc.and_then(|l| l.branch.clone()),
-                            loc.is_some_and(|l| l.dirty),
-                            loc.map_or(0, |l| l.ahead),
-                            loc.map_or(0, |l| l.behind),
+                            (
+                                loc.and_then(|l| l.branch.clone()),
+                                loc.is_some_and(|l| l.dirty),
+                                loc.map_or(0, |l| l.additions),
+                                loc.map_or(0, |l| l.deletions),
+                                loc.map_or(0, |l| l.ahead),
+                                loc.map_or(0, |l| l.behind),
+                            ),
                             super::labels::sidebar_hint(
                                 e,
                                 &if e.machine() == "local" {

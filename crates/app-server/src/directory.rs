@@ -193,6 +193,8 @@ impl AppServer {
                 worktree_id: None,
                 branch: None,
                 dirty: false,
+                additions: 0,
+                deletions: 0,
                 ahead: 0,
                 behind: 0,
             },
@@ -338,6 +340,8 @@ impl AppServer {
                         context.worktree_id = resolved.worktree_id;
                         context.branch = resolved.branch;
                         context.dirty = resolved.dirty;
+                        context.additions = resolved.additions;
+                        context.deletions = resolved.deletions;
                         context.ahead = resolved.ahead;
                         context.behind = resolved.behind;
                         changed = true;

@@ -16,6 +16,8 @@ pub enum WorktreeScope {
 pub struct ScopeGitSummary {
     pub branch: Option<String>,
     pub dirty: bool,
+    pub additions: u32,
+    pub deletions: u32,
     pub ahead: u32,
     pub behind: u32,
 }
@@ -23,6 +25,20 @@ pub struct ScopeGitSummary {
 impl ScopeGitSummary {
     pub fn indicators(&self) -> Vec<String> {
         format_git_indicators(self.dirty, self.ahead, self.behind)
+    }
+
+    pub fn tooltip_indicators(&self) -> Vec<String> {
+        let mut parts = Vec::new();
+        if self.dirty {
+            parts.push(format!("+{} −{}", self.additions, self.deletions));
+        }
+        if self.ahead > 0 {
+            parts.push(format!("↑{}", self.ahead));
+        }
+        if self.behind > 0 {
+            parts.push(format!("↓{}", self.behind));
+        }
+        parts
     }
 }
 
@@ -180,6 +196,8 @@ pub fn scope_git_summary(
             return ScopeGitSummary {
                 branch: loc.branch.clone(),
                 dirty: loc.dirty,
+                additions: loc.additions,
+                deletions: loc.deletions,
                 ahead: loc.ahead,
                 behind: loc.behind,
             };

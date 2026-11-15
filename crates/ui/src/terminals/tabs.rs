@@ -468,6 +468,8 @@ pub fn header(ui: Ui) -> impl IntoElement {
                                 c.terminal_id.clone(),
                                 c.branch.clone(),
                                 c.dirty,
+                                c.additions,
+                                c.deletions,
                                 c.ahead,
                                 c.behind,
                             )
@@ -703,7 +705,7 @@ pub fn header(ui: Ui) -> impl IntoElement {
                         "Switch Project / Worktree\nCurrent: {name}\nDirectory: {}",
                         e.cwd().unwrap_or_else(|| "Unavailable".into())
                     );
-                    let ind = git.indicators();
+                    let ind = git.tooltip_indicators();
                     if !ind.is_empty() {
                         tip.push_str(&format!("\nGit: {}", ind.join(" · ")));
                     }
@@ -764,12 +766,21 @@ pub fn header(ui: Ui) -> impl IntoElement {
                     .child(muted(short).min_w(px(0.)).truncate());
 
                 if pill_git.dirty {
-                    pill_row = pill_row.child(
-                        label("changed")
-                            .text_size(px(11.))
-                            .text_color(ATTENTION)
-                            .flex_shrink_0(),
-                    );
+                    pill_row = pill_row
+                        .child(
+                            label(format!("+{}", pill_git.additions))
+                                .text_size(px(11.))
+                                .font_family("Menlo")
+                                .text_color(SUCCESS)
+                                .flex_shrink_0(),
+                        )
+                        .child(
+                            label(format!("−{}", pill_git.deletions))
+                                .text_size(px(11.))
+                                .font_family("Menlo")
+                                .text_color(DANGER)
+                                .flex_shrink_0(),
+                        );
                 }
                 if pill_git.ahead > 0 || pill_git.behind > 0 {
                     let mut ab = Vec::new();
