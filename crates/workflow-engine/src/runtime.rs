@@ -363,9 +363,27 @@ pub fn start_adopted(
                 let step_ref = format!("{key}:{}", run.visit);
                 if let Some(entry_ref) = adopted_terminal.take() {
                     if let Some(agent) = &mut entry_ref.agent {
+                        if matches!(
+                            agent.state.as_str(),
+                            "completed" | "backlog" | "blocked" | "failed"
+                        ) {
+                            agent.number = agent.number.saturating_add(1).max(1);
+                            agent.state = "running".into();
+                            agent.error = None;
+                            agent.completed_at = None;
+                            agent.completion_turn = None;
+                            agent.turn_ended_at = None;
+                            agent.close_requested_at = None;
+                            agent.close_state.clear();
+                            agent.lifecycle.close_reason.clear();
+                        }
+                        if agent.trigger.is_comment() {
+                            agent.trigger = ExecutionTrigger::Interactive;
+                        }
                         agent.workflow_run_id = Some(run.id.clone());
                         agent.workflow_step = Some(step_ref);
                         agent.stage = card.stage.clone();
+                        agent.updated_at = now();
                         if legacy {
                             let following = run.definition.steps[&key]
                                 .next()

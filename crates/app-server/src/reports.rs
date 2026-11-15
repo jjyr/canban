@@ -84,12 +84,10 @@ impl AppServer {
                         terminals.iter().find(|t| {
                             t.id == tid
                                 && t.agent.as_ref().is_some_and(|a| {
-                                    !matches!(
-                                        a.state.as_str(),
-                                        "completed" | "backlog" | "cancelled" | "superseded"
-                                    ) && requested_profile
-                                        .as_deref()
-                                        .is_none_or(|pid| a.profile.id == pid)
+                                    !matches!(a.state.as_str(), "cancelled" | "superseded")
+                                        && requested_profile
+                                            .as_deref()
+                                            .is_none_or(|pid| a.profile.id == pid)
                                 })
                         })
                     })
@@ -239,10 +237,20 @@ impl AppServer {
             } else {
                 format!("{state}: {}", report.message)
             };
+            let active_wf = active_wf_id
+                .as_deref()
+                .and_then(|id| db.get::<WorkflowRun>(id).ok())
+                .filter(|r| r.active());
+            let wf_awaiting_report = active_wf.as_ref().is_some_and(|r| {
+                matches!(r.state.as_str(), "waiting_agent" | "blocked")
+                    && r.terminal_id
+                        .as_deref()
+                        .is_none_or(|tid| Some(tid) == terminal_id.as_deref())
+            });
             let is_comment = entry_opt
                 .as_ref()
                 .and_then(|t| t.agent.as_ref())
-                .is_some_and(|r| r.trigger.is_comment());
+                .is_some_and(|r| r.trigger.is_comment() && r.workflow_run_id.is_none());
             let comment_questions = if is_comment {
                 db.list::<Question>()?
                     .into_iter()
@@ -294,10 +302,11 @@ impl AppServer {
                 }
             }
             let terminal_done = matches!(state, "completed" | "backlog");
-            let mut should_advance = entry_opt.as_ref().and_then(|t| t.agent.as_ref()).is_none();
+            let mut should_advance =
+                entry_opt.as_ref().and_then(|t| t.agent.as_ref()).is_none() || wf_awaiting_report;
             if let Some(ref mut entry) = entry_opt
                 && let Some(ref mut run) = entry.agent
-                && !matches!(run.state.as_str(), "completed" | "backlog")
+                && (!matches!(run.state.as_str(), "completed" | "backlog") || wf_awaiting_report)
             {
                 let report_at = now();
                 run.state = state.into();

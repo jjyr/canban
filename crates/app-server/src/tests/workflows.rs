@@ -3337,6 +3337,307 @@ fn backlog_interactive_session_updates_card_adopts_develop_without_retrigger_and
 }
 
 #[test]
+fn comment_session_completed_then_adopted_in_same_live_terminal_advances_to_merge_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    git_in(&source, &["init", "-b", "main"]);
+    git_identity(&source);
+    std::fs::write(source.join("lib.rs"), "pub fn base() -> usize { 1 }\n").unwrap();
+    git_in(&source, &["add", "."]);
+    git_in(&source, &["commit", "-m", "init"]);
+    let remote = dir.path().join("remote.git");
+    std::fs::create_dir_all(&remote).unwrap();
+    git_in(&remote, &["init", "--bare", "-b", "main"]);
+    git_in(
+        &source,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git_in(&source, &["push", "-u", "origin", "main"]);
+
+    let app = AppServer::open(dir.path().join("home"), PathBuf::from("/bin/echo")).unwrap();
+    let p: Project = serde_json::from_value(
+        app.call(
+            "project.create",
+            json!({"name": "Comment Adopt Merge", "directory": source}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let card: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({
+                "project_id": p.id,
+                "title": "Jump to Card and expand terminal",
+                "body": "Initial notes"
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    // 1. User posts a `@developer` comment in Backlog -> spawns a comment session.
+    app.call(
+        "comment.add",
+        json!({
+            "card_id": card.id,
+            "body": "@developer Please analyze the approach first"
+        }),
+    )
+    .unwrap();
+    let req = app
+        .snapshot()
+        .unwrap()
+        .terminals
+        .into_iter()
+        .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == card.id))
+        .expect("comment session queued");
+    assert!(req.agent.as_ref().unwrap().trigger.is_comment());
+
+    let ops = canban_workspaces::Ops::local();
+    let wt = ops.prepare(&app.home, &p, &card).unwrap();
+    let branch = ops.current_branch(wt.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut current: Card = db.get(&card.id)?;
+            current.worktree = Some(wt.to_str().unwrap().into());
+            current.branch = Some(branch);
+            db.save(&current)
+        })
+        .unwrap();
+    git_identity(&wt);
+    let term_entry = admit(&app, &req);
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut entry: TerminalEntry = db.get(&term_entry.id)?;
+            let run = entry.agent.as_mut().unwrap();
+            run.connection_state = "connected".into();
+            run.observed = Some(json!({
+                "state": "live",
+                "turn": 1,
+                "status": { "state": "idle" }
+            }));
+            run.lifecycle.observed_at = Some(now());
+            db.save(&entry)
+        })
+        .unwrap();
+
+    // 2. Agent answers the comment task via `report --state completed` while the PTY stays live.
+    app.call(
+        "execution.report",
+        json!({
+            "project_id": p.id,
+            "card": card.number,
+            "profile_id": "developer",
+            "request_key": "comment-report-1",
+            "state": "completed",
+            "message": "Analyzed design; ready to implement upon confirmation",
+            "body": "## Plan\n1. Update jump handler"
+        }),
+    )
+    .unwrap();
+    let after_comment = app.snapshot().unwrap();
+    let comment_term = after_comment
+        .terminals
+        .iter()
+        .find(|t| t.id == term_entry.id)
+        .unwrap();
+    assert_eq!(comment_term.agent.as_ref().unwrap().state, "completed");
+    assert!(!comment_term.agent.as_ref().unwrap().finished());
+    assert_eq!(
+        after_comment
+            .cards
+            .iter()
+            .find(|c| c.id == card.id)
+            .unwrap()
+            .stage,
+        "backlog"
+    );
+
+    // 3. User authorizes implementation in the same live terminal -> Agent runs `card adopt`.
+    let adopt_res = app
+        .call(
+            "card.adopt",
+            json!({
+                "project_id": p.id,
+                "card": card.number,
+                "profile_id": "developer",
+                "stage": "develop",
+                "request_key": "comment-adopt-1"
+            }),
+        )
+        .unwrap();
+    assert_eq!(adopt_res["adopted"], json!(true));
+    assert_eq!(adopt_res["card"]["stage"], json!("develop"));
+    let run_id = adopt_res["workflow_run"]["id"].as_str().unwrap().to_owned();
+
+    let after_adopt = app.snapshot().unwrap();
+    let adopted_term = after_adopt
+        .terminals
+        .iter()
+        .find(|t| t.id == term_entry.id)
+        .unwrap();
+    let adopted_agent = adopted_term.agent.as_ref().unwrap();
+    assert_eq!(
+        adopted_agent.state, "running",
+        "adopting a stage in an already-completed live session must reset AgentRun.state to running"
+    );
+    assert!(adopted_agent.completed_at.is_none());
+    assert!(adopted_agent.completion_turn.is_none());
+    assert_eq!(adopted_agent.trigger, ExecutionTrigger::Interactive);
+    assert_eq!(
+        adopted_agent.workflow_run_id.as_deref(),
+        Some(run_id.as_str())
+    );
+    assert_eq!(adopted_agent.number, 2);
+
+    // 4. Agent commits code and runs second `report --state completed` -> advances to Review & merges!
+    std::fs::write(
+        wt.join("lib.rs"),
+        "pub fn base() -> usize { 1 }\npub fn jump_expanded() -> bool { true }\n",
+    )
+    .unwrap();
+    git_in(&wt, &["add", "."]);
+    git_in(
+        &wt,
+        &["commit", "-m", "Implement jump with expanded terminal"],
+    );
+
+    app.call(
+        "execution.report",
+        json!({
+            "project_id": p.id,
+            "card": card.number,
+            "profile_id": "developer",
+            "request_key": "comment-adopt-report-2",
+            "state": "completed",
+            "message": "Implemented jump with expanded terminal"
+        }),
+    )
+    .unwrap();
+
+    let final_snap = app.snapshot().unwrap();
+    let final_card = final_snap.cards.iter().find(|c| c.id == card.id).unwrap();
+    assert_eq!(final_card.stage, "review");
+    assert!(
+        final_card.delivery.is_some(),
+        "second completed report after card.adopt in a live comment terminal must enter Merge Queue and deliver"
+    );
+    let final_run = final_snap
+        .workflow_runs
+        .iter()
+        .find(|r| r.id == run_id)
+        .unwrap();
+    assert_eq!(final_run.state, "completed");
+    let second_reported = final_snap
+        .events
+        .iter()
+        .rev()
+        .find(|e| e.card_id == card.id && e.kind == "execution.reported")
+        .unwrap();
+    assert_eq!(
+        second_reported.data["comment_replied"],
+        json!(false),
+        "adopted workflow completion report must remain visible as a normal task completion report"
+    );
+
+    // 5. Defensive fallback: even if legacy/in-flight state had `AgentRun.state == "completed"` while
+    // `WorkflowRun` remained `waiting_agent`, a fresh report still advances the workflow.
+    let card2: Card = serde_json::from_value(
+        app.call(
+            "card.create",
+            json!({
+                "project_id": p.id,
+                "title": "Legacy stuck adopted terminal",
+                "body": "Fallback check"
+            }),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    app.call(
+        "agent.open",
+        json!({"card_id": card2.id, "profile_id": "developer"}),
+    )
+    .unwrap();
+    let req2 = app
+        .snapshot()
+        .unwrap()
+        .terminals
+        .into_iter()
+        .find(|t| t.agent.as_ref().is_some_and(|a| a.card_id == card2.id))
+        .unwrap();
+    let wt2 = ops.prepare(&app.home, &p, &card2).unwrap();
+    let branch2 = ops.current_branch(wt2.to_str().unwrap()).unwrap();
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut current: Card = db.get(&card2.id)?;
+            current.worktree = Some(wt2.to_str().unwrap().into());
+            current.branch = Some(branch2);
+            db.save(&current)
+        })
+        .unwrap();
+    git_identity(&wt2);
+    let term2 = admit(&app, &req2);
+    let adopt2 = app
+        .call(
+            "card.adopt",
+            json!({
+                "project_id": p.id,
+                "card": card2.number,
+                "stage": "develop",
+                "request_key": "legacy-adopt"
+            }),
+        )
+        .unwrap();
+    let run2_id = adopt2["workflow_run"]["id"].as_str().unwrap().to_owned();
+    // Simulate legacy pre-fix state where `AgentRun.state` stayed `"completed"` while `WorkflowRun` waited.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut entry: TerminalEntry = db.get(&term2.id)?;
+            entry.agent.as_mut().unwrap().state = "completed".into();
+            db.save(&entry)
+        })
+        .unwrap();
+    std::fs::write(wt2.join("fallback.rs"), "pub fn ok() {}\n").unwrap();
+    git_in(&wt2, &["add", "."]);
+    git_in(&wt2, &["commit", "-m", "Fallback commit"]);
+    app.call(
+        "execution.report",
+        json!({
+            "project_id": p.id,
+            "card": card2.number,
+            "request_key": "legacy-report",
+            "state": "completed",
+            "message": "Completed against legacy adopted state"
+        }),
+    )
+    .unwrap();
+    let snap2 = app.snapshot().unwrap();
+    let final_card2 = snap2.cards.iter().find(|c| c.id == card2.id).unwrap();
+    assert_eq!(final_card2.stage, "review");
+    assert!(final_card2.delivery.is_some());
+    assert_eq!(
+        snap2
+            .workflow_runs
+            .iter()
+            .find(|r| r.id == run2_id)
+            .unwrap()
+            .state,
+        "completed"
+    );
+}
+
+#[test]
 fn merge_queue_drains_fifo_holds_head_during_conflict_and_never_spawns_merger_for_clean_merges() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source");
