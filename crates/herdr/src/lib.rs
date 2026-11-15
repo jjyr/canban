@@ -113,11 +113,15 @@ impl Client {
     pub fn read(&self, terminal: &str) -> Result<Value> {
         self.call("terminal.read", json!({"terminal":terminal,"lines":160}))
     }
+    pub fn read_screen(&self, terminal: &str) -> Result<Value> {
+        self.call("terminal.read", json!({"terminal":terminal,"lines":0}))
+    }
 }
 
 pub mod activity;
 pub mod events;
 pub mod host;
 mod pool;
+pub mod refine;
 pub mod stream;
 pub mod transport;

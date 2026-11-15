@@ -149,29 +149,32 @@ impl AppServer {
                 client.status()?["core"]["id"] == core,
                 "Core changed during observation"
             );
-            return Ok((
-                core,
-                list["terminals"]
-                    .as_array()
-                    .context("Invalid inventory")?
-                    .clone(),
-            ));
+            let mut records = list["terminals"]
+                .as_array()
+                .context("Invalid inventory")?
+                .clone();
+            self.apply_refinements(&core, &mut records);
+            return Ok((core, records));
         }
-        let state = self.inventory.lock().unwrap();
-        ensure!(
-            state.error.is_none()
-                && state.last_at > 0
-                && now().saturating_sub(state.last_at) < 45_000,
-            "{}",
-            state
-                .error
-                .as_deref()
-                .unwrap_or("Herdr subscription is connecting")
-        );
-        Ok((
-            state.core.clone(),
-            state.records.values().cloned().collect(),
-        ))
+        let (core, mut records) = {
+            let state = self.inventory.lock().unwrap();
+            ensure!(
+                state.error.is_none()
+                    && state.last_at > 0
+                    && now().saturating_sub(state.last_at) < 45_000,
+                "{}",
+                state
+                    .error
+                    .as_deref()
+                    .unwrap_or("Herdr subscription is connecting")
+            );
+            (
+                state.core.clone(),
+                state.records.values().cloned().collect::<Vec<_>>(),
+            )
+        };
+        self.apply_refinements(&core, &mut records);
+        Ok((core, records))
     }
     /// Returns the currently verified Herdr Core ID from the active event subscription
     /// without a round-trip when fresh, falling back to `Client::status()`.
@@ -593,6 +596,9 @@ impl AppServer {
                     wait = Some(wait.map_or(duration, |w| w.min(duration)));
                 };
                 if let Some(at) = server.event_deadline() {
+                    due(at);
+                }
+                if let Some(at) = server.refine_deadline() {
                     due(at);
                 }
                 if s.workflow_runs

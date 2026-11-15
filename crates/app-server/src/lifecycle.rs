@@ -207,6 +207,7 @@ impl AppServer {
             let actual = client.get(terminal)?;
             if actual["state"] != "live"
                 || !matches!(actual["status"]["state"].as_str(), Some("idle" | "done"))
+                || self.is_refined_working_now(client, entry, &actual)
             {
                 continue;
             }
@@ -264,7 +265,9 @@ impl AppServer {
                 let actual = client.get(terminal)?;
                 let state = actual["status"]["state"].as_str().unwrap_or("");
                 ensure!(
-                    actual["state"] == "live" && matches!(state, "idle" | "done"),
+                    actual["state"] == "live"
+                        && matches!(state, "idle" | "done")
+                        && !self.is_refined_working_now(client, entry, &actual),
                     "Agent is no longer idle"
                 );
                 if let Some(ExitAction::Input { text }) = &exit_action {

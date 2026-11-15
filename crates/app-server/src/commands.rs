@@ -137,7 +137,7 @@ impl AppServer {
                 };
                 let q = self.contexts.lock().unwrap();
                 Ok(
-                    json!({"core_id":core,"generation":generation,"connected":connected,"terminal_count":terminals,"context_probes":q.probes(),"pending_contexts":q.pending_count(),"check_limit":4,"checks_running":self.check_slots.lock().unwrap().len()}),
+                    json!({"core_id":core,"generation":generation,"connected":connected,"terminal_count":terminals,"context_probes":q.probes(),"pending_contexts":q.pending_count(),"refine_probes":self.refine_probes(),"refined_working":self.refined_working_count(),"check_limit":4,"checks_running":self.check_slots.lock().unwrap().len()}),
                 )
             }
             "app.ping" => Ok(

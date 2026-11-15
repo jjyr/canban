@@ -595,6 +595,7 @@ impl AppServer {
                     }
                     if actual["state"] != "live"
                         || !matches!(actual["status"]["state"].as_str(), Some("idle" | "done"))
+                        || self.is_refined_working_now(&client, &entry, &actual)
                     {
                         return Ok(false);
                     }

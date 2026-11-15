@@ -46,6 +46,7 @@ pub struct AppServer {
     terminal_gate: Mutex<()>,
     terminal_contexts: Mutex<Vec<TerminalContext>>,
     inventory: Mutex<observation::Inventory>,
+    refinements: refine::RefinementTracker,
     observer_running: AtomicBool,
     herdr_wake: AtomicBool,
     herdr_install: Arc<Mutex<herdr_setup::HerdrInstallState>>,
@@ -644,6 +645,7 @@ impl AppServer {
             terminal_gate: Mutex::new(()),
             terminal_contexts: Mutex::new(Vec::new()),
             inventory: Mutex::new(Default::default()),
+            refinements: Default::default(),
             observer_running: AtomicBool::new(false),
             herdr_wake: AtomicBool::new(false),
             herdr_install: Arc::new(Mutex::new(Default::default())),
@@ -924,6 +926,7 @@ mod lifecycle;
 mod notes;
 mod observation;
 mod overview;
+mod refine;
 mod reminders;
 mod reports;
 mod resources;
