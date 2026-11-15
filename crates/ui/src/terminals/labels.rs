@@ -19,26 +19,64 @@ pub fn provider(e: &Entry) -> View {
                 .truncate(),
         )
 }
-/// Sidebar metadata is visible text, without a nested provider tooltip.
-pub fn sidebar_provider(e: &Entry, expanded: bool) -> View {
-    let Some((mark, provider)) = e.provider() else {
-        return view();
-    };
-    let profile = e.profile().unwrap_or_default();
-    let title = if provider.eq_ignore_ascii_case(profile) {
-        provider
+pub const SIDEBAR_TITLE_MAX_CHARS: usize = 32;
+
+/// Truncates a sidebar session title to at most `SIDEBAR_TITLE_MAX_CHARS` characters,
+/// collapsing internal whitespace/newlines onto a single line and appending `…` when exceeded.
+pub fn truncate_sidebar_title(title: &str) -> String {
+    let single_line = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = single_line.chars();
+    let head: String = chars.by_ref().take(SIDEBAR_TITLE_MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{}…", head.trim_end())
     } else {
-        format!("{provider} · {profile}")
-    };
-    let name = muted(title).flex_1().min_w(px(0.));
-    view()
-        .flex_row()
-        .items_start()
-        .gap_1()
-        .min_w(px(0.))
-        .child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0())
-        .child(if expanded { name } else { name.truncate() })
+        head
+    }
 }
+
+/// Formats the left-side identity/machine caption for the second line of a Terminal sidebar row:
+/// - Card Role Agent: `@role · Local` (or remote machine name), omitting engine display name and Card stage;
+/// - Standalone Agent / Shell with observed Agent / Plain Shell: `Local` (or remote machine name).
+pub fn sidebar_meta_text(e: &Entry, machine: &str) -> String {
+    if let Some(profile) = e.profile().filter(|p| !p.is_empty()) {
+        format!("@{profile} · {machine}")
+    } else {
+        machine.to_owned()
+    }
+}
+
+/// Leading icon for the second line of a Terminal sidebar row: Agent brand mark when present,
+/// otherwise the generic `Icon::Terminal` mark.
+pub fn sidebar_meta_icon(e: &Entry) -> Icon {
+    e.provider().map(|(mark, _)| mark).unwrap_or(Icon::Terminal)
+}
+
+/// Sidebar metadata on the second row: `[Agent/Terminal Icon]` + `(@role · )Machine`, single-line truncated.
+pub fn sidebar_meta(e: &Entry, machine: &str) -> View {
+    let mark = sidebar_meta_icon(e);
+    let caption = sidebar_meta_text(e, machine);
+    view()
+        .flex_1()
+        .min_w(px(0.))
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .child(icon(mark).w(px(13.)).h(px(13.)).flex_shrink_0())
+        .child(muted(caption).flex_1().min_w(px(0.)).truncate())
+}
+
+/// Right-aligned compact Herdr status indicator (`[status_mark] + [status_word]`) for the second line
+/// of a Terminal sidebar row. Plain idle Shells return `None` to stay quiet.
+pub fn sidebar_status(e: &Entry) -> Option<AnyElement> {
+    let label_el = sidebar_status_label_raw(e)?;
+    let mut group = view().flex_row().items_center().gap_1().flex_shrink_0();
+    if let Some(mark_el) = status_mark(e) {
+        group = group.child(mark_el);
+    }
+    group = group.child(label_el);
+    Some(group.into_element())
+}
+
 pub fn sidebar_hint(e: &Entry, machine: &str) -> String {
     let mut lines = vec![e.title(), format!("Project: {}", e.project_name)];
     if let Some(profile) = e.profile() {
@@ -145,8 +183,7 @@ pub fn status_mark(e: &Entry) -> Option<AnyElement> {
     }
 }
 
-/// Right-aligned compact Herdr status label for Terminal sidebar rows.
-pub fn sidebar_status_label(e: &Entry) -> Option<AnyElement> {
+fn sidebar_status_label_raw(e: &Entry) -> Option<AnyElement> {
     use canban_types::HerdrStatus;
     let st = e.herdr_status();
     let (word, color) = match st {
@@ -173,22 +210,14 @@ pub fn sidebar_status_label(e: &Entry) -> Option<AnyElement> {
         HerdrStatus::Error => ("Error", DANGER),
         HerdrStatus::Disconnected => ("Offline", DANGER),
     };
-    let badge_el = text(word)
-        .text_size(px(11.))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(color)
-        .flex_shrink_0();
-    if let Some(reason) = e.attention_reason() {
-        Some(
-            view()
-                .flex_shrink_0()
-                .tooltip(hint_tooltip(reason).placement(Placement::Right))
-                .child(badge_el)
-                .into_element(),
-        )
-    } else {
-        Some(badge_el.into_element())
-    }
+    Some(
+        text(word)
+            .text_size(px(11.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(color)
+            .flex_shrink_0()
+            .into_element(),
+    )
 }
 pub fn profile_width(e: &Entry) -> f32 {
     (text_width(e.profile().unwrap_or_default()) + 22.).clamp(52., 128.)

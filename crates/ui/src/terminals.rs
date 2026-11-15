@@ -14,6 +14,11 @@ pub use entries::{Entry, entries};
 use nsh_core::prelude::*;
 use serde_json::json;
 
+#[cfg(test)]
+pub(crate) fn sidebar_for_test(ui: Ui) -> impl IntoElement {
+    tree::sidebar(ui)
+}
+
 /// Finished/archived entries retain Card history but never leave stale tabs in Terminals.
 pub fn watch(ui: Ui) {
     navigation::watch(ui);

@@ -2282,3 +2282,444 @@ fn mod_digit_shortcuts_select_numbered_tab_in_current_workspace_and_reset_labels
         assert_eq!(reset_title, "Terminal 1");
     });
 }
+
+#[test]
+fn sidebar_rows_render_strict_two_line_compact_layout_without_engine_names_stages_or_selection_reflow()
+ {
+    use crate::terminals::labels::{
+        SIDEBAR_TITLE_MAX_CHARS, sidebar_meta_icon, sidebar_meta_text, truncate_sidebar_title,
+    };
+    use canban_ui_kit::Icon;
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventPayload, MountItem, NodeId, element::JsEvent,
+        geometry::size, prelude::*,
+    };
+    use std::collections::{HashMap, HashSet};
+
+    // 1. Unit checks for title truncation and second-line metadata rules.
+    assert_eq!(truncate_sidebar_title("Terminal 1"), "Terminal 1");
+    let exact_32 = "a".repeat(SIDEBAR_TITLE_MAX_CHARS);
+    assert_eq!(truncate_sidebar_title(&exact_32), exact_32);
+    let long_cjk = "#86 Terminals 现在中间栏最多 3 行，能否紧凑些最多两行并且永远不折行";
+    let truncated = truncate_sidebar_title(long_cjk);
+    assert!(truncated.ends_with('…'), "expected ellipsis: {truncated}");
+    assert_eq!(
+        truncated.chars().count(),
+        SIDEBAR_TITLE_MAX_CHARS + 1,
+        "32 chars + 1 ellipsis: {truncated}"
+    );
+    assert_eq!(
+        truncate_sidebar_title("line1\n  line2\tline3"),
+        "line1 line2 line3"
+    );
+
+    #[component]
+    fn SidebarProbe() -> impl IntoElement {
+        canban_ui_kit::tokens::install_theme();
+        let ui = crate::presenter::Ui::new();
+        let mut s = fixture();
+        s.projects[0].directory = "/repo/p1".into();
+        s.projects[0].target_branch = Some("main".into());
+        s.cards[0].number = 86;
+        s.cards[0].stage = "develop".into();
+        s.cards[0].title = "Terminals 现在中间栏最多 3 行，能否紧凑些最多两行并且永远不折行".into();
+        s.cards[0].worktree = Some("/repo/p1-wt/c1".into());
+        s.cards[0].branch = Some("canban-0afd/86".into());
+
+        // Card Role Agent (Antigravity engine, @developer role, Blocked with RuntimeWait reason)
+        {
+            let run = s.terminals[0].agent.as_mut().unwrap();
+            run.profile.id = "developer".into();
+            run.profile.preset = Some("agy".into());
+            run.stage = "develop".into();
+            run.observed = Some(json!({
+                "state": "live",
+                "status": {
+                    "state": "blocked",
+                    "kind": "permission",
+                    "title": "Allow command?",
+                    "msg": "cargo test --workspace"
+                }
+            }));
+            run.lifecycle.waiting = Some(RuntimeWait {
+                id: "wait-86".into(),
+                kind: "permission".into(),
+                title: "Allow command?".into(),
+                message: "cargo test --workspace".into(),
+                since: 1,
+            });
+        }
+        // Finish p2's default agent so we focus on p1's four canonical session kinds + renamed Card Agent.
+        s.terminals[1].agent.as_mut().unwrap().observed = Some(json!({"state": "finished"}));
+
+        // Renamed Card Role Agent on the same Card (#86) to verify selecting a renamed Agent
+        // never injects an extra original Card title line.
+        let mut renamed_run = s.terminals[0].agent.clone().unwrap();
+        renamed_run.profile.id = "reviewer".into();
+        renamed_run.profile.preset = Some("claude".into());
+        renamed_run.stage = "review".into();
+        renamed_run.terminal = Some("t-renamed".into());
+        renamed_run.location = Some(WorkLocation {
+            machine: "gpu-box".into(),
+            directory: "/remote/c1".into(),
+        });
+        renamed_run.observed = Some(json!({"state": "live", "status": {"state": "working"}}));
+        renamed_run.lifecycle.waiting = None;
+        let renamed_id = Conversation::key("c1", "reviewer");
+        s.terminals.push(TerminalEntry {
+            id: renamed_id.clone(),
+            conversation_id: Some(renamed_id.clone()),
+            number: 3,
+            name: Some("Custom Review Session".into()),
+            origin_project_id: Some("p1".into()),
+            origin_card_id: Some("c1".into()),
+            agent_engine: None,
+            runtime: None,
+            agent: Some(renamed_run),
+            created_at: 2,
+        });
+
+        // Standalone ephemeral Agent (`Antigravity 1`, Done)
+        s.terminals.push(TerminalEntry {
+            id: "standalone-agy".into(),
+            conversation_id: None,
+            number: 4,
+            name: Some("Antigravity 1".into()),
+            origin_project_id: Some("p1".into()),
+            origin_card_id: Some("c1".into()),
+            agent_engine: Some("agy".into()),
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some("pty-standalone".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: Some("done".into()),
+                agent_turn: Some(1),
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+            created_at: 3,
+        });
+
+        // Shell with observed Agent (`Terminal 4` running `codex`, Working)
+        s.terminals.push(TerminalEntry {
+            id: "shell-with-codex".into(),
+            conversation_id: None,
+            number: 5,
+            name: Some("Terminal 4".into()),
+            origin_project_id: Some("p1".into()),
+            origin_card_id: Some("c1".into()),
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some("pty-codex-shell".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: Some("working".into()),
+                agent_turn: Some(1),
+                observed_agent: Some("codex".into()),
+                waiting: None,
+            }),
+            agent: None,
+            created_at: 4,
+        });
+
+        // Plain idle Shell (`Terminal 1`)
+        s.terminals.push(TerminalEntry {
+            id: "plain-shell".into(),
+            conversation_id: None,
+            number: 6,
+            name: Some("Terminal 1".into()),
+            origin_project_id: Some("p1".into()),
+            origin_card_id: Some("c1".into()),
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("core".into()),
+                terminal: Some("pty-plain".into()),
+                state: "running".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+            created_at: 5,
+        });
+
+        let projected = crate::terminals::entries(&s);
+        let card_dev = projected
+            .iter()
+            .find(|e| e.profile() == Some("developer"))
+            .unwrap();
+        assert_eq!(sidebar_meta_icon(card_dev), Icon::Agy);
+        assert_eq!(sidebar_meta_text(card_dev, "Local"), "@developer · Local");
+
+        let card_rev = projected
+            .iter()
+            .find(|e| e.profile() == Some("reviewer"))
+            .unwrap();
+        assert_eq!(sidebar_meta_icon(card_rev), Icon::Claude);
+        assert_eq!(
+            sidebar_meta_text(card_rev, "gpu-box"),
+            "@reviewer · gpu-box"
+        );
+
+        let standalone = projected
+            .iter()
+            .find(|e| e.saved.id == "standalone-agy")
+            .unwrap();
+        assert_eq!(sidebar_meta_icon(standalone), Icon::Agy);
+        assert_eq!(sidebar_meta_text(standalone, "Local"), "Local");
+
+        let shell_codex = projected
+            .iter()
+            .find(|e| e.saved.id == "shell-with-codex")
+            .unwrap();
+        assert_eq!(sidebar_meta_icon(shell_codex), Icon::Codex);
+        assert_eq!(sidebar_meta_text(shell_codex, "Local"), "Local");
+
+        let plain = projected
+            .iter()
+            .find(|e| e.saved.id == "plain-shell")
+            .unwrap();
+        assert_eq!(sidebar_meta_icon(plain), Icon::Terminal);
+        assert_eq!(sidebar_meta_text(plain, "Local"), "Local");
+
+        ui.machines
+            .set(json!({"machines": [{"id": "gpu-box", "name": "gpu-box", "state": "connected"}]}));
+        ui.snapshot.set(s);
+        ui.snapshot_ready.set(true);
+        ui.project.set("p1".into());
+        ui.page.set("terminals".into());
+        ui.open_terminal("plain-shell".into());
+
+        let select_blocked_id = Conversation::key("c1", "developer");
+        view()
+            .w(px(300.))
+            .h(px(640.))
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Select Blocked Card Agent".into()))
+                    .on_press(move |_: &()| ui.open_terminal(select_blocked_id.clone())),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Select Renamed Card Agent".into()))
+                    .on_press(move |_: &()| ui.open_terminal(renamed_id.clone())),
+            )
+            .child(crate::terminals::sidebar_for_test(ui))
+    }
+
+    struct MountedSidebar {
+        alive: HashSet<NodeId>,
+        parents: HashMap<NodeId, NodeId>,
+        texts: HashMap<NodeId, String>,
+        labels: HashMap<String, NodeId>,
+    }
+    impl MountedSidebar {
+        fn new() -> Self {
+            Self {
+                alive: HashSet::new(),
+                parents: HashMap::new(),
+                texts: HashMap::new(),
+                labels: HashMap::new(),
+            }
+        }
+        fn apply(&mut self, batch: &nsh_core::MountBatch) {
+            for item in &batch.items {
+                match item {
+                    MountItem::Create { id, .. } => {
+                        self.alive.insert(*id);
+                    }
+                    MountItem::Insert { parent, child, .. } => {
+                        self.parents.insert(*child, *parent);
+                    }
+                    MountItem::Remove { id } => {
+                        self.parents.remove(id);
+                    }
+                    MountItem::Delete { id } => {
+                        self.alive.remove(id);
+                        self.parents.remove(id);
+                        self.texts.remove(id);
+                    }
+                    MountItem::Text { id, text, .. } => {
+                        self.texts.insert(*id, text.text.to_string());
+                    }
+                    MountItem::ViewProps { id, props } => {
+                        if let Some(label) = &props.accessibility.label {
+                            self.labels.insert(label.to_string(), *id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        fn is_mounted(&self, mut id: NodeId) -> bool {
+            if !self.alive.contains(&id) {
+                return false;
+            }
+            let mut guard = 0;
+            while id != nsh_core::ROOT_ID {
+                let Some(&parent) = self.parents.get(&id) else {
+                    return false;
+                };
+                id = parent;
+                guard += 1;
+                if guard > 256 {
+                    return false;
+                }
+            }
+            true
+        }
+        fn mounted_texts(&self) -> Vec<String> {
+            self.texts
+                .iter()
+                .filter(|(id, _)| self.is_mounted(**id))
+                .map(|(_, v)| v.clone())
+                .collect()
+        }
+    }
+
+    fn pump(core: &mut Core<ApproxTextEngine>, tree: &mut MountedSidebar) {
+        for _ in 0..8 {
+            let had_batch = if let Some(batch) = core.commit() {
+                tree.apply(&batch);
+                true
+            } else {
+                false
+            };
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            let mut dispatched = false;
+            for ev in events {
+                match ev {
+                    JsEvent::Event(id, kind, payload) => {
+                        core.component_event(id, kind, &payload);
+                        dispatched = true;
+                    }
+                    JsEvent::LayoutListener {
+                        host,
+                        id,
+                        listener,
+                        frame,
+                    } => {
+                        core.component_layout(host, id, &listener, frame);
+                        dispatched = true;
+                    }
+                    _ => {}
+                }
+            }
+            if !had_batch && !dispatched {
+                break;
+            }
+        }
+    }
+
+    let mut core = Core::new(ApproxTextEngine, size(px(300.), px(640.)));
+    core.set_components(nsh_base::registry());
+    core.mount_root(&nsh_core::element::Root::of::<SidebarProbe>());
+    let mut tree = MountedSidebar::new();
+    pump(&mut core, &mut tree);
+
+    let check_invariants = |texts: &[String], phase: &str| {
+        let expected_truncated = truncate_sidebar_title(
+            "#86 Terminals 现在中间栏最多 3 行，能否紧凑些最多两行并且永远不折行",
+        );
+        assert!(
+            texts.iter().any(|t| t == &expected_truncated),
+            "[{phase}] Card #86 title must stay truncated to 32 chars + ellipsis: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("永远不折行")),
+            "[{phase}] full un-truncated Card #86 title must never render inline even when selected: {texts:?}"
+        );
+        // Engine names and Card Stage labels must NOT appear in sidebar rows.
+        for forbidden in [
+            "Antigravity ·",
+            "Claude ·",
+            "Codex",
+            "· Develop",
+            "· Review",
+            "Open",
+        ] {
+            assert!(
+                !texts.iter().any(|t| t.contains(forbidden)),
+                "[{phase}] forbidden legacy metadata `{forbidden}` rendered in sidebar: {texts:?}"
+            );
+        }
+        // Inline 3rd-line wait/error reasons must NOT render in the sidebar (kept in hover tooltip).
+        assert!(
+            !texts
+                .iter()
+                .any(|t| t.contains("Permission required") || t.contains("cargo test")),
+            "[{phase}] Blocked wait detail must live in tooltip rather than a 3rd row line: {texts:?}"
+        );
+        // Expected 2nd-line left captions and right Herdr status words:
+        for required in [
+            "@developer · Local",
+            "@reviewer · gpu-box",
+            "Local",
+            "Antigravity 1",
+            "Terminal 4",
+            "Terminal 1",
+            "Custom Review Session",
+            "Blocked",
+            "Working",
+            "Done",
+        ] {
+            assert!(
+                texts.iter().any(|t| t == required),
+                "[{phase}] missing expected sidebar label `{required}` in {texts:?}"
+            );
+        }
+    };
+
+    // Initial state (`plain-shell` selected)
+    let initial_texts = tree.mounted_texts();
+    check_invariants(&initial_texts, "initial");
+    // Tooltip / accessibility label still retains full Card title & Permission required wait reason!
+    assert!(
+        tree.labels.keys().any(|lbl| lbl.contains("永远不折行")
+            && lbl.contains("Permission required: Allow command? · cargo test --workspace")),
+        "hover tooltip / accessibility label must preserve full Card title and wait reason: {:?}",
+        tree.labels.keys().collect::<Vec<_>>()
+    );
+
+    // Select Blocked Card Agent (`#86 @developer`) -> title stays truncated, no 3rd line appears!
+    let btn_blocked = *tree
+        .labels
+        .get("Select Blocked Card Agent")
+        .expect("Select Blocked Card Agent button");
+    assert!(core.component_event(btn_blocked, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+    check_invariants(&tree.mounted_texts(), "selected-blocked");
+
+    // Select Renamed Card Agent (`Custom Review Session` / `@reviewer`) -> no extra original Card title line!
+    let btn_renamed = *tree
+        .labels
+        .get("Select Renamed Card Agent")
+        .expect("Select Renamed Card Agent button");
+    assert!(core.component_event(btn_renamed, EventKind::Press, &EventPayload::None));
+    pump(&mut core, &mut tree);
+    let renamed_texts = tree.mounted_texts();
+    check_invariants(&renamed_texts, "selected-renamed");
+    assert_eq!(
+        renamed_texts
+            .iter()
+            .filter(|t| t.starts_with("#86 "))
+            .count(),
+        1,
+        "selecting a renamed Agent must NOT add a second `#86 ...` original Card title line: {renamed_texts:?}"
+    );
+}

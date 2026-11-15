@@ -269,118 +269,45 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
         let selected = is_selected.get();
         let id = id.clone();
         let context_id = id.clone();
-        let herdr = e.herdr_status();
-        let attention = e.attention_reason();
         let machine = if e.machine() == "local" {
             "Local".into()
         } else {
             crate::machines::name(ui, e.machine())
         };
         let hint = super::labels::sidebar_hint(&e, &machine);
-        let title = label(e.title()).flex_1().min_w(px(0.));
-        let title = if selected { title } else { title.truncate() };
-        let mut lead_group = view()
-            .flex_1()
+        let short_title = super::labels::truncate_sidebar_title(&e.title());
+        let first_line = view()
+            .w_full()
             .min_w(px(0.))
             .flex_row()
             .items_center()
-            .gap_1p5();
-        if let Some(mark_el) = super::labels::status_mark(&e) {
-            lead_group = lead_group.child(mark_el);
-        }
-        if e.agent.is_none() {
-            if let Some((mark, _)) = e.provider() {
-                lead_group = lead_group.child(icon(mark).w(px(14.)).h(px(14.)).flex_shrink_0());
-            } else if herdr == canban_types::HerdrStatus::PlainShell {
-                lead_group = lead_group.child(
-                    icon_tinted(Icon::Terminal, MUTED)
-                        .w(px(13.))
-                        .h(px(13.))
-                        .flex_shrink_0(),
-                );
-            }
-        }
-        lead_group = lead_group.child(title);
-
-        let mut content = view().w_full().min_w(px(0.)).gap_1();
-        let mut first = view()
+            .child(
+                label(short_title)
+                    .font_weight(if selected {
+                        FontWeight::MEDIUM
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate(),
+            );
+        let mut second_line = view()
             .w_full()
             .min_w(px(0.))
             .flex_row()
             .items_center()
             .gap_2()
-            .child(lead_group);
-        if let Some(status_el) = super::labels::sidebar_status_label(&e) {
-            first = first.child(status_el);
+            .child(super::labels::sidebar_meta(&e, &machine));
+        if let Some(status_el) = super::labels::sidebar_status(&e) {
+            second_line = second_line.child(status_el);
         }
-        content = content.child(first);
-        if e.agent.is_some() {
-            if selected
-                && e.saved.name.is_some()
-                && let Some(card) = &e.card
-            {
-                content = content.child(
-                    muted(format!("#{} {}", card.number, card.title))
-                        .w_full()
-                        .min_w(px(0.)),
-                );
-            }
-            let mut meta_row = view()
-                .w_full()
-                .min_w(px(0.))
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .child(super::labels::sidebar_provider(&e, selected).flex_1());
-            if let Some(stage_name) = e.stage.as_deref().filter(|s| !s.is_empty()) {
-                let stage = muted(format!("· {stage_name}")).flex_shrink_0();
-                meta_row = meta_row.child(if selected { stage } else { stage.truncate() });
-            }
-            content = content.child(meta_row);
-        } else if let Some((_, prov_name)) = e.provider() {
-            let prov = muted(prov_name).w_full().min_w(px(0.));
-            content = content.child(if selected { prov } else { prov.truncate() });
-        }
-        if matches!(
-            herdr,
-            canban_types::HerdrStatus::Blocked
-                | canban_types::HerdrStatus::Error
-                | canban_types::HerdrStatus::Disconnected
-        ) || e.needs_attention()
-        {
-            if let Some(reason) = &attention {
-                let reason_color = match herdr {
-                    canban_types::HerdrStatus::Error | canban_types::HerdrStatus::Disconnected => {
-                        DANGER
-                    }
-                    _ => ATTENTION,
-                };
-                let reason_line = text(format!("{reason} · {machine}"))
-                    .text_size(px(CAPTION_SIZE))
-                    .text_color(reason_color)
-                    .w_full()
-                    .min_w(px(0.));
-                content = content.child(if selected {
-                    reason_line
-                } else {
-                    reason_line.truncate()
-                });
-            } else {
-                let machine_line = muted(machine).w_full().min_w(px(0.));
-                content = content.child(if selected {
-                    machine_line
-                } else {
-                    machine_line.truncate()
-                });
-            }
-        } else {
-            let machine_line = muted(machine).w_full().min_w(px(0.));
-            content = content.child(if selected {
-                machine_line
-            } else {
-                machine_line.truncate()
-            });
-        }
+        let content = view()
+            .w_full()
+            .min_w(px(0.))
+            .gap_0p5()
+            .child(first_line)
+            .child(second_line);
         view()
             .on_context_menu(move |event: &nsh_core::ContextMenuEvent| {
                 ui.spawn(super::tabs::menu(
@@ -393,12 +320,9 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
             .child(
                 canban_ui_kit::press_target()
                     .w_full()
-                    .min_h(px(if e.agent.is_some() || e.provider().is_some() {
-                        64.
-                    } else {
-                        48.
-                    }))
+                    .h(px(46.))
                     .px_2()
+                    .py_1()
                     .flex_row()
                     .items_center()
                     .gap_2()
@@ -408,7 +332,6 @@ fn row(ui: Ui, e: Entry) -> impl IntoElement {
                     .focus(|s| s.border_1().border_color(ACCENT))
                     .selected(move || selected)
                     .accessibility_label(move || Some(hint.clone().into()))
-                    .py_2()
                     .child(content)
                     .on_press(move |_: &()| ui.open_terminal(id.clone())),
             )
