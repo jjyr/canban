@@ -16,6 +16,7 @@ pub mod frame;
 pub mod github;
 pub mod hosts;
 pub(crate) mod index;
+pub mod insights;
 pub mod links;
 pub mod machines;
 pub mod navigation;

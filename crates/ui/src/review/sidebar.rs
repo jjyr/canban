@@ -790,171 +790,166 @@ pub fn render_top_bar(ui: Ui) -> impl IntoElement {
     let st = ui.review_state;
     let project_anchor = element_ref();
 
-    view()
-        .border_b_1()
-        .border_color(BORDER)
-        .bg(SURFACE)
-        .child(
-            view()
-                .min_h(px(42.))
-                .px_3()
-                .py_1p5()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .child(
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_1p5()
-                        .child(chrome_button(
-                            Icon::Sidebar,
-                            "Toggle Git sidebar",
-                            move |_| st.sidebar_open.update(|v| *v = !*v),
-                        ))
-                        .child(when(
-                            move || !ui.card.get().is_empty(),
-                            move || {
-                                chrome_button(Icon::Back, "Back to Card", move |_| {
-                                    ui.page.set("card".into());
+    view().border_b_1().border_color(BORDER).bg(SURFACE).child(
+        view()
+            .min_h(px(42.))
+            .px_3()
+            .py_1p5()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1p5()
+                    .child(chrome_button(
+                        Icon::Sidebar,
+                        "Toggle Git sidebar",
+                        move |_| st.sidebar_open.update(|v| *v = !*v),
+                    ))
+                    .child(when(
+                        move || !ui.card.get().is_empty(),
+                        move || {
+                            chrome_button(Icon::Back, "Back to Card", move |_| {
+                                ui.page.set("card".into());
+                            })
+                        },
+                    ))
+                    .child(
+                        canban_ui_kit::press_target()
+                            .element_ref(&project_anchor)
+                            .h(px(28.))
+                            .px_2p5()
+                            .rounded(px(RADIUS))
+                            .border_1()
+                            .border_color(BORDER)
+                            .bg(INSET)
+                            .hover(|s| s.bg(CARD_HOVER))
+                            .flex_row()
+                            .items_center()
+                            .gap_1p5()
+                            .child(icon(Icon::Projects).w(px(12.)).h(px(12.)))
+                            .child(
+                                label(move || {
+                                    ui.current_project()
+                                        .map(|p| p.name)
+                                        .unwrap_or_else(|| "Select Project".into())
                                 })
-                            },
-                        ))
-                        .child(
-                            canban_ui_kit::press_target()
-                                .element_ref(&project_anchor)
-                                .h(px(28.))
-                                .px_2p5()
-                                .rounded(px(RADIUS))
-                                .border_1()
-                                .border_color(BORDER)
-                                .bg(INSET)
-                                .hover(|s| s.bg(CARD_HOVER))
-                                .flex_row()
-                                .items_center()
-                                .gap_1p5()
-                                .child(icon(Icon::Projects).w(px(12.)).h(px(12.)))
-                                .child(
-                                    label(move || {
-                                        ui.current_project()
-                                            .map(|p| p.name)
-                                            .unwrap_or_else(|| "Select Project".into())
-                                    })
-                                    .text_size(px(12.))
-                                    .font_weight(FontWeight::MEDIUM),
-                                )
-                                .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.)))
-                                .on_press(move |_: &()| {
-                                    let projects =
-                                        ui.snapshot.with_untracked(|s| s.projects.clone());
-                                    if projects.is_empty() {
-                                        return;
-                                    }
-                                    ui.spawn(async move {
-                                        let items: Vec<MenuItem> = projects
-                                            .into_iter()
-                                            .map(|p| {
-                                                let pid = p.id.clone();
-                                                let is_cur = ui.project.get_untracked() == pid;
-                                                MenuItem::new(format!(
-                                                    "{}{}",
-                                                    if is_cur { "✓ " } else { "" },
-                                                    p.name
-                                                ))
-                                                .on_select(move || {
-                                                    ui.select_project(pid.clone());
-                                                    open_compare(ui);
-                                                })
+                                .text_size(px(12.))
+                                .font_weight(FontWeight::MEDIUM),
+                            )
+                            .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.)))
+                            .on_press(move |_: &()| {
+                                let projects = ui.snapshot.with_untracked(|s| s.projects.clone());
+                                if projects.is_empty() {
+                                    return;
+                                }
+                                ui.spawn(async move {
+                                    let items: Vec<MenuItem> = projects
+                                        .into_iter()
+                                        .map(|p| {
+                                            let pid = p.id.clone();
+                                            let is_cur = ui.project.get_untracked() == pid;
+                                            MenuItem::new(format!(
+                                                "{}{}",
+                                                if is_cur { "✓ " } else { "" },
+                                                p.name
+                                            ))
+                                            .on_select(move || {
+                                                ui.select_project(pid.clone());
+                                                open_compare(ui);
                                             })
-                                            .collect();
-                                        if let Some(bounds) = project_anchor.measure().await {
-                                            popup_menu_at(
-                                                items,
-                                                point(
-                                                    bounds.page.x,
-                                                    bounds.page.y + bounds.frame.size.height,
-                                                ),
-                                            )
-                                            .await;
-                                        } else {
-                                            popup_menu(items).await;
-                                        }
-                                    });
-                                }),
-                        )
-                        .child(git_ops::render_checkout_picker(ui))
-                        .child(render_ref_picker(ui, true))
-                        .child(muted("←").text_size(px(12.)))
-                        .child(render_ref_picker(ui, false))
-                        .child(when(
-                            move || {
-                                st.mode.get() == "git"
-                                    && !matches!(
-                                        st.compare_ref.get().as_str(),
-                                        "WORKDIR" | "STAGED" | "UNSTAGED"
-                                    )
-                            },
-                            move || {
-                                view()
-                                    .tooltip(hint_tooltip("Swap Base and Compare refs"))
-                                    .child(compact_action("⇄", Variant::Quiet, move |_| {
-                                        let b = st.base_ref.get_untracked();
-                                        let c = st.compare_ref.get_untracked();
-                                        select_git_pair(ui, c, b);
-                                    }))
-                            },
-                        ))
-                        .child(when(
-                            move || st.mode.get() != "github_pr",
-                            move || {
-                                view()
-                                    .tooltip(hint_tooltip(
-                                        "Toggle merge-base (A...B) vs direct (A..B) diff",
-                                    ))
-                                    .child(compact_action(
-                                        move || {
-                                            if st.three_dot.get() { "A...B" } else { "A..B" }
-                                        },
-                                        Variant::Quiet,
-                                        move |_| {
-                                            st.three_dot.update(|v| *v = !*v);
-                                            refresh_active_diff(ui, false);
-                                        },
-                                    ))
-                            },
-                        )),
-                )
-                .child(
-                    view()
-                        .flex_row()
-                        .flex_wrap()
-                        .items_center()
-                        .gap_1p5()
-                        .child(git_ops::render_sync_controls(ui))
-                        .child(when(
-                            move || !ui.card.get().is_empty() && !ui.narrow.get(),
-                            move || {
-                                compact_action(
-                                    move || {
-                                        if st.card_drawer_open.get() {
-                                            "Hide Card"
-                                        } else {
-                                            "Card"
-                                        }
-                                    },
-                                    Variant::Secondary,
-                                    move |_| st.card_drawer_open.update(|v| *v = !*v),
+                                        })
+                                        .collect();
+                                    if let Some(bounds) = project_anchor.measure().await {
+                                        popup_menu_at(
+                                            items,
+                                            point(
+                                                bounds.page.x,
+                                                bounds.page.y + bounds.frame.size.height,
+                                            ),
+                                        )
+                                        .await;
+                                    } else {
+                                        popup_menu(items).await;
+                                    }
+                                });
+                            }),
+                    )
+                    .child(git_ops::render_checkout_picker(ui))
+                    .child(render_ref_picker(ui, true))
+                    .child(muted("←").text_size(px(12.)))
+                    .child(render_ref_picker(ui, false))
+                    .child(when(
+                        move || {
+                            st.mode.get() == "git"
+                                && !matches!(
+                                    st.compare_ref.get().as_str(),
+                                    "WORKDIR" | "STAGED" | "UNSTAGED"
                                 )
-                            },
-                        ))
-                        .child(chrome_button(Icon::Refresh, "Refresh diff", move |_| {
-                            refresh_active_diff(ui, true);
-                        })),
-                ),
-        )
+                        },
+                        move || {
+                            view()
+                                .tooltip(hint_tooltip("Swap Base and Compare refs"))
+                                .child(compact_action("⇄", Variant::Quiet, move |_| {
+                                    let b = st.base_ref.get_untracked();
+                                    let c = st.compare_ref.get_untracked();
+                                    select_git_pair(ui, c, b);
+                                }))
+                        },
+                    ))
+                    .child(when(
+                        move || st.mode.get() != "github_pr",
+                        move || {
+                            view()
+                                .tooltip(hint_tooltip(
+                                    "Toggle merge-base (A...B) vs direct (A..B) diff",
+                                ))
+                                .child(compact_action(
+                                    move || {
+                                        if st.three_dot.get() { "A...B" } else { "A..B" }
+                                    },
+                                    Variant::Quiet,
+                                    move |_| {
+                                        st.three_dot.update(|v| *v = !*v);
+                                        refresh_active_diff(ui, false);
+                                    },
+                                ))
+                        },
+                    )),
+            )
+            .child(
+                view()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_1p5()
+                    .child(git_ops::render_sync_controls(ui))
+                    .child(when(
+                        move || !ui.card.get().is_empty() && !ui.narrow.get(),
+                        move || {
+                            compact_action(
+                                move || {
+                                    if st.card_drawer_open.get() {
+                                        "Hide Card"
+                                    } else {
+                                        "Card"
+                                    }
+                                },
+                                Variant::Secondary,
+                                move |_| st.card_drawer_open.update(|v| *v = !*v),
+                            )
+                        },
+                    ))
+                    .child(chrome_button(Icon::Refresh, "Refresh diff", move |_| {
+                        refresh_active_diff(ui, true);
+                    })),
+            ),
+    )
 }
 
 pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
@@ -985,8 +980,7 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                         .gap_2()
                         .child(icon(Icon::GitHub).w(px(13.)).h(px(13.)))
                         .child(
-                            label(format!("{repo} · PR #{num}"))
-                                .font_weight(FontWeight::SEMIBOLD),
+                            label(format!("{repo} · PR #{num}")).font_weight(FontWeight::SEMIBOLD),
                         ),
                 )
                 .child(
@@ -1128,9 +1122,13 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
             }));
         }
         let refresh_cid = c.id.clone();
-        left_info = left_info.child(chrome_button(Icon::Refresh, "Refresh PR status", move |_| {
-            dispatch(ui, "github.pr.refresh", json!({ "card_id": refresh_cid }));
-        }));
+        left_info = left_info.child(chrome_button(
+            Icon::Refresh,
+            "Refresh PR status",
+            move |_| {
+                dispatch(ui, "github.pr.refresh", json!({ "card_id": refresh_cid }));
+            },
+        ));
     } else if let Some(prt) = &pr_target {
         let num = prt["number"].as_u64().unwrap_or(0);
         let url = prt["url"].as_str().unwrap_or("").to_owned();
@@ -1356,9 +1354,9 @@ pub fn render_card_delivery_banner(ui: Ui) -> AnyElement {
                     any = true;
                     col = col.child(notice(reason, Tone::Attention));
                 }
-                let live_warning = ui.snapshot.with(|s| {
-                    canban_types::agent_activity_warning(&p.card_id, &s.terminals)
-                });
+                let live_warning = ui
+                    .snapshot
+                    .with(|s| canban_types::agent_activity_warning(&p.card_id, &s.terminals));
                 if let Some(warning) = live_warning {
                     any = true;
                     let cid = p.card_id.clone();

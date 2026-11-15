@@ -201,7 +201,7 @@ fn controls() -> impl IntoElement {
                     panel()
                         .child(label("Shared Lucide icons · muted / selected / attention"))
                         .child(view().flex_row().flex_wrap().gap_2().children(
-                            [Icon::Search, Icon::Terminal, Icon::Compare, Icon::Board, Icon::Overview,
+                            [Icon::Search, Icon::Terminal, Icon::Compare, Icon::Board, Icon::Insights, Icon::Overview,
                              Icon::Archive, Icon::Settings, Icon::Projects, Icon::Agent, Icon::GitHub,
                              Icon::ChevronDown, Icon::Plus, Icon::Check]
                             .into_iter().enumerate().map(|(i, kind)|
@@ -976,6 +976,25 @@ pub fn Gallery() -> impl IntoElement {
         ui.project.set("gallery-project".into());
         ui.card.set(String::new());
         ui.page.set("archive".into());
+        return canban_ui::frame::screen(ui).into_element();
+    }
+    if matches!(
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
+        Ok("insights" | "insights-empty")
+    ) {
+        canban_ui::frame::configure_window_chrome();
+        if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("insights-empty") {
+            let mut empty = canban_types::Snapshot::default();
+            empty
+                .projects
+                .push(fixtures::workspace().projects.remove(0));
+            ui.snapshot.set(empty);
+        } else {
+            ui.snapshot.set(fixtures::insights());
+        }
+        ui.project.set("gallery-project".into());
+        ui.card.set(String::new());
+        ui.page.set("insights".into());
         return canban_ui::frame::screen(ui).into_element();
     }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("reminders") {
@@ -2084,6 +2103,13 @@ pub fn Gallery() -> impl IntoElement {
                     scene.set("workspace".into());
                     canban_ui::hosts::open_host_settings(ui, "home-linux".into(), "diagnostics");
                     canban_ui::diagnostics::refresh_diagnostics(ui);
+                }))
+                .child(action("Insights", Variant::Quiet, move |_| {
+                    ui.snapshot.set(fixtures::insights());
+                    ui.project.set("gallery-project".into());
+                    ui.insights.scope_project.set(String::new());
+                    scene.set("workspace".into());
+                    ui.navigate("insights");
                 }))
                 .child(action("Acknowledgements", Variant::Quiet, move |_| {
                     scene.set("workspace".into());

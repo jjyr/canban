@@ -44,6 +44,7 @@ pub struct Ui {
     /// Commands outlive transient buttons/lists, but end with the window.
     pub owner: Owner,
     pub github: crate::github::Browser,
+    pub insights: crate::insights::State,
     pub workflows: crate::workflows::State,
     pub review_state: crate::review::State,
     /// Optional host adapter for the reusable Board drop intent (Gallery uses local fixtures).
@@ -356,6 +357,7 @@ impl Ui {
         Self {
             owner: Owner::current(),
             github: crate::github::Browser::new(),
+            insights: crate::insights::State::new(),
             workflows: crate::workflows::State::new(),
             review_state: crate::review::State::new(),
             board_move: stored(None),
@@ -772,7 +774,7 @@ impl Ui {
             self.card_standalone.set(
                 matches!(
                     self.page.get_untracked().as_str(),
-                    "terminals" | "overview" | "github"
+                    "terminals" | "overview" | "github" | "insights"
                 ) || self.card_standalone.get_untracked()
                     && matches!(self.page.get_untracked().as_str(), "card" | "review"),
             );

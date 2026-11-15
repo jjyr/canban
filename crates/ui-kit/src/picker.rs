@@ -64,8 +64,7 @@ impl PickerOption {
     }
 
     pub fn keywords(mut self, keywords: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.keywords
-            .extend(keywords.into_iter().map(Into::into));
+        self.keywords.extend(keywords.into_iter().map(Into::into));
         self
     }
 }
@@ -172,10 +171,7 @@ impl SearchPopover {
         self
     }
 
-    pub fn custom_option(
-        mut self,
-        f: impl Fn(&str) -> Option<PickerOption> + 'static,
-    ) -> Self {
+    pub fn custom_option(mut self, f: impl Fn(&str) -> Option<PickerOption> + 'static) -> Self {
         self.custom_option = Some(Rc::new(f));
         self
     }
@@ -240,11 +236,7 @@ impl IntoElement for SearchPopover {
                 let filtered = computed(move || {
                     let all = options_fn();
                     let q = query.get();
-                    filter_picker_options(
-                        &all,
-                        &q,
-                        custom_fn.as_deref(),
-                    )
+                    filter_picker_options(&all, &q, custom_fn.as_deref())
                 });
 
                 effect(move || {
@@ -252,9 +244,7 @@ impl IntoElement for SearchPopover {
                     let q = query.get();
                     if let Some(api) = command.api::<nsh_base::CommandApi>() {
                         let target = if q.trim().is_empty() {
-                            rows.iter()
-                                .find(|r| r.selected)
-                                .or_else(|| rows.first())
+                            rows.iter().find(|r| r.selected).or_else(|| rows.first())
                         } else {
                             rows.first()
                         };
@@ -342,22 +332,18 @@ impl IntoElement for SearchPopover {
                     .shadow_lg()
                     .overflow_hidden()
                     .child(
-                        view()
-                            .p_2()
-                            .border_b_1()
-                            .border_color(BORDER)
-                            .child(
-                                field(query, &placeholder)
-                                    .element_ref(&search_input)
-                                    .min_h(px(28.))
-                                    .px_2p5()
-                                    .py_1()
-                                    .text_size(px(12.))
-                                    .label(placeholder.clone())
-                                    .on_focus(move || input_focused.set(true))
-                                    .on_blur(move || input_focused.set(false))
-                                    .on_submit(move |_: &str| submit()),
-                            ),
+                        view().p_2().border_b_1().border_color(BORDER).child(
+                            field(query, &placeholder)
+                                .element_ref(&search_input)
+                                .min_h(px(28.))
+                                .px_2p5()
+                                .py_1()
+                                .text_size(px(12.))
+                                .label(placeholder.clone())
+                                .on_focus(move || input_focused.set(true))
+                                .on_blur(move || input_focused.set(false))
+                                .on_submit(move |_: &str| submit()),
+                        ),
                     )
                     .child(
                         nsh_base::command()
@@ -413,10 +399,7 @@ impl IntoElement for SearchPopover {
                                             .truncate()
                                             .min_w(px(0.))
                                     } else {
-                                        label(opt.label)
-                                            .text_size(px(12.))
-                                            .truncate()
-                                            .min_w(px(0.))
+                                        label(opt.label).text_size(px(12.)).truncate().min_w(px(0.))
                                     };
                                     let mut row = view()
                                         .cursor_pointer()
@@ -436,17 +419,10 @@ impl IntoElement for SearchPopover {
                                     if let Some(ic) = opt.icon {
                                         row = row.child(icon(ic).w(px(12.)).h(px(12.)));
                                     }
-                                    row = row.child(
-                                        view()
-                                            .flex_1()
-                                            .min_w(px(0.))
-                                            .child(title_el),
-                                    );
+                                    row = row.child(view().flex_1().min_w(px(0.)).child(title_el));
                                     if !opt.detail.is_empty() {
                                         row = row.child(
-                                            muted(opt.detail)
-                                                .text_size(px(11.))
-                                                .flex_shrink_0(),
+                                            muted(opt.detail).text_size(px(11.)).flex_shrink_0(),
                                         );
                                     }
                                     if opt.selected {
@@ -546,9 +522,11 @@ mod tests {
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].id, "ref:HEAD~3");
 
-        let exact = filter_picker_options(&items, "main", Some(&|q: &str| {
-            Some(PickerOption::new(q, format!("Use ref \"{q}\"")))
-        }));
+        let exact = filter_picker_options(
+            &items,
+            "main",
+            Some(&|q: &str| Some(PickerOption::new(q, format!("Use ref \"{q}\"")))),
+        );
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].id, "main");
         assert_eq!(exact[0].detail, "default");

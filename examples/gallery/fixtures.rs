@@ -2340,3 +2340,259 @@ pub fn multi_host_workspace(
 
     (local, vec![local_summary, remote_summary])
 }
+
+pub fn insights() -> canban_types::Snapshot {
+    use canban_types::*;
+    let base_now = now();
+    let day_ms: u64 = 86_400_000;
+    let hour_ms: u64 = 3_600_000;
+    let min_ms: u64 = 60_000;
+
+    let mut s = workspace();
+    s.projects[0].name = "Canban".into();
+    let mut second_proj = s.projects[0].clone();
+    second_proj.id = "herdr-core".into();
+    second_proj.name = "Herdr Core".into();
+    second_proj.directory = "/Users/demo/Workspace/herdr".into();
+    s.projects.push(second_proj);
+
+    let titles: &[(&str, bool)] = &[
+        (
+            "任务完成情况统计页面 · Insights throughput & scheduling charts",
+            false,
+        ),
+        ("Unified Diff & Git Compare searchable ref popovers", true),
+        ("Multi-host Tailscale snapshot merge & offline cache", false),
+        (
+            "Preserve Board stage scroll across Card split transitions",
+            false,
+        ),
+        ("Herdr PTY stream reconnect & wide-glyph clipping fix", true),
+        ("Workflow Studio visual column automation badges", false),
+        ("GitHub PR inline review thread sync & batch submit", true),
+        ("SQLite WAL checkpoint diagnostics & server log tail", false),
+        ("Markdown rope editor CJK + Menlo caret alignment", false),
+        ("FIFO merge queue conflict recovery with @merger", false),
+    ];
+
+    let mut seq = 500u64;
+    let mut card_num = 10u64;
+
+    // Populate 65 days of realistic history across both projects
+    for days_ago in (0u64..65).rev() {
+        let pattern = (days_ago * 7 + 3) % 11;
+        // Occasional quiet weekend-like days
+        if pattern == 0 || pattern == 5 {
+            continue;
+        }
+        let cards_today = match pattern {
+            1 | 2 | 6 => 1usize,
+            3 | 7 | 9 => 2usize,
+            _ => 3usize,
+        };
+        let day_anchor = base_now.saturating_sub(days_ago * day_ms + 6 * hour_ms);
+
+        for slot in 0..cards_today {
+            card_num += 1;
+            let (base_title, is_pr) = titles[(card_num as usize) % titles.len()];
+            let pid = if (card_num + slot as u64).is_multiple_of(3) {
+                "herdr-core"
+            } else {
+                "gallery-project"
+            };
+            let cid = format!("insights-card-{card_num}");
+            let created_at = day_anchor.saturating_sub(((slot as u64) + 2) * 3 * hour_ms);
+            let work_start = created_at + 45 * min_ms;
+
+            let mut card = s.cards[0].clone();
+            card.id = cid.clone();
+            card.project_id = pid.into();
+            card.number = card_num;
+            card.title = base_title.into();
+            card.created_at = created_at;
+            card.attention = None;
+            card.human_gate = None;
+
+            // Keep a couple of unmerged archived cards so Gallery verifies merge-only counting
+            let unmerged_archived = card_num == 24 || card_num == 51;
+            // Keep a couple of recent cards active (unmerged)
+            let still_active = days_ago <= 1 && slot == cards_today - 1;
+
+            if unmerged_archived {
+                card.stage = "backlog".into();
+                card.archived_at = Some(day_anchor + (slot as u64) * hour_ms);
+                card.delivery = None;
+            } else if still_active {
+                card.stage = "develop".into();
+                card.archived_at = None;
+                card.delivery = None;
+            } else {
+                let lead_hours = ((card_num % 7) + 1) * 2;
+                let merged_at =
+                    (work_start + lead_hours * hour_ms).min(base_now.saturating_sub(60_000));
+                card.stage = "review".into();
+                card.archived_at = Some(merged_at);
+                card.delivery = Some(Delivery {
+                    target_branch: "main".into(),
+                    commit: format!("{:07x}", card_num * 9973),
+                    request_key: if is_pr {
+                        format!("github:jjyr/canban#{card_num}")
+                    } else {
+                        format!("merge:{cid}")
+                    },
+                    merged_at,
+                });
+            }
+            s.cards.push(card);
+
+            seq += 1;
+            s.events.push(Event {
+                id: format!("ins-ev-{seq}"),
+                project_id: pid.into(),
+                card_id: cid.clone(),
+                sequence: seq,
+                kind: "card.stage_changed".into(),
+                actor: "user".into(),
+                message: "backlog → develop".into(),
+                data: json!({}),
+                created_at: work_start,
+            });
+
+            if unmerged_archived {
+                continue;
+            }
+
+            // Schedule 1-2 Agent runs on this card
+            let profiles_for_card: &[(&str, &str, &str)] = match card_num % 5 {
+                0 => &[
+                    ("planner", "workflow", "completed"),
+                    ("developer", "workflow", "completed"),
+                ],
+                1 => &[
+                    ("developer", "workflow", "completed"),
+                    ("reviewer", "comment:rev", "completed"),
+                ],
+                2 => &[("developer", "comment:ask", "blocked")],
+                3 => &[(
+                    "developer",
+                    "interactive",
+                    if days_ago < 20 { "failed" } else { "completed" },
+                )],
+                _ => &[(
+                    "developer",
+                    "workflow",
+                    if still_active { "running" } else { "completed" },
+                )],
+            };
+
+            for (r_idx, &(prof, trig, outcome)) in profiles_for_card.iter().enumerate() {
+                let run_num = (r_idx + 1) as u32;
+                let q_at = day_anchor + (slot as u64) * 35 * min_ms + (r_idx as u64) * 25 * min_ms;
+                let q_wait = ((card_num % 4) + 1) * 8_000;
+                let s_at = q_at + q_wait;
+                let tid = format!("{cid}:{prof}");
+                let has_wf = trig == "workflow";
+
+                seq += 1;
+                s.events.push(Event {
+                    id: format!("ins-ev-{seq}"),
+                    project_id: pid.into(),
+                    card_id: cid.clone(),
+                    sequence: seq,
+                    kind: "execution.queued".into(),
+                    actor: if trig.starts_with("comment:") { "user" } else { "system" }.into(),
+                    message: format!("Queued @{prof}"),
+                    data: json!({
+                        "terminal_id": tid,
+                        "run_number": run_num,
+                        "trigger": trig,
+                        "origin": if trig.starts_with("comment:") { "comment" } else if trig == "interactive" { "manual" } else { "workflow" },
+                        "workflow_run_id": has_wf.then(|| format!("wf-{cid}")),
+                    }),
+                    created_at: q_at,
+                });
+
+                seq += 1;
+                s.events.push(Event {
+                    id: format!("ins-ev-{seq}"),
+                    project_id: pid.into(),
+                    card_id: cid.clone(),
+                    sequence: seq,
+                    kind: "execution.started".into(),
+                    actor: "system".into(),
+                    message: format!("Started @{prof}"),
+                    data: json!({
+                        "terminal_id": tid,
+                        "run_number": run_num,
+                        "trigger": trig,
+                        "workflow_run_id": has_wf.then(|| format!("wf-{cid}")),
+                    }),
+                    created_at: s_at,
+                });
+
+                if outcome == "failed" {
+                    seq += 1;
+                    s.events.push(Event {
+                        id: format!("ins-ev-{seq}"),
+                        project_id: pid.into(),
+                        card_id: cid.clone(),
+                        sequence: seq,
+                        kind: "execution.failed".into(),
+                        actor: "system".into(),
+                        message: "Agent process exited unexpectedly".into(),
+                        data: json!({
+                            "terminal_id": tid,
+                            "run_number": run_num,
+                        }),
+                        created_at: s_at + 12 * min_ms,
+                    });
+                } else if outcome != "running" {
+                    seq += 1;
+                    s.events.push(Event {
+                        id: format!("ins-ev-{seq}"),
+                        project_id: pid.into(),
+                        card_id: cid.clone(),
+                        sequence: seq,
+                        kind: "execution.reported".into(),
+                        actor: format!("agent:{prof}"),
+                        message: format!("Reported {outcome}"),
+                        data: json!({
+                            "state": outcome,
+                            "workflow_run_id": has_wf.then(|| format!("wf-{cid}")),
+                        }),
+                        created_at: s_at + 18 * min_ms,
+                    });
+                }
+            }
+        }
+    }
+
+    // Include two @merger conflict-resolution batch runs in the past two weeks
+    for (b_idx, d_ago) in [(1u64, 2u64), (2u64, 9u64)] {
+        let ts = base_now.saturating_sub(d_ago * day_ms + 3 * hour_ms);
+        s.merge_batches.push(MergeBatch {
+            id: format!("merge-batch:ins-{b_idx}"),
+            project_id: "gallery-project".into(),
+            profile_id: "merger".into(),
+            provider_session_id: None,
+            target_branch: "main".into(),
+            target_head: "a1b2c3d".into(),
+            strategy: Default::default(),
+            sync_upstream: true,
+            test_command: Some("cargo nextest run".into()),
+            worktree: "/preview/worktrees/merge-batch".into(),
+            state: "completed".into(),
+            failure_kind: Some("conflict".into()),
+            conflict_card_number: Some(card_num),
+            conflict_files: vec!["crates/ui/src/rail.rs".into()],
+            test_output: None,
+            items: Vec::new(),
+            prompt: "Resolve conflict in crates/ui/src/rail.rs".into(),
+            error: None,
+            created_at: ts,
+            updated_at: ts + 6 * min_ms,
+        });
+    }
+
+    s
+}

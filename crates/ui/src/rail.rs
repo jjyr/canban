@@ -81,6 +81,13 @@ pub fn sidebar(ui: Ui) -> impl IntoElement {
         || 0,
         move |_| ui.navigate("github"),
     ))
+    .child(icon_action(
+        Icon::Insights,
+        "Insights".into(),
+        move || ui.page.get() == "insights",
+        || 0,
+        move |_| ui.navigate("insights"),
+    ))
     .child(view().flex_1())
     .child(crate::updates::rail(ui))
     .child(icon_action(

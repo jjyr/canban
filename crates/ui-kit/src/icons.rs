@@ -75,6 +75,7 @@ pub enum Icon {
     MessageSquare,
     Server,
     Diagnostics,
+    Insights,
 }
 impl Icon {
     fn source(self) -> &'static str {
@@ -150,6 +151,7 @@ impl Icon {
             Self::MessageSquare => include_str!("../assets/lucide/message-square.svg"),
             Self::Server => include_str!("../assets/lucide/server.svg"),
             Self::Diagnostics => include_str!("../assets/lucide/activity.svg"),
+            Self::Insights => include_str!("../assets/lucide/chart-column.svg"),
         }
     }
 
@@ -392,5 +394,14 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn insights_icon_vector_rasterizes_cleanly() {
+        let markup = Icon::Insights.source();
+        let drawing = nsh_core::svg::drawing(markup).expect("Insights SVG drawing()");
+        assert!(!drawing.ops.is_empty());
+        let raster = nsh_core::svg::rasterize(markup.as_bytes(), 32).expect("Insights rasterize()");
+        assert!(raster.pixels.as_chunks::<4>().0.iter().any(|px| px[3] > 0));
     }
 }

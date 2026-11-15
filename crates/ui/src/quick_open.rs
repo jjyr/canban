@@ -244,7 +244,9 @@ pub fn overlay(ui: Ui) -> impl IntoElement {
                                         } else {
                                             format!("{} · {}", c.display, c.context)
                                         },
-                                        icon: if c.id.contains("agent") {
+                                        icon: if c.id.contains("insights") {
+                                            Icon::Insights
+                                        } else if c.id.contains("agent") {
                                             Icon::Agent
                                         } else if c.id.contains("worktree") {
                                             Icon::Branch

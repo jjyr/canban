@@ -303,6 +303,54 @@ pub const CATALOG: &[Command] = &[
         keywords: "issues pull requests pr",
     },
     Command {
+        id: "go-insights",
+        title: "Go to Insights",
+        key: "",
+        display: "Insights",
+        context: "Navigation",
+        keywords: "statistics metrics charts kanban merged completion scheduling throughput cadence",
+    },
+    Command {
+        id: "insights-range-7d",
+        title: "Insights: Show Last 7 Days (7D)",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "7d week range window filter statistics",
+    },
+    Command {
+        id: "insights-range-30d",
+        title: "Insights: Show Last 30 Days (30D)",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "30d month range window filter statistics",
+    },
+    Command {
+        id: "insights-range-90d",
+        title: "Insights: Show Last 90 Days (90D)",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "90d quarter range window filter statistics",
+    },
+    Command {
+        id: "insights-all-projects",
+        title: "Insights: Scope to All Projects",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "all projects scope filter global statistics",
+    },
+    Command {
+        id: "insights-current-project",
+        title: "Insights: Scope to Current Project",
+        key: "",
+        display: "Insights",
+        context: "Insights",
+        keywords: "current project scope filter statistics",
+    },
+    Command {
         id: "go-workflows",
         title: "Open Project Workflows",
         key: "",
@@ -786,6 +834,32 @@ pub fn execute(ui: Ui, id: &str) {
         "go-terminals" => ui.navigate("terminals"),
         "go-review" => crate::review::open_compare(ui),
         "go-github" => ui.navigate("github"),
+        "go-insights" => ui.navigate("insights"),
+        "insights-range-7d" => {
+            crate::insights::set_range(ui, crate::insights::model::RangeWindow::Days7);
+            ui.navigate("insights");
+        }
+        "insights-range-30d" => {
+            crate::insights::set_range(ui, crate::insights::model::RangeWindow::Days30);
+            ui.navigate("insights");
+        }
+        "insights-range-90d" => {
+            crate::insights::set_range(ui, crate::insights::model::RangeWindow::Days90);
+            ui.navigate("insights");
+        }
+        "insights-all-projects" => {
+            ui.insights.scope_project.set(String::new());
+            ui.navigate("insights");
+        }
+        "insights-current-project" => {
+            let pid = ui.project.get_untracked();
+            if !pid.is_empty() {
+                ui.insights.scope_project.set(pid);
+                ui.navigate("insights");
+            } else {
+                ui.notify("Select a Project first");
+            }
+        }
         "go-workflows" => ui.navigate("workflows"),
         "edit-workflow-agent" => crate::workflows::edit_agent(ui),
         "set-default-workflow" => crate::workflows::set_default_workflow(ui),
@@ -1467,6 +1541,8 @@ mod tests {
         assert!(CATALOG.iter().any(|c| c.id == "delete-last-comment"));
         assert!(CATALOG.iter().any(|c| c.id == "open-last-github-comment"));
         assert!(CATALOG.iter().any(|c| c.id == "retry-auto-merge"));
+        assert!(CATALOG.iter().any(|c| c.id == "go-insights"));
+        assert!(CATALOG.iter().any(|c| c.id == "insights-range-30d"));
         let go_git = CATALOG.iter().find(|c| c.id == "go-review").unwrap();
         assert_eq!(go_git.title, "Go to Git");
         assert_eq!(go_git.display, "Git");
