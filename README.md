@@ -14,6 +14,7 @@
 </p>
 
 <p align="center">
+  <a href="https://canban.dev"><strong>Website (canban.dev)</strong></a> ·
   <a href="#philosophy">Philosophy</a> ·
   <a href="#highlights">Highlights</a> ·
   <a href="#installation">Installation</a> ·
@@ -64,7 +65,7 @@ Press `Cmd+J` on any Card for a side-by-side terminal split or open the dedicate
 **Prerequisites**: macOS 13.0+ (Apple Silicon), `git`, at least one native Agent CLI (`claude`, `codex`, `agy`, `cursor-agent`, etc.), and **Herdr Core (`hc`)** (Canban guides one-click `hc` setup on first launch if missing).
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jjyr/canban/main/scripts/install.sh | bash
+curl -fsSL https://canban.dev/install.sh | bash
 ```
 
 Installs or live-upgrades `/Applications/Canban.app` without interrupting active `herdr-core` sessions, and automatically handles macOS Gatekeeper quarantine removal and local ad-hoc code signing.

@@ -1,4 +1,8 @@
 #!/bin/bash
+if [ -z "${BASH_VERSION:-}" ]; then
+  printf 'canban install error: bash is required (run: curl -fsSL https://canban.dev/install.sh | bash)\n' >&2
+  exit 1
+fi
 set -euo pipefail
 
 # Canban macOS installer and upgrader.

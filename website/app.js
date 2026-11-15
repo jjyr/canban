@@ -6,7 +6,7 @@
   "use strict";
 
   const INSTALL_COMMANDS = {
-    script: "curl -fsSL https://canban.dev/install.sh | sh",
+    script: "curl -fsSL https://canban.dev/install.sh | bash",
     source: "git clone https://github.com/jjyr/canban.git && cd canban && mise run install-app",
   };
 
@@ -15,9 +15,10 @@
   /* ------------------------------------------------------------------------ */
   const I18N = {
     en: {
-      meta_title: "Canban = Kanban + Workflow + Herdr",
+      meta_title:
+        "Canban — AI-Native Kanban Workbench for Coding Agents (Kanban + Workflow + Herdr)",
       meta_desc:
-        "Maintain Human Context with Kanban, schedule with custom Workflows, and power native Agent CLIs with Herdr.",
+        "Canban is an open-source native macOS Kanban workbench for coding agents. Maintain Human Context on Kanban cards, automate isolated Git worktrees & Queue Merge with custom Workflows, and run Claude Code, Codex, or Agy inside Herdr persistent PTY terminals.",
 
       ch_1: "WORKBENCH",
       ch_2: "CONTEXT",
@@ -94,14 +95,17 @@
       s_herdr: "TTY Agent Support",
       s_nsh: "Native UI",
       s_ghostty: "Terminal Rendering Engine",
+      closing_seo_note:
+        "Canban is an open-source native macOS Kanban workbench for AI coding agents — built in Rust to run Claude Code, Codex, Antigravity (agy), and Cursor CLI in isolated Git worktrees with persistent Herdr PTY terminals.",
 
       footer_meta: "Apache-2.0 · © 2026 JJy",
     },
 
     zh: {
-      meta_title: "Canban = Kanban + Workflow + Herdr",
+      meta_title:
+        "Canban — 面向 AI 编程 Agent 的原生 Kanban 工作台 (Kanban + Workflow + Herdr)",
       meta_desc:
-        "用 Kanban 维护 Human Context，自定义 Workflow 调度，Herdr 提供原生的 Agent CLI 支持。",
+        "Canban 是开源原生 macOS 编程 Agent 看板工作台：用 Kanban 卡片维护 Human Context，通过自定义 Workflow 自动隔离 Git Worktree 与 Queue Merge，并在 Herdr 持久化 PTY 终端中直接运行 Claude Code、Codex、Agy 等原生 Agent CLI。",
 
       ch_1: "工作台",
       ch_2: "上下文",
@@ -178,6 +182,8 @@
       s_herdr: "提供 TTY Agent 支持",
       s_nsh: "Native UI",
       s_ghostty: "终端渲染引擎",
+      closing_seo_note:
+        "Canban 是基于 Rust 构建的开源原生 macOS 编程 Agent 看板工作台，支持在独立 Git Worktree 与 Herdr 持久 PTY 终端中运行 Claude Code、Codex、Antigravity (agy) 与 Cursor CLI。",
 
       footer_meta: "Apache-2.0 · © 2026 JJy",
     },
@@ -200,11 +206,18 @@
   let osdTimer = null;
   let touchStartY = null;
 
-  function switchChannel(nextIndex) {
+  function switchChannel(nextIndex, syncHash) {
     const clamped = Math.max(0, Math.min(TOTAL_CHANNELS - 1, nextIndex));
     if (clamped === currentChannel) return;
 
     currentChannel = clamped;
+
+    if (syncHash !== false && window.history && window.history.replaceState) {
+      const hash = currentChannel === 0 ? window.location.pathname + window.location.search : `#ch-${currentChannel}`;
+      try {
+        window.history.replaceState(null, "", hash);
+      } catch (_) {}
+    }
 
     const glass = document.getElementById("crt-glass");
     const osd = document.getElementById("crt-osd");
@@ -247,6 +260,13 @@
   }
 
   function setupChannelNavigation() {
+    const applyHashChannel = () => {
+      const m = /^#ch-([0-3])$/.exec(window.location.hash || "");
+      if (m) switchChannel(Number(m[1]), false);
+    };
+    applyHashChannel();
+    window.addEventListener("hashchange", applyHashChannel);
+
     document.querySelectorAll("[data-goto-ch]").forEach((el) => {
       el.addEventListener("click", (e) => {
         e.preventDefault();
@@ -596,6 +616,17 @@
       try {
         localStorage.setItem("canban_lang", normalized);
       } catch (_) {}
+      if (window.history && window.history.replaceState) {
+        try {
+          const url = new URL(window.location.href);
+          if (normalized === "zh") {
+            url.searchParams.set("lang", "zh");
+          } else {
+            url.searchParams.delete("lang");
+          }
+          window.history.replaceState(null, "", url.pathname + url.search + url.hash);
+        } catch (_) {}
+      }
     }
   }
 

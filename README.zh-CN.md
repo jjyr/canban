@@ -14,6 +14,7 @@
 </p>
 
 <p align="center">
+  <a href="https://canban.dev/?lang=zh"><strong>官网 (canban.dev)</strong></a> ·
   <a href="#设计哲学">设计哲学</a> ·
   <a href="#核心亮点">核心亮点</a> ·
   <a href="#安装">安装</a> ·
@@ -64,7 +65,7 @@ Card 沿 `Backlog → Develop → Review`（或自定义列）流转，卡片上
 **前置要求**：macOS 13.0+（Apple Silicon）、`git`、至少一个原生 Agent CLI（如 `claude`、`codex`、`agy`、`cursor-agent`），以及 **Herdr Core (`hc`)**（首次启动时若缺失会引导一键安装）。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/jjyr/canban/main/scripts/install.sh | bash
+curl -fsSL https://canban.dev/install.sh | bash
 ```
 
 一键安装或热升级 `/Applications/Canban.app`（保留运行中的 `herdr-core` 会话），并在 macOS 上自动清理 Gatekeeper 隔离属性与完成本地签名处理。

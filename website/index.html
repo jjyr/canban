@@ -3,21 +3,148 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Canban = Kanban + Workflow + Herdr</title>
-  <meta name="description" content="Maintain Human Context with Kanban, schedule with custom Workflows, and power native Agent CLIs with Herdr.">
-  <meta property="og:title" content="Canban = Kanban + Workflow + Herdr">
-  <meta property="og:description" content="Maintain Human Context with Kanban, schedule with custom Workflows, and power native Agent CLIs with Herdr.">
+  <title>Canban — AI-Native Kanban Workbench for Coding Agents (Kanban + Workflow + Herdr)</title>
+  <meta name="description" content="Canban is an open-source native macOS Kanban workbench for coding agents. Maintain Human Context on Kanban cards, automate isolated Git worktrees &amp; Queue Merge with custom Workflows, and run Claude Code, Codex, or Agy inside Herdr persistent PTY terminals.">
+  <meta name="application-name" content="Canban">
+  <meta name="apple-mobile-web-app-title" content="Canban">
+  <meta name="author" content="JJy">
+  <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+  <meta name="theme-color" content="#141511">
+
+  <!-- Open Graph -->
+  <meta property="og:site_name" content="Canban">
+  <meta property="og:title" content="Canban — AI-Native Kanban Workbench (Kanban + Workflow + Herdr)">
+  <meta property="og:description" content="Open-source native macOS Kanban workbench for AI coding agents. Maintain Human Context on Kanban cards, automate isolated Git worktrees &amp; Queue Merge, and run native Agent CLIs in Herdr persistent PTYs.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://canban.dev/">
+  <meta property="og:locale" content="en_US">
+  <meta property="og:locale:alternate" content="zh_CN">
+  <meta property="og:image" content="https://canban.dev/og-image.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Canban = Kanban + Workflow + Herdr — Open-source AI-native Kanban workbench for coding agents">
+
+  <!-- Twitter / X Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Canban — AI-Native Kanban Workbench (Kanban + Workflow + Herdr)">
+  <meta name="twitter:description" content="Open-source native macOS Kanban workbench for AI coding agents. Maintain Human Context, automate Git worktrees &amp; Queue Merge, and run Agent CLIs in persistent PTYs.">
+  <meta name="twitter:image" content="https://canban.dev/og-image.png">
+  <meta name="twitter:image:alt" content="Canban = Kanban + Workflow + Herdr">
+
+  <!-- Canonical & Localization -->
   <link rel="canonical" href="https://canban.dev/">
-  <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+  <link rel="alternate" hreflang="en" href="https://canban.dev/">
+  <link rel="alternate" hreflang="zh-CN" href="https://canban.dev/?lang=zh">
+  <link rel="alternate" hreflang="x-default" href="https://canban.dev/">
+
+  <!-- Icons & Manifest -->
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
+
+  <!-- Structured Data (JSON-LD: WebSite + SoftwareApplication + FAQPage) -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "WebSite",
+        "@id": "https://canban.dev/#website",
+        "name": "Canban",
+        "alternateName": ["Canban.dev", "Canban App", "Canban Workbench"],
+        "url": "https://canban.dev/",
+        "inLanguage": ["en", "zh-CN"],
+        "description": "Official website for Canban — the open-source native macOS Kanban workbench for AI coding agents (Canban = Kanban + Workflow + Herdr)."
+      },
+      {
+        "@type": "SoftwareApplication",
+        "@id": "https://canban.dev/#software",
+        "name": "Canban",
+        "alternateName": "Canban Workbench",
+        "url": "https://canban.dev/",
+        "downloadUrl": "https://canban.dev/install.sh",
+        "installUrl": "https://canban.dev/#ch-3",
+        "codeRepository": "https://github.com/jjyr/canban",
+        "sameAs": [
+          "https://github.com/jjyr/canban"
+        ],
+        "image": "https://canban.dev/og-image.png",
+        "screenshot": "https://canban.dev/og-image.png",
+        "applicationCategory": "DeveloperApplication",
+        "applicationSubCategory": "AI Coding Agent Workbench & Kanban Board",
+        "operatingSystem": "macOS 13.0+",
+        "softwareRequirements": "git, Herdr Core (hc), and any native Agent CLI (Claude Code, Codex, Antigravity agy, Cursor CLI)",
+        "license": "https://www.apache.org/licenses/LICENSE-2.0",
+        "isAccessibleForFree": true,
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "author": {
+          "@type": "Person",
+          "name": "JJy",
+          "url": "https://github.com/jjyr"
+        },
+        "description": "Canban is an open-source native macOS desktop workbench built in Rust that unifies Kanban cards for Human Context, GitHub Actions-style Workflows with isolated Git worktrees and FIFO Queue Merge, and Herdr persistent PTY terminals for native AI coding agent CLIs.",
+        "featureList": [
+          "Kanban board for Human Context with Markdown specs, #Card links, screenshots, @Agent discussions, and GitHub Issue/PR sync",
+          "Visual Workflow Studio & YAML workflows with automatic per-Card Git worktree isolation",
+          "Serialized FIFO Queue Merge with automatic @merger conflict resolution",
+          "Herdr persistent PTY terminal powered by Rust, longbridge/nsh (AppKit/Metal), and libghostty-vt",
+          "Zero-interference support for Claude Code, Codex, Antigravity (agy), Cursor CLI, and custom Agent CLIs"
+        ],
+        "keywords": "Canban, canban.dev, AI Kanban, coding agents, Claude Code, Codex, Herdr, Git worktree workflow, developer workbench, macOS Rust app"
+      },
+      {
+        "@type": "FAQPage",
+        "@id": "https://canban.dev/#faq",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "What is Canban?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Canban (canban.dev) is an open-source native macOS workbench for orchestrating AI coding agents, defined by Canban = Kanban + Workflow + Herdr. Unlike generic Kanban web apps, Canban pairs each Kanban card with an isolated Git worktree, declarative agent workflows, and persistent Herdr PTY terminals."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Which AI coding agent CLIs work with Canban?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Canban runs any native Agent CLI directly inside persistent Herdr PTY sessions — including Claude Code (claude), OpenAI Codex (codex), Antigravity (agy), Cursor CLI (cursor-agent), Pi, and custom terminal agents — preserving native TUIs, MCP servers, skills, permissions, and session resume across app restarts."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How do I install Canban on macOS?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Install or live-upgrade Canban.app on macOS 13.0+ by running: curl -fsSL https://canban.dev/install.sh | bash — or build from source via git clone https://github.com/jjyr/canban.git && cd canban && mise run install-app."
+            }
+          }
+        ]
+      }
+    ]
+  }
+  </script>
 
   <script>
     (function () {
       try {
+        var params = new URLSearchParams(window.location.search);
+        var urlLang = params.get("lang");
         var saved = localStorage.getItem("canban_lang");
         var chosen = "en";
-        if (saved === "en" || saved === "zh") {
+        if (urlLang === "zh" || urlLang === "zh-CN") {
+          chosen = "zh";
+        } else if (urlLang === "en") {
+          chosen = "en";
+        } else if (saved === "en" || saved === "zh") {
           chosen = saved;
         } else {
           var langs = navigator.languages && navigator.languages.length
@@ -52,27 +179,27 @@
     <header class="crt-topbar">
       <a href="#ch-0" class="crt-brand" data-goto-ch="0" aria-label="Canban CH 01">
         <span class="power-led" aria-hidden="true"></span>
-        <img src="./favicon.svg" alt="" class="brand-mark" width="20" height="20">
+        <img src="./favicon.svg" alt="Canban logo" class="brand-mark" width="20" height="20">
         <span class="brand-word">CANBAN</span>
       </a>
 
       <nav class="ch-nav" aria-label="CRT Channels">
-        <button type="button" class="ch-btn is-active" data-goto-ch="0">
+        <a href="#ch-0" class="ch-btn is-active" data-goto-ch="0">
           <span class="ch-idx">CH.01</span>
           <span data-i18n="ch_1">WORKBENCH</span>
-        </button>
-        <button type="button" class="ch-btn" data-goto-ch="1">
+        </a>
+        <a href="#ch-1" class="ch-btn" data-goto-ch="1">
           <span class="ch-idx">CH.02</span>
           <span data-i18n="ch_2">CONTEXT</span>
-        </button>
-        <button type="button" class="ch-btn" data-goto-ch="2">
+        </a>
+        <a href="#ch-2" class="ch-btn" data-goto-ch="2">
           <span class="ch-idx">CH.03</span>
           <span data-i18n="ch_3">TOPOLOGY</span>
-        </button>
-        <button type="button" class="ch-btn" data-goto-ch="3">
+        </a>
+        <a href="#ch-3" class="ch-btn" data-goto-ch="3">
           <span class="ch-idx">CH.04</span>
           <span data-i18n="ch_4">INSTALL</span>
-        </button>
+        </a>
       </nav>
 
       <div class="crt-actions">
@@ -912,14 +1039,14 @@
             <div class="install-shell is-large">
               <div class="install-code-wrap">
                 <span class="install-prompt">$</span>
-                <code class="install-cmd" id="closing-install-cmd">curl -fsSL https://canban.dev/install.sh | sh</code>
+                <code class="install-cmd" id="closing-install-cmd">curl -fsSL https://canban.dev/install.sh | bash</code>
               </div>
               <button
                 type="button"
                 class="copy-btn"
                 id="closing-copy-btn"
                 data-copy-btn
-                data-copy-value="curl -fsSL https://canban.dev/install.sh | sh"
+                data-copy-value="curl -fsSL https://canban.dev/install.sh | bash"
                 aria-label="Copy install command"
               >
                 <span class="copy-text" data-i18n="copy_label">Copy</span>
@@ -944,6 +1071,10 @@
               <div class="cp-cell"><b>NSH UI</b> <span data-i18n="s_nsh">Native UI</span></div>
               <div class="cp-cell"><b>libghostty</b> <span data-i18n="s_ghostty">Terminal Rendering Engine</span></div>
             </div>
+
+            <p class="closing-seo-note" data-i18n="closing_seo_note">
+              Canban is an open-source native macOS Kanban workbench for AI coding agents — built in Rust to run Claude Code, Codex, Antigravity (agy), and Cursor CLI in isolated Git worktrees with persistent Herdr PTY terminals.
+            </p>
           </div>
         </div>
       </section>
@@ -953,12 +1084,12 @@
     <footer class="crt-bottombar">
       <div class="cb-left">
         <span class="cb-prompt">$</span>
-        <code class="cb-cmd">curl -fsSL https://canban.dev/install.sh | sh</code>
+        <code class="cb-cmd">curl -fsSL https://canban.dev/install.sh | bash</code>
         <button
           type="button"
           class="cb-copy"
           data-copy-btn
-          data-copy-value="curl -fsSL https://canban.dev/install.sh | sh"
+          data-copy-value="curl -fsSL https://canban.dev/install.sh | bash"
         >
           <span class="copy-text" data-i18n="copy_label">Copy</span>
         </button>

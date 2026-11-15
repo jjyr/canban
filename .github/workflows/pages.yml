@@ -5,6 +5,7 @@ on:
       - main
     paths:
       - 'website/**'
+      - 'scripts/install.sh'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -30,6 +31,11 @@ jobs:
         uses: actions/configure-pages@v5
         with:
           enablement: true
+      - name: Sync canonical installer into website artifact
+        run: |
+          rm -f website/install.sh
+          cp scripts/install.sh website/install.sh
+          chmod 0755 website/install.sh
       - name: Upload static site artifact
         uses: actions/upload-pages-artifact@v3
         with:
