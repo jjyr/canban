@@ -273,8 +273,11 @@ else:
         if let Some(session) = p["session"].as_str().filter(|s| !s.trim().is_empty()) {
             argv.extend(["--session".into(), session.into()]);
         }
+        let mut snap = self.snapshot()?;
+        snap.terminal_contexts = self.terminal_contexts.lock().unwrap().clone();
+        let title = snap.next_unique_terminal_title("Add machine");
         self.create_terminal(
-            json!({"machine":"local","setup_argv":argv,"request_key":p["request_key"]}),
+            json!({"machine":"local","name":title,"setup_argv":argv,"request_key":p["request_key"]}),
         )
     }
     pub(super) fn remove_machine(&self, p: Value) -> Result<Value> {

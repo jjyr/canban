@@ -1139,6 +1139,34 @@ impl Snapshot {
             .unwrap_or(0);
         format!("{prefix} {}", max_n + 1)
     }
+
+    /// Deduplicated custom label `<base>` (when unused) or `<base> 2`, `<base> 3`, …
+    /// among live terminals globally.
+    pub fn next_unique_terminal_title(&self, base: &str) -> String {
+        let base = base.trim();
+        let head = format!("{base} ");
+        let mut exact_used = false;
+        let mut max_n = 1u64;
+        for t in self.terminals.iter().filter(|t| self.terminal_is_live(t)) {
+            let title = t.title();
+            if title == base {
+                exact_used = true;
+            } else if let Some(suffix) = title.strip_prefix(&head)
+                && !suffix.is_empty()
+                && !suffix.starts_with('0')
+                && suffix.bytes().all(|b| b.is_ascii_digit())
+                && let Ok(n) = suffix.parse::<u64>()
+                && n >= 2
+            {
+                max_n = max_n.max(n);
+            }
+        }
+        if !exact_used && max_n == 1 {
+            base.to_owned()
+        } else {
+            format!("{base} {}", max_n + 1)
+        }
+    }
 }
 /// Durable terminal and Card-role Agent execution record.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -1808,6 +1836,61 @@ mod tests {
         assert_eq!(
             v4.split('-').map(str::len).collect::<Vec<_>>(),
             vec![8, 4, 4, 4, 12]
+        );
+    }
+
+    #[test]
+    fn next_unique_terminal_title_deduplicates_live_entries() {
+        let make_term = |id: &str, name: &str, state: &str| TerminalEntry {
+            id: id.into(),
+            conversation_id: None,
+            number: 1,
+            name: Some(name.into()),
+            origin_project_id: None,
+            origin_card_id: None,
+            agent_engine: None,
+            runtime: Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: None,
+                core_id: Some("c1".into()),
+                terminal: Some("t1".into()),
+                state: state.into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            }),
+            agent: None,
+            created_at: 1,
+        };
+        let mut snap = Snapshot::default();
+        assert_eq!(
+            snap.next_unique_terminal_title("Add machine"),
+            "Add machine"
+        );
+
+        // Finished entries do not reserve the base title.
+        snap.terminals
+            .push(make_term("s0", "Add machine", "finished"));
+        assert_eq!(
+            snap.next_unique_terminal_title("Add machine"),
+            "Add machine"
+        );
+
+        // Live `Add machine` advances to `Add machine 2`, then `Add machine 3`.
+        snap.terminals
+            .push(make_term("s1", "Add machine", "running"));
+        assert_eq!(
+            snap.next_unique_terminal_title("Add machine"),
+            "Add machine 2"
+        );
+        snap.terminals
+            .push(make_term("s2", "Add machine 2", "running"));
+        assert_eq!(
+            snap.next_unique_terminal_title("Add machine"),
+            "Add machine 3"
         );
     }
 }

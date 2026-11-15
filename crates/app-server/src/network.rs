@@ -532,8 +532,9 @@ canban pair {mode_flag} --port {port} --json"#
 }
 
 /// Build an interactive shell command string that installs/updates `hc` + `canban` on a remote
-/// Linux/macOS host over SSH, enables its user daemon (`systemd --user` / `launchd`), and prints
-/// the pairing URI cleanly inside a setup Terminal.
+/// Linux/macOS host over SSH, enables its user daemon (`systemd --user` / `launchd`), prints
+/// the pairing URI cleanly inside a setup Terminal, and drops into an interactive login shell so
+/// the Terminal stays open until the user explicitly closes it.
 pub fn build_ssh_bootstrap_command(
     ssh_target: &str,
     repo: &str,
@@ -544,7 +545,7 @@ pub fn build_ssh_bootstrap_command(
     let remote_inner = format!(
         r#"set -e
 mkdir -p "$HOME/.local/bin"
-export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
 echo "==> [1/3] Checking Herdr Core (hc)..."
 if ! command -v hc >/dev/null 2>&1; then
   curl -fsSL https://releases.herdr.dev/core/install.sh | sh
@@ -559,23 +560,50 @@ esac
 if [ "$OS" = "linux" ]; then
   ASSET="canban-linux-${{ARCH}}.tar.gz"
   TMP=$(mktemp -d)
-  curl -fL "https://github.com/{repo}/releases/latest/download/${{ASSET}}" -o "$TMP/canban.tar.gz"
-  tar -xzf "$TMP/canban.tar.gz" -C "$TMP"
-  install -m 0755 "$TMP/canban" "$HOME/.local/bin/canban"
-  rm -rf "$TMP"
+  if curl -fL "https://github.com/{repo}/releases/latest/download/${{ASSET}}" -o "$TMP/canban.tar.gz" 2>/dev/null; then
+    tar -xzf "$TMP/canban.tar.gz" -C "$TMP"
+    install -m 0755 "$TMP/canban" "$HOME/.local/bin/canban"
+    rm -rf "$TMP"
+  else
+    rm -rf "$TMP"
+    echo "    Prebuilt ${{ASSET}} not found in latest GitHub release; building canban-cli from source..."
+    if ! command -v cargo >/dev/null 2>&1 && ! command -v mise >/dev/null 2>&1; then
+      echo "Error: Prebuilt ${{ASSET}} is not published yet and neither cargo nor mise is installed on remote host." >&2
+      exit 1
+    fi
+    SRC_TMP=$(mktemp -d)
+    git clone --depth 1 "https://github.com/{repo}.git" "$SRC_TMP/canban"
+    (
+      cd "$SRC_TMP/canban"
+      if command -v mise >/dev/null 2>&1; then
+        mise trust -q 2>/dev/null || true
+        mise x -- cargo build --release --locked -p canban-cli
+      else
+        cargo build --release --locked -p canban-cli
+      fi
+      install -m 0755 target/release/canban "$HOME/.local/bin/canban"
+    )
+    rm -rf "$SRC_TMP"
+  fi
 elif [ "$OS" = "darwin" ] && [ -x "/Applications/Canban.app/Contents/MacOS/canban" ]; then
   ln -sf "/Applications/Canban.app/Contents/MacOS/canban" "$HOME/.local/bin/canban"
 fi
 echo "==> [3/3] Configuring background service & pairing..."
 "$HOME/.local/bin/canban" service install {mode_flag} --port {port}
 echo ""
-echo "==> Pairing ready! Copy the URI below if not auto-detected:"
+echo "==> Pairing ready! Copy the URI below (or return to Connect a Machine and click Pair & Connect):"
 "$HOME/.local/bin/canban" pair {mode_flag} --port {port}
 "#
     );
-    let escaped_target = shell_single_quote(ssh_target.trim());
-    let escaped_inner = shell_single_quote(&remote_inner);
-    format!("ssh -t {escaped_target} 'sh -lc '\"'\"'{escaped_inner}'\"'\"''")
+    let remote_cmd = format!("sh -lc {}", shell_single_quote(&remote_inner));
+    let ssh_cmd = format!(
+        "ssh -t {} {}",
+        shell_single_quote(ssh_target.trim()),
+        shell_single_quote(&remote_cmd)
+    );
+    format!(
+        "{ssh_cmd}; status=$?; echo ''; if [ \"$status\" -ne 0 ]; then echo \"==> Setup failed (exit $status). Scroll up to inspect the error, or troubleshoot directly below.\"; else echo \"==> Setup complete. Close this terminal tab when done.\"; fi; exec \"${{SHELL:-/bin/zsh}}\" -l"
+    )
 }
 
 fn shell_single_quote(s: &str) -> String {
@@ -865,5 +893,46 @@ mod tests {
         assert_eq!(hosts[1].alias, "arch-box");
         assert_eq!(hosts[2].alias, "cloud-vm");
         assert_eq!(hosts[2].hostname, "203.0.113.10");
+    }
+
+    #[test]
+    fn ssh_bootstrap_command_parses_in_zsh_and_sh_and_retains_interactive_shell() {
+        let cmd = build_ssh_bootstrap_command("jjy@100.127.37.78", "jjyr/canban", true, 7680);
+        assert!(
+            cmd.contains("exec \"${SHELL:-/bin/zsh}\" -l"),
+            "bootstrap command must hand off to an interactive shell so the terminal does not auto-close"
+        );
+        for shell in ["/bin/sh", "/bin/zsh"] {
+            if Path::new(shell).is_file() {
+                let status = Command::new(shell)
+                    .args(["-n", "-c", &cmd])
+                    .status()
+                    .expect("spawn shell syntax check");
+                assert!(
+                    status.success(),
+                    "{shell} -n rejected bootstrap command:\n{cmd}"
+                );
+            }
+        }
+        // Also verify that the argv passed across `ssh` executes valid `sh -n` syntax on the remote side.
+        // Extract the second argument passed to `ssh -t <target> <remote_cmd>` by evaluating word-splitting in `/bin/sh` with a mock `ssh` function.
+        let verify_inner = format!(
+            "ssh() {{ shift; shift; /bin/sh -c \"$(printf '%s' \\\"$1\\\" | sed 's/^sh -lc //')\" -- -n >/dev/null 2>&1 || eval \"set -- $1; /bin/sh -n -c \\\"\\$3\\\"\"; }}; \
+             ssh_check() {{ shift; shift; eval \"check_remote $1\"; }}; \
+             check_remote() {{ [ \"$1\" = \"sh\" ] && [ \"$2\" = \"-lc\" ] && /bin/sh -n -c \"$3\"; }}; \
+             {}",
+            cmd.replacen("ssh -t ", "ssh_check -t ", 1)
+                .split("; status=$?")
+                .next()
+                .unwrap()
+        );
+        let inner_status = Command::new("/bin/sh")
+            .args(["-c", &verify_inner])
+            .status()
+            .expect("verify inner remote script syntax");
+        assert!(
+            inner_status.success(),
+            "remote inner sh script failed syntax check:\n{cmd}"
+        );
     }
 }

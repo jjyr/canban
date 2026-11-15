@@ -632,9 +632,21 @@ fn launch(ui: Ui, params: serde_json::Value) {
     if crate::APP.get().is_none() {
         let project_id = params["project_id"].as_str().map(str::to_owned);
         let card_id = params["card_id"].as_str().map(str::to_owned);
+        let custom_name = params["name"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned);
         let agent = params["agent"] == true;
         let inherit = params["inherit_terminal_id"].as_str().is_some();
         let id = gallery_create_entry(ui, project_id, card_id, agent, inherit);
+        if let Some(name) = custom_name {
+            ui.snapshot.update(|s| {
+                if let Some(t) = s.terminals.iter_mut().find(|t| t.id == id) {
+                    t.name = Some(name);
+                }
+            });
+        }
         ui.open_terminal(id);
         return;
     }

@@ -149,12 +149,15 @@ fn spawn_ssh_bootstrap_terminal(ui: Ui, ssh_target: &str, prefer_tailscale: bool
         port,
     );
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let title = ui
+        .snapshot
+        .with_untracked(|s| s.next_unique_terminal_title("Add machine"));
     close_overlays(ui);
     crate::terminals::launch_custom(
         ui,
         json!({
             "host_id": "local",
-            "name": format!("Setup {}", ssh_target.trim()),
+            "name": title,
             "setup_argv": [shell, "-lc", script],
         }),
     );
