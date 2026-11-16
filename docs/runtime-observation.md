@@ -90,3 +90,12 @@ Acceptance evidence from this change (temporary artifacts):
 - devpc remote event acceptance: `/private/tmp/cb-events-remote-hmz5wsfd/evidence.json`. Remote cwd/branch discovery and explicit refresh, runtime permission/exit, immutable-owner route rename, removal without a false exit and re-add/reconnect passed. Machine-specific isolation/cleanup details are kept in `~/Workspace/Machines/machines/devpc/runtime-events-20261109.md`.
 
 No live user Core or Canban database was changed. Native FSEvents acceptance required an unsandboxed process; the first sandboxed attempt did not deliver filesystem notifications and was not counted as a pass.
+
+## Terminal directory projection (2026-11-16)
+
+`TerminalContext.directory_root` carries the canonical Git checkout root, or the
+canonical current directory outside Git. It is resolved in the existing shared
+background context cache, never by UI rendering. Shells and Agents consume the
+same foreground cwd events. Same-binding last-known contexts survive temporary
+observation loss; known external locations do not fall back to launch Projects.
+The desktop API version advances with this additive snapshot field.

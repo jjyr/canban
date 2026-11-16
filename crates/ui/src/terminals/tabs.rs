@@ -708,7 +708,8 @@ pub fn header(ui: Ui) -> impl IntoElement {
                     }
                     let ic = match scope {
                         super::worktrees::WorktreeScope::ProjectRoot(_) => Icon::Projects,
-                        super::worktrees::WorktreeScope::Unassigned(_) => Icon::Terminal,
+                        super::worktrees::WorktreeScope::Unassigned(_)
+                        | super::worktrees::WorktreeScope::Directory { .. } => Icon::Terminal,
                         _ => Icon::Branch,
                     };
                     (ic, name, git, tip)

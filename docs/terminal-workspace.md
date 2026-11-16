@@ -30,20 +30,41 @@ Implemented user-approved direction, 2026-11-08. Native/runtime acceptance is re
 |      |   ⎇ feat/login    ↑2   [+][⋯] | <-- Active ManagedWorktree (idle ones hidden from tree)     |
 |      |   │ Terminal 2                |                                                             |
 |      |   │ ❯_ Local                  |                                                             |
-|      | 📁 Docs & Website   [⎇+] [+]  | <-- Empty project: single title row only                    |
+|      | 📁 Docs & Website   [⎇+] [+]  | <-- Empty projects are omitted                    |
 +--------------------------------------+-------------------------------------------------------------+
 ```
 
 The window chrome follows the same left/right divider as the content while aligning with the unified 42-point chrome geometry across all screens: native traffic-light clearance and `<` / `>` Back/Forward sit at the exact same horizontal coordinates as every other page, followed by the sidebar toggle (`☰`), so `<` / `>` never jump when switching to or from `Terminals`. The right panel owns **Worktree-scoped tabs** (only live Terminals in the same `WorktreeScope` as the selected Terminal), `+` (New Shell in current worktree), `▾` (Project Root / Managed Branch Worktree / Machine menu), Open Agent, current Card/Project link, the **Project / Worktree Switcher** pill (`[⎇ <branch> · +N −M · ↑N ↓M ▾]`), compact actions, and the global right-end **Activity & Notifications** trigger pill (`[⚡ N · ● active/max]`, `Command+I`). Resizing the left panel moves its full-height divider. With the list hidden, tab controls clear the native window buttons and `<` / `>`. NSH owns window dragging, system double-click behavior, traffic-light geometry and resizable panels. Terminal content has no separate title, toolbar, tab strip, placeholder asking to select a conversation, or permanent technical status footer.
 
-### Unified `WorktreeScope` and context linkage (2026-11-14)
+### Live directory projection (2026-11-16)
 
-- **Four `WorktreeScope` variants:** `ProjectRoot(project_id)` (main repository directory), `CardWorktree(card_id)` (Card worktree and associated sessions), `ManagedWorktree(worktree_id)` (standalone branch checkout), and `Unassigned(machine)` (external directories grouped under `Other`). Workflow Agents stay pinned to `CardWorktree(card_id)`; Project Workflow configuration sessions stay in `ProjectRoot(project_id)`; Shells and ephemeral CLI sessions resolve dynamically from `TerminalContext.cwd` (`ManagedWorktree -> CardWorktree -> ProjectRoot -> Unassigned`).
-- **Scope-isolated Tabs, `Command+1`–`9` & cycling:** The top tab strip, `Command+1` through `Command+9` (selecting the 1st through 9th tab in the current tab strip), and `Command+Shift+[` / `Command+Shift+]` (`cycle`) display and switch strictly across live Terminals within the active `WorktreeScope` (always including the currently selected Terminal itself, with `SELECTED` background, semibold `TEXT` title vs regular `MUTED` sibling titles, and a bottom `ACCENT` indicator bar; switching selection across `ProjectRoot`, `CardWorktree`, `ManagedWorktree`, or `Unassigned` immediately updates the tab strip without leaving tabs from the previous scope).
-- **Simplified `Project -> Worktree -> Terminal` tree:** Only worktree scopes with at least one live Terminal appear in the left tree (idle `ManagedWorktree`s, idle `CardWorktree`s, and empty `ProjectRoot`s are omitted from the tree and remain accessible via the top-right Worktree Switcher, `+ [▾]`, and Quick Open). All active nodes render expanded without `▾/▸` collapse toggles. Projects with zero live Terminals render only a single `📁 ProjectName [⎇+] [+]` title row.
-- **Git status indicators:** Active worktree branch rows and the top-right Worktree Switcher display green/red uncommitted line diff counts (`+N −M`, including untracked text files and `+0 −0` for non-text/mode-only dirty states) when the checkout has uncommitted changes (`TerminalContext.dirty`) and upstream tracking divergence (`↑N`, `↓M`) when an upstream tracking branch has commit differences (`ahead` / `behind`), omitting zero upstream counts. Context menus retain plain text indicators (`changed`).
-- **Close fallback order (`Command+W` / `×`):** Closing the selected Terminal jumps first to the **previous** live Terminal in the **same `WorktreeScope`** (or **next** if none precedes it); if the worktree has no remaining live Terminals, it jumps to the **previous** live Terminal in the **same Project** in tree order (or **next** if none precedes it); if the Project has no remaining live Terminals, it jumps to the **previous** live Terminal **globally** in sidebar tree order (or **next** globally if none precedes it), clearing to the right-hand Empty State (`New terminal`) only when no live Terminals remain anywhere.
-- **Creation & global `Command+T`:** Clicking top `+` (or pressing `Command+T` while on `Terminals`) inherits the current `WorktreeScope` (falling back to the active project's `ProjectRoot`). Triggering `Command+T` globally from non-`Terminals` pages (outside an open Card terminal split) opens a fresh Shell in the active project's `ProjectRoot` without inheriting prior sub-worktree sessions. Both UI worktree switching and shell `cd` dynamically update tree attribution and top tabs.
+Terminals are the source of the sidebar, not Project membership. Every live Shell,
+CLI and workflow Agent is placed by its observed cwd on its owning machine.
+Launch Project and Card identity never override that location. Task ownership,
+report destinations and execution history remain unchanged when a Terminal moves.
+A directory associated with a Card displays that association independently of the
+Terminal's task identity.
+
+- AppServer resolves a canonical Git worktree root (grouping its subdirectories)
+  or canonical cwd outside Git, with Project/Card/Managed Worktree associations.
+  Unregistered directories and repositories remain visible by path. Machines and
+  backend hosts are part of directory identity.
+- Only occupied locations and their Project ancestors appear. Empty registered
+  Projects are absent; creating a Terminal and changing directory populates the
+  tree. Unknown locations are shown without inventing a launch-directory binding.
+  Transient observation/discovery loss retains the last confirmed location for
+  the same Core/Terminal binding.
+- Tabs and terminal cycling use the current location scope. Ordinary directories
+  outside Git are separate scopes; subdirectories of one Git checkout share a scope.
+- The sidebar is a flat keyed list. Terminal IDs and machine/path directory keys
+  survive reparenting; Project names, branches, Git counts and Agent status are
+  presentation data. Only structural changes request scoped layout transitions.
+  Outgoing rows collapse/fade before removal, incoming rows fade in, and existing
+  rows move without replacing the terminal viewer. Reduced Motion skips transitions.
+- Rendering performs no filesystem, Git or network IO. Existing event observation
+  and bounded shared context caches own discovery. Per-row presentation memos keep
+  unrelated status changes out of structural reconciliation.
+
 - **Unified real-time Herdr status & notifications (2026-11-15):** Every Terminal—Card Role Agents (`AgentRun`), ephemeral CLI Agents (`agent_engine`), Configuration/Merge sessions, and interactive Shells where a user manually launches an Agent CLI (`observed_agent`)—projects a single real-time `HerdrStatus` (`Working`, `Starting`, `Queued`, `Blocked` with `RuntimeWait` details, `Done`, `Idle`, `Error`, `Disconnected`, or quiet `PlainShell`). Top/Card tab strips display compact leading status marks (`live_dot(ACCENT)` for `Working`, amber shield/help icon for `Blocked`, green check for `Done`, danger triangle for `Error`/`Offline`, and quiet plain Shells without status clutter; Worktree headers carry no aggregate status counts), while Terminal sidebar rows place `[status_mark] + [status_word]` on the right end of their second line (keeping detailed wait/error reasons in the row hover tooltip rather than adding a third line). When a manual CLI Agent exits back to its login Shell (`zsh`/`bash`), AppServer clears any residual PTY OSC 7501 `agent_status`, `agent_turn`, and `waiting` fields. Active (`Working`/`Starting`) standalone/manual Agent terminals appear in `⌘I` `Running` without consuming Scheduler `max_agents` slots, while `Blocked`/`Error`/`Disconnected` terminals surface in `⌘I` `Needs you`, increment the top-right alert pill and primary `Terminals` rail badge, and trigger audible chimes via `sound_items`.
 - **Compact fixed two-line sidebar session rows (2026-11-15):** Every session row in the `Terminals` sidebar tree (`crates/ui/src/terminals/tree.rs`) renders a uniform two-line compact layout (`h(px(46.))`) that never wraps or shifts height when selected, deselected, or blocked:
   - **Line 1 (pure title):** Displays only the session title, capped at 32 characters (`SIDEBAR_TITLE_MAX_CHARS = 32`, whitespace-collapsed with trailing `…`) plus single-line container `.truncate()` whether selected or unselected. Card stages (`Column`), Agent brand icons, and status indicators are omitted from Line 1 so full horizontal space belongs to `#N Card title…`, `<AgentEngine> N`, or `Terminal N`.
@@ -82,9 +103,9 @@ TerminalEntry (stable ID / ordering number / origin_project_id? / name)
 
 SQLite schema v5 migrates v4 Terminal entries transactionally, preserving IDs, names, numbers and Core/PTy bindings. `TerminalSource`, permanent Shell Project/Card ownership and stored Shell cwd are removed. Agent bindings remain on Attempts; `conversation_id` expresses the optional task association. Existing operation receipts are decoded compatibly when read and are not rewritten. Manual Terminals create no Card, Request, Attempt or workflow outcome.
 
-Launch cwd is only an API argument. Live cwd comes from nonempty `foreground.cwd`, falling back to `terminal.cwd`, matching the Herdr UI client. It is an observation of the foreground process, not a guaranteed shell-prompt directory. AppServer consumes one Core event subscription with an initial snapshot/reconnect recovery and publishes in-memory, Core/PTY-fenced `terminal_contexts` in snapshots. Directory/Git discovery is bounded and cached; there is no periodic inventory/status scan. See [runtime observation](runtime-observation.md). Contexts are recomputed after restart and disappear when unavailable. `Attempt.cwd` remains historical execution context, never a substitute for live location.
+Launch cwd is only an API argument. Live cwd comes from nonempty `foreground.cwd`, falling back to `terminal.cwd`, matching the Herdr UI client. It is an observation of the foreground process, not a guaranteed shell-prompt directory. AppServer consumes one Core event subscription with an initial snapshot/reconnect recovery and publishes in-memory, Core/PTY-fenced `terminal_contexts` in snapshots. Directory/Git discovery is bounded and cached; there is no periodic inventory/status scan. See [runtime observation](runtime-observation.md). Contexts are recomputed after restart; transient observation loss retains the last confirmed context for the same Core/PTY binding. A replaced Core or finished Terminal cannot reuse it. `Attempt.cwd` remains historical execution context, never a substitute for live location.
 
-Project matching uses canonical path boundaries, the most specific registered directory, known Card worktrees, or an unambiguous common Git repository. Card hints require one known active worktree match or one active Card matching both repository and branch; ambiguous matches remain unassigned. A task Card always takes precedence for managed Agents, even if their foreground directory belongs to another Project. Hints never authorize reporting, resuming, workflow advancement or merging.
+Project matching uses canonical path boundaries, the most specific registered directory, known Card worktrees, or an unambiguous common Git repository. Card hints require one known active worktree match or one active Card matching both repository and branch; ambiguous matches remain unassigned. A managed Agent keeps its task Card for task actions and reporting, while directory tree placement follows the current location and its associated Card. Hints never authorize reporting, resuming, workflow advancement or merging.
 
 Schema v6 originally added a separate `manual_number` and counter; Schema v18 removes `manual_number` and the `'terminal-manual-number'` counter, materializing prior automatic labels onto `TerminalEntry.name` and switching new independent Terminal titles to per-Project live `max(N) + 1` allocation (`origin_project_id` records the initial Project scope before live `terminal_contexts` observation). Custom names, IDs, ordering numbers, Core/PTy bindings and Agent records remain intact. Historical operation receipts are not rewritten.
 
@@ -248,3 +269,24 @@ For a Card-level entry, reuse its last explicitly opened live Agent, otherwise o
 Timeline request links attach only when that request is the current live invocation. Historical requests open their own assignment/state/output on the Card, with a separately labelled Open current conversation action when applicable. Closed Quick Open candidates advertise View history. Resume is an explicit exact-session operation with an expected-attempt fence; unavailable provider history cannot silently become a fresh start. Start and Resume receipts respect pending guards. When admission initially queues a request, the UI shows its context and attaches only after that exact request obtains a PTY. Leaving that context cancels automatic navigation. Successful attachment returns directly to the launch origin on Back, without an extra queue-context history entry.
 
 Back/Forward retain existing route, draft and scroll behavior and never replay execution. Overview no longer embeds a Terminal preview or context inspector. The [entry inventory and design](overview-and-terminal-navigation-proposal.md) records the full cross-surface scope.
+
+## Directory projection validation (2026-11-16, Card #97)
+
+- Full `mise run test -- --no-fail-fast`: 552 passed. After the final outgoing-row
+  and header-action refinements, the complete UI scope passed again (146 tests).
+- NSH mounted-tree regression verifies the same Terminal row NodeIds survive
+  a directory move and unrelated status changes. Model regressions cover external
+  directories, shared Git roots, machine separation and unchanged Agent task ownership.
+- `mise run acceptance-events`: passed at `/private/tmp/cb-events-ao2zud22`, including
+  plain-Shell builtin cd, canonical Git subdirectory roots, rapid consecutive cd,
+  shared context probes, no idle inventory scans, missed events and reconnect.
+- `mise run acceptance`: passed at `/private/tmp/cb-rjchg9bw/home` with isolated Core,
+  Develop/Review, mentions, Archive/Restore, restart and global concurrency checks.
+- Final `mise run build` passed. `CANBAN_GALLERY_SCENE=terminal-directory mise run
+  gallery` built and launched. A separate `mise run dev -- --home
+  /private/tmp/cb97-native-home` desktop/server pair started successfully with an
+  isolated Core; those processes and the disposable Core were stopped afterwards.
+- Native pointer/focus/scroll interaction and visual animation smoothness are **not
+  newly accepted**: the computer-use service failed with `Sky Computer Use native
+  pipe startup failed`. Gallery/App startup is only a smoke check, and the mounted
+  NSH test is not a substitute for macOS interaction or a frame-rate benchmark.

@@ -70,8 +70,11 @@ sample of native panel opacity. Sampling is disabled in normal runs. These logs
 help distinguish a real fade/reversal from simply reaching the final state;
 they are not FPS or frame-latency measurements.
 
-Overview inspectors, Terminal session sidebars and secondary disclosures are
-outside this first batch. Board drag/placeholder animations retain their existing
+Overview inspectors and secondary disclosures are outside this first batch.
+Terminal sidebars now use a flat retained keyed list with scoped 160ms movement,
+entry fade and exit collapse/fade; status-only updates do not trigger structural
+motion. The `terminal-directory` Gallery scene exercises external cd, restore,
+status-only updates and removal of all Terminals. Board drag/placeholder animations retain their existing
 implementation.
 
 ## Verification (2026-11-10)

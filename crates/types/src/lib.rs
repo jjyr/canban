@@ -1526,6 +1526,9 @@ pub struct TerminalContext {
     pub core_id: String,
     pub terminal: String,
     pub cwd: Option<String>,
+    /// Canonical worktree root, or canonical cwd outside Git.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory_root: Option<String>,
     pub project_id: Option<String>,
     pub card_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -1392,6 +1392,59 @@ pub fn Gallery() -> impl IntoElement {
         }
         return canban_ui::frame::screen(ui).into_element();
     }
+    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminal-directory") {
+        canban_ui::frame::configure_window_chrome();
+        let mut initial = fixtures::terminal_workspace();
+        for ctx in &mut initial.terminal_contexts {
+            ctx.directory_root = ctx.cwd.clone();
+        }
+        ui.snapshot.set(initial.clone());
+        ui.open_terminal("gallery-project-root-shell".into());
+        let reset = initial.clone();
+        return view()
+            .flex_1()
+            .min_h(px(0.))
+            .child(
+                view()
+                    .flex_row()
+                    .gap_2()
+                    .child(action("External cd", Variant::Secondary, move |_| {
+                        ui.snapshot.update(|s| {
+                            if let Some(c) = s
+                                .terminal_contexts
+                                .iter_mut()
+                                .find(|c| c.terminal_id == "gallery-project-root-shell")
+                            {
+                                c.cwd = Some("/tmp/external/src".into());
+                                c.directory_root = Some("/tmp/external".into());
+                                c.project_id = None;
+                                c.card_id = None;
+                                c.worktree_id = None;
+                                c.branch = Some("feature".into());
+                            }
+                        })
+                    }))
+                    .child(action("Status only", Variant::Secondary, move |_| {
+                        ui.snapshot.update(|s| {
+                            for c in &mut s.terminal_contexts {
+                                c.dirty = !c.dirty;
+                                c.additions += 1;
+                            }
+                        })
+                    }))
+                    .child(action("Restore", Variant::Secondary, move |_| {
+                        ui.snapshot.set(reset.clone())
+                    }))
+                    .child(action("Empty", Variant::Secondary, move |_| {
+                        ui.snapshot.update(|s| {
+                            s.terminals.clear();
+                            s.terminal_contexts.clear();
+                        })
+                    })),
+            )
+            .child(canban_ui::frame::screen(ui))
+            .into_element();
+    }
     if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("terminals") {
         canban_ui::frame::configure_window_chrome();
         ui.snapshot.set(fixtures::terminal_workspace());

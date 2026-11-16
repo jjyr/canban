@@ -95,6 +95,18 @@ try:
  wait(lambda s:context(s,terminal['id']).get('branch')=='changed' and context(s,second['id']).get('branch')=='changed','HEAD invalidation')
  outside=base/'outside';outside.mkdir();hc('terminal.send',{'terminal':terminal['runtime']['terminal'],'text':'cd '+str(outside),'force':True})
  wait(lambda s:context(s,terminal['id']).get('cwd')==str(outside),'cwd event')
+ observed=wait(lambda s:context(s,terminal['id']).get('directory_root')==str(outside.resolve()),'external canonical root')
+ assert context(observed,terminal['id'])['project_id'] is None
+ # Builtin cd keeps the shell PID; subdirectories must share the Git root.
+ sub=source/'src';sub.mkdir()
+ hc('terminal.send',{'terminal':terminal['runtime']['terminal'],'text':'cd '+str(sub),'force':True})
+ observed=wait(lambda s:context(s,terminal['id']).get('cwd')==str(sub) and context(s,terminal['id']).get('directory_root')==str(source.resolve()),'subdirectory root')
+ assert context(observed,terminal['id'])['project_id']==project['id']
+ # Rapid changes must settle on the last cwd, never a late earlier discovery.
+ hc('terminal.send',{'terminal':terminal['runtime']['terminal'],'text':'cd '+str(source)+'; cd '+str(sub)+'; cd '+str(outside),'force':True})
+ observed=wait(lambda s:context(s,terminal['id']).get('cwd')==str(outside) and context(s,terminal['id']).get('directory_root')==str(outside.resolve()),'rapid cd final root')
+ assert context(observed,terminal['id'])['project_id'] is None
+ print('PLAIN_SHELL_CWD_ROOT_AND_RAPID_CD_OK',flush=True)
  git(outside,'init','-b','new-repository')
  wait(lambda s:context(s,terminal['id']).get('branch')=='new-repository','new .git invalidation')
  stub=base/'agy';stub.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(0.8)\n');stub.chmod(0o755)

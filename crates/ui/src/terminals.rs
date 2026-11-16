@@ -153,21 +153,21 @@ pub fn scope_tabs(ui: Ui) -> Vec<Entry> {
     let Some(cur) = current(ui) else {
         return Vec::new();
     };
-    ui.snapshot.with(|s| {
-        let target_scope = worktrees::entry_scope(s, &cur);
+    {
+        let target_scope = worktrees::location_key(&cur);
         ui.closing_terminals.with(|closing| {
             ui.terminal_entries.with(|rows| {
                 rows.iter()
                     .filter(|e| {
                         e.listed()
                             && !closing.contains(&e.saved.id)
-                            && worktrees::entry_scope(s, e) == target_scope
+                            && worktrees::location_key(e) == target_scope
                     })
                     .cloned()
                     .collect()
             })
         })
-    })
+    }
 }
 
 /// Pure fallback resolution when closing a live Terminal:
@@ -187,7 +187,10 @@ pub fn fallback_after_close(
 
     let same_scope: Vec<&Entry> = rows
         .iter()
-        .filter(|e| is_live_or_target(e) && worktrees::entry_scope(s, e) == target_scope)
+        .filter(|e| {
+            is_live_or_target(e)
+                && worktrees::location_key(e) == worktrees::location_key(closed_entry)
+        })
         .collect();
     if let Some(pos) = same_scope.iter().position(|e| e.saved.id == closed_id) {
         if pos > 0 {
@@ -672,18 +675,6 @@ fn launch(ui: Ui, params: serde_json::Value) {
 /// or falls back to the active project's root directory when no Terminal is selected.
 pub fn new_tab(ui: Ui) {
     if let Some(cur) = untracked(|| current(ui)) {
-        if cur.agent.is_some()
-            && let Some(card) = cur.card.filter(|c| c.archived_at.is_none())
-        {
-            launch(
-                ui,
-                json!({
-                    "project_id": card.project_id,
-                    "card_id": card.id,
-                }),
-            );
-            return;
-        }
         launch(ui, json!({ "inherit_terminal_id": cur.saved.id }));
         return;
     }

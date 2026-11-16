@@ -327,7 +327,15 @@ fn independent_terminals_inherit_observed_cwd_and_only_derive_project_context() 
     );
     app.config.write().unwrap().hc = "/usr/bin/false".into();
     app.observe_terminals().unwrap();
-    assert!(app.snapshot().unwrap().terminal_contexts.is_empty());
+    // A disconnected observer retains last-known same-binding placement, while
+    // an explicit current-context request still reports unavailability.
+    assert!(
+        app.snapshot()
+            .unwrap()
+            .terminal_contexts
+            .iter()
+            .all(|c| c.cwd.as_deref() == dir.path().to_str())
+    );
     let context = app
         .call("terminal.context", json!({"terminal_id":first["id"]}))
         .unwrap();

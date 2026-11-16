@@ -1220,6 +1220,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
     let card_project_id = card.project_id.clone();
     let card_id = card.id.clone();
     s.terminal_contexts.push(canban_types::TerminalContext {
+        directory_root: None,
         machine: "local".into(),
         terminal_id: "gallery-linked-shell".into(),
         core_id: "gallery".into(),
@@ -1263,6 +1264,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         created_at: 0,
     });
     s.terminal_contexts.push(canban_types::TerminalContext {
+        directory_root: None,
         machine: "local".into(),
         terminal_id: "gallery-project-root-shell".into(),
         core_id: "gallery".into(),
@@ -1329,6 +1331,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         created_at: 0,
     });
     s.terminal_contexts.push(canban_types::TerminalContext {
+        directory_root: None,
         machine: "local".into(),
         terminal_id: "gallery-wt-shell".into(),
         core_id: "gallery".into(),
@@ -1399,6 +1402,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         created_at: 0,
     });
     s.terminal_contexts.push(canban_types::TerminalContext {
+        directory_root: None,
         machine: "local".into(),
         terminal_id: "gallery-ephemeral-agent".into(),
         core_id: "gallery".into(),
@@ -1415,6 +1419,7 @@ pub fn terminal_workspace() -> canban_types::Snapshot {
         behind: 1,
     });
     s.terminal_contexts.push(canban_types::TerminalContext {
+        directory_root: None,
         machine: "local".into(),
         terminal_id: "gallery-wt-shell-2".into(),
         core_id: "gallery".into(),

@@ -790,6 +790,7 @@ impl AppServer {
             core_id: core.into(),
             terminal: terminal.into(),
             cwd,
+            directory_root: resolved.directory_root,
             project_id: resolved.project_id,
             card_id: resolved.card_id,
             worktree_id: resolved.worktree_id,
@@ -885,6 +886,20 @@ impl AppServer {
                 {
                     contexts.push(context);
                 }
+            }
+            // Preserve only a confirmed location for the same binding while observation
+            // or asynchronous discovery is unavailable. Never invent the launch directory.
+            if !contexts.iter().any(|c| c.terminal_id == item.id)
+                && let Some((core, terminal)) = &binding
+                && !observed
+                    .as_ref()
+                    .is_ok_and(|(observed_core, _)| observed_core != core)
+                && value.is_none_or(|v| v["state"] != "finished")
+                && let Some(previous) = snapshot.terminal_contexts.iter().find(|c| {
+                    c.terminal_id == item.id && c.core_id == *core && c.terminal == *terminal
+                })
+            {
+                contexts.push(previous.clone());
             }
             let is_special_agent = item.is_special_session()
                 || snapshot

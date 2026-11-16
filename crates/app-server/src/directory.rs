@@ -188,6 +188,7 @@ impl AppServer {
                 core_id: core.into(),
                 terminal: terminal.into(),
                 cwd: Some(cwd.into()),
+                directory_root: None,
                 project_id: None,
                 card_id: None,
                 worktree_id: None,
@@ -335,6 +336,7 @@ impl AppServer {
                         && let Ok(resolved) = result
                     {
                         let mut context = job.context.clone();
+                        context.directory_root = resolved.directory_root;
                         context.project_id = resolved.project_id;
                         context.card_id = resolved.card_id;
                         context.worktree_id = resolved.worktree_id;

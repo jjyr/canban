@@ -1,3 +1,47 @@
+fn observe_fixture_locations(s: &mut Snapshot) {
+    for t in &s.terminals {
+        if s.terminal_contexts.iter().any(|c| c.terminal_id == t.id) {
+            continue;
+        }
+        let cid = t
+            .agent
+            .as_ref()
+            .map(|a| &a.card_id)
+            .or(t.origin_card_id.as_ref());
+        let card = cid.and_then(|id| s.cards.iter().find(|c| &c.id == id));
+        let pid = card.map(|c| &c.project_id).or(t.origin_project_id.as_ref());
+        let project = pid.and_then(|id| s.projects.iter().find(|p| &p.id == id));
+        let path = card.and_then(|c| c.worktree.clone()).unwrap_or_else(|| {
+            if let Some(c) = card {
+                format!("/fixture/worktrees/{}", c.id)
+            } else {
+                project
+                    .map(|p| p.directory.clone())
+                    .unwrap_or_else(|| "/fixture/outside".into())
+            }
+        });
+        s.terminal_contexts.push(TerminalContext {
+            terminal_id: t.id.clone(),
+            machine: "local".into(),
+            cwd: Some(path.clone()),
+            directory_root: Some(path),
+            project_id: pid.cloned(),
+            card_id: cid.cloned(),
+            ..Default::default()
+        });
+    }
+    for c in &mut s.terminal_contexts {
+        if c.directory_root.is_none() {
+            c.directory_root = c.cwd.as_ref().map(|p| {
+                if p == "/repo/p1/crates" {
+                    "/repo/p1".into()
+                } else {
+                    p.clone()
+                }
+            });
+        }
+    }
+}
 use super::*;
 fn fixture() -> Snapshot {
     let mut s = Snapshot::default();
@@ -253,7 +297,7 @@ fn directory_regrouping_changes_hints_without_changing_terminal_identity_or_agen
     assert!(manual.inferred_card);
     assert!(manual.agent.is_none());
     let task = rows.iter().find(|e| e.saved.id == agent).unwrap();
-    assert_eq!(task.project_id.as_deref(), Some("p1"));
+    assert_eq!(task.project_id.as_deref(), Some("p2"));
     assert_eq!(task.card.as_ref().unwrap().id, "c1");
     assert!(!task.inferred_card);
     s.terminal_contexts.clear();
@@ -1252,6 +1296,7 @@ fn optimistic_close_removes_tab_immediately_and_rolls_back_on_unknown_or_error()
             .collect();
 
         let ui = crate::presenter::Ui::new();
+        observe_fixture_locations(&mut s);
         ui.snapshot.set(s);
         ui.snapshot_ready.set(true);
         ui.terminal_tabs.set(vec!["term-1".into(), "term-2".into()]);
@@ -1452,6 +1497,7 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
         assert!(format_git_indicators(false, 0, 0).is_empty());
 
         let ui = crate::presenter::Ui::new();
+        observe_fixture_locations(&mut s);
         ui.snapshot.set(s);
         ui.snapshot_ready.set(true);
         ui.project.set("p1".into());
@@ -1505,6 +1551,7 @@ fn worktree_scopes_isolate_tabs_and_cycle_hide_empty_branches_and_regroup_on_cd(
                 .find(|c| c.terminal_id == "card-shell")
                 .unwrap();
             ctx.cwd = Some("/repo/p1".into());
+            ctx.directory_root = ctx.cwd.clone();
             ctx.card_id = None;
             ctx.branch = Some("main".into());
         });
@@ -1634,6 +1681,7 @@ fn close_terminal_fallback_prefers_same_worktree_prev_then_same_project_prev_the
         ]);
 
         let ui = crate::presenter::Ui::new();
+        observe_fixture_locations(&mut s);
         ui.snapshot.set(s);
         ui.snapshot_ready.set(true);
         ui.page.set("terminals".into());
@@ -1688,6 +1736,7 @@ fn global_new_terminal_opens_in_project_root_while_in_page_new_tab_inherits_curr
         s.cards[0].branch = Some("canban/1".into());
 
         let ui = crate::presenter::Ui::new();
+        observe_fixture_locations(&mut s);
         ui.snapshot.set(s);
         ui.snapshot_ready.set(true);
         ui.project.set("p1".into());
@@ -1729,7 +1778,7 @@ fn global_new_terminal_opens_in_project_root_while_in_page_new_tab_inherits_curr
 }
 
 #[test]
-fn merge_batch_terminal_lives_directly_in_project_root_without_polluting_root_git_summary() {
+fn merge_batch_terminal_uses_its_actual_checkout_and_git_summary() {
     use crate::terminals::worktrees::{WorktreeScope, entry_scope, scope_git_summary};
 
     let mut s = fixture();
@@ -1802,11 +1851,13 @@ fn merge_batch_terminal_lives_directly_in_project_root_without_polluting_root_gi
         .expect("merger entry must appear in terminal entries");
     assert_eq!(merger_entry.title(), "@merger");
     let scope = entry_scope(&s, merger_entry);
-    assert_eq!(scope, WorktreeScope::ProjectRoot("p1".into()));
+    assert!(
+        matches!(scope, WorktreeScope::Directory { ref path, .. } if path == "/home/worktrees/p1/_merge_queue")
+    );
 
     let summary = scope_git_summary(&s, &scope, std::slice::from_ref(merger_entry));
-    assert_eq!(summary.branch.as_deref(), Some("main"));
-    assert!(!summary.dirty);
+    assert_eq!(summary.branch, None);
+    assert!(summary.dirty);
     assert_eq!(summary.ahead, 0);
     assert_eq!(summary.behind, 0);
 }
@@ -1981,6 +2032,7 @@ fn mounted_tabs_header_updates_across_project_root_and_worktree_selection_and_ma
             },
         ]);
 
+        observe_fixture_locations(&mut s);
         ui.snapshot.set(s);
         ui.snapshot_ready.set(true);
         ui.project.set("p1".into());
@@ -3108,4 +3160,199 @@ fn top_right_project_card_and_cwd_context_labels_are_vertically_centered_in_term
         (ext_center_y - proj_center_y).abs() <= 1.0,
         "external cwd ({ext_center_y}) must align vertically with project title ({proj_center_y})"
     );
+}
+
+#[test]
+fn live_directory_projection_moves_agents_without_reassigning_tasks() {
+    use crate::terminals::{
+        tree::{TreeNode, project_tree},
+        worktrees::{WorktreeScope, entry_scope, location_key},
+    };
+    let mut s = fixture();
+    let terminal = s.terminals[0].id.clone();
+    let task_card = s.terminals[0].agent.as_ref().unwrap().card_id.clone();
+    s.terminal_contexts = vec![TerminalContext {
+        terminal_id: terminal.clone(),
+        machine: "local".into(),
+        cwd: Some("/external/src".into()),
+        directory_root: Some("/external".into()),
+        ..Default::default()
+    }];
+    let rows = crate::terminals::entries(&s);
+    let e = rows.iter().find(|e| e.saved.id == terminal).unwrap();
+    assert_eq!(e.agent.as_ref().unwrap().card.id, task_card);
+    assert!(
+        matches!(entry_scope(&s,e), WorktreeScope::Directory { project: None, ref path, .. } if path == "/external")
+    );
+    let before = project_tree(&s, &[e.clone()]);
+    assert!(!before.iter().any(|n| matches!(n, TreeNode::Project(_))));
+    let key = location_key(e);
+    s.terminal_contexts[0].cwd = Some("/external/tests".into());
+    let rows = crate::terminals::entries(&s);
+    let e = rows.iter().find(|e| e.saved.id == terminal).unwrap();
+    assert_eq!(location_key(e), key);
+    assert_eq!(project_tree(&s, &[e.clone()]), before);
+    s.terminal_contexts[0].directory_root = Some("/elsewhere".into());
+    s.terminal_contexts[0].cwd = Some("/elsewhere".into());
+    let rows = crate::terminals::entries(&s);
+    let e = rows.iter().find(|e| e.saved.id == terminal).unwrap();
+    assert_ne!(location_key(e), key);
+    assert!(project_tree(&s, &[e.clone()]).contains(&TreeNode::Terminal(terminal)));
+    assert_eq!(e.agent.as_ref().unwrap().card.id, task_card);
+    assert_eq!(project_tree(&s, &[]), vec![TreeNode::Empty]);
+}
+
+#[test]
+fn shell_origin_does_not_override_observed_external_directory_and_status_does_not_change_tree() {
+    use crate::terminals::{tree::project_tree, worktrees::entry_scope};
+    let mut s = fixture();
+    let mut shell = s.terminals[0].clone();
+    shell.id = "external-shell".into();
+    shell.agent = None;
+    shell.conversation_id = None;
+    shell.origin_card_id = None;
+    shell.origin_project_id = Some("p1".into());
+    shell.runtime = Some(serde_json::from_value(json!({"machine":"local", "state":"running", "connection":"connected", "core_id":"core", "terminal":"shell"})).unwrap());
+    s.terminals.push(shell);
+    s.terminal_contexts.push(TerminalContext {
+        terminal_id: "external-shell".into(),
+        machine: "local".into(),
+        cwd: Some("/outside".into()),
+        directory_root: Some("/outside".into()),
+        ..Default::default()
+    });
+    let rows = crate::terminals::entries(&s);
+    let e = rows
+        .iter()
+        .find(|e| e.saved.id == "external-shell")
+        .unwrap()
+        .clone();
+    assert!(e.project_id.is_none());
+    let before = project_tree(&s, &[e.clone()]);
+    let mut updated = e.clone();
+    updated.saved.runtime.as_mut().unwrap().agent_status = Some("working".into());
+    updated.location.as_mut().unwrap().dirty = true;
+    assert_eq!(project_tree(&s, &[updated.clone()]), before);
+    updated.location.as_mut().unwrap().machine = "another-machine".into();
+    assert_ne!(entry_scope(&s, &updated), entry_scope(&s, &e));
+}
+
+#[test]
+fn retained_directory_rows_survive_cd_and_unrelated_status_updates() {
+    use nsh_core::{
+        ApproxTextEngine, Core, EventKind, EventPayload, MountItem, NodeId, element::JsEvent,
+        geometry::size, prelude::*,
+    };
+    use std::collections::{HashMap, HashSet};
+    #[component]
+    fn RetainedProbe() -> impl IntoElement {
+        let ui = crate::presenter::Ui::new();
+        let mut s = fixture();
+        observe_fixture_locations(&mut s);
+        ui.snapshot.set(s);
+        let tid = ui.snapshot.get_untracked().terminals[0].id.clone();
+        let move_id = tid.clone();
+        view()
+            .w(px(300.))
+            .h(px(640.))
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Move directory".into()))
+                    .on_press(move |_: &()| {
+                        ui.snapshot.update(|s| {
+                            let c = s
+                                .terminal_contexts
+                                .iter_mut()
+                                .find(|c| c.terminal_id == move_id)
+                                .unwrap();
+                            c.cwd = Some("/external".into());
+                            c.directory_root = c.cwd.clone();
+                            c.project_id = None;
+                            c.card_id = None;
+                        })
+                    }),
+            )
+            .child(
+                canban_ui_kit::press_target()
+                    .accessibility_label(Some("Update status".into()))
+                    .on_press(move |_: &()| {
+                        ui.snapshot.update(|s| {
+                            let c = s
+                                .terminal_contexts
+                                .iter_mut()
+                                .find(|c| c.terminal_id == tid)
+                                .unwrap();
+                            c.dirty = !c.dirty;
+                        })
+                    }),
+            )
+            .child(crate::terminals::sidebar_for_test(ui))
+    }
+    #[derive(Default)]
+    struct Mounted {
+        keys: HashMap<String, NodeId>,
+        labels: HashMap<String, NodeId>,
+        deleted: HashSet<NodeId>,
+    }
+    fn pump(core: &mut Core<ApproxTextEngine>, m: &mut Mounted) {
+        for _ in 0..8 {
+            if let Some(batch) = core.commit() {
+                for item in batch.items {
+                    match item {
+                        MountItem::ViewProps { id, props } => {
+                            if let Some(key) = props.test_id {
+                                m.keys.insert(key.to_string(), id);
+                            }
+                            if let Some(label) = props.accessibility.label {
+                                m.labels.insert(label.to_string(), id);
+                            }
+                        }
+                        MountItem::Delete { id } => {
+                            m.deleted.insert(id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mut events = Vec::new();
+            core.take_events(&mut events);
+            for ev in events {
+                match ev {
+                    JsEvent::Event(id, kind, payload) => {
+                        core.component_event(id, kind, &payload);
+                    }
+                    JsEvent::LayoutListener {
+                        host,
+                        id,
+                        listener,
+                        frame,
+                    } => core.component_layout(host, id, &listener, frame),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut core = Core::new(ApproxTextEngine, size(px(300.), px(640.)));
+    core.set_components(nsh_base::registry());
+    core.mount_root(&nsh_core::element::Root::of::<RetainedProbe>());
+    let mut m = Mounted::default();
+    pump(&mut core, &mut m);
+    let keys: Vec<_> = m
+        .keys
+        .iter()
+        .filter(|(k, _)| k.starts_with("terminal:"))
+        .map(|(k, id)| (k.clone(), *id))
+        .collect();
+    assert_eq!(keys.len(), 2);
+    for action in ["Update status", "Move directory", "Update status"] {
+        assert!(core.component_event(m.labels[action], EventKind::Press, &EventPayload::None));
+        pump(&mut core, &mut m);
+        for (key, id) in &keys {
+            assert_eq!(m.keys[key], *id, "row remounted during {action}");
+            assert!(
+                !m.deleted.contains(id),
+                "retained row deleted during {action}"
+            );
+        }
+    }
 }

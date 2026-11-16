@@ -19,6 +19,7 @@ pub struct GitStatus {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ResolvedContext {
+    pub directory_root: Option<String>,
     pub project_id: Option<String>,
     pub card_id: Option<String>,
     pub worktree_id: Option<String>,
@@ -311,7 +312,7 @@ impl Ops {
             .projects
             .iter()
             .filter(|p| p.work_location().machine == *machine)
-            .map(|p| (p.directory.clone(), p.id.clone()))
+            .map(|p| (p.work_location().directory.clone(), p.id.clone()))
             .collect();
         let mut checkouts: Vec<(String, String)> = Vec::new();
         let mut managed_checkouts: Vec<(String, String)> = Vec::new();
@@ -575,8 +576,13 @@ print(json.dumps({'paths':rows,'git_dir':gd or None,'status':st}))"#,
             .cloned()
             .unwrap_or_default();
         let branch = git_status.branch.clone();
+        let directory_root = rows
+            .get(cwd)
+            .and_then(|v| v["top"].as_str().or_else(|| v["path"].as_str()))
+            .map(str::to_owned);
         let Some(path) = canonical(cwd) else {
             return Ok(ResolvedContext {
+                directory_root,
                 branch,
                 dirty: git_status.dirty,
                 additions: git_status.additions,
@@ -614,6 +620,7 @@ print(json.dumps({'paths':rows,'git_dir':gd or None,'status':st}))"#,
             });
         let Some(project) = project else {
             return Ok(ResolvedContext {
+                directory_root,
                 branch,
                 dirty: git_status.dirty,
                 additions: git_status.additions,
@@ -662,6 +669,7 @@ print(json.dumps({'paths':rows,'git_dir':gd or None,'status':st}))"#,
             }
         };
         Ok(ResolvedContext {
+            directory_root,
             project_id: Some(project),
             card_id: card,
             worktree_id,
@@ -1066,6 +1074,10 @@ mod cache_tests {
         std::fs::create_dir(&sub).unwrap();
 
         let sub_ctx = ops.directory_context_full(&Snapshot::default(), sub.to_str().unwrap());
+        assert_eq!(
+            sub_ctx.directory_root.as_deref(),
+            repo.canonicalize().unwrap().to_str()
+        );
         assert!(sub_ctx.dirty);
         assert_eq!((sub_ctx.additions, sub_ctx.deletions), (9, 2));
 

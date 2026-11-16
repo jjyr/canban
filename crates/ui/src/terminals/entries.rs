@@ -519,18 +519,8 @@ pub fn entries(s: &Snapshot) -> Vec<Entry> {
                     })
             })
         };
-        let project_id = configuration
-            .map(|c| c.project_id.clone())
-            .or_else(|| merge_batch.map(|b| b.project_id.clone()))
-            .or_else(|| scheduled_run.map(|r| r.project_id.clone()))
-            .or_else(|| {
-                agent
-                    .as_ref()
-                    .map(|r| r.card.project_id.clone())
-                    .or_else(|| location.as_ref().and_then(|c| c.project_id.clone()))
-                    .or_else(|| t.origin_project_id.clone())
-                    .or_else(|| card.as_ref().map(|c| c.project_id.clone()))
-            });
+        // Presentation follows observed location; Agent/Card ownership remains on `agent`.
+        let project_id = location.as_ref().and_then(|c| c.project_id.clone());
         let inferred_card = agent.is_none() && t.origin_card_id.is_none() && card.is_some();
         let stage = agent.as_ref().and_then(|a| a.agent()).map(|att| {
             s.projects
