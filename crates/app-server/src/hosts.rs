@@ -148,11 +148,47 @@ struct RemoteSlot {
     client: Option<Arc<AppClient>>,
     tunnel: Option<SshTunnel>,
     connection: HostConnectionState,
+    updating: bool,
     cached: Option<CachedHostData>,
     last_state_raw: Value,
     reconnect_count: u32,
     consecutive_failures: u32,
     next_retry_at: std::time::Instant,
+}
+
+struct UpdatingGuard<'a> {
+    registry: &'a HostRegistry,
+    host_id: String,
+    active: bool,
+}
+
+impl Drop for UpdatingGuard<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut guard = self.registry.remotes.lock().unwrap();
+        if let Some(slot) = guard.get_mut(&self.host_id) {
+            slot.updating = false;
+            slot.next_retry_at = std::time::Instant::now();
+            if slot.connection.is_updating() {
+                slot.connection = if slot.saved.enabled {
+                    HostConnectionState::Connecting
+                } else {
+                    HostConnectionState::Offline {
+                        error: "Disabled".into(),
+                        cached_at: slot.cached.as_ref().map(|c| c.saved_at),
+                    }
+                };
+            }
+        }
+        drop(guard);
+        self.registry.emit(AppEvent::Changed {
+            topic: "application",
+            card_id: None,
+        });
+        self.registry.wake();
+    }
 }
 
 pub struct HostRegistry {
@@ -205,6 +241,7 @@ impl HostRegistry {
                     client: None,
                     tunnel: None,
                     connection: initial_conn,
+                    updating: false,
                     cached,
                     last_state_raw: Value::Null,
                     reconnect_count: 0,
@@ -387,6 +424,7 @@ impl HostRegistry {
                 client,
                 tunnel,
                 connection: conn,
+                updating: false,
                 cached,
                 last_state_raw: state_val.unwrap_or(Value::Null),
                 reconnect_count: 0,
@@ -460,7 +498,7 @@ impl HostRegistry {
                     error: "Disabled".into(),
                     cached_at: slot.cached.as_ref().map(|c| c.saved_at),
                 };
-            } else {
+            } else if !slot.updating {
                 slot.consecutive_failures = 0;
                 slot.next_retry_at = std::time::Instant::now();
                 slot.connection = HostConnectionState::Connecting;
@@ -480,7 +518,8 @@ impl HostRegistry {
         {
             let mut guard = self.remotes.lock().unwrap();
             for (id, slot) in guard.iter_mut() {
-                if host_id.is_none_or(|target| target == id) && slot.saved.enabled {
+                if host_id.is_none_or(|target| target == id) && slot.saved.enabled && !slot.updating
+                {
                     slot.client = None;
                     slot.tunnel = None;
                     slot.consecutive_failures = 0;
@@ -496,6 +535,45 @@ impl HostRegistry {
         self.wake();
     }
 
+    fn apply_established_slot(
+        &self,
+        host_id: &str,
+        established: EstablishedConnection,
+    ) -> (bool, bool) {
+        let (client_opt, tunnel, conn_state, state_val, server_id) = established;
+        let mut guard = self.remotes.lock().unwrap();
+        let Some(slot) = guard.get_mut(host_id) else {
+            return (false, false);
+        };
+        let was_connected = slot.connection.is_connected();
+        slot.client = client_opt;
+        slot.tunnel = tunnel;
+        slot.connection = conn_state;
+        slot.consecutive_failures = 0;
+        if let Some(sid) = server_id
+            && slot.saved.server_id.is_none()
+        {
+            slot.saved.server_id = Some(sid);
+        }
+        if let Some(val) = state_val {
+            if let (Ok(snap), Ok(cfg)) = (
+                serde_json::from_value::<Snapshot>(val["snapshot"].clone()),
+                serde_json::from_value::<Config>(val["config"].clone()),
+            ) {
+                let data = CachedHostData {
+                    saved_at: now(),
+                    snapshot: snap,
+                    config: cfg,
+                };
+                Self::save_cache(&self.local_home, host_id, &data);
+                slot.cached = Some(data);
+            }
+            slot.last_state_raw = val;
+        }
+        let became_connected = !was_connected && slot.connection.is_connected();
+        (true, became_connected || !was_connected)
+    }
+
     /// Upgrade a remote host's `canband` daemon over its authenticated transport (`update.daemon`),
     /// even when the host is currently held in `ApiMismatch` (`BackendOlder`) state.
     pub fn update_remote_daemon(&self, host_id: &str) -> Result<Value> {
@@ -503,17 +581,43 @@ impl HostRegistry {
             host_id != "local",
             "Use Settings -> Updates to update This Mac"
         );
-        let saved = {
-            let guard = self.remotes.lock().unwrap();
-            guard
-                .get(host_id)
-                .map(|s| s.saved.clone())
-                .with_context(|| format!("Unknown Canban host '{host_id}'"))?
+        let (saved, prior_server_id) = {
+            let mut guard = self.remotes.lock().unwrap();
+            let slot = guard
+                .get_mut(host_id)
+                .with_context(|| format!("Unknown Canban host '{host_id}'"))?;
+            if slot.updating || slot.connection.is_updating() {
+                bail!(
+                    "Daemon update is already in progress on '{}'",
+                    slot.saved.name
+                );
+            }
+            if matches!(slot.saved.transport, HostTransport::Local) {
+                bail!("Cannot remote-update Local transport");
+            }
+            slot.updating = true;
+            slot.client = None;
+            slot.tunnel = None;
+            slot.connection = HostConnectionState::Updating {
+                version: String::new(),
+            };
+            (slot.saved.clone(), slot.saved.server_id.clone())
         };
+        let mut updating_guard = UpdatingGuard {
+            registry: self,
+            host_id: host_id.to_owned(),
+            active: true,
+        };
+        self.emit(AppEvent::Changed {
+            topic: "application",
+            card_id: None,
+        });
+        self.wake();
+
         let params = json!({
             "request_key": id(),
         });
-        let res = match &saved.transport {
+        let rpc_res = match &saved.transport {
             HostTransport::Local => bail!("Cannot remote-update Local transport"),
             HostTransport::Tcp { addr, token } => client::rpc_endpoint(
                 &ClientEndpoint::Tcp {
@@ -526,25 +630,171 @@ impl HostRegistry {
             HostTransport::Ssh {
                 target,
                 remote_home,
-            } => {
-                let tun = SshTunnel::start(
-                    &Self::tunnels_dir(&self.local_home),
-                    &format!("{host_id}-update"),
-                    target,
-                    remote_home.as_deref(),
-                )?;
+            } => SshTunnel::start(
+                &Self::tunnels_dir(&self.local_home),
+                &format!("{host_id}-update"),
+                target,
+                remote_home.as_deref(),
+            )
+            .and_then(|tun| {
                 client::rpc_endpoint(
                     &ClientEndpoint::Unix(tun.socket_path.clone()),
                     "update.daemon",
                     params,
                 )
+            }),
+        };
+
+        let res = match rpc_res {
+            Ok(val) => val,
+            Err(err) => {
+                updating_guard.active = false;
+                {
+                    let mut guard = self.remotes.lock().unwrap();
+                    if let Some(slot) = guard.get_mut(host_id) {
+                        slot.updating = false;
+                        slot.consecutive_failures = 0;
+                        slot.next_retry_at = std::time::Instant::now();
+                        slot.connection = if slot.saved.enabled {
+                            HostConnectionState::Connecting
+                        } else {
+                            HostConnectionState::Offline {
+                                error: "Disabled".into(),
+                                cached_at: slot.cached.as_ref().map(|c| c.saved_at),
+                            }
+                        };
+                    }
+                }
+                self.poll_remotes_once();
+                self.emit(AppEvent::Changed {
+                    topic: "application",
+                    card_id: None,
+                });
+                self.wake();
+                return Err(err);
             }
-        }?;
+        };
+
         if res["updated"] == true {
-            // Wait briefly for the remote service restart before triggering reconnect.
-            std::thread::sleep(Duration::from_millis(600));
-            self.reconnect(Some(host_id));
+            let target_ver = res["version"]
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            if !target_ver.is_empty() {
+                {
+                    let mut guard = self.remotes.lock().unwrap();
+                    if let Some(slot) = guard.get_mut(host_id)
+                        && slot.updating
+                    {
+                        slot.connection = HostConnectionState::Updating {
+                            version: target_ver.clone(),
+                        };
+                    }
+                }
+                self.emit(AppEvent::Changed {
+                    topic: "application",
+                    card_id: None,
+                });
+            }
+
+            // `update.daemon` schedules `systemctl --user restart canban.service` (`RestartSec=2`),
+            // `launchctl kickstart -k`, or graceful `app.shutdown` + spawn ~120ms after flushing RPC.
+            // Poll within a bounded window until the restarted daemon comes online with the updated build/API.
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            std::thread::sleep(Duration::from_millis(350));
+            let mut connected = false;
+            while std::time::Instant::now() < deadline {
+                let still_enabled = {
+                    let guard = self.remotes.lock().unwrap();
+                    guard.get(host_id).is_some_and(|s| s.saved.enabled)
+                };
+                if !still_enabled {
+                    break;
+                }
+                if let Ok(est) = self.establish_connection(host_id, &saved.transport) {
+                    let matches_restarted = match &est.2 {
+                        HostConnectionState::Connected { version, .. } => {
+                            let new_sid = est.4.as_deref();
+                            let sid_changed = prior_server_id
+                                .as_deref()
+                                .zip(new_sid)
+                                .is_some_and(|(old, cur)| old != cur);
+                            target_ver.is_empty() || version == &target_ver || sid_changed
+                        }
+                        _ => false,
+                    };
+                    if matches_restarted {
+                        updating_guard.active = false;
+                        {
+                            let mut guard = self.remotes.lock().unwrap();
+                            if let Some(slot) = guard.get_mut(host_id) {
+                                slot.updating = false;
+                                if let Some(sid) = &est.4 {
+                                    slot.saved.server_id = Some(sid.clone());
+                                }
+                            }
+                        }
+                        let _ = self.apply_established_slot(host_id, est);
+                        connected = true;
+                        break;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(400));
+            }
+
+            if !connected {
+                updating_guard.active = false;
+                {
+                    let mut guard = self.remotes.lock().unwrap();
+                    if let Some(slot) = guard.get_mut(host_id) {
+                        slot.updating = false;
+                        slot.client = None;
+                        slot.tunnel = None;
+                        slot.consecutive_failures = 0;
+                        slot.next_retry_at = std::time::Instant::now();
+                        slot.connection = if slot.saved.enabled {
+                            HostConnectionState::Connecting
+                        } else {
+                            HostConnectionState::Offline {
+                                error: "Disabled".into(),
+                                cached_at: slot.cached.as_ref().map(|c| c.saved_at),
+                            }
+                        };
+                    }
+                }
+                self.poll_remotes_once();
+            }
+
+            self.emit(AppEvent::Changed {
+                topic: "resync",
+                card_id: None,
+            });
+            self.wake();
+        } else {
+            updating_guard.active = false;
+            {
+                let mut guard = self.remotes.lock().unwrap();
+                if let Some(slot) = guard.get_mut(host_id) {
+                    slot.updating = false;
+                    slot.consecutive_failures = 0;
+                    slot.next_retry_at = std::time::Instant::now();
+                    slot.connection = if slot.saved.enabled {
+                        HostConnectionState::Connecting
+                    } else {
+                        HostConnectionState::Offline {
+                            error: "Disabled".into(),
+                            cached_at: slot.cached.as_ref().map(|c| c.saved_at),
+                        }
+                    };
+                }
+            }
             self.poll_remotes_once();
+            self.emit(AppEvent::Changed {
+                topic: "application",
+                card_id: None,
+            });
+            self.wake();
         }
         Ok(res)
     }
@@ -653,7 +903,7 @@ impl HostRegistry {
                 let Some(slot) = guard.get_mut(&id) else {
                     continue;
                 };
-                if !slot.saved.enabled {
+                if !slot.saved.enabled || slot.updating {
                     continue;
                 }
                 if let Some(tun) = &mut slot.tunnel
@@ -675,7 +925,9 @@ impl HostRegistry {
                     Ok(state_val) => {
                         let rtt_ms = start.elapsed().as_millis() as u64;
                         let mut guard = self.remotes.lock().unwrap();
-                        if let Some(slot) = guard.get_mut(&id) {
+                        if let Some(slot) = guard.get_mut(&id)
+                            && !slot.updating
+                        {
                             if slot.last_state_raw != state_val {
                                 if let (Ok(snap), Ok(cfg)) = (
                                     serde_json::from_value::<Snapshot>(
@@ -706,7 +958,9 @@ impl HostRegistry {
                     Err(err) => {
                         let msg = format!("{err:#}");
                         let mut guard = self.remotes.lock().unwrap();
-                        if let Some(slot) = guard.get_mut(&id) {
+                        if let Some(slot) = guard.get_mut(&id)
+                            && !slot.updating
+                        {
                             slot.client = None;
                             slot.tunnel = None;
                             slot.reconnect_count = slot.reconnect_count.saturating_add(1);
@@ -734,7 +988,9 @@ impl HostRegistry {
             match self.establish_connection(&id, &saved.transport) {
                 Ok((client_opt, tunnel, conn_state, state_val, server_id)) => {
                     let mut guard = self.remotes.lock().unwrap();
-                    if let Some(slot) = guard.get_mut(&id) {
+                    if let Some(slot) = guard.get_mut(&id)
+                        && !slot.updating
+                    {
                         let was_connected = slot.connection.is_connected();
                         slot.client = client_opt;
                         slot.tunnel = tunnel;
@@ -769,7 +1025,9 @@ impl HostRegistry {
                 Err(err) => {
                     let msg = format!("{err:#}");
                     let mut guard = self.remotes.lock().unwrap();
-                    if let Some(slot) = guard.get_mut(&id) {
+                    if let Some(slot) = guard.get_mut(&id)
+                        && !slot.updating
+                    {
                         slot.consecutive_failures = slot.consecutive_failures.saturating_add(1);
                         let backoff_secs = match slot.consecutive_failures {
                             1 => 1,
@@ -1136,5 +1394,343 @@ impl HostRegistry {
             });
         }
         Ok(res)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn update_remote_daemon_transitions_updating_guards_concurrency_and_recovers_after_delayed_restart()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let local_home = dir.path().join("local-home");
+        let remote_home = dir.path().join("remote-home");
+
+        let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+        let _local_running = local_app.start_with_listen(None).unwrap();
+        let local_client =
+            AppClient::connect_home(local_home.clone(), Path::new("/bin/echo")).unwrap();
+
+        let remote_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        canban_updater::atomic(
+            &network::token_path(&remote_home),
+            format!("{remote_token}\n").as_bytes(),
+        )
+        .unwrap();
+
+        // Mock an older `canband` TCP endpoint that blocks briefly inside `update.daemon`
+        // so we can observe the live `Updating` state, test concurrent duplicate update rejection,
+        // and verify `poll_remotes_once` / `reconnect` do not clobber `Updating` mid-upgrade!
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let remote_addr = format!("127.0.0.1:{port}");
+
+        // Write saved host directly into hosts.json in an initial older/mismatch state.
+        let hosts_file = HostsFile {
+            hosts: vec![SavedHost {
+                id: "home-linux".into(),
+                name: "Home Linux".into(),
+                transport: HostTransport::Tcp {
+                    addr: remote_addr.clone(),
+                    token: remote_token.into(),
+                },
+                ssh_target: Some("jjy@127.0.0.1".into()),
+                server_id: Some("srv-old-daemon".into()),
+                enabled: true,
+                added_at: now(),
+            }],
+        };
+        canban_context::atomic(
+            &HostRegistry::hosts_path(&local_home),
+            &serde_json::to_vec_pretty(&hosts_file).unwrap(),
+        )
+        .unwrap();
+
+        let registry = HostRegistry::new(local_client);
+        let events_rx = registry.subscribe();
+
+        let (entered_rpc_tx, entered_rpc_rx) = mpsc::channel();
+        let (release_rpc_tx, release_rpc_rx) = mpsc::channel();
+        let remote_home_for_restart = remote_home.clone();
+
+        let mock_thread = std::thread::spawn(move || {
+            // Accept connections until `update.daemon` arrives (background supervisor may probe first).
+            loop {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() || line.is_empty() {
+                    continue;
+                }
+                let req: Value = serde_json::from_str(&line).unwrap_or_default();
+                assert_eq!(req["auth"].as_str(), Some(remote_token));
+                match req["method"].as_str().unwrap_or("") {
+                    "app.ping" => {
+                        // Simulate older daemon API so supervisor sees ApiMismatch.
+                        let _ = writeln!(
+                            stream,
+                            "{}",
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": req["id"],
+                                "result": {
+                                    "api_version": API_VERSION.saturating_sub(2),
+                                    "server_id": "srv-old-daemon",
+                                    "build": {
+                                        "version": "20261114-1",
+                                        "api": API_VERSION.saturating_sub(2),
+                                        "platform": "linux-x86_64"
+                                    }
+                                }
+                            })
+                        );
+                        let _ = stream.flush();
+                    }
+                    "update.daemon" => {
+                        let _ = entered_rpc_tx.send(());
+                        let _ = release_rpc_rx.recv_timeout(Duration::from_secs(5));
+                        let _ = writeln!(
+                            stream,
+                            "{}",
+                            json!({
+                                "jsonrpc": "2.0",
+                                "id": req["id"],
+                                "result": {
+                                    "updated": true,
+                                    "version": env!("CARGO_PKG_VERSION"),
+                                    "api_version": API_VERSION,
+                                    "restarting": true
+                                }
+                            })
+                        );
+                        let _ = stream.flush();
+                        drop(stream);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            // Drop old listener and simulate `RestartSec=2` systemd restart delay (~950ms > old 600ms sleep!)
+            // before starting a real updated `AppServer` on the exact same port!
+            drop(listener);
+            std::thread::sleep(Duration::from_millis(950));
+            let restarted_app =
+                AppServer::open(remote_home_for_restart, PathBuf::from("/bin/echo")).unwrap();
+            let restarted_running = restarted_app
+                .start_with_listen(Some(ServerListenConfig {
+                    tailscale: false,
+                    port,
+                    listen: Some(format!("127.0.0.1:{port}")),
+                }))
+                .unwrap();
+            (restarted_app, restarted_running)
+        });
+
+        // Wait briefly for initial probe to establish `ApiMismatch`.
+        for _ in 0..20 {
+            registry.poll_remotes_once();
+            if registry.summaries().iter().any(|h| {
+                h.id == "home-linux"
+                    && matches!(h.connection, HostConnectionState::ApiMismatch { .. })
+            }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let initial_sum = registry
+            .summaries()
+            .into_iter()
+            .find(|h| h.id == "home-linux")
+            .unwrap();
+        assert!(
+            matches!(
+                initial_sum.connection,
+                HostConnectionState::ApiMismatch { .. }
+            ),
+            "expected initial ApiMismatch, got {:?}",
+            initial_sum.connection
+        );
+
+        // Drain prior events, then launch `update_remote_daemon` on a worker thread.
+        while events_rx.try_recv().is_ok() {}
+        let reg_for_upd = registry.clone();
+        let upd_handle = std::thread::spawn(move || reg_for_upd.update_remote_daemon("home-linux"));
+
+        entered_rpc_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("update.daemon RPC should reach remote host");
+
+        // Verify `Updating` was emitted BEFORE `update.daemon` finished!
+        let mid_sum = registry
+            .summaries()
+            .into_iter()
+            .find(|h| h.id == "home-linux")
+            .unwrap();
+        assert!(
+            mid_sum.is_updating(),
+            "expected host to be in Updating state during in-flight RPC, got {:?}",
+            mid_sum.connection
+        );
+        assert_eq!(mid_sum.connection.short_status(), "Updating daemon…");
+        assert!(
+            events_rx.try_recv().is_ok(),
+            "expected AppEvent::Changed when entering Updating state"
+        );
+
+        // Concurrent duplicate `update_remote_daemon` call must be rejected cleanly.
+        let dup_err = registry
+            .update_remote_daemon("home-linux")
+            .expect_err("concurrent update_remote_daemon should fail");
+        assert!(
+            dup_err.to_string().contains("already in progress"),
+            "unexpected duplicate update error: {dup_err:#}"
+        );
+
+        // Background `reconnect` and `poll_remotes_once` must NOT clobber `Updating`!
+        registry.reconnect(None);
+        registry.poll_remotes_once();
+        let after_poll = registry
+            .summaries()
+            .into_iter()
+            .find(|h| h.id == "home-linux")
+            .unwrap();
+        assert!(
+            after_poll.is_updating(),
+            "poll_remotes_once / reconnect clobbered Updating state: {:?}",
+            after_poll.connection
+        );
+
+        // Let `update.daemon` reply and simulate delayed systemd restart (~950ms).
+        let _ = release_rpc_tx.send(());
+        let res = upd_handle.join().unwrap().expect("update_remote_daemon ok");
+        assert_eq!(res["updated"], true);
+
+        let (_restarted_app, _restarted_running) = mock_thread.join().unwrap();
+
+        // By the time `update_remote_daemon` returns, the host must have seamlessly transitioned to `Connected`!
+        let final_sum = registry
+            .summaries()
+            .into_iter()
+            .find(|h| h.id == "home-linux")
+            .unwrap();
+        assert!(
+            final_sum.is_connected(),
+            "expected host to recover to Connected after delayed daemon restart, got {:?}",
+            final_sum.connection
+        );
+        assert!(!final_sum.is_updating());
+    }
+
+    #[test]
+    fn failed_remote_daemon_update_clears_updating_flag_and_restores_accurate_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let local_home = dir.path().join("local-home");
+        let local_app = AppServer::open(local_home.clone(), PathBuf::from("/bin/echo")).unwrap();
+        let _local_running = local_app.start_with_listen(None).unwrap();
+        let local_client =
+            AppClient::connect_home(local_home.clone(), Path::new("/bin/echo")).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let remote_addr = format!("127.0.0.1:{port}");
+        let remote_token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        let hosts_file = HostsFile {
+            hosts: vec![SavedHost {
+                id: "home-linux".into(),
+                name: "Home Linux".into(),
+                transport: HostTransport::Tcp {
+                    addr: remote_addr,
+                    token: remote_token.into(),
+                },
+                ssh_target: None,
+                server_id: Some("srv-old-daemon".into()),
+                enabled: true,
+                added_at: now(),
+            }],
+        };
+        canban_context::atomic(
+            &HostRegistry::hosts_path(&local_home),
+            &serde_json::to_vec_pretty(&hosts_file).unwrap(),
+        )
+        .unwrap();
+
+        let stop_mock = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop_mock.clone();
+        let mock_thread = std::thread::spawn(move || {
+            let _ = listener.set_nonblocking(false);
+            while !stop_clone.load(Ordering::SeqCst) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                if stop_clone.load(Ordering::SeqCst) {
+                    break;
+                }
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() || line.is_empty() {
+                    continue;
+                }
+                let req: Value = serde_json::from_str(&line).unwrap_or_default();
+                if req["method"] == "update.daemon" {
+                    let _ = writeln!(
+                        stream,
+                        "{}",
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": req["id"],
+                            "error": {"code": -32000, "message": "Release download timed out"}
+                        })
+                    );
+                    let _ = stream.flush();
+                } else if req["method"] == "app.ping" {
+                    let _ = writeln!(
+                        stream,
+                        "{}",
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": req["id"],
+                            "result": {
+                                "api_version": API_VERSION.saturating_sub(1),
+                                "server_id": "srv-old-daemon",
+                                "build": {"version": "20261114-1", "api": API_VERSION.saturating_sub(1)}
+                            }
+                        })
+                    );
+                    let _ = stream.flush();
+                }
+            }
+        });
+
+        let registry = HostRegistry::new(local_client);
+        let err = registry
+            .update_remote_daemon("home-linux")
+            .expect_err("expected RPC error from mock server");
+        assert!(err.to_string().contains("Release download timed out"));
+
+        let restored = registry
+            .summaries()
+            .into_iter()
+            .find(|h| h.id == "home-linux")
+            .unwrap();
+        assert!(
+            !restored.is_updating(),
+            "updating flag must be cleared on failure, got {:?}",
+            restored.connection
+        );
+        assert!(
+            matches!(restored.connection, HostConnectionState::ApiMismatch { .. }),
+            "expected host to return to ApiMismatch after failed update, got {:?}",
+            restored.connection
+        );
+
+        stop_mock.store(true, Ordering::SeqCst);
+        let _ = std::net::TcpStream::connect(format!("127.0.0.1:{port}"));
+        let _ = mock_thread.join();
     }
 }

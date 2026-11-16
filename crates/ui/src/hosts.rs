@@ -163,11 +163,51 @@ fn infer_ssh_target_for_host(summary: &HostSummary) -> Option<String> {
     }
 }
 
+fn mark_host_connection(ui: Ui, host_id: &str, next: HostConnectionState) {
+    let cur_list = untracked(|| effective_hosts(ui));
+    ui.hosts.set(
+        cur_list
+            .into_iter()
+            .map(|mut h| {
+                if h.id == host_id {
+                    h.connection = next.clone();
+                }
+                h
+            })
+            .collect(),
+    );
+    ui.snapshot.update(|s| {
+        if let Some(h) = s.host_summaries.get_mut(host_id) {
+            h.connection = next.clone();
+        }
+    });
+}
+
 pub fn update_host_daemon(ui: Ui, summary: HostSummary) {
+    if summary.is_local || summary.is_updating() {
+        return;
+    }
+    let already_updating = untracked(|| {
+        effective_hosts(ui)
+            .iter()
+            .any(|h| h.id == summary.id && h.is_updating())
+    });
+    if already_updating {
+        return;
+    }
     let host_id = summary.id.clone();
     let host_name = summary.name.clone();
     let ssh_fallback = infer_ssh_target_for_host(&summary);
     let prefer_tailscale = !summary.transport_label.contains("SSH");
+
+    mark_host_connection(
+        ui,
+        &host_id,
+        HostConnectionState::Updating {
+            version: String::new(),
+        },
+    );
+
     if let Some(reg) = crate::HOSTS.get().cloned() {
         ui.notify(format!("Updating Canban daemon on {host_name}…"));
         ui.spawn(async move {
@@ -218,9 +258,39 @@ pub fn update_host_daemon(ui: Ui, summary: HostSummary) {
             }
         });
     } else {
-        ui.notify(format!(
-            "Gallery preview: simulated daemon update on {host_name}"
-        ));
+        ui.notify(format!("Gallery preview: updating daemon on {host_name}…"));
+        let hid = host_id;
+        ui.owner.run(|| {
+            set_timeout(Duration::from_millis(1600), move || {
+                let target_ver = env!("CARGO_PKG_VERSION").to_owned();
+                let connected = HostConnectionState::Connected {
+                    rtt_ms: 9,
+                    api_version: canban_updater::DESKTOP_API,
+                    version: target_ver.clone(),
+                    platform: "linux-x86_64".into(),
+                };
+                if let Some(mut rows) = ui.hosts.try_get() {
+                    let mut changed = false;
+                    for h in &mut rows {
+                        if h.id == hid && h.is_updating() {
+                            h.connection = connected.clone();
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        let _ = ui.hosts.try_set(rows);
+                    }
+                }
+                if let Some(mut snap) = ui.snapshot.try_get()
+                    && let Some(h) = snap.host_summaries.get_mut(&hid)
+                    && h.is_updating()
+                {
+                    h.connection = connected.clone();
+                    let _ = ui.snapshot.try_set(snap);
+                }
+                ui.notify(format!("Updated {host_name} daemon to {target_ver}"));
+            });
+        });
     }
 }
 
@@ -269,10 +339,22 @@ fn spawn_ssh_bootstrap_terminal(ui: Ui, ssh_target: &str, prefer_tailscale: bool
 pub(crate) fn status_tone(summary: &HostSummary) -> Tone {
     if summary.is_connected() {
         Tone::Success
+    } else if summary.is_updating() {
+        Tone::Info
     } else if summary.needs_attention() {
         Tone::Danger
     } else {
         Tone::Attention
+    }
+}
+
+pub(crate) fn host_status_badge(summary: &HostSummary) -> View {
+    let tone = status_tone(summary);
+    let label = summary.connection.short_status();
+    if summary.is_updating() {
+        live_status(label, tone)
+    } else {
+        status(label, tone)
     }
 }
 
@@ -311,12 +393,23 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                         .iter()
                         .filter(|h| !h.is_local && h.is_connected())
                         .count();
-                    format!(
-                        "Connected Hosts\n{} + {} / {} remote online",
-                        crate::platform::LOCAL_HOST_NAME,
-                        online,
-                        remote_count
-                    )
+                    let updating = list.iter().filter(|h| h.is_updating()).count();
+                    if updating > 0 {
+                        format!(
+                            "Connected Hosts\n{} + {} / {} remote online ({} updating…)",
+                            crate::platform::LOCAL_HOST_NAME,
+                            online,
+                            remote_count,
+                            updating
+                        )
+                    } else {
+                        format!(
+                            "Connected Hosts\n{} + {} / {} remote online",
+                            crate::platform::LOCAL_HOST_NAME,
+                            online,
+                            remote_count
+                        )
+                    }
                 }
             })
             .placement(Placement::Bottom),
@@ -325,7 +418,10 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
             let list = hosts_memo.get();
             let remote_count = list.iter().filter(|h| !h.is_local).count();
             let any_attention = list.iter().any(|h| !h.is_local && h.needs_attention());
-            let any_offline = list.iter().any(|h| !h.is_local && h.is_offline());
+            let any_updating = list.iter().any(|h| !h.is_local && h.is_updating());
+            let any_offline = list
+                .iter()
+                .any(|h| !h.is_local && h.is_offline() && !h.is_updating());
             let online_remotes = list
                 .iter()
                 .filter(|h| !h.is_local && h.is_connected())
@@ -336,6 +432,8 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                 ACCENT
             } else if any_attention {
                 DANGER
+            } else if any_updating {
+                ACCENT
             } else if any_offline {
                 ATTENTION
             } else {
@@ -345,11 +443,15 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                 SELECTED
             } else if any_attention || any_offline {
                 ATTENTION_SURFACE
+            } else if any_updating {
+                SELECTED
             } else {
                 INSET
             };
             let dot_color = if any_attention {
                 DANGER
+            } else if any_updating {
+                ACCENT
             } else if any_offline {
                 ATTENTION
             } else if remote_count > 0 {
@@ -374,6 +476,11 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                     Some(
                         if remote_count == 0 {
                             format!("Connected Hosts, {} only", crate::platform::LOCAL_HOST_NAME)
+                        } else if any_updating {
+                            format!(
+                                "Connected Hosts, updating remote daemon ({} of {} online)",
+                                online_remotes, remote_count
+                            )
                         } else {
                             format!(
                                 "Connected Hosts, {} of {} remote online",
@@ -392,6 +499,8 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
                         ACCENT
                     } else if any_attention {
                         DANGER
+                    } else if any_updating {
+                        ACCENT
                     } else if any_offline {
                         ATTENTION
                     } else {
@@ -404,7 +513,11 @@ pub fn trigger_pill(ui: Ui) -> impl IntoElement {
 
             if remote_count > 0 {
                 btn = btn
-                    .child(view().w(px(6.)).h(px(6.)).rounded_full().bg(dot_color))
+                    .child(if any_updating {
+                        live_dot(dot_color)
+                    } else {
+                        view().w(px(6.)).h(px(6.)).rounded_full().bg(dot_color)
+                    })
                     .child(
                         muted(format!("{}/{}", online_remotes + 1, remote_count + 1))
                             .text_size(px(11.5))
@@ -485,34 +598,42 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                 let hid_set = h.id.clone();
                                 let hid_diag = h.id.clone();
                                 let tone = status_tone(h);
-                                let short = h.connection.short_status();
+                                let status_chip = host_status_badge(h);
                                 let err_opt = h.connection.error_detail().map(str::to_owned);
                                 let is_local = h.is_local;
                                 let is_conn = h.is_connected();
+                                let is_upd = h.is_updating();
 
                                 let mut actions =
                                     view().flex_row().flex_wrap().items_center().gap_1();
                                 if !is_local {
-                                    if matches!(
-                                        h.connection,
-                                        HostConnectionState::ApiMismatch { .. }
-                                    ) {
-                                        let h_upd = h.clone();
+                                    if is_upd {
+                                        actions = actions.child(
+                                            compact_action("Updating…", Variant::Secondary, |_| {})
+                                                .disabled(|| true),
+                                        );
+                                    } else {
+                                        if matches!(
+                                            h.connection,
+                                            HostConnectionState::ApiMismatch { .. }
+                                        ) {
+                                            let h_upd = h.clone();
+                                            actions = actions.child(compact_action(
+                                                "Update Daemon",
+                                                Variant::Primary,
+                                                move |_| update_host_daemon(ui, h_upd.clone()),
+                                            ));
+                                        }
                                         actions = actions.child(compact_action(
-                                            "Update Daemon",
-                                            Variant::Primary,
-                                            move |_| update_host_daemon(ui, h_upd.clone()),
+                                            "Reconnect",
+                                            if is_conn {
+                                                Variant::Quiet
+                                            } else {
+                                                Variant::Secondary
+                                            },
+                                            move |_| reconnect_host(ui, Some(hid_rec.clone())),
                                         ));
                                     }
-                                    actions = actions.child(compact_action(
-                                        "Reconnect",
-                                        if is_conn {
-                                            Variant::Quiet
-                                        } else {
-                                            Variant::Secondary
-                                        },
-                                        move |_| reconnect_host(ui, Some(hid_rec.clone())),
-                                    ));
                                 }
                                 if is_conn {
                                     actions = actions.child(compact_action(
@@ -558,7 +679,7 @@ pub fn popover(ui: Ui) -> impl IntoElement {
                                                     )
                                                     .child(badge(h.transport_label.clone())),
                                             )
-                                            .child(status(short, tone)),
+                                            .child(status_chip),
                                     )
                                     .child(
                                         view()
@@ -685,8 +806,11 @@ pub fn new_project_host_picker(
                 let hid_sel = h.id.clone();
                 let cur_sel = selected_id.clone();
                 let is_online = h.is_connected();
+                let is_updating = h.is_updating();
                 let title = if is_online {
                     h.name.clone()
+                } else if is_updating {
+                    format!("{} (updating…)", h.name)
                 } else {
                     format!("{} (offline)", h.name)
                 };
@@ -701,8 +825,12 @@ pub fn new_project_host_picker(
                     move |_| {
                         if !is_online {
                             ui.operation_error.set(
-                                "Reconnect this remote host before creating a new Project on it."
-                                    .into(),
+                                if is_updating {
+                                    "Wait for the remote daemon update to finish before creating a new Project on this host."
+                                } else {
+                                    "Reconnect this remote host before creating a new Project on it."
+                                }
+                                .into(),
                             );
                             return;
                         }
@@ -725,41 +853,73 @@ pub fn offline_banner(ui: Ui) -> impl IntoElement {
         move || {
             dynamic(move || {
                 let host_id = ui.active_project_host();
-                let (host_name, detail, mismatch_sum) = ui.snapshot.with(|s| {
-                    let name = s.host_display_name(&host_id).to_owned();
-                    let sum = s.host_summary(&host_id).cloned();
-                    let status = sum
-                        .as_ref()
-                        .map(|h| h.connection.short_status())
-                        .unwrap_or_else(|| "Offline · Cached".into());
-                    let mm = sum.filter(|h| {
-                        matches!(h.connection, HostConnectionState::ApiMismatch { .. })
+                let list = effective_hosts(ui);
+                let host_sum = list
+                    .into_iter()
+                    .find(|h| h.id == host_id)
+                    .or_else(|| ui.snapshot.with(|s| s.host_summary(&host_id).cloned()));
+                let host_name = host_sum
+                    .as_ref()
+                    .map(|h| h.name.clone())
+                    .unwrap_or_else(|| {
+                        ui.snapshot
+                            .with(|s| s.host_display_name(&host_id).to_owned())
                     });
-                    (name, status, mm)
-                });
+                let is_updating = host_sum.as_ref().is_some_and(HostSummary::is_updating);
+                let detail = host_sum
+                    .as_ref()
+                    .map(|h| h.connection.short_status())
+                    .unwrap_or_else(|| "Offline · Cached".into());
+                let mismatch_sum = host_sum
+                    .filter(|h| matches!(h.connection, HostConnectionState::ApiMismatch { .. }));
                 let hid_rec = host_id.clone();
                 let hid_diag = host_id;
                 let mut trailing = view().flex_row().items_center().gap_1p5();
-                if let Some(h_upd) = mismatch_sum {
+                if is_updating {
+                    trailing = trailing.child(
+                        compact_action("Updating…", Variant::Secondary, |_| {}).disabled(|| true),
+                    );
+                } else {
+                    if let Some(h_upd) = mismatch_sum {
+                        trailing = trailing.child(compact_action(
+                            "Update Daemon",
+                            Variant::Primary,
+                            move |_| update_host_daemon(ui, h_upd.clone()),
+                        ));
+                    }
                     trailing = trailing.child(compact_action(
-                        "Update Daemon",
-                        Variant::Primary,
-                        move |_| update_host_daemon(ui, h_upd.clone()),
+                        "Reconnect",
+                        Variant::Secondary,
+                        move |_| {
+                            reconnect_host(ui, Some(hid_rec.clone()));
+                        },
                     ));
                 }
-                trailing = trailing
-                    .child(compact_action("Reconnect", Variant::Secondary, move |_| {
-                        reconnect_host(ui, Some(hid_rec.clone()));
-                    }))
-                    .child(compact_action("Diagnostics", Variant::Quiet, move |_| {
+                trailing =
+                    trailing.child(compact_action("Diagnostics", Variant::Quiet, move |_| {
                         open_host_settings(ui, hid_diag.clone(), "diagnostics");
                     }));
+                let banner_bg = if is_updating {
+                    SELECTED
+                } else {
+                    ATTENTION_SURFACE
+                };
+                let banner_border = if is_updating { ACCENT } else { ATTENTION };
+                let banner_text = if is_updating {
+                    format!(
+                        "{host_name} is updating ({detail}) — viewing cached Kanban state read-only while the remote daemon restarts."
+                    )
+                } else {
+                    format!(
+                        "{host_name} is offline ({detail}) — viewing last cached Kanban state read-only while remote Agents continue on the host."
+                    )
+                };
                 view()
                     .px_4()
                     .py_2()
-                    .bg(ATTENTION_SURFACE)
+                    .bg(banner_bg)
                     .border_b_1()
-                    .border_color(ATTENTION)
+                    .border_color(banner_border)
                     .flex_row()
                     .flex_wrap()
                     .items_center()
@@ -771,13 +931,8 @@ pub fn offline_banner(ui: Ui) -> impl IntoElement {
                             .items_center()
                             .gap_2()
                             .min_w(px(0.))
-                            .child(live_dot(ATTENTION))
-                            .child(
-                                label(format!(
-                                    "{host_name} is offline ({detail}) — viewing last cached Kanban state read-only while remote Agents continue on the host."
-                                ))
-                                .text_size(px(12.5)),
-                            ),
+                            .child(live_dot(banner_border))
+                            .child(label(banner_text).text_size(px(12.5))),
                     )
                     .child(trailing)
             })
@@ -1703,35 +1858,48 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
             let mut controls = view().flex_row().flex_wrap().items_center().gap_1p5();
             if !h.is_local {
                 if is_enabled {
-                    if matches!(h.connection, HostConnectionState::ApiMismatch { .. }) {
-                        let h_upd = h.clone();
+                    if h.is_updating() {
+                        controls = controls.child(
+                            compact_action("Updating…", Variant::Secondary, |_| {})
+                                .disabled(|| true),
+                        );
+                    } else {
+                        if matches!(h.connection, HostConnectionState::ApiMismatch { .. }) {
+                            let h_upd = h.clone();
+                            controls = controls.child(compact_action(
+                                "Update Daemon",
+                                Variant::Primary,
+                                move |_| update_host_daemon(ui, h_upd.clone()),
+                            ));
+                        }
                         controls = controls.child(compact_action(
-                            "Update Daemon",
-                            Variant::Primary,
-                            move |_| update_host_daemon(ui, h_upd.clone()),
+                            "Reconnect",
+                            Variant::Quiet,
+                            move |_| reconnect_host(ui, Some(hid_rec.clone())),
                         ));
                     }
-                    controls = controls.child(compact_action(
-                        "Reconnect",
-                        Variant::Quiet,
-                        move |_| reconnect_host(ui, Some(hid_rec.clone())),
-                    ));
                 }
                 controls = controls
-                    .child(compact_action(
-                        if is_enabled { "Disable" } else { "Enable" },
-                        Variant::Quiet,
-                        move |_| {
-                            if let Some(reg) = crate::HOSTS.get() {
-                                if let Err(e) = reg.set_host_enabled(&hid_toggle, !is_enabled) {
-                                    ui.operation_error.set(format!("{e:#}"));
-                                } else {
-                                    reload_saved();
-                                    refresh(ui);
+                    .child(
+                        compact_action(
+                            if is_enabled { "Disable" } else { "Enable" },
+                            Variant::Quiet,
+                            move |_| {
+                                if let Some(reg) = crate::HOSTS.get() {
+                                    if let Err(e) = reg.set_host_enabled(&hid_toggle, !is_enabled) {
+                                        ui.operation_error.set(format!("{e:#}"));
+                                    } else {
+                                        reload_saved();
+                                        refresh(ui);
+                                    }
                                 }
-                            }
-                        },
-                    ))
+                            },
+                        )
+                        .disabled({
+                            let updating = h.is_updating();
+                            move || updating
+                        }),
+                    )
                     .child(compact_action("Rename", Variant::Quiet, move |_| {
                         rename_draft.set(cur_name.clone());
                         renaming_id.set(Some(hid_edit.clone()));
@@ -1783,7 +1951,7 @@ pub fn settings_section_view(ui: Ui) -> impl IntoElement {
                                 .child(live_dot(dot_color_for_tone(tone)))
                                 .child(label(h.name.clone()).font_weight(FontWeight::SEMIBOLD))
                                 .child(badge(h.transport_label.clone()))
-                                .child(status(h.connection.short_status(), tone)),
+                                .child(host_status_badge(h)),
                         )
                         .child(controls),
                 )
@@ -2089,6 +2257,198 @@ mod tests {
         assert!(
             update_buttons >= 2,
             "expected `Update Daemon` action in both Settings -> Hosts and Connected Hosts popover, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn updating_host_renders_progress_status_and_replaces_update_action_across_surfaces() {
+        #[component]
+        fn ProbeUpdatingHosts() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let mut snapshot = Snapshot::default();
+            snapshot.projects.push(Project {
+                id: "home-linux:proj-remote".into(),
+                name: "Backend Worker".into(),
+                directory: "/home/jjy/backend".into(),
+                location: None,
+                github: None,
+                detected_github: None,
+                github_disconnected: false,
+                delivery_mode: Default::default(),
+                agent_overrides: BTreeMap::new(),
+                tags: Vec::new(),
+                workflow: Workflow::default(),
+                target_branch: Some("main".into()),
+                created_at: 1,
+            });
+            let local_summary = HostSummary {
+                id: "local".into(),
+                name: "This Mac".into(),
+                is_local: true,
+                transport_label: "Local socket".into(),
+                endpoint_label: "~/.canban/app.sock".into(),
+                ssh_target: None,
+                server_id: None,
+                connection: HostConnectionState::Connected {
+                    rtt_ms: 0,
+                    api_version: canban_updater::DESKTOP_API,
+                    version: "0.4.2".into(),
+                    platform: "macos-aarch64".into(),
+                },
+                active_agents: 0,
+                max_agents: 5,
+                project_count: 0,
+                reconnect_count: 0,
+                last_synced_at: None,
+            };
+            let updating_summary = HostSummary {
+                id: "home-linux".into(),
+                name: "Home Linux".into(),
+                is_local: false,
+                transport_label: "Tailscale / TCP".into(),
+                endpoint_label: "100.64.0.10:7680".into(),
+                ssh_target: Some("jjy@100.64.0.10".into()),
+                server_id: Some("srv-home".into()),
+                connection: HostConnectionState::Updating {
+                    version: "20261116-1".into(),
+                },
+                active_agents: 0,
+                max_agents: 8,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: Some(1_700_000_000_000),
+            };
+            snapshot
+                .entity_hosts
+                .insert("home-linux:proj-remote".into(), "home-linux".into());
+            snapshot
+                .host_summaries
+                .insert("local".into(), local_summary.clone());
+            snapshot
+                .host_summaries
+                .insert("home-linux".into(), updating_summary.clone());
+            ui.hosts.set(vec![local_summary, updating_summary]);
+            ui.snapshot.set(snapshot);
+            ui.project.set("home-linux:proj-remote".into());
+            ui.utility_popup.set("hosts".into());
+            view()
+                .w(px(1200.))
+                .h(px(1100.))
+                .child(trigger_pill(ui))
+                .child(offline_banner(ui))
+                .child(settings_section_view(ui))
+                .child(popover(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(1100.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeUpdatingHosts>());
+        let texts = collect_mounted_texts(core.commit().expect("mount batch"));
+
+        let status_badges = texts
+            .iter()
+            .filter(|t| *t == "Updating to 20261116-1…")
+            .count();
+        assert!(
+            status_badges >= 2,
+            "expected `Updating to 20261116-1…` status in Connected Hosts popover and Settings -> Hosts, got {texts:?}"
+        );
+        let busy_buttons = texts.iter().filter(|t| *t == "Updating…").count();
+        assert!(
+            busy_buttons >= 3,
+            "expected disabled `Updating…` action indicator in popover, settings, and banner, got {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t == "Update Daemon"),
+            "did not expect clickable `Update Daemon` while host is already updating, got {texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("Home Linux is updating (Updating to 20261116-1…)")),
+            "expected updating banner copy for Home Linux, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn optimistic_mark_host_connection_transitions_mismatch_to_updating() {
+        #[component]
+        fn ProbeOptimisticUpdate() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let local_summary = HostSummary {
+                id: "local".into(),
+                name: "This Mac".into(),
+                is_local: true,
+                transport_label: "Local socket".into(),
+                endpoint_label: "~/.canban/app.sock".into(),
+                ssh_target: None,
+                server_id: None,
+                connection: HostConnectionState::Connected {
+                    rtt_ms: 0,
+                    api_version: canban_updater::DESKTOP_API,
+                    version: "0.4.2".into(),
+                    platform: "macos-aarch64".into(),
+                },
+                active_agents: 0,
+                max_agents: 5,
+                project_count: 0,
+                reconnect_count: 0,
+                last_synced_at: None,
+            };
+            let mismatch = HostSummary {
+                id: "home-linux".into(),
+                name: "Home Linux".into(),
+                is_local: false,
+                transport_label: "Tailscale / TCP".into(),
+                endpoint_label: "100.64.0.10:7680".into(),
+                ssh_target: None,
+                server_id: Some("srv-home".into()),
+                connection: HostConnectionState::ApiMismatch {
+                    server_api: 54,
+                    app_api: canban_updater::DESKTOP_API,
+                    version: "20261115-2".into(),
+                },
+                active_agents: 0,
+                max_agents: 8,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: None,
+            };
+            let mut snap = Snapshot::default();
+            snap.host_summaries
+                .insert("local".into(), local_summary.clone());
+            snap.host_summaries
+                .insert("home-linux".into(), mismatch.clone());
+            ui.hosts.set(vec![local_summary, mismatch.clone()]);
+            ui.snapshot.set(snap);
+            ui.utility_popup.set("hosts".into());
+
+            // Trigger optimistic transition directly.
+            mark_host_connection(
+                ui,
+                &mismatch.id,
+                HostConnectionState::Updating {
+                    version: String::new(),
+                },
+            );
+
+            view().w(px(1200.)).h(px(800.)).child(popover(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1200.), px(800.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeOptimisticUpdate>());
+        let texts = collect_mounted_texts(core.commit().expect("mount batch"));
+
+        assert!(
+            texts.iter().any(|t| t == "Updating daemon…"),
+            "expected optimistic `Updating daemon…` status in Connected Hosts popover, got {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t == "Update Daemon"),
+            "expected `Update Daemon` button hidden during optimistic update, got {texts:?}"
         );
     }
 }

@@ -2144,6 +2144,22 @@ pub fn Gallery() -> impl IntoElement {
                     ui.navigate("board");
                     canban_ui::hosts::toggle_popover(ui);
                 }))
+                .child(action("Multi-host · Updating", Variant::Quiet, move |_| {
+                    let (mut snap, mut hosts) = fixtures::multi_host_workspace(false);
+                    if let Some(h) = hosts.iter_mut().find(|h| h.id == "home-linux") {
+                        h.connection = canban_types::HostConnectionState::Updating {
+                            version: "20261116-1".into(),
+                        };
+                        snap.host_summaries.insert(h.id.clone(), h.clone());
+                    }
+                    ui.discovery.set(fixtures::discovery_catalog());
+                    ui.hosts.set(hosts);
+                    ui.snapshot.set(snap);
+                    ui.select_project("remote-linux-core".into());
+                    scene.set("workspace".into());
+                    ui.navigate("board");
+                    canban_ui::hosts::toggle_popover(ui);
+                }))
                 .child(action("Connect Machine", Variant::Quiet, move |_| {
                     let (snap, hosts) = fixtures::multi_host_workspace(false);
                     ui.discovery.set(fixtures::discovery_catalog());

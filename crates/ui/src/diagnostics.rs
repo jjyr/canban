@@ -351,7 +351,6 @@ pub fn section_view(ui: Ui) -> impl IntoElement {
 
         // Card 1: Connection & Transport
         if let Some(h) = &summary {
-            let tone = crate::hosts::status_tone(h);
             let mut conn_rows = view()
                 .gap_0p5()
                 .child(kv_row("Host", h.name.clone()))
@@ -379,6 +378,16 @@ pub fn section_view(ui: Ui) -> impl IntoElement {
                         format!("v{api_version} (Desktop v{})", canban_updater::DESKTOP_API),
                     ))
                     .child(kv_row("Daemon build", format!("{version} ({platform})")));
+            } else if let HostConnectionState::Updating { version } = &h.connection {
+                if !version.trim().is_empty() {
+                    conn_rows = conn_rows.child(kv_row("Target release", version.clone()));
+                }
+                conn_rows = conn_rows.child(
+                    view().pt_1p5().items_start().child(
+                        compact_action("Updating…", Variant::Secondary, |_| {})
+                            .disabled(|| true),
+                    ),
+                );
             } else if let HostConnectionState::ApiMismatch {
                 server_api,
                 app_api,
@@ -411,28 +420,43 @@ pub fn section_view(ui: Ui) -> impl IntoElement {
             }
             stack = stack.child(diag_card(
                 "1. Connection & Transport",
-                status(h.connection.short_status(), tone).into_element(),
+                crate::hosts::host_status_badge(h).into_element(),
                 conn_rows,
             ));
         }
 
         if let Some(err) = diag["error"].as_str() {
             let hid_rec = host_id.clone();
+            let is_updating = summary.as_ref().is_some_and(HostSummary::is_updating);
             stack = stack.child(
                 panel()
                     .p_3p5()
                     .gap_2()
                     .border_1()
-                    .border_color(ATTENTION)
-                    .bg(ATTENTION_SURFACE)
-                    .child(label("Remote Diagnostics Unreachable").font_weight(FontWeight::SEMIBOLD))
+                    .border_color(if is_updating { ACCENT } else { ATTENTION })
+                    .bg(if is_updating { SELECTED } else { ATTENTION_SURFACE })
+                    .child(
+                        label(if is_updating {
+                            "Remote Daemon Updating"
+                        } else {
+                            "Remote Diagnostics Unreachable"
+                        })
+                        .font_weight(FontWeight::SEMIBOLD),
+                    )
                     .child(muted(err.to_owned()))
                     .child(
-                        view().items_start().child(compact_action(
-                            "Reconnect Host",
-                            Variant::Secondary,
-                            move |_| crate::hosts::reconnect_host(ui, Some(hid_rec.clone())),
-                        )),
+                        view().items_start().child(
+                            if is_updating {
+                                compact_action("Updating…", Variant::Secondary, |_| {})
+                                    .disabled(|| true)
+                            } else {
+                                compact_action(
+                                    "Reconnect Host",
+                                    Variant::Secondary,
+                                    move |_| crate::hosts::reconnect_host(ui, Some(hid_rec.clone())),
+                                )
+                            },
+                        ),
                     ),
             );
             return stack;
@@ -827,6 +851,84 @@ mod tests {
         assert!(
             texts.iter().any(|t| t.contains("100.64.0.10:7680")),
             "expected remote endpoint in Diagnostics, got {texts:?}"
+        );
+    }
+
+    #[test]
+    fn diagnostics_renders_updating_host_state_without_stale_reconnect_cta() {
+        #[component]
+        fn ProbeUpdatingDiagnostics() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            let local = HostSummary {
+                id: "local".into(),
+                name: "This Mac".into(),
+                is_local: true,
+                transport_label: "Local socket".into(),
+                endpoint_label: "~/.canban/app.sock".into(),
+                ssh_target: None,
+                server_id: None,
+                connection: HostConnectionState::Connected {
+                    rtt_ms: 0,
+                    api_version: canban_updater::DESKTOP_API,
+                    version: "0.4.2".into(),
+                    platform: "macos-aarch64".into(),
+                },
+                active_agents: 0,
+                max_agents: 5,
+                project_count: 1,
+                reconnect_count: 0,
+                last_synced_at: None,
+            };
+            let remote = HostSummary {
+                id: "home-linux".into(),
+                name: "Home Linux".into(),
+                is_local: false,
+                transport_label: "Tailscale TCP".into(),
+                endpoint_label: "100.64.0.10:7680".into(),
+                ssh_target: Some("jjy@home-box".into()),
+                server_id: Some("srv-home".into()),
+                connection: HostConnectionState::Updating {
+                    version: "20261116-1".into(),
+                },
+                active_agents: 0,
+                max_agents: 6,
+                project_count: 2,
+                reconnect_count: 0,
+                last_synced_at: Some(1_700_000_000_000),
+            };
+            ui.hosts.set(vec![local, remote]);
+            ui.settings_host.set("home-linux".into());
+            ui.diagnostics.set(json!({
+                "error": "Host 'Home Linux' is currently unavailable (Updating to 20261116-1…)"
+            }));
+            view().w(px(1080.)).h(px(1000.)).child(section_view(ui))
+        }
+
+        let mut core = Core::new(ApproxTextEngine, size(px(1080.), px(1000.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<ProbeUpdatingDiagnostics>());
+        let batch = core.commit().expect("mount batch");
+        let texts: Vec<String> = batch
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                MountItem::Text { text, .. } => Some(text.text.to_string()),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            texts.iter().any(|t| t == "Updating to 20261116-1…"),
+            "expected `Updating to 20261116-1…` status in Diagnostics, got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|t| t == "Remote Daemon Updating"),
+            "expected `Remote Daemon Updating` card title during restart, got {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t == "Reconnect Host"),
+            "did not expect `Reconnect Host` button while daemon update is in flight, got {texts:?}"
         );
     }
 }

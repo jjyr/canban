@@ -112,6 +112,10 @@ pub enum HostConnectionState {
         #[serde(default)]
         platform: String,
     },
+    Updating {
+        #[serde(default)]
+        version: String,
+    },
     Reconnecting {
         #[serde(default)]
         attempt: u32,
@@ -139,6 +143,10 @@ impl HostConnectionState {
         matches!(self, Self::Connected { .. })
     }
 
+    pub fn is_updating(&self) -> bool {
+        matches!(self, Self::Updating { .. })
+    }
+
     pub fn short_status(&self) -> String {
         match self {
             Self::Connecting => "Connecting…".into(),
@@ -147,6 +155,14 @@ impl HostConnectionState {
                     "Connected".into()
                 } else {
                     format!("Connected · {rtt_ms}ms")
+                }
+            }
+            Self::Updating { version } => {
+                let ver = version.trim();
+                if ver.is_empty() {
+                    "Updating daemon…".into()
+                } else {
+                    format!("Updating to {ver}…")
                 }
             }
             Self::Reconnecting { attempt, .. } => {
@@ -212,6 +228,10 @@ pub struct HostSummary {
 impl HostSummary {
     pub fn is_connected(&self) -> bool {
         self.is_local || self.connection.is_connected()
+    }
+
+    pub fn is_updating(&self) -> bool {
+        !self.is_local && self.connection.is_updating()
     }
 
     pub fn is_offline(&self) -> bool {
@@ -553,5 +573,46 @@ mod host_tests {
         assert_eq!(local.host_display_name("local"), "This Mac");
         assert!(local.is_host_offline("home-linux"));
         assert!(!local.is_host_offline("local"));
+    }
+
+    #[test]
+    fn updating_connection_state_serializes_and_formats_status_cleanly() {
+        let generic = HostConnectionState::Updating {
+            version: String::new(),
+        };
+        assert!(!generic.is_connected());
+        assert!(generic.is_updating());
+        assert_eq!(generic.short_status(), "Updating daemon…");
+        assert_eq!(generic.error_detail(), None);
+
+        let versioned = HostConnectionState::Updating {
+            version: "20261116-1".into(),
+        };
+        assert_eq!(versioned.short_status(), "Updating to 20261116-1…");
+
+        let json = serde_json::to_value(&versioned).unwrap();
+        assert_eq!(json["state"], "updating");
+        assert_eq!(json["version"], "20261116-1");
+        let roundtrip: HostConnectionState = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip, versioned);
+
+        let summary = HostSummary {
+            id: "home-linux".into(),
+            name: "home-linux".into(),
+            is_local: false,
+            transport_label: "Tailscale / TCP".into(),
+            endpoint_label: "100.84.12.5:7680".into(),
+            ssh_target: None,
+            server_id: None,
+            connection: generic,
+            active_agents: 0,
+            max_agents: 8,
+            project_count: 1,
+            reconnect_count: 0,
+            last_synced_at: None,
+        };
+        assert!(summary.is_updating());
+        assert!(summary.is_offline());
+        assert!(!summary.needs_attention());
     }
 }
