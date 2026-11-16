@@ -196,6 +196,7 @@ pub struct HostRegistry {
     local: Arc<AppClient>,
     remotes: Mutex<BTreeMap<String, RemoteSlot>>,
     entity_hosts: RwLock<BTreeMap<String, String>>,
+    acknowledged_owners: Mutex<BTreeMap<String, String>>,
     listeners: Mutex<Vec<mpsc::Sender<AppEvent>>>,
     wake_tx: mpsc::SyncSender<()>,
     stop: AtomicBool,
@@ -257,6 +258,7 @@ impl HostRegistry {
             local: local.clone(),
             remotes: Mutex::new(map),
             entity_hosts: RwLock::new(BTreeMap::new()),
+            acknowledged_owners: Mutex::new(BTreeMap::new()),
             listeners: Mutex::new(Vec::new()),
             wake_tx,
             stop: AtomicBool::new(false),
@@ -1194,6 +1196,17 @@ impl HostRegistry {
             }
         }
 
+        // Newly created remote Cards can be addressed before the supervisor's
+        // authoritative snapshot catches up. Do not project replies into its
+        // cache: the UI must distinguish a stale cache from read confirmation.
+        self.acknowledged_owners.lock().unwrap().retain(|id, host| {
+            if combined.entity_hosts.contains_key(id) || !combined.host_summaries.contains_key(host)
+            {
+                return false;
+            }
+            combined.entity_hosts.insert(id.clone(), host.clone());
+            true
+        });
         *self.entity_hosts.write().unwrap() = combined.entity_hosts.clone();
         Ok(combined)
     }
@@ -1387,7 +1400,28 @@ impl HostRegistry {
                     | "usage.refresh"
             )
         {
-            self.sync_host_now(&host_id);
+            if matches!(
+                method,
+                "card.create" | "comment.add" | "github.issue.add" | "github.item.add"
+            ) {
+                // These replies contain the committed Card/Event. Do not make
+                // acknowledgement wait for a second full remote state transfer.
+                if method != "comment.add"
+                    && let Some(id) = res["id"].as_str()
+                {
+                    self.acknowledged_owners
+                        .lock()
+                        .unwrap()
+                        .insert(id.into(), host_id.clone());
+                    self.entity_hosts
+                        .write()
+                        .unwrap()
+                        .insert(id.into(), host_id.clone());
+                }
+                self.wake();
+            } else {
+                self.sync_host_now(&host_id);
+            }
             self.emit(AppEvent::Changed {
                 topic: "application",
                 card_id: None,

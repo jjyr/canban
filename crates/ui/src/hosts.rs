@@ -127,7 +127,7 @@ pub fn reconnect_host(ui: Ui, host_id: Option<String>) {
             .map(|(sums, snap_res)| {
                 let _ = ui.hosts.try_set(sums);
                 if let Ok(snap) = snap_res {
-                    let _ = ui.snapshot.try_set(snap);
+                    ui.accept_snapshot(snap);
                 }
             });
             ui.notify(match host_id {
@@ -223,7 +223,7 @@ pub fn update_host_daemon(ui: Ui, summary: HostSummary) {
                 Ok((Ok(val), sums, snap_res)) => {
                     let _ = ui.hosts.try_set(sums);
                     if let Ok(snap) = snap_res {
-                        let _ = ui.snapshot.try_set(snap);
+                        ui.accept_snapshot(snap);
                     }
                     if val["updated"] == true {
                         let ver = val["version"].as_str().unwrap_or("latest");
@@ -235,7 +235,7 @@ pub fn update_host_daemon(ui: Ui, summary: HostSummary) {
                 Ok((Err(err), sums, snap_res)) => {
                     let _ = ui.hosts.try_set(sums);
                     if let Ok(snap) = snap_res {
-                        let _ = ui.snapshot.try_set(snap);
+                        ui.accept_snapshot(snap);
                     }
                     let msg = format!("{err:#}");
                     if msg.contains("Unknown update operation: update.daemon")
@@ -286,7 +286,7 @@ pub fn update_host_daemon(ui: Ui, summary: HostSummary) {
                     && h.is_updating()
                 {
                     h.connection = connected.clone();
-                    let _ = ui.snapshot.try_set(snap);
+                    ui.accept_snapshot(snap);
                 }
                 ui.notify(format!("Updated {host_name} daemon to {target_ver}"));
             });
@@ -998,7 +998,7 @@ fn finish_host_registration(
         match res {
             Ok(Ok((_sum, snap, all))) => {
                 let _ = ui.hosts.try_set(all);
-                let _ = ui.snapshot.try_set(snap);
+                ui.accept_snapshot(snap);
                 close_overlays(ui);
                 ui.notify(format!("Connected to {host_name}"));
             }

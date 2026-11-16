@@ -1055,7 +1055,7 @@ pub fn close_entry_confirmed(ui: Ui, id: &str) {
             Ok(Ok((value, snapshot))) => {
                 if let Some(s) = snapshot {
                     ui.snapshot_epoch.update(|v| *v += 1);
-                    ui.snapshot.set(s);
+                    ui.accept_snapshot(s);
                 }
                 finish_optimistic_close(ui, &ctx, Ok(value));
             }

@@ -1,4 +1,5 @@
 use crate::drafts::Draft;
+pub(crate) mod submission;
 use canban_types::*;
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
@@ -145,7 +146,9 @@ pub struct Ui {
     /// Shared minute-granularity clock (s) for utility bar usage countdowns.
     pub utility_clock: Signal<u64>,
     pub refreshing: Signal<bool>,
+    pub(crate) refresh_requested: Signal<bool>,
     pub snapshot_epoch: Signal<u64>,
+    pub(crate) committed_writes: Stored<submission::CommittedWrites>,
     pub output: Signal<String>,
     pub output_observed_at: Signal<Option<u64>>,
     pub output_request: Signal<u64>,
@@ -213,6 +216,18 @@ pub fn workspace_dismiss_action(page: &str, blocked: bool) -> Option<WorkspaceDi
 }
 
 impl Ui {
+    /// Apply a server snapshot without losing writes acknowledged since it was
+    /// read (including remote hosts whose cached state has not caught up yet).
+    pub(crate) fn accept_snapshot(self, mut snapshot: Snapshot) {
+        if self
+            .committed_writes
+            .try_with(|writes| writes.reconcile(&mut snapshot))
+            .is_some()
+        {
+            self.snapshot.try_set(snapshot);
+        }
+    }
+
     pub fn apply_config(self, cfg: &Config) {
         batch(move || {
             self.default_agent.set(cfg.default_agent.clone());
@@ -479,7 +494,9 @@ impl Ui {
             runtime_clock: signal(now()),
             utility_clock: signal(now() / 1000),
             refreshing: signal(false),
+            refresh_requested: signal(false),
             snapshot_epoch: signal(0),
+            committed_writes: stored(Default::default()),
             output: signal(String::new()),
             output_observed_at: signal(None),
             output_request: signal(0),
@@ -867,21 +884,23 @@ impl Ui {
 }
 pub fn refresh(ui: Ui) {
     if ui.refreshing.get_untracked() {
+        ui.refresh_requested.set(true);
         return;
     }
-    ui.refreshing.set(true);
     let Some(app) = crate::APP.get().cloned() else {
         ui.status
             .set("Gallery preview: no AppServer connected".into());
         return;
     };
+    ui.refreshing.set(true);
+    ui.refresh_requested.set(false);
     let epoch = ui.snapshot_epoch.get_untracked();
     let restore_project = ui.project.get_untracked().is_empty();
     let cfg_host = ui.effective_config_host();
     ui.spawn(async move {
         let result = blocking(move || {
             let snapshot = crate::merged_snapshot()?;
-            let summaries = crate::host_summaries();
+            let summaries = snapshot_summaries(&snapshot);
             let saved_project = if restore_project {
                 app.call("utilities.state", json!({}))?["preferences"]["last_project"]
                     .as_str()
@@ -899,10 +918,13 @@ pub fn refresh(ui: Ui) {
         .await;
         if ui.snapshot_epoch.get_untracked() != epoch {
             ui.refreshing.set(false);
+            refresh(ui);
             return;
         }
         match result {
-            Ok(Ok((snapshot, config, summaries, saved_project))) => {
+            Ok(Ok((mut snapshot, config, summaries, saved_project))) => {
+                ui.committed_writes
+                    .with(|writes| writes.reconcile(&mut snapshot));
                 if ui.notification_resync.replace(false) {
                     ui.notification_delivery
                         .with(|t| t.baseline(&canban_notifications::sound_items(&snapshot)));
@@ -935,7 +957,16 @@ pub fn refresh(ui: Ui) {
             Err(e) => ui.operation_error.set(format!("Refresh worker: {e}")),
         }
         ui.refreshing.set(false);
+        if ui.refresh_requested.get_untracked() {
+            refresh(ui);
+        }
     });
+}
+
+fn snapshot_summaries(snapshot: &Snapshot) -> Vec<HostSummary> {
+    let mut summaries: Vec<_> = snapshot.host_summaries.values().cloned().collect();
+    summaries.sort_by_key(|s| !s.is_local);
+    summaries
 }
 pub fn dispatch(ui: Ui, method: &'static str, params: Value) {
     dispatch_then(ui, method, params, |_| {});
@@ -1004,15 +1035,17 @@ pub fn dispatch_complete(
     let source = ui.location();
     let active_project = ui.project.get_untracked();
     let cfg_host = ui.effective_config_host();
+    let immediate = submission::immediate(method);
+    let epoch = ui.snapshot_epoch.get_untracked();
     ui.spawn(async move {
         let result = blocking(move || {
             let value = crate::routed_call(method, params, Some(active_project.as_str()))?;
-            Ok::<_, anyhow::Error>((
-                value,
-                crate::merged_snapshot()?,
-                crate::config_for_host(&cfg_host),
-                crate::host_summaries(),
-            ))
+            let refreshed = if immediate {
+                None
+            } else {
+                Some((crate::merged_snapshot()?, crate::config_for_host(&cfg_host)))
+            };
+            Ok::<_, anyhow::Error>((value, refreshed))
         })
         .await;
         ui.pending_methods.update(|s| {
@@ -1026,17 +1059,31 @@ pub fn dispatch_complete(
         ui.pending
             .set(!ui.pending_methods.with_untracked(BTreeSet::is_empty));
         match result {
-            Ok(Ok((value, snapshot, config, summaries))) => {
+            Ok(Ok((value, refreshed))) => {
+                let stale = ui.snapshot_epoch.get_untracked() != epoch;
                 batch(|| {
                     ui.snapshot_epoch.update(|v| *v += 1);
-                    if !summaries.is_empty() {
-                        ui.hosts.set(summaries);
+                    ui.committed_writes
+                        .with(|writes| writes.record(method, &value));
+                    if let Some((mut snapshot, config)) = refreshed.filter(|_| !stale) {
+                        ui.committed_writes
+                            .with(|writes| writes.reconcile(&mut snapshot));
+                        let summaries = snapshot_summaries(&snapshot);
+                        if !summaries.is_empty() {
+                            ui.hosts.set(summaries);
+                        }
+                        ui.apply_config(&config);
+                        ui.snapshot.set(snapshot);
+                    } else if immediate {
+                        ui.committed_writes.with(|writes| {
+                            ui.snapshot.update(|snapshot| writes.overlay(snapshot));
+                        });
                     }
-                    ui.apply_config(&config);
                     ui.runtime_clock.set(now());
-                    ui.snapshot.set(snapshot);
                 });
-                ui.prefetch_active_reports();
+                if !immediate && !stale {
+                    ui.prefetch_active_reports();
+                }
                 let failed = matches!(value["state"].as_str(), Some("failed" | "unknown"));
                 if failed {
                     let msg = format!(
@@ -1172,6 +1219,9 @@ pub fn dispatch_complete(
                     _ => {}
                 }
                 after(Ok(value));
+                if immediate || stale {
+                    refresh(ui);
+                }
             }
             Ok(Err(e)) => {
                 let error = format!("{e:#}");
@@ -1321,6 +1371,7 @@ pub(crate) fn should_open_created_card(active: bool, source: &Location) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod submission_rpc;
 
     fn location(page: &str, new_draft: &str) -> Location {
         Location {

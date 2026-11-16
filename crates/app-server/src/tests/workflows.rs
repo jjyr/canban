@@ -1,4 +1,44 @@
 use super::*;
+
+#[test]
+fn admission_projection_matches_full_state_without_loading_history() {
+    let (_dir, app, p, c) = setup();
+    app.call(
+        "card.move",
+        json!({"card_id":c.id,"stage":"develop","revision":c.revision}),
+    )
+    .unwrap();
+    app.call(
+        "comment.add",
+        json!({"card_id":c.id,"body":"Question","mentions":["codex"]}),
+    )
+    .unwrap();
+    let other = app
+        .call("card.create", json!({"project_id":p.id,"title":"Second"}))
+        .unwrap();
+    app.call(
+        "card.move",
+        json!({"card_id":other["id"],"stage":"develop","revision":other["revision"]}),
+    )
+    .unwrap();
+    let full = app.snapshot().unwrap();
+    assert!(!full.events.is_empty());
+    assert!(!full.questions.is_empty());
+    let narrow = app.store.lock().unwrap().db().admission_snapshot().unwrap();
+    assert!(narrow.events.is_empty());
+    assert!(narrow.workflow_revisions.is_empty());
+    assert_eq!(narrow.questions, full.questions);
+    assert_eq!(
+        canban_scheduler::active_count(&narrow),
+        canban_scheduler::active_count(&full)
+    );
+    for slots in 0..=4 {
+        assert_eq!(
+            canban_scheduler::admissions(&narrow, slots),
+            canban_scheduler::admissions(&full, slots)
+        );
+    }
+}
 fn plan_yaml(id: &str, instruction: &str) -> String {
     format!(
         r#"schema: 1

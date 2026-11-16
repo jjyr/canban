@@ -204,7 +204,8 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
     assert_eq!(snap.host_display_name("home-linux"), "Home Linux");
     assert!(!snap.is_host_offline("home-linux"));
 
-    // 3. Routed mutation on remote Project lands on remote AppServer and updates merged_snapshot immediately!
+    // 3. Routed creation acknowledges the write and ownership immediately; the
+    // supervisor refreshes the full remote snapshot separately.
     let remote_c2: Card = serde_json::from_value(
         registry
             .call_routed(
@@ -222,6 +223,13 @@ fn host_registry_merges_multi_host_routes_mutations_caches_offline_and_recovers(
     .unwrap();
     assert_eq!(local_app.snapshot().unwrap().cards.len(), 1);
     assert_eq!(remote_app.snapshot().unwrap().cards.len(), 2);
+    let pending_snap = registry.merged_snapshot().unwrap();
+    assert_eq!(pending_snap.card_host(&remote_c2.id), "home-linux");
+    assert_eq!(
+        registry.resolve_target_host("comment.add", &json!({"card_id":remote_c2.id}), None),
+        "home-linux"
+    );
+    registry.poll_remotes_once();
     let snap2 = registry.merged_snapshot().unwrap();
     assert_eq!(snap2.cards.len(), 3);
     assert_eq!(snap2.card_host(&remote_c2.id), "home-linux");

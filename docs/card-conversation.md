@@ -128,6 +128,14 @@ native acceptance](card-editor.md#readers-previews-and-navigation).
 
 Desktop comments always send an explicit `mentions` array (including `[]`); legacy clients omitting the field keep the server's existing parser. An asynchronous send clears only the submitted draft, preserving newer text/recipients and failed submissions. No CLI interface change is required.
 
+Send completes on the write acknowledgement and projects the returned comment
+into Activity immediately. It does not wait for a full workspace/host refresh.
+Refresh requests coalesce in the background; a refresh requested during an
+in-flight read is retained, and older or cached snapshots cannot hide an
+acknowledged comment while catching up. A failed refresh is a separate workspace
+error, not a failed Send: the already submitted draft stays cleared. Actual write
+failures retain the draft for retry, and pending submission guards still apply.
+
 **Attach files** opens the native multiple-file chooser directly. Client-local paths are read off the render thread and sent as bytes, so they do not assume an AppServer on the same machine. Command+V supports ordinary text and clipboard images/files through the NSH clipboard service; file drops use the same upload boundary. Per-file chips expose uploading, success, removal and failure/retry. Pending/failed uploads block submission until finished, retried or removed. Uploaded bytes are shared in memory while pending rather than copied on every keystroke. Removing a chip removes its draft reference; the already saved attachment and its Timeline event remain Card history. Uploads are not a filesystem deletion operation.
 
 Attachment references are readable links to Card-managed resources. Images referenced by normal Markdown image URLs use NSH's Markdown renderer; uploaded images currently appear as attachment links/chips rather than inline image thumbnails. Existing saved attachments remain reachable under **... → Attachments**. There is no path-entry panel in the attachment flow.

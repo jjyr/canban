@@ -380,7 +380,7 @@ pub fn register(ui: Ui, project_id: &str, raw_tag: &str) -> Option<String> {
                     })
                     .await;
                     if let Ok(Ok(snapshot)) = result {
-                        ui.snapshot.try_set(snapshot);
+                        ui.accept_snapshot(snapshot);
                     }
                 });
             } else {

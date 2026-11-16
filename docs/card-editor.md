@@ -70,6 +70,14 @@ the submitted draft's history entry so Back returns directly to the previous
 route), allowing consecutive Card creation without re-opening New Card. Published
 task readers do not present unsubmitted edits as saved content.
 
+New Card submission completes when AppServer acknowledges the write, without
+waiting for a full workspace refresh. The returned Card appears immediately;
+one coalesced background refresh reconciles workflow and host state. Older or
+cached snapshots retain acknowledged writes until authoritative state includes
+them. A refresh failure is reported separately from a successful submission and
+does not restore the submitted draft or invite a duplicate create. Host summaries
+reuse the fetched snapshot rather than reading the full state again.
+
 Text, recipients and references persist. Pending attachment bytes, native undo
 history, caret and scroll positions are not restored across application restart.
 Successful attachment links remain in the persisted Markdown. Expansion uses

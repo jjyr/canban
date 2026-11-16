@@ -164,7 +164,17 @@ impl AppServer {
     pub(crate) fn pump_admissions(&self) -> Result<()> {
         let config = self.config();
         let admitted = self.store.lock().unwrap().write(|db| {
-            let snapshot = db.snapshot()?;
+            let waiting: bool = db.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM workflow_runs WHERE json_extract(data,'$.state')='waiting_capacity')",
+                [],
+                |row| row.get(0),
+            )?;
+            if !waiting {
+                return Ok(Vec::new());
+            }
+            // Admission never consumes Timeline/report/GitHub history. Loading that
+            // history here puts its full cost on every mutation's response path.
+            let snapshot = db.admission_snapshot()?;
             let ids = canban_scheduler::admissions(&snapshot, config.scheduler.max_agents);
             let mut cards = Vec::new();
             for id in ids {

@@ -466,6 +466,21 @@ impl Db<'_> {
         )?;
         Ok(event)
     }
+    /// The scheduler's admission inputs, excluding unrelated content/history.
+    /// Keep questions: pending assignments affect idle-session slot eligibility.
+    pub fn admission_snapshot(&self) -> Result<Snapshot> {
+        Ok(Snapshot {
+            cards: self.list()?,
+            terminals: self.list()?,
+            workflow_runs: self.list()?,
+            configuration_sessions: self.list()?,
+            merge_batches: self.list()?,
+            scheduled_runs: self.list()?,
+            questions: self.list()?,
+            ..Default::default()
+        })
+    }
+
     pub fn snapshot(&self) -> Result<Snapshot> {
         let sources: Vec<WorkflowSource> = self.list()?;
         let revisions: Vec<WorkflowRevision> = self.list()?;
