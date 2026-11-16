@@ -155,20 +155,22 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
         if st.log_ticket.try_get() != Some(ticket) {
             return;
         }
-        st.log_loading.set(false);
-        if let Ok(value) = &res {
-            let val = &value.data;
-            let page = val["commits"].as_array().cloned().unwrap_or_default();
-            let has_more = val["has_more"].as_bool().unwrap_or(false);
-            if append {
-                st.log_commits.update(|list| list.extend(page));
-            } else {
-                st.log_commits.set(page);
+        batch(|| {
+            st.log_loading.set(false);
+            if let Ok(value) = &res {
+                let val = &value.data;
+                let page = val["commits"].as_array().cloned().unwrap_or_default();
+                let has_more = val["has_more"].as_bool().unwrap_or(false);
+                if append {
+                    st.log_commits.update(|list| list.extend(page));
+                } else {
+                    st.log_commits.set(page);
+                }
+                st.log_has_more.set(has_more);
+            } else if let Err(e) = res {
+                st.error.set(e);
             }
-            st.log_has_more.set(has_more);
-        } else if let Err(e) = res {
-            st.error.set(e);
-        }
+        });
     });
 }
 
@@ -244,6 +246,10 @@ fn run_sync(ui: Ui, method: &'static str, mut params: Value) {
     super::invalidate_reads(ui);
     let context = ui.review_state.read_context.with(|v| v.clone());
     let project = ui.project.get_untracked();
+    let original_project = project.clone();
+    let original_host = ui.active_project_host();
+    let original_cwd = ui.review_state.checkout_cwd.get_untracked();
+    let original_card = ui.card.get_untracked();
     params["request_key"] = json!(canban_types::id());
     ui.pending_methods.update(|s| {
         s.insert(method);
@@ -261,7 +267,14 @@ fn run_sync(ui: Ui, method: &'static str, mut params: Value) {
         if active {
             super::invalidate_reads(ui);
         } else {
-            ui.review_state.read_cache.with(|cache| cache.invalidate());
+            ui.review_state.read_cache.with(|cache| {
+                cache.invalidate_checkout(
+                    &original_host,
+                    &original_project,
+                    &original_cwd,
+                    Some(&original_card),
+                )
+            });
         }
         match result {
             Ok(Ok(_)) => {

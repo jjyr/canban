@@ -162,17 +162,29 @@ pub(crate) fn workspace_root() -> impl IntoElement {
             }
         }
     });
+    review::init(ui);
     let events = stored(if let Some(hosts) = crate::HOSTS.get() {
-        hosts.subscribe()
+        (Some(hosts.subscribe()), None)
     } else {
-        crate::APP.get().unwrap().subscribe()
+        (None, Some(crate::APP.get().unwrap().subscribe()))
     });
     let dirty = signal(false);
     set_interval(std::time::Duration::from_millis(250), move || {
-        let changed = events.with(|rx| rx.try_iter().collect::<Vec<_>>());
+        let changed = events.with(|(hosts, local)| {
+            if let Some(rx) = hosts {
+                rx.try_iter().collect::<Vec<_>>()
+            } else {
+                local
+                    .as_ref()
+                    .unwrap()
+                    .try_iter()
+                    .map(canban_app_server::hosts::HostEvent::local)
+                    .collect()
+            }
+        });
         if changed.iter().any(|e| {
             matches!(
-                e,
+                &e.event,
                 canban_types::AppEvent::Changed {
                     topic: "resync",
                     ..
@@ -183,7 +195,7 @@ pub(crate) fn workspace_root() -> impl IntoElement {
         }
         if changed.iter().any(|e| {
             matches!(
-                e,
+                &e.event,
                 canban_types::AppEvent::Changed {
                     topic: "github" | "resync",
                     ..
@@ -192,21 +204,7 @@ pub(crate) fn workspace_root() -> impl IntoElement {
         }) {
             ui.github.epoch.update(|v| *v += 1);
         }
-        if changed.iter().any(|e| {
-            matches!(
-                e,
-                canban_types::AppEvent::Changed {
-                    topic: "review" | "resync",
-                    ..
-                }
-            )
-        }) {
-            if ui.page.get_untracked() == "review" {
-                review::refresh(ui);
-            } else {
-                review::invalidate_reads(ui);
-            }
-        }
+        review::handle_host_events(ui, &changed);
         if !changed.is_empty() {
             dirty.set(true);
         }

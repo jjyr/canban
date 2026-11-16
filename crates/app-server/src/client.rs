@@ -589,7 +589,7 @@ impl AppClient {
     }
 }
 
-fn change_topic(connected: bool, previous: &Value, next: &Value) -> &'static str {
+pub(crate) fn change_topic(connected: bool, previous: &Value, next: &Value) -> &'static str {
     if !connected {
         "resync"
     } else if previous["github_revision"] != next["github_revision"] {

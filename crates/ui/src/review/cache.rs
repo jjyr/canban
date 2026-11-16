@@ -1,6 +1,6 @@
 //! Window-owned Git read cache. RPC and patch preparation run on the blocking
-//! pool; identical concurrent reads share a result. Events/manual refresh clear
-//! the generation so an older request cannot repopulate invalidated entries.
+//! pool; identical concurrent reads share a result. Scoped events/manual refresh detach
+//! matching flights so older requests cannot repopulate invalidated entries.
 use super::model::{DiffLine, parse_unified_hunk_lines};
 use crate::cache::LruCache;
 use serde_json::Value;
@@ -41,7 +41,6 @@ impl ReadValue {
 type ReadResult = Result<Arc<ReadValue>, String>;
 type Flight = Arc<OnceLock<ReadResult>>;
 struct Inner {
-    generation: u64,
     entries: LruCache<String, (Instant, Arc<ReadValue>)>,
     inflight: BTreeMap<String, Flight>,
 }
@@ -62,7 +61,6 @@ impl ReadCache {
         Self {
             ttl,
             inner: Mutex::new(Inner {
-                generation: 0,
                 entries: LruCache::new(24),
                 inflight: BTreeMap::new(),
             }),
@@ -71,26 +69,66 @@ impl ReadCache {
 
     pub fn invalidate(&self) {
         let mut inner = self.inner.lock().unwrap();
-        inner.generation += 1;
         inner.entries.clear();
         inner.inflight.clear();
     }
 
+    /// Detach matching flights as well as cached values. Their owners may finish,
+    /// but cannot refill this scope or remove a newer flight for the same key.
+    pub fn invalidate_scope(&self, host: &str, project: Option<&str>) {
+        let prefix = match project {
+            Some(project) => format!(
+                "[{},{},",
+                serde_json::json!(host),
+                serde_json::json!(project)
+            ),
+            None => format!("[{},", serde_json::json!(host)),
+        };
+        let mut inner = self.inner.lock().unwrap();
+        inner.entries.retain(|key, _| !key.starts_with(&prefix));
+        inner.inflight.retain(|key, _| !key.starts_with(&prefix));
+    }
+
+    pub fn invalidate_checkout(&self, host: &str, project: &str, cwd: &str, card: Option<&str>) {
+        let prefix = format!(
+            "[{},{},",
+            serde_json::json!(host),
+            serde_json::json!(project)
+        );
+        let matches = |key: &str| {
+            if !key.starts_with(&prefix) {
+                return false;
+            }
+            let key: Value = serde_json::from_str(key).unwrap_or_default();
+            if key[2] == "review.github_pr" {
+                return true;
+            }
+            let params = &key[3];
+            if params["use_card_worktree"] == true {
+                card.is_some() && params["card_id"].as_str() == card
+            } else {
+                params["cwd"].as_str().unwrap_or("") == cwd
+            }
+        };
+        let mut inner = self.inner.lock().unwrap();
+        inner.entries.retain(|key, _| !matches(key));
+        inner.inflight.retain(|key, _| !matches(key));
+    }
+
     pub fn load(&self, key: String, fetch: impl FnOnce() -> Result<Value, String>) -> ReadResult {
-        let (generation, flight, owner) = {
+        let (flight, owner) = {
             let mut inner = self.inner.lock().unwrap();
             if let Some((at, value)) = inner.entries.get(&key)
                 && at.elapsed() < self.ttl
             {
                 return Ok(value.clone());
             }
-            let generation = inner.generation;
             match inner.inflight.get(&key) {
-                Some(flight) => (generation, flight.clone(), false),
+                Some(flight) => (flight.clone(), false),
                 None => {
                     let flight = Arc::new(OnceLock::new());
                     inner.inflight.insert(key.clone(), flight.clone());
-                    (generation, flight, true)
+                    (flight, true)
                 }
             }
         };
@@ -100,7 +138,11 @@ impl ReadCache {
         let result = fetch().map(|v| Arc::new(ReadValue::new(v)));
         {
             let mut inner = self.inner.lock().unwrap();
-            if inner.generation == generation {
+            if inner
+                .inflight
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &flight))
+            {
                 inner.inflight.remove(&key);
                 if let Ok(value) = &result {
                     inner.entries.insert(key, (Instant::now(), value.clone()));
@@ -113,7 +155,7 @@ impl ReadCache {
 }
 
 pub fn key(host: &str, project: &str, method: &str, params: &Value) -> String {
-    // Refresh bypasses the cache by invalidating its generation; it is not a
+    // Refresh bypasses the cache by invalidating its scope; it is not a
     // different comparison and must preserve selected file/scroll state.
     let mut identity = params.clone();
     if let Some(object) = identity.as_object_mut() {
@@ -126,6 +168,90 @@ pub fn key(host: &str, project: &str, method: &str, params: &Value) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn checkout_invalidation_keeps_other_worktrees_and_matches_card_comparisons() {
+        let cache = ReadCache::default();
+        let here = key("local", "p", "git.refs", &json!({"cwd":"/wt/a"}));
+        let card = key(
+            "local",
+            "p",
+            "git.compare",
+            &json!({"card_id":"a", "use_card_worktree":true}),
+        );
+        let other = key("local", "p", "git.refs", &json!({"cwd":"/wt/b"}));
+        let other_card = key(
+            "local",
+            "p",
+            "git.compare",
+            &json!({"card_id":"b", "use_card_worktree":true}),
+        );
+        for request in [&here, &card, &other, &other_card] {
+            cache.load(request.clone(), || Ok(json!("before"))).unwrap();
+        }
+        cache.invalidate_checkout("local", "p", "/wt/a", Some("a"));
+        for request in [here, card] {
+            assert_eq!(
+                cache.load(request, || Ok(json!("after"))).unwrap().data,
+                "after"
+            );
+        }
+        for request in [other, other_card] {
+            cache
+                .load(request, || panic!("another worktree was invalidated"))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn scoped_invalidation_preserves_other_hosts_and_projects_including_inflight_reads() {
+        let cache = ReadCache::default();
+        let local = key("local", "p", "git.refs", &json!({}));
+        let other_project = key("local", "prefix", "git.refs", &json!({}));
+        let remote = key("devpc", "p", "git.refs", &json!({}));
+        cache.load(local.clone(), || Ok(json!(1))).unwrap();
+        cache.load(other_project.clone(), || Ok(json!(2))).unwrap();
+        cache
+            .load(remote.clone(), || {
+                cache.invalidate_scope("local", Some("p"));
+                Ok(json!(3))
+            })
+            .unwrap();
+        assert_eq!(cache.load(local.clone(), || Ok(json!(4))).unwrap().data, 4);
+        cache
+            .load(other_project, || panic!("another Project was invalidated"))
+            .unwrap();
+        cache
+            .load(remote.clone(), || {
+                panic!("another host flight was invalidated")
+            })
+            .unwrap();
+        cache.invalidate_scope("devpc", None);
+        assert_eq!(cache.load(remote, || Ok(json!(5))).unwrap().data, 5);
+        cache
+            .load(local, || panic!("remote recovery invalidated local Git"))
+            .unwrap();
+    }
+
+    #[test]
+    fn invalidated_old_flight_cannot_replace_newer_result_in_the_same_scope() {
+        let cache = ReadCache::default();
+        let request = key("local", "p", "git.compare", &json!({}));
+        cache
+            .load(request.clone(), || {
+                cache.invalidate_scope("local", Some("p"));
+                cache.load(request.clone(), || Ok(json!("new"))).unwrap();
+                Ok(json!("old"))
+            })
+            .unwrap();
+        assert_eq!(
+            cache
+                .load(request, || panic!("new result was lost"))
+                .unwrap()
+                .data,
+            "new"
+        );
+    }
 
     #[test]
     fn reads_are_reused_but_checkout_range_host_and_expiry_are_distinct() {

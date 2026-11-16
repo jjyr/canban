@@ -73,6 +73,15 @@ This contract defines how one native `Canban.app` client connects simultaneously
 
 ### 2.2 Client `HostRegistry`, routing and offline snapshot cache
 
+Connection events retain their host identity in a client-side `HostEvent`
+envelope; this does not change AppServer RPC payloads. A status transition such
+as Connecting, Offline, Updating or ApiMismatch updates host status only. The
+same observed state emits no additional event. Only a transition from not
+connected to Connected emits that host's `resync`; it must not invalidate
+another host's Git reads. Subsequent probes of reachable incompatible daemons wait
+30 seconds unless the user explicitly reconnects. Git applies host,
+Project and known worktree invalidation as described in [Git workbench](git-workbench.md).
+
 `canban-ui` replaces the single `OnceLock<Arc<AppClient>>` assumption with a multi-host `HostRegistry` persisted in `<local-home>/config/hosts.json`:
 
 - **Host entries:**

@@ -403,11 +403,19 @@ pub fn open_card(ui: Ui, card_id: &str) {
 /// cannot update the screen or refill the cache.
 pub fn invalidate_reads(ui: Ui) {
     let st = ui.review_state;
-    st.read_cache.with(|c| c.invalidate());
+    st.read_cache.with(|c| {
+        c.invalidate_checkout(
+            &ui.active_project_host(),
+            &ui.project.get_untracked(),
+            &st.checkout_cwd.get_untracked(),
+            Some(&ui.card.get_untracked()),
+        )
+    });
     cancel_reads(st);
 }
 
 fn cancel_reads(st: State) {
+    st.refresh_pending.set(false);
     st.refs_ticket.update(|n| *n += 1);
     st.log_ticket.update(|n| *n += 1);
     st.compare_ticket.update(|n| *n += 1);
@@ -451,7 +459,10 @@ pub(crate) async fn cached_read(
     project: String,
 ) -> Result<std::sync::Arc<cache::ReadValue>, String> {
     let cache = ui.review_state.read_cache.with(|v| v.clone());
-    let key = cache::key(&ui.active_project_host(), &project, method, &params);
+    let host = ui
+        .snapshot
+        .with_untracked(|s| s.project_host(&project).to_owned());
+    let key = cache::key(&host, &project, method, &params);
     blocking(move || {
         cache.load(key, || {
             crate::routed_call(method, params, Some(&project)).map_err(|e| format!("{e:#}"))
@@ -473,11 +484,74 @@ pub fn show_more_files(ui: Ui) {
 }
 
 pub fn refresh(ui: Ui) {
-    refresh_active_diff(ui, true);
-    load_refs(ui);
-    let branch = ui.review_state.log_branch.get_untracked();
-    if !branch.is_empty() {
-        git_ops::load_branch_log(ui, branch, false);
+    prepare_context(ui);
+    let st = ui.review_state;
+    if untracked(|| ui.is_active_project_offline()) {
+        st.refresh_pending.set(false);
+        return;
+    }
+    if reads_busy(st) {
+        st.refresh_pending.set(true);
+        return;
+    }
+    batch(|| {
+        invalidate_reads(ui);
+        load_active_diff(ui, true);
+        load_refs(ui);
+        let branch = st.log_branch.get_untracked();
+        if !branch.is_empty() {
+            git_ops::load_branch_log(ui, branch, false);
+        }
+    });
+}
+
+fn reads_busy(st: State) -> bool {
+    st.refs_loading.get() || st.log_loading.get() || st.compare_loading.get()
+}
+
+/// One trailing refresh for a burst; reads already running are allowed to finish.
+pub(crate) fn init(ui: Ui) {
+    effect(move || {
+        if ui.page.get() == "review"
+            && ui.review_state.refresh_pending.get()
+            && !reads_busy(ui.review_state)
+        {
+            untracked(|| refresh(ui));
+        }
+    });
+}
+
+pub(crate) fn handle_host_events(ui: Ui, events: &[canban_app_server::hosts::HostEvent]) {
+    let host = ui.active_project_host();
+    let project = ui.project.get_untracked();
+    let mut active_changed = false;
+    for event in events {
+        let canban_types::AppEvent::Changed { topic, card_id } = &event.event;
+        if !matches!(*topic, "resync" | "review") {
+            continue;
+        }
+        let card = card_id.as_ref().and_then(|id| {
+            ui.snapshot
+                .with_untracked(|s| s.cards.iter().find(|c| &c.id == id).cloned())
+        });
+        let event_project = card.as_ref().map(|c| c.project_id.as_str());
+        let event_cwd = card.as_ref().and_then(|c| c.worktree.as_deref());
+        ui.review_state.read_cache.with(|cache| {
+            if let (Some(project), Some(cwd)) = (event_project, event_cwd) {
+                cache.invalidate_checkout(&event.host_id, project, cwd, card_id.as_deref());
+            } else {
+                cache.invalidate_scope(&event.host_id, event_project);
+            }
+        });
+        active_changed |= event.host_id == host
+            && event_project.is_none_or(|p| p == project)
+            && event_cwd.is_none_or(|cwd| {
+                cwd == ui.review_state.checkout_cwd.get_untracked()
+                    || card_id.as_deref() == Some(ui.card.get_untracked().as_str())
+            });
+    }
+    if active_changed && ui.page.get_untracked() == "review" {
+        refresh(ui);
     }
 }
 
@@ -504,6 +578,9 @@ fn load_refs_impl(ui: Ui, compare: Option<bool>) {
         return;
     };
     prepare_context(ui);
+    if untracked(|| ui.is_active_project_offline()) {
+        return;
+    }
     if crate::APP.get().is_none() {
         git_ops::load_branch_log(ui, String::new(), false);
         return;
@@ -528,69 +605,79 @@ fn load_refs_impl(ui: Ui, compare: Option<bool>) {
         if st.refs_ticket.try_get() != Some(ticket) {
             return;
         }
-        st.refs_loading.set(false);
-        match result {
-            Ok(value) => {
-                let val = &value.data;
-                let current = val["current_branch"]
-                    .as_str()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("HEAD")
-                    .to_owned();
-                let default_br = val["default_branch"].as_str().unwrap_or("main").to_owned();
-                batch(|| {
-                    let pair_unchanged = initial_pair
-                        == (st.base_ref.get_untracked(), st.compare_ref.get_untracked());
-                    if pair_unchanged
-                        && compare.is_some_and(|smart| {
-                            smart
-                                || st.base_ref.get_untracked().is_empty()
-                                || st.compare_ref.get_untracked().is_empty()
-                        })
-                    {
-                        if val["dirty"] == true {
-                            st.base_ref.set("HEAD".into());
-                            st.compare_ref.set("WORKDIR".into());
-                        } else if current != default_br {
-                            st.base_ref.set(default_br);
-                            st.compare_ref.set(current.clone());
-                        } else {
-                            st.base_ref.set("HEAD~1".into());
-                            st.compare_ref.set("HEAD".into());
+        batch(|| {
+            st.refs_loading.set(false);
+            match result {
+                Ok(value) => {
+                    let val = &value.data;
+                    let current = val["current_branch"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("HEAD")
+                        .to_owned();
+                    let default_br = val["default_branch"].as_str().unwrap_or("main").to_owned();
+                    batch(|| {
+                        let pair_unchanged = initial_pair
+                            == (st.base_ref.get_untracked(), st.compare_ref.get_untracked());
+                        if pair_unchanged
+                            && compare.is_some_and(|smart| {
+                                smart
+                                    || st.base_ref.get_untracked().is_empty()
+                                    || st.compare_ref.get_untracked().is_empty()
+                            })
+                        {
+                            if val["dirty"] == true {
+                                st.base_ref.set("HEAD".into());
+                                st.compare_ref.set("WORKDIR".into());
+                            } else if current != default_br {
+                                st.base_ref.set(default_br);
+                                st.compare_ref.set(current.clone());
+                            } else {
+                                st.base_ref.set("HEAD~1".into());
+                                st.compare_ref.set("HEAD".into());
+                            }
                         }
-                    }
-                    st.refs_data.set(val.clone());
-                    // The refs response already contains the first commit page.
-                    let log = st.log_branch.get_untracked();
-                    if (log.is_empty() || log == current)
-                        && st.log_query.get_untracked().trim().is_empty()
-                        && st.log_commits.with_untracked(Vec::is_empty)
+                        st.refs_data.set(val.clone());
+                        // The refs response already contains the first commit page.
+                        let log = st.log_branch.get_untracked();
+                        if (log.is_empty() || log == current)
+                            && st.log_query.get_untracked().trim().is_empty()
+                            && st.log_commits.with_untracked(Vec::is_empty)
+                            && !st.log_loading.get_untracked()
+                        {
+                            st.log_branch.set(current.clone());
+                            st.log_commits
+                                .set(val["commits"].as_array().cloned().unwrap_or_default());
+                            st.log_has_more
+                                .set(st.log_commits.with_untracked(Vec::len) >= 40);
+                        }
+                    });
+                    if st.log_commits.with_untracked(Vec::is_empty)
                         && !st.log_loading.get_untracked()
+                        && (!st.log_query.get_untracked().trim().is_empty()
+                            || st.log_branch.get_untracked() != current)
                     {
-                        st.log_branch.set(current.clone());
-                        st.log_commits
-                            .set(val["commits"].as_array().cloned().unwrap_or_default());
-                        st.log_has_more
-                            .set(st.log_commits.with_untracked(Vec::len) >= 40);
+                        git_ops::load_branch_log(ui, st.log_branch.get_untracked(), false);
                     }
-                });
-                if st.log_commits.with_untracked(Vec::is_empty)
-                    && !st.log_loading.get_untracked()
-                    && (!st.log_query.get_untracked().trim().is_empty()
-                        || st.log_branch.get_untracked() != current)
-                {
-                    git_ops::load_branch_log(ui, st.log_branch.get_untracked(), false);
+                    if compare.is_some() {
+                        refresh_active_diff(ui, false);
+                    }
                 }
-                if compare.is_some() {
-                    refresh_active_diff(ui, false);
-                }
+                Err(e) => st.error.set(e),
             }
-            Err(e) => st.error.set(e),
-        }
+        });
     });
 }
 
 pub fn refresh_active_diff(ui: Ui, force_remote_refresh: bool) {
+    if force_remote_refresh {
+        refresh(ui);
+    } else {
+        load_active_diff(ui, false);
+    }
+}
+
+fn load_active_diff(ui: Ui, force_remote_refresh: bool) {
     let st = ui.review_state;
     if crate::APP.get().is_none() {
         if let Some(p) = ui.review.get_untracked() {
@@ -600,8 +687,8 @@ pub fn refresh_active_diff(ui: Ui, force_remote_refresh: bool) {
         return;
     }
     prepare_context(ui);
-    if force_remote_refresh {
-        invalidate_reads(ui);
+    if untracked(|| ui.is_active_project_offline()) {
+        return;
     }
     let Some(project) = ui.current_project() else {
         return;
@@ -642,6 +729,7 @@ pub fn refresh_active_diff(ui: Ui, force_remote_refresh: bool) {
         return;
     }
     if !same_request {
+        st.refresh_pending.set(false);
         st.compare_request.replace(request);
         batch(|| {
             st.compare_data.set(json!({}));
@@ -750,6 +838,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                 .min_w(px(0.))
                 .min_h(px(0.))
                 .child(sidebar::render_top_bar(ui))
+                .child(crate::hosts::offline_banner(ui))
                 .child(dynamic(move || sidebar::render_card_delivery_banner(ui)))
                 .child(dynamic(move || {
                     let err = st.error.get();
@@ -769,23 +858,7 @@ pub fn screen(ui: Ui) -> impl IntoElement {
                         .min_h(px(0.))
                         .min_w(px(0.))
                         .flex_row()
-                        .child(view().flex_1().min_w(px(0.)).min_h(px(0.)).child(dynamic(
-                            move || {
-                                let data = if crate::APP.get().is_none()
-                                    && let Some(p) = ui.review.get()
-                                {
-                                    preview_to_compare_json(&p)
-                                } else if crate::APP.get().is_none()
-                                    && !ui.card.get().is_empty()
-                                    && ui.current_card().is_some_and(|c| c.delivery.is_some())
-                                {
-                                    json!({ "files": [] })
-                                } else {
-                                    st.compare_data.get()
-                                };
-                                diff::render_diff_workbench(ui, &data, st.compare_loading.get())
-                            },
-                        )))
+                        .child(diff::workbench(ui))
                         .child(when(
                             move || {
                                 st.card_drawer_open.get()

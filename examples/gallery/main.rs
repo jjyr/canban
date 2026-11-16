@@ -1714,7 +1714,7 @@ pub fn Gallery() -> impl IntoElement {
     }
     if matches!(
         std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
-        Ok("review-working-tree" | "review-async" | "review-large-diff")
+        Ok("review-working-tree" | "review-async" | "review-large-diff" | "review-refresh")
     ) {
         canban_ui::frame::configure_window_chrome();
         ui.snapshot.set(fixtures::workspace());
@@ -1749,6 +1749,25 @@ pub fn Gallery() -> impl IntoElement {
                     if v.len() > 1 {
                         v.rotate_left(1);
                     }
+                });
+            });
+        }
+        if scene == "review-refresh" {
+            let st = ui.review_state;
+            set_interval(std::time::Duration::from_millis(800), move || {
+                batch(|| {
+                    let loading = !st.compare_loading.get_untracked();
+                    st.refs_loading.set(loading);
+                    st.compare_loading.set(loading);
+                    // Unrelated snapshot changes must not remount the code view.
+                    ui.snapshot.update(|s| {
+                        s.projects[0].name = if loading {
+                            "Refresh fixture"
+                        } else {
+                            "Gallery"
+                        }
+                        .into()
+                    });
                 });
             });
         }

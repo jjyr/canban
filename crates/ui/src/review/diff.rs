@@ -45,82 +45,95 @@ fn multiline_comment_input(
         )
 }
 
-pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement {
+fn working_tree_mode(ui: Ui) -> bool {
+    ui.review_state.mode.get() == "git"
+        && matches!(
+            ui.review_state.compare_ref.get().as_str(),
+            "" | "WORKDIR" | "STAGED" | "UNSTAGED"
+        )
+}
+
+/// Scroll hosts stay mounted across loading, Snapshot and equal-result updates.
+/// Only the initial unresolved query uses the full-size loading placeholder.
+pub fn workbench(ui: Ui) -> impl IntoElement {
+    let st = ui.review_state;
+    let data = computed(move || {
+        let mut value = if crate::APP.get().is_none()
+            && let Some(p) = ui.review.get()
+        {
+            super::preview_to_compare_json(&p)
+        } else if crate::APP.get().is_none()
+            && !ui.card.get().is_empty()
+            && ui.current_card().is_some_and(|c| c.delivery.is_some())
+        {
+            json!({"files": []})
+        } else {
+            st.compare_data.get()
+        };
+        if value["status_files"].is_null() && working_tree_mode(ui) {
+            let status = st.refs_data.with(|v| v["status_files"].clone());
+            if !status.is_null() {
+                value["status_files"] = status;
+            }
+        }
+        value
+    });
+    let login = computed(move || {
+        ui.snapshot.with(|s| {
+            ui.github
+                .gh_status
+                .with(|gh| crate::github::active_login_from(s, gh))
+        })
+    });
+    let initial_loading = computed(move || {
+        data.with(|v| v["files"].is_null()) && (st.refs_loading.get() || st.compare_loading.get())
+    });
+    view().flex_1().min_w(px(0.)).min_h(px(0.)).child(
+        when(
+            move || initial_loading.get(),
+            move || {
+                view()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .p_6()
+                    .child(muted("Loading diff…"))
+            },
+        )
+        .otherwise(move || {
+            view()
+                .flex_1()
+                .min_w(px(0.))
+                .min_h(px(0.))
+                .flex_row()
+                .child(dynamic(move || file_list(ui, &data.get())))
+                .child(
+                    view()
+                        .label("Git diff code")
+                        .flex_1()
+                        .min_h(px(0.))
+                        .min_w(px(0.))
+                        .child(
+                            scroll()
+                                .flex_1()
+                                .min_h(px(0.))
+                                .min_w(px(0.))
+                                .child(dynamic(move || code_content(ui, &data.get(), login))),
+                        ),
+                )
+        }),
+    )
+}
+
+fn file_list(ui: Ui, data: &Value) -> AnyElement {
     let st = ui.review_state;
     let files = data["files"].as_array().cloned().unwrap_or_default();
-    let commits = data["commits"].as_array().cloned().unwrap_or_default();
-    let remote_threads = data["threads"].as_array().cloned().unwrap_or_default();
     let total_add = data["total_additions"].as_u64().unwrap_or(0);
     let total_del = data["total_deletions"].as_u64().unwrap_or(0);
-    let truncated = data["truncated"].as_bool().unwrap_or(false);
-    let commit_detail = data["commit_detail"]
-        .as_object()
-        .map(|_| &data["commit_detail"]);
-    let is_workdir_mode = st.mode.get() == "git"
-        && matches!(
-            st.compare_ref.get().as_str(),
-            "" | "WORKDIR" | "STAGED" | "UNSTAGED"
-        );
-
-    if loading && files.is_empty() && commit_detail.is_none() {
-        return view()
-            .flex_1()
-            .items_center()
-            .justify_center()
-            .p_6()
-            .child(muted("Loading diff…"))
-            .into_element();
-    }
-
-    if files.is_empty() && commit_detail.is_none() && !is_workdir_mode {
-        return view()
-            .flex_1()
-            .items_center()
-            .justify_center()
-            .p_6()
-            .gap_2()
-            .child(label("No file changes").font_weight(FontWeight::SEMIBOLD))
-            .child(muted(
-                "The selected base and compare references have identical file contents.",
-            ))
-            .into_element();
-    }
-
     let selected = st.selected_file.get();
-    let active_line = st.active_line.get();
     let pending_all = st.pending_comments.get();
-    let editing_remote = st.editing_remote_comment.get();
-    let deleting_remote = st.deleting_remote_comment.get();
-    let my_login = ui.snapshot.with(|s| {
-        ui.github
-            .gh_status
-            .with(|gh| crate::github::active_login_from(s, gh))
-    });
-    let pr_target = st.pr_target.get();
-    let pr_base_url = pr_target.as_ref().and_then(|pr| {
-        pr["url"]
-            .as_str()
-            .filter(|u| !u.is_empty())
-            .map(str::to_owned)
-            .or_else(|| {
-                let repo = pr["repository"].as_str().unwrap_or("");
-                let num = pr["number"].as_u64().unwrap_or(0);
-                (!repo.is_empty() && num > 0)
-                    .then(|| format!("https://github.com/{repo}/pull/{num}"))
-            })
-    });
-
-    let status_files_for_actions: Vec<Value> = if is_workdir_mode {
-        data["status_files"]
-            .as_array()
-            .cloned()
-            .or_else(|| st.refs_data.with(|v| v["status_files"].as_array().cloned()))
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
-    let left_pane = if is_workdir_mode {
+    let is_workdir_mode = working_tree_mode(ui);
+    if is_workdir_mode {
         git_ops::render_working_tree_pane(ui, data)
     } else {
         // Standard file list pane (216px)
@@ -241,13 +254,76 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
             .bg(SURFACE)
             .child(scroll().flex_1().min_h(px(0.)).child(file_list))
             .into_element()
+    }
+}
+
+fn code_content(ui: Ui, data: &Value, login: Memo<Option<String>>) -> AnyElement {
+    let st = ui.review_state;
+    let files = data["files"].as_array().cloned().unwrap_or_default();
+    let commits = data["commits"].as_array().cloned().unwrap_or_default();
+    let remote_threads = data["threads"].as_array().cloned().unwrap_or_default();
+    let truncated = data["truncated"].as_bool().unwrap_or(false);
+    let commit_detail = data["commit_detail"]
+        .as_object()
+        .map(|_| &data["commit_detail"]);
+    let is_workdir_mode = st.mode.get() == "git"
+        && matches!(
+            st.compare_ref.get().as_str(),
+            "" | "WORKDIR" | "STAGED" | "UNSTAGED"
+        );
+
+    if files.is_empty() && commit_detail.is_none() && !is_workdir_mode {
+        return view()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .p_6()
+            .gap_2()
+            .child(label("No file changes").font_weight(FontWeight::SEMIBOLD))
+            .child(muted(
+                "The selected base and compare references have identical file contents.",
+            ))
+            .into_element();
+    }
+
+    let selected = st.selected_file.get();
+    let active_line = st.active_line.get();
+    let pending_all = st.pending_comments.get();
+    let editing_remote = st.editing_remote_comment.get();
+    let deleting_remote = st.deleting_remote_comment.get();
+    let my_login = login.get();
+    let pr_target = st.pr_target.get();
+    let pr_base_url = pr_target.as_ref().and_then(|pr| {
+        pr["url"]
+            .as_str()
+            .filter(|u| !u.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                let repo = pr["repository"].as_str().unwrap_or("");
+                let num = pr["number"].as_u64().unwrap_or(0);
+                (!repo.is_empty() && num > 0)
+                    .then(|| format!("https://github.com/{repo}/pull/{num}"))
+            })
+    });
+
+    let status_files_for_actions: Vec<Value> = if is_workdir_mode {
+        data["status_files"]
+            .as_array()
+            .cloned()
+            .or_else(|| st.refs_data.with(|v| v["status_files"].as_array().cloned()))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
     };
 
     // Right main diff viewer
     let mut diff_column = view().gap_3().p_3();
 
     if let Some(detail) = commit_detail {
-        diff_column = diff_column.child(git_ops::render_commit_detail_card(ui, detail));
+        let detail = detail.clone();
+        diff_column = diff_column.child(dynamic(move || {
+            git_ops::render_commit_detail_card(ui, &detail)
+        }));
     }
 
     if truncated {
@@ -803,20 +879,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
         ));
     }
 
-    view()
-        .flex_1()
-        .min_h(px(0.))
-        .min_w(px(0.))
-        .flex_row()
-        .child(left_pane)
-        .child(
-            scroll()
-                .flex_1()
-                .min_h(px(0.))
-                .min_w(px(0.))
-                .child(diff_column),
-        )
-        .into_element()
+    diff_column.into_element()
 }
 
 fn inline_composer_box(ui: Ui, target: LineTarget) -> View {

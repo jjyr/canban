@@ -156,6 +156,23 @@ struct RemoteSlot {
     next_retry_at: std::time::Instant,
 }
 
+/// Window-side event provenance. This envelope never crosses the AppServer RPC
+/// boundary: connection state and recovery belong to one host, not every host.
+#[derive(Clone, Debug)]
+pub struct HostEvent {
+    pub host_id: String,
+    pub event: AppEvent,
+}
+
+impl HostEvent {
+    pub fn local(event: AppEvent) -> Self {
+        Self {
+            host_id: "local".into(),
+            event,
+        }
+    }
+}
+
 struct UpdatingGuard<'a> {
     registry: &'a HostRegistry,
     host_id: String,
@@ -183,10 +200,13 @@ impl Drop for UpdatingGuard<'_> {
             }
         }
         drop(guard);
-        self.registry.emit(AppEvent::Changed {
-            topic: "application",
-            card_id: None,
-        });
+        self.registry.emit(
+            &self.host_id,
+            AppEvent::Changed {
+                topic: "host",
+                card_id: None,
+            },
+        );
         self.registry.wake();
     }
 }
@@ -197,7 +217,7 @@ pub struct HostRegistry {
     remotes: Mutex<BTreeMap<String, RemoteSlot>>,
     entity_hosts: RwLock<BTreeMap<String, String>>,
     acknowledged_owners: Mutex<BTreeMap<String, String>>,
-    listeners: Mutex<Vec<mpsc::Sender<AppEvent>>>,
+    listeners: Mutex<Vec<mpsc::Sender<HostEvent>>>,
     wake_tx: mpsc::SyncSender<()>,
     stop: AtomicBool,
 }
@@ -275,7 +295,7 @@ impl HostRegistry {
                 if reg.stop.load(Ordering::SeqCst) {
                     break;
                 }
-                reg.emit(ev);
+                reg.emit("local", ev);
             }
         });
 
@@ -340,13 +360,17 @@ impl HostRegistry {
         }
     }
 
-    pub fn subscribe(&self) -> mpsc::Receiver<AppEvent> {
+    pub fn subscribe(&self) -> mpsc::Receiver<HostEvent> {
         let (tx, rx) = mpsc::channel();
         self.listeners.lock().unwrap().push(tx);
         rx
     }
 
-    fn emit(&self, event: AppEvent) {
+    fn emit(&self, host_id: &str, event: AppEvent) {
+        let event = HostEvent {
+            host_id: host_id.into(),
+            event,
+        };
         self.listeners
             .lock()
             .unwrap()
@@ -441,10 +465,17 @@ impl HostRegistry {
             sum
         };
 
-        self.emit(AppEvent::Changed {
-            topic: "resync",
-            card_id: None,
-        });
+        self.emit(
+            &summary.id,
+            AppEvent::Changed {
+                topic: if summary.connection.is_connected() {
+                    "resync"
+                } else {
+                    "host"
+                },
+                card_id: None,
+            },
+        );
         self.wake();
         Ok(summary)
     }
@@ -458,10 +489,13 @@ impl HostRegistry {
         };
         let _ = std::fs::remove_file(Self::cache_path(&self.local_home, host_id));
         self.save_hosts_file(&all_saved)?;
-        self.emit(AppEvent::Changed {
-            topic: "resync",
-            card_id: None,
-        });
+        self.emit(
+            host_id,
+            AppEvent::Changed {
+                topic: "host",
+                card_id: None,
+            },
+        );
         Ok(())
     }
 
@@ -478,10 +512,13 @@ impl HostRegistry {
             guard.values().map(|s| s.saved.clone()).collect::<Vec<_>>()
         };
         self.save_hosts_file(&all_saved)?;
-        self.emit(AppEvent::Changed {
-            topic: "application",
-            card_id: None,
-        });
+        self.emit(
+            host_id,
+            AppEvent::Changed {
+                topic: "host",
+                card_id: None,
+            },
+        );
         Ok(())
     }
 
@@ -508,15 +545,19 @@ impl HostRegistry {
             guard.values().map(|s| s.saved.clone()).collect::<Vec<_>>()
         };
         self.save_hosts_file(&all_saved)?;
-        self.emit(AppEvent::Changed {
-            topic: "resync",
-            card_id: None,
-        });
+        self.emit(
+            host_id,
+            AppEvent::Changed {
+                topic: "host",
+                card_id: None,
+            },
+        );
         self.wake();
         Ok(())
     }
 
     pub fn reconnect(&self, host_id: Option<&str>) {
+        let mut changed = Vec::new();
         {
             let mut guard = self.remotes.lock().unwrap();
             for (id, slot) in guard.iter_mut() {
@@ -527,13 +568,19 @@ impl HostRegistry {
                     slot.consecutive_failures = 0;
                     slot.next_retry_at = std::time::Instant::now();
                     slot.connection = HostConnectionState::Connecting;
+                    changed.push(id.clone());
                 }
             }
         }
-        self.emit(AppEvent::Changed {
-            topic: "application",
-            card_id: None,
-        });
+        for id in changed {
+            self.emit(
+                &id,
+                AppEvent::Changed {
+                    topic: "host",
+                    card_id: None,
+                },
+            );
+        }
         self.wake();
     }
 
@@ -547,11 +594,22 @@ impl HostRegistry {
         let Some(slot) = guard.get_mut(host_id) else {
             return (false, false);
         };
-        let was_connected = slot.connection.is_connected();
+        let previous = slot.connection.clone();
+        let data_changed = state_val
+            .as_ref()
+            .is_some_and(|v| *v != slot.last_state_raw);
         slot.client = client_opt;
         slot.tunnel = tunnel;
         slot.connection = conn_state;
         slot.consecutive_failures = 0;
+        // A reachable but incompatible daemon needs a slower probe, not an
+        // immediate retry on every supervisor pass. Explicit reconnect bypasses it.
+        slot.next_retry_at = std::time::Instant::now()
+            + if slot.connection.is_connected() {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(30)
+            };
         if let Some(sid) = server_id
             && slot.saved.server_id.is_none()
         {
@@ -572,8 +630,11 @@ impl HostRegistry {
             }
             slot.last_state_raw = val;
         }
-        let became_connected = !was_connected && slot.connection.is_connected();
-        (true, became_connected || !was_connected)
+        let became_connected = !previous.is_connected() && slot.connection.is_connected();
+        (
+            previous != slot.connection || data_changed,
+            became_connected,
+        )
     }
 
     /// Upgrade a remote host's `canband` daemon over its authenticated transport (`update.daemon`),
@@ -610,10 +671,13 @@ impl HostRegistry {
             host_id: host_id.to_owned(),
             active: true,
         };
-        self.emit(AppEvent::Changed {
-            topic: "application",
-            card_id: None,
-        });
+        self.emit(
+            host_id,
+            AppEvent::Changed {
+                topic: "host",
+                card_id: None,
+            },
+        );
         self.wake();
 
         let params = json!({
@@ -668,10 +732,13 @@ impl HostRegistry {
                     }
                 }
                 self.poll_remotes_once();
-                self.emit(AppEvent::Changed {
-                    topic: "application",
-                    card_id: None,
-                });
+                self.emit(
+                    host_id,
+                    AppEvent::Changed {
+                        topic: "host",
+                        card_id: None,
+                    },
+                );
                 self.wake();
                 return Err(err);
             }
@@ -694,10 +761,13 @@ impl HostRegistry {
                         };
                     }
                 }
-                self.emit(AppEvent::Changed {
-                    topic: "application",
-                    card_id: None,
-                });
+                self.emit(
+                    host_id,
+                    AppEvent::Changed {
+                        topic: "host",
+                        card_id: None,
+                    },
+                );
             }
 
             // `update.daemon` schedules `systemctl --user restart canban.service` (`RestartSec=2`),
@@ -768,10 +838,13 @@ impl HostRegistry {
                 self.poll_remotes_once();
             }
 
-            self.emit(AppEvent::Changed {
-                topic: "resync",
-                card_id: None,
-            });
+            self.emit(
+                host_id,
+                AppEvent::Changed {
+                    topic: if connected { "resync" } else { "host" },
+                    card_id: None,
+                },
+            );
             self.wake();
         } else {
             updating_guard.active = false;
@@ -792,10 +865,13 @@ impl HostRegistry {
                 }
             }
             self.poll_remotes_once();
-            self.emit(AppEvent::Changed {
-                topic: "application",
-                card_id: None,
-            });
+            self.emit(
+                host_id,
+                AppEvent::Changed {
+                    topic: "host",
+                    card_id: None,
+                },
+            );
             self.wake();
         }
         Ok(res)
@@ -896,10 +972,9 @@ impl HostRegistry {
             let guard = self.remotes.lock().unwrap();
             guard.keys().cloned().collect()
         };
-        let mut any_changed = false;
-        let mut resync = false;
 
         for id in ids {
+            let mut topic = None;
             let (saved, existing_client, should_retry) = {
                 let mut guard = self.remotes.lock().unwrap();
                 let Some(slot) = guard.get_mut(&id) else {
@@ -946,8 +1021,12 @@ impl HostRegistry {
                                     Self::save_cache(&self.local_home, &id, &data);
                                     slot.cached = Some(data);
                                 }
+                                topic = Some(client::change_topic(
+                                    true,
+                                    &slot.last_state_raw,
+                                    &state_val,
+                                ));
                                 slot.last_state_raw = state_val;
-                                any_changed = true;
                             }
                             if let HostConnectionState::Connected {
                                 rtt_ms: prev_rtt, ..
@@ -976,9 +1055,18 @@ impl HostRegistry {
                                     error: msg,
                                 }
                             };
-                            any_changed = true;
+                            topic = Some("host");
                         }
                     }
+                }
+                if let Some(topic) = topic {
+                    self.emit(
+                        &id,
+                        AppEvent::Changed {
+                            topic,
+                            card_id: None,
+                        },
+                    );
                 }
                 continue;
             }
@@ -988,40 +1076,10 @@ impl HostRegistry {
             }
 
             match self.establish_connection(&id, &saved.transport) {
-                Ok((client_opt, tunnel, conn_state, state_val, server_id)) => {
-                    let mut guard = self.remotes.lock().unwrap();
-                    if let Some(slot) = guard.get_mut(&id)
-                        && !slot.updating
-                    {
-                        let was_connected = slot.connection.is_connected();
-                        slot.client = client_opt;
-                        slot.tunnel = tunnel;
-                        slot.connection = conn_state;
-                        slot.consecutive_failures = 0;
-                        if let Some(sid) = server_id
-                            && slot.saved.server_id.is_none()
-                        {
-                            slot.saved.server_id = Some(sid);
-                        }
-                        if let Some(val) = state_val {
-                            if let (Ok(snap), Ok(cfg)) = (
-                                serde_json::from_value::<Snapshot>(val["snapshot"].clone()),
-                                serde_json::from_value::<Config>(val["config"].clone()),
-                            ) {
-                                let data = CachedHostData {
-                                    saved_at: now(),
-                                    snapshot: snap,
-                                    config: cfg,
-                                };
-                                Self::save_cache(&self.local_home, &id, &data);
-                                slot.cached = Some(data);
-                            }
-                            slot.last_state_raw = val;
-                        }
-                        if !was_connected {
-                            resync = true;
-                        }
-                        any_changed = true;
+                Ok(established) => {
+                    let (changed, connected) = self.apply_established_slot(&id, established);
+                    if changed {
+                        topic = Some(if connected { "resync" } else { "host" });
                     }
                 }
                 Err(err) => {
@@ -1053,18 +1111,20 @@ impl HostRegistry {
                             }
                         };
                         if slot.connection != prev {
-                            any_changed = true;
+                            topic = Some("host");
                         }
                     }
                 }
             }
-        }
-
-        if any_changed {
-            self.emit(AppEvent::Changed {
-                topic: if resync { "resync" } else { "application" },
-                card_id: None,
-            });
+            if let Some(topic) = topic {
+                self.emit(
+                    &id,
+                    AppEvent::Changed {
+                        topic,
+                        card_id: None,
+                    },
+                );
+            }
         }
     }
 
@@ -1426,10 +1486,13 @@ impl HostRegistry {
             } else {
                 self.sync_host_now(&host_id);
             }
-            self.emit(AppEvent::Changed {
-                topic: "application",
-                card_id: None,
-            });
+            self.emit(
+                &host_id,
+                AppEvent::Changed {
+                    topic: "application",
+                    card_id: None,
+                },
+            );
         }
         Ok(res)
     }
@@ -1596,6 +1659,27 @@ mod tests {
 
         // Drain prior events, then launch `update_remote_daemon` on a worker thread.
         while events_rx.try_recv().is_ok() {}
+        // Repeated incompatible probes are state observations, never recovery.
+        // A normal supervisor pass must also respect the mismatch retry deadline.
+        for _ in 0..3 {
+            let retry = registry.remotes.lock().unwrap()["home-linux"].next_retry_at;
+            assert!(retry > std::time::Instant::now());
+            registry.poll_remotes_once();
+            registry
+                .remotes
+                .lock()
+                .unwrap()
+                .get_mut("home-linux")
+                .unwrap()
+                .next_retry_at = std::time::Instant::now();
+            registry.poll_remotes_once();
+        }
+        assert!(
+            events_rx
+                .try_iter()
+                .all(|event| event.host_id != "home-linux"),
+            "unchanged ApiMismatch emitted another event"
+        );
         let reg_for_upd = registry.clone();
         let upd_handle = std::thread::spawn(move || reg_for_upd.update_remote_daemon("home-linux"));
 
@@ -1662,6 +1746,23 @@ mod tests {
             final_sum.connection
         );
         assert!(!final_sum.is_updating());
+        let recovered = events_rx
+            .try_iter()
+            .filter(|event| {
+                event.host_id == "home-linux"
+                    && matches!(
+                        event.event,
+                        AppEvent::Changed {
+                            topic: "resync",
+                            ..
+                        }
+                    )
+            })
+            .count();
+        assert_eq!(
+            recovered, 1,
+            "only actual remote recovery emits one host-scoped resync"
+        );
     }
 
     #[test]

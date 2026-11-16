@@ -814,4 +814,166 @@ mod tests {
         // Linux left-side window buttons (custom gtk-decoration-layout): left inset grows cleanly.
         assert_eq!(compute_chrome_padding(76., 0., false), (86., 10.));
     }
+    #[test]
+    fn git_diff_retains_nodes_during_refresh_and_ignores_other_host_recovery() {
+        #[component]
+        fn GitRefreshHarness() -> impl IntoElement {
+            canban_ui_kit::tokens::install_theme();
+            let ui = Ui::new();
+            ui.project.set("p".into());
+            ui.page.set("review".into());
+            ui.snapshot.update(|s| {
+                for (id, project, path) in [("card-other", "other", "/wt/other"), ("card-worktree", "p", "/wt/p") ] {
+                    s.cards.push(serde_json::from_value(json!({"id":id, "project_id":project, "number":1, "title":id, "body":"", "stage":"review", "revision":1, "created_at":1, "worktree":path})).unwrap());
+                }
+            });
+            ui.review_state.base_ref.set("main".into());
+            ui.review_state.compare_ref.set("topic".into());
+            let value = crate::review::cache::ReadValue::new(json!({
+                "files": [{"filename":"keep.rs", "patch":"@@ -1 +1 @@\n-old\n+retained code", "additions":1, "deletions":1}]
+            }));
+            crate::review::apply_compare(ui, &value);
+            crate::review::init(ui);
+            let event = move |host: &str| canban_app_server::hosts::HostEvent {
+                host_id: host.into(),
+                event: canban_types::AppEvent::Changed {
+                    topic: "resync",
+                    card_id: None,
+                },
+            };
+            view()
+                .size_full()
+                .child(
+                    canban_ui_kit::press_target()
+                        .accessibility_label("refresh-begin")
+                        .on_press(move |_: &()| ui.review_state.compare_loading.set(true)),
+                )
+                .child(
+                    canban_ui_kit::press_target()
+                        .accessibility_label("refresh-end")
+                        .on_press(move |_: &()| ui.review_state.compare_loading.set(false)),
+                )
+                .child(
+                    canban_ui_kit::press_target()
+                        .accessibility_label("snapshot-change")
+                        .on_press(move |_: &()| {
+                            ui.snapshot.update(|s| {
+                                s.entity_hosts.insert("unrelated".into(), "devpc".into());
+                            })
+                        }),
+                )
+                .child(
+                    canban_ui_kit::press_target()
+                        .accessibility_label("remote-recovery")
+                        .on_press(move |_: &()| {
+                            crate::review::handle_host_events(ui, &[event("devpc")])
+                        }),
+                )
+                .child(
+                    canban_ui_kit::press_target()
+                        .accessibility_label("other-project-recovery")
+                        .on_press(move |_: &()| {
+                            crate::review::handle_host_events(
+                                ui,
+                                &[canban_app_server::hosts::HostEvent {
+                                    host_id: "local".into(),
+                                    event: canban_types::AppEvent::Changed {
+                                        topic: "review",
+                                        card_id: Some("card-other".into()),
+                                    },
+                                }],
+                            )
+                        }),
+                )
+                .child(
+                    canban_ui_kit::press_target()
+                        .accessibility_label("other-worktree-recovery")
+                        .on_press(move |_: &()| {
+                            crate::review::handle_host_events(
+                                ui,
+                                &[canban_app_server::hosts::HostEvent {
+                                    host_id: "local".into(),
+                                    event: canban_types::AppEvent::Changed {
+                                        topic: "review",
+                                        card_id: Some("card-worktree".into()),
+                                    },
+                                }],
+                            )
+                        }),
+                )
+                .child(
+                    canban_ui_kit::press_target()
+                        .accessibility_label("local-recovery-burst")
+                        .on_press(move |_: &()| {
+                            for _ in 0..8 {
+                                crate::review::handle_host_events(ui, &[event("local")]);
+                            }
+                        }),
+                )
+                .child(canban_ui_kit::label(move || {
+                    format!(
+                        "pending:{} ticket:{}",
+                        ui.review_state.refresh_pending.get(),
+                        ui.review_state.compare_ticket.get()
+                    )
+                }))
+                .child(crate::review::diff::workbench(ui))
+        }
+        let mut core = Core::new(ApproxTextEngine, size(px(1360.), px(900.)));
+        core.set_components(nsh_base::registry());
+        core.mount_root(&nsh_core::element::Root::of::<GitRefreshHarness>());
+        let mut tree = TreeTracker::new();
+        pump(&mut core, &mut tree);
+        let original_code = tree
+            .mounted_node_for_text("+ retained code")
+            .expect("diff mounted");
+        let code_host = tree.labels["Git diff code"];
+        for label in [
+            "refresh-begin",
+            "snapshot-change",
+            "remote-recovery",
+            "other-project-recovery",
+            "other-worktree-recovery",
+        ] {
+            let id = tree.labels[label];
+            assert!(core.component_event(id, EventKind::Press, &EventPayload::None));
+            pump(&mut core, &mut tree);
+            assert_eq!(
+                tree.mounted_node_for_text("+ retained code"),
+                Some(original_code)
+            );
+            assert!(tree.is_mounted(code_host));
+            assert!(
+                tree.mounted_node_for_text("pending:false ticket:0")
+                    .is_some()
+            );
+        }
+        assert!(core.component_event(
+            tree.labels["local-recovery-burst"],
+            EventKind::Press,
+            &EventPayload::None
+        ));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.mounted_node_for_text("pending:true ticket:0")
+                .is_some(),
+            "burst should queue once without cancelling current reads"
+        );
+        assert!(core.component_event(
+            tree.labels["refresh-end"],
+            EventKind::Press,
+            &EventPayload::None
+        ));
+        pump(&mut core, &mut tree);
+        assert!(
+            tree.mounted_node_for_text("pending:false ticket:1")
+                .is_some(),
+            "one trailing refresh should drain the burst"
+        );
+        assert_eq!(
+            tree.mounted_node_for_text("+ retained code"),
+            Some(original_code)
+        );
+        assert!(tree.is_mounted(code_host));
+    }
 }

@@ -45,6 +45,11 @@ impl<K: Ord + Clone, V> LruCache<K, V> {
         self.order.clear();
     }
 
+    pub fn retain(&mut self, mut keep: impl FnMut(&K, &V) -> bool) {
+        self.entries.retain(|key, (_, value)| keep(key, value));
+        self.order.retain(|_, key| self.entries.contains_key(key));
+    }
+
     /// Look up `key` without updating recency order.
     pub fn peek<Q>(&self, key: &Q) -> Option<&V>
     where

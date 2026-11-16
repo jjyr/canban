@@ -26,14 +26,31 @@ reuse interval. Keys include host, Project, method and complete query parameters
 RPC calls and patch-line parsing run on the blocking pool. Concurrent identical
 reads share one request and prepared result. Failed reads are not cached.
 
-Manual refresh, Git mutations and `review`/`resync` events invalidate the cache.
-An invalidation generation prevents older reads from refilling it. Per-query
-tickets prevent older responses from replacing the current view after a context
-or range change. Events also invalidate cached reads while the page is hidden;
-re-entry reads again. External filesystem changes without an event are observed
-on the next expired read or explicit refresh. Existing content remains visible
-during a refresh of the same query; changing query clears mismatched content.
-An initial refs response must not overwrite a range edited while it was loading.
+Invalidation follows the event's owning host. A connection-status change does
+not invalidate Git data. Actual host recovery (`resync`) invalidates only that
+host's reads; known Card `review` events narrow this to its Project/worktree.
+Manual refresh and Git mutations invalidate the active checkout. Unknown event
+ownership falls back to the originating host, never every host. Hidden-page
+caches follow the same rules and re-entry reads again. Incompatible remote
+daemons cannot refresh a local Git view, even when they recover successfully.
+
+Invalidation detaches matching in-flight reads, preventing older completions
+from refilling the cache or replacing a newer flight. Per-query tickets prevent
+older responses from replacing the current view after a context/range change.
+Repeated refresh requests during a read batch queue at most one trailing batch,
+allowing the current reads to finish. Changing context/range drops the old pending
+refresh. External filesystem changes without an event are observed on the next
+expired read or explicit refresh. An initial refs response must not overwrite a
+range edited while it was loading.
+
+Loading state is separate from the code content. Only an unresolved initial
+query shows the full-size loading placeholder. Refreshing an existing result,
+including an empty result, retains the code scroll container and current content.
+Unrelated Snapshot/connection updates do not rebuild code rows; account identity
+and working-tree status use equality-filtered projections. Commit-history
+navigation updates are confined to the commit header. Switching queries clears
+mismatched content. An offline remote view retains known content, shows the host
+notice, and waits for recovery rather than repeatedly issuing Git reads.
 
 Prepared patch lines are shared with rendering. All files initially mounts four
 file bodies; Show more files adds four, and selecting an individual file opens
@@ -62,6 +79,11 @@ the normal application subscription.
 screen with refs, commits and loading changing every 800 ms. Open the history
 branch popover, type a query, wait through multiple updates, then select a ref
 or dismiss with Escape. The query and focus must survive the updates.
+
+`CANBAN_GALLERY_SCENE=review-refresh mise run gallery` changes diff/refs loading
+and unrelated Snapshot metadata every 800 ms. Open an inline comment, type a
+draft, wait through several updates, then continue typing without refocusing.
+The editor, draft and focus must survive; code must not return to Loading.
 
 `CANBAN_GALLERY_SCENE=review-large-diff mise run gallery` contains 60 files with
 400 changed lines per file. Verify bounded initial content, direct file
@@ -109,3 +131,38 @@ Validated on macOS from base `d2572f49d2ec` plus the Card #100 changes:
 
 These checks establish native interaction and bounded initial construction, not
 quantitative frame-time improvements across every repository or remote host.
+
+## Host-scoped refresh regression acceptance (2026-11-16)
+
+Validated from base `c17019f` plus the refresh-isolation changes:
+
+- `mise run test`: 573 passed, one intentionally skipped. Regressions cover
+  repeated incompatible probes, a single host-scoped recovery event, host/Project/
+  checkout cache isolation, invalidated flight completion, retained code nodes
+  across loading/Snapshot changes, unrelated host/Project/worktree events, and a
+  burst draining into one trailing refresh.
+- `mise run acceptance` passed with disposable home
+  `/private/tmp/cb-k92mtxzj/home` and an isolated Core; `mise run build` packaged
+  `.local/Canban.app`. No RPC/schema change or desktop API bump was needed.
+- The packaged native fixture under `/private/tmp/cb-git-refresh-neb4kbca`
+  used a disposable repository, isolated home/Core and local TCP mock
+  remote. API 60 versus App API 61 reproduced the original mismatch. Across
+  repeated mismatch probes the local Git reads stayed at one refs and one compare.
+  One explicit refresh increased refs/compare to two and log to one. Subsequent
+  remote recovery and forced reconnection into mismatch did not increase these
+  counts. The code remained scrolled to line 10 during and after refresh/recovery.
+  Method counts and assertions are recorded in the fixture's `evidence.json`.
+- The production `review-refresh` Gallery alternated loading and unrelated
+  Snapshot metadata every 800 ms. An inline comment draft survived these updates;
+  after explicitly focusing its editor, later text was appended without
+  refocusing. The native code area remained visible throughout.
+- Changed-file formatting and `git diff --check` passed. Optional strict Clippy
+  checks are blocked by existing lints in unchanged files: test-module ordering
+  in `crates/ui-kit/src/button.rs`, needless borrows in
+  `crates/app-server/src/github.rs`, and `chunks_exact_to_as_chunks` in
+  `crates/profiles/src/launch.rs`. These are separate from the passing runtime
+  tests; no unrelated source was changed to silence them.
+  Production libraries passed
+  `cargo clippy --workspace --lib -- -D warnings -A clippy::needless_borrow`,
+  allowing only the known pre-existing GitHub borrow lint. Native fixture and
+  Gallery processes and their isolated services/Core were closed afterwards.
