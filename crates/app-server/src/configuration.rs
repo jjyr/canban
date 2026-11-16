@@ -55,6 +55,7 @@ impl AppServer {
                 if p["prompt"].is_string() {ensure!(p["prompt"]==prompt,"Prompt context changed; reopen Edit with agent to review it");}
                 let session=ConfigurationSession {id:key.clone(),project_id:project.id,profile_id:profile.id,provider_session_id:if fresh {None}else{old.as_ref().and_then(|s|s.provider_session_id.clone())},generation:old.as_ref().map_or(1,|s|s.generation+1),state:"queued".into(),prompt,error:None};
                 let mut terminal=db.get::<TerminalEntry>(&key).unwrap_or(TerminalEntry {id:key.clone(),conversation_id:None,number:db.counter("terminal-number")?,name:Some(format!("Workflows · {}",session.profile_id)),origin_project_id:Some(session.project_id.clone()),origin_card_id:None,agent_engine:None,runtime:None,agent:None,created_at:now()});
+                terminal.created_at=now();
                 terminal.runtime=None;db.save(&terminal)?;db.save(&session)?;
                 Ok(json!({"terminal_id":key,"reused":false,"state":"queued"}))
             }),
@@ -63,7 +64,7 @@ impl AppServer {
     }
     pub(super) fn pump_configuration(&self) -> Result<()> {
         let snapshot = self.snapshot()?;
-        for mut session in snapshot.configuration_sessions.clone() {
+        for session in snapshot.configuration_sessions.clone() {
             if session.state != "queued" {
                 if let Some(t) = snapshot
                     .terminals
@@ -87,9 +88,22 @@ impl AppServer {
                             .unwrap_or("unknown")
                     };
                     if session.state != next {
-                        session.state = next.into();
-                        self.store.lock().unwrap().write(|db| db.save(&session))?;
-                        self.emit("configuration", None);
+                        let expected_gen = session.generation;
+                        let expected_state = session.state.clone();
+                        let next_state: String = next.into();
+                        let mut updated = false;
+                        self.store.lock().unwrap().write(|db| {
+                            let mut current: ConfigurationSession = db.get(&session.id)?;
+                            if current.generation == expected_gen && current.state == expected_state {
+                                current.state = next_state;
+                                db.save(&current)?;
+                                updated = true;
+                            }
+                            Ok(())
+                        })?;
+                        if updated {
+                            self.emit("configuration", None);
+                        }
                     }
                 }
                 continue;
@@ -99,38 +113,54 @@ impl AppServer {
             {
                 continue;
             }
-            let project = snapshot
-                .projects
-                .iter()
-                .find(|p| p.id == session.project_id);
-            let profile = canban_scheduler::select_in_project(
-                &self.config(),
-                project,
-                Some(&session.profile_id),
-            )?;
-            let mut terminal: TerminalEntry = self.store.lock().unwrap().db().get(&session.id)?;
-            session.state = "starting".into();
-            let fresh = session.provider_session_id.is_none();
-            if fresh && profile.command().iter().any(|s| s.contains("{session_id}")) {
-                session.provider_session_id = Some(super::runtime::uuid_session_id());
-            }
-            terminal.runtime = Some(TerminalRuntime {
-                machine: "local".into(),
-                owner_core_id: None,
-                core_id: None,
-                terminal: None,
-                state: "starting".into(),
-                connection: "connecting".into(),
-                error: None,
-                agent_status: None,
-                agent_turn: None,
-                observed_agent: None,
-                waiting: None,
-            });
-            self.store.lock().unwrap().write(|db| {
-                db.save(&session)?;
-                db.save(&terminal)
+            let _gate = self.terminal_gate.lock().unwrap();
+            let admitted = self.store.lock().unwrap().write(|db| {
+                let current_snap = db.snapshot()?;
+                if canban_scheduler::active_count(&current_snap)
+                    >= self.config().scheduler.max_agents
+                {
+                    return Ok(None);
+                }
+                let mut current: ConfigurationSession = db.get(&session.id)?;
+                if current.state != "queued" || current.generation != session.generation {
+                    return Ok(None);
+                }
+                let project = current_snap
+                    .projects
+                    .iter()
+                    .find(|p| p.id == current.project_id)
+                    .cloned();
+                let profile = canban_scheduler::select_in_project(
+                    &self.config(),
+                    project.as_ref(),
+                    Some(&current.profile_id),
+                )?;
+                let mut terminal: TerminalEntry = db.get(&current.id)?;
+                current.state = "starting".into();
+                let fresh = current.provider_session_id.is_none();
+                if fresh && profile.command().iter().any(|s| s.contains("{session_id}")) {
+                    current.provider_session_id = Some(super::runtime::uuid_session_id());
+                }
+                terminal.runtime = Some(TerminalRuntime {
+                    machine: "local".into(),
+                    owner_core_id: None,
+                    core_id: None,
+                    terminal: None,
+                    state: "starting".into(),
+                    connection: "connecting".into(),
+                    error: None,
+                    agent_status: None,
+                    agent_turn: None,
+                    observed_agent: None,
+                    waiting: None,
+                });
+                db.save(&current)?;
+                db.save(&terminal)?;
+                Ok(Some((current, terminal, project, profile, fresh)))
             })?;
+            let Some((mut session, mut terminal, project, profile, fresh)) = admitted else {
+                continue;
+            };
             let result = (|| -> Result<()> {
                 let client = canban_herdr::Client {
                     config: self.config(),
@@ -148,6 +178,7 @@ impl AppServer {
                 std::fs::create_dir_all(&cwd)?;
                 let cwd_str = cwd.to_string_lossy().into_owned();
                 let project_dir = project
+                    .as_ref()
                     .map(|p| p.directory.as_str())
                     .unwrap_or(cwd_str.as_str());
                 let mut argv = canban_profiles::command(
@@ -199,12 +230,30 @@ impl AppServer {
                         ("canban.project".into(), session.project_id.clone()),
                     ]),
                 )?;
+                let address = strp(&receipt, "address")?.to_owned();
                 let runtime = terminal.runtime.as_mut().unwrap();
                 runtime.core_id = Some(core.clone());
-                runtime.owner_core_id = Some(core);
-                runtime.terminal = Some(strp(&receipt, "address")?.into());
+                runtime.owner_core_id = Some(core.clone());
+                runtime.terminal = Some(address.clone());
                 runtime.state = "running".into();
                 runtime.connection = "connected".into();
+                {
+                    let mut inv = self.inventory.lock().unwrap();
+                    if inv.core == core {
+                        let key = inv.address(&address);
+                        inv.records.entry(key.clone()).or_insert_with(|| {
+                            let mut seeded = receipt.clone();
+                            seeded["address"] = json!(key);
+                            if seeded["state"].is_null() {
+                                seeded["state"] = json!("live");
+                            }
+                            if seeded["cwd"].is_null() {
+                                seeded["cwd"] = json!(cwd_str);
+                            }
+                            seeded
+                        });
+                    }
+                }
                 ensure!(
                     receipt
                         .get("first_message")
@@ -223,9 +272,14 @@ impl AppServer {
                     r.error = session.error.clone();
                 }
             }
+            let expected_gen = session.generation;
             self.store.lock().unwrap().write(|db| {
-                db.save(&session)?;
-                db.save(&terminal)
+                let current: ConfigurationSession = db.get(&session.id)?;
+                if current.generation == expected_gen {
+                    db.save(&session)?;
+                    db.save(&terminal)?;
+                }
+                Ok(())
             })?;
             self.emit("configuration", None);
         }

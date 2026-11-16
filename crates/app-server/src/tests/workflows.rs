@@ -877,6 +877,111 @@ fn closing_a_queued_configuration_agent_cancels_launch_without_creating_a_card()
 }
 
 #[test]
+fn stale_configuration_observation_never_overwrites_newly_queued_generation() {
+    let (_dir, app, p, _) = setup();
+    let opened = app
+        .call(
+            "configuration.open",
+            json!({"project_id": p.id, "auto_fresh": true}),
+        )
+        .unwrap();
+    let key = opened["terminal_id"].as_str().unwrap().to_owned();
+
+    // Simulate Generation 1 finished terminal whose ConfigurationSession is still `running`.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut s: ConfigurationSession = db.get(&key)?;
+            s.provider_session_id = Some("exact-gen1-history".into());
+            s.state = "running".into();
+            db.save(&s)?;
+            let mut t: TerminalEntry = db.get(&key)?;
+            t.created_at = 1_000;
+            t.runtime = Some(TerminalRuntime {
+                machine: "local".into(),
+                owner_core_id: Some("isolated".into()),
+                core_id: Some("isolated".into()),
+                terminal: Some("local/gen1".into()),
+                state: "finished".into(),
+                connection: "connected".into(),
+                error: None,
+                agent_status: None,
+                agent_turn: None,
+                observed_agent: None,
+                waiting: None,
+            });
+            db.save(&t)
+        })
+        .unwrap();
+
+    // Snapshot captured by `pump_configuration` BEFORE `configuration.open` runs.
+    let stale_snapshot_session = app
+        .snapshot()
+        .unwrap()
+        .configuration_sessions
+        .into_iter()
+        .find(|c| c.id == key)
+        .unwrap();
+    assert_eq!(stale_snapshot_session.generation, 1);
+    assert_eq!(stale_snapshot_session.state, "running");
+
+    // Client concurrently calls `configuration.open` -> advances to Generation 2 (`queued`).
+    let reopened = app
+        .call(
+            "configuration.open",
+            json!({"project_id": p.id, "auto_fresh": true}),
+        )
+        .unwrap();
+    assert_eq!(reopened["reused"], false);
+    assert_eq!(reopened["state"], "queued");
+
+    let after_open = app.snapshot().unwrap();
+    let gen2 = after_open
+        .configuration_sessions
+        .iter()
+        .find(|c| c.id == key)
+        .unwrap();
+    assert_eq!(gen2.generation, 2);
+    assert_eq!(gen2.state, "queued");
+    assert_eq!(
+        gen2.provider_session_id.as_deref(),
+        Some("exact-gen1-history")
+    );
+    let term = after_open.terminals.iter().find(|t| t.id == key).unwrap();
+    assert!(
+        term.created_at > 1_000,
+        "requeued configuration terminal must refresh created_at for observation lag guard"
+    );
+
+    // Verify generation guard: attempting a stale gen-1 state write leaves gen-2 `queued`.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            let mut current: ConfigurationSession = db.get(&key)?;
+            if current.generation == stale_snapshot_session.generation
+                && current.state == stale_snapshot_session.state
+            {
+                current.state = "finished".into();
+                db.save(&current)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let preserved = app
+        .snapshot()
+        .unwrap()
+        .configuration_sessions
+        .into_iter()
+        .find(|c| c.id == key)
+        .unwrap();
+    assert_eq!(preserved.generation, 2);
+    assert_eq!(preserved.state, "queued");
+}
+
+#[test]
 fn edited_default_yaml_owns_callback_snapshots_instead_of_historical_stage_fields() {
     let (_dir, app, p, c) = setup();
     let review_yaml = format!(

@@ -229,7 +229,7 @@ impl AppServer {
                     break;
                 }
                 if !canban_updater::handoff::active(&home) {
-                    let _ = canban_updater::handoff::flush(&home);
+                    let _ = canban_updater::handoff::flush_settled(&home);
                     if !updates_disabled
                         && !cfg!(test)
                         && std::time::Instant::now() >= next

@@ -932,7 +932,7 @@ fn run() -> Result<()> {
     let result = match canban_app_server::rpc(&endpoint, &method, p.clone()) {
         Ok(result) => {
             if let Some(path) = queued {
-                std::fs::remove_file(path)?;
+                let _ = std::fs::remove_file(path);
             }
             result
         }

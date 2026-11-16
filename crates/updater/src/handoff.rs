@@ -100,6 +100,17 @@ pub fn enqueue(home: &Path, method: &str, params: &Value) -> Result<PathBuf> {
     Ok(path)
 }
 pub fn flush(home: &Path) -> Result<()> {
+    flush_older_than(home, std::time::Duration::ZERO)
+}
+
+/// Periodic background flush skips fresh files (<2s old) that may currently be
+/// in-flight inside a live `canban` CLI process, avoiding double RPC sends while
+/// still flushing anything left behind by an interrupted upgrade within seconds.
+pub fn flush_settled(home: &Path) -> Result<()> {
+    flush_older_than(home, std::time::Duration::from_secs(2))
+}
+
+fn flush_older_than(home: &Path, min_age: std::time::Duration) -> Result<()> {
     if active(home) {
         return Ok(());
     }
@@ -115,13 +126,25 @@ pub fn flush(home: &Path) -> Result<()> {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let value: Pending = serde_json::from_slice(&std::fs::read(&path)?)?;
+        if !min_age.is_zero()
+            && let Ok(meta) = std::fs::metadata(&path)
+            && let Ok(modified) = meta.modified()
+            && modified.elapsed().is_ok_and(|age| age < min_age)
+        {
+            continue;
+        }
+        let Ok(raw) = std::fs::read(&path) else {
+            continue;
+        };
+        let value: Pending = serde_json::from_slice(&raw)?;
         match rpc(&home.join("app.sock"), &value.method, value.params) {
-            Ok(_) => std::fs::remove_file(path)?,
+            Ok(_) => {
+                let _ = std::fs::remove_file(path);
+            }
             Err(e) => {
-                if e.to_string().starts_with("RPC ") && !active(home) {
+                if e.to_string().starts_with("RPC ") && !active(home) && path.exists() {
                     atomic(&path.with_extension("rejected"), e.to_string().as_bytes())?;
-                    std::fs::rename(&path, path.with_extension("pending-manual"))?;
+                    let _ = std::fs::rename(&path, path.with_extension("pending-manual"));
                 }
                 break;
             }
@@ -140,6 +163,17 @@ mod tests {
         assert_eq!(a, enqueue(t.path(), "execution.report", &p).unwrap());
         assert!(enqueue(t.path(), "review.merge", &p).is_err());
         assert_eq!(std::fs::read_dir(a.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn flush_settled_skips_inflight_outbox_entries_until_settled() {
+        let t = tempfile::tempdir().unwrap();
+        let p = json!({"request_key":"inflight","body":"retained"});
+        let path = enqueue(t.path(), "execution.report", &p).unwrap();
+        // Without a listening socket, an immediate `flush` would fail to connect,
+        // whereas `flush_settled` leaves fresh (<2s) in-flight CLI files untouched.
+        flush_settled(t.path()).unwrap();
+        assert!(path.is_file());
     }
 }
 

@@ -668,7 +668,7 @@ impl AppServer {
                         }
                     }
                 }
-                // Only queued work awaiting an unavailable machine needs retry admission.
+                // Only queued work awaiting an unavailable machine or slot needs retry admission.
                 let retry_needed = canban_scheduler::next(&s, server.config().scheduler.max_agents)
                     .is_some()
                     || canban_scheduler::timers::next_scheduled_run(
@@ -677,7 +677,8 @@ impl AppServer {
                     )
                     .is_some()
                     || (canban_scheduler::active_count(&s) < server.config().scheduler.max_agents
-                        && s.merge_batches.iter().any(|b| b.state == "queued"));
+                        && (s.merge_batches.iter().any(|b| b.state == "queued")
+                            || s.configuration_sessions.iter().any(|c| c.state == "queued")));
                 if retry_needed {
                     let mut current = s
                         .terminals
@@ -700,6 +701,12 @@ impl AppServer {
                             .iter()
                             .filter(|r| !r.creates_card && r.state == "queued")
                             .map(|r| r.id.clone()),
+                    );
+                    current.extend(
+                        s.configuration_sessions
+                            .iter()
+                            .filter(|c| c.state == "queued")
+                            .map(|c| format!("{}:{}", c.id, c.generation)),
                     );
                     if current != queued {
                         queued = current;
