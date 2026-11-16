@@ -1196,7 +1196,7 @@ impl HostRegistry {
             }
         }
 
-        // Newly created remote Cards can be addressed before the supervisor's
+        // Newly created remote Cards/Terminals can be addressed before the supervisor's
         // authoritative snapshot catches up. Do not project replies into its
         // cache: the UI must distinguish a stale cache from read confirmation.
         self.acknowledged_owners.lock().unwrap().retain(|id, host| {
@@ -1402,9 +1402,13 @@ impl HostRegistry {
         {
             if matches!(
                 method,
-                "card.create" | "comment.add" | "github.issue.add" | "github.item.add"
+                "card.create"
+                    | "comment.add"
+                    | "github.issue.add"
+                    | "github.item.add"
+                    | "terminal.create"
             ) {
-                // These replies contain the committed Card/Event. Do not make
+                // These replies contain the committed Card/Event/Terminal. Do not make
                 // acknowledgement wait for a second full remote state transfer.
                 if method != "comment.add"
                     && let Some(id) = res["id"].as_str()

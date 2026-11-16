@@ -39,6 +39,51 @@ Implemented user-approved direction, 2026-11-08. Native/runtime acceptance is re
 
 The window chrome follows the same left/right divider as the content while aligning with the unified 42-point chrome geometry across all screens: native traffic-light clearance and `<` / `>` Back/Forward sit at the exact same horizontal coordinates as every other page, followed by the sidebar toggle (`☰`), so `<` / `>` never jump when switching to or from `Terminals`. The right panel owns **Worktree-scoped tabs** (only live Terminals in the same `WorktreeScope` as the selected Terminal), `+` (New Shell in current worktree), `▾` (Project Root / Managed Branch Worktree / Machine menu), Open Agent, current Card/Project link, the **Project / Worktree Switcher** pill (`[⎇ <branch> · +N −M · ↑N ↓M ▾]`), compact actions, and the global right-end **Activity & Notifications** trigger pill (`[⚡ N · ● running]`, `Command+I`). Resizing the left panel moves its full-height divider. With the list hidden, tab controls clear the native window buttons and `<` / `>`. NSH owns window dragging, system double-click behavior, traffic-light geometry and resizable panels. Terminal content has no separate title, toolbar, tab strip, placeholder asking to select a conversation, or permanent technical status footer.
 
+### Terminal creation response (2026-11-16)
+
+All New Terminal controls open the server-confirmed Terminal entry as soon as
+`terminal.create` returns. They do not wait for a subsequent full workspace
+snapshot or remote-host cache synchronization. The UI retains the committed
+entry and its backend host while older snapshots catch up; authoritative runtime
+observations and renames supersede that receipt. Full refresh and observed
+directory grouping continue in the background. A location may briefly remain
+unassigned until its actual Core observation arrives; launch arguments are not
+presented as observed cwd.
+
+AppServer naming, default-name restoration and explicit directory-context reads
+use a terminal-specific projection containing Projects, Cards, Terminals,
+Managed Worktrees and configuration/merge/scheduled owners. They do not load
+Timeline, reports, Notes or workflow revision history. Existing launch-intent
+receipts, Core identity checks and source-navigation fences still apply.
+
+Validation at `f1b801d` plus this change: `mise run build`, all 569 workspace tests
+(one opt-in test skipped), and `mise run acceptance` passed. The real-PTY
+acceptance home was `/private/tmp/cb-5mf_ause/home`. New regressions verify that
+creation, inherited cwd and default rename do not read unrelated history, and
+that stale snapshots retain a new Terminal without overwriting later close or
+rename observations.
+
+A sequential local comparison used the same synthetic workload (100 Notes of
+100,000 bytes, approximately 10 MB) with disposable homes and separate real
+Herdr Cores. Across three creations, including an inherited-cwd launch, the old
+creation-plus-`app.state` response path took 1.67–2.03 seconds. The new creation
+receipt took 0.10–0.44 seconds; the subsequent full state read still took
+0.97–1.11 seconds and is now outside the navigation callback. Baseline data:
+`/private/tmp/cb-terminal-timing-1brn66k4/timing.json`; updated data:
+`/private/tmp/cb-terminal-timing-n7ll3a8y/timing.json`; comparison harness:
+`/private/tmp/cb-terminal-perf-timing.py`. These are transport/CLI measurements,
+not a frame-rate or click-to-prompt benchmark.
+
+Native packaged-App interaction with an isolated home/Core at
+`/private/tmp/cb-terminal-native-n06pex9f` verified both the current-worktree `+`
+and directory-node `+`, automatic tab selection, command entry and output,
+closing the new PTY while retaining its neighbor, and creation of a distinct
+replacement PTY. No paid provider was used. The older `acceptance-native.py`
+harness could not prepare this run because it still expects `Snapshot.attempts`;
+the dedicated disposable harness was used instead. An initial simultaneous
+packaging attempt conflicted during code-sign verification; subsequent packaging
+and acceptance passed. The installed `/Applications/Canban.app` was not replaced.
+
 ### Live directory projection (2026-11-16)
 
 Terminals are the source of the sidebar, not Project membership. Every live Shell,

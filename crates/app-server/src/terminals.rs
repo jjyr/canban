@@ -422,7 +422,7 @@ impl AppServer {
             let resolved_name = match custom_name {
                 Some(n) => Some(n),
                 None => {
-                    let mut snap = db.snapshot()?;
+                    let mut snap = db.terminal_snapshot()?;
                     snap.terminal_contexts = self.terminal_contexts.lock().unwrap().clone();
                     Some(snap.next_terminal_label(
                         origin_project_id.as_deref(),
@@ -691,7 +691,7 @@ impl AppServer {
             item.name = if !name.is_empty() {
                 Some(name.into())
             } else if item.conversation_id.is_none() {
-                let mut snap = db.snapshot()?;
+                let mut snap = db.terminal_snapshot()?;
                 snap.terminal_contexts = self.terminal_contexts.lock().unwrap().clone();
                 let pid = snap.terminal_project_id(&item).map(str::to_owned);
                 Some(snap.next_terminal_label(
@@ -810,7 +810,7 @@ impl AppServer {
         }
     }
     pub(super) fn terminal_context(&self, p: Value) -> Result<Value> {
-        let s = self.snapshot()?;
+        let s = self.store.lock().unwrap().db().terminal_snapshot()?;
         let key = strp(&p, "terminal_id")?;
         let item = s
             .terminals

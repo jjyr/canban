@@ -481,6 +481,25 @@ impl Db<'_> {
         })
     }
 
+    /// Terminal naming and directory association inputs, without Timeline,
+    /// reports, workflow revisions or other unrelated history.
+    pub fn terminal_snapshot(&self) -> Result<Snapshot> {
+        Ok(Snapshot {
+            projects: self.list()?,
+            cards: self
+                .list::<Card>()?
+                .into_iter()
+                .filter(|c| c.removed_at.is_none())
+                .collect(),
+            terminals: self.list()?,
+            worktrees: self.list()?,
+            configuration_sessions: self.list()?,
+            merge_batches: self.list()?,
+            scheduled_runs: self.list()?,
+            ..Default::default()
+        })
+    }
+
     pub fn snapshot(&self) -> Result<Snapshot> {
         let sources: Vec<WorkflowSource> = self.list()?;
         let revisions: Vec<WorkflowRevision> = self.list()?;

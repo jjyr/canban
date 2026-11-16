@@ -27,6 +27,48 @@ for line in sys.stdin:
     app.config.write().unwrap().hc = script.to_string_lossy().into();
 }
 #[test]
+fn terminal_creation_context_and_default_rename_do_not_read_unrelated_history() {
+    let (dir, app, project, _) = setup();
+    core(&app, dir.path());
+    // An unreadable unrelated record makes full-snapshot reads fail. Terminal
+    // creation, inherited directory resolution and naming need none of it.
+    app.store
+        .lock()
+        .unwrap()
+        .write(|db| {
+            db.conn.execute(
+                "INSERT INTO notes(id,state,number,data) VALUES('unrelated-history','',0,'{}')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(app.snapshot().is_err());
+    let terminal = app
+        .call("terminal.create", json!({"project_id":project.id}))
+        .unwrap();
+    assert_eq!(terminal["name"], "Terminal 1");
+    let context = app
+        .call("terminal.context", json!({"terminal_id":terminal["id"]}))
+        .unwrap();
+    assert_eq!(context["project_id"], project.id);
+    let second = app
+        .call(
+            "terminal.create",
+            json!({"inherit_terminal_id":terminal["id"]}),
+        )
+        .unwrap();
+    assert_eq!(second["name"], "Terminal 2");
+    let renamed = app
+        .call(
+            "terminal.rename",
+            json!({"terminal_id":second["id"],"name":""}),
+        )
+        .unwrap();
+    assert_eq!(renamed["name"], "Terminal 2");
+}
+
+#[test]
 fn close_owns_shell_termination_and_receipt_replay_never_targets_a_new_binding() {
     let (dir, app, p, _) = setup();
     core(&app, dir.path());

@@ -1034,6 +1034,10 @@ pub fn dispatch_complete(
     }
     let source = ui.location();
     let active_project = ui.project.get_untracked();
+    let target_host = crate::HOSTS
+        .get()
+        .map(|hosts| hosts.resolve_target_host(method, &params, Some(active_project.as_str())))
+        .unwrap_or_else(|| "local".into());
     let cfg_host = ui.effective_config_host();
     let immediate = submission::immediate(method);
     let epoch = ui.snapshot_epoch.get_untracked();
@@ -1064,7 +1068,7 @@ pub fn dispatch_complete(
                 batch(|| {
                     ui.snapshot_epoch.update(|v| *v += 1);
                     ui.committed_writes
-                        .with(|writes| writes.record(method, &value));
+                        .with(|writes| writes.record(method, &value, &target_host));
                     if let Some((mut snapshot, config)) = refreshed.filter(|_| !stale) {
                         ui.committed_writes
                             .with(|writes| writes.reconcile(&mut snapshot));
