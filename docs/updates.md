@@ -76,7 +76,8 @@ UI rail / Settings         |                         |
 - `update.state {}` returns build, discovery/progress/error state and the current install token/phase.
 - `update.check {}` starts a background check. Concurrent check/install operations share an operation lock.
 - `update.install { version, ui_pid, app_id }` requires the exact currently offered version and the owning packaged UI process. Agent-bound requests cannot install. The manifest/candidate API is allowed to advance; the new App's matching UI and CLI are verified together.
-- `canban build-info` returns `{ version, commit, schema, api, platform }`. The current desktop API is 56 and schema is 20. Local unversioned builds identify themselves as `development` / `unknown`.
+- `update.daemon { version?, request_key? }` upgrades a headless CLI or coexisting Linux/macOS desktop bundle on a remote `canband` host (recovering the live bundle path even if `/proc/self/exe` points to a deleted or retired `.canban-previous-*` backup) and schedules service restart.
+- `canban build-info` returns `{ version, commit, schema, api, platform }`. The current desktop API is 60 and schema is 20. Local unversioned builds identify themselves as `development` / `unknown`.
 
 Update state is under `~/.canban/updates/`: `state.json`, `install.json`, `updater.log`, `operation.lock`, `upgrade.lock`, `jobs/<token>/canban-updater`, `outbox/` and temporary staging/session files (`database-before.sqlite` exists only while an upgrade is active or awaiting `manual_recovery`). Successful replacement retains only the current job's `.Canban-previous-<token>.app` beside the installed App and prunes older managed backup bundles automatically.
 
