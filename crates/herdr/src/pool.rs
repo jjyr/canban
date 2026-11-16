@@ -272,8 +272,11 @@ for line in sys.stdin:
         res = {'sent': True}
     else:
         res = {'ok': True}
+    # Capture the exit instruction before publishing this reply: the caller
+    # may arm the next request as soon as it receives the current response.
+    close_after_reply = os.path.exists(base + '/close_after_reply')
     print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': res}), flush=True)
-    if os.path.exists(base + '/close_after_reply'):
+    if close_after_reply:
         os.unlink(base + '/close_after_reply')
         sys.exit(0)
 "#,
