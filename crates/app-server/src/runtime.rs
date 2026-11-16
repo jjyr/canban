@@ -244,6 +244,7 @@ impl AppServer {
         }
         self.migrate_exit_failures()?;
         self.start_runtime();
+        self.start_github_workers();
         self.start_update_checks();
         let weak = Arc::downgrade(self);
         std::thread::spawn(move || {
@@ -281,10 +282,10 @@ impl AppServer {
                         .db()
                         .list::<Project>()
                         .unwrap_or_default();
-                    server.github_refresh_queries();
                     for project in projects.into_iter().filter(|p| p.github.is_some()) {
-                        let _ = server.github_sync(&project.id);
+                        let _ = server.queue_github_sync(&project.id, false);
                     }
+                    server.github_refresh_queries();
                     let cards = server
                         .store
                         .lock()

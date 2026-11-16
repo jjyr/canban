@@ -386,6 +386,7 @@ impl Snapshot {
     pub fn merge_remote_snapshot(&mut self, mut remote: Snapshot, summary: HostSummary) {
         let host_id = summary.id.clone();
         remote.register_host_entities(&host_id);
+        self.github_sync.extend(remote.github_sync.clone());
         for (k, v) in remote.entity_hosts {
             self.entity_hosts.insert(k, v);
         }

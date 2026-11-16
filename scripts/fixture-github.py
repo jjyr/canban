@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 """Deterministic gh API transport for isolated acceptance; never contacts GitHub."""
-import json, os, sys
+import json, os, sys, time
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 base=Path(os.environ['CANBAN_GITHUB_FIXTURE_DIR'])
@@ -10,12 +10,15 @@ args=sys.argv[1:];method=args[args.index('--method')+1] if '--method' in args el
 path=next(a for a in args if a.startswith('/'));url=urlsplit(path);p=url.path;q=parse_qs(url.query);page=int(q.get('page',['1'])[0])
 body=json.load(sys.stdin) if '--input' in args else None
 with (base/'requests.jsonl').open('a') as f:f.write(json.dumps({'method':method,'path':path,'body':body})+'\n')
+if method == 'GET' and p == s.get('delay_path'): time.sleep(s.get('delay_seconds', 2))
 user={'id':7,'login':'fixture'}
 def issue(n):
  return {'id':100+n,'node_id':f'I_{n}','number':n,'title':s.get('title','Cache-backed GitHub task') if n==1 else 'Review the native diff','body':'REMOTE_BODY_SENTINEL: GitHub source description.','state':s.get('issue_state','open'),'html_url':f'https://github.com/fixture/repo/'+('pull/2' if n==2 else f'issues/{n}'),'user':user,'labels':[{'name':'bug'}],'assignees':[user],'updated_at':s.get('updated_at','2026-11-10T00:00:00Z'),'pull_request':{'url':'https://api.github.com/repos/fixture/repo/pulls/2'} if n==2 else None}
 pr={**issue(2),'id':202,'node_id':'PR_2','state':s.get('pr_state','open'),'merged':s.get('merged',False),'draft':False,'head':{'sha':s.get('head','a'*40),'ref':'feature/cache'},'base':{'sha':'b'*40,'ref':'main'},'requested_reviewers':[user]}
 repo={'id':1,'full_name':'fixture/repo','default_branch':'main','html_url':'https://github.com/fixture/repo'}
 code=200;link=None;poll=None;result=None
+if method == 'GET' and p == s.get('fail_path'):
+ print('HTTP/2 403 Forbidden\n\n'+json.dumps({'message':'fixture access denied'}));sys.exit(1)
 if method!='GET':
  if body and body.get('body') in ['DENY_FIXTURE','UNKNOWN_FIXTURE']:
   code=403 if body['body']=='DENY_FIXTURE' else 500;result={'message':'Fixture rejection'}

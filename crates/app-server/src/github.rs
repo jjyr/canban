@@ -3,6 +3,7 @@ use super::*;
 mod browse;
 mod delivery;
 mod projection;
+pub(super) mod worker;
 use canban_kanban::github::{self as integration, Change};
 impl AppServer {
     fn github_client(&self) -> Result<canban_github::Client> {
@@ -238,11 +239,19 @@ impl AppServer {
                 let intake: GitHubIntake =
                     serde_json::from_value(p.get("intake").cloned().unwrap_or(json!("all")))?;
                 let account_generation = self.github.generation();
-                let client = self.github_client()?.refreshing();
-                let info = client.repo(&repo)?;
-                if intake == GitHubIntake::Collaborators || p["pr_intake"] == "collaborators" {
-                    client.collaborators(&repo).context("Cannot enable collaborator intake: could not verify repository collaborators")?;
-                }
+                let existing = {
+                    let store = self.store.lock().unwrap();
+                    let pid = super::resolve_project_id(store.db(), project_id)?;
+                    store.db().get::<Project>(&pid)?.github
+                };
+                let (repository, repository_id) = if let Some(source) =
+                    existing.filter(|s| s.repository.eq_ignore_ascii_case(&repo))
+                {
+                    (source.repository, source.repository_id)
+                } else {
+                    let info = self.github_client()?.refreshing().repo(&repo)?;
+                    (info.full_name, info.id)
+                };
                 let result = self.mutate(method, &p, |db| {
                     ensure!(
                         self.github.generation() == account_generation,
@@ -259,8 +268,8 @@ impl AppServer {
                         labels: strings(&p, "labels"),
                         include_drafts: p["include_drafts"].as_bool().unwrap_or(false),
                         paused: p["paused"].as_bool().unwrap_or(false),
-                        repository: info.full_name,
-                        repository_id: info.id,
+                        repository,
+                        repository_id,
                         generation: id(),
                         intake,
                         synced_at: None,
@@ -272,7 +281,7 @@ impl AppServer {
                     db.save(&project)?;
                     Ok(serde_json::to_value(project)?)
                 })?;
-                self.github_sync_due.store(true, Ordering::SeqCst);
+                self.queue_github_sync(result["id"].as_str().context("Missing project")?, true)?;
                 Ok(result)
             }
             "github.source.disconnect" => {
@@ -435,6 +444,34 @@ impl AppServer {
                     Ok(serde_json::to_value(card)?)
                 })
             }
+            "github.sync.request" => {
+                self.queue_github_sync(strp(&p, "project_id")?, true)?;
+                Ok(json!({"queued":true}))
+            }
+            "github.repository.info" => {
+                let repo = canban_github::repository(strp(&p, "repository")?)?;
+                self.github_cached_client()?
+                    .get::<Value>(&format!("/repos/{repo}"))
+            }
+            "github.repositories" => {
+                let project = {
+                    let store = self.store.lock().unwrap();
+                    let pid = super::resolve_project_id(store.db(), strp(&p, "project_id")?)?;
+                    store.db().get::<Project>(&pid)?
+                };
+                let loc = project.work_location();
+                let machine = self.resolve_machine(&loc.machine, true)?;
+                let mut candidates = Vec::new();
+                for (remote, url) in self
+                    .ops(&machine)
+                    .remote_urls(&loc.directory, &project.workflow.workspace.remote)
+                {
+                    if let Ok(repository) = canban_github::remote_repository(&url) {
+                        candidates.push(json!({"remote":remote,"repository":repository}));
+                    }
+                }
+                Ok(json!({"candidates":candidates}))
+            }
             "github.sync" => {
                 self.github_sync(strp(&p, "project_id")?)?;
                 Ok(json!({"synced":true}))
@@ -446,14 +483,72 @@ impl AppServer {
         }
     }
     pub(super) fn github_sync(&self, project_id: &str) -> Result<()> {
-        let (project, cards, cache) = {
+        self.github_sync_run(project_id, false, None)
+    }
+    pub(super) fn github_sync_run(
+        &self,
+        project_id: &str,
+        manual: bool,
+        expected: Option<&str>,
+    ) -> Result<()> {
+        let gate = self.github_sync_gate(project_id);
+        let _guard = gate.lock().unwrap();
+        let mut project: Project = self.store.lock().unwrap().db().get(project_id)?;
+        let source = project
+            .github
+            .as_mut()
+            .context("Project has no GitHub source")?;
+        if expected.is_some_and(|g| g != source.generation) {
+            return Ok(());
+        }
+        if source.paused && !manual {
+            return Ok(());
+        }
+        source.paused = false;
+        let generation = source.generation.clone();
+        let last_success = source.synced_at;
+        self.github_phase(&project, "issues");
+        let issues = self.github_sync_issues(&project);
+        self.github_phase(&project, "prs");
+        let prs = self.github_pr_intake(&project);
+        self.github_phase(&project, "observations");
+        let observations = self.github_event_refresh(&project);
+        let errors: Vec<_> = [
+            ("Issues", issues),
+            ("PRs", prs),
+            ("Observations", observations),
+        ]
+        .into_iter()
+        .filter_map(|(stage, r)| r.err().map(|e| format!("{stage}: {e:#}")))
+        .collect();
+        let error = (!errors.is_empty()).then(|| errors.join("; "));
+        self.store.lock().unwrap().write(|db| {
+            let mut current: Project = db.get(project_id)?;
+            if let Some(g) = &mut current.github
+                && g.generation == generation
+            {
+                g.synced_at = if error.is_none() {
+                    Some(now())
+                } else {
+                    last_success
+                };
+                g.error = error.clone();
+                db.save(&current)?;
+            }
+            Ok(())
+        })?;
+        self.emit("github", None);
+        if let Some(error) = error {
+            bail!("{error}");
+        }
+        Ok(())
+    }
+    fn github_sync_issues(&self, project: &Project) -> Result<()> {
+        let project_id = project.id.as_str();
+        let (cards, cache) = {
             let store = self.store.lock().unwrap();
             let db = store.db();
-            (
-                db.get::<Project>(project_id)?,
-                db.list::<Card>()?,
-                db.list::<GitHubIssueSnapshot>()?,
-            )
+            (db.list::<Card>()?, db.list::<GitHubIssueSnapshot>()?)
         };
         let source = project
             .github
@@ -519,8 +614,6 @@ impl AppServer {
         if let Some(error) = error {
             bail!("{error}")
         }
-        self.github_pr_intake(&project)?;
-        self.github_event_refresh(&project)?;
         Ok(())
     }
 }

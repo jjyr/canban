@@ -1006,7 +1006,7 @@ pub fn execute(ui: Ui, id: &str) {
         "sync-github-repo" => {
             if let Some(p) = ui.current_project() {
                 if p.github.is_some() {
-                    dispatch(ui, "github.sync", json!({"project_id": p.id}));
+                    dispatch(ui, "github.sync.request", json!({"project_id": p.id}));
                 } else {
                     ui.navigate("github-repository");
                 }

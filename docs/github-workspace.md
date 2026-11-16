@@ -6,6 +6,8 @@ Status: integrated with the editor/updater on main, 2026-11-10. This is the curr
 
 The primary rail places GitHub immediately above Archive. GitHub contains Notifications, Issues and Pull requests. Account/access and cache controls belong to its Account & access page. Settings no longer duplicates GitHub configuration.
 
+The Board header includes a separate icon-only synchronization action next to the GitHub icon. Clock, rotating refresh (respecting reduced motion), warning and pause icons expose queued, running, failed/partial and paused states; tooltips show the repository, last successful synchronization, additions and errors. The action queues a manual synchronization without opening settings.
+
 The Board header's GitHub icon opens the selected Project's repository and sync rules, showing a connected indicator dot when an active repository source is bound. Canban automatically inspects a Project's Git remote (`workflow.workspace.remote`, defaulting to `origin`, or a unique `github.com` remote) on Project creation, work-location updates, startup/background reconciliation, and post-sign-in checks. When a signed-in GitHub App or `gh` CLI account can resolve the repository, Canban automatically binds `Project.github` with both Open Issue intake (`intake`) and Open PR intake (`pr_intake`) defaulting to `off` — enabling Issue/PR search, GitHub panel scoping, and PR delivery immediately without flooding Backlog. Manually disconnecting a repository records `github_disconnected` so background reconciliation will not re-link it automatically until the user explicitly reconnects (including one-click linking of the detected remote). Existing linked projects preserve their configured intake modes, and ordinary local work and execution locations remain independent of GitHub availability.
 
 Canban App authentication remains available through the existing Device Flow and private credential file. Repository operations prefer that account when connected. With no App connection, the already signed-in GitHub CLI account supplies repository browsing, intake and explicit API actions. Canban invokes `gh api` without extracting or copying its credentials. Git push continues to use the saved execution machine's Git credentials.
@@ -24,7 +26,7 @@ The unified Add Card form supports Local, GitHub Issue and GitHub PR. Search/sel
 
 Issue intake supports off, all Open Issues and collaborator-authored Open Issues. PR intake supports off, all Open PRs, collaborators, assigned to me, authored by me or Review requested from me. Additional author and Label lists narrow new intake, and Draft inclusion is explicit. Author matching is case-insensitive; collaborator membership uses GitHub user IDs. Label alternatives are OR; distinct condition groups are AND.
 
-Automatic intake creates Backlog records without Agent, Session or worktree launch. Changed eligibility never ejects existing Cards. Turning intake off continues to refresh already tracked sources. Pause stops the Project's worker; independent GitHub browsing can still refresh the shared remote cache. Closing an Issue or merging an ordinary related PR does not move or archive a Card. A delivery merge records a local delivery receipt through the existing workflow policy; Archive remains separate.
+Automatic intake creates Backlog records without Agent, Session or worktree launch. Changed eligibility never ejects existing Cards. Turning intake off continues to refresh already tracked sources. Pause stops automatic synchronization; explicit manual synchronization still runs once; independent GitHub browsing can still refresh the shared remote cache. Closing an Issue or merging an ordinary related PR does not move or archive a Card. A delivery merge records a local delivery receipt through the existing workflow policy; Archive remains separate.
 
 Accepted next architecture (2026-11-11, initial implementation; see [workflow/event coverage](product/workflow-engine.md)): [event subscriptions](product/events-and-notifications.md) can react to source-bound Card creation and Issue/PR observations, and start the [unified workflow engine](product/workflow-engine.md). Intake itself retains the Backlog-only ownership action; execution requires an enabled subscription. Source bindings must be complete before publishing creation. Discovery/baselines, polling gaps and durable deduplication are explicit. Persist minimal event/progress metadata independently of disposable responses; do not restore permanent remote-body/comment/diff mirrors. Existing refresh broadcasts are not this durable event feed. A configured workflow may explicitly react to source close/merge; these observations still have no built-in Card progression.
 
@@ -86,3 +88,33 @@ New execution manifests keep source identities, local instructions and local his
 `mise run acceptance-github-native` adds the packaged native app against the same deterministic remote for interactive acceptance. Gallery includes GitHub inbox, PR diff and offline cached-content scenes using production components. These fixtures are not live GitHub protected-branch, permission or OAuth acceptance. Historical live App/PR/merge evidence remains in [GitHub integration](github-integration.md).
 
 The [2026-11-10 acceptance report](github-workspace-acceptance-20261110.md) records the automated and native checks and the boundary between live notification reads and fixture-only writes.
+
+## Repository settings and asynchronous synchronization (2026-11-16)
+
+Repository settings use controlled toggles for Issue/PR intake, Draft PRs and
+pausing automatic synchronization. Scope selectors update a local draft directly;
+they do not mirror values through bidirectional reactive effects. Disabling intake
+retains its draft scope. Save remains explicit. Same-repository rule saves are local
+transactions; first/new repository bindings validate identity asynchronously.
+Collaborator permissions are checked during synchronization and failures remain visible.
+
+Local remote candidates and GitHub fork/parent metadata load independently off the
+UI thread. Selecting a candidate or parent changes only the draft source repository,
+never local Git remotes. A fork is not silently redirected to its parent.
+
+`github.sync.request` queues a project and returns immediately. Two workers run
+independently of warm browsing-query refresh. Requests for the same generation
+coalesce; new settings replace pending requests and fence old results. The existing
+`github.sync` RPC remains a synchronous compatibility operation, serialized against
+queued work for the same project. Saving schedules one manual synchronization even
+when automatic synchronization is paused. Issue and PR stages run independently;
+errors from either stage and activity observation are retained, and last-success
+advances only when the entire run succeeds.
+
+Ephemeral `Snapshot.github_sync` status is shared by Board/settings and merged across
+hosts. Worker status resets at service restart; the saved source retains last-success
+and error. UI RPCs, candidate discovery and fork metadata use background execution.
+Leaving the page does not cancel synchronization or overwrite unsaved drafts.
+Desktop API 61 introduces the queue, discovery RPCs and snapshot status.
+
+[2026-11-16 synchronization acceptance](github-sync-acceptance-20261116.md) records the automated, native and live Fiber source checks and their boundaries.

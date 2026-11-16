@@ -123,3 +123,46 @@ pub fn utility_button(
                 .on_press(press),
         )
 }
+
+/// Compact sync action with native animation and reduced-motion support.
+pub fn sync_action(
+    kind: Icon,
+    title: String,
+    busy: bool,
+    spinning: bool,
+    press: impl Fn(&()) + 'static,
+) -> View {
+    use nsh_core::element::Animation;
+    let angle = animated_value(0.);
+    if spinning && !super::motion::reduced() {
+        let animation =
+            Animation::timing(&angle, 360., Timing::new(1000., Easing::Linear)).looped(None);
+        let _ = animation.start();
+        cleanup(move || animation.stop());
+    }
+    view()
+        .window_drag(false)
+        .flex_shrink_0()
+        .tooltip(hint_tooltip(title.clone()).placement(Placement::Bottom))
+        .child(
+            super::press_target()
+                .w(px(30.))
+                .h(px(30.))
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .bg(CLEAR)
+                .hover(|s| s.bg(INSET))
+                .focus(|s| s.border_1().border_color(ACCENT))
+                .accessibility_label(move || Some(title.clone().into()))
+                .disabled(move || busy)
+                .child(
+                    view()
+                        .w(px(16.))
+                        .h(px(16.))
+                        .bind_rotate(&angle)
+                        .child(icon(kind).w(px(16.)).h(px(16.))),
+                )
+                .on_press(press),
+        )
+}

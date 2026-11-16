@@ -1003,6 +1003,8 @@ pub struct Artifact {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub struct Snapshot {
+    #[serde(default)]
+    pub github_sync: BTreeMap<String, GitHubSyncStatus>,
     /// Client-side host ownership (`entity_id -> host_id`) populated when merging remote hosts.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub entity_hosts: BTreeMap<String, String>,
@@ -1909,4 +1911,14 @@ mod tests {
             "Add machine 3"
         );
     }
+}
+
+/// Ephemeral project worker status, delivered through the normal snapshot event stream.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct GitHubSyncStatus {
+    pub generation: String,
+    pub phase: String,
+    pub issues_added: usize,
+    pub prs_added: usize,
+    pub error: Option<String>,
 }

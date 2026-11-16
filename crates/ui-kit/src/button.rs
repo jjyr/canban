@@ -136,3 +136,39 @@ mod tests {
         assert!(offenders.is_empty(), "use press_target(): {offenders:?}");
     }
 }
+
+/// Controlled toggle: the caller owns its value; pointer and keyboard share one action.
+pub fn toggle(
+    label: &'static str,
+    value: impl Fn() -> bool + Copy + 'static,
+    changed: impl Fn(bool) + 'static,
+) -> nsh_base::ButtonElement {
+    press_target()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .min_h(px(30.))
+        .accessibility_label(move || {
+            Some(format!("{label}: {}", if value() { "on" } else { "off" }).into())
+        })
+        .focus(|s| s.border_1().border_color(ACCENT))
+        .child(text(label).text_size(px(12.)).text_color(TEXT))
+        .child(
+            view()
+                .w(px(34.))
+                .h(px(20.))
+                .rounded_full()
+                .p_0p5()
+                .bg(move || if value() { ACCENT_FILL } else { INSET })
+                .child(
+                    view()
+                        .w(px(16.))
+                        .h(px(16.))
+                        .rounded_full()
+                        .bg(TEXT)
+                        .ml(move || px(if value() { 14. } else { 0. })),
+                ),
+        )
+        .on_press(move |_: &()| changed(!value()))
+}

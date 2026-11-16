@@ -1513,6 +1513,41 @@ pub fn Gallery() -> impl IntoElement {
         return canban_ui::frame::screen(ui).into_element();
     }
     let scene_env = std::env::var("CANBAN_GALLERY_SCENE").unwrap_or_default();
+    if let Some(phase) = scene_env.strip_prefix("github-sync-") {
+        let mut snapshot = fixtures::workspace();
+        let project = &mut snapshot.projects[0];
+        project.github = Some(canban_types::GitHubSource {
+            repository: "nervosnetwork/fiber".into(),
+            repository_id: 1,
+            generation: "gallery".into(),
+            intake: canban_types::GitHubIntake::All,
+            pr_intake: canban_types::GitHubPrIntake::All,
+            authors: vec![],
+            labels: vec![],
+            include_drafts: false,
+            paused: phase == "paused",
+            synced_at: Some(canban_types::now()),
+            error: None,
+        });
+        let id = project.id.clone();
+        snapshot.github_sync.insert(
+            id.clone(),
+            canban_types::GitHubSyncStatus {
+                generation: "gallery".into(),
+                phase: phase.into(),
+                issues_added: 3,
+                prs_added: 2,
+                error: (phase == "failed").then(|| "PRs: repository access denied".into()),
+            },
+        );
+        ui.snapshot.set(snapshot);
+        ui.select_project(id);
+        if phase == "settings" {
+            ui.navigate("github-repository");
+        }
+        return canban_ui::frame::screen(ui).into_element();
+    }
+
     if matches!(
         scene_env.as_str(),
         "github-discussion" | "github-discussion-delete-confirm"

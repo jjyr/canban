@@ -44,9 +44,29 @@ try:
  assert p['github']['repository']=='fixture/repo' and p['github']['intake']=='off' and p['github']['pr_intake']=='off'
  call('github.sync',{'project_id':p['id']});assert call('app.snapshot')['cards']==[]
  call('project.github',{'project_id':p['id'],'repository':'fixture/repo','intake':'all','pr_intake':'all'})
- call('github.sync',{'project_id':p['id']})
  s=wait(lambda s:len(s['cards'])==2);assert all(c['stage']=='backlog' for c in s['cards']);assert not [t for t in s['terminals'] if t.get('agent')]
  issue=next(c for c in s['cards'] if c['content']['kind']=='github_issue');prcard=next(c for c in s['cards'] if c['content']['kind']=='github_pr')
+ # Slow transport must not hold the rule-save RPC; duplicate requests coalesce.
+ wait(lambda s:s['github_sync'].get(p['id'],{}).get('phase')=='success')
+ remote(delay_path='/repos/fixture/repo/issues',delay_seconds=2)
+ started=time.monotonic()
+ call('project.github',{'project_id':p['id'],'repository':'fixture/repo','intake':'all','pr_intake':'all','paused':True})
+ save_seconds=time.monotonic()-started
+ assert save_seconds < 1.5, 'Saving existing rules waited for GitHub'
+ wait(lambda s:s['github_sync'].get(p['id'],{}).get('phase')=='issues')
+ for _ in range(3):call('github.sync.request',{'project_id':p['id']})
+ wait(lambda s:s['github_sync'].get(p['id'],{}).get('phase')=='success')
+ # Manual requests work while automatic sync is paused; PR errors remain visible.
+ remote(delay_path='',fail_path='/repos/fixture/repo/pulls')
+ call('github.sync.request',{'project_id':p['id']})
+ failed=wait(lambda s:s['github_sync'].get(p['id'],{}).get('phase')=='failed')
+ assert 'PRs:' in failed['github_sync'][p['id']]['error']
+ assert next(x for x in failed['projects'] if x['id']==p['id'])['github']['error']
+ remote(fail_path='')
+ call('github.sync.request',{'project_id':p['id']})
+ wait(lambda s:s['github_sync'].get(p['id'],{}).get('phase')=='success')
+ call('project.github',{'project_id':p['id'],'repository':'fixture/repo','intake':'all','pr_intake':'all'})
+ wait(lambda s:s['github_sync'].get(p['id'],{}).get('phase')=='success')
  r={'repository':'fixture/repo','kind':'pr','number':2,'sha':None,'url':'https://github.com/fixture/repo/pull/2'}
  restored=call('github.item.add',{'project_id':p['id'],'reference':r});assert restored['id']==prcard['id']
  local=call('card.create',{'project_id':p['id'],'title':'Local implementation task','body':'Keep this content local.'})
@@ -106,7 +126,7 @@ try:
  before_state=call('app.state')
  call('github.browse',{'kind':'issues','relation':'all','state':'open','query':'new query cache','page':2})
  after_state=call('app.state');assert after_state['snapshot']['cards']==before_state['snapshot']['cards'];assert after_state['github_revision']>before_state['github_revision']
- results={'passed':True,'base':str(base),'home':str(home),'project_id':p['id'],'issue_card':issue['id'],'pr_card':prcard['id'],'local_card':local['id'],'checks':['automatic Issue/PR Backlog intake','manual dedup','Local references','notification pagination/cache','versioned Diff','comment and Review receipts','stale-head rejection','source refresh without execution','notification read receipt','no mirrored remote bodies','restart/cache restore','cache-only changes propagate without Card changes']}
+ results={'passed':True,'base':str(base),'home':str(home),'project_id':p['id'],'issue_card':issue['id'],'pr_card':prcard['id'],'local_card':local['id'],'rule_save_seconds':save_seconds,'checks':['nonblocking same-repository rule save','queued automatic intake after Save','paused manual sync','PR error visibility and retry','automatic Issue/PR Backlog intake','manual dedup','Local references','notification pagination/cache','versioned Diff','comment and Review receipts','stale-head rejection','source refresh without execution','notification read receipt','no mirrored remote bodies','restart/cache restore','cache-only changes propagate without Card changes']}
  (base/'results.json').write_text(json.dumps(results,indent=2));print(json.dumps(results),flush=True)
  if args.native:
   app_id='com.canban.github-acceptance.'+base.name;bundle=base/'CanbanGitHubAcceptance.app';shutil.copytree(root/'.local/Canban.app',bundle)

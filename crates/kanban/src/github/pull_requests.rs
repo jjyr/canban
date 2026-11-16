@@ -12,7 +12,11 @@ pub fn fetch(client: &Client, project: &Project, cards: &[Card], login: &str) ->
     let mut numbers: std::collections::BTreeSet<u64> = cards
         .iter()
         .filter(|c| c.project_id == project.id && c.removed_at.is_none() && c.is_github_pr())
-        .filter_map(|c| c.github_issue().map(|s| s.number))
+        .filter_map(|c| {
+            c.github_issue()
+                .filter(|s| s.repository_id == source.repository_id)
+                .map(|s| s.number)
+        })
         .collect();
     if source.pr_intake != GitHubPrIntake::Off {
         let collaborators = if source.pr_intake == GitHubPrIntake::Collaborators {

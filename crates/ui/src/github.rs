@@ -3,6 +3,8 @@ mod detail;
 pub mod filters;
 pub mod references;
 mod repository;
+mod sync;
+pub use sync::{sync_button, sync_hint};
 pub mod workspace;
 use crate::{
     drafts::{self, Draft},

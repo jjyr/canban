@@ -6,7 +6,7 @@ pub mod linux_gtk;
 pub mod scrollbar;
 pub mod surface;
 pub mod tokens;
-pub use button::{Variant, action, action_with_icon, compact_action, press_target};
+pub use button::{Variant, action, action_with_icon, compact_action, press_target, toggle};
 pub use checkbox::checkbox;
 pub use input::{bound_field, field};
 pub use scrollbar::vertical_scrollbar;

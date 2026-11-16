@@ -1067,7 +1067,7 @@ pub fn dispatch_complete(
                                 ui.notify("Repository settings saved");
                             }
                         }
-                        "github.sync" => ui.notify("GitHub repository synced"),
+                        "github.sync.request" => ui.notify("GitHub synchronization queued"),
                         "github.source.disconnect" => ui.notify("GitHub repository disconnected"),
                         "workflow.save" => ui.notify("Workflow saved"),
                         "workflow.default.set" => {

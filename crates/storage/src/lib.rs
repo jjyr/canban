@@ -474,6 +474,7 @@ impl Db<'_> {
             .filter(|w| sources.iter().any(|s| s.revision_id == w.id))
             .collect();
         Ok(Snapshot {
+            github_sync: Default::default(),
             workflow_runs: self.list()?,
             workflow_revisions: active,
             workflow_sources: sources,

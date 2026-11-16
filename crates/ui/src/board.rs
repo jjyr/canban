@@ -69,7 +69,14 @@ pub fn chrome_bar(ui: Ui) -> impl IntoElement {
                             move |_| ui.navigate("github-repository"),
                         )
                     },
-                )),
+                ))
+                .child(dynamic(move || {
+                    if let Some(p) = project.get().filter(|p| p.github.is_some()) {
+                        crate::github::sync_button(ui, p.id).into_element()
+                    } else {
+                        view().into_element()
+                    }
+                })),
         )
         .child(activity::strip(ui))
         .child(

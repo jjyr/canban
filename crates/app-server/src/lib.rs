@@ -28,6 +28,8 @@ pub struct AppServer {
     pub home: PathBuf,
     github: Arc<canban_github::auth::Service>,
     github_sync_due: AtomicBool,
+    github_jobs: Mutex<github::worker::Jobs>,
+    github_job_signal: std::sync::Condvar,
     github_revision: std::sync::atomic::AtomicU64,
     github_cli: Arc<canban_github::cli::Service>,
     github_queries: Mutex<std::collections::BTreeMap<String, Value>>,
@@ -620,6 +622,8 @@ impl AppServer {
             _service_lock: service_lock,
             utilities: utilities::Utilities::new(&home),
             github_sync_due: AtomicBool::new(true),
+            github_jobs: Mutex::new(Default::default()),
+            github_job_signal: std::sync::Condvar::new(),
             github_revision: std::sync::atomic::AtomicU64::new(0),
             github_queries: Mutex::new(
                 std::fs::read(home.join("cache/github/queries.json"))
@@ -815,6 +819,7 @@ impl AppServer {
     }
     pub fn snapshot(&self) -> Result<Snapshot> {
         let mut snapshot = self.store.lock().unwrap().snapshot()?;
+        snapshot.github_sync = self.github_jobs.lock().unwrap().status.clone();
         snapshot.github = serde_json::from_value(serde_json::to_value(self.github.status())?)?;
         self.project_github(&mut snapshot);
         snapshot.merging_cards = self

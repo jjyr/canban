@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct Rules {
+    #[serde(default = "all_scope")]
+    issue_scope: String,
+    #[serde(default = "all_scope")]
+    pr_scope: String,
     intake: String,
     pr_intake: String,
     authors: String,
@@ -15,6 +19,8 @@ struct Rules {
 impl Default for Rules {
     fn default() -> Self {
         Self {
+            issue_scope: "all".into(),
+            pr_scope: "all".into(),
             intake: "off".into(),
             pr_intake: "off".into(),
             authors: String::new(),
@@ -58,6 +64,75 @@ fn split_csv(s: String) -> Vec<String> {
         .collect()
 }
 
+fn all_scope() -> String {
+    "all".into()
+}
+fn controlled_choice(
+    _ui: Ui,
+    value: impl Fn() -> String + Copy + 'static,
+    changed: impl Fn(String) + Copy + 'static,
+    options: Vec<(&'static str, &'static str)>,
+) -> impl IntoElement {
+    use canban_ui_kit::picker::{PickerOption, search_popover};
+    let labels = options.clone();
+    search_popover(
+        action(
+            move || {
+                let current = value();
+                format!(
+                    "{} ▾",
+                    labels
+                        .iter()
+                        .find(|(id, _)| *id == current)
+                        .map(|(_, label)| *label)
+                        .unwrap_or("")
+                )
+            },
+            Variant::Secondary,
+            |_| {},
+        ),
+        move || {
+            let selected = value();
+            options
+                .iter()
+                .map(|(id, label)| PickerOption::new(*id, *label).selected(*id == selected))
+                .collect()
+        },
+        changed,
+    )
+    .width(280.)
+    .list_height(200.)
+}
+fn rule_choice(
+    ui: Ui,
+    d: Signal<Draft>,
+    pr: bool,
+    options: Vec<(&'static str, &'static str)>,
+) -> impl IntoElement {
+    controlled_choice(
+        ui,
+        move || {
+            if pr {
+                rules(d).pr_intake
+            } else {
+                rules(d).intake
+            }
+        },
+        move |v| {
+            edit(d, |r| {
+                if pr {
+                    r.pr_intake = v.clone();
+                    r.pr_scope = v;
+                } else {
+                    r.intake = v.clone();
+                    r.issue_scope = v;
+                }
+            })
+        },
+        options,
+    )
+}
+
 pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
     let source = id.clone();
     let saved = computed(move || {
@@ -73,6 +148,12 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                     let repo = if let Some(g) = &p.github {
                         r.intake = enum_name(&g.intake);
                         r.pr_intake = enum_name(&g.pr_intake);
+                        if r.intake != "off" {
+                            r.issue_scope = r.intake.clone();
+                        }
+                        if r.pr_intake != "off" {
+                            r.pr_scope = r.pr_intake.clone();
+                        }
                         r.authors = g.authors.join(", ");
                         r.labels = g.labels.join(", ");
                         r.drafts = g.include_drafts;
@@ -95,12 +176,49 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
         format!("github-repository:{id}"),
         Draft {
             title: initial.0.clone(),
-            base_title: initial.0,
+            base_title: initial.0.clone(),
             body: body.clone(),
             base_body: body,
             ..Default::default()
         },
     );
+    let candidates = signal(Value::Null);
+    let candidate_error = signal(String::new());
+    let repository_info = signal(Value::Null);
+    if crate::APP.get().is_some() {
+        let pid = id.clone();
+        ui.spawn(async move {
+            let result = blocking(move || {
+                crate::routed_call("github.repositories", json!({"project_id":pid}), Some(&pid))
+            })
+            .await;
+            match result {
+                Ok(Ok(v)) => {
+                    candidates.try_set(v);
+                }
+                other => {
+                    candidate_error.try_set(format!("Repository discovery failed: {other:?}"));
+                }
+            }
+        });
+    }
+    let info_repository = initial.0.clone();
+    if crate::APP.get().is_some() && !info_repository.is_empty() {
+        let pid = id.clone();
+        ui.spawn(async move {
+            if let Ok(Ok(info)) = blocking(move || {
+                crate::routed_call(
+                    "github.repository.info",
+                    json!({"project_id":pid,"repository":info_repository}),
+                    Some(&pid),
+                )
+            })
+            .await
+            {
+                repository_info.try_set(info);
+            }
+        });
+    }
     let baseline = signal(initial.1);
     effect(move || {
         let (repository, remote) = saved.get();
@@ -115,7 +233,9 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
             };
         }
         merge!(intake, pr_intake, authors, labels, drafts, paused, delivery);
-        d.update(|d| {
+        let mut next = d.get_untracked();
+        {
+            let d = &mut next;
             let next_title = if d.title == d.base_title {
                 repository.clone()
             } else {
@@ -127,46 +247,12 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                 d.base_title = repository;
                 d.body = next_body;
             }
-        });
+            d.base_body = serde_json::to_string(&remote).unwrap();
+        }
+        if next != d.get_untracked() {
+            d.set(next);
+        }
         baseline.set(remote);
-    });
-    let intake = signal(rules_untracked(d).intake);
-    let pr = signal(rules_untracked(d).pr_intake);
-    let delivery = signal(rules_untracked(d).delivery);
-    effect(move || {
-        let r = rules(d);
-        if intake.get_untracked() != r.intake {
-            intake.set(r.intake)
-        }
-        if pr.get_untracked() != r.pr_intake {
-            pr.set(r.pr_intake)
-        }
-        if delivery.get_untracked() != r.delivery {
-            delivery.set(r.delivery)
-        }
-    });
-    effect(move || {
-        let v = intake.get();
-        untracked(|| edit(d, |r| r.intake = v));
-    });
-    effect(move || {
-        let v = pr.get();
-        untracked(|| edit(d, |r| r.pr_intake = v));
-    });
-    effect(move || {
-        let v = delivery.get();
-        untracked(|| edit(d, |r| r.delivery = v));
-    });
-    let drafts_flag = signal(rules_untracked(d).drafts);
-    let paused_flag = signal(rules_untracked(d).paused);
-    effect(move || {
-        let r = rules(d);
-        if drafts_flag.get_untracked() != r.drafts {
-            drafts_flag.set(r.drafts);
-        }
-        if paused_flag.get_untracked() != r.paused {
-            paused_flag.set(r.paused);
-        }
     });
     let save = id.clone();
     let sync = id.clone();
@@ -309,13 +395,25 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                             }
                             row.into_element()
                         }))
-                        .child(checkbox(
-                            "Pause synchronization".into(),
-                            paused_flag,
-                            move |enabled| {
-                                edit(d, |r| r.paused = *enabled);
-                            },
-                        )),
+                        .child(dynamic(move || {
+                            let data = candidates.get();
+                            let mut area = view().gap_2();
+                            for candidate in data["candidates"].as_array().into_iter().flatten() {
+                                let repo = candidate["repository"].as_str().unwrap_or("").to_owned();
+                                let label = format!("Use {} · {}", candidate["remote"].as_str().unwrap_or("remote"), repo);
+                                area = area.child(compact_action(label, Variant::Quiet, move |_| d.update(|d| d.title = repo.clone())));
+                            }
+                            let info = repository_info.get();
+                            if let Some(parent) = info["parent"]["full_name"].as_str() {
+                                let parent = parent.to_owned();
+                                area = area.child(muted(format!("{} is a fork of {parent}", info["full_name"].as_str().unwrap_or("Repository"))))
+                                    .child(compact_action("Use upstream repository", Variant::Secondary, move |_| d.update(|d| d.title = parent.clone())));
+                            }
+                            if !candidate_error.get().is_empty() { area = area.child(notice(candidate_error.get(), Tone::Attention)); }
+                            area
+                        }))
+                        .child(toggle("Pause automatic synchronization", move || rules(d).paused,
+                            move |enabled| edit(d, |r| r.paused = enabled))),
                 ),
         )
         .child(
@@ -335,33 +433,33 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                                 .child(
                                     view()
                                         .gap_1()
-                                        .child(muted("Open Issues"))
-                                        .child(choice(
-                                            ui,
-                                            intake,
+                                        .child(toggle("Automatically sync Issues", move || rules(d).intake != "off", move |enabled| edit(d, |r| {
+                                            r.intake = if enabled { r.issue_scope.clone() } else { "off".into() };
+                                        })))
+                                        .child(when(move || rules(d).intake != "off", move || rule_choice(
+                                            ui, d, false,
                                             vec![
-                                                ("off", "Off"),
                                                 ("all", "All authors"),
                                                 ("collaborators", "Repository collaborators"),
                                             ],
-                                        )),
+                                        ))),
                                 )
                                 .child(
                                     view()
                                         .gap_1()
-                                        .child(muted("Open pull requests"))
-                                        .child(choice(
-                                            ui,
-                                            pr,
+                                        .child(toggle("Automatically sync pull requests", move || rules(d).pr_intake != "off", move |enabled| edit(d, |r| {
+                                            r.pr_intake = if enabled { r.pr_scope.clone() } else { "off".into() };
+                                        })))
+                                        .child(when(move || rules(d).pr_intake != "off", move || rule_choice(
+                                            ui, d, true,
                                             vec![
-                                                ("off", "Off"),
                                                 ("all", "All authors"),
                                                 ("collaborators", "Repository collaborators"),
                                                 ("review_requested", "Review requested from me"),
                                                 ("assigned", "Assigned to me"),
                                                 ("authored", "Created by me"),
                                             ],
-                                        )),
+                                        ))),
                                 ),
                         )
                         .child(
@@ -380,21 +478,15 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                             )
                             .key("github-rule-labels"),
                         )
-                        .child(checkbox(
-                            "Include Draft PRs".into(),
-                            drafts_flag,
-                            move |enabled| {
-                                edit(d, |r| r.drafts = *enabled);
-                            },
-                        )),
+                        .child(toggle("Include Draft PRs", move || rules(d).drafts,
+                            move |enabled| edit(d, |r| r.drafts = enabled))),
                 ),
         )
         .child(
             section_group("Code Delivery")
                 .description("Choose how completed Card branches are delivered by default.")
-                .child(choice(
-                    ui,
-                    delivery,
+                .child(controlled_choice(
+                    ui, move || rules(d).delivery, move |v| edit(d, |r| r.delivery = v),
                     vec![("local", "Local merge"), ("github_pr", "GitHub PR")],
                 )),
         )
@@ -405,7 +497,7 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                 .items_center()
                 .gap_2()
                 .child(
-                    action("Save repository settings", Variant::Primary, move |_| {
+                    action(move || if ui.is_method_pending("project.github") { "Saving…" } else { "Save repository settings" }, Variant::Primary, move |_| {
                         let r = rules_untracked(d);
                         dispatch(
                             ui,
@@ -427,9 +519,7 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                         ui.is_method_pending("project.github") || d.get().title.trim().is_empty()
                     }),
                 )
-                .child(chrome_button(Icon::Refresh, "Sync now", move |_| {
-                    dispatch(ui, "github.sync", json!({"project_id": sync}))
-                }))
+                .child(super::sync_button(ui, sync))
                 .child(compact_action("Disconnect", Variant::Quiet, move |_| {
                     dispatch(
                         ui,
@@ -439,24 +529,11 @@ pub fn settings(ui: Ui, id: String, name: String) -> impl IntoElement {
                 })),
         )
         .child(dynamic(move || {
-            let g = ui.snapshot.with(|s| {
-                s.projects
-                    .iter()
-                    .find(|p| p.id == id)
-                    .and_then(|p| p.github.clone())
-            });
-            let mut area = view().gap_1();
-            if let Some(g) = g {
-                area = area.child(muted(
-                    g.synced_at
-                        .map(|t| format!("Last sync: {}s ago", now().saturating_sub(t) / 1000))
-                        .unwrap_or_else(|| "Not synced yet".into()),
-                ));
-                if let Some(e) = g.error {
-                    area = area.child(notice(e, Tone::Attention));
-                }
+            let snapshot = ui.snapshot.get();
+            if let Some(project) = snapshot.projects.iter().find(|p| p.id == id) {
+                return view().child(muted(super::sync_hint(project, snapshot.github_sync.get(&id), now())));
             }
-            area.into_element()
+            view()
         }))
 }
 
