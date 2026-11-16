@@ -7,7 +7,7 @@ use super::*;
 use crate::terminals::{
     Entry, card_live_entries_for_ui, default_card_terminal_for_ui, select_card_tab,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 
 pub fn select_entry_for_card(ui: Ui, card_id: &str) -> Option<Entry> {
     let live = card_live_entries_for_ui(ui, card_id);
@@ -407,7 +407,7 @@ pub fn pane(ui: Ui) -> impl IntoElement {
                                         "core_id": core_id,
                                     })
                                 }
-                                None => Value::Null,
+                                None => serde_json::Value::Null,
                             })
                         })
                         .prop("read_only", move || {

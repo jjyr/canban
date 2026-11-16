@@ -626,7 +626,7 @@ fn controls() -> impl IntoElement {
                                 fixtures::TERMINAL,
                                 canban_ui::utilities::terminal_theme,
                                 move || canban_ui::utilities::terminal_font(ui),
-                                || canban_terminal::linux::FocusRequest::default(),
+                                canban_terminal::linux::FocusRequest::default,
                             )
                             .w_full()
                             .h(px(320.0))

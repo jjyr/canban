@@ -553,6 +553,7 @@ mod tests {
                 .map(|(id, _)| *id)
         }
 
+        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
         fn mounted_custom_count(&self, component_name: &str) -> usize {
             self.custom_components
                 .iter()

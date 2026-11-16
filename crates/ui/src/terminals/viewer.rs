@@ -1,6 +1,6 @@
 //! Selected conversation controls, retained context and one native attachment.
 use super::*;
-use serde_json::{Value, json};
+use serde_json::json;
 fn context(ui: Ui) -> impl IntoElement {
     dynamic(move || {
         let Some(row) = selected(ui) else {
@@ -185,7 +185,7 @@ pub fn embedded(ui: Ui, selected_id: Memo<String>) -> impl IntoElement {
                                 "core_id": core_id,
                             })
                         }
-                        None => Value::Null,
+                        None => serde_json::Value::Null,
                     })
                 })
                 .prop("read_only", move || {
