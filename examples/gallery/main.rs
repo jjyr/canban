@@ -1712,7 +1712,10 @@ pub fn Gallery() -> impl IntoElement {
         ui.page.set("review".into());
         return canban_ui::frame::screen(ui).into_element();
     }
-    if std::env::var("CANBAN_GALLERY_SCENE").as_deref() == Ok("review-working-tree") {
+    if matches!(
+        std::env::var("CANBAN_GALLERY_SCENE").as_deref(),
+        Ok("review-working-tree" | "review-async" | "review-large-diff")
+    ) {
         canban_ui::frame::configure_window_chrome();
         ui.snapshot.set(fixtures::workspace());
         ui.select_project("gallery-project".into());
@@ -1733,6 +1736,33 @@ pub fn Gallery() -> impl IntoElement {
         ui.review_state
             .commit_summary
             .set("feat(review): add working tree stage & commit controls".into());
+        let scene = std::env::var("CANBAN_GALLERY_SCENE").unwrap_or_default();
+        if scene == "review-async" {
+            let st = ui.review_state;
+            set_interval(std::time::Duration::from_millis(800), move || {
+                let loading = !st.refs_loading.get_untracked();
+                st.refs_loading.set(loading);
+                st.log_loading.set(loading);
+                st.refs_data
+                    .update(|v| v["ahead"] = json!(if loading { 2 } else { 1 }));
+                st.log_commits.update(|v| {
+                    if v.len() > 1 {
+                        v.rotate_left(1);
+                    }
+                });
+            });
+        }
+        if scene == "review-large-diff" {
+            let mut data = fixtures::git_workdir_compare();
+            let patch = "@@ -1,200 +1,200 @@\n".to_owned() + &"-old line\n+new line\n".repeat(200);
+            data["files"] = json!((0..60).map(|i| json!({"filename":format!("src/module-{i}.rs"), "status":"modified", "additions":200, "deletions":200, "patch":patch})).collect::<Vec<_>>());
+            let prepared = review::cache::ReadValue::new(data.clone());
+            ui.review_state.prepared_lines.set(prepared.lines);
+            ui.review_state.compare_data.set(data);
+            ui.review_state
+                .compare_ref
+                .set("feat/diff-workbench".into());
+        }
         ui.page.set("review".into());
         return canban_ui::frame::screen(ui).into_element();
     }

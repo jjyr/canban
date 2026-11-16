@@ -56,11 +56,13 @@ pub fn select_checkout(ui: Ui, cwd: String) {
         st.active_line.set(None);
         st.error.set(String::new());
     });
-    load_refs_and_compare(ui, true);
+    super::prepare_context(ui);
+    load_refs_and_compare(ui, false);
 }
 
 /// Loads paginated commit history for `branch` (or `st.log_branch` / `current_branch`).
 pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
+    super::prepare_context(ui);
     let st = ui.review_state;
     let rev = if branch.trim().is_empty() {
         let cur = st.log_branch.get_untracked();
@@ -79,6 +81,10 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
     } else {
         branch
     };
+    if st.log_branch.get_untracked() != rev {
+        st.log_commits.set(Vec::new());
+        st.log_has_more.set(false);
+    }
     st.log_branch.set(rev.clone());
 
     let query = st.log_query.get_untracked();
@@ -134,20 +140,24 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
         return;
     };
 
+    let request = params.to_string();
+    if st.log_loading.get_untracked() && st.log_request.with(|r| *r == request) {
+        return;
+    }
+    st.log_request.replace(request);
     let ticket = st.log_ticket.get_untracked() + 1;
     st.log_ticket.set(ticket);
     st.log_loading.set(true);
     let active_proj = ui.project.get_untracked();
 
     ui.spawn(async move {
-        let res =
-            blocking(move || crate::routed_call("git.log", params, Some(active_proj.as_str())))
-                .await;
+        let res = super::cached_read(ui, "git.log", params, active_proj).await;
         if st.log_ticket.try_get() != Some(ticket) {
             return;
         }
         st.log_loading.set(false);
-        if let Ok(Ok(val)) = res {
+        if let Ok(value) = &res {
+            let val = &value.data;
             let page = val["commits"].as_array().cloned().unwrap_or_default();
             let has_more = val["has_more"].as_bool().unwrap_or(false);
             if append {
@@ -156,6 +166,8 @@ pub fn load_branch_log(ui: Ui, branch: String, append: bool) {
                 st.log_commits.set(page);
             }
             st.log_has_more.set(has_more);
+        } else if let Err(e) = res {
+            st.error.set(e);
         }
     });
 }
@@ -208,10 +220,81 @@ pub fn restore_range_backup(ui: Ui) {
 }
 
 fn reload_after_git_mutation(ui: Ui) {
+    super::invalidate_reads(ui);
     load_refs(ui);
     let br = ui.review_state.log_branch.get_untracked();
     load_branch_log(ui, br, false);
     refresh_active_diff(ui, false);
+}
+
+pub fn sync_pending(ui: Ui) -> bool {
+    ui.pending_methods.with(|s| {
+        ["git.fetch", "git.pull", "git.push"]
+            .iter()
+            .any(|m| s.contains(m))
+    })
+}
+
+/// Git sync does not need to replace the complete application snapshot. Keep
+/// progress local and refresh just the active Git queries after completion.
+fn run_sync(ui: Ui, method: &'static str, mut params: Value) {
+    if sync_pending(ui) {
+        return;
+    }
+    super::invalidate_reads(ui);
+    let context = ui.review_state.read_context.with(|v| v.clone());
+    let project = ui.project.get_untracked();
+    params["request_key"] = json!(canban_types::id());
+    ui.pending_methods.update(|s| {
+        s.insert(method);
+    });
+    ui.status.set(format!("{method}…"));
+    ui.operation_error.set(String::new());
+    ui.review_state.error.set(String::new());
+    ui.spawn(async move {
+        let result = blocking(move || crate::routed_call(method, params, Some(&project))).await;
+        ui.pending_methods.update(|s| {
+            s.remove(method);
+        });
+        // Invalidate even after navigating away; never refresh a different checkout.
+        let active = ui.review_state.read_context.with(|v| *v == context);
+        if active {
+            super::invalidate_reads(ui);
+        } else {
+            ui.review_state.read_cache.with(|cache| cache.invalidate());
+        }
+        match result {
+            Ok(Ok(_)) => {
+                ui.notify(match method {
+                    "git.fetch" => "Fetch completed",
+                    "git.pull" => "Pull completed",
+                    _ => "Push completed",
+                });
+                if active && ui.page.get_untracked() == "review" {
+                    load_refs(ui);
+                    let branch = ui.review_state.log_branch.get_untracked();
+                    load_branch_log(ui, branch, false);
+                    refresh_active_diff(ui, false);
+                }
+            }
+            Ok(Err(e)) => {
+                let error = format!("{method}: {e:#}");
+                if active {
+                    ui.review_state.error.set(error.clone());
+                }
+                ui.operation_error.set(error.clone());
+                ui.notify(error);
+            }
+            Err(e) => {
+                let error = format!("{method}: {e}");
+                if active {
+                    ui.review_state.error.set(error.clone());
+                }
+                ui.operation_error.set(error.clone());
+                ui.notify(error);
+            }
+        }
+    });
 }
 
 pub fn run_fetch(ui: Ui) {
@@ -222,9 +305,7 @@ pub fn run_fetch(ui: Ui) {
     let Some(params) = git_params(ui, json!({ "prune": true })) else {
         return;
     };
-    dispatch_then(ui, "git.fetch", params, move |_| {
-        reload_after_git_mutation(ui);
-    });
+    run_sync(ui, "git.fetch", params);
 }
 
 pub fn run_pull(ui: Ui) {
@@ -238,9 +319,7 @@ pub fn run_pull(ui: Ui) {
     let Some(params) = git_params(ui, json!({})) else {
         return;
     };
-    dispatch_then(ui, "git.pull", params, move |_| {
-        reload_after_git_mutation(ui);
-    });
+    run_sync(ui, "git.pull", params);
 }
 
 pub fn run_push(ui: Ui) {
@@ -254,9 +333,7 @@ pub fn run_push(ui: Ui) {
     let Some(params) = git_params(ui, json!({})) else {
         return;
     };
-    dispatch_then(ui, "git.push", params, move |_| {
-        reload_after_git_mutation(ui);
-    });
+    run_sync(ui, "git.push", params);
 }
 
 pub fn run_stage(ui: Ui, paths: Vec<String>, all: bool) {
@@ -455,6 +532,8 @@ pub fn render_checkout_picker(ui: Ui) -> impl IntoElement {
     let st = ui.review_state;
 
     let trigger = canban_ui_kit::press_target()
+        .w_full()
+        .min_w(px(0.))
         .h(px(28.))
         .px_2p5()
         .rounded(px(RADIUS))
@@ -465,7 +544,7 @@ pub fn render_checkout_picker(ui: Ui) -> impl IntoElement {
         .flex_row()
         .items_center()
         .gap_1p5()
-        .accessibility_label("Switch active Git checkout, worktree, or PR / Card branch")
+        .accessibility_label("Workspace: switch checkout or Card")
         .child(icon(Icon::Folder).w(px(12.)).h(px(12.)))
         .child(
             label(move || {
@@ -521,7 +600,10 @@ pub fn render_checkout_picker(ui: Ui) -> impl IntoElement {
             })
             .font_family(MONO_FONT)
             .text_size(px(11.5))
-            .font_weight(FontWeight::MEDIUM),
+            .font_weight(FontWeight::MEDIUM)
+            .truncate()
+            .min_w(px(0.))
+            .flex_1(),
         )
         .child(icon(Icon::ChevronDown).w(px(11.)).h(px(11.)));
 
@@ -707,7 +789,7 @@ pub fn render_sync_controls(ui: Ui) -> impl IntoElement {
             .gap_1()
             .child(
                 compact_action("Fetch", Variant::Quiet, move |_| run_fetch(ui))
-                    .disabled(move || ui.is_method_pending("git.fetch")),
+                    .disabled(move || sync_pending(ui)),
             )
             .child(
                 compact_action(
@@ -719,7 +801,7 @@ pub fn render_sync_controls(ui: Ui) -> impl IntoElement {
                     },
                     move |_| run_pull(ui),
                 )
-                .disabled(move || ui.is_method_pending("git.pull") || !on_branch),
+                .disabled(move || sync_pending(ui) || !on_branch),
             )
             .child(
                 compact_action(
@@ -731,7 +813,7 @@ pub fn render_sync_controls(ui: Ui) -> impl IntoElement {
                     },
                     move |_| run_push(ui),
                 )
-                .disabled(move || ui.is_method_pending("git.push") || !on_branch),
+                .disabled(move || sync_pending(ui) || !on_branch),
             )
             .into_element()
     })

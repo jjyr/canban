@@ -192,18 +192,20 @@ pub(crate) fn workspace_root() -> impl IntoElement {
         }) {
             ui.github.epoch.update(|v| *v += 1);
         }
-        if ui.page.get_untracked() == "review"
-            && changed.iter().any(|e| {
-                matches!(
-                    e,
-                    canban_types::AppEvent::Changed {
-                        topic: "review" | "resync",
-                        ..
-                    }
-                )
-            })
-        {
-            review::load_refs(ui);
+        if changed.iter().any(|e| {
+            matches!(
+                e,
+                canban_types::AppEvent::Changed {
+                    topic: "review" | "resync",
+                    ..
+                }
+            )
+        }) {
+            if ui.page.get_untracked() == "review" {
+                review::refresh(ui);
+            } else {
+                review::invalidate_reads(ui);
+            }
         }
         if !changed.is_empty() {
             dirty.set(true);

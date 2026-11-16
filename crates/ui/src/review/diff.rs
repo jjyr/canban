@@ -62,7 +62,7 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
             "" | "WORKDIR" | "STAGED" | "UNSTAGED"
         );
 
-    if loading && files.is_empty() && commit_detail.is_none() && !is_workdir_mode {
+    if loading && files.is_empty() && commit_detail.is_none() {
         return view()
             .flex_1()
             .items_center()
@@ -338,8 +338,10 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
         );
     }
 
+    let total_files = files.len();
+    let limit = st.visible_file_limit.get();
     let visible_files: Vec<Value> = if selected.is_empty() {
-        files
+        files.into_iter().take(limit).collect()
     } else {
         files
             .into_iter()
@@ -441,11 +443,14 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                 ))
                 .into_element()
         } else {
-            let parsed_lines = parse_unified_hunk_lines(&patch);
+            let parsed_lines = st
+                .prepared_lines
+                .with(|all| all.get(&path).cloned())
+                .unwrap_or_else(|| std::sync::Arc::new(parse_unified_hunk_lines(&patch)));
             let mut rows = view();
 
             // Show file-level comment composer if line == 1 and no specific hunk line matched or at top
-            for dl in parsed_lines.into_iter().take(500) {
+            for dl in parsed_lines.iter().take(500).cloned() {
                 if dl.kind == '@' || dl.kind == '\\' {
                     rows = rows.child(
                         view().px_3().py_1().bg(INSET).child(
@@ -788,6 +793,14 @@ pub fn render_diff_workbench(ui: Ui, data: &Value, loading: bool) -> AnyElement 
                 .child(extra_composer)
                 .child(body),
         );
+    }
+
+    if selected.is_empty() && total_files > limit {
+        diff_column = diff_column.child(compact_action(
+            format!("Show more files ({} remaining)", total_files - limit),
+            Variant::Secondary,
+            move |_| super::show_more_files(ui),
+        ));
     }
 
     view()

@@ -757,6 +757,22 @@ pub const CATALOG: &[Command] = &[
         keywords: "bug feedback diagnostics",
     },
     Command {
+        id: "git-refresh",
+        title: "Git: Refresh",
+        key: "",
+        display: "Git",
+        context: "Git",
+        keywords: "reload refresh refs log diff",
+    },
+    Command {
+        id: "git-more-files",
+        title: "Git: Show More Diff Files",
+        key: "",
+        display: "Git",
+        context: "Git",
+        keywords: "diff files load more",
+    },
+    Command {
         id: "git-fetch",
         title: "Git: Fetch Remote",
         key: "",
@@ -1455,6 +1471,8 @@ pub fn execute(ui: Ui, id: &str) {
         "check-herdr" => dispatch(ui, "herdr.status", json!({})),
         "check-updates" => crate::updates::check(ui),
         "report-issue" => crate::utilities::report::open(ui),
+        "git-refresh" => crate::review::refresh(ui),
+        "git-more-files" => crate::review::show_more_files(ui),
         "git-fetch" => {
             if ui.page.get_untracked() != "review" {
                 crate::review::open_compare(ui);

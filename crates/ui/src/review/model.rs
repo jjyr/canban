@@ -1,5 +1,6 @@
 use nsh_core::prelude::*;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingInlineComment {
@@ -32,6 +33,13 @@ pub struct State {
     /// Optional GitHub PR target (`{ "repository": "owner/repo", "number": 42 }`)
     pub pr_target: Signal<Option<Value>>,
     pub selected_file: Signal<String>,
+    pub read_cache: Stored<Arc<super::cache::ReadCache>>,
+    pub read_context: Stored<String>,
+    pub refs_request: Stored<String>,
+    pub log_request: Stored<String>,
+    pub compare_request: Stored<String>,
+    pub prepared_lines: Signal<Arc<super::cache::PreparedLines>>,
+    pub visible_file_limit: Signal<usize>,
     pub refs_data: Signal<Value>,
     pub compare_data: Signal<Value>,
     pub refs_loading: Signal<bool>,
@@ -95,6 +103,13 @@ impl State {
             three_dot: signal(true),
             pr_target: signal(None),
             selected_file: signal(String::new()),
+            read_cache: stored(Arc::new(super::cache::ReadCache::default())),
+            read_context: stored(String::new()),
+            refs_request: stored(String::new()),
+            log_request: stored(String::new()),
+            compare_request: stored(String::new()),
+            prepared_lines: signal(Arc::default()),
+            visible_file_limit: signal(4),
             refs_data: signal(json!({})),
             compare_data: signal(json!({})),
             refs_loading: signal(false),
